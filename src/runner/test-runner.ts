@@ -107,7 +107,8 @@ export async function runTest(
     const passedSteps = stepResults.filter((s) => s.status === 'passed').length;
     const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.subActions.length, 0);
-    const overallStatus = failedSteps > 0 ? 'failed' : 'passed';
+    const timedOut = stepResults.length < test.steps.length && !bail;
+    const overallStatus = failedSteps > 0 || timedOut ? 'failed' : 'passed';
 
     logger.testEnd(test.title, overallStatus === 'passed', durationMs);
     logger.info(`Tokens used: ${tokenTracker.getSummary()}`);
