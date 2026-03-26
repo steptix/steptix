@@ -877,6 +877,25 @@ A standalone test that runs against a real public website to validate the tool w
 5. **Responsive disambiguation:** Rather than filtering duplicate mobile/desktop elements at the DOM cleaner level (which could hide elements the AI needs), we annotate all visible interactive elements with their bounding rectangle position and let the AI decide which to target based on viewport dimensions and position context.
 6. **Retry enrichment over blind retry:** Retries include full context of what failed (selector, error, match count) so the AI can adapt its approach rather than repeating the same failing action. This is more effective than simply re-running the same step.
 7. **AI response capture:** All raw AI responses are captured and included in the HTML report for full traceability, even on failed steps across all retry attempts. This aids debugging and helps users understand AI decision-making.
+8. **Direct Playwright over Chrome MCP:** We evaluated using Chrome MCP (Model Context Protocol) as the browser automation layer — where the AI would call standardised MCP tools (`browser_click`, `browser_type`, etc.) exposed by an MCP server wrapping Chrome DevTools Protocol — and chose direct Playwright integration instead. The rationale:
+
+   **What Chrome MCP offers:**
+   - Standardised tool interface — any MCP-compatible model can drive the browser without custom integration code
+   - Reduced custom code — no need for a bespoke action executor, DOM cleaner, or screenshot pipeline
+   - Ecosystem compatibility — other MCP clients (Claude Desktop, Cursor, etc.) can reuse the same browser server
+   - Simpler AI prompting — the AI calls tools directly rather than outputting structured JSON that we parse and execute
+
+   **Why direct Playwright is better suited to this use case:**
+   - **Pipeline control** — We own the DOM cleaning, screenshot timing, retry logic, and token budgeting. With MCP, we are constrained to whatever the server exposes and its default behaviour
+   - **Optimised context** — Our DOM cleaner strips irrelevant nodes, adds position annotations, and keeps snapshots within token budget. A generic MCP server sends back whatever it captures, with no awareness of our token constraints
+   - **Test framework integration** — Assertions, reporting, step tracking, context files, and retry enrichment are test-specific concerns that sit above the browser control layer. MCP does not address these
+   - **Deterministic execution** — Direct Playwright API calls give us precise control over action execution, waiters, and error handling. MCP adds a network hop and an additional abstraction layer between our executor and the browser
+   - **Latency** — Direct Playwright calls are faster than JSON-RPC round-trips through an MCP server for every interaction
+   - **Responsive layout handling** — Our position annotation system (§6.5) and viewport-aware prompting require tight integration between DOM cleaning and the AI prompt. An MCP server would not provide this without significant customisation
+
+   **When Chrome MCP would be preferable:** General-purpose AI browser control, ad-hoc automation, or agent-style exploratory workflows where the AI needs flexible, open-ended browser access without a structured test framework around it.
+
+   **Future consideration:** An alternative MCP backend could be offered as a plugin for environments where Chrome MCP is already running, but direct Playwright remains the default for structured test execution.
 
 ---
 
