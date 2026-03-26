@@ -1,0 +1,803 @@
+# ai-ui-automation — Technical Specification v1.0
+
+**Author:** Greg (AI Tech Lead) / Paul Kent
+**Date:** 2026-03-26
+**Status:** Draft
+
+---
+
+## 1. Overview
+
+**ai-ui-automation** is a CLI tool that executes UI tests written in natural language (Markdown). It uses Playwright to drive a browser and an AI model (via the aiapi gateway) to interpret instructions, interact with the DOM, evaluate assertions, and produce detailed HTML reports.
+
+### Core Principles
+
+- Tests are authored in plain Markdown — no selectors, no page objects, no code
+- AI reasons about each step using cleaned DOM snapshots and screenshots
+- Every sub-action is logged with screenshots, DOM state, and AI reasoning
+- Handles multi-step instructions, multi-page flows, popups, iframes, and file uploads
+
+---
+
+## 2. Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    CLI (Entry Point)                 │
+│  npx ai-ui-auto run tests/ --tag smoke --headless   │
+└──────────────┬──────────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────────┐
+│                   Test Runner                        │
+│  - Discovers .md files                              │
+│  - Parses frontmatter (tags, config)                │
+│  - Loads context files from context/                │
+│  - Resolves parameters (inline, env, data files)    │
+│  - Orchestrates step execution                      │
+└──────────────┬──────────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────────┐
+│                  AI Step Executor                    │
+│  - Sends step + DOM snapshot + screenshot to AI     │
+│  - Receives planned sub-actions                     │
+│  - Executes each sub-action via Playwright          │
+│  - Captures screenshot + DOM after each sub-action  │
+│  - Evaluates assertions via AI                      │
+│  - Handles retries (1 retry before failure)         │
+│  - Dismisses unexpected obstacles automatically     │
+│  - Prompts user on ambiguity                        │
+└──────────────┬──────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────┐    ┌─────────────────────┐
+│   Playwright Browser     │    │   aiapi Gateway     │
+│  - Headed (default)      │    │  POST /v1/vision    │
+│  - Headless (--headless) │    │  POST /v1/stream    │
+│  - Multi-page, popups    │    │  Model: gpt-5.4     │
+│  - iframes, file upload  │    │  Input: 1M tokens   │
+└──────────────────────────┘    └─────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────────┐
+│                  Report Generator                    │
+│  - HTML report with embedded screenshots            │
+│  - DOM snapshots per sub-action                     │
+│  - AI reasoning trace                               │
+│  - Extracted assertion values                       │
+│  - Failure screenshots with AI explanation          │
+│  - Output: ./reports/<timestamp>-<test-name>.html   │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Test File Format
+
+Test files are Markdown with YAML frontmatter. Located in a user-specified directory (default: `tests/`).
+
+### Example: `tests/login-flow.md`
+
+```markdown
+---
+tags: [smoke, login, critical]
+timeout: 60s
+---
+
+# Login Flow Test
+
+## Config
+- baseUrl: https://app.example.com
+- timeout: 30s
+
+## Parameters
+- username: admin@test.com
+- password: $ENV_PASSWORD
+
+## Steps
+1. Navigate to the login page
+2. Login with "{{username}}" and "{{password}}"
+3. Verify the dashboard shows a balance greater than $0
+4. Click on "Transaction History" and verify at least 3 transactions are listed
+5. Logout and verify the login page is displayed
+```
+
+### Frontmatter Fields
+
+| Field     | Type     | Default | Description                          |
+|-----------|----------|---------|--------------------------------------|
+| `tags`    | string[] | `[]`    | Tags for filtering test execution    |
+| `timeout` | string   | `60s`   | Max duration for the entire test     |
+
+### Sections
+
+| Section        | Required | Description                                                |
+|----------------|----------|------------------------------------------------------------|
+| `# Title`      | Yes      | Test name (H1 heading)                                     |
+| `## Config`    | No       | Test-level configuration (baseUrl, timeout overrides)      |
+| `## Parameters`| No       | Key-value pairs, supports `$ENV_VAR` and `{{placeholder}}` |
+| `## Steps`     | Yes      | Ordered list of natural language instructions               |
+
+### Parameter Resolution Order
+
+1. Inline value in the Parameters section
+2. Environment variable (prefixed with `$`)
+3. Data file (see Section 4)
+4. Prompt user at runtime if unresolved
+
+---
+
+## 4. Parameterisation
+
+### Inline Parameters
+
+```markdown
+## Parameters
+- username: admin@test.com
+- password: $ENV_PASSWORD
+```
+
+### Data Files
+
+For data-driven tests, reference a JSON or CSV data file:
+
+```markdown
+---
+tags: [data-driven]
+dataFile: data/users.json
+---
+
+# Multi-User Login Test
+
+## Steps
+1. Navigate to the login page
+2. Login with "{{username}}" and "{{password}}"
+3. Verify the welcome message contains "{{displayName}}"
+```
+
+`data/users.json`:
+```json
+[
+  { "username": "admin@test.com", "password": "admin123", "displayName": "Admin User" },
+  { "username": "viewer@test.com", "password": "viewer123", "displayName": "Viewer" }
+]
+```
+
+The test runs once per data row. Each run appears as a separate entry in the report.
+
+### Environment Variables
+
+Any parameter value starting with `$` is resolved from the environment:
+- `$ENV_PASSWORD` → `process.env.ENV_PASSWORD`
+
+---
+
+## 5. Context Files
+
+Auto-discovered from the `context/` directory (relative to project root). All `.md` files in `context/` are loaded and sent to the AI as system context before test execution begins.
+
+### Purpose
+
+Provide application-specific knowledge so the AI understands the app:
+
+### Example: `context/app-overview.md`
+
+```markdown
+# MyApp Overview
+
+MyApp is a financial dashboard application.
+
+## Login Page
+- URL: /login
+- Has email and password fields
+- The "Sign In" button is disabled until both fields are filled
+- After login, redirects to /dashboard
+- Failed login shows a red banner with "Invalid credentials"
+
+## Dashboard
+- Shows account balance in the top-right card
+- Balance format: "$X,XXX.XX"
+- Navigation menu is on the left sidebar
+- "Transaction History" is the 3rd menu item
+
+## Known Quirks
+- A cookie consent banner appears on first visit — click "Accept All" to dismiss
+- The session expires after 15 minutes of inactivity
+```
+
+### Loading Rules
+
+- All `.md` files in `context/` are loaded alphabetically
+- Subdirectories are supported: `context/pages/login.md`
+- Context is included in the AI system prompt for every step
+- Total context size is tracked against the 1M token input limit
+
+---
+
+## 6. AI Interaction Model
+
+### Step Execution Flow
+
+For each natural language step:
+
+```
+1. Capture current state
+   - Clean DOM snapshot (simplified, see §6.2)
+   - Screenshot (PNG, viewport size)
+
+2. Send to AI
+   - System prompt: context files + test metadata
+   - Conversation history: prior steps and outcomes
+   - Current step instruction
+   - Current DOM snapshot
+   - Current screenshot (base64)
+
+3. AI responds with action plan
+   - List of sub-actions to execute
+   - Each sub-action: { action, selector, value?, description }
+
+4. Execute each sub-action
+   - Perform via Playwright
+   - Capture screenshot + DOM after execution
+   - Log to report
+
+5. After all sub-actions
+   - If step contains assertion: send final state to AI for evaluation
+   - AI returns: { pass: boolean, actual: string, explanation: string }
+
+6. On failure
+   - Retry once (full step re-execution)
+   - If retry fails: capture failure screenshot, AI explains what it was trying to do, mark step as FAILED
+```
+
+### 6.1 AI Action Types
+
+The AI returns structured JSON actions. Supported types:
+
+| Action      | Fields                          | Description                     |
+|-------------|----------------------------------|---------------------------------|
+| `click`     | `selector`, `description`       | Click an element                |
+| `type`      | `selector`, `value`, `description` | Type text into a field       |
+| `select`    | `selector`, `value`, `description` | Select dropdown option       |
+| `navigate`  | `url`, `description`            | Navigate to URL                 |
+| `upload`    | `selector`, `filePath`, `description` | Upload a file              |
+| `hover`     | `selector`, `description`       | Hover over element              |
+| `wait`      | `condition`, `timeout`, `description` | Wait for condition          |
+| `scroll`    | `direction`, `amount`, `description` | Scroll the page             |
+| `switchFrame` | `selector`, `description`     | Switch to iframe               |
+| `dismiss`   | `selector`, `description`       | Dismiss popup/modal/banner     |
+| `assert`    | `condition`, `expected`, `description` | Evaluate an assertion     |
+| `keyboard`  | `key`, `description`            | Press keyboard shortcut         |
+| `prompt`    | `question`, `description`       | Ask user for clarification      |
+
+### 6.2 DOM Snapshot Cleaning
+
+Full DOM is too large for AI context. The cleaner produces a simplified representation:
+
+**Included:**
+- Interactive elements: `<input>`, `<button>`, `<a>`, `<select>`, `<textarea>`, `<label>`
+- Visible text content (trimmed)
+- Element roles and aria attributes
+- Form structure
+- Semantic landmarks (`<nav>`, `<main>`, `<header>`, `<footer>`)
+- `data-testid` and `id` attributes
+- Element visibility state
+
+**Excluded:**
+- Inline styles and CSS classes (unless semantically meaningful)
+- Script and style tags
+- SVG paths and complex SVG internals
+- Hidden elements (`display: none`, `visibility: hidden`)
+- Decorative elements without text or interaction
+
+**Output format:** Indented, annotated HTML-like structure with stable selectors.
+
+### 6.3 Obstacle Handling
+
+When the AI encounters unexpected elements (cookie banners, modals, alerts):
+
+1. AI identifies the obstacle
+2. Attempts to dismiss it (click "Accept", "Close", "X", "OK", etc.)
+3. Logs the dismissal as a sub-action
+4. Continues with the original step
+5. If dismissal fails, flags it and continues if possible
+
+### 6.4 Ambiguity Handling
+
+When the AI cannot determine the correct action:
+
+1. AI returns a `prompt` action with a question
+2. CLI displays the question to the user with the current screenshot
+3. User provides guidance via stdin
+4. AI incorporates the answer and continues
+
+---
+
+## 7. Configuration
+
+### `ai-ui-auto.config.ts`
+
+```typescript
+import { defineConfig } from 'ai-ui-automation';
+
+export default defineConfig({
+  // AI Configuration
+  ai: {
+    gatewayUrl: 'https://llm.corp.example',
+    apiKey: process.env.AI_API_KEY,       // Bearer token for aiapi
+    model: 'gpt-5.4',
+    maxInputTokens: 1_000_000,
+    streamResponses: true,
+  },
+
+  // Browser Configuration
+  browser: {
+    headed: true,                          // Default: true. Override with --headless
+    viewport: { width: 1280, height: 720 },
+    slowMo: 0,                             // ms delay between actions (for debugging)
+    browser: 'chromium',                   // 'chromium' | 'firefox' | 'webkit'
+  },
+
+  // Test Discovery
+  tests: {
+    dir: './tests',                        // Test file directory
+    contextDir: './context',               // Context files directory
+    pattern: '**/*.md',                    // Glob pattern for test files
+  },
+
+  // Execution
+  execution: {
+    timeout: 60_000,                       // Default test timeout (ms)
+    retries: 1,                            // Retries per step before failure
+    screenshotOnFailure: true,
+    dismissObstacles: true,                // Auto-dismiss unexpected modals/banners
+    promptOnAmbiguity: true,               // Ask user when AI is unsure
+  },
+
+  // Reporting
+  reports: {
+    outputDir: './reports',
+    includeScreenshots: true,
+    includeDomSnapshots: true,
+    includeAiReasoning: true,
+    embedScreenshots: true,                // Base64 embed vs separate files
+  },
+});
+```
+
+---
+
+## 8. CLI Interface
+
+### Commands
+
+```bash
+# Run all tests
+npx ai-ui-auto run
+
+# Run specific test file
+npx ai-ui-auto run tests/login-flow.md
+
+# Run all tests in a directory
+npx ai-ui-auto run tests/
+
+# Run tests matching tag
+npx ai-ui-auto run --tag smoke
+npx ai-ui-auto run --tag "smoke,critical"   # AND logic
+
+# Run headless
+npx ai-ui-auto run --headless
+
+# Specify config
+npx ai-ui-auto run --config ./custom.config.ts
+
+# Initialise project structure
+npx ai-ui-auto init
+
+# List discovered tests
+npx ai-ui-auto list
+npx ai-ui-auto list --tag smoke
+```
+
+### CLI Flags
+
+| Flag              | Type    | Default                  | Description                        |
+|-------------------|---------|--------------------------|------------------------------------|
+| `--config`        | string  | `ai-ui-auto.config.ts`  | Path to config file                |
+| `--tag`           | string  | —                        | Filter by tag (comma-separated)    |
+| `--headless`      | boolean | `false`                  | Run browser in headless mode       |
+| `--timeout`       | number  | `60000`                  | Test timeout in ms                 |
+| `--reporter`      | string  | `html`                   | Reporter type                      |
+| `--verbose`       | boolean | `false`                  | Verbose console output             |
+| `--bail`          | boolean | `false`                  | Stop on first failure              |
+| `--browser`       | string  | `chromium`               | Browser engine                     |
+
+### `ai-ui-auto init`
+
+Scaffolds a new project:
+
+```
+my-project/
+├── ai-ui-auto.config.ts
+├── context/
+│   └── app-overview.md
+├── tests/
+│   └── example.md
+├── data/
+│   └── (empty)
+├── reports/
+│   └── (generated)
+└── package.json
+```
+
+---
+
+## 9. HTML Report
+
+### Structure
+
+Each test run produces an HTML report at `./reports/<timestamp>-<test-name>.html`.
+
+### Report Contents
+
+```
+┌─────────────────────────────────────────────────┐
+│  Test: Login Flow Test                          │
+│  Status: PASSED (3/3 steps)                     │
+│  Duration: 24.3s                                │
+│  Tags: smoke, login, critical                   │
+│  Date: 2026-03-26 18:30:00 AEDT                │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  Step 1: Navigate to the login page    ✅ PASS  │
+│  ├─ Sub-action 1.1: Navigate to /login          │
+│  │  ├─ Screenshot: [embedded image]             │
+│  │  ├─ DOM snapshot: [collapsible]              │
+│  │  └─ AI reasoning: "Navigating to baseUrl..." │
+│  └─ Duration: 1.2s                              │
+│                                                 │
+│  Step 2: Login with credentials        ✅ PASS  │
+│  ├─ Sub-action 2.1: Type username               │
+│  │  ├─ Screenshot: [embedded image]             │
+│  │  ├─ DOM snapshot: [collapsible]              │
+│  │  └─ AI reasoning: "Found email input..."     │
+│  ├─ Sub-action 2.2: Type password               │
+│  │  ├─ Screenshot: [embedded image]             │
+│  │  └─ AI reasoning: "Found password field..."  │
+│  ├─ Sub-action 2.3: Click Sign In               │
+│  │  ├─ Screenshot: [embedded image]             │
+│  │  └─ AI reasoning: "Clicking submit button.." │
+│  └─ Duration: 4.8s                              │
+│                                                 │
+│  Step 3: Verify balance > $0           ✅ PASS  │
+│  ├─ Assertion result:                           │
+│  │  ├─ Expected: Balance greater than $0        │
+│  │  ├─ Actual: $1,234.56                        │
+│  │  └─ AI explanation: "Found balance card..."  │
+│  ├─ Screenshot: [embedded image]                │
+│  └─ Duration: 2.1s                              │
+│                                                 │
+├─────────────────────────────────────────────────┤
+│  Summary                                        │
+│  Total steps: 3 | Passed: 3 | Failed: 0        │
+│  Total sub-actions: 6                           │
+│  AI tokens used: 45,231                         │
+└─────────────────────────────────────────────────┘
+```
+
+### Failure Report Additions
+
+When a step fails:
+- **Failure screenshot** with visual annotation of what the AI was targeting
+- **AI explanation** of what it was trying to do and why it failed
+- **Retry log** showing both attempts
+- **DOM snapshot** at the point of failure
+
+---
+
+## 10. aiapi Gateway Changes
+
+New endpoints required — **existing endpoints remain untouched**.
+
+### 10.1 `POST /v1/vision`
+
+Multimodal chat endpoint supporting text + image content.
+
+**Request:**
+```json
+{
+  "model": "gpt-5.4",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a UI test automation agent..."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Current step: Login with admin@test.com and password123\n\nDOM:\n<simplified-dom>...</simplified-dom>"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,iVBOR..."
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 4096,
+  "response_format": { "type": "json_object" }
+}
+```
+
+**Response:** Same format as existing `/v1/chat` but supports multimodal content.
+
+**Implementation:**
+- Accepts `content` as string (text-only) or array (multimodal)
+- Routes to vision-capable model endpoints
+- OpenAI: uses standard chat completions API (natively supports multimodal)
+- Anthropic: converts `image_url` to Anthropic's `image` content block format
+- Input token limit: 1,000,000
+
+### 10.2 `POST /v1/stream`
+
+Streaming chat endpoint (supports both text-only and multimodal).
+
+**Request:** Same schema as `/v1/vision` with an implicit `stream: true`.
+
+**Response:** Server-Sent Events (SSE) stream.
+
+```
+data: {"id":"chunk-1","choices":[{"delta":{"content":"{"}}]}
+data: {"id":"chunk-2","choices":[{"delta":{"content":"action"}}]}
+...
+data: [DONE]
+```
+
+**Implementation:**
+- Sets `stream: true` on upstream provider request
+- OpenAI: proxies SSE chunks directly
+- Anthropic: converts Anthropic's streaming format to OpenAI-compatible SSE
+- Supports multimodal input (same as `/v1/vision`)
+- Connection timeout: 120s
+- Input token limit: 1,000,000
+
+### 10.3 Auth
+
+Both new endpoints use the same Bearer token auth as the existing `/v1/chat`.
+
+---
+
+## 11. Project Structure
+
+```
+ai-ui-automation/
+├── package.json
+├── tsconfig.json
+├── src/
+│   ├── index.ts                  # CLI entry point
+│   ├── cli/
+│   │   ├── commands/
+│   │   │   ├── run.ts            # Run command
+│   │   │   ├── init.ts           # Init scaffolding
+│   │   │   └── list.ts           # List tests
+│   │   └── index.ts              # CLI setup (commander/yargs)
+│   ├── config/
+│   │   ├── loader.ts             # Load & validate config
+│   │   ├── defaults.ts           # Default configuration
+│   │   └── types.ts              # Config type definitions
+│   ├── parser/
+│   │   ├── markdown.ts           # Parse .md test files
+│   │   ├── frontmatter.ts        # YAML frontmatter parser
+│   │   ├── parameters.ts         # Parameter resolution
+│   │   └── types.ts              # Parsed test types
+│   ├── context/
+│   │   └── loader.ts             # Load context/ directory
+│   ├── runner/
+│   │   ├── test-runner.ts        # Orchestrates test execution
+│   │   ├── step-executor.ts      # Executes individual steps
+│   │   └── retry.ts              # Retry logic
+│   ├── ai/
+│   │   ├── client.ts             # aiapi gateway client
+│   │   ├── prompts.ts            # System prompts & templates
+│   │   ├── action-parser.ts      # Parse AI response to actions
+│   │   └── types.ts              # AI request/response types
+│   ├── browser/
+│   │   ├── manager.ts            # Playwright browser lifecycle
+│   │   ├── dom-cleaner.ts        # DOM snapshot cleaning
+│   │   ├── screenshot.ts         # Screenshot capture
+│   │   ├── actions.ts            # Execute Playwright actions
+│   │   └── obstacle-handler.ts   # Auto-dismiss unexpected UI
+│   ├── report/
+│   │   ├── generator.ts          # HTML report generation
+│   │   ├── template.ts           # Report HTML template
+│   │   └── types.ts              # Report data types
+│   └── utils/
+│       ├── logger.ts             # Console logging
+│       └── tokens.ts             # Token counting/tracking
+├── templates/
+│   ├── report.html               # Report HTML template
+│   └── init/                     # Init scaffolding templates
+│       ├── config.ts.tpl
+│       ├── example.md.tpl
+│       └── context.md.tpl
+└── tests/                        # Unit tests for the tool itself
+    ├── parser.test.ts
+    ├── dom-cleaner.test.ts
+    └── ...
+```
+
+---
+
+## 12. Dependencies
+
+| Package              | Purpose                         |
+|----------------------|---------------------------------|
+| `playwright`         | Browser automation              |
+| `commander`          | CLI framework                   |
+| `gray-matter`        | YAML frontmatter parsing        |
+| `marked`             | Markdown parsing                |
+| `tsx`                 | TypeScript execution            |
+| `chalk`              | Terminal colours                |
+| `ora`                | Terminal spinners                |
+| `glob`               | File discovery                  |
+| `handlebars`         | HTML report templating          |
+| `tiktoken`           | Token counting                  |
+| `eventsource-parser` | SSE stream parsing              |
+
+---
+
+## 13. AI System Prompt Design
+
+The system prompt sent to the AI for each step:
+
+```
+You are an expert UI test automation agent. You control a web browser to execute test steps described in natural language.
+
+## Application Context
+{loaded context files}
+
+## Test Information
+- Test: {test name}
+- Base URL: {baseUrl}
+- Current Step: {step number} of {total steps}
+
+## Your Task
+Execute the following test step by returning a JSON array of actions.
+
+## Rules
+1. Return ONLY valid JSON — no markdown, no explanation outside JSON
+2. Each action must have: { "action": string, "selector": string, "value"?: string, "description": string }
+3. Use CSS selectors. Prefer data-testid, id, aria-label, then visible text
+4. If the step requires an assertion, include an "assert" action as the final action
+5. If you encounter an unexpected popup/modal/banner, include a "dismiss" action before your main actions
+6. If you cannot determine what to do, return a single "prompt" action with your question
+7. For assertions, extract the ACTUAL value from the page and include it
+
+## Current State
+Step instruction: "{step text}"
+
+DOM Snapshot:
+{cleaned DOM}
+
+[Screenshot is attached as an image]
+
+## Response Format
+{
+  "actions": [
+    { "action": "click", "selector": "#login-btn", "description": "Click the login button" }
+  ],
+  "reasoning": "Brief explanation of your approach"
+}
+```
+
+---
+
+## 14. Execution Flow (End to End)
+
+```
+1. CLI parses arguments
+2. Load config from ai-ui-auto.config.ts
+3. Discover test files (filtered by --tag if specified)
+4. Load context files from context/
+5. For each test file:
+   a. Parse markdown: frontmatter, config, parameters, steps
+   b. Resolve parameters (inline → env → data file → prompt user)
+   c. Launch Playwright browser (headed/headless per config)
+   d. Navigate to baseUrl (if specified)
+   e. For each step:
+      i.   Capture DOM snapshot + screenshot
+      ii.  Send to AI via /v1/vision (or /v1/stream)
+      iii. Parse AI response into action list
+      iv.  If action is "prompt" → ask user, re-send to AI
+      v.   Execute each sub-action via Playwright
+      vi.  After each sub-action: capture screenshot + DOM
+      vii. If step has assertion: send final state to AI for evaluation
+      viii. On failure: retry once, then mark FAILED with explanation
+   f. Close browser
+   g. Generate HTML report
+6. Print summary to console
+7. Exit with code 0 (all passed) or 1 (any failed)
+```
+
+---
+
+## 15. Future Considerations (Post-v1)
+
+- **VS Code Test Explorer extension** — discover and run .md tests from the IDE
+- **Parallel test execution** — run multiple test files concurrently
+- **Video recording** — Playwright trace/video per test
+- **Test generation** — AI observes manual testing and generates .md test files
+- **Visual regression** — compare screenshots across runs
+- **CI/CD reporters** — JUnit XML, GitHub Actions annotations
+- **Shared step libraries** — reusable step definitions across tests
+- **npm package** — publish to npm for `npx` usage without local install
+
+---
+
+## 16. Testing Strategy
+
+### 16.1 Unit Tests (Vitest)
+
+| Area               | What's Tested                                                      |
+|--------------------|--------------------------------------------------------------------|
+| Markdown parser    | Frontmatter extraction, config, parameters, steps from `.md` files |
+| Parameter resolver | `$ENV_VAR`, `{{placeholder}}`, data file rows, fallback prompting  |
+| DOM cleaner        | Simplified output from raw HTML, element filtering, attribute retention |
+| AI response parser | Valid JSON actions, malformed responses, missing fields, edge cases |
+| Token counter      | Accurate usage tracking, soft budget warnings at 100K              |
+| Report generator   | Valid HTML output, correct pass/fail counts, embedded screenshots  |
+
+### 16.2 Integration Tests
+
+- AI client correctly constructs and sends multimodal payloads to `/v1/vision` and `/v1/stream`
+- Playwright action executor maps each AI action type to correct browser operation
+- Obstacle handler identifies and dismisses a known modal, then continues
+- SSE stream parser handles chunked responses and `[DONE]` termination
+
+### 16.3 End-to-End Tests
+
+**Test target app:** A small static web app (`fixtures/test-app/`) that ships in the repo, served locally during E2E runs. The app includes:
+
+- Login page (email + password, "Sign In" button, error banner on bad credentials)
+- Dashboard with balance display (`$1,234.56`), sidebar navigation
+- Transaction history page (table with 5 sample transactions)
+- Cookie consent banner on first visit
+- Logout button that returns to login page
+
+**E2E test approach:**
+
+1. Start local HTTP server serving `fixtures/test-app/`
+2. Run `.md` test files against it using the real CLI
+3. Real AI calls via aiapi gateway (not mocked)
+4. Assert on generated HTML report: correct step count, pass/fail status, screenshots present, extracted assertion values match expected
+
+**E2E test files:**
+
+- `fixtures/tests/login-flow.md` — login, verify balance, logout
+- `fixtures/tests/invalid-login.md` — bad credentials, verify error message
+- `fixtures/tests/navigation.md` — multi-page flow through all sections
+- `fixtures/tests/data-driven-login.md` — parameterised with `fixtures/data/users.json`
+
+### 16.4 Smoke Test (External)
+
+A standalone test that runs against a real public website to validate the tool works outside the controlled fixture environment:
+
+- `fixtures/tests/google-search.md` — search Google and verify results (see below)
+
+---
+
+## 17. Design Decisions
+
+1. **Selector strategy:** AI decides based on context, but is instructed to prefer `data-testid` > `id` > `aria-label` > visible text when multiple options exist for the same element.
+2. **Token budget per step:** Soft budget of 100K tokens per step with a console warning when exceeded. No hard cap — total remains bound by the 1M input limit.
+3. **Screenshot resolution:** Full viewport screenshots for v1. Element-level cropping deferred to a future version.
+4. **Conversation history:** Prior steps are included as text summaries only (e.g. "Step 2: Logged in successfully, now on /dashboard"). Full DOM snapshots from prior steps are not carried forward.
+
+---
+
+*End of specification.*
