@@ -1,6 +1,11 @@
 import { chromium, firefox, webkit, type Browser, type BrowserContext, type Page } from 'playwright';
+import { chromium as stealthChromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
 import { logger } from '../utils/logger.js';
+
+// Apply stealth plugin to avoid bot detection
+stealthChromium.use(StealthPlugin());
 
 export interface BrowserSession {
   browser: Browser;
@@ -10,6 +15,7 @@ export interface BrowserSession {
 
 /**
  * Launch a Playwright browser and create a new page with the given configuration.
+ * Chromium uses playwright-extra with stealth plugin to avoid bot detection.
  */
 export async function launchBrowser(config: BrowserConfig): Promise<BrowserSession> {
   const browserType = config.browser;
@@ -32,7 +38,8 @@ export async function launchBrowser(config: BrowserConfig): Promise<BrowserSessi
       break;
     case 'chromium':
     default:
-      browser = await chromium.launch(launchOptions);
+      // Use stealth chromium to bypass bot detection
+      browser = await stealthChromium.launch(launchOptions) as unknown as Browser;
   }
 
   const context = await browser.newContext({
