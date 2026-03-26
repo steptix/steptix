@@ -12,6 +12,7 @@ export type ActionType =
   | 'dismiss'
   | 'assert'
   | 'keyboard'
+  | 'keypress'
   | 'prompt';
 
 /** A single action returned by the AI */

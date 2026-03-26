@@ -63,6 +63,7 @@ export async function executeAction(
         break;
 
       case 'keyboard':
+      case 'keypress':
         await executeKeyboard(page, action);
         break;
 
@@ -141,7 +142,9 @@ async function executeWait(page: Page, action: AIAction): Promise<void> {
   const condition = action.condition ?? action.value ?? '';
   const timeout = action.timeout ?? 10_000;
 
-  if (condition.startsWith('#') || condition.startsWith('.') || condition.startsWith('[')) {
+  // Detect CSS selectors: starts with tag name, #, ., or [
+  const looksLikeSelector = /^([a-z][a-z0-9]*(\[|#|\.| |,|:)|[#.\[])/.test(condition);
+  if (looksLikeSelector) {
     // CSS selector
     await page.waitForSelector(condition, { timeout });
   } else if (condition.startsWith('http') || condition.includes('/')) {

@@ -4,36 +4,19 @@ import type { Page } from 'playwright';
  * Capture a cleaned DOM snapshot from the current page.
  * Runs a script in the browser context to extract a simplified, AI-friendly
  * representation of the interactive and semantic elements.
+ * 
+ * We use a string-based evaluate to avoid TypeScript/esbuild injecting
+ * helper functions (like __name) that don't exist in the browser context.
  */
 export async function captureDomSnapshot(page: Page): Promise<string> {
-  // Cast to any so TypeScript doesn't complain about DOM types used inside
-  // the browser-side function — page.evaluate() serializes it to run in-browser.
-  return page.evaluate(cleanDomForAI as () => string);
+  return page.evaluate(DOM_CLEANER_SCRIPT);
 }
 
 /**
- * Clean a raw HTML string into a simplified representation.
- * Used in unit tests where a real browser is not available.
+ * Self-contained browser script as a string expression.
+ * This avoids any Node/TypeScript runtime helpers leaking into the browser context.
  */
-export function cleanHtmlString(html: string): string {
-  // Parse in Node environment using basic regex-based extraction
-  // (Full DOM parsing requires a browser — this is the unit-test-friendly version)
-  return extractInteractiveElements(html);
-}
-
-/**
- * This function runs INSIDE the browser via page.evaluate().
- * It must be self-contained — no imports, no external references.
- * DOM types (Element, HTMLElement, Node, document, window) are browser globals
- * that are not available in the Node TypeScript compilation target — they are
- * cast to unknown here and work correctly at runtime inside the browser.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function cleanDomForAI(this: unknown): string {
-  /* eslint-disable @typescript-eslint/no-explicit-any */
-  const _window = (globalThis as any).window as any;
-  const _document = (globalThis as any).document as any;
-  const _Node = (globalThis as any).Node as any;
+const DOM_CLEANER_SCRIPT = `(() => {
   const INTERACTIVE_TAGS = new Set([
     'input', 'button', 'a', 'select', 'textarea', 'label',
     'nav', 'main', 'header', 'footer', 'form', 'section', 'article',
@@ -44,20 +27,17 @@ function cleanDomForAI(this: unknown): string {
     'meta', 'link', 'base', 'title',
   ]);
 
-  function isVisible(el: any): boolean {
-    const style = _window.getComputedStyle(el);
+  function isVisible(el) {
+    const style = window.getComputedStyle(el);
     return (
       style.display !== 'none' &&
       style.visibility !== 'hidden' &&
-      style.opacity !== '0' &&
-      el.offsetParent !== null
+      style.opacity !== '0'
     );
   }
 
-  function getAttributes(el: any): string {
-    const attrs: string[] = [];
-
-    // Priority attributes
+  function getAttributes(el) {
+    const attrs = [];
     const important = [
       'id', 'data-testid', 'name', 'type', 'role', 'aria-label',
       'aria-labelledby', 'aria-describedby', 'aria-expanded', 'aria-checked',
@@ -65,55 +45,45 @@ function cleanDomForAI(this: unknown): string {
       'checked', 'selected', 'disabled', 'readonly', 'required',
       'for', 'action', 'method',
     ];
-
     for (const attr of important) {
       const val = el.getAttribute(attr);
       if (val !== null && val !== '') {
-        attrs.push(`${attr}="${val}"`);
+        attrs.push(attr + '="' + val + '"');
       }
     }
-
     return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
   }
 
-  function getVisibleText(el: any): string {
-    // For inputs, return value or placeholder
+  function getVisibleText(el) {
     if (el.tagName.toLowerCase() === 'input') {
-      if (el.value) return `[value="${el.value}"]`;
-      if (el.placeholder) return `[placeholder="${el.placeholder}"]`;
+      if (el.value) return '[value="' + el.value + '"]';
+      if (el.placeholder) return '[placeholder="' + el.placeholder + '"]';
       return '';
     }
-
-    // Collect direct text nodes only (not nested)
     let text = '';
     for (const node of el.childNodes) {
-      if (node.nodeType === _Node.TEXT_NODE) {
-        text += (node.textContent ?? '').trim();
+      if (node.nodeType === Node.TEXT_NODE) {
+        text += (node.textContent || '').trim();
       }
     }
-    return text.trim().substring(0, 100); // Truncate long text
+    return text.trim().substring(0, 100);
   }
 
-  function buildSelector(el: any): string {
+  function buildSelector(el) {
     const testId = el.getAttribute('data-testid');
-    if (testId) return `[data-testid="${testId}"]`;
-
+    if (testId) return '[data-testid="' + testId + '"]';
     const id = el.getAttribute('id');
-    if (id) return `#${id}`;
-
+    if (id) return '#' + id;
     const tag = el.tagName.toLowerCase();
     const name = el.getAttribute('name');
-    if (name) return `${tag}[name="${name}"]`;
-
+    if (name) return tag + '[name="' + name + '"]';
     const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel) return `${tag}[aria-label="${ariaLabel}"]`;
-
+    if (ariaLabel) return tag + '[aria-label="' + ariaLabel + '"]';
     return tag;
   }
 
-  function processElement(el: any, depth: number): string {
+  function processElement(el, depth) {
     const tag = el.tagName.toLowerCase();
-
     if (SKIP_TAGS.has(tag)) return '';
     if (!isVisible(el)) return '';
 
@@ -124,34 +94,41 @@ function cleanDomForAI(this: unknown): string {
     const isInteractive = INTERACTIVE_TAGS.has(tag);
 
     let output = '';
-
     if (isInteractive || text || attrs) {
-      const selectorComment = isInteractive ? ` <!-- ${selector} -->` : '';
-      const textContent = text ? ` ${text}` : '';
-      output += `${indent}<${tag}${attrs}>${textContent}${selectorComment}\n`;
+      const selectorComment = isInteractive ? ' <!-- ' + selector + ' -->' : '';
+      const textContent = text ? ' ' + text : '';
+      output += indent + '<' + tag + attrs + '>' + textContent + selectorComment + '\\n';
     }
 
-    // Process children
     for (const child of el.children) {
       output += processElement(child, depth + (isInteractive ? 1 : 0));
     }
 
     if (isInteractive || text || attrs) {
       if (!['input', 'br', 'hr', 'img', 'link', 'meta'].includes(tag)) {
-        output += `${indent}</${tag}>\n`;
+        output += indent + '</' + tag + '>\\n';
       }
     }
-
     return output;
   }
 
   try {
-    const body = _document.body;
+    const body = document.body;
     if (!body) return '<body>(empty)</body>';
     return processElement(body, 0) || '<body>(no visible interactive elements)</body>';
   } catch (err) {
-    return `<error>Failed to clean DOM: ${String(err)}</error>`;
+    return '<error>Failed to clean DOM: ' + String(err) + '</error>';
   }
+})()`;
+
+/**
+ * Clean a raw HTML string into a simplified representation.
+ * Used in unit tests where a real browser is not available.
+ */
+export function cleanHtmlString(html: string): string {
+  // Parse in Node environment using basic regex-based extraction
+  // (Full DOM parsing requires a browser — this is the unit-test-friendly version)
+  return extractInteractiveElements(html);
 }
 
 /**
