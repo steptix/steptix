@@ -247,8 +247,12 @@ For each natural language step:
    - AI returns: { pass: boolean, actual: string, explanation: string }
 
 6. On failure
-   - Retry once (full step re-execution)
+   - Collect failure context: failed selector, error message, element match count
+   - Retry once with enriched context (see §6.5)
+   - The retry prompt includes a "Previous Attempt Failed" section telling the AI which selectors were tried, how many elements matched, and why they failed — so it picks a different approach
    - If retry fails: capture failure screenshot, AI explains what it was trying to do, mark step as FAILED
+
+7. All raw AI responses (action plan, clarification, assertion) are captured and included in the report (see §9)
 ```
 
 ### 6.1 AI Action Types
@@ -283,6 +287,7 @@ Full DOM is too large for AI context. The cleaner produces a simplified represen
 - Semantic landmarks (`<nav>`, `<main>`, `<header>`, `<footer>`)
 - `data-testid` and `id` attributes
 - Element visibility state
+- **Bounding rect position annotations** on interactive elements: `[pos:x,y w×h]` from `getBoundingClientRect()`. Zero-size elements are annotated as `[pos:hidden]`. This helps the AI disambiguate duplicate elements (e.g. mobile vs desktop nav) by their position relative to the viewport.
 
 **Excluded:**
 - Inline styles and CSS classes (unless semantically meaningful)
@@ -291,7 +296,14 @@ Full DOM is too large for AI context. The cleaner produces a simplified represen
 - Hidden elements (`display: none`, `visibility: hidden`)
 - Decorative elements without text or interaction
 
-**Output format:** Indented, annotated HTML-like structure with stable selectors.
+**Output format:** Indented, annotated HTML-like structure with stable selectors and position annotations.
+
+**Example output:**
+```
+<nav role="navigation">
+  <a href="/login" role="button"> Log In <!-- a[role='button'][href='/login'] --> [pos:950,24 120x40]
+</nav>
+```
 
 ### 6.3 Obstacle Handling
 
@@ -311,6 +323,40 @@ When the AI cannot determine the correct action:
 2. CLI displays the question to the user with the current screenshot
 3. User provides guidance via stdin
 4. AI incorporates the answer and continues
+
+### 6.5 Responsive Layout Handling
+
+Many web applications render duplicate elements for mobile and desktop layouts (e.g. two navigation bars). The tool helps the AI target the correct variant through three mechanisms:
+
+1. **Viewport and device mode in system prompt** — The AI is told the viewport dimensions and a device mode classification:
+   - `≥1024px` width → `desktop`
+   - `≥768px` width → `tablet`
+   - `<768px` width → `mobile`
+   - Example: `Viewport: 1280×720px (desktop view)`
+
+2. **Position annotations in DOM snapshot** — Interactive elements include their bounding rectangle from `getBoundingClientRect()`. Off-screen or zero-size elements are clearly marked, allowing the AI to distinguish:
+   - Desktop nav at `[pos:950,24 120x40]` — visible in viewport
+   - Mobile nav at `[pos:-300,0 120x40]` — off-screen, should be ignored
+   - Hidden duplicate at `[pos:hidden]` — zero-size, should be ignored
+
+3. **AI prompt rule** — The system prompt explicitly instructs the AI to use viewport size and position annotations to disambiguate, preferring elements within the visible viewport.
+
+### 6.6 Retry Context Enrichment
+
+When a step fails and is retried, the retry is not blind — it includes context about what was already tried:
+
+1. On action failure, the executor captures:
+   - The CSS selector that was used
+   - The error message
+   - The number of elements that matched the selector (via `page.locator(selector).count()`)
+
+2. On retry, a `## Previous Attempt Failed` block is appended to the step instruction, telling the AI:
+   - Which selector was tried and failed
+   - If 0 elements matched: "No elements matched this selector"
+   - If >1 elements matched: "N elements matched — the first was used but was not the right target. Use a more specific selector."
+   - Explicit instruction: "do not reuse the same selectors that failed"
+
+3. Failure context accumulates across retries — if multiple retries are configured, each subsequent attempt sees all prior failures.
 
 ---
 
@@ -486,11 +532,22 @@ Each test run produces an HTML report at `./reports/<timestamp>-<test-name>.html
 └─────────────────────────────────────────────────┘
 ```
 
+### AI Responses Section
+
+Each step includes a collapsible **AI Responses** section showing every raw AI response captured during that step. Responses are labeled by purpose:
+
+- **action-plan** — the initial response with the list of sub-actions and reasoning
+- **clarification** — the follow-up response after user answered an ambiguity prompt
+- **assertion** — the assertion evaluation response
+
+All AI responses are captured and displayed regardless of whether the step passed or failed, including responses from all retry attempts. This provides full traceability of the AI's decision-making.
+
 ### Failure Report Additions
 
 When a step fails:
 - **Failure screenshot** with visual annotation of what the AI was targeting
 - **AI explanation** of what it was trying to do and why it failed
+- **AI responses** from all attempts (including retries) shown in collapsible sections
 - **Retry log** showing both attempts
 - **DOM snapshot** at the point of failure
 
@@ -665,24 +722,29 @@ You are an expert UI test automation agent. You control a web browser to execute
 - Test: {test name}
 - Base URL: {baseUrl}
 - Current Step: {step number} of {total steps}
+- Viewport: {width}×{height}px ({device mode} view)
 
 ## Your Task
-Execute the following test step by returning a JSON array of actions.
+Execute the following test step by returning a JSON object with an array of actions.
 
 ## Rules
 1. Return ONLY valid JSON — no markdown, no explanation outside JSON
-2. Each action must have: { "action": string, "selector": string, "value"?: string, "description": string }
-3. Use CSS selectors. Prefer data-testid, id, aria-label, then visible text
-4. If the step requires an assertion, include an "assert" action as the final action
-5. If you encounter an unexpected popup/modal/banner, include a "dismiss" action before your main actions
-6. If you cannot determine what to do, return a single "prompt" action with your question
-7. For assertions, extract the ACTUAL value from the page and include it
+2. Each action must have: { "action": string, "description": string } plus relevant fields
+3. Use CSS selectors. Prefer data-testid > id > aria-label > name > visible text
+4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
+5. If the step requires an assertion, include an "assert" action as the last action
+6. If you encounter an unexpected popup/modal/banner, include a "dismiss" action BEFORE your main actions
+7. If you cannot determine what to do, return a single "prompt" action with a "question" field
+8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
+9. For "navigate" actions, set "url" to the full or relative URL
+10. For "type" actions, set "value" to the text to type
+11. For "wait" actions, set "condition" to a CSS selector, URL pattern, or keyword like "networkidle"
 
 ## Current State
 Step instruction: "{step text}"
 
 DOM Snapshot:
-{cleaned DOM}
+{cleaned DOM with position annotations}
 
 [Screenshot is attached as an image]
 
@@ -693,6 +755,18 @@ DOM Snapshot:
   ],
   "reasoning": "Brief explanation of your approach"
 }
+```
+
+### Retry Prompt Enrichment
+
+On retry, a `## Previous Attempt Failed` block is appended to the step instruction:
+
+```
+## Previous Attempt Failed
+The following actions were tried and failed. Choose a DIFFERENT approach — do not reuse the same selectors that failed.
+
+- Action "click" with selector `a[role='button'][href='/login']` failed: locator.click: Error: ...
+  → 3 elements matched this selector — the first one was used but it was not the right target. Use a more specific selector (e.g. scope with a parent, use :nth-of-type(), :has-text(), or combine with other attributes) to target the correct element.
 ```
 
 ---
@@ -710,14 +784,17 @@ DOM Snapshot:
    c. Launch Playwright browser (headed/headless per config)
    d. Navigate to baseUrl (if specified)
    e. For each step:
-      i.   Capture DOM snapshot + screenshot
-      ii.  Send to AI via /v1/vision (or /v1/stream)
-      iii. Parse AI response into action list
-      iv.  If action is "prompt" → ask user, re-send to AI
-      v.   Execute each sub-action via Playwright
-      vi.  After each sub-action: capture screenshot + DOM
-      vii. If step has assertion: send final state to AI for evaluation
-      viii. On failure: retry once, then mark FAILED with explanation
+      i.    Capture DOM snapshot (with position annotations) + screenshot
+      ii.   Send to AI via /v1/vision (or /v1/stream), including viewport/device mode
+      iii.  Parse AI response into action list
+      iv.   Capture raw AI response for the report
+      v.    If action is "prompt" → ask user, re-send to AI, capture response
+      vi.   Execute each sub-action via Playwright
+      vii.  After each sub-action: capture screenshot + DOM
+      viii. If step has assertion: send final state to AI for evaluation, capture response
+      ix.   On failure: collect failed selector, match count, and error context
+      x.    Retry with enriched prompt (prior failure details), then mark FAILED with explanation
+      xi.   Include all captured AI responses (from all attempts) in the report
    f. Close browser
    g. Generate HTML report
 6. Print summary to console
@@ -793,10 +870,13 @@ A standalone test that runs against a real public website to validate the tool w
 
 ## 17. Design Decisions
 
-1. **Selector strategy:** AI decides based on context, but is instructed to prefer `data-testid` > `id` > `aria-label` > visible text when multiple options exist for the same element.
+1. **Selector strategy:** AI decides based on context, but is instructed to prefer `data-testid` > `id` > `aria-label` > `name` > visible text when multiple options exist for the same element.
 2. **Token budget per step:** Soft budget of 100K tokens per step with a console warning when exceeded. No hard cap — total remains bound by the 1M input limit.
 3. **Screenshot resolution:** Full viewport screenshots for v1. Element-level cropping deferred to a future version.
 4. **Conversation history:** Prior steps are included as text summaries only (e.g. "Step 2: Logged in successfully, now on /dashboard"). Full DOM snapshots from prior steps are not carried forward.
+5. **Responsive disambiguation:** Rather than filtering duplicate mobile/desktop elements at the DOM cleaner level (which could hide elements the AI needs), we annotate all visible interactive elements with their bounding rectangle position and let the AI decide which to target based on viewport dimensions and position context.
+6. **Retry enrichment over blind retry:** Retries include full context of what failed (selector, error, match count) so the AI can adapt its approach rather than repeating the same failing action. This is more effective than simply re-running the same step.
+7. **AI response capture:** All raw AI responses are captured and included in the HTML report for full traceability, even on failed steps across all retry attempts. This aids debugging and helps users understand AI decision-making.
 
 ---
 

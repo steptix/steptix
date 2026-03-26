@@ -125,6 +125,8 @@ export async function runTest(
       totalSubActions,
       durationMs,
       tokensUsed: tokenTracker.total,
+      inputTokens: tokenTracker.inputTotal,
+      outputTokens: tokenTracker.outputTotal,
       date: new Date().toISOString(),
       ...(baseUrl !== undefined && { baseUrl }),
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
@@ -223,6 +225,8 @@ export async function runTests(
   const failedTests = reports.filter((r) => r.status === 'failed').length;
   const totalDurationMs = reports.reduce((sum, r) => sum + r.durationMs, 0);
   const totalTokensUsed = reports.reduce((sum, r) => sum + r.tokensUsed, 0);
+  const totalInputTokens = reports.reduce((sum, r) => sum + r.inputTokens, 0);
+  const totalOutputTokens = reports.reduce((sum, r) => sum + r.outputTokens, 0);
 
   return {
     totalTests,
@@ -230,6 +234,8 @@ export async function runTests(
     failedTests,
     totalDurationMs,
     totalTokensUsed,
+    totalInputTokens,
+    totalOutputTokens,
     reports,
   };
 }

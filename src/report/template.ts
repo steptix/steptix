@@ -95,6 +95,12 @@ export function getReportTemplate(): string {
     .screenshot-img { max-width: 100%; border: 1px solid var(--border); border-radius: 6px; cursor: zoom-in; }
 
     /* DOM snapshot */
+    .ai-responses { margin-top: 14px; }
+    .ai-responses-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 6px; }
+    .ai-response { margin-top: 6px; }
+    .ai-response summary { font-size: 0.8rem; font-weight: 500; color: var(--muted); cursor: pointer; margin-bottom: 4px; }
+    .ai-response pre { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.75rem; background: var(--code-bg); padding: 12px; border-radius: 5px; overflow-x: auto; max-height: 400px; overflow-y: auto; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
+
     .dom-snapshot { margin-top: 10px; }
     .dom-snapshot summary { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; cursor: pointer; margin-bottom: 6px; }
     .dom-snapshot pre { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.75rem; background: var(--code-bg); padding: 12px; border-radius: 5px; overflow-x: auto; max-height: 300px; overflow-y: auto; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
@@ -173,8 +179,16 @@ export function getReportTemplate(): string {
       <span class="label">Sub-actions</span>
     </div>
     <div class="summary-stat">
+      <span class="number">{{inputTokens}}</span>
+      <span class="label">Input Tokens</span>
+    </div>
+    <div class="summary-stat">
+      <span class="number">{{outputTokens}}</span>
+      <span class="label">Output Tokens</span>
+    </div>
+    <div class="summary-stat">
       <span class="number">{{tokensUsed}}</span>
-      <span class="label">Tokens</span>
+      <span class="label">Total Tokens</span>
     </div>
   </div>
 

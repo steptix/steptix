@@ -54,6 +54,16 @@ const DOM_CLEANER_SCRIPT = `(() => {
     return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
   }
 
+  function getPositionAnnotation(el) {
+    try {
+      var rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return ' [pos:hidden]';
+      return ' [pos:' + Math.round(rect.x) + ',' + Math.round(rect.y) + ' ' + Math.round(rect.width) + 'x' + Math.round(rect.height) + ']';
+    } catch (e) {
+      return '';
+    }
+  }
+
   function getVisibleText(el) {
     if (el.tagName.toLowerCase() === 'input') {
       if (el.value) return '[value="' + el.value + '"]';
@@ -96,8 +106,9 @@ const DOM_CLEANER_SCRIPT = `(() => {
     let output = '';
     if (isInteractive || text || attrs) {
       const selectorComment = isInteractive ? ' <!-- ' + selector + ' -->' : '';
+      const posAnnotation = isInteractive ? getPositionAnnotation(el) : '';
       const textContent = text ? ' ' + text : '';
-      output += indent + '<' + tag + attrs + '>' + textContent + selectorComment + '\\n';
+      output += indent + '<' + tag + attrs + '>' + textContent + selectorComment + posAnnotation + '\\n';
     }
 
     for (const child of el.children) {

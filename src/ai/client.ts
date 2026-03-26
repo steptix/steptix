@@ -56,8 +56,8 @@ export class AiClient {
 
     if (data.usage) {
       this.tokenTracker.addUsage(
-        data.usage.prompt_tokens,
-        data.usage.completion_tokens,
+        data.usage.input_tokens,
+        data.usage.output_tokens,
       );
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     }
@@ -132,11 +132,11 @@ export class AiClient {
 
             // Check for usage info (some providers include it in the last chunk)
             const chunkWithUsage = chunk as StreamChunk & {
-              usage?: { prompt_tokens: number; completion_tokens: number };
+              usage?: { input_tokens: number; output_tokens: number };
             };
             if (chunkWithUsage.usage) {
-              promptTokens = chunkWithUsage.usage.prompt_tokens;
-              completionTokens = chunkWithUsage.usage.completion_tokens;
+              promptTokens = chunkWithUsage.usage.input_tokens;
+              completionTokens = chunkWithUsage.usage.output_tokens;
             }
 
             // Check finish reason

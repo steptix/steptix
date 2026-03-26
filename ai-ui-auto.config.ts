@@ -3,8 +3,8 @@ import { defineConfig } from './src/config/types.js';
 export default defineConfig({
   ai: {
     gatewayUrl: 'https://llm.corp.example',
-    apiKey: 'c27c1232-8f59-44e9-85ec-37856a25ee32',
-    model: 'gpt-5.4',
+    // apiKey: process.env.AI_API_KEY,
+    model: 'gpt-5.4-mini',
     maxInputTokens: 1_000_000,
     streamResponses: true,
   },

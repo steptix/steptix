@@ -6,6 +6,8 @@ export interface RetryOptions {
   delayMs?: number;
   /** Label for log messages */
   label?: string;
+  /** Called after each failed attempt, before the next retry */
+  onFailure?: (err: unknown) => void;
 }
 
 /**
@@ -16,7 +18,7 @@ export async function withRetry<T>(
   fn: (attempt: number) => Promise<T>,
   options: RetryOptions,
 ): Promise<T> {
-  const { maxRetries, delayMs = 0, label = 'operation' } = options;
+  const { maxRetries, delayMs = 0, label = 'operation', onFailure } = options;
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
@@ -32,6 +34,7 @@ export async function withRetry<T>(
       lastError = err;
       if (attempt <= maxRetries) {
         logger.warn(`${label} failed on attempt ${attempt}: ${String(err)}`);
+        onFailure?.(err);
       }
     }
   }

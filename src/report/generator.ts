@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
-import type { TestReport, StepResult, SubActionResult } from './types.js';
+import type { TestReport, StepResult, SubActionResult, AiInteraction } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
@@ -59,6 +59,8 @@ function renderReport(report: TestReport): string {
 
   const duration = formatDuration(report.durationMs);
   const tokensUsed = report.tokensUsed.toLocaleString();
+  const inputTokens = report.inputTokens.toLocaleString();
+  const outputTokens = report.outputTokens.toLocaleString();
   const stepsHtml = renderSteps(report.steps);
 
   return template({
@@ -77,6 +79,8 @@ function renderReport(report: TestReport): string {
     failedSteps: report.failedSteps,
     totalSubActions: report.totalSubActions,
     tokensUsed,
+    inputTokens,
+    outputTokens,
     stepsHtml: new Handlebars.SafeString(stepsHtml),
   });
 }
@@ -97,6 +101,10 @@ function renderStep(step: StepResult): string {
 
   const assertionHtml = step.assertion
     ? renderAssertion(step.assertion)
+    : '';
+
+  const aiResponsesHtml = step.aiResponses && step.aiResponses.length > 0
+    ? renderAiResponses(step.aiResponses)
     : '';
 
   const failureHtml = step.status === 'failed'
@@ -135,6 +143,7 @@ function renderStep(step: StepResult): string {
     ${domHtml}
     ${subActionsHtml}
     ${assertionHtml}
+    ${aiResponsesHtml}
     ${failureHtml}
   </div>
 </div>`;
@@ -201,6 +210,21 @@ function renderAssertion(
     <span class="assertion-key">Explanation:</span>
     <span>${escapeHtml(assertion.explanation)}</span>
   </div>
+</div>`;
+}
+
+function renderAiResponses(responses: AiInteraction[]): string {
+  const items = responses.map((r) => {
+    const label = escapeHtml(r.purpose);
+    return `<details class="ai-response">
+      <summary>AI response — ${label}</summary>
+      <pre>${escapeHtml(r.response)}</pre>
+    </details>`;
+  }).join('\n');
+
+  return `<div class="ai-responses">
+  <div class="ai-responses-title">AI Responses (${responses.length})</div>
+  ${items}
 </div>`;
 }
 

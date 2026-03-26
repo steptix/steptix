@@ -3,14 +3,16 @@ import { stdin as input, stdout as output } from 'node:process';
 import type { Page } from 'playwright';
 import type { Config } from '../config/types.js';
 import type { AIAction } from '../ai/types.js';
-import type { StepResult, SubActionResult } from '../report/types.js';
+import type { StepResult, SubActionResult, AiInteraction } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import {
   buildSystemPrompt,
   buildStepMessage,
   buildClarificationMessage,
   buildAssertionMessage,
+  buildRetryContext,
 } from '../ai/prompts.js';
+import type { PriorFailureContext } from '../ai/prompts.js';
 import { parseAIResponse, parseAssertionEvaluation } from '../ai/action-parser.js';
 import { captureDomSnapshot } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
@@ -27,6 +29,18 @@ export interface StepExecutorOptions {
   testName: string;
   baseUrl?: string;
   conversationHistory: string[];
+}
+
+/** Error subclass that carries failure context for retry enrichment */
+class StepFailureError extends Error {
+  failures: PriorFailureContext[];
+  aiResponses: AiInteraction[];
+  constructor(message: string, failures: PriorFailureContext[], aiResponses: AiInteraction[] = []) {
+    super(message);
+    this.name = 'StepFailureError';
+    this.failures = failures;
+    this.aiResponses = aiResponses;
+  }
 }
 
 /** Determine if a step instruction likely contains an assertion */
@@ -52,6 +66,8 @@ export async function executeStep(
 ): Promise<StepResult> {
   const startTime = Date.now();
   let retried = false;
+  let priorFailures: PriorFailureContext[] = [];
+  let allAiResponses: AiInteraction[] = [];
 
   const attempt = async (attemptNumber: number): Promise<StepResult> => {
     if (attemptNumber === 2) retried = true;
@@ -63,6 +79,7 @@ export async function executeStep(
       opts,
       startTime,
       retried,
+      priorFailures,
     );
   };
 
@@ -70,6 +87,13 @@ export async function executeStep(
     return await withRetry(attempt, {
       maxRetries: opts.config.execution.retries,
       label: `step ${stepIndex}`,
+      onFailure: (err) => {
+        // Collect failure context and AI responses from the attempt for the next retry
+        if (err instanceof StepFailureError) {
+          priorFailures = [...priorFailures, ...err.failures];
+          allAiResponses = [...allAiResponses, ...err.aiResponses];
+        }
+      },
     });
   } catch (err) {
     // Both attempts failed
@@ -85,6 +109,11 @@ export async function executeStep(
       failureScreenshot = shot?.base64;
     }
 
+    // Collect AI responses from the final failed attempt too
+    if (err instanceof StepFailureError) {
+      allAiResponses = [...allAiResponses, ...err.aiResponses];
+    }
+
     return {
       index: stepIndex,
       instruction,
@@ -95,6 +124,7 @@ export async function executeStep(
       ...(failureScreenshot !== undefined && { screenshotBase64: failureScreenshot }),
       error: errorMessage,
       aiExplanation: `Failed to execute step after ${opts.config.execution.retries + 1} attempts. Last error: ${errorMessage}`,
+      ...(allAiResponses.length > 0 && { aiResponses: allAiResponses }),
     };
   }
 }
@@ -106,6 +136,7 @@ async function executeStepAttempt(
   opts: StepExecutorOptions,
   startTime: number,
   retried: boolean,
+  priorFailures: PriorFailureContext[] = [],
 ): Promise<StepResult> {
   const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory } = opts;
 
@@ -126,10 +157,17 @@ async function executeStepAttempt(
     baseUrl,
     stepIndex,
     totalSteps,
+    config.browser.viewport,
   );
 
+  // Append retry context so the AI knows what was already tried
+  const retryHint = buildRetryContext(priorFailures);
+  const enrichedInstruction = retryHint
+    ? `${instruction}${retryHint}`
+    : instruction;
+
   const userMessage = buildStepMessage(
-    instruction,
+    enrichedInstruction,
     domSnapshot,
     screenshotBase64 ?? null,
     conversationHistory,
@@ -140,9 +178,13 @@ async function executeStepAttempt(
     userMessage,
   ];
 
+  // Track all AI responses for the report
+  const aiResponses: AiInteraction[] = [];
+
   // 4. Get AI action plan
   const rawResponse = await aiClient.complete(messages);
   let aiResponse = parseAIResponse(rawResponse);
+  aiResponses.push({ purpose: 'action-plan', response: rawResponse });
 
   logger.debug(`AI reasoning: ${aiResponse.reasoning}`);
 
@@ -160,6 +202,7 @@ async function executeStepAttempt(
       { role: 'assistant', content: rawResponse },
       clarificationMsg,
     ]);
+    aiResponses.push({ purpose: 'clarification', response: clarifiedResponse });
     aiResponse = parseAIResponse(clarifiedResponse);
   }
 
@@ -168,6 +211,7 @@ async function executeStepAttempt(
   let stepFailed = false;
   let stepError: string | undefined;
   let assertionResult: StepResult['assertion'];
+  const collectedFailures: PriorFailureContext[] = [];
 
   for (const action of aiResponse.actions) {
     if (action.action === 'assert') {
@@ -203,6 +247,16 @@ async function executeStepAttempt(
     if (!result.success) {
       stepFailed = true;
       stepError = result.error;
+
+      // Collect failure context so retry gets richer info
+      if (result.failedSelector) {
+        collectedFailures.push({
+          selector: result.failedSelector,
+          error: result.error ?? 'Unknown error',
+          ...(result.matchCount !== undefined && { matchCount: result.matchCount }),
+          actionType: action.action,
+        });
+      }
       break;
     }
   }
@@ -225,6 +279,7 @@ async function executeStepAttempt(
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
     ]);
+    aiResponses.push({ purpose: 'assertion', response: assertRaw });
 
     const evaluation = parseAssertionEvaluation(assertRaw);
 
@@ -247,7 +302,7 @@ async function executeStepAttempt(
   const status = stepFailed ? 'failed' : 'passed';
 
   if (stepFailed) {
-    throw new Error(stepError ?? 'Step failed');
+    throw new StepFailureError(stepError ?? 'Step failed', collectedFailures, aiResponses);
   }
 
   const domSnapshotForStep = config.reports.includeDomSnapshots ? domSnapshot : undefined;
@@ -263,6 +318,7 @@ async function executeStepAttempt(
     retried,
     ...(stepError !== undefined && { error: stepError }),
     aiExplanation: aiResponse.reasoning,
+    ...(aiResponses.length > 0 && { aiResponses }),
   };
 }
 

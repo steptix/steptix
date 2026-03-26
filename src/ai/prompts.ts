@@ -1,5 +1,20 @@
 import type { ChatMessage } from './types.js';
 
+/** Viewport dimensions passed to the system prompt */
+export interface ViewportInfo {
+  width: number;
+  height: number;
+}
+
+/**
+ * Classify viewport width into a device mode label.
+ */
+function classifyDeviceMode(width: number): string {
+  if (width >= 1024) return 'desktop';
+  if (width >= 768) return 'tablet';
+  return 'mobile';
+}
+
 /**
  * Build the system prompt for step execution.
  * Includes application context and AI behaviour rules.
@@ -10,6 +25,7 @@ export function buildSystemPrompt(
   baseUrl?: string,
   currentStep?: number,
   totalSteps?: number,
+  viewport?: ViewportInfo,
 ): string {
   const stepInfo =
     currentStep !== undefined && totalSteps !== undefined
@@ -18,12 +34,19 @@ export function buildSystemPrompt(
 
   const baseUrlInfo = baseUrl ? `- Base URL: ${baseUrl}` : '';
 
+  let viewportInfo = '';
+  if (viewport) {
+    const mode = classifyDeviceMode(viewport.width);
+    viewportInfo = `- Viewport: ${viewport.width}×${viewport.height}px (${mode} view)`;
+  }
+
   return `You are an expert UI test automation agent. You control a web browser to execute test steps described in natural language.
 
 ${contextContent ? `## Application Context\n\n${contextContent}\n\n` : ''}## Test Information
 - Test: ${testName}
 ${baseUrlInfo}
 ${stepInfo}
+${viewportInfo}
 
 ## Your Task
 Execute the following test step by returning a JSON object with an array of actions.
@@ -32,13 +55,14 @@ Execute the following test step by returning a JSON object with an array of acti
 1. Return ONLY valid JSON — no markdown, no explanation outside JSON
 2. Each action must have: { "action": string, "description": string } plus relevant fields
 3. Use CSS selectors. Prefer data-testid > id > aria-label > name > visible text
-4. If the step requires an assertion, include an "assert" action as the last action
-5. If you encounter an unexpected popup/modal/banner, include a "dismiss" action BEFORE your main actions
-6. If you cannot determine what to do, return a single "prompt" action with a "question" field
-7. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
-8. For "navigate" actions, set "url" to the full or relative URL
-9. For "type" actions, set "value" to the text to type
-10. For "wait" actions, set "condition" to a CSS selector, URL pattern, or keyword like "networkidle"
+4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
+5. If the step requires an assertion, include an "assert" action as the last action
+6. If you encounter an unexpected popup/modal/banner, include a "dismiss" action BEFORE your main actions
+7. If you cannot determine what to do, return a single "prompt" action with a "question" field
+8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
+9. For "navigate" actions, set "url" to the full or relative URL
+10. For "type" actions, set "value" to the text to type
+11. For "wait" actions, set "condition" to a CSS selector, URL pattern, or keyword like "networkidle"
 
 ## Response Format
 {
@@ -149,6 +173,43 @@ Respond with ONLY this JSON format:
     role: 'user',
     content: textContent,
   };
+}
+
+/** Context from a prior failed attempt, used to guide the AI on retry */
+export interface PriorFailureContext {
+  /** The selector that was tried */
+  selector: string;
+  /** The error message from the failed action */
+  error: string;
+  /** How many elements matched the selector (0 = not found, >1 = ambiguous) */
+  matchCount?: number;
+  /** The action type that failed */
+  actionType: string;
+}
+
+/**
+ * Build a retry hint block that is appended to the user message on retry.
+ * Tells the AI what was already tried so it picks a different approach.
+ */
+export function buildRetryContext(failures: PriorFailureContext[]): string {
+  if (failures.length === 0) return '';
+
+  const lines = failures.map((f) => {
+    let detail = `- Action "${f.actionType}" with selector \`${f.selector}\` failed: ${f.error}`;
+    if (f.matchCount !== undefined) {
+      if (f.matchCount === 0) {
+        detail += `\n  → No elements matched this selector.`;
+      } else if (f.matchCount > 1) {
+        detail += `\n  → ${f.matchCount} elements matched this selector — the first one was used but it was not the right target. Use a more specific selector (e.g. scope with a parent, use :nth-of-type(), :has-text(), or combine with other attributes) to target the correct element.`;
+      }
+    }
+    return detail;
+  });
+
+  return `\n\n## Previous Attempt Failed
+The following actions were tried and failed. Choose a DIFFERENT approach — do not reuse the same selectors that failed.
+
+${lines.join('\n')}`;
 }
 
 /**

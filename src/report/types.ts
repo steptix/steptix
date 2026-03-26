@@ -22,6 +22,14 @@ export interface AssertionResult extends AssertionEvaluation {
   expected: string;
 }
 
+/** A single captured AI response during step execution */
+export interface AiInteraction {
+  /** What triggered this AI call (e.g. "action-plan", "clarification", "assertion") */
+  purpose: string;
+  /** The raw response text from the AI */
+  response: string;
+}
+
 /** Result of a single test step */
 export interface StepResult {
   /** 1-based step number */
@@ -40,6 +48,8 @@ export interface StepResult {
   error?: string;
   /** AI explanation of what it was attempting (shown on failure) */
   aiExplanation?: string;
+  /** All raw AI responses captured during this step */
+  aiResponses?: AiInteraction[];
 }
 
 /** Complete test run report data */
@@ -55,6 +65,10 @@ export interface TestReport {
   totalSubActions: number;
   durationMs: number;
   tokensUsed: number;
+  /** Input (prompt) tokens consumed across all AI calls */
+  inputTokens: number;
+  /** Output (completion) tokens consumed across all AI calls */
+  outputTokens: number;
   /** ISO 8601 date string */
   date: string;
   baseUrl?: string;
@@ -70,5 +84,7 @@ export interface RunSummary {
   failedTests: number;
   totalDurationMs: number;
   totalTokensUsed: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
   reports: TestReport[];
 }

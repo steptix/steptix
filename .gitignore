@@ -2,3 +2,5 @@ node_modules/
 dist/
 reports/
 *.tsbuildinfo
+.env
+.env.*

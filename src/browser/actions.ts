@@ -6,6 +6,10 @@ import { logger } from '../utils/logger.js';
 export interface ActionExecutionResult {
   success: boolean;
   error?: string;
+  /** The selector that was used (for failure context on retry) */
+  failedSelector?: string;
+  /** How many elements matched the selector (0 = not found, >1 = ambiguous) */
+  matchCount?: number;
 }
 
 /**
@@ -85,27 +89,44 @@ export async function executeAction(
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     logger.error(`Action failed [${action.action}]: ${errorMessage}`);
-    return { success: false, error: errorMessage };
+
+    // Count how many elements matched the selector for retry context
+    let matchCount: number | undefined;
+    if (action.selector) {
+      try {
+        matchCount = await page.locator(action.selector).count();
+      } catch {
+        // Selector itself may be invalid — leave matchCount undefined
+      }
+    }
+
+    return {
+      success: false,
+      error: errorMessage,
+      ...(action.selector !== undefined && { failedSelector: action.selector }),
+      ...(matchCount !== undefined && { matchCount }),
+    };
   }
 }
 
 async function executeClick(page: Page, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
-  await page.locator(selector).first().click({ timeout: 10_000 });
+  await page.locator(selector).locator('visible=true').first().click({ timeout: 10_000 });
 }
 
 async function executeType(page: Page, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
   const value = action.value ?? '';
+  const locator = page.locator(selector).locator('visible=true').first();
   // Clear existing content first, then type
-  await page.locator(selector).first().clear({ timeout: 5_000 });
-  await page.locator(selector).first().fill(value, { timeout: 10_000 });
+  await locator.clear({ timeout: 5_000 });
+  await locator.fill(value, { timeout: 10_000 });
 }
 
 async function executeSelect(page: Page, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
   const value = action.value ?? '';
-  await page.locator(selector).first().selectOption(value, { timeout: 10_000 });
+  await page.locator(selector).locator('visible=true').first().selectOption(value, { timeout: 10_000 });
 }
 
 async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): Promise<void> {
@@ -130,12 +151,12 @@ async function executeUpload(page: Page, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
   const filePath = action.filePath ?? action.value ?? '';
   if (!filePath) throw new Error('upload action requires a filePath');
-  await page.locator(selector).first().setInputFiles(filePath, { timeout: 10_000 });
+  await page.locator(selector).locator('visible=true').first().setInputFiles(filePath, { timeout: 10_000 });
 }
 
 async function executeHover(page: Page, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
-  await page.locator(selector).first().hover({ timeout: 10_000 });
+  await page.locator(selector).locator('visible=true').first().hover({ timeout: 10_000 });
 }
 
 async function executeWait(page: Page, action: AIAction): Promise<void> {
@@ -180,7 +201,7 @@ async function executeDismiss(page: Page, action: AIAction): Promise<void> {
 
   if (selector) {
     try {
-      const locator = page.locator(selector).first();
+      const locator = page.locator(selector).locator('visible=true').first();
       if (await locator.isVisible({ timeout: 3_000 })) {
         await locator.click({ timeout: 5_000 });
         return;
