@@ -1,0 +1,50 @@
+{
+  "name": "ai-ui-automation",
+  "version": "1.0.0",
+  "description": "AI-powered UI test automation using natural language Markdown test files",
+  "type": "module",
+  "bin": {
+    "ai-ui-auto": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "eventsource-parser": "^2.0.0",
+    "glob": "^10.3.10",
+    "gray-matter": "^4.0.3",
+    "handlebars": "^4.7.8",
+    "marked": "^12.0.0",
+    "ora": "^8.0.1",
+    "playwright": "^1.42.0",
+    "tiktoken": "^1.0.15",
+    "tsx": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/handlebars": "^4.1.0",
+    "@types/node": "^20.11.0",
+    "@vitest/coverage-v8": "^1.4.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

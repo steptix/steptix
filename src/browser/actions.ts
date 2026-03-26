@@ -1,0 +1,230 @@
+import type { Page } from 'playwright';
+import type { AIAction } from '../ai/types.js';
+import { logger } from '../utils/logger.js';
+
+/** Result of executing a single Playwright action */
+export interface ActionExecutionResult {
+  success: boolean;
+  error?: string;
+}
+
+/**
+ * Execute a single AI action via Playwright.
+ * Maps each action type to the corresponding Playwright API call.
+ */
+export async function executeAction(
+  page: Page,
+  action: AIAction,
+  baseUrl?: string,
+): Promise<ActionExecutionResult> {
+  logger.subAction(action.description);
+
+  try {
+    switch (action.action) {
+      case 'click':
+        await executeClick(page, action);
+        break;
+
+      case 'type':
+        await executeType(page, action);
+        break;
+
+      case 'select':
+        await executeSelect(page, action);
+        break;
+
+      case 'navigate':
+        await executeNavigate(page, action, baseUrl);
+        break;
+
+      case 'upload':
+        await executeUpload(page, action);
+        break;
+
+      case 'hover':
+        await executeHover(page, action);
+        break;
+
+      case 'wait':
+        await executeWait(page, action);
+        break;
+
+      case 'scroll':
+        await executeScroll(page, action);
+        break;
+
+      case 'switchFrame':
+        // Frame switching is handled at a higher level
+        logger.debug(`switchFrame action: ${action.selector ?? 'default'}`);
+        break;
+
+      case 'dismiss':
+        await executeDismiss(page, action);
+        break;
+
+      case 'keyboard':
+        await executeKeyboard(page, action);
+        break;
+
+      case 'assert':
+        // Assertions are evaluated by the AI — no Playwright action needed
+        logger.debug(`assert action: ${action.description}`);
+        break;
+
+      case 'prompt':
+        // Prompt actions are handled at the step executor level
+        logger.debug(`prompt action: ${action.question ?? action.description}`);
+        break;
+
+      default:
+        logger.warn(`Unknown action type: ${(action as AIAction).action}`);
+    }
+
+    return { success: true };
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Action failed [${action.action}]: ${errorMessage}`);
+    return { success: false, error: errorMessage };
+  }
+}
+
+async function executeClick(page: Page, action: AIAction): Promise<void> {
+  const selector = requireSelector(action);
+  await page.locator(selector).first().click({ timeout: 10_000 });
+}
+
+async function executeType(page: Page, action: AIAction): Promise<void> {
+  const selector = requireSelector(action);
+  const value = action.value ?? '';
+  // Clear existing content first, then type
+  await page.locator(selector).first().clear({ timeout: 5_000 });
+  await page.locator(selector).first().fill(value, { timeout: 10_000 });
+}
+
+async function executeSelect(page: Page, action: AIAction): Promise<void> {
+  const selector = requireSelector(action);
+  const value = action.value ?? '';
+  await page.locator(selector).first().selectOption(value, { timeout: 10_000 });
+}
+
+async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): Promise<void> {
+  let url = action.url ?? action.value ?? '';
+
+  if (!url) {
+    throw new Error('navigate action requires a url or value');
+  }
+
+  // Resolve relative URLs against baseUrl
+  if (url.startsWith('/') && baseUrl) {
+    const base = baseUrl.replace(/\/$/, '');
+    url = `${base}${url}`;
+  } else if (!url.startsWith('http') && baseUrl) {
+    url = `${baseUrl.replace(/\/$/, '')}/${url}`;
+  }
+
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+}
+
+async function executeUpload(page: Page, action: AIAction): Promise<void> {
+  const selector = requireSelector(action);
+  const filePath = action.filePath ?? action.value ?? '';
+  if (!filePath) throw new Error('upload action requires a filePath');
+  await page.locator(selector).first().setInputFiles(filePath, { timeout: 10_000 });
+}
+
+async function executeHover(page: Page, action: AIAction): Promise<void> {
+  const selector = requireSelector(action);
+  await page.locator(selector).first().hover({ timeout: 10_000 });
+}
+
+async function executeWait(page: Page, action: AIAction): Promise<void> {
+  const condition = action.condition ?? action.value ?? '';
+  const timeout = action.timeout ?? 10_000;
+
+  if (condition.startsWith('#') || condition.startsWith('.') || condition.startsWith('[')) {
+    // CSS selector
+    await page.waitForSelector(condition, { timeout });
+  } else if (condition.startsWith('http') || condition.includes('/')) {
+    // URL pattern
+    await page.waitForURL(condition, { timeout });
+  } else if (condition === 'networkidle') {
+    await page.waitForLoadState('networkidle', { timeout });
+  } else if (condition === 'load') {
+    await page.waitForLoadState('load', { timeout });
+  } else {
+    // Generic wait for condition text to appear
+    await page.waitForFunction(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (text) => (globalThis as any).document.body.textContent?.includes(text) ?? false,
+      condition,
+      { timeout },
+    );
+  }
+}
+
+async function executeScroll(page: Page, action: AIAction): Promise<void> {
+  const direction = action.direction ?? 'down';
+  const amount = action.amount ?? 300;
+
+  const deltaX = direction === 'left' ? -amount : direction === 'right' ? amount : 0;
+  const deltaY = direction === 'up' ? -amount : direction === 'down' ? amount : 0;
+
+  await page.mouse.wheel(deltaX, deltaY);
+}
+
+async function executeDismiss(page: Page, action: AIAction): Promise<void> {
+  const selector = action.selector;
+
+  if (selector) {
+    try {
+      const locator = page.locator(selector).first();
+      if (await locator.isVisible({ timeout: 3_000 })) {
+        await locator.click({ timeout: 5_000 });
+        return;
+      }
+    } catch {
+      // Element not found or not clickable — try common dismiss patterns
+    }
+  }
+
+  // Try common dismiss button patterns
+  const dismissPatterns = [
+    'button:has-text("Accept All")',
+    'button:has-text("Accept")',
+    'button:has-text("Close")',
+    'button:has-text("OK")',
+    'button:has-text("Dismiss")',
+    '[aria-label="Close"]',
+    '[aria-label="Dismiss"]',
+    '.close-button',
+    '#cookie-accept',
+  ];
+
+  for (const pattern of dismissPatterns) {
+    try {
+      const el = page.locator(pattern).first();
+      if (await el.isVisible({ timeout: 1_000 })) {
+        await el.click({ timeout: 3_000 });
+        logger.debug(`Dismissed element matching: ${pattern}`);
+        return;
+      }
+    } catch {
+      // Try next pattern
+    }
+  }
+
+  logger.debug('No dismiss target found — continuing');
+}
+
+async function executeKeyboard(page: Page, action: AIAction): Promise<void> {
+  const key = action.key ?? action.value ?? '';
+  if (!key) throw new Error('keyboard action requires a key');
+  await page.keyboard.press(key);
+}
+
+function requireSelector(action: AIAction): string {
+  if (!action.selector) {
+    throw new Error(`Action "${action.action}" requires a selector but none was provided`);
+  }
+  return action.selector;
+}

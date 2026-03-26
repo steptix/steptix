@@ -1,0 +1,121 @@
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { DEFAULT_CONFIG } from './defaults.js';
+import type { Config, UserConfig } from './types.js';
+import { logger } from '../utils/logger.js';
+
+/** Recursively merge user config over defaults */
+function mergeConfig(defaults: Config, overrides: UserConfig): Config {
+  const result = { ...defaults };
+
+  for (const key of Object.keys(overrides) as Array<keyof UserConfig>) {
+    const override = overrides[key];
+    if (override === undefined) continue;
+
+    const defaultVal = defaults[key];
+    if (
+      typeof override === 'object' &&
+      !Array.isArray(override) &&
+      typeof defaultVal === 'object' &&
+      !Array.isArray(defaultVal)
+    ) {
+      // @ts-expect-error — recursive merge of matching sub-object types
+      result[key] = { ...defaultVal, ...override };
+    } else {
+      // @ts-expect-error — direct assignment of overriding primitive
+      result[key] = override;
+    }
+  }
+
+  return result;
+}
+
+/** Resolve a config file path, searching common locations */
+function resolveConfigPath(configPath?: string): string | null {
+  const cwd = process.cwd();
+
+  if (configPath) {
+    return path.resolve(cwd, configPath);
+  }
+
+  // Search for default config filenames
+  const candidates = [
+    'ai-ui-auto.config.ts',
+    'ai-ui-auto.config.js',
+    'ai-ui-auto.config.mjs',
+  ];
+
+  for (const candidate of candidates) {
+    const fullPath = path.resolve(cwd, candidate);
+    try {
+      // Check existence by attempting a require resolve
+      createRequire(import.meta.url).resolve(fullPath);
+      return fullPath;
+    } catch {
+      // File doesn't exist, try next
+    }
+  }
+
+  return null;
+}
+
+/** Load and merge configuration from file + defaults */
+export async function loadConfig(configPath?: string): Promise<Config> {
+  const resolvedPath = resolveConfigPath(configPath);
+
+  if (!resolvedPath) {
+    logger.debug('No config file found, using defaults');
+    return DEFAULT_CONFIG;
+  }
+
+  logger.debug(`Loading config from: ${resolvedPath}`);
+
+  try {
+    const fileUrl = pathToFileURL(resolvedPath).href;
+
+    // Use tsx to handle TypeScript config files at runtime
+    let module: { default?: UserConfig };
+
+    if (resolvedPath.endsWith('.ts')) {
+      // tsx registers TypeScript handling — import works directly in tsx context
+      module = await import(fileUrl) as { default?: UserConfig };
+    } else {
+      module = await import(fileUrl) as { default?: UserConfig };
+    }
+
+    const userConfig = module.default ?? {};
+    return mergeConfig(DEFAULT_CONFIG, userConfig);
+  } catch (err) {
+    logger.warn(`Failed to load config from ${resolvedPath}: ${String(err)}`);
+    logger.warn('Falling back to default configuration');
+    return DEFAULT_CONFIG;
+  }
+}
+
+/** Apply CLI flag overrides onto an already-loaded config */
+export function applyCliOverrides(
+  config: Config,
+  overrides: {
+    headless?: boolean;
+    timeout?: number;
+    browser?: 'chromium' | 'firefox' | 'webkit';
+    verbose?: boolean;
+  },
+): Config {
+  const result = { ...config };
+
+  if (overrides.headless === true) {
+    result.browser = { ...result.browser, headed: false };
+  }
+
+  if (overrides.timeout !== undefined) {
+    result.execution = { ...result.execution, timeout: overrides.timeout };
+  }
+
+  if (overrides.browser !== undefined) {
+    result.browser = { ...result.browser, browser: overrides.browser };
+  }
+
+  return result;
+}

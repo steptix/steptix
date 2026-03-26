@@ -1,0 +1,113 @@
+/** All supported AI action types */
+export type ActionType =
+  | 'click'
+  | 'type'
+  | 'select'
+  | 'navigate'
+  | 'upload'
+  | 'hover'
+  | 'wait'
+  | 'scroll'
+  | 'switchFrame'
+  | 'dismiss'
+  | 'assert'
+  | 'keyboard'
+  | 'prompt';
+
+/** A single action returned by the AI */
+export interface AIAction {
+  action: ActionType;
+  /** CSS selector for the target element */
+  selector?: string;
+  /** Text to type, option value to select, or condition to wait for */
+  value?: string;
+  /** URL to navigate to */
+  url?: string;
+  /** File path for upload actions */
+  filePath?: string;
+  /** Condition string for wait/assert actions */
+  condition?: string;
+  /** Expected value for assertion */
+  expected?: string;
+  /** Scroll direction */
+  direction?: 'up' | 'down' | 'left' | 'right';
+  /** Scroll amount in pixels */
+  amount?: number;
+  /** Timeout in milliseconds for wait actions */
+  timeout?: number;
+  /** Keyboard key or shortcut (e.g. "Enter", "Control+a") */
+  key?: string;
+  /** Question to ask the user for prompt actions */
+  question?: string;
+  /** Human-readable description of what this action does */
+  description: string;
+}
+
+/** The structured response from the AI for a test step */
+export interface AIResponse {
+  actions: AIAction[];
+  reasoning: string;
+}
+
+/** Result of an AI assertion evaluation */
+export interface AssertionEvaluation {
+  pass: boolean;
+  /** The actual value extracted from the page */
+  actual: string;
+  /** Explanation of why the assertion passed or failed */
+  explanation: string;
+}
+
+/** A single content block in a multimodal message */
+export type MessageContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/** A message in the AI conversation */
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string | MessageContentBlock[];
+}
+
+/** Request payload for /v1/vision */
+export interface VisionRequest {
+  model: string;
+  messages: ChatMessage[];
+  max_tokens?: number;
+  response_format?: { type: 'json_object' | 'text' };
+}
+
+/** A single choice in the AI response */
+export interface ResponseChoice {
+  message: {
+    role: string;
+    content: string;
+  };
+  finish_reason: string;
+}
+
+/** Usage statistics from the API response */
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+/** Response from /v1/vision */
+export interface VisionResponse {
+  id: string;
+  choices: ResponseChoice[];
+  usage: TokenUsage;
+}
+
+/** A single SSE chunk from /v1/stream */
+export interface StreamChunk {
+  id?: string;
+  choices: Array<{
+    delta: {
+      content?: string;
+      role?: string;
+    };
+    finish_reason?: string | null;
+  }>;
+}

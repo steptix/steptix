@@ -1,0 +1,149 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import chalk from 'chalk';
+import type { Command } from 'commander';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export function registerInitCommand(program: Command): void {
+  program
+    .command('init [dir]')
+    .description('Scaffold a new ai-ui-auto project in the target directory (default: current dir)')
+    .option('--force', 'Overwrite existing files', false)
+    .action(async (dir: string | undefined, opts: { force: boolean }) => {
+      await initCommand(dir ?? '.', opts.force);
+    });
+}
+
+async function initCommand(targetDir: string, force: boolean): Promise<void> {
+  const absTarget = path.resolve(targetDir);
+
+  console.log(chalk.bold(`\nInitialising ai-ui-auto project in: ${chalk.cyan(absTarget)}\n`));
+
+  // Resolve templates directory relative to this module
+  // In source: src/cli/commands/ -> ../../.. -> project root -> templates/init
+  // In dist:   dist/cli/commands/ -> ../../.. -> project root -> templates/init
+  const templatesDir = path.join(__dirname, '../../../templates/init');
+
+  // Ensure target directory exists
+  await fs.mkdir(absTarget, { recursive: true });
+
+  // Create standard project directories
+  const dirs = ['tests', 'context', 'reports'];
+  for (const dir of dirs) {
+    const dirPath = path.join(absTarget, dir);
+    await fs.mkdir(dirPath, { recursive: true });
+    console.log(chalk.green('  ✓') + ` Created ${dir}/`);
+  }
+
+  // Copy template files
+  const templateFiles: Array<{ src: string; dest: string }> = [
+    { src: 'ai-ui-auto.config.ts', dest: 'ai-ui-auto.config.ts' },
+    { src: 'tests/example.md', dest: 'tests/example.md' },
+    { src: 'context/app.md', dest: 'context/app.md' },
+  ];
+
+  for (const { src, dest } of templateFiles) {
+    const srcPath = path.join(templatesDir, src);
+    const destPath = path.join(absTarget, dest);
+
+    // Check if destination exists
+    if (!force) {
+      try {
+        await fs.access(destPath);
+        console.log(chalk.yellow('  ⚠') + ` Skipping ${dest} (already exists — use --force to overwrite)`);
+        continue;
+      } catch {
+        // File does not exist — proceed
+      }
+    }
+
+    try {
+      const content = await fs.readFile(srcPath, 'utf-8');
+      await fs.mkdir(path.dirname(destPath), { recursive: true });
+      await fs.writeFile(destPath, content, 'utf-8');
+      console.log(chalk.green('  ✓') + ` Created ${dest}`);
+    } catch (err) {
+      // Templates not found (e.g. running from source before build) — write inline defaults
+      await writeDefaultTemplate(dest, destPath);
+    }
+  }
+
+  console.log(chalk.bold(`\n${'─'.repeat(50)}`));
+  console.log(chalk.bold('  Next steps:'));
+  console.log('');
+  console.log(`  1. Edit ${chalk.cyan('ai-ui-auto.config.ts')} — set your base URL and AI gateway`);
+  console.log(`  2. Edit ${chalk.cyan('tests/example.md')}   — write your first test`);
+  console.log(`  3. Edit ${chalk.cyan('context/app.md')}     — describe your application`);
+  console.log(`  4. Run   ${chalk.cyan('ai-ui-auto run')}     — execute the tests`);
+  console.log(chalk.bold(`${'─'.repeat(50)}\n`));
+}
+
+async function writeDefaultTemplate(templateName: string, destPath: string): Promise<void> {
+  const defaults: Record<string, string> = {
+    'ai-ui-auto.config.ts': `import { defineConfig } from 'ai-ui-automation';
+
+export default defineConfig({
+  ai: {
+    gatewayUrl: 'https://aiapi.example.com',
+    // apiKey: process.env.AI_API_KEY,
+    model: 'gpt-5.4',
+  },
+  browser: {
+    headed: true,
+  },
+  tests: {
+    dir: './tests',
+    contextDir: './context',
+  },
+  reports: {
+    outputDir: './reports',
+  },
+});
+`,
+    'tests/example.md': `---
+tags: [smoke]
+---
+
+# Example Login Test
+
+## Config
+- baseUrl: http://localhost:3000
+
+## Parameters
+- email: user@example.com
+- password: $TEST_PASSWORD
+
+## Steps
+1. Navigate to the login page
+2. Enter "{{email}}" in the email field
+3. Enter "{{password}}" in the password field
+4. Click the Sign In button
+5. Assert that the dashboard is visible
+`,
+    'context/app.md': `# Application Context
+
+This is a web application with the following structure:
+
+## Pages
+- **Login** (\`/\`): Email and password login form
+- **Dashboard** (\`/dashboard\`): Main overview with key metrics
+- **Transactions** (\`/transactions\`): Transaction history table
+
+## Authentication
+- Login form at root URL
+- Session persists via cookie
+- Logout button in the top navigation
+
+## Notes
+- Cookie consent banner appears on first visit
+`,
+  };
+
+  const content = defaults[templateName] ?? `# ${templateName}\n`;
+  await fs.mkdir(path.dirname(destPath), { recursive: true });
+  await fs.writeFile(destPath, content, 'utf-8');
+  console.log(chalk.green('  ✓') + ` Created ${templateName}`);
+}
