@@ -166,8 +166,9 @@ async function executeWait(page: Page, action: AIAction): Promise<void> {
   // Detect CSS selectors: starts with tag name, #, ., or [
   const looksLikeSelector = /^([a-z][a-z0-9]*(\[|#|\.| |,|:)|[#.\[])/.test(condition);
   if (looksLikeSelector) {
-    // CSS selector
-    await page.waitForSelector(condition, { timeout });
+    // CSS selector — use 'attached' state so hidden inputs (type="hidden") don't time out.
+    // Playwright's default state is 'visible', which hidden elements never satisfy.
+    await page.waitForSelector(condition, { state: 'attached', timeout });
   } else if (condition.startsWith('http') || condition.includes('/')) {
     // URL pattern
     await page.waitForURL(condition, { timeout });

@@ -78,10 +78,28 @@ async function tryExtractFromSelector(
     const count = await locator.count();
     if (count === 0) return undefined;
 
-    // Try value attribute (for hidden inputs) then content attribute (for meta tags)
+    // For input elements the .value JS property is the source of truth — especially for
+    // hidden inputs whose value is populated asynchronously (e.g. a CSRF token loaded
+    // by a fetch() on page load).  getAttribute('value') only returns the static HTML
+    // attribute and misses JS-set values.
+    //
+    // Poll via locator.evaluate() every 100 ms for up to 5 s to handle async timing.
+    // evaluate() bypasses Playwright visibility restrictions so it works on hidden inputs.
+    const deadline = Date.now() + 5_000;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let inputVal = await locator.evaluate((el) => (el as any).value as string).catch(() => '');
+    while (!inputVal && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 100));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      inputVal = await locator.evaluate((el) => (el as any).value as string).catch(() => '');
+    }
+    if (inputVal) return inputVal;
+
+    // Try value attribute (static fallback for elements not covered by the poll above)
     const value = await locator.getAttribute('value');
     if (value) return value;
 
+    // Try content attribute (for <meta name="csrf-token" content="...">)
     const content = await locator.getAttribute('content');
     if (content) return content;
 

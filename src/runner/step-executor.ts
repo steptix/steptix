@@ -347,6 +347,21 @@ async function executeStepAttempt(
       ...(result.error !== undefined && { error: result.error }),
     });
 
+    // After a successful "wait" on a CSRF-related selector, automatically extract and
+    // cache the token value so a subsequent api_call can inject it without needing an
+    // explicit extract_csrf action from the AI.
+    if (result.success && action.action === 'wait') {
+      const waitSelector = action.condition ?? action.value ?? '';
+      if (/csrf|__RequestVerificationToken/i.test(waitSelector)) {
+        const csrfResult = await extractCsrfToken(page, waitSelector).catch(() => undefined);
+        if (csrfResult) {
+          csrfTokens[csrfResult.selector] = csrfResult.token;
+          csrfTokens['__latest__'] = csrfResult.token;
+          logger.debug(`Auto-extracted CSRF token after wait on: ${waitSelector}`);
+        }
+      }
+    }
+
     if (!result.success) {
       stepFailed = true;
       stepError = result.error;
@@ -473,6 +488,28 @@ async function executeApiCallAction(
 
   // Merge AI-provided headers with any extracted CSRF token
   const headers: Record<string, string> = { ...(action.apiHeaders ?? {}) };
+
+  // The AI sometimes emits template placeholders like {{csrfToken}} instead of the real
+  // value.  Strip out any such placeholder so the injection logic below can fill it in.
+  const csrfHeaderKey = Object.keys(headers).find(
+    (k) => k.toLowerCase() === 'x-csrf-token',
+  );
+  if (csrfHeaderKey && /^\{\{.*\}\}$/.test(headers[csrfHeaderKey] ?? '')) {
+    logger.info(`Replacing CSRF placeholder "${headers[csrfHeaderKey]}" with real token`);
+    delete headers[csrfHeaderKey];
+  }
+
+  // If no CSRF token has been captured yet, opportunistically try to extract one from
+  // the current page.  This handles the case where the AI skips the navigate/wait steps
+  // and goes straight to the api_call without an explicit extract_csrf action.
+  if (!csrfTokens['__latest__'] && !headers['x-csrf-token'] && !headers['X-CSRF-Token']) {
+    const autoResult = await extractCsrfToken(page, '').catch(() => undefined);
+    if (autoResult) {
+      csrfTokens[autoResult.selector] = autoResult.token;
+      csrfTokens['__latest__'] = autoResult.token;
+      logger.debug(`Pre-flight CSRF extraction succeeded via: ${autoResult.selector}`);
+    }
+  }
 
   // Inject the latest CSRF token if the AI hasn't already provided one
   const csrfToken = csrfTokens['__latest__'];
