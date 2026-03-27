@@ -5,6 +5,7 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
   'hover', 'wait', 'scroll', 'switchFrame', 'dismiss',
   'assert', 'keyboard', 'prompt',
+  'api_call', 'extract_csrf', 'extract_value',
 ]);
 
 /**
@@ -153,6 +154,27 @@ function parseAction(raw: unknown, index: number): AIAction {
 
   if (typeof obj['amount'] === 'number') action.amount = obj['amount'];
   if (typeof obj['timeout'] === 'number') action.timeout = obj['timeout'];
+
+  // API action fields
+  if (typeof obj['method'] === 'string') action.method = obj['method'];
+  if (obj['body'] !== undefined) action.body = obj['body'];
+  if (typeof obj['source'] === 'string') action.source = obj['source'];
+  if (typeof obj['path'] === 'string') action.path = obj['path'];
+  if (typeof obj['as'] === 'string') action.as = obj['as'];
+
+  const modeRaw = obj['apiMode'];
+  if (modeRaw === 'browser' || modeRaw === 'standalone') {
+    action.apiMode = modeRaw;
+  }
+
+  if (typeof obj['apiHeaders'] === 'object' && obj['apiHeaders'] !== null && !Array.isArray(obj['apiHeaders'])) {
+    const rawHeaders = obj['apiHeaders'] as Record<string, unknown>;
+    const safeHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawHeaders)) {
+      if (typeof v === 'string') safeHeaders[k] = v;
+    }
+    action.apiHeaders = safeHeaders;
+  }
 
   return action;
 }

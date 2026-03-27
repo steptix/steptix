@@ -6,6 +6,14 @@ export interface ViewportInfo {
   height: number;
 }
 
+/** Optional API context to augment the system prompt for tests with API steps */
+export interface ApiPromptContext {
+  /** History of prior API responses, formatted for AI consumption */
+  responseHistory: string;
+  /** Whether any API context files were loaded (enables API action types) */
+  hasApiContext: boolean;
+}
+
 /**
  * Classify viewport width into a device mode label.
  */
@@ -26,6 +34,7 @@ export function buildSystemPrompt(
   currentStep?: number,
   totalSteps?: number,
   viewport?: ViewportInfo,
+  apiContext?: ApiPromptContext,
 ): string {
   const stepInfo =
     currentStep !== undefined && totalSteps !== undefined
@@ -40,7 +49,9 @@ export function buildSystemPrompt(
     viewportInfo = `- Viewport: ${viewport.width}×${viewport.height}px (${mode} view)`;
   }
 
-  return `You are an expert UI test automation agent. You control a web browser to execute test steps described in natural language.
+  const apiSection = buildApiSection(apiContext);
+
+  return `You are an expert UI test automation agent. You control a web browser and can also execute API calls.
 
 ${contextContent ? `## Application Context\n\n${contextContent}\n\n` : ''}## Test Information
 - Test: ${testName}
@@ -63,6 +74,20 @@ Execute the following test step by returning a JSON object with an array of acti
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 11. For "wait" actions, set "condition" to a CSS selector, URL pattern, or keyword like "networkidle"
+${apiContext?.hasApiContext ? `
+## API Actions (use when the step describes an API call)
+When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions:
+
+{ "action": "api_call", "method": "GET", "url": "https://...", "apiHeaders": {}, "body": {}, "apiMode": "standalone"|"browser", "description": "..." }
+
+- Set "apiMode" to "browser" for Front Proxy or Experience APIs (they need browser session cookies)
+- Set "apiMode" to "standalone" (or omit) for Private, Serverless, or Public APIs
+- For Private APIs, include the x-api-key header in "apiHeaders" using the value from the context
+- For Front Proxy APIs that need CSRF, first return an "extract_csrf" action to get the token:
+  { "action": "extract_csrf", "selector": "input[name='__RequestVerificationToken']", "source": "/delegates", "description": "Extract CSRF token" }
+  Then include the token as a header in the following api_call action.
+- To extract a value from a prior API response for use in the current step:
+  { "action": "extract_value", "from": "step_N", "path": "data.0.id", "as": "delegateId", "description": "..." }` : ''}
 
 ## Response Format
 {
@@ -71,7 +96,8 @@ Execute the following test step by returning a JSON object with an array of acti
     { "action": "assert", "condition": "dashboard visible", "expected": "balance > 0", "description": "Verify dashboard loaded" }
   ],
   "reasoning": "Brief explanation of your approach"
-}`;
+}
+${apiSection}`;
 }
 
 /**
@@ -210,6 +236,16 @@ export function buildRetryContext(failures: PriorFailureContext[]): string {
 The following actions were tried and failed. Choose a DIFFERENT approach — do not reuse the same selectors that failed.
 
 ${lines.join('\n')}`;
+}
+
+/**
+ * Build the optional API response history section for the system prompt.
+ */
+function buildApiSection(apiContext?: ApiPromptContext): string {
+  if (!apiContext?.hasApiContext) return '';
+  if (!apiContext.responseHistory) return '';
+
+  return `\n## API Response History\nThe following API calls have been made in prior steps of this test:\n\n${apiContext.responseHistory}`;
 }
 
 /**

@@ -11,6 +11,7 @@ import { resolveParameters, loadDataFile, interpolate } from '../parser/paramete
 import { generateReport } from '../report/generator.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { logger } from '../utils/logger.js';
+import { ApiResponseStore } from '../api/response-store.js';
 
 /**
  * Run a single test instance (ParsedTest with resolved parameters).
@@ -32,6 +33,7 @@ export async function runTest(
 
   const tokenTracker = new TokenTracker();
   const aiClient = new AiClient(config.ai, tokenTracker);
+  const apiResponseStore = new ApiResponseStore();
 
   const baseUrl = test.config.baseUrl;
   const conversationHistory: string[] = [];
@@ -78,6 +80,7 @@ export async function runTest(
         testName: test.title,
         ...(baseUrl !== undefined && { baseUrl }),
         conversationHistory: [...conversationHistory],
+        apiResponseStore,
       });
 
       stepResults.push(stepResult);

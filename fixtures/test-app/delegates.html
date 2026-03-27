@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Delegates</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+    }
+
+    .header {
+      background: #1a56db;
+      color: #fff;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .logo { font-size: 20px; font-weight: 700; }
+
+    nav a {
+      color: rgba(255,255,255,0.85);
+      text-decoration: none;
+      margin-left: 24px;
+      font-size: 14px;
+    }
+    nav a:hover { color: #fff; }
+
+    .main { padding: 32px; max-width: 900px; margin: 0 auto; }
+
+    h1 { font-size: 22px; font-weight: 700; color: #111827; margin-bottom: 24px; }
+
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+      overflow: hidden;
+    }
+
+    table { width: 100%; border-collapse: collapse; }
+
+    th {
+      background: #f9fafb;
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    td {
+      padding: 14px 16px;
+      font-size: 14px;
+      color: #374151;
+      border-bottom: 1px solid #f3f4f6;
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f9fafb; }
+
+    .status-badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .status-active { background: #d1fae5; color: #065f46; }
+    .status-inactive { background: #fee2e2; color: #991b1b; }
+
+    .logout-btn {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.5);
+      color: #fff;
+      padding: 6px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .logout-btn:hover { background: rgba(255,255,255,0.1); }
+  </style>
+</head>
+<body>
+
+  <!--
+    CSRF protection: hidden input with request verification token.
+    The server populates this via a script tag so each page load gets a fresh token.
+  -->
+  <input type="hidden" id="csrf-token-value" name="__RequestVerificationToken" value="">
+
+  <div class="header">
+    <div class="logo">SecureBank</div>
+    <nav>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="transactions.html">Transactions</a>
+      <a href="delegates.html" style="color:#fff;font-weight:600">Delegates</a>
+    </nav>
+    <button class="logout-btn" id="logout-btn">Logout</button>
+  </div>
+
+  <div class="main">
+    <h1>Delegates</h1>
+
+    <div class="card">
+      <table id="delegates-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Mobile</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="delegates-tbody">
+          <tr><td colspan="4" style="text-align:center;padding:32px;color:#9ca3af">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    // Redirect to login if not logged in
+    if (!sessionStorage.getItem('logged-in')) {
+      window.location.href = 'index.html';
+    }
+
+    // Fetch CSRF token from the server and populate the hidden field
+    fetch('/api/csrf-token')
+      .then(r => r.json())
+      .then(data => {
+        document.getElementById('csrf-token-value').value = data.token;
+      })
+      .catch(() => {});
+
+    // Fetch and render delegates
+    fetch('/api/delegates')
+      .then(r => r.json())
+      .then(delegates => {
+        const tbody = document.getElementById('delegates-tbody');
+        if (!delegates.length) {
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:32px;color:#9ca3af">No delegates found</td></tr>';
+          return;
+        }
+        tbody.innerHTML = delegates.map(d => `
+          <tr data-id="${d.id}">
+            <td>${d.name}</td>
+            <td>${d.email}</td>
+            <td class="mobile-cell">${d.mobile}</td>
+            <td><span class="status-badge ${d.status === 'active' ? 'status-active' : 'status-inactive'}">${d.status}</span></td>
+          </tr>
+        `).join('');
+      })
+      .catch(() => {
+        document.getElementById('delegates-tbody').innerHTML =
+          '<tr><td colspan="4" style="text-align:center;padding:32px;color:#ef4444">Failed to load delegates</td></tr>';
+      });
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.clear();
+      window.location.href = 'index.html';
+    });
+  </script>
+</body>
+</html>

@@ -13,7 +13,11 @@ export type ActionType =
   | 'assert'
   | 'keyboard'
   | 'keypress'
-  | 'prompt';
+  | 'prompt'
+  // API action types
+  | 'api_call'
+  | 'extract_csrf'
+  | 'extract_value';
 
 /** A single action returned by the AI */
 export interface AIAction {
@@ -40,6 +44,29 @@ export interface AIAction {
   key?: string;
   /** Question to ask the user for prompt actions */
   question?: string;
+  /** HTTP method for api_call actions (GET, POST, PUT, etc.) */
+  method?: string;
+  /**
+   * Request body for api_call actions.
+   * The AI provides this as a JSON-serialisable value.
+   */
+  body?: unknown;
+  /**
+   * Additional HTTP headers for api_call actions.
+   * The AI includes auth headers as specified in the API context.
+   */
+  apiHeaders?: Record<string, string>;
+  /**
+   * Execution mode for api_call: 'browser' uses Playwright context.request (carries cookies),
+   * 'standalone' uses native fetch. Defaults to 'standalone'.
+   */
+  apiMode?: 'browser' | 'standalone';
+  /** CSS selector for extract_csrf actions (where to find the token) */
+  source?: string;
+  /** JSONPath-style path for extract_value actions (e.g. "data.0.id") */
+  path?: string;
+  /** Variable name to assign the extracted value to (for extract_value) */
+  as?: string;
   /** Human-readable description of what this action does */
   description: string;
 }

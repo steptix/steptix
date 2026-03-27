@@ -1,6 +1,11 @@
 import type { Config } from './types.js';
 
 export const DEFAULT_CONFIG: Config = {
+  api: {
+    specsDir: './specs',
+    requestTimeout: 30_000,
+    redactSensitive: true,
+  },
   ai: {
     gatewayUrl: 'https://llm.corp.example',
     ...(process.env['AI_API_KEY'] !== undefined && { apiKey: process.env['AI_API_KEY'] }),

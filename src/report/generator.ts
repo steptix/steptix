@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
-import type { TestReport, StepResult, SubActionResult, AiInteraction } from './types.js';
+import type { TestReport, StepResult, SubActionResult, AiInteraction, ApiCallData } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
@@ -152,7 +152,7 @@ function renderStep(step: StepResult): string {
 function renderSubAction(sub: SubActionResult): string {
   const actionName = sub.action.action;
   const description = sub.action.description;
-  const hasBody = sub.screenshotBase64 || sub.domSnapshot || sub.aiReasoning || sub.error;
+  const hasBody = sub.screenshotBase64 || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData;
 
   const screenshotHtml = sub.screenshotBase64
     ? `<div class="screenshot-container">
@@ -179,14 +179,78 @@ function renderSubAction(sub: SubActionResult): string {
        </div>`
     : '';
 
+  const apiHtml = sub.apiCallData
+    ? renderApiCallData(sub.apiCallData)
+    : '';
+
   return `<div class="sub-action">
   <div class="sub-action-header">
     <span class="sub-action-index">${sub.index}</span>
     <span class="action-badge">${escapeHtml(actionName)}</span>
     <span class="sub-action-desc">${escapeHtml(description)}</span>
   </div>
-  ${hasBody ? `<div class="sub-action-body">${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
+  ${hasBody ? `<div class="sub-action-body">${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
+}
+
+function renderApiCallData(data: ApiCallData): string {
+  const statusClass = data.status >= 200 && data.status < 300
+    ? 'badge-pass'
+    : data.status >= 400
+      ? 'badge-fail'
+      : 'badge-skip';
+
+  const requestBodyHtml = data.requestBody !== undefined
+    ? `<details class="dom-snapshot">
+        <summary>Request Body</summary>
+        <pre>${escapeHtml(formatJson(data.requestBody))}</pre>
+       </details>`
+    : '';
+
+  const responseBodyHtml = data.responseBody !== undefined
+    ? `<details class="dom-snapshot">
+        <summary>Response Body</summary>
+        <pre>${escapeHtml(formatJson(data.responseBody))}</pre>
+       </details>`
+    : '';
+
+  const headersHtml = data.requestHeaders && Object.keys(data.requestHeaders).length > 0
+    ? `<details class="dom-snapshot">
+        <summary>Request Headers</summary>
+        <pre>${escapeHtml(formatRedactedHeaders(data.requestHeaders))}</pre>
+       </details>`
+    : '';
+
+  return `<div class="api-call-block">
+  <div class="assertion-row">
+    <span class="assertion-key">Request:</span>
+    <span>${escapeHtml(data.method)} ${escapeHtml(data.url)}</span>
+  </div>
+  <div class="assertion-row">
+    <span class="assertion-key">Status:</span>
+    <span class="badge ${statusClass}">${data.status}</span>
+  </div>
+  ${requestBodyHtml}
+  ${headersHtml}
+  ${responseBodyHtml}
+</div>`;
+}
+
+function formatJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatRedactedHeaders(headers: Record<string, string>): string {
+  const sensitivePatterns = /key|secret|password|token|cookie|authorization/i;
+  const redacted: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    redacted[k] = sensitivePatterns.test(k) ? '[redacted]' : v;
+  }
+  return JSON.stringify(redacted, null, 2);
 }
 
 function renderAssertion(

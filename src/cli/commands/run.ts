@@ -7,6 +7,7 @@ import { parseTestFile, discoverTestFiles } from '../../parser/markdown.js';
 import { filterByTags, runTests } from '../../runner/test-runner.js';
 import { setVerbose, logger } from '../../utils/logger.js';
 import type { RunSummary } from '../../report/types.js';
+import { loadEnvFile } from '../../env/loader.js';
 
 export interface RunOptions {
   config?: string;
@@ -17,6 +18,7 @@ export interface RunOptions {
   bail?: boolean;
   browser?: 'chromium' | 'firefox' | 'webkit';
   reporter?: string;
+  env?: string;
 }
 
 export function registerRunCommand(program: Command): void {
@@ -31,6 +33,7 @@ export function registerRunCommand(program: Command): void {
     .option('--bail', 'Stop on first test failure', false)
     .option('--browser <engine>', 'Browser engine: chromium, firefox, webkit')
     .option('--reporter <type>', 'Reporter type (html)', 'html')
+    .option('--env <name>', 'Environment name — loads .env.<name> from project root')
     .action(async (target: string | undefined, opts: RunOptions) => {
       await runCommand(target, opts);
     });
@@ -42,6 +45,16 @@ async function runCommand(
 ): Promise<void> {
   if (opts.verbose) {
     setVerbose(true);
+  }
+
+  // Load environment file if --env was specified
+  if (opts.env) {
+    try {
+      await loadEnvFile(opts.env, process.cwd());
+    } catch (err) {
+      console.error(chalk.red(`Error: ${String(err)}`));
+      process.exit(1);
+    }
   }
 
   // Load config

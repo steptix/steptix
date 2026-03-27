@@ -2,6 +2,17 @@ import type { AIAction, AssertionEvaluation } from '../ai/types.js';
 
 export type StepStatus = 'passed' | 'failed' | 'skipped';
 
+/** Captured data from an API call sub-action */
+export interface ApiCallData {
+  method: string;
+  url: string;
+  requestBody?: unknown;
+  requestHeaders?: Record<string, string>;
+  status: number;
+  responseHeaders?: Record<string, string>;
+  responseBody?: unknown;
+}
+
 /** Result of a single sub-action execution */
 export interface SubActionResult {
   /** 1-based index within the parent step */
@@ -15,6 +26,8 @@ export interface SubActionResult {
   aiReasoning?: string;
   durationMs: number;
   error?: string;
+  /** Populated for api_call sub-actions */
+  apiCallData?: ApiCallData;
 }
 
 /** Result of an assertion embedded in a step */

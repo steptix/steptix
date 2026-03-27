@@ -3,7 +3,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import type { Page } from 'playwright';
 import type { Config } from '../config/types.js';
 import type { AIAction } from '../ai/types.js';
-import type { StepResult, SubActionResult, AiInteraction } from '../report/types.js';
+import type { StepResult, SubActionResult, AiInteraction, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import {
   buildSystemPrompt,
@@ -12,7 +12,7 @@ import {
   buildAssertionMessage,
   buildRetryContext,
 } from '../ai/prompts.js';
-import type { PriorFailureContext } from '../ai/prompts.js';
+import type { PriorFailureContext, ApiPromptContext } from '../ai/prompts.js';
 import { parseAIResponse, parseAssertionEvaluation } from '../ai/action-parser.js';
 import { captureDomSnapshot } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
@@ -20,6 +20,9 @@ import { executeAction } from '../browser/actions.js';
 import { handleObstacles } from '../browser/obstacle-handler.js';
 import { withRetry } from './retry.js';
 import { logger } from '../utils/logger.js';
+import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
+import { extractCsrfToken } from '../api/csrf-handler.js';
+import type { ApiResponseStore } from '../api/response-store.js';
 
 export interface StepExecutorOptions {
   page: Page;
@@ -29,6 +32,7 @@ export interface StepExecutorOptions {
   testName: string;
   baseUrl?: string;
   conversationHistory: string[];
+  apiResponseStore?: ApiResponseStore;
 }
 
 /** Error subclass that carries failure context for retry enrichment */
@@ -138,7 +142,7 @@ async function executeStepAttempt(
   retried: boolean,
   priorFailures: PriorFailureContext[] = [],
 ): Promise<StepResult> {
-  const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory } = opts;
+  const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore } = opts;
 
   // 1. Auto-dismiss any unexpected obstacles
   if (config.execution.dismissObstacles) {
@@ -150,7 +154,17 @@ async function executeStepAttempt(
   const screenshot = await captureScreenshot(page);
   const screenshotBase64 = screenshot?.base64;
 
-  // 3. Build messages for the AI
+  // 3. Build API context if we have response history
+  const apiContext: ApiPromptContext | undefined = contextContent.includes('Type:')
+    ? {
+        hasApiContext: true,
+        responseHistory: apiResponseStore?.hasResponses()
+          ? apiResponseStore.formatForContext()
+          : '',
+      }
+    : undefined;
+
+  // 4. Build messages for the AI
   const systemPrompt = buildSystemPrompt(
     contextContent,
     testName,
@@ -158,6 +172,7 @@ async function executeStepAttempt(
     stepIndex,
     totalSteps,
     config.browser.viewport,
+    apiContext,
   );
 
   // Append retry context so the AI knows what was already tried
@@ -213,6 +228,9 @@ async function executeStepAttempt(
   let assertionResult: StepResult['assertion'];
   const collectedFailures: PriorFailureContext[] = [];
 
+  // Accumulated CSRF tokens keyed by selector, available to subsequent api_call actions
+  const csrfTokens: Record<string, string> = {};
+
   for (const action of aiResponse.actions) {
     if (action.action === 'assert') {
       // Handled after all other actions
@@ -224,6 +242,84 @@ async function executeStepAttempt(
     }
 
     const subStartTime = Date.now();
+    const aiReasoningVal = config.reports.includeAiReasoning ? aiResponse.reasoning : undefined;
+
+    // ── API action types ─────────────────────────────────────────────────────
+    if (action.action === 'extract_csrf') {
+      const csrfResult = await extractCsrfToken(
+        page,
+        action.selector ?? action.source ?? '',
+        action.source,
+      ).catch((err) => {
+        logger.warn(`CSRF extraction failed: ${String(err)}`);
+        return undefined;
+      });
+
+      const subDuration = Date.now() - subStartTime;
+      const subActionResult: SubActionResult = {
+        index: subActions.length + 1,
+        action,
+        durationMs: subDuration,
+        ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+      };
+
+      if (csrfResult) {
+        csrfTokens[csrfResult.selector] = csrfResult.token;
+        // Store under a generic key so the next api_call can find it
+        csrfTokens['__latest__'] = csrfResult.token;
+      } else {
+        subActionResult.error = 'CSRF token could not be extracted';
+        stepFailed = true;
+        stepError = subActionResult.error;
+      }
+
+      subActions.push(subActionResult);
+      if (stepFailed) break;
+      continue;
+    }
+
+    if (action.action === 'extract_value') {
+      // Extraction from prior API responses is handled implicitly by the AI's context —
+      // log it as a no-op sub-action so it appears in the report.
+      subActions.push({
+        index: subActions.length + 1,
+        action,
+        durationMs: Date.now() - subStartTime,
+        ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+      });
+      continue;
+    }
+
+    if (action.action === 'api_call') {
+      const apiSubResult = await executeApiCallAction(
+        action,
+        page,
+        stepIndex,
+        csrfTokens,
+        config.api?.requestTimeout,
+        apiResponseStore,
+      );
+
+      const subDuration = Date.now() - subStartTime;
+      const subActionResult: SubActionResult = {
+        index: subActions.length + 1,
+        action,
+        durationMs: subDuration,
+        ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+        ...(apiSubResult.apiCallData !== undefined && { apiCallData: apiSubResult.apiCallData }),
+        ...(apiSubResult.error !== undefined && { error: apiSubResult.error }),
+      };
+      subActions.push(subActionResult);
+
+      if (apiSubResult.failed) {
+        stepFailed = true;
+        stepError = apiSubResult.error;
+        break;
+      }
+      continue;
+    }
+
+    // ── Browser action types ─────────────────────────────────────────────────
     const result = await executeAction(page, action, baseUrl);
     const subDuration = Date.now() - subStartTime;
 
@@ -233,7 +329,6 @@ async function executeStepAttempt(
 
     const postShotBase64 = postShot?.base64;
     const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;
-    const aiReasoningVal = config.reports.includeAiReasoning ? aiResponse.reasoning : undefined;
     subActions.push({
       index: subActions.length + 1,
       action,
@@ -320,6 +415,100 @@ async function executeStepAttempt(
     aiExplanation: aiResponse.reasoning,
     ...(aiResponses.length > 0 && { aiResponses }),
   };
+}
+
+interface ApiCallSubResult {
+  failed: boolean;
+  error?: string;
+  apiCallData?: ApiCallData;
+}
+
+/**
+ * Execute an api_call action using either the Playwright browser context or standalone fetch.
+ * Stores the response in the provided ApiResponseStore for subsequent steps.
+ */
+async function executeApiCallAction(
+  action: AIAction,
+  page: Page,
+  stepIndex: number,
+  csrfTokens: Record<string, string>,
+  requestTimeout: number | undefined,
+  apiResponseStore?: ApiResponseStore,
+): Promise<ApiCallSubResult> {
+  const method = (action.method ?? 'GET').toUpperCase();
+  const url = action.url ?? '';
+
+  if (!url) {
+    return { failed: true, error: 'api_call action missing required "url" field' };
+  }
+
+  // Merge AI-provided headers with any extracted CSRF token
+  const headers: Record<string, string> = { ...(action.apiHeaders ?? {}) };
+
+  // Inject the latest CSRF token if the AI hasn't already provided one
+  const csrfToken = csrfTokens['__latest__'];
+  if (csrfToken && !headers['x-csrf-token'] && !headers['X-CSRF-Token']) {
+    headers['x-csrf-token'] = csrfToken;
+  }
+
+  const callOpts = {
+    method,
+    url,
+    headers,
+    body: action.body,
+    timeoutMs: requestTimeout ?? 30_000,
+  };
+
+  logger.subAction(`API ${method} ${url}`);
+
+  try {
+    const apiResult = action.apiMode === 'browser'
+      ? await callApiBrowserContext(page, callOpts)
+      : await callApiStandalone(callOpts);
+
+    // Store in response store for subsequent steps
+    if (apiResponseStore) {
+      const endpointPath = extractEndpointPath(url);
+      apiResponseStore.add({
+        stepNumber: stepIndex,
+        endpoint: endpointPath,
+        method,
+        url,
+        ...(action.body !== undefined && { requestBody: action.body }),
+        status: apiResult.status,
+        headers: apiResult.headers,
+        body: apiResult.body,
+        timestamp: Date.now(),
+      });
+    }
+
+    const apiCallData: ApiCallData = {
+      method,
+      url,
+      ...(action.body !== undefined && { requestBody: action.body }),
+      ...(Object.keys(headers).length > 0 && { requestHeaders: headers }),
+      status: apiResult.status,
+      responseHeaders: apiResult.headers,
+      responseBody: apiResult.body,
+    };
+
+    logger.debug(`API response: ${apiResult.status} (${apiResult.durationMs}ms)`);
+
+    return { failed: false, apiCallData };
+  } catch (err) {
+    const errorMsg = `API call failed: ${String(err)}`;
+    logger.error(errorMsg);
+    return { failed: true, error: errorMsg };
+  }
+}
+
+/** Extract just the path portion from a full URL for display purposes */
+function extractEndpointPath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
 }
 
 async function promptUser(question: string): Promise<string> {

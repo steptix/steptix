@@ -57,12 +57,22 @@ export interface ReportsConfig {
   embedScreenshots: boolean;
 }
 
+export interface ApiConfig {
+  /** Directory to cache downloaded OpenAPI/Swagger specs */
+  specsDir: string;
+  /** Default timeout per API request in milliseconds */
+  requestTimeout: number;
+  /** Redact auth values (API keys, tokens, cookies) in HTML reports */
+  redactSensitive: boolean;
+}
+
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
   tests: TestsConfig;
   execution: ExecutionConfig;
   reports: ReportsConfig;
+  api: ApiConfig;
 }
 
 /** Deeply partial version of Config for user-provided overrides */
