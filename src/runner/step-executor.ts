@@ -291,6 +291,13 @@ async function executeStepAttempt(
     }
 
     if (action.action === 'api_call') {
+      // If context describes a Front Proxy or Experience API and the AI didn't set apiMode,
+      // default to "browser" so the request carries browser session cookies.
+      if (!action.apiMode && contextContent.match(/Type:\s*(Front Proxy|Experience)/i)) {
+        action.apiMode = 'browser';
+        logger.debug('Auto-set apiMode to "browser" based on Front Proxy/Experience context');
+      }
+
       const apiSubResult = await executeApiCallAction(
         action,
         page,
@@ -298,6 +305,7 @@ async function executeStepAttempt(
         csrfTokens,
         config.api?.requestTimeout,
         apiResponseStore,
+        baseUrl,
       );
 
       const subDuration = Date.now() - subStartTime;
@@ -363,13 +371,20 @@ async function executeStepAttempt(
 
     const assertAction = aiResponse.actions.find((a) => a.action === 'assert');
 
+    const apiHistory = apiContext?.responseHistory;
+    logger.info(`Assertion context — API response history present: ${!!apiHistory}, length: ${apiHistory?.length ?? 0}`);
+    if (apiHistory) {
+      logger.info(`API response history: ${apiHistory.substring(0, 300)}`);
+    }
+
     const assertMsg = buildAssertionMessage(
       instruction,
       finalDom,
       finalShot?.base64 ?? null,
+      apiHistory,
     );
 
-    const assertSystemPrompt = buildSystemPrompt(contextContent, testName, baseUrl);
+    const assertSystemPrompt = buildSystemPrompt(contextContent, testName, baseUrl, undefined, undefined, undefined, apiContext);
     const assertRaw = await aiClient.complete([
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
@@ -434,9 +449,23 @@ async function executeApiCallAction(
   csrfTokens: Record<string, string>,
   requestTimeout: number | undefined,
   apiResponseStore?: ApiResponseStore,
+  baseUrl?: string,
 ): Promise<ApiCallSubResult> {
   const method = (action.method ?? 'GET').toUpperCase();
-  const url = action.url ?? '';
+  let url = action.url ?? '';
+
+  // Resolve relative URLs against baseUrl or the current page URL
+  if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+    const base = baseUrl ?? page.url();
+    if (base) {
+      try {
+        url = new URL(url, base).toString();
+        logger.debug(`Resolved relative API URL to: ${url}`);
+      } catch {
+        // If URL resolution fails, leave as-is and let the fetch fail with a clear error
+      }
+    }
+  }
 
   if (!url) {
     return { failed: true, error: 'api_call action missing required "url" field' };
@@ -492,7 +521,8 @@ async function executeApiCallAction(
       responseBody: apiResult.body,
     };
 
-    logger.debug(`API response: ${apiResult.status} (${apiResult.durationMs}ms)`);
+    logger.info(`API response: ${apiResult.status} (${apiResult.durationMs}ms) — mode: ${action.apiMode ?? 'standalone'}`);
+    logger.info(`API response body preview: ${JSON.stringify(apiResult.body).substring(0, 200)}`);
 
     return { failed: false, apiCallData };
   } catch (err) {

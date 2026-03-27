@@ -258,19 +258,39 @@
 
     // Login form handler
     // Valid credentials: demo@securebank.com / password123
-    document.getElementById('login-form').addEventListener('submit', function (e) {
+    document.getElementById('login-form').addEventListener('submit', async function (e) {
       e.preventDefault();
       const email = document.getElementById('email').value.trim();
       const password = document.getElementById('password').value;
       const errorBanner = document.getElementById('error-banner');
 
-      if (email === 'demo@securebank.com' && password === 'password123') {
-        sessionStorage.setItem('logged-in', 'true');
-        sessionStorage.setItem('user-email', email);
-        window.location.href = 'dashboard.html';
-      } else {
-        errorBanner.classList.add('visible');
-        document.getElementById('password').value = '';
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+          sessionStorage.setItem('logged-in', 'true');
+          sessionStorage.setItem('user-email', email);
+          window.location.href = 'dashboard.html';
+        } else {
+          errorBanner.classList.add('visible');
+          document.getElementById('password').value = '';
+        }
+      } catch {
+        // Fallback to client-side check if server unavailable
+        if (email === 'demo@securebank.com' && password === 'password123') {
+          sessionStorage.setItem('logged-in', 'true');
+          sessionStorage.setItem('user-email', email);
+          window.location.href = 'dashboard.html';
+        } else {
+          errorBanner.classList.add('visible');
+          document.getElementById('password').value = '';
+        }
       }
     });
   </script>

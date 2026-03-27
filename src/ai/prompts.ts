@@ -76,7 +76,9 @@ Execute the following test step by returning a JSON object with an array of acti
 11. For "wait" actions, set "condition" to a CSS selector, URL pattern, or keyword like "networkidle"
 ${apiContext?.hasApiContext ? `
 ## API Actions (use when the step describes an API call)
-When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions:
+When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.
+
+IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "http", "request", or any other value.
 
 { "action": "api_call", "method": "GET", "url": "https://...", "apiHeaders": {}, "body": {}, "apiMode": "standalone"|"browser", "description": "..." }
 
@@ -158,17 +160,27 @@ export function buildClarificationMessage(
 
 /**
  * Build the assertion evaluation prompt.
- * Asks the AI to evaluate whether the current page state satisfies the step assertion.
+ * Asks the AI to evaluate whether the current page state (and/or prior API responses) satisfies the step assertion.
  */
 export function buildAssertionMessage(
   stepInstruction: string,
   domSnapshot: string,
   screenshotBase64: string | null,
+  apiResponseHistory?: string,
 ): ChatMessage {
-  const textContent = `Evaluate whether the following test assertion PASSES or FAILS based on the current page state.
+  const apiSection = apiResponseHistory
+    ? `\n\n## Prior API Responses (IMPORTANT — evaluate assertions about "the response" or API data against this section)\n${apiResponseHistory}`
+    : '';
+
+  const context = apiResponseHistory
+    ? 'the current page state AND the prior API responses below. IMPORTANT: If the assertion refers to "the response", API data, or data not visible on the page, evaluate it against the Prior API Responses section, NOT the page DOM.'
+    : 'the current page state';
+
+  const textContent = `Evaluate whether the following test assertion PASSES or FAILS based on ${context}.
 
 ## Assertion
 ${stepInstruction}
+${apiSection}
 
 ## Current Page DOM
 \`\`\`html
@@ -178,7 +190,7 @@ ${domSnapshot}
 Respond with ONLY this JSON format:
 {
   "pass": true or false,
-  "actual": "the actual value you found on the page",
+  "actual": "the actual value you found",
   "explanation": "brief explanation of why it passes or fails"
 }`;
 

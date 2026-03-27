@@ -144,8 +144,18 @@ async function handleRequest(
 ): Promise<void> {
   // ── Static files ───────────────────────────────────────────────────────────
   if (!pathname.startsWith('/api/')) {
-    if (pathname === '/' || pathname === '/index.html') {
-      serveStatic(res, path.join(__dirname, 'index.html'));
+    // Route friendly URLs to their HTML files
+    const friendlyRoutes: Record<string, string> = {
+      '/': 'index.html',
+      '/index.html': 'index.html',
+      '/login': 'index.html',
+      '/dashboard': 'dashboard.html',
+      '/delegates': 'delegates.html',
+      '/transactions': 'transactions.html',
+    };
+    const mappedFile = friendlyRoutes[pathname];
+    if (mappedFile) {
+      serveStatic(res, path.join(__dirname, mappedFile));
     } else if (pathname.endsWith('.html')) {
       serveStatic(res, path.join(__dirname, pathname.slice(1)));
     } else {

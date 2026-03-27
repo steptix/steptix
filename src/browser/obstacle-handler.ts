@@ -73,8 +73,8 @@ export async function handleObstacles(page: Page): Promise<ObstacleResult[]> {
         await btn.click({ timeout: 3_000 });
         logger.info(`Auto-dismissed: ${pattern}`);
         results.push({ found: true, dismissed: true, label: pattern });
-        // Wait briefly for the animation to complete
-        await page.waitForTimeout(300);
+        // Wait for the dismiss animation and any re-render to settle
+        await page.waitForTimeout(500);
         break; // Only dismiss one at a time
       }
     } catch {
@@ -97,7 +97,8 @@ async function tryDismissObstacle(
       if (await btn.isVisible({ timeout: 500 })) {
         await btn.click({ timeout: 3_000 });
         logger.info(`Auto-dismissed ${label} via: ${btnPattern}`);
-        await page.waitForTimeout(300);
+        // Wait for the dismiss animation and any re-render to settle
+        await page.waitForTimeout(500);
         return true;
       }
     } catch {
@@ -108,7 +109,7 @@ async function tryDismissObstacle(
   // Try pressing Escape to close modals
   try {
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(500);
 
     // Check if the obstacle is still visible
     const el = page.locator(obstacleSelector).first();

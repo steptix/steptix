@@ -16,7 +16,7 @@ export default defineConfig({
   },
   tests: {
     dir: './fixtures/tests',
-    contextDir: './context',
+    contextDir: './fixtures/context',
     pattern: '**/*.md',
   },
   execution: {

@@ -33,8 +33,17 @@ export async function extractCsrfToken(
   if (navigateTo) {
     const currentUrl = page.url();
     if (!currentUrl.includes(navigateTo)) {
-      logger.debug(`Navigating to ${navigateTo} to extract CSRF token`);
-      await page.goto(navigateTo, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      // Resolve relative URLs against the current page URL
+      let targetUrl = navigateTo;
+      if (!navigateTo.startsWith('http://') && !navigateTo.startsWith('https://')) {
+        try {
+          targetUrl = new URL(navigateTo, currentUrl).toString();
+        } catch {
+          // leave as-is
+        }
+      }
+      logger.debug(`Navigating to ${targetUrl} to extract CSRF token`);
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     }
   }
 

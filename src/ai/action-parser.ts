@@ -9,6 +9,20 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
 ]);
 
 /**
+ * Normalise common AI action type variants to canonical types.
+ * AI models sometimes return "api", "http", "request" etc. instead of "api_call".
+ */
+const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
+  'api': 'api_call',
+  'http': 'api_call',
+  'request': 'api_call',
+  'http_request': 'api_call',
+  'fetch': 'api_call',
+  'csrf': 'extract_csrf',
+  'get_csrf': 'extract_csrf',
+};
+
+/**
  * Parse the raw string response from the AI into a structured AIResponse.
  * Handles JSON wrapped in markdown code blocks, whitespace, and minor formatting issues.
  */
@@ -116,9 +130,15 @@ function parseAction(raw: unknown, index: number): AIAction {
 
   const obj = raw as Record<string, unknown>;
 
-  const actionType = obj['action'];
-  if (typeof actionType !== 'string') {
+  const rawActionType = obj['action'];
+  if (typeof rawActionType !== 'string') {
     throw new Error(`Action at index ${index} missing required "action" field`);
+  }
+
+  // Normalise common AI variants to canonical action types
+  const actionType = ACTION_TYPE_ALIASES[rawActionType] ?? rawActionType;
+  if (actionType !== rawActionType) {
+    logger.info(`Normalised action type "${rawActionType}" → "${actionType}" at index ${index}`);
   }
 
   if (!VALID_ACTION_TYPES.has(actionType as ActionType)) {
