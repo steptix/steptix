@@ -126,6 +126,63 @@ timeout: 60s
 3. Data file (see Section 4)
 4. Prompt user at runtime if unresolved
 
+### Special Step Prefixes
+
+Steps can use special prefix syntax to control execution behaviour:
+
+#### `[input: variable_name]` — Pause for User Input
+
+Pauses test execution and prompts the user to enter a value in the terminal. The value is stored as a named parameter that can be referenced in subsequent steps using `{{variable_name}}` interpolation. This is useful for values that cannot be known ahead of time, such as OTP codes, CAPTCHAs, or approval codes.
+
+```markdown
+## Steps
+1. Navigate to the login page
+2. Enter "user@example.com" and click Send OTP
+3. [input: otp_code] Enter the OTP code sent to your phone
+4. Type "{{otp_code}}" into the verification field and submit
+5. Verify the dashboard is visible
+```
+
+At step 3, the test pauses and the user sees:
+
+```
+🔑 User input required:
+  Enter the OTP code sent to your phone: _
+```
+
+The text after the `[input: name]` prefix is used as the prompt message. If omitted, a default prompt is shown. The step is marked as passed once the user provides a value.
+
+#### `[interactive]` — Interactive REPL Mode
+
+Opens an interactive prompt where the user can type free-form natural language instructions that are executed as AI-driven steps in real time. This turns the test into a live exploration session — useful for debugging, investigating page state, or performing ad-hoc actions mid-test.
+
+```markdown
+## Steps
+1. Navigate to the login page
+2. Login with "admin@test.com" and "password123"
+3. [interactive] Explore the dashboard
+4. Logout and verify the login page is displayed
+```
+
+At step 3, the test pauses and the user enters a REPL:
+
+```
+🎮 Interactive mode — Explore the dashboard
+  > Click on the Settings menu
+  ✓ Interactive command passed
+
+🎮 Interactive mode — Explore the dashboard
+  > Verify the account name shows "John Smith"
+  ✓ Interactive command passed
+
+🎮 Interactive mode — Explore the dashboard
+  > done
+```
+
+Each instruction is executed as a full AI step with screenshots, DOM snapshots, and retry logic. Conversation history accumulates across interactive commands so the AI maintains context. Type `done` or press Enter on an empty line to exit interactive mode and continue with the next test step. The optional text after `[interactive]` is shown as a hint on each prompt.
+
+If any interactive command fails, the overall step is marked as failed.
+
 ---
 
 ## 4. Parameterisation
@@ -248,7 +305,7 @@ For each natural language step:
 
 6. On failure
    - Collect failure context: failed selector, error message, element match count
-   - Retry once with enriched context (see §6.5)
+   - Retry once with enriched context (see §6.7)
    - The retry prompt includes a "Previous Attempt Failed" section telling the AI which selectors were tried, how many elements matched, and why they failed — so it picks a different approach
    - If retry fails: capture failure screenshot, AI explains what it was trying to do, mark step as FAILED
 
@@ -267,7 +324,7 @@ The AI returns structured JSON actions. Supported types:
 | `navigate`  | `url`, `description`            | Navigate to URL                 |
 | `upload`    | `selector`, `filePath`, `description` | Upload a file              |
 | `hover`     | `selector`, `description`       | Hover over element              |
-| `wait`      | `condition`, `timeout`, `description` | Wait for condition          |
+| `wait`      | `condition`, `timeout`, `description` | Wait for condition or duration |
 | `scroll`    | `direction`, `amount`, `description` | Scroll the page             |
 | `switchFrame` | `selector`, `description`     | Switch to iframe               |
 | `dismiss`   | `selector`, `description`       | Dismiss popup/modal/banner     |
@@ -315,7 +372,27 @@ When the AI encounters unexpected elements (cookie banners, modals, alerts):
 4. Continues with the original step
 5. If dismissal fails, flags it and continues if possible
 
-### 6.4 Ambiguity Handling
+### 6.4 Wait Actions
+
+The `wait` action supports several condition types:
+
+| Condition Format | Behaviour | Example |
+|-----------------|-----------|---------|
+| CSS selector | Waits for element to appear in DOM | `#dashboard`, `.loading-spinner` |
+| URL pattern | Waits for navigation to URL | `https://app.example.com/dashboard`, `/dashboard` |
+| `networkidle` | Waits for network activity to settle | `networkidle` |
+| `load` | Waits for page load event | `load` |
+| Duration string | Sleeps for the specified time | `30s`, `2m`, `1m 30s` |
+| Text content | Waits for text to appear on page | `Welcome back` |
+
+Duration strings support simple and compound formats:
+
+- Simple: `30s`, `2m`, `500ms`, `30 seconds`, `2 minutes`
+- Compound: `1m 30s`, `1 min 10 sec`, `2 minutes 30 seconds`
+
+In natural language steps, the AI is instructed to use duration format for wait/delay steps (e.g. a step like "Wait 30 seconds" produces `{ action: "wait", condition: "30s" }`).
+
+### 6.5 Ambiguity Handling
 
 When the AI cannot determine the correct action:
 
@@ -324,7 +401,7 @@ When the AI cannot determine the correct action:
 3. User provides guidance via stdin
 4. AI incorporates the answer and continues
 
-### 6.5 Responsive Layout Handling
+### 6.6 Responsive Layout Handling
 
 Many web applications render duplicate elements for mobile and desktop layouts (e.g. two navigation bars). The tool helps the AI target the correct variant through three mechanisms:
 
@@ -341,7 +418,7 @@ Many web applications render duplicate elements for mobile and desktop layouts (
 
 3. **AI prompt rule** — The system prompt explicitly instructs the AI to use viewport size and position annotations to disambiguate, preferring elements within the visible viewport.
 
-### 6.6 Retry Context Enrichment
+### 6.7 Retry Context Enrichment
 
 When a step fails and is retried, the retry is not blind — it includes context about what was already tried:
 
@@ -738,7 +815,7 @@ Execute the following test step by returning a JSON object with an array of acti
 8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
-11. For "wait" actions, set "condition" to a CSS selector, URL pattern, or keyword like "networkidle"
+11. For "wait" actions, set "condition" to a CSS selector, URL pattern, keyword like "networkidle", or a duration like "30s", "2m", "1m 30s"
 
 ## Current State
 Step instruction: "{step text}"
@@ -784,17 +861,20 @@ The following actions were tried and failed. Choose a DIFFERENT approach — do 
    c. Launch Playwright browser (headed/headless per config)
    d. Navigate to baseUrl (if specified)
    e. For each step:
-      i.    Capture DOM snapshot (with position annotations) + screenshot
-      ii.   Send to AI via /v1/vision (or /v1/stream), including viewport/device mode
-      iii.  Parse AI response into action list
-      iv.   Capture raw AI response for the report
-      v.    If action is "prompt" → ask user, re-send to AI, capture response
-      vi.   Execute each sub-action via Playwright
-      vii.  After each sub-action: capture screenshot + DOM
-      viii. If step has assertion: send final state to AI for evaluation, capture response
-      ix.   On failure: collect failed selector, match count, and error context
-      x.    Retry with enriched prompt (prior failure details), then mark FAILED with explanation
-      xi.   Include all captured AI responses (from all attempts) in the report
+      i.    Interpolate {{placeholders}} with resolved parameters
+      ii.   If step has [input: name] prefix → prompt user, store value as parameter, mark passed
+      iii.  If step has [interactive] prefix → enter REPL loop for user-driven commands
+      iv.   Otherwise, capture DOM snapshot (with position annotations) + screenshot
+      v.    Send to AI via /v1/vision (or /v1/stream), including viewport/device mode
+      vi.   Parse AI response into action list
+      vii.  Capture raw AI response for the report
+      viii. If action is "prompt" → ask user, re-send to AI, capture response
+      ix.   Execute each sub-action via Playwright
+      x.    After each sub-action: capture screenshot + DOM
+      xi.   If step has assertion: send final state to AI for evaluation, capture response
+      xii.  On failure: collect failed selector, match count, and error context
+      xiii. Retry with enriched prompt (prior failure details), then mark FAILED with explanation
+      xiv.  Include all captured AI responses (from all attempts) in the report
    f. Close browser
    g. Generate HTML report
 6. Print summary to console
@@ -891,7 +971,7 @@ A standalone test that runs against a real public website to validate the tool w
    - **Test framework integration** — Assertions, reporting, step tracking, context files, and retry enrichment are test-specific concerns that sit above the browser control layer. MCP does not address these
    - **Deterministic execution** — Direct Playwright API calls give us precise control over action execution, waiters, and error handling. MCP adds a network hop and an additional abstraction layer between our executor and the browser
    - **Latency** — Direct Playwright calls are faster than JSON-RPC round-trips through an MCP server for every interaction
-   - **Responsive layout handling** — Our position annotation system (§6.5) and viewport-aware prompting require tight integration between DOM cleaning and the AI prompt. An MCP server would not provide this without significant customisation
+   - **Responsive layout handling** — Our position annotation system (§6.6) and viewport-aware prompting require tight integration between DOM cleaning and the AI prompt. An MCP server would not provide this without significant customisation
 
    **When Chrome MCP would be preferable:** General-purpose AI browser control, ad-hoc automation, or agent-style exploratory workflows where the AI needs flexible, open-ended browser access without a structured test framework around it.
 
