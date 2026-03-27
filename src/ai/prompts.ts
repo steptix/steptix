@@ -73,7 +73,7 @@ Execute the following test step by returning a JSON object with an array of acti
 8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
-11. For "wait" actions, set "condition" to a CSS selector, URL pattern, or keyword like "networkidle"
+11. For "wait" actions, set "condition" to a CSS selector, URL pattern, keyword like "networkidle", or a duration like "30s", "2m", "1m 30s"
 ${apiContext?.hasApiContext ? `
 ## API Actions (use when the step describes an API call)
 When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.

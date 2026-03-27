@@ -1,7 +1,9 @@
 import path from 'node:path';
+import readline from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
 import type { Config } from '../config/types.js';
 import type { ParsedTest, TestInstance } from '../parser/types.js';
-import type { TestReport, RunSummary } from '../report/types.js';
+import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser } from '../browser/manager.js';
@@ -12,6 +14,60 @@ import { generateReport } from '../report/generator.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { logger } from '../utils/logger.js';
 import { ApiResponseStore } from '../api/response-store.js';
+
+/** Pattern for [input: variable_name] steps that pause for user input */
+const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
+
+/** Pattern for [interactive] steps that open a REPL for free-form instructions */
+const INTERACTIVE_STEP_PATTERN = /^\[interactive\]\s*(.*)/i;
+
+/**
+ * Check if a step instruction is an input prompt step.
+ * Returns the variable name and prompt text if it matches, or null otherwise.
+ */
+function parseInputStep(instruction: string): { variable: string; promptText: string } | null {
+  const match = instruction.match(INPUT_STEP_PATTERN);
+  if (!match) return null;
+  return { variable: match[1]!, promptText: match[2]?.trim() || `Enter value for "${match[1]}"` };
+}
+
+/**
+ * Check if a step instruction is an interactive prompt step.
+ * Returns the optional hint text if it matches, or null otherwise.
+ */
+function parseInteractiveStep(instruction: string): { hint: string } | null {
+  const match = instruction.match(INTERACTIVE_STEP_PATTERN);
+  if (!match) return null;
+  return { hint: match[1]?.trim() || '' };
+}
+
+/** Prompt the user for a value during test execution */
+async function promptUserForInput(promptText: string): Promise<string> {
+  const rl = readline.createInterface({ input, output });
+  try {
+    console.log(`\n🔑 User input required:`);
+    const answer = await rl.question(`  ${promptText}: `);
+    return answer.trim();
+  } finally {
+    rl.close();
+  }
+}
+
+/** Prompt the user for a free-form instruction in interactive mode */
+async function promptInteractive(hint: string): Promise<string> {
+  const rl = readline.createInterface({ input, output });
+  try {
+    if (hint) {
+      console.log(`\n🎮 Interactive mode — ${hint}`);
+    } else {
+      console.log(`\n🎮 Interactive mode — type instructions to execute, "done" to continue`);
+    }
+    const answer = await rl.question(`  > `);
+    return answer.trim();
+  } finally {
+    rl.close();
+  }
+}
 
 /**
  * Run a single test instance (ParsedTest with resolved parameters).
@@ -37,6 +93,7 @@ export async function runTest(
 
   const baseUrl = test.config.baseUrl;
   const conversationHistory: string[] = [];
+  const csrfTokens: Record<string, string> = {};
 
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
@@ -72,16 +129,99 @@ export async function runTest(
 
       logger.step(i + 1, test.steps.length, instruction);
 
-      const stepResult = await executeStep(i + 1, test.steps.length, instruction, {
-        page: session.page,
-        config,
-        aiClient,
-        contextContent,
-        testName: test.title,
-        ...(baseUrl !== undefined && { baseUrl }),
-        conversationHistory: [...conversationHistory],
-        apiResponseStore,
-      });
+      // Handle [input: variable_name] steps — pause for user input
+      const inputStep = parseInputStep(instruction);
+      const interactiveStep = !inputStep ? parseInteractiveStep(instruction) : null;
+      let stepResult: StepResult;
+
+      if (inputStep) {
+        const stepStartTime = Date.now();
+        const value = await promptUserForInput(inputStep.promptText);
+        resolvedParameters[inputStep.variable] = value;
+        logger.info(`Stored user input as parameter "{{${inputStep.variable}}}"`);
+
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'passed',
+          subActions: [],
+          durationMs: Date.now() - stepStartTime,
+          retried: false,
+          aiExplanation: `User provided input for "${inputStep.variable}"`,
+        };
+      } else if (interactiveStep) {
+        // Interactive REPL — user types instructions that execute as AI steps
+        const stepStartTime = Date.now();
+        const interactiveResults: StepResult[] = [];
+        let interactiveIndex = 1;
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const userInstruction = await promptInteractive(interactiveStep.hint);
+          if (!userInstruction || userInstruction.toLowerCase() === 'done') break;
+
+          logger.step(i + 1, test.steps.length, `(interactive ${interactiveIndex}) ${userInstruction}`);
+
+          const result = await executeStep(i + 1, test.steps.length, userInstruction, {
+            page: session.page,
+            config,
+            aiClient,
+            contextContent,
+            testName: test.title,
+            ...(baseUrl !== undefined && { baseUrl }),
+            conversationHistory: [...conversationHistory],
+            apiResponseStore,
+            csrfTokens,
+          });
+
+          interactiveResults.push(result);
+
+          // Add to conversation history so subsequent interactive commands have context
+          const currentUrl = session.page.url();
+          conversationHistory.push(
+            formatStepHistoryEntry(
+              i + 1,
+              `(interactive) ${userInstruction}`,
+              result.status === 'passed',
+              currentUrl,
+            ),
+          );
+
+          if (result.status === 'passed') {
+            logger.success(`Interactive command passed`);
+          } else {
+            logger.error(`Interactive command failed: ${result.error ?? 'unknown error'}`);
+          }
+
+          interactiveIndex++;
+        }
+
+        const anyFailed = interactiveResults.some((r) => r.status === 'failed');
+        const allSubActions = interactiveResults.flatMap((r) => r.subActions);
+
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: anyFailed ? 'failed' : 'passed',
+          subActions: allSubActions,
+          durationMs: Date.now() - stepStartTime,
+          retried: false,
+          aiExplanation: `Interactive mode: executed ${interactiveResults.length} command(s)`,
+          ...(anyFailed && { error: 'One or more interactive commands failed' }),
+        };
+      } else {
+        stepResult = await executeStep(i + 1, test.steps.length, instruction, {
+          page: session.page,
+          config,
+          aiClient,
+          contextContent,
+          testName: test.title,
+          ...(baseUrl !== undefined && { baseUrl }),
+          conversationHistory: [...conversationHistory],
+          apiResponseStore,
+          csrfTokens,
+        });
+      }
 
       stepResults.push(stepResult);
 

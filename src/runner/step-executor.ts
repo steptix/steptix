@@ -33,6 +33,8 @@ export interface StepExecutorOptions {
   baseUrl?: string;
   conversationHistory: string[];
   apiResponseStore?: ApiResponseStore;
+  /** CSRF tokens accumulated across steps — keyed by selector, with '__latest__' for the most recent */
+  csrfTokens: Record<string, string>;
 }
 
 /** Error subclass that carries failure context for retry enrichment */
@@ -142,7 +144,7 @@ async function executeStepAttempt(
   retried: boolean,
   priorFailures: PriorFailureContext[] = [],
 ): Promise<StepResult> {
-  const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore } = opts;
+  const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens } = opts;
 
   // 1. Auto-dismiss any unexpected obstacles
   if (config.execution.dismissObstacles) {
@@ -227,9 +229,6 @@ async function executeStepAttempt(
   let stepError: string | undefined;
   let assertionResult: StepResult['assertion'];
   const collectedFailures: PriorFailureContext[] = [];
-
-  // Accumulated CSRF tokens keyed by selector, available to subsequent api_call actions
-  const csrfTokens: Record<string, string> = {};
 
   for (const action of aiResponse.actions) {
     if (action.action === 'assert') {

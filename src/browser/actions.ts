@@ -159,9 +159,37 @@ async function executeHover(page: Page, action: AIAction): Promise<void> {
   await page.locator(selector).locator('visible=true').first().hover({ timeout: 10_000 });
 }
 
+/**
+ * Parse a duration string into milliseconds.
+ * Supports simple ("30s", "2 minutes", "500ms") and compound ("1m 30s", "1 min 10 sec") formats.
+ */
+function parseDuration(value: string): number | null {
+  const pattern = /(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?|sec|m|minutes?|min)/gi;
+  let totalMs = 0;
+  let matched = false;
+
+  for (const match of value.matchAll(pattern)) {
+    matched = true;
+    const num = parseFloat(match[1]!);
+    const unit = match[2]!.toLowerCase();
+    if (unit.startsWith('ms') || unit.startsWith('millisecond')) totalMs += num;
+    else if (unit.startsWith('s') || unit === 'sec') totalMs += num * 1_000;
+    else if (unit.startsWith('m')) totalMs += num * 60_000;
+  }
+
+  return matched ? Math.round(totalMs) : null;
+}
+
 async function executeWait(page: Page, action: AIAction): Promise<void> {
   const condition = action.condition ?? action.value ?? '';
   const timeout = action.timeout ?? 10_000;
+
+  // Duration-based sleep: "30s", "2m", "500ms", "30 seconds", etc.
+  const durationMs = parseDuration(condition);
+  if (durationMs !== null) {
+    await page.waitForTimeout(durationMs);
+    return;
+  }
 
   // Detect CSS selectors: starts with tag name, #, ., or [
   const looksLikeSelector = /^([a-z][a-z0-9]*(\[|#|\.| |,|:)|[#.\[])/.test(condition);
