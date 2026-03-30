@@ -114,6 +114,57 @@ export function OutputPanel() {
               </div>
             )}
 
+            {/* AI API Responses */}
+            {output.aiInteractions && output.aiInteractions.length > 0 && (
+              <div className="output-section">
+                <div className="output-section-title">
+                  AI API Responses ({output.aiInteractions.length})
+                </div>
+                {output.aiInteractions.map((interaction, i) => {
+                  let parsed: unknown;
+                  try { parsed = JSON.parse(interaction.response); } catch { parsed = null; }
+                  const formatted = parsed !== null
+                    ? JSON.stringify(parsed, null, 2)
+                    : interaction.response;
+                  return (
+                    <details key={i} className="output-ai-interaction" style={{ marginBottom: 6 }}>
+                      <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 500, padding: '4px 0', userSelect: 'none' }}>
+                        <span className="output-interaction-purpose">{interaction.purpose}</span>
+                      </summary>
+                      {interaction.requestMessages && interaction.requestMessages.length > 0 && (
+                        <details style={{ marginBottom: 4 }}>
+                          <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--text-secondary)', padding: '2px 0', userSelect: 'none' }}>
+                            Request ({interaction.requestMessages.length} message{interaction.requestMessages.length !== 1 ? 's' : ''})
+                          </summary>
+                          {interaction.requestMessages.map((msg, j) => (
+                            <div key={j} style={{ marginBottom: 4 }}>
+                              <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-secondary)', padding: '2px 4px', background: 'var(--bg-secondary)' }}>
+                                {msg.role}
+                              </div>
+                              <pre className="output-ai-response" style={{ maxHeight: 300 }}>{msg.content}</pre>
+                            </div>
+                          ))}
+                        </details>
+                      )}
+                      <pre className="output-ai-response">{formatted}</pre>
+                    </details>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* DOM Context */}
+            {output.domSnapshot && (
+              <div className="output-section">
+                <details>
+                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 500, padding: '4px 0', userSelect: 'none' }}>
+                    Page Context (DOM snapshot)
+                  </summary>
+                  <pre className="output-dom-snapshot">{output.domSnapshot}</pre>
+                </details>
+              </div>
+            )}
+
             {/* Error */}
             {output.error && (
               <div className="output-section">

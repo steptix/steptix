@@ -25,6 +25,7 @@ import { AiClient } from '../../ai/client.js';
 import { formatStepHistoryEntry } from '../../ai/prompts.js';
 import { TokenTracker } from '../../utils/tokens.js';
 import { ApiResponseStore } from '../../api/response-store.js';
+import { generateReport } from '../../report/generator.js';
 
 // ---------------------------------------------------------------------------
 // Patterns mirrored from test-runner.ts (not exported there)
@@ -88,6 +89,10 @@ export class UIRunnerAdapter {
 
   // --- Steering ---
   private steerResolve: ((instruction: string) => void) | null = null;
+
+  // --- Accumulated step results (includes steering steps in execution order) ---
+  private stepResults: StepResult[] = [];
+  private steeringCount = 0;
 
   // --- Browser / AI state (set during a run) ---
   private session: BrowserSession | null = null;
@@ -218,6 +223,10 @@ export class UIRunnerAdapter {
       ...(result.error !== undefined && { error: result.error }),
     });
 
+    // Record in step results so steering shows up in the report
+    const steeringIndex = (this.test?.steps.length ?? 0) + (++this.steeringCount);
+    this.stepResults.push({ ...result, index: steeringIndex, instruction: `[steering] ${resolvedInstruction}` });
+
     // Add to conversation history (do NOT modify test steps array)
     const currentUrl = this.page.url();
     this.conversationHistory.push(
@@ -251,6 +260,8 @@ export class UIRunnerAdapter {
   // -----------------------------------------------------------------------
 
   private async executeRun(filePath: string): Promise<void> {
+    const runStartTime = Date.now();
+
     // 1. Load config
     this.config = await loadConfig();
 
@@ -292,7 +303,7 @@ export class UIRunnerAdapter {
     const timeoutDeadline = Date.now() + testTimeout;
 
     // 9. Step execution loop
-    const stepResults: StepResult[] = [];
+    this.stepResults = [];
     const totalSteps = parsedTest.steps.length;
     let bail = false;
     let i = 0;
@@ -365,7 +376,7 @@ export class UIRunnerAdapter {
           aiExplanation: `User provided input for "${variable}"`,
         };
 
-        stepResults.push(stepResult);
+        this.stepResults.push(stepResult);
 
         this.emit('runner:step-complete', {
           stepIndex,
@@ -402,7 +413,7 @@ export class UIRunnerAdapter {
           aiExplanation: 'Interactive mode completed',
         };
 
-        stepResults.push(stepResult);
+        this.stepResults.push(stepResult);
 
         this.emit('runner:step-complete', {
           stepIndex,
@@ -449,7 +460,7 @@ export class UIRunnerAdapter {
         ...(result.error !== undefined && { error: result.error }),
       });
 
-      stepResults.push(result);
+      this.stepResults.push(result);
 
       // Add to conversation history
       const currentUrl = this.page.url();
@@ -466,11 +477,40 @@ export class UIRunnerAdapter {
     }
 
     // 10. Emit completion
-    const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
+    const failedSteps = this.stepResults.filter((s) => s.status === 'failed').length;
     const overallStatus: 'passed' | 'failed' =
       failedSteps > 0 || this.stopped ? 'failed' : 'passed';
 
-    this.emit('runner:complete', { status: overallStatus });
+    // 11. Generate HTML report
+    let reportPath: string | undefined;
+    if (this.config && this.tokenTracker) {
+      try {
+        const durationMs = Date.now() - runStartTime;
+        const report = {
+          testName: parsedTest.title,
+          filePath,
+          tags: parsedTest.frontmatter.tags,
+          status: overallStatus,
+          steps: this.stepResults,
+          totalSteps: this.stepResults.length,
+          passedSteps: this.stepResults.filter((s) => s.status === 'passed').length,
+          failedSteps,
+          totalSubActions: this.stepResults.reduce((sum, s) => sum + s.subActions.length, 0),
+          durationMs,
+          tokensUsed: this.tokenTracker.total,
+          inputTokens: this.tokenTracker.inputTotal,
+          outputTokens: this.tokenTracker.outputTotal,
+          date: new Date().toISOString(),
+          ...(parsedTest.config.baseUrl !== undefined && { baseUrl: parsedTest.config.baseUrl }),
+          ...(Object.keys(this.resolvedParameters).length > 0 && { parameters: this.resolvedParameters }),
+        };
+        reportPath = await generateReport(report, this.config.reports.outputDir);
+      } catch {
+        // Report generation failure should not affect run result
+      }
+    }
+
+    this.emit('runner:complete', { status: overallStatus, ...(reportPath !== undefined && { reportPath }) });
   }
 
   // -----------------------------------------------------------------------
@@ -534,6 +574,15 @@ export class UIRunnerAdapter {
         dataUrl: `data:image/png;base64,${result.screenshotBase64}`,
       });
     }
+
+    // Emit full AI interactions (raw responses + DOM context)
+    if (result.aiResponses && result.aiResponses.length > 0) {
+      this.emit('runner:ai-interactions', {
+        stepIndex,
+        aiInteractions: result.aiResponses,
+        ...(result.domSnapshot !== undefined && { domSnapshot: result.domSnapshot }),
+      });
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -549,6 +598,8 @@ export class UIRunnerAdapter {
     this.currentPauseReason = null;
     this.inputResolve = null;
     this.steerResolve = null;
+    this.stepResults = [];
+    this.steeringCount = 0;
     this.conversationHistory = [];
     this.csrfTokens = {};
     this.resolvedParameters = {};

@@ -1,11 +1,46 @@
 import React, { useReducer, createContext, useContext, useEffect } from 'react';
-import type { RunState, StepOutput } from '../ipc-types';
+import type { RunState, StepOutput, SubActionResult, AiInteraction } from '../ipc-types';
 import { Toolbar } from './components/Toolbar';
 import { Explorer } from './components/Explorer';
 import { EditorTabs } from './components/EditorTabs';
 import { Editor } from './components/Editor';
 import { OutputPanel } from './components/OutputPanel';
+import { LogPanel } from './components/LogPanel';
 import { InputModal } from './components/InputModal';
+
+// ---------------------------------------------------------------------------
+// Log
+// ---------------------------------------------------------------------------
+export interface LogEntry {
+  id: number;
+  level: 'info' | 'success' | 'error' | 'warn' | 'detail';
+  message: string;
+  timestamp: string;
+}
+
+let logIdCounter = 0;
+
+function now(): string {
+  return new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function describeSubAction(sa: SubActionResult): string {
+  const a = sa.action;
+  switch (a.action) {
+    case 'click':    return `click ${a.selector ?? a.description}`;
+    case 'type':     return `type "${a.value ?? ''}" → ${a.selector ?? ''}`;
+    case 'navigate': return `navigate → ${a.url ?? ''}`;
+    case 'assert':   return `assert: ${a.condition ?? a.description}`;
+    case 'wait':     return `wait ${a.condition ? `"${a.condition}"` : `${a.timeout ?? ''}ms`}`;
+    case 'select':   return `select "${a.value ?? ''}" in ${a.selector ?? ''}`;
+    case 'api_call': return `${a.method ?? 'GET'} ${a.url ?? ''}`;
+    case 'extract_csrf':  return `extract CSRF from ${a.source ?? a.selector ?? ''}`;
+    case 'extract_value': return `extract ${a.path ?? ''} as ${a.as ?? ''}`;
+    case 'scroll':   return `scroll ${a.direction ?? ''} ${a.amount ?? ''}px`;
+    case 'keyboard': return `keyboard: ${a.key ?? ''}`;
+    default:         return `${a.action}${a.description ? ` — ${a.description}` : ''}`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Tab model
@@ -29,8 +64,10 @@ export interface AppState {
   selectedStep: number | null;
   currentStep: number | null;
   runningFile: string | null;
+  reportPath: string | null;
   testsDir: string;
   inputPrompt: { prompt: string; variable: string } | null;
+  logs: LogEntry[];
 }
 
 const initialState: AppState = {
@@ -42,8 +79,10 @@ const initialState: AppState = {
   selectedStep: null,
   currentStep: null,
   runningFile: null,
+  reportPath: null,
   testsDir: '',
   inputPrompt: null,
+  logs: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -66,7 +105,10 @@ export type AppAction =
   | { type: 'CLEAR_EXECUTION_STATE' }
   | { type: 'SET_INPUT_PROMPT'; prompt: string; variable: string }
   | { type: 'CLEAR_INPUT_PROMPT' }
-  | { type: 'RELOAD_TAB_CONTENT'; filePath: string; content: string };
+  | { type: 'RELOAD_TAB_CONTENT'; filePath: string; content: string }
+  | { type: 'ADD_LOG'; level: LogEntry['level']; message: string }
+  | { type: 'SET_REPORT_PATH'; path: string | null }
+  | { type: 'UPDATE_STEP_AI_INTERACTIONS'; stepIndex: number; aiInteractions: AiInteraction[]; domSnapshot?: string };
 
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
@@ -146,6 +188,32 @@ function appReducer(state: AppState, action: AppAction): AppState {
         stepOutputs: new Map(),
         currentStep: null,
         selectedStep: null,
+        reportPath: null,
+        logs: [],
+      };
+    case 'SET_REPORT_PATH':
+      return { ...state, reportPath: action.path };
+    case 'UPDATE_STEP_AI_INTERACTIONS': {
+      const stepOutputs = new Map(state.stepOutputs);
+      const existing = stepOutputs.get(action.stepIndex);
+      if (existing) {
+        stepOutputs.set(action.stepIndex, {
+          ...existing,
+          aiInteractions: action.aiInteractions,
+          ...(action.domSnapshot !== undefined && { domSnapshot: action.domSnapshot }),
+        });
+      }
+      return { ...state, stepOutputs };
+    }
+    case 'ADD_LOG':
+      return {
+        ...state,
+        logs: [...state.logs, {
+          id: ++logIdCounter,
+          level: action.level,
+          message: action.message,
+          timestamp: now(),
+        }],
       };
     case 'SET_INPUT_PROMPT':
       return { ...state, inputPrompt: { prompt: action.prompt, variable: action.variable } };
@@ -200,6 +268,7 @@ export function App() {
 
     unsubs.push(
       bridge.on('runner:step-start', (data) => {
+        dispatch({ type: 'ADD_LOG', level: 'info', message: `→ Step ${data.stepIndex}/${data.totalSteps}: ${data.instruction}` });
         dispatch({ type: 'SET_CURRENT_STEP', stepIndex: data.stepIndex });
         dispatch({
           type: 'SET_STEP_OUTPUT',
@@ -209,6 +278,7 @@ export function App() {
             instruction: data.instruction,
             status: 'running',
             aiReasoning: '',
+            aiInteractions: [],
             subActions: [],
             screenshots: [],
           },
@@ -219,6 +289,13 @@ export function App() {
 
     unsubs.push(
       bridge.on('runner:step-complete', (data) => {
+        const dur = (data.durationMs / 1000).toFixed(1);
+        if (data.status === 'passed') {
+          dispatch({ type: 'ADD_LOG', level: 'success', message: `✓ Step ${data.stepIndex} passed (${dur}s)` });
+        } else {
+          const errPart = data.error ? `: ${data.error}` : '';
+          dispatch({ type: 'ADD_LOG', level: 'error', message: `✗ Step ${data.stepIndex} failed${errPart} (${dur}s)` });
+        }
         dispatch({
           type: 'UPDATE_STEP_OUTPUT',
           stepIndex: data.stepIndex,
@@ -232,6 +309,7 @@ export function App() {
 
     unsubs.push(
       bridge.on('runner:paused', (data) => {
+        dispatch({ type: 'ADD_LOG', level: 'warn', message: `⏸ Paused at step ${data.stepIndex} (${data.reason})` });
         dispatch({
           type: 'SET_RUN_STATE',
           runState: { status: 'paused', currentStep: data.stepIndex, reason: data.reason },
@@ -249,28 +327,34 @@ export function App() {
 
     unsubs.push(
       bridge.on('runner:resumed', () => {
+        dispatch({ type: 'ADD_LOG', level: 'info', message: '▶ Resumed' });
         dispatch({ type: 'SET_RUN_STATE', runState: { status: 'running', currentStep: 0 } });
       }),
     );
 
     unsubs.push(
       bridge.on('runner:complete', (data) => {
+        dispatch({ type: 'ADD_LOG', level: data.status === 'passed' ? 'success' : 'error', message: data.status === 'passed' ? '✓ Test passed' : '✗ Test failed' });
+        if (data.reportPath) {
+          dispatch({ type: 'ADD_LOG', level: 'info', message: `📄 Report: ${data.reportPath}` });
+        }
         dispatch({
           type: 'SET_RUN_STATE',
           runState: { status: 'complete', result: data.status },
         });
         dispatch({ type: 'SET_CURRENT_STEP', stepIndex: null });
         dispatch({ type: 'SET_RUNNING_FILE', filePath: null });
+        dispatch({ type: 'SET_REPORT_PATH', path: data.reportPath ?? null });
       }),
     );
 
     unsubs.push(
       bridge.on('runner:error', (data) => {
+        dispatch({ type: 'ADD_LOG', level: 'error', message: `✗ Error: ${data.message}` });
         dispatch({
           type: 'SET_RUN_STATE',
           runState: { status: 'complete', result: 'failed' },
         });
-        console.error('Runner error:', data.message);
       }),
     );
 
@@ -289,6 +373,9 @@ export function App() {
 
     unsubs.push(
       bridge.on('runner:subaction', (data) => {
+        const sa = data.subAction;
+        const desc = describeSubAction(sa);
+        dispatch({ type: 'ADD_LOG', level: sa.error ? 'error' : 'detail', message: `  · ${desc}${sa.error ? ` — ${sa.error}` : ''}` });
         const existing = stateRef.current.stepOutputs.get(data.stepIndex);
         if (existing) {
           dispatch({
@@ -335,6 +422,17 @@ export function App() {
       }),
     );
 
+    unsubs.push(
+      bridge.on('runner:ai-interactions', (data) => {
+        dispatch({
+          type: 'UPDATE_STEP_AI_INTERACTIONS',
+          stepIndex: data.stepIndex,
+          aiInteractions: data.aiInteractions,
+          ...(data.domSnapshot !== undefined && { domSnapshot: data.domSnapshot }),
+        });
+      }),
+    );
+
     return () => unsubs.forEach((fn) => fn());
   }, []);
 
@@ -360,6 +458,7 @@ export function App() {
                   Open a file from the explorer to begin
                 </div>
               )}
+              <LogPanel />
             </div>
             <OutputPanel />
           </div>

@@ -7,7 +7,7 @@
  * import() which CJS supports.
  */
 
-import { ipcMain, dialog } from 'electron';
+import { ipcMain, shell, dialog } from 'electron';
 import type { BrowserWindow } from 'electron';
 import type { UIRunnerAdapter } from './runner-adapter.js';
 import type { MainToRendererEvents } from '../ipc-types.js';
@@ -163,6 +163,10 @@ export async function registerIpcHandlers({ mainWindow, testsDir: initialTestsDi
   ipcMain.handle('set-tests-dir', (_event, params: { dir: string }) => {
     testsDir = params.dir;
   });
+
+  ipcMain.handle('shell:open-file', (_event, params: { path: string }) => {
+    void shell.openExternal(`file://${params.path}`);
+  });
 }
 
 /**
@@ -187,6 +191,7 @@ export function removeIpcHandlers(): void {
     'runner:update-breakpoints',
     'dialog:select-folder',
     'set-tests-dir',
+    'shell:open-file',
   ];
 
   for (const channel of channels) {

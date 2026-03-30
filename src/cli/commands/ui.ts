@@ -64,7 +64,7 @@ async function uiCommand(
   // The Electron main process entry point (relative to dist)
   const electronEntry = path.resolve(
     path.dirname(require.resolve('../../ui/main/index.js')),
-    'index.js',
+    'index.cjs',
   );
 
   console.log(chalk.blue('Launching Runner UI...'));
@@ -72,9 +72,16 @@ async function uiCommand(
   console.log(chalk.dim(`  Config: ${configPath}`));
 
   // Spawn the Electron process
-  const child = spawn(electronPath, [electronEntry, '--testsDir', testsDir, '--configPath', configPath], {
+  // Unset ELECTRON_RUN_AS_NODE so Electron runs as a full app, not a Node.js subprocess.
+  // On Linux, --no-sandbox and --ozone-platform=x11 are required for display.
+  const spawnEnv = { ...process.env };
+  delete spawnEnv['ELECTRON_RUN_AS_NODE'];
+
+  const extraFlags = process.platform === 'linux' ? ['--no-sandbox', '--ozone-platform=x11'] : [];
+
+  const child = spawn(electronPath, [...extraFlags, electronEntry, '--testsDir', testsDir, '--configPath', configPath], {
     stdio: 'inherit',
-    env: { ...process.env },
+    env: spawnEnv,
   });
 
   child.on('error', (err) => {

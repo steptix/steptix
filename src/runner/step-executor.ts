@@ -13,6 +13,7 @@ import {
   buildRetryContext,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, ApiPromptContext } from '../ai/prompts.js';
+import type { ChatMessage } from '../ai/types.js';
 import { parseAIResponse, parseAssertionEvaluation } from '../ai/action-parser.js';
 import { captureDomSnapshot } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
@@ -35,6 +36,15 @@ export interface StepExecutorOptions {
   apiResponseStore?: ApiResponseStore;
   /** CSRF tokens accumulated across steps — keyed by selector, with '__latest__' for the most recent */
   csrfTokens: Record<string, string>;
+}
+
+/** Extract text-only content from a ChatMessage (strips base64 image blocks) */
+function extractTextFromMessage(msg: ChatMessage): string {
+  if (typeof msg.content === 'string') return msg.content;
+  return msg.content
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
 }
 
 /** Error subclass that carries failure context for retry enrichment */
@@ -201,7 +211,11 @@ async function executeStepAttempt(
   // 4. Get AI action plan
   const rawResponse = await aiClient.complete(messages);
   let aiResponse = parseAIResponse(rawResponse);
-  aiResponses.push({ purpose: 'action-plan', response: rawResponse });
+  aiResponses.push({
+    purpose: 'action-plan',
+    requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+    response: rawResponse,
+  });
 
   logger.debug(`AI reasoning: ${aiResponse.reasoning}`);
 
@@ -213,13 +227,18 @@ async function executeStepAttempt(
       promptAction.question ?? promptAction.description,
       userAnswer,
     );
-    const clarifiedResponse = await aiClient.complete([
+    const clarificationMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       userMessage,
       { role: 'assistant', content: rawResponse },
       clarificationMsg,
-    ]);
-    aiResponses.push({ purpose: 'clarification', response: clarifiedResponse });
+    ];
+    const clarifiedResponse = await aiClient.complete(clarificationMessages);
+    aiResponses.push({
+      purpose: 'clarification',
+      requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+      response: clarifiedResponse,
+    });
     aiResponse = parseAIResponse(clarifiedResponse);
   }
 
@@ -399,11 +418,16 @@ async function executeStepAttempt(
     );
 
     const assertSystemPrompt = buildSystemPrompt(contextContent, testName, baseUrl, undefined, undefined, undefined, apiContext);
-    const assertRaw = await aiClient.complete([
+    const assertMessages: ChatMessage[] = [
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
-    ]);
-    aiResponses.push({ purpose: 'assertion', response: assertRaw });
+    ];
+    const assertRaw = await aiClient.complete(assertMessages);
+    aiResponses.push({
+      purpose: 'assertion',
+      requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+      response: assertRaw,
+    });
 
     const evaluation = parseAssertionEvaluation(assertRaw);
 

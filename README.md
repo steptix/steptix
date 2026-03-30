@@ -154,6 +154,70 @@ timeout: 60s
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
 - `[interactive] optional hint` -- opens an interactive REPL for ad-hoc commands (type `done` to continue)
 
+## How it works: execution pipeline
+
+When you run a test, here's what happens end to end:
+
+```
+.md File
+  ↓
+[Parser: src/parser/markdown.ts]
+  ├─ gray-matter → frontmatter (tags, timeout, dataFile)
+  ├─ marked lexer → tokenize body
+  └─ Extract: title, config (baseUrl), parameters, steps (string[])
+       ↓
+[src/runner/test-runner.ts — resolveParameters()]
+  ├─ $ENV_VAR  → process.env lookup (or .env file)
+  ├─ dataFile  → expand into one TestInstance per CSV/JSON row
+  └─ Prompt    → ask user for any unresolved values
+       ↓
+[runTest() — step loop]
+  ├─ [input: var]   → prompt user, store value
+  ├─ [interactive]  → REPL until "done"
+  └─ Normal step    → executeStep()
+       ↓
+[src/runner/step-executor.ts — executeStep()]
+  1. captureDomSnapshot()   — walk live DOM, extract interactive elements + positions
+  2. captureScreenshot()    — Playwright PNG → base64
+  3. Build AI prompt        — system prompt (rules + context) + prior steps + DOM + screenshot
+  4. POST to AI model       — returns { actions: [...], reasoning: "..." }
+  5. Execute each action    — Playwright browser automation (see table below)
+  6. Assertion keywords?    — second AI call to evaluate pass/fail
+  7. On failure             — retry (up to 2×) with failure context appended to prompt
+       ↓
+[src/report/generator.ts]
+  └─ Self-contained HTML report with screenshots, AI responses, pass/fail per step
+```
+
+### AI action types
+
+| Action | What Playwright does |
+|--------|---------------------|
+| `click` | `locator(selector).click()` |
+| `type` | `locator.clear()` + `locator.fill(value)` |
+| `navigate` | `page.goto(url)` |
+| `wait` | `waitForSelector()` or `waitForTimeout()` |
+| `select` | `locator.selectOption(value)` |
+| `scroll` | `page.evaluate()` scroll |
+| `hover` | `locator.hover()` |
+| `keyboard` | `page.keyboard.press()` |
+| `upload` | `locator.setInputFiles(filePath)` |
+| `api_call` | HTTP fetch (with session cookies or standalone) |
+| `assert` | Second AI call evaluates pass/fail against DOM + screenshot |
+
+### Key source files
+
+| Component | Files |
+|-----------|-------|
+| Parsing | `src/parser/markdown.ts`, `frontmatter.ts`, `parameters.ts` |
+| Running | `src/runner/test-runner.ts`, `step-executor.ts`, `retry.ts` |
+| AI | `src/ai/client.ts`, `prompts.ts`, `action-parser.ts` |
+| Browser | `src/browser/manager.ts`, `actions.ts`, `dom-cleaner.ts`, `screenshot.ts` |
+| CLI | `src/cli/commands/run.ts`, `src/index.ts` |
+| Config | `src/config/loader.ts`, `src/env/loader.ts` |
+| Reports | `src/report/generator.ts`, `template.ts` |
+| Runner UI | `src/ui/` (Electron app) |
+
 ## Configuration
 
 Create `ai-ui-auto.config.ts` in your project root:

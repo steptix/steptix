@@ -555,6 +555,75 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
+   AI Interactions & DOM snapshot in OutputPanel
+   --------------------------------------------------------------------------- */
+.output-ai-interaction {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.output-ai-interaction summary {
+  background: var(--bg-tertiary);
+  padding: 4px 8px;
+  list-style: none;
+}
+
+.output-ai-interaction summary::-webkit-details-marker {
+  display: none;
+}
+
+.output-ai-interaction summary::before {
+  content: '▶ ';
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.output-ai-interaction[open] summary::before {
+  content: '▼ ';
+}
+
+.output-interaction-purpose {
+  color: var(--accent-blue);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.output-ai-response {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  padding: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.output-dom-snapshot {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.toolbar-btn--report {
+  color: var(--accent-blue);
+}
+
+/* ---------------------------------------------------------------------------
    Screenshot Strip
    --------------------------------------------------------------------------- */
 .screenshot-strip {
@@ -735,6 +804,74 @@ body {
   opacity: 0.4;
   cursor: default;
 }
+
+/* ---------------------------------------------------------------------------
+   Log Panel
+   --------------------------------------------------------------------------- */
+.log-panel {
+  height: 200px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+.log-panel-header {
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.log-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.log-empty {
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  font-style: italic;
+}
+
+.log-entry {
+  display: flex;
+  gap: 10px;
+  padding: 0 12px;
+}
+
+.log-entry:hover {
+  background: var(--bg-hover);
+}
+
+.log-timestamp {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.7;
+  padding-top: 1px;
+}
+
+.log-message {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-entry--info    .log-message { color: var(--text-primary); }
+.log-entry--success .log-message { color: var(--status-passed); }
+.log-entry--error   .log-message { color: var(--status-failed); }
+.log-entry--warn    .log-message { color: var(--status-paused); }
+.log-entry--detail  .log-message { color: var(--text-secondary); }
 
 /* ---------------------------------------------------------------------------
    Scrollbar Styling

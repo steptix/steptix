@@ -3,7 +3,7 @@
  * Bridges renderer invoke calls to file-manager and runner-adapter functions.
  */
 
-import { ipcMain, type BrowserWindow } from 'electron';
+import { ipcMain, shell, type BrowserWindow } from 'electron';
 
 import {
   readFile,
@@ -138,6 +138,11 @@ export function registerIpcHandlers({ mainWindow, testsDir }: IpcHandlerOptions)
       runnerAdapter!.updateBreakpoints(params.breakpoints);
     },
   );
+
+  ipcMain.handle('shell:open-file', (_event, params: { path: string }) => {
+    // Open HTML reports in the default browser using file:// URL
+    void shell.openExternal(`file://${params.path}`);
+  });
 }
 
 /**
@@ -160,6 +165,7 @@ export function removeIpcHandlers(): void {
     'runner:steer',
     'runner:input-response',
     'runner:update-breakpoints',
+    'shell:open-file',
   ];
 
   for (const channel of channels) {

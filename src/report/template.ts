@@ -94,12 +94,32 @@ export function getReportTemplate(): string {
     .screenshot-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
     .screenshot-img { max-width: 100%; border: 1px solid var(--border); border-radius: 6px; cursor: zoom-in; }
 
-    /* DOM snapshot */
+    /* AI Responses */
     .ai-responses { margin-top: 14px; }
     .ai-responses-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 6px; }
-    .ai-response { margin-top: 6px; }
-    .ai-response summary { font-size: 0.8rem; font-weight: 500; color: var(--muted); cursor: pointer; margin-bottom: 4px; }
-    .ai-response pre { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.75rem; background: var(--code-bg); padding: 12px; border-radius: 5px; overflow-x: auto; max-height: 400px; overflow-y: auto; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
+    .ai-response { margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+    .ai-response summary { font-size: 0.8rem; font-weight: 600; color: #1d4ed8; background: #eff6ff; cursor: pointer; padding: 8px 12px; border-bottom: 1px solid var(--border); list-style: none; display: flex; align-items: center; gap: 6px; }
+    .ai-response summary::-webkit-details-marker { display: none; }
+    .ai-response summary::before { content: '▶'; font-size: 0.65rem; color: var(--muted); }
+    .ai-response[open] summary::before { content: '▼'; }
+    .ai-response pre { margin: 0; }
+    .json-block { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; background: #1e1e2e; color: #cdd6f4; padding: 14px 16px; overflow-x: auto; max-height: 500px; overflow-y: auto; white-space: pre; line-height: 1.6; }
+    .j-key  { color: #89b4fa; }
+    .j-str  { color: #a6e3a1; }
+    .j-num  { color: #fab387; }
+    .j-kw   { color: #cba6f7; font-style: italic; }
+
+    /* AI Request */
+    .ai-request { margin: 8px 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+    .ai-request summary { font-size: 0.8rem; font-weight: 600; color: #92400e; background: #fffbeb; cursor: pointer; padding: 8px 12px; border-bottom: 1px solid var(--border); list-style: none; display: flex; align-items: center; gap: 6px; }
+    .ai-request summary::-webkit-details-marker { display: none; }
+    .ai-request summary::before { content: '▶'; font-size: 0.65rem; color: var(--muted); }
+    .ai-request[open] summary::before { content: '▼'; }
+    .ai-request-body { padding: 0; }
+    .ai-request-message { border-bottom: 1px solid var(--border); }
+    .ai-request-message:last-child { border-bottom: none; }
+    .ai-request-role { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); background: var(--code-bg); padding: 4px 12px; }
+    .ai-request-content { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; padding: 10px 12px; margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; background: var(--surface); color: var(--text); }
 
     .dom-snapshot { margin-top: 10px; }
     .dom-snapshot summary { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; cursor: pointer; margin-bottom: 6px; }

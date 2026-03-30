@@ -8,10 +8,11 @@
 // ---------------------------------------------------------------------------
 // Re-export existing report types that the renderer needs
 // ---------------------------------------------------------------------------
-import type { SubActionResult as _SubActionResult, StepResult as _StepResult } from '../report/types.js';
+import type { SubActionResult as _SubActionResult, StepResult as _StepResult, AiInteraction as _AiInteraction } from '../report/types.js';
 
 export type SubActionResult = _SubActionResult;
 export type StepResult = _StepResult;
+export type AiInteraction = _AiInteraction;
 
 // ---------------------------------------------------------------------------
 // Run state model (renderer-side)
@@ -31,8 +32,10 @@ export interface StepOutput {
   instruction: string;
   status: 'pending' | 'running' | 'passed' | 'failed';
   aiReasoning: string;
+  aiInteractions: AiInteraction[];
   subActions: SubActionResult[];
   screenshots: string[]; // base64 data URLs
+  domSnapshot?: string;
   error?: string;
   durationMs?: number;
 }
@@ -74,6 +77,11 @@ export interface MainToRendererEvents {
     stepIndex: number;
     text: string;
   };
+  'runner:ai-interactions': {
+    stepIndex: number;
+    aiInteractions: AiInteraction[];
+    domSnapshot?: string;
+  };
   'runner:paused': {
     stepIndex: number;
     reason: PauseReason;
@@ -84,6 +92,7 @@ export interface MainToRendererEvents {
   'runner:resumed': Record<string, never>;
   'runner:complete': {
     status: 'passed' | 'failed';
+    reportPath?: string;
   };
   'runner:error': {
     message: string;
@@ -157,6 +166,10 @@ export interface RendererToMainInvokes {
   'dialog:select-folder': {
     params: Record<string, never>;
     result: { path: string | null };
+  };
+  'shell:open-file': {
+    params: { path: string };
+    result: void;
   };
   'set-tests-dir': {
     params: { dir: string };

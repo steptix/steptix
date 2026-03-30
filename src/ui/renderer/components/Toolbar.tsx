@@ -7,7 +7,7 @@ export function Toolbar() {
   const dispatch = useAppDispatch();
   const invoke = useIpcInvoke();
 
-  const { runState, tabs, activeTabIndex, breakpoints } = state;
+  const { runState, tabs, activeTabIndex, breakpoints, reportPath } = state;
   const status = runState.status;
   const activeTab = tabs[activeTabIndex] ?? null;
 
@@ -44,6 +44,11 @@ export function Toolbar() {
   const handleResume = useCallback(() => {
     invoke('runner:resume', {});
   }, [invoke]);
+
+  const handleViewReport = useCallback(() => {
+    if (!reportPath) return;
+    invoke('shell:open-file', { path: reportPath });
+  }, [reportPath, invoke]);
 
   const handleSave = useCallback(() => {
     if (!activeTab) return;
@@ -124,6 +129,15 @@ export function Toolbar() {
         >
           &#128190; Save
         </button>
+        {isComplete && reportPath && (
+          <button
+            className="toolbar-btn toolbar-btn--report"
+            onClick={handleViewReport}
+            title="Open HTML report in browser"
+          >
+            &#128196; View Report
+          </button>
+        )}
       </div>
       <div className="toolbar-right">
         <span className={`status-indicator ${statusClass}`}>{statusLabel}</span>
