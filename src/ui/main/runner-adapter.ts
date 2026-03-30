@@ -26,6 +26,7 @@ import { formatStepHistoryEntry } from '../../ai/prompts.js';
 import { TokenTracker } from '../../utils/tokens.js';
 import { ApiResponseStore } from '../../api/response-store.js';
 import { generateReport } from '../../report/generator.js';
+import { setLogCallback } from '../../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // Patterns mirrored from test-runner.ts (not exported there)
@@ -126,6 +127,10 @@ export class UIRunnerAdapter {
     this.stopped = false;
     this.breakpoints = new Set(breakpoints);
 
+    setLogCallback((level, message) => {
+      this.emit('runner:log', { level, message });
+    });
+
     try {
       await this.executeRun(filePath);
     } catch (err) {
@@ -134,6 +139,7 @@ export class UIRunnerAdapter {
         this.emit('runner:error', { message });
       }
     } finally {
+      setLogCallback(null);
       await this.cleanup();
     }
   }
@@ -205,6 +211,7 @@ export class UIRunnerAdapter {
       conversationHistory: [...this.conversationHistory],
       ...(this.apiResponseStore != null && { apiResponseStore: this.apiResponseStore }),
       csrfTokens: this.csrfTokens,
+      resolvedParameters: this.resolvedParameters,
     });
 
     // Emit sub-actions and screenshots
@@ -442,6 +449,7 @@ export class UIRunnerAdapter {
         conversationHistory: [...this.conversationHistory],
         apiResponseStore: this.apiResponseStore,
         csrfTokens: this.csrfTokens,
+        resolvedParameters: this.resolvedParameters,
       });
 
       // Emit sub-actions and screenshots

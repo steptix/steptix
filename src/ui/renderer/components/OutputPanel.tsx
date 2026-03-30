@@ -130,6 +130,11 @@ export function OutputPanel() {
                     <details key={i} className="output-ai-interaction" style={{ marginBottom: 6 }}>
                       <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 500, padding: '4px 0', userSelect: 'none' }}>
                         <span className="output-interaction-purpose">{interaction.purpose}</span>
+                        {interaction.attemptNumber && interaction.attemptNumber > 1 && (
+                          <span className="step-status-badge step-status-skipped" style={{ marginLeft: 6, fontSize: 10 }}>
+                            Attempt {interaction.attemptNumber}
+                          </span>
+                        )}
                       </summary>
                       {interaction.requestMessages && interaction.requestMessages.length > 0 && (
                         <details style={{ marginBottom: 4 }}>

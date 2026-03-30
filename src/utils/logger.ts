@@ -3,9 +3,19 @@ import chalk from 'chalk';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 let verboseMode = false;
+let logCallback: ((level: LogLevel, message: string) => void) | null = null;
 
 export function setVerbose(enabled: boolean): void {
   verboseMode = enabled;
+}
+
+/** Register a callback that receives every log entry (in addition to console output). */
+export function setLogCallback(fn: ((level: LogLevel, message: string) => void) | null): void {
+  logCallback = fn;
+}
+
+function notify(level: LogLevel, message: string): void {
+  logCallback?.(level, message);
 }
 
 function timestamp(): string {
@@ -16,22 +26,27 @@ export const logger = {
   debug(message: string, ...args: unknown[]): void {
     if (!verboseMode) return;
     console.log(chalk.gray(`[${timestamp()}] [DEBUG] ${message}`), ...args);
+    notify('debug', message);
   },
 
   info(message: string, ...args: unknown[]): void {
     console.log(chalk.cyan(`[${timestamp()}] [INFO]  ${message}`), ...args);
+    notify('info', message);
   },
 
   success(message: string, ...args: unknown[]): void {
     console.log(chalk.green(`[${timestamp()}] [PASS]  ${message}`), ...args);
+    notify('info', message);
   },
 
   warn(message: string, ...args: unknown[]): void {
     console.warn(chalk.yellow(`[${timestamp()}] [WARN]  ${message}`), ...args);
+    notify('warn', message);
   },
 
   error(message: string, ...args: unknown[]): void {
     console.error(chalk.red(`[${timestamp()}] [ERROR] ${message}`), ...args);
+    notify('error', message);
   },
 
   step(index: number, total: number, instruction: string): void {

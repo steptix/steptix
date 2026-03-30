@@ -97,6 +97,10 @@ export interface MainToRendererEvents {
   'runner:error': {
     message: string;
   };
+  'runner:log': {
+    level: 'info' | 'warn' | 'error' | 'debug';
+    message: string;
+  };
   'file:changed': {
     path: string;
     content?: string;

@@ -358,6 +358,13 @@ export function App() {
       }),
     );
 
+    unsubs.push(
+      bridge.on('runner:log', (data) => {
+        const level = data.level === 'warn' ? 'warn' : data.level === 'error' ? 'error' : 'detail';
+        dispatch({ type: 'ADD_LOG', level, message: data.message });
+      }),
+    );
+
     return () => unsubs.forEach((fn) => fn());
   }, []);
 

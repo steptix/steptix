@@ -298,8 +298,11 @@ function renderAiResponses(responses: AiInteraction[]): string {
         </details>`
       : '';
 
+    const attemptLabel = r.attemptNumber && r.attemptNumber > 1
+      ? ` <span class="badge badge-skip">Attempt ${r.attemptNumber}</span>`
+      : '';
     return `<details class="ai-response">
-      <summary>AI response — ${label}</summary>
+      <summary>AI response — ${label}${attemptLabel}</summary>
       ${requestSection}
       <pre class="json-block">${highlightJson(pretty)}</pre>
     </details>`;
