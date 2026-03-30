@@ -81,6 +81,7 @@ export class UIRunnerAdapter {
 
   // --- Pause machinery ---
   private pauseHandle: PauseHandle | null = null;
+  private currentPauseReason: 'breakpoint' | 'interactive' | 'stepover' | null = null;
 
   // --- Input step response ---
   private inputResolve: ((value: string) => void) | null = null;
@@ -180,15 +181,16 @@ export class UIRunnerAdapter {
 
     const stepIndex = this.currentStepIndex;
     const totalSteps = this.test.steps.length;
+    const resolvedInstruction = interpolate(instruction, this.resolvedParameters);
 
     // Emit step-start for the steering step
     this.emit('runner:step-start', {
       stepIndex,
-      instruction: `(steering) ${instruction}`,
+      instruction: `(steering) ${resolvedInstruction}`,
       totalSteps,
     });
 
-    const result = await executeStep(stepIndex, totalSteps, instruction, {
+    const result = await executeStep(stepIndex, totalSteps, resolvedInstruction, {
       page: this.page,
       config: this.config,
       aiClient: this.aiClient,
@@ -213,6 +215,7 @@ export class UIRunnerAdapter {
       stepIndex,
       status: result.status === 'passed' ? 'passed' : 'failed',
       durationMs: result.durationMs,
+      ...(result.error !== undefined && { error: result.error }),
     });
 
     // Add to conversation history (do NOT modify test steps array)
@@ -220,13 +223,18 @@ export class UIRunnerAdapter {
     this.conversationHistory.push(
       formatStepHistoryEntry(
         stepIndex,
-        `(steering) ${instruction}`,
+        `(steering) ${resolvedInstruction}`,
         result.status === 'passed',
         currentUrl,
       ),
     );
 
     this.tokenTracker?.resetStep();
+
+    // Restore paused state on the renderer — the run loop is still awaiting the pause handle
+    if (this.pauseHandle && this.currentPauseReason) {
+      this.emit('runner:paused', { stepIndex, reason: this.currentPauseReason });
+    }
   }
 
   /** Respond to an [input: variable] prompt. */
@@ -438,6 +446,7 @@ export class UIRunnerAdapter {
         stepIndex,
         status: result.status === 'passed' ? 'passed' : 'failed',
         durationMs: result.durationMs,
+        ...(result.error !== undefined && { error: result.error }),
       });
 
       stepResults.push(result);
@@ -470,6 +479,7 @@ export class UIRunnerAdapter {
 
   private async pause(stepIndex: number, reason: 'breakpoint' | 'interactive' | 'stepover'): Promise<void> {
     this.pauseHandle = createPauseHandle();
+    this.currentPauseReason = reason;
     this.emit('runner:paused', { stepIndex, reason });
 
     try {
@@ -536,6 +546,7 @@ export class UIRunnerAdapter {
     this.currentStepIndex = 0;
     this.pointerOverride = undefined;
     this.pauseHandle = null;
+    this.currentPauseReason = null;
     this.inputResolve = null;
     this.steerResolve = null;
     this.conversationHistory = [];

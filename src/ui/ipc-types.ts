@@ -60,6 +60,7 @@ export interface MainToRendererEvents {
     stepIndex: number;
     status: 'passed' | 'failed';
     durationMs: number;
+    error?: string;
   };
   'runner:subaction': {
     stepIndex: number;

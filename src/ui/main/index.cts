@@ -8,6 +8,7 @@
  * Electron's patched module loader rather than resolving to the npm shim.
  */
 
+import 'dotenv/config';
 import path from 'node:path';
 import { watch, type FSWatcher } from 'node:fs';
 

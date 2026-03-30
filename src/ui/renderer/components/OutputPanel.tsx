@@ -64,6 +64,37 @@ export function OutputPanel() {
                           {sa.aiReasoning}
                         </div>
                       )}
+                      {sa.apiCallData && (
+                        <div style={{ marginTop: 4, fontSize: 11, fontFamily: 'monospace' }}>
+                          <div style={{ color: 'var(--text-secondary)' }}>
+                            {sa.apiCallData.method} {sa.apiCallData.url}
+                            {' → '}
+                            <span style={{ color: sa.apiCallData.status >= 400 ? 'var(--status-failed)' : 'var(--status-passed)' }}>
+                              {sa.apiCallData.status}
+                            </span>
+                          </div>
+                          {sa.apiCallData.requestBody != null && (
+                            <details style={{ marginTop: 2 }}>
+                              <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>Request body</summary>
+                              <pre style={{ margin: '2px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                {typeof sa.apiCallData.requestBody === 'string'
+                                  ? sa.apiCallData.requestBody
+                                  : JSON.stringify(sa.apiCallData.requestBody, null, 2)}
+                              </pre>
+                            </details>
+                          )}
+                          {sa.apiCallData.responseBody != null && (
+                            <details style={{ marginTop: 2 }}>
+                              <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>Response body</summary>
+                              <pre style={{ margin: '2px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                {typeof sa.apiCallData.responseBody === 'string'
+                                  ? sa.apiCallData.responseBody
+                                  : JSON.stringify(sa.apiCallData.responseBody, null, 2)}
+                              </pre>
+                            </details>
+                          )}
+                        </div>
+                      )}
                       {sa.error && (
                         <div style={{ color: 'var(--status-failed)', fontSize: 11 }}>
                           {sa.error}

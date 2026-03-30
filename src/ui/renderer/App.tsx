@@ -222,7 +222,7 @@ export function App() {
         dispatch({
           type: 'UPDATE_STEP_OUTPUT',
           stepIndex: data.stepIndex,
-          patch: { status: data.status, durationMs: data.durationMs },
+          patch: { status: data.status, durationMs: data.durationMs, error: data.error },
         });
       }),
     );

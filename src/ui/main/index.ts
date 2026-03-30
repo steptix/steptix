@@ -5,6 +5,7 @@
  * the CLI `ui` command) and creates the application window.
  */
 
+import 'dotenv/config';
 import path from 'node:path';
 import { watch, type FSWatcher } from 'node:fs';
 import { fileURLToPath } from 'node:url';
