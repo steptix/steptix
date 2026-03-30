@@ -17,7 +17,9 @@ export type ActionType =
   // API action types
   | 'api_call'
   | 'extract_csrf'
-  | 'extract_value';
+  | 'extract_value'
+  // Capture a DOM value into a test variable
+  | 'read';
 
 /** A single action returned by the AI */
 export interface AIAction {

@@ -280,9 +280,31 @@ function renderAssertion(
 function renderAiResponses(responses: AiInteraction[]): string {
   const items = responses.map((r) => {
     const label = escapeHtml(r.purpose);
+    const pretty = formatJson(tryParseJson(r.response));
+
+    const requestHtml = r.requestMessages && r.requestMessages.length > 0
+      ? r.requestMessages.map((m) =>
+          `<div class="ai-request-message">
+            <div class="ai-request-role">${escapeHtml(m.role)}</div>
+            <pre class="ai-request-content">${escapeHtml(m.content)}</pre>
+          </div>`,
+        ).join('')
+      : '';
+
+    const requestSection = requestHtml
+      ? `<details class="ai-request">
+          <summary>Request (${r.requestMessages!.length} message${r.requestMessages!.length !== 1 ? 's' : ''})</summary>
+          <div class="ai-request-body">${requestHtml}</div>
+        </details>`
+      : '';
+
+    const attemptLabel = r.attemptNumber && r.attemptNumber > 1
+      ? ` <span class="badge badge-skip">Attempt ${r.attemptNumber}</span>`
+      : '';
     return `<details class="ai-response">
-      <summary>AI response — ${label}</summary>
-      <pre>${escapeHtml(r.response)}</pre>
+      <summary>AI response — ${label}${attemptLabel}</summary>
+      ${requestSection}
+      <pre class="json-block">${highlightJson(pretty)}</pre>
     </details>`;
   }).join('\n');
 
@@ -290,6 +312,77 @@ function renderAiResponses(responses: AiInteraction[]): string {
   <div class="ai-responses-title">AI Responses (${responses.length})</div>
   ${items}
 </div>`;
+}
+
+function tryParseJson(text: string): unknown {
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+/**
+ * Applies simple syntax highlighting to a pretty-printed JSON string.
+ * Returns an HTML string with <span> colour tags — safe to embed in a <pre>.
+ */
+function highlightJson(json: string): string {
+  // Tokenise line-by-line so we can escape each segment before wrapping in spans
+  return json
+    .split('\n')
+    .map((line) => highlightJsonLine(line))
+    .join('\n');
+}
+
+function highlightJsonLine(line: string): string {
+  // Match: key, string value, number, boolean/null
+  // We process segments left-to-right and escape each piece.
+  const segments: string[] = [];
+  let remaining = line;
+
+  while (remaining.length > 0) {
+    // Leading whitespace / structural characters
+    const ws = remaining.match(/^([\s{}\[\],]+)/);
+    if (ws) {
+      segments.push(escapeHtml(ws[1]!));
+      remaining = remaining.slice(ws[1]!.length);
+      continue;
+    }
+
+    // JSON key (string followed by colon)
+    const keyMatch = remaining.match(/^("(?:[^"\\]|\\.)*")(\s*:)/);
+    if (keyMatch) {
+      segments.push(`<span class="j-key">${escapeHtml(keyMatch[1]!)}</span>${escapeHtml(keyMatch[2]!)}`);
+      remaining = remaining.slice(keyMatch[0].length);
+      continue;
+    }
+
+    // String value
+    const strMatch = remaining.match(/^"(?:[^"\\]|\\.)*"/);
+    if (strMatch) {
+      segments.push(`<span class="j-str">${escapeHtml(strMatch[0])}</span>`);
+      remaining = remaining.slice(strMatch[0].length);
+      continue;
+    }
+
+    // Number
+    const numMatch = remaining.match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (numMatch) {
+      segments.push(`<span class="j-num">${escapeHtml(numMatch[0])}</span>`);
+      remaining = remaining.slice(numMatch[0].length);
+      continue;
+    }
+
+    // Boolean / null
+    const boolMatch = remaining.match(/^(true|false|null)/);
+    if (boolMatch) {
+      segments.push(`<span class="j-kw">${boolMatch[1]!}</span>`);
+      remaining = remaining.slice(boolMatch[1]!.length);
+      continue;
+    }
+
+    // Fallback: emit one character escaped
+    segments.push(escapeHtml(remaining[0]!));
+    remaining = remaining.slice(1);
+  }
+
+  return segments.join('');
 }
 
 function formatDuration(ms: number): string {

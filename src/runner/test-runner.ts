@@ -21,6 +21,9 @@ const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
 /** Pattern for [interactive] steps that open a REPL for free-form instructions */
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]\s*(.*)/i;
 
+/** Pattern for [output: variable_name] steps that capture a DOM value into a variable */
+const OUTPUT_STEP_PATTERN = /^\[output:\s*(\w+)\]\s*(.*)/i;
+
 /**
  * Check if a step instruction is an input prompt step.
  * Returns the variable name and prompt text if it matches, or null otherwise.
@@ -39,6 +42,21 @@ function parseInteractiveStep(instruction: string): { hint: string } | null {
   const match = instruction.match(INTERACTIVE_STEP_PATTERN);
   if (!match) return null;
   return { hint: match[1]?.trim() || '' };
+}
+
+/**
+ * Check if a step instruction is an output capture step.
+ * Returns the variable name and the instruction text (with variable hint appended) if it matches.
+ */
+function parseOutputStep(instruction: string): { variable: string; enrichedInstruction: string } | null {
+  const match = instruction.match(OUTPUT_STEP_PATTERN);
+  if (!match) return null;
+  const variable = match[1]!;
+  const text = match[2]?.trim() || `Capture value into "${variable}"`;
+  return {
+    variable,
+    enrichedInstruction: `${text} [store as: ${variable}]`,
+  };
 }
 
 /** Prompt the user for a value during test execution */
@@ -132,6 +150,7 @@ export async function runTest(
       // Handle [input: variable_name] steps — pause for user input
       const inputStep = parseInputStep(instruction);
       const interactiveStep = !inputStep ? parseInteractiveStep(instruction) : null;
+      const outputStep = !inputStep && !interactiveStep ? parseOutputStep(instruction) : null;
       let stepResult: StepResult;
 
       if (inputStep) {
@@ -209,6 +228,22 @@ export async function runTest(
           aiExplanation: `Interactive mode: executed ${interactiveResults.length} command(s)`,
           ...(anyFailed && { error: 'One or more interactive commands failed' }),
         };
+      } else if (outputStep) {
+        stepResult = await executeStep(i + 1, test.steps.length, outputStep.enrichedInstruction, {
+          page: session.page,
+          config,
+          aiClient,
+          contextContent,
+          testName: test.title,
+          ...(baseUrl !== undefined && { baseUrl }),
+          conversationHistory: [...conversationHistory],
+          apiResponseStore,
+          csrfTokens,
+          resolvedParameters,
+        });
+        if (stepResult.status === 'passed') {
+          logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
+        }
       } else {
         stepResult = await executeStep(i + 1, test.steps.length, instruction, {
           page: session.page,
@@ -220,6 +255,7 @@ export async function runTest(
           conversationHistory: [...conversationHistory],
           apiResponseStore,
           csrfTokens,
+          resolvedParameters,
         });
       }
 

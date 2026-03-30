@@ -39,6 +39,10 @@ export interface AssertionResult extends AssertionEvaluation {
 export interface AiInteraction {
   /** What triggered this AI call (e.g. "action-plan", "clarification", "assertion") */
   purpose: string;
+  /** Which retry attempt this interaction belongs to (1 = first attempt, 2 = first retry, etc.) */
+  attemptNumber?: number;
+  /** Text-only messages sent to the AI (base64 images omitted; screenshots are captured separately) */
+  requestMessages?: Array<{ role: string; content: string }>;
   /** The raw response text from the AI */
   response: string;
 }

@@ -13,6 +13,7 @@ import {
   buildRetryContext,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, ApiPromptContext } from '../ai/prompts.js';
+import type { ChatMessage } from '../ai/types.js';
 import { parseAIResponse, parseAssertionEvaluation } from '../ai/action-parser.js';
 import { captureDomSnapshot } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
@@ -35,6 +36,17 @@ export interface StepExecutorOptions {
   apiResponseStore?: ApiResponseStore;
   /** CSRF tokens accumulated across steps — keyed by selector, with '__latest__' for the most recent */
   csrfTokens: Record<string, string>;
+  /** Live parameter map — read actions write captured values here for use in later steps */
+  resolvedParameters?: Record<string, string>;
+}
+
+/** Extract text-only content from a ChatMessage (strips base64 image blocks) */
+function extractTextFromMessage(msg: ChatMessage): string {
+  if (typeof msg.content === 'string') return msg.content;
+  return msg.content
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
 }
 
 /** Error subclass that carries failure context for retry enrichment */
@@ -49,15 +61,15 @@ class StepFailureError extends Error {
   }
 }
 
-/** Determine if a step instruction likely contains an assertion */
+/** Determine if a step instruction likely contains an assertion.
+ * Matches only when an assertion verb is the primary intent — i.e. at the start of the
+ * instruction (after stripping optional [prefix] markers like [input: x]).
+ * This avoids false positives from button/element names that happen to contain
+ * assertion words (e.g. "Click the Verify Code button"). */
 function isAssertionStep(instruction: string): boolean {
-  const assertionKeywords = [
-    'verify', 'assert', 'check', 'confirm', 'ensure', 'should',
-    'must', 'expect', 'validate', 'see', 'shows', 'displays',
-    'contains', 'greater than', 'less than', 'equal to',
-  ];
-  const lower = instruction.toLowerCase();
-  return assertionKeywords.some((kw) => lower.includes(kw));
+  // Strip leading [prefix] markers such as [input: x] or [interactive]
+  const stripped = instruction.replace(/^\[.*?\]\s*/i, '').toLowerCase();
+  return /^(verify|assert|check|confirm|ensure|should|must|expect|validate|greater than|less than|equal to)/.test(stripped);
 }
 
 /**
@@ -86,11 +98,12 @@ export async function executeStep(
       startTime,
       retried,
       priorFailures,
+      attemptNumber,
     );
   };
 
   try {
-    return await withRetry(attempt, {
+    const result = await withRetry(attempt, {
       maxRetries: opts.config.execution.retries,
       label: `step ${stepIndex}`,
       onFailure: (err) => {
@@ -101,6 +114,16 @@ export async function executeStep(
         }
       },
     });
+
+    // If a prior attempt failed, merge its AI interactions into the successful result
+    // so the report shows all attempts, not just the one that succeeded
+    if (allAiResponses.length > 0) {
+      return {
+        ...result,
+        aiResponses: [...allAiResponses, ...(result.aiResponses ?? [])],
+      };
+    }
+    return result;
   } catch (err) {
     // Both attempts failed
     const durationMs = Date.now() - startTime;
@@ -143,6 +166,7 @@ async function executeStepAttempt(
   startTime: number,
   retried: boolean,
   priorFailures: PriorFailureContext[] = [],
+  attemptNumber: number = 1,
 ): Promise<StepResult> {
   const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens } = opts;
 
@@ -201,7 +225,12 @@ async function executeStepAttempt(
   // 4. Get AI action plan
   const rawResponse = await aiClient.complete(messages);
   let aiResponse = parseAIResponse(rawResponse);
-  aiResponses.push({ purpose: 'action-plan', response: rawResponse });
+  aiResponses.push({
+    purpose: 'action-plan',
+    attemptNumber,
+    requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+    response: rawResponse,
+  });
 
   logger.debug(`AI reasoning: ${aiResponse.reasoning}`);
 
@@ -213,13 +242,19 @@ async function executeStepAttempt(
       promptAction.question ?? promptAction.description,
       userAnswer,
     );
-    const clarifiedResponse = await aiClient.complete([
+    const clarificationMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       userMessage,
       { role: 'assistant', content: rawResponse },
       clarificationMsg,
-    ]);
-    aiResponses.push({ purpose: 'clarification', response: clarifiedResponse });
+    ];
+    const clarifiedResponse = await aiClient.complete(clarificationMessages);
+    aiResponses.push({
+      purpose: 'clarification',
+      attemptNumber,
+      requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+      response: clarifiedResponse,
+    });
     aiResponse = parseAIResponse(clarifiedResponse);
   }
 
@@ -330,6 +365,12 @@ async function executeStepAttempt(
     const result = await executeAction(page, action, baseUrl);
     const subDuration = Date.now() - subStartTime;
 
+    // Store captured value from "read" actions into the live parameter map
+    if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
+      opts.resolvedParameters[action.as] = result.capturedValue;
+      logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
+    }
+
     // Capture state after action
     const postDom = await captureDomSnapshot(page).catch(() => '');
     const postShot = await captureScreenshot(page);
@@ -399,11 +440,17 @@ async function executeStepAttempt(
     );
 
     const assertSystemPrompt = buildSystemPrompt(contextContent, testName, baseUrl, undefined, undefined, undefined, apiContext);
-    const assertRaw = await aiClient.complete([
+    const assertMessages: ChatMessage[] = [
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
-    ]);
-    aiResponses.push({ purpose: 'assertion', response: assertRaw });
+    ];
+    const assertRaw = await aiClient.complete(assertMessages);
+    aiResponses.push({
+      purpose: 'assertion',
+      attemptNumber,
+      requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+      response: assertRaw,
+    });
 
     const evaluation = parseAssertionEvaluation(assertRaw);
 

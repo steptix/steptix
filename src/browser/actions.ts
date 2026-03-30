@@ -10,6 +10,8 @@ export interface ActionExecutionResult {
   failedSelector?: string;
   /** How many elements matched the selector (0 = not found, >1 = ambiguous) */
   matchCount?: number;
+  /** Value captured by a "read" action */
+  capturedValue?: string;
 }
 
 /**
@@ -80,6 +82,11 @@ export async function executeAction(
         // Prompt actions are handled at the step executor level
         logger.debug(`prompt action: ${action.question ?? action.description}`);
         break;
+
+      case 'read': {
+        const captured = await executeRead(page, action);
+        return { success: true, capturedValue: captured };
+      }
 
       default:
         logger.warn(`Unknown action type: ${(action as AIAction).action}`);
@@ -280,4 +287,21 @@ function requireSelector(action: AIAction): string {
     throw new Error(`Action "${action.action}" requires a selector but none was provided`);
   }
   return action.selector;
+}
+
+/**
+ * Read the value or text content of an element.
+ * Tries the element's `value` attribute first (for inputs), falls back to `textContent`.
+ */
+async function executeRead(page: Page, action: AIAction): Promise<string> {
+  const selector = requireSelector(action);
+  logger.subAction(`read ${selector} → ${action.as ?? '(unnamed)'}`);
+  const value = await page.$eval(selector, (el) => {
+    if ('value' in el && typeof (el as { value: unknown }).value === 'string') {
+      return (el as { value: string }).value;
+    }
+    return el.textContent?.trim() ?? '';
+  });
+  logger.info(`read captured: "${value}" → variable "${action.as ?? '(unnamed)'}"`);
+  return value;
 }

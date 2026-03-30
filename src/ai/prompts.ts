@@ -67,13 +67,14 @@ Execute the following test step by returning a JSON object with an array of acti
 2. Each action must have: { "action": string, "description": string } plus relevant fields
 3. Use CSS selectors. Prefer data-testid > id > aria-label > name > visible text
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
-5. If the step requires an assertion, include an "assert" action as the last action
+5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — action success is determined by whether it throws an error, not by an assertion
 6. If you encounter an unexpected popup/modal/banner, include a "dismiss" action BEFORE your main actions
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
 8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 11. For "wait" actions, set "condition" to a CSS selector, URL pattern, keyword like "networkidle", or a duration like "30s", "2m", "1m 30s"
+12. For "read" actions, set "selector" to the CSS selector of the element to read and "as" to a snake_case variable name. Use "read" when a step asks you to capture, note, remember, store, or take note of a value from the page (e.g. "capture the residential address", "take note of the balance", "note the email"). If the step specifies a variable name via [store as: name], use that name exactly. Otherwise derive a concise snake_case name from what is being captured (e.g. "residential address" → "residential_address", "account balance" → "account_balance"). Captured values become available as {{variable_name}} in later steps
 ${apiContext?.hasApiContext ? `
 ## API Actions (use when the step describes an API call)
 When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.

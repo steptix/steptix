@@ -1,6 +1,9 @@
 node_modules/
 dist/
+dist-ui/
 reports/
+memory/
 *.tsbuildinfo
 .env
 .env.*
+!.env.example
