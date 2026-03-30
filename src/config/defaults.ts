@@ -30,6 +30,7 @@ export const DEFAULT_CONFIG: Config = {
     screenshotOnFailure: true,
     dismissObstacles: true,
     promptOnAmbiguity: true,
+    maxTurns: 5,
   },
   reports: {
     outputDir: './reports',

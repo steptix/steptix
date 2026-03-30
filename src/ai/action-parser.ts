@@ -4,8 +4,9 @@ import { logger } from '../utils/logger.js';
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
   'hover', 'wait', 'scroll', 'switchFrame', 'dismiss',
-  'assert', 'keyboard', 'prompt',
+  'assert', 'keyboard', 'keypress', 'prompt',
   'api_call', 'extract_csrf', 'extract_value',
+  'read', 'count',
 ]);
 
 /**
@@ -120,7 +121,9 @@ function validateAndNormaliseResponse(parsed: unknown): AIResponse {
   const reasoning =
     typeof obj['reasoning'] === 'string' ? obj['reasoning'] : 'No reasoning provided';
 
-  return { actions, reasoning };
+  const needs_reeval = obj['needs_reeval'] === true ? true : undefined;
+
+  return { actions, reasoning, ...(needs_reeval !== undefined && { needs_reeval }) };
 }
 
 function parseAction(raw: unknown, index: number): AIAction {

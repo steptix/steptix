@@ -41,6 +41,8 @@ export interface AiInteraction {
   purpose: string;
   /** Which retry attempt this interaction belongs to (1 = first attempt, 2 = first retry, etc.) */
   attemptNumber?: number;
+  /** Turn number within a multi-turn step (1, 2, 3, …). Absent for single-turn steps. */
+  turnNumber?: number;
   /** Text-only messages sent to the AI (base64 images omitted; screenshots are captured separately) */
   requestMessages?: Array<{ role: string; content: string }>;
   /** The raw response text from the AI */

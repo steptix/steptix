@@ -19,7 +19,9 @@ export type ActionType =
   | 'extract_csrf'
   | 'extract_value'
   // Capture a DOM value into a test variable
-  | 'read';
+  | 'read'
+  // Count elements matching a selector and store the result
+  | 'count';
 
 /** A single action returned by the AI */
 export interface AIAction {
@@ -77,6 +79,11 @@ export interface AIAction {
 export interface AIResponse {
   actions: AIAction[];
   reasoning: string;
+  /**
+   * When true, the AI signals it needs a fresh snapshot before planning remaining actions.
+   * The executor will re-evaluate after executing the returned actions.
+   */
+  needs_reeval?: boolean;
 }
 
 /** Result of an AI assertion evaluation */

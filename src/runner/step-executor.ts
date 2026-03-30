@@ -9,6 +9,7 @@ import {
   buildSystemPrompt,
   buildStepMessage,
   buildClarificationMessage,
+  buildContinuationMessage,
   buildAssertionMessage,
   buildRetryContext,
 } from '../ai/prompts.js';
@@ -158,6 +159,16 @@ export async function executeStep(
   }
 }
 
+/** Tag AI interactions with turn numbers for multi-turn steps; omit turnNumber for single-turn steps. */
+function tagAiResponses(
+  buffer: Array<{ interaction: AiInteraction; turn: number }>,
+  isMultiTurn: boolean,
+): AiInteraction[] {
+  return buffer.map(({ interaction, turn }) =>
+    isMultiTurn ? { ...interaction, turnNumber: turn } : interaction,
+  );
+}
+
 async function executeStepAttempt(
   stepIndex: number,
   totalSteps: number,
@@ -169,264 +180,338 @@ async function executeStepAttempt(
   attemptNumber: number = 1,
 ): Promise<StepResult> {
   const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens } = opts;
+  const maxTurns = config.execution.maxTurns;
 
-  // 1. Auto-dismiss any unexpected obstacles
-  if (config.execution.dismissObstacles) {
-    await handleObstacles(page);
-  }
+  // Accumulated across all turns
+  const aiResponseBuffer: Array<{ interaction: AiInteraction; turn: number }> = [];
+  const allSubActions: SubActionResult[] = [];
+  const allCompletedActions: Array<{ description: string }> = [];
+  const collectedFailures: PriorFailureContext[] = [];
+  const urlHistory: string[] = [];
 
-  // 2. Capture current page state
-  const domSnapshot = await captureDomSnapshot(page);
-  const screenshot = await captureScreenshot(page);
-  const screenshotBase64 = screenshot?.base64;
+  // First-turn state is used for the step result (screenshot / DOM taken at step start)
+  let firstTurnDomSnapshot = '';
+  let firstTurnScreenshot: string | undefined;
 
-  // 3. Build API context if we have response history
-  const apiContext: ApiPromptContext | undefined = contextContent.includes('Type:')
-    ? {
-        hasApiContext: true,
-        responseHistory: apiResponseStore?.hasResponses()
-          ? apiResponseStore.formatForContext()
-          : '',
-      }
-    : undefined;
+  // Retained from the final turn for aiExplanation and assertion context
+  let lastAiResponse: ReturnType<typeof parseAIResponse> | null = null;
+  let lastApiContext: ApiPromptContext | undefined;
 
-  // 4. Build messages for the AI
-  const systemPrompt = buildSystemPrompt(
-    contextContent,
-    testName,
-    baseUrl,
-    stepIndex,
-    totalSteps,
-    config.browser.viewport,
-    apiContext,
-  );
-
-  // Append retry context so the AI knows what was already tried
-  const retryHint = buildRetryContext(priorFailures);
-  const enrichedInstruction = retryHint
-    ? `${instruction}${retryHint}`
-    : instruction;
-
-  const userMessage = buildStepMessage(
-    enrichedInstruction,
-    domSnapshot,
-    screenshotBase64 ?? null,
-    conversationHistory,
-  );
-
-  const messages = [
-    { role: 'system' as const, content: systemPrompt },
-    userMessage,
-  ];
-
-  // Track all AI responses for the report
-  const aiResponses: AiInteraction[] = [];
-
-  // 4. Get AI action plan
-  const rawResponse = await aiClient.complete(messages);
-  let aiResponse = parseAIResponse(rawResponse);
-  aiResponses.push({
-    purpose: 'action-plan',
-    attemptNumber,
-    requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-    response: rawResponse,
-  });
-
-  logger.debug(`AI reasoning: ${aiResponse.reasoning}`);
-
-  // 5. Handle prompt actions (ambiguity resolution)
-  const promptAction = aiResponse.actions.find((a) => a.action === 'prompt');
-  if (promptAction && config.execution.promptOnAmbiguity) {
-    const userAnswer = await promptUser(promptAction.question ?? promptAction.description);
-    const clarificationMsg = buildClarificationMessage(
-      promptAction.question ?? promptAction.description,
-      userAnswer,
-    );
-    const clarificationMessages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt },
-      userMessage,
-      { role: 'assistant', content: rawResponse },
-      clarificationMsg,
-    ];
-    const clarifiedResponse = await aiClient.complete(clarificationMessages);
-    aiResponses.push({
-      purpose: 'clarification',
-      attemptNumber,
-      requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-      response: clarifiedResponse,
-    });
-    aiResponse = parseAIResponse(clarifiedResponse);
-  }
-
-  // 6. Execute each sub-action
-  const subActions: SubActionResult[] = [];
+  let assertionResult: StepResult['assertion'];
   let stepFailed = false;
   let stepError: string | undefined;
-  let assertionResult: StepResult['assertion'];
-  const collectedFailures: PriorFailureContext[] = [];
+  let completedTurns = 0;
 
-  for (const action of aiResponse.actions) {
-    if (action.action === 'assert') {
-      // Handled after all other actions
-      continue;
-    }
-    if (action.action === 'prompt') {
-      // Already handled above
-      continue;
+  for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
+    completedTurns = currentTurn;
+
+    // 1. Auto-dismiss obstacles (first turn only)
+    if (currentTurn === 1 && config.execution.dismissObstacles) {
+      await handleObstacles(page);
     }
 
-    const subStartTime = Date.now();
-    const aiReasoningVal = config.reports.includeAiReasoning ? aiResponse.reasoning : undefined;
+    // 2. Capture current page state
+    const domSnapshot = await captureDomSnapshot(page);
+    const screenshot = await captureScreenshot(page);
+    const screenshotBase64 = screenshot?.base64;
+    const currentUrl = page.url();
 
-    // ── API action types ─────────────────────────────────────────────────────
-    if (action.action === 'extract_csrf') {
-      const csrfResult = await extractCsrfToken(
-        page,
-        action.selector ?? action.source ?? '',
-        action.source,
-      ).catch((err) => {
-        logger.warn(`CSRF extraction failed: ${String(err)}`);
-        return undefined;
-      });
-
-      const subDuration = Date.now() - subStartTime;
-      const subActionResult: SubActionResult = {
-        index: subActions.length + 1,
-        action,
-        durationMs: subDuration,
-        ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
-      };
-
-      if (csrfResult) {
-        csrfTokens[csrfResult.selector] = csrfResult.token;
-        // Store under a generic key so the next api_call can find it
-        csrfTokens['__latest__'] = csrfResult.token;
-      } else {
-        subActionResult.error = 'CSRF token could not be extracted';
-        stepFailed = true;
-        stepError = subActionResult.error;
-      }
-
-      subActions.push(subActionResult);
-      if (stepFailed) break;
-      continue;
+    if (currentTurn === 1) {
+      firstTurnDomSnapshot = domSnapshot;
+      firstTurnScreenshot = screenshotBase64;
     }
 
-    if (action.action === 'extract_value') {
-      // Extraction from prior API responses is handled implicitly by the AI's context —
-      // log it as a no-op sub-action so it appears in the report.
-      subActions.push({
-        index: subActions.length + 1,
-        action,
-        durationMs: Date.now() - subStartTime,
-        ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
-      });
-      continue;
-    }
-
-    if (action.action === 'api_call') {
-      // If context describes a Front Proxy or Experience API and the AI didn't set apiMode,
-      // default to "browser" so the request carries browser session cookies.
-      if (!action.apiMode && contextContent.match(/Type:\s*(Front Proxy|Experience)/i)) {
-        action.apiMode = 'browser';
-        logger.debug('Auto-set apiMode to "browser" based on Front Proxy/Experience context');
-      }
-
-      const apiSubResult = await executeApiCallAction(
-        action,
-        page,
-        stepIndex,
-        csrfTokens,
-        config.api?.requestTimeout,
-        apiResponseStore,
-        baseUrl,
+    // 3. Cycle detection: abort if current URL matches URL from two turns ago
+    if (urlHistory.length >= 2 && currentUrl === urlHistory[urlHistory.length - 2]) {
+      throw new StepFailureError(
+        `Step failed: navigation cycle detected — stuck at ${currentUrl}`,
+        [],
+        tagAiResponses(aiResponseBuffer, completedTurns > 1),
       );
+    }
+    urlHistory.push(currentUrl);
 
-      const subDuration = Date.now() - subStartTime;
-      const subActionResult: SubActionResult = {
-        index: subActions.length + 1,
-        action,
-        durationMs: subDuration,
-        ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
-        ...(apiSubResult.apiCallData !== undefined && { apiCallData: apiSubResult.apiCallData }),
-        ...(apiSubResult.error !== undefined && { error: apiSubResult.error }),
-      };
-      subActions.push(subActionResult);
+    // 4. Build API context and system prompt (rebuilt each turn so API history stays current)
+    const apiContext: ApiPromptContext | undefined = contextContent.includes('Type:')
+      ? {
+          hasApiContext: true,
+          responseHistory: apiResponseStore?.hasResponses()
+            ? apiResponseStore.formatForContext()
+            : '',
+        }
+      : undefined;
+    lastApiContext = apiContext;
 
-      if (apiSubResult.failed) {
-        stepFailed = true;
-        stepError = apiSubResult.error;
-        break;
-      }
-      continue;
+    const systemPrompt = buildSystemPrompt(
+      contextContent,
+      testName,
+      baseUrl,
+      stepIndex,
+      totalSteps,
+      config.browser.viewport,
+      apiContext,
+    );
+
+    // 5. Build user message (first turn: normal step message; subsequent: continuation prompt)
+    let userMessage: ChatMessage;
+    if (currentTurn === 1) {
+      const retryHint = buildRetryContext(priorFailures);
+      const enrichedInstruction = retryHint ? `${instruction}${retryHint}` : instruction;
+      userMessage = buildStepMessage(
+        enrichedInstruction,
+        domSnapshot,
+        screenshotBase64 ?? null,
+        conversationHistory,
+      );
+    } else {
+      userMessage = buildContinuationMessage(
+        instruction,
+        allCompletedActions,
+        opts.resolvedParameters ?? {},
+        currentUrl,
+        domSnapshot,
+        screenshotBase64 ?? null,
+        currentTurn,
+      );
     }
 
-    // ── Browser action types ─────────────────────────────────────────────────
-    const result = await executeAction(page, action, baseUrl);
-    const subDuration = Date.now() - subStartTime;
+    const messages: ChatMessage[] = [
+      { role: 'system', content: systemPrompt },
+      userMessage,
+    ];
 
-    // Store captured value from "read" actions into the live parameter map
-    if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
-      opts.resolvedParameters[action.as] = result.capturedValue;
-      logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
-    }
-
-    // Capture state after action
-    const postDom = await captureDomSnapshot(page).catch(() => '');
-    const postShot = await captureScreenshot(page);
-
-    const postShotBase64 = postShot?.base64;
-    const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;
-    subActions.push({
-      index: subActions.length + 1,
-      action,
-      ...(postShotBase64 !== undefined && { screenshotBase64: postShotBase64 }),
-      ...(domSnapshotVal !== undefined && { domSnapshot: domSnapshotVal }),
-      ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
-      durationMs: subDuration,
-      ...(result.error !== undefined && { error: result.error }),
+    // 6. Get AI action plan
+    const rawResponse = await aiClient.complete(messages);
+    let aiResponse = parseAIResponse(rawResponse);
+    lastAiResponse = aiResponse;
+    aiResponseBuffer.push({
+      interaction: {
+        purpose: 'action-plan',
+        attemptNumber,
+        requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+        response: rawResponse,
+      },
+      turn: currentTurn,
     });
 
-    // After a successful "wait" on a CSRF-related selector, automatically extract and
-    // cache the token value so a subsequent api_call can inject it without needing an
-    // explicit extract_csrf action from the AI.
-    if (result.success && action.action === 'wait') {
-      const waitSelector = action.condition ?? action.value ?? '';
-      if (/csrf|__RequestVerificationToken/i.test(waitSelector)) {
-        const csrfResult = await extractCsrfToken(page, waitSelector).catch(() => undefined);
+    logger.debug(`AI reasoning (turn ${currentTurn}): ${aiResponse.reasoning}`);
+
+    // 7. Handle prompt actions (ambiguity resolution)
+    const promptAction = aiResponse.actions.find((a) => a.action === 'prompt');
+    if (promptAction && config.execution.promptOnAmbiguity) {
+      const userAnswer = await promptUser(promptAction.question ?? promptAction.description);
+      const clarificationMsg = buildClarificationMessage(
+        promptAction.question ?? promptAction.description,
+        userAnswer,
+      );
+      const clarificationMessages: ChatMessage[] = [
+        { role: 'system', content: systemPrompt },
+        userMessage,
+        { role: 'assistant', content: rawResponse },
+        clarificationMsg,
+      ];
+      const clarifiedResponse = await aiClient.complete(clarificationMessages);
+      aiResponseBuffer.push({
+        interaction: {
+          purpose: 'clarification',
+          attemptNumber,
+          requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+          response: clarifiedResponse,
+        },
+        turn: currentTurn,
+      });
+      aiResponse = parseAIResponse(clarifiedResponse);
+      lastAiResponse = aiResponse;
+    }
+
+    // 8. Execute each sub-action
+    let turnFailed = false;
+    let turnError: string | undefined;
+
+    for (const action of aiResponse.actions) {
+      if (action.action === 'assert') continue;
+      if (action.action === 'prompt') continue;
+
+      const subStartTime = Date.now();
+      const aiReasoningVal = config.reports.includeAiReasoning ? aiResponse.reasoning : undefined;
+
+      // ── API action types ─────────────────────────────────────────────────────
+      if (action.action === 'extract_csrf') {
+        const csrfResult = await extractCsrfToken(
+          page,
+          action.selector ?? action.source ?? '',
+          action.source,
+        ).catch((err) => {
+          logger.warn(`CSRF extraction failed: ${String(err)}`);
+          return undefined;
+        });
+
+        const subDuration = Date.now() - subStartTime;
+        const subActionResult: SubActionResult = {
+          index: allSubActions.length + 1,
+          action,
+          durationMs: subDuration,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+        };
+
         if (csrfResult) {
           csrfTokens[csrfResult.selector] = csrfResult.token;
           csrfTokens['__latest__'] = csrfResult.token;
-          logger.debug(`Auto-extracted CSRF token after wait on: ${waitSelector}`);
+        } else {
+          subActionResult.error = 'CSRF token could not be extracted';
+          turnFailed = true;
+          turnError = subActionResult.error;
+        }
+
+        allSubActions.push(subActionResult);
+        if (turnFailed) break;
+        continue;
+      }
+
+      if (action.action === 'extract_value') {
+        // Extraction from prior API responses is handled implicitly by the AI's context —
+        // log it as a no-op sub-action so it appears in the report.
+        allSubActions.push({
+          index: allSubActions.length + 1,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+        });
+        continue;
+      }
+
+      if (action.action === 'api_call') {
+        // If context describes a Front Proxy or Experience API and the AI didn't set apiMode,
+        // default to "browser" so the request carries browser session cookies.
+        if (!action.apiMode && contextContent.match(/Type:\s*(Front Proxy|Experience)/i)) {
+          action.apiMode = 'browser';
+          logger.debug('Auto-set apiMode to "browser" based on Front Proxy/Experience context');
+        }
+
+        const apiSubResult = await executeApiCallAction(
+          action,
+          page,
+          stepIndex,
+          csrfTokens,
+          config.api?.requestTimeout,
+          apiResponseStore,
+          baseUrl,
+        );
+
+        const subDuration = Date.now() - subStartTime;
+        const subActionResult: SubActionResult = {
+          index: allSubActions.length + 1,
+          action,
+          durationMs: subDuration,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          ...(apiSubResult.apiCallData !== undefined && { apiCallData: apiSubResult.apiCallData }),
+          ...(apiSubResult.error !== undefined && { error: apiSubResult.error }),
+        };
+        allSubActions.push(subActionResult);
+
+        if (apiSubResult.failed) {
+          turnFailed = true;
+          turnError = apiSubResult.error;
+          break;
+        }
+        continue;
+      }
+
+      // ── Browser action types ─────────────────────────────────────────────────
+      const result = await executeAction(page, action, baseUrl);
+      const subDuration = Date.now() - subStartTime;
+
+      // Store captured value from "read" / "count" actions into the live parameter map
+      if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
+        opts.resolvedParameters[action.as] = result.capturedValue;
+        logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
+      }
+
+      // Capture state after action
+      const postDom = await captureDomSnapshot(page).catch(() => '');
+      const postShot = await captureScreenshot(page);
+      const postShotBase64 = postShot?.base64;
+      const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;
+      allSubActions.push({
+        index: allSubActions.length + 1,
+        action,
+        ...(postShotBase64 !== undefined && { screenshotBase64: postShotBase64 }),
+        ...(domSnapshotVal !== undefined && { domSnapshot: domSnapshotVal }),
+        ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+        durationMs: subDuration,
+        ...(result.error !== undefined && { error: result.error }),
+      });
+
+      // After a successful "wait" on a CSRF-related selector, automatically extract and
+      // cache the token value so a subsequent api_call can inject it without needing an
+      // explicit extract_csrf action from the AI.
+      if (result.success && action.action === 'wait') {
+        const waitSelector = action.condition ?? action.value ?? '';
+        if (/csrf|__RequestVerificationToken/i.test(waitSelector)) {
+          const csrfResult = await extractCsrfToken(page, waitSelector).catch(() => undefined);
+          if (csrfResult) {
+            csrfTokens[csrfResult.selector] = csrfResult.token;
+            csrfTokens['__latest__'] = csrfResult.token;
+            logger.debug(`Auto-extracted CSRF token after wait on: ${waitSelector}`);
+          }
         }
       }
+
+      if (!result.success) {
+        turnFailed = true;
+        turnError = result.error;
+
+        // Collect failure context so retry gets richer info
+        if (result.failedSelector) {
+          collectedFailures.push({
+            selector: result.failedSelector,
+            error: result.error ?? 'Unknown error',
+            ...(result.matchCount !== undefined && { matchCount: result.matchCount }),
+            actionType: action.action,
+          });
+        }
+        break;
+      }
     }
 
-    if (!result.success) {
-      stepFailed = true;
-      stepError = result.error;
+    // Track non-assert/prompt actions for the continuation prompt on the next turn
+    allCompletedActions.push(
+      ...aiResponse.actions.filter((a) => a.action !== 'assert' && a.action !== 'prompt'),
+    );
 
-      // Collect failure context so retry gets richer info
-      if (result.failedSelector) {
-        collectedFailures.push({
-          selector: result.failedSelector,
-          error: result.error ?? 'Unknown error',
-          ...(result.matchCount !== undefined && { matchCount: result.matchCount }),
-          actionType: action.action,
-        });
-      }
+    if (turnFailed) {
+      throw new StepFailureError(
+        turnError ?? 'Step failed',
+        collectedFailures,
+        tagAiResponses(aiResponseBuffer, completedTurns > 1),
+      );
+    }
+
+    // 9a. Check needs_reeval: if false/absent, the step is complete after this turn
+    if (!aiResponse.needs_reeval) {
       break;
     }
+
+    // needs_reeval is true — enforce the turn cap
+    if (currentTurn === maxTurns) {
+      throw new StepFailureError(
+        `Step failed: multi-turn limit reached (${maxTurns} turns).\nLast URL: ${page.url()}`,
+        [],
+        tagAiResponses(aiResponseBuffer, true),
+      );
+    }
+
+    logger.info(`Turn ${currentTurn} complete (needs_reeval=true) — starting turn ${currentTurn + 1}`);
   }
 
-  // 7. Evaluate assertion if step has one
+  // 9b. Evaluate assertion if step has one (runs after all turns complete successfully)
   if (!stepFailed && isAssertionStep(instruction)) {
     const finalDom = await captureDomSnapshot(page);
     const finalShot = await captureScreenshot(page);
 
-    const assertAction = aiResponse.actions.find((a) => a.action === 'assert');
+    const assertAction = lastAiResponse?.actions.find((a) => a.action === 'assert');
 
-    const apiHistory = apiContext?.responseHistory;
+    const apiHistory = lastApiContext?.responseHistory;
     logger.info(`Assertion context — API response history present: ${!!apiHistory}, length: ${apiHistory?.length ?? 0}`);
     if (apiHistory) {
       logger.info(`API response history: ${apiHistory.substring(0, 300)}`);
@@ -439,17 +524,20 @@ async function executeStepAttempt(
       apiHistory,
     );
 
-    const assertSystemPrompt = buildSystemPrompt(contextContent, testName, baseUrl, undefined, undefined, undefined, apiContext);
+    const assertSystemPrompt = buildSystemPrompt(contextContent, testName, baseUrl, undefined, undefined, undefined, lastApiContext);
     const assertMessages: ChatMessage[] = [
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
     ];
     const assertRaw = await aiClient.complete(assertMessages);
-    aiResponses.push({
-      purpose: 'assertion',
-      attemptNumber,
-      requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-      response: assertRaw,
+    aiResponseBuffer.push({
+      interaction: {
+        purpose: 'assertion',
+        attemptNumber,
+        requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+        response: assertRaw,
+      },
+      turn: completedTurns,
     });
 
     const evaluation = parseAssertionEvaluation(assertRaw);
@@ -470,25 +558,25 @@ async function executeStepAttempt(
   }
 
   const durationMs = Date.now() - startTime;
-  const status = stepFailed ? 'failed' : 'passed';
+  const isMultiTurn = completedTurns > 1;
+  const aiResponses = tagAiResponses(aiResponseBuffer, isMultiTurn);
 
   if (stepFailed) {
     throw new StepFailureError(stepError ?? 'Step failed', collectedFailures, aiResponses);
   }
 
-  const domSnapshotForStep = config.reports.includeDomSnapshots ? domSnapshot : undefined;
+  const domSnapshotForStep = config.reports.includeDomSnapshots ? firstTurnDomSnapshot : undefined;
   return {
     index: stepIndex,
     instruction,
-    status,
-    subActions,
+    status: 'passed',
+    subActions: allSubActions,
     ...(assertionResult !== undefined && { assertion: assertionResult }),
-    ...(screenshotBase64 !== undefined && { screenshotBase64 }),
+    ...(firstTurnScreenshot !== undefined && { screenshotBase64: firstTurnScreenshot }),
     ...(domSnapshotForStep !== undefined && { domSnapshot: domSnapshotForStep }),
     durationMs,
     retried,
-    ...(stepError !== undefined && { error: stepError }),
-    aiExplanation: aiResponse.reasoning,
+    aiExplanation: lastAiResponse?.reasoning ?? 'No reasoning provided',
     ...(aiResponses.length > 0 && { aiResponses }),
   };
 }

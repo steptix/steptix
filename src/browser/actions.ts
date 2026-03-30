@@ -88,6 +88,11 @@ export async function executeAction(
         return { success: true, capturedValue: captured };
       }
 
+      case 'count': {
+        const counted = await executeCount(page, action);
+        return { success: true, capturedValue: counted };
+      }
+
       default:
         logger.warn(`Unknown action type: ${(action as AIAction).action}`);
     }
@@ -287,6 +292,19 @@ function requireSelector(action: AIAction): string {
     throw new Error(`Action "${action.action}" requires a selector but none was provided`);
   }
   return action.selector;
+}
+
+/**
+ * Count the number of elements matching a CSS selector.
+ * Stores the result as a string (e.g. "3") in resolvedParameters[action.as].
+ */
+async function executeCount(page: Page, action: AIAction): Promise<string> {
+  const selector = requireSelector(action);
+  logger.subAction(`count ${selector} → ${action.as ?? '(unnamed)'}`);
+  const count = await page.locator(selector).count();
+  const result = String(count);
+  logger.info(`count: ${count} elements matching "${selector}" → variable "${action.as ?? '(unnamed)'}"`);
+  return result;
 }
 
 /**

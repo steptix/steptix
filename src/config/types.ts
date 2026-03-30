@@ -42,6 +42,8 @@ export interface ExecutionConfig {
   dismissObstacles: boolean;
   /** Ask user when AI cannot determine next action */
   promptOnAmbiguity: boolean;
+  /** Maximum number of AI turns per step for multi-turn execution (default: 5) */
+  maxTurns: number;
 }
 
 export interface ReportsConfig {

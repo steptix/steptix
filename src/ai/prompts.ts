@@ -75,6 +75,8 @@ Execute the following test step by returning a JSON object with an array of acti
 10. For "type" actions, set "value" to the text to type
 11. For "wait" actions, set "condition" to a CSS selector, URL pattern, keyword like "networkidle", or a duration like "30s", "2m", "1m 30s"
 12. For "read" actions, set "selector" to the CSS selector of the element to read and "as" to a snake_case variable name. Use "read" when a step asks you to capture, note, remember, store, or take note of a value from the page (e.g. "capture the residential address", "take note of the balance", "note the email"). If the step specifies a variable name via [store as: name], use that name exactly. Otherwise derive a concise snake_case name from what is being captured (e.g. "residential address" → "residential_address", "account balance" → "account_balance"). Captured values become available as {{variable_name}} in later steps
+13. For "count" actions, set "selector" to the CSS selector to count and "as" to a snake_case variable name. Use "count" when a step asks how many elements exist (e.g. "how many accounts", "count the rows"). The result is stored as a string (e.g. "3") and available as {{variable_name}} in later steps
+14. Set "needs_reeval": true if you have returned all the actions you can plan from the current page state, but more actions are needed to complete the step — e.g. you need to navigate first and then interact with elements on the new page. Omit or set false when the step is complete after the returned actions
 ${apiContext?.hasApiContext ? `
 ## API Actions (use when the step describes an API call)
 When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.
@@ -98,7 +100,8 @@ IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "htt
     { "action": "click", "selector": "#login-btn", "description": "Click the login button" },
     { "action": "assert", "condition": "dashboard visible", "expected": "balance > 0", "description": "Verify dashboard loaded" }
   ],
-  "reasoning": "Brief explanation of your approach"
+  "reasoning": "Brief explanation of your approach",
+  "needs_reeval": false
 }
 ${apiSection}`;
 }
@@ -249,6 +252,68 @@ export function buildRetryContext(failures: PriorFailureContext[]): string {
 The following actions were tried and failed. Choose a DIFFERENT approach — do not reuse the same selectors that failed.
 
 ${lines.join('\n')}`;
+}
+
+/**
+ * Build the user message for a continuation turn in a multi-turn step.
+ * Sent on turns > 1, after the AI has requested re-evaluation via needs_reeval.
+ */
+export function buildContinuationMessage(
+  originalInstruction: string,
+  completedActions: Array<{ description: string }>,
+  capturedVariables: Record<string, string>,
+  currentUrl: string,
+  domSnapshot: string,
+  screenshotBase64: string | null,
+  turnNumber: number,
+): ChatMessage {
+  const actionLines = completedActions.length > 0
+    ? completedActions.map((a) => `  - ${a.description}`).join('\n')
+    : '  (none)';
+
+  const variableLines = Object.entries(capturedVariables).length > 0
+    ? Object.entries(capturedVariables).map(([k, v]) => `  ${k} = "${v}"`).join('\n')
+    : '  (none)';
+
+  const textContent = `You are continuing the execution of a step.
+
+Original instruction: "${originalInstruction}"
+
+Actions completed so far (turns 1–${turnNumber - 1}):
+${actionLines}
+
+Variables captured so far:
+${variableLines}
+
+Current URL: ${currentUrl}
+
+## DOM Snapshot
+\`\`\`html
+${domSnapshot}
+\`\`\`
+
+[Screenshot is attached as an image — use it to understand the current visual state of the page]
+
+What actions are needed to complete the original instruction?
+Set needs_reeval: true again only if you still cannot complete the step from this page state.`;
+
+  if (screenshotBase64) {
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text: textContent },
+        {
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${screenshotBase64}` },
+        },
+      ],
+    };
+  }
+
+  return {
+    role: 'user',
+    content: textContent,
+  };
 }
 
 /**
