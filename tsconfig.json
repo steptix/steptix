@@ -20,5 +20,5 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "fixtures", "templates"]
+  "exclude": ["node_modules", "dist", "tests", "fixtures", "templates", "src/ui/renderer", "src/ui/main/index.ts", "src/ui/main/ipc-handler.ts", "src/ui/preload.ts"]
 }

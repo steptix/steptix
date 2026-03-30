@@ -4,3 +4,4 @@ reports/
 *.tsbuildinfo
 .env
 .env.*
+!.env.example
