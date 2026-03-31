@@ -27,6 +27,11 @@
  *     GET /iframe/nested/advisor            → advisor portal with 2 nested iframes
  *     GET /iframe/nested/chat               → chat widget (nested inside advisor)
  *     GET /iframe/nested/recommendations    → recommendations panel (nested inside advisor)
+ *
+ *   New window / tab test page:
+ *     GET /new-window          → page with buttons to open a new window and a new tab
+ *     GET /new-window/popup    → content served in the new window (popup)
+ *     GET /new-window/tab      → content served in the new tab
  */
 
 import http from 'node:http';
@@ -1090,6 +1095,153 @@ function generateRecommendationsHtml(): string {
   return wrapIframeHtml('SecureBank \u2014 Recommendations', style, body);
 }
 
+// ─── New Window / Tab content ─────────────────────────────────────────────────
+
+function generateNewWindowContent(subpage: string): string | null {
+  if (subpage === 'popup') {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Popup Window</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      padding: 32px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      padding: 32px;
+      max-width: 500px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 20px; font-weight: 700; color: #111827; margin-bottom: 8px; }
+    p { color: #6b7280; font-size: 14px; margin-bottom: 16px; }
+    .info { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: #1e40af; margin-bottom: 16px; }
+    label { display: block; font-size: 14px; font-weight: 500; color: #374151; margin-bottom: 6px; }
+    input[type="text"] {
+      width: 100%; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 8px;
+      font-size: 15px; color: #111827; outline: none; margin-bottom: 16px;
+    }
+    input[type="text"]:focus { border-color: #1a56db; box-shadow: 0 0 0 3px rgba(26,86,219,0.12); }
+    .btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .btn-primary { background: #1a56db; color: #fff; }
+    .btn-primary:hover { background: #1648c0; }
+    .btn-close { background: #ef4444; color: #fff; margin-left: 8px; }
+    .btn-close:hover { background: #dc2626; }
+    .actions { display: flex; gap: 8px; }
+    #result { margin-top: 16px; padding: 12px 16px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; font-size: 13px; color: #166534; display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Popup Window</h1>
+    <p>This page was opened as a new window (popup).</p>
+    <div class="info">Window name: <strong>securebank-popup</strong></div>
+    <label for="popup-message">Send a message back to the opener</label>
+    <input type="text" id="popup-message" placeholder="Type a message...">
+    <div class="actions">
+      <button class="btn btn-primary" id="send-btn">Send to Opener</button>
+      <button class="btn btn-close" id="close-btn">Close Window</button>
+    </div>
+    <div id="result"></div>
+  </div>
+  <script>
+    document.getElementById('send-btn').addEventListener('click', function () {
+      var msg = document.getElementById('popup-message').value;
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage({ source: 'popup', message: msg }, '*');
+        var r = document.getElementById('result');
+        r.style.display = 'block';
+        r.textContent = 'Message sent: ' + msg;
+      }
+    });
+    document.getElementById('close-btn').addEventListener('click', function () {
+      window.close();
+    });
+  </script>
+</body>
+</html>`;
+  }
+
+  if (subpage === 'tab') {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — New Tab</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 500px;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 32px; }
+    .logo-icon {
+      width: 36px; height: 36px; background: #1a56db; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-weight: bold; font-size: 18px;
+    }
+    .logo-name { font-size: 22px; font-weight: 700; color: #111827; }
+    h1 { font-size: 24px; font-weight: 700; color: #111827; margin-bottom: 8px; }
+    p { color: #6b7280; font-size: 14px; margin-bottom: 16px; }
+    .info { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: #1e40af; margin-bottom: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+    th { text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; padding: 8px 12px; border-bottom: 2px solid #e5e7eb; }
+    td { padding: 10px 12px; font-size: 14px; color: #111827; border-bottom: 1px solid #f3f4f6; }
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .badge-success { background: #d1fae5; color: #065f46; }
+    .badge-pending { background: #fef3c7; color: #92400e; }
+    .back-link { display: block; text-align: center; font-size: 13px; color: #1a56db; text-decoration: none; }
+    .back-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <div class="logo-icon">S</div>
+      <span class="logo-name">SecureBank</span>
+    </div>
+    <h1>Account Summary</h1>
+    <p>This page was opened in a new tab.</p>
+    <div class="info">Opened from the main application window.</div>
+    <table>
+      <thead>
+        <tr><th>Account</th><th>Balance</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Savings</td><td>$12,450.00</td><td><span class="badge badge-success">Active</span></td></tr>
+        <tr><td>Checking</td><td>$3,280.50</td><td><span class="badge badge-success">Active</span></td></tr>
+        <tr><td>Investment</td><td>$45,000.00</td><td><span class="badge badge-pending">Pending</span></td></tr>
+      </tbody>
+    </table>
+    <a href="/dashboard" class="back-link">Go to Dashboard</a>
+  </div>
+</body>
+</html>`;
+  }
+
+  return null;
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -1134,6 +1286,19 @@ async function handleRequest(
     return;
   }
 
+  // ── New-window / new-tab content (dynamically generated HTML) ──────────────
+  if (pathname.startsWith('/new-window/')) {
+    const subpage = pathname.slice('/new-window/'.length);
+    const html = generateNewWindowContent(subpage);
+    if (html) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } else {
+      notFound(res);
+    }
+    return;
+  }
+
   // ── Static files ───────────────────────────────────────────────────────────
   if (!pathname.startsWith('/api/')) {
     // Route friendly URLs to their HTML files
@@ -1146,6 +1311,7 @@ async function handleRequest(
       '/transactions': 'transactions.html',
       '/iframes': 'iframes.html',
       '/nested-iframes': 'nested-iframes.html',
+      '/new-window': 'new-window.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {
@@ -1263,7 +1429,7 @@ async function handleRequest(
 
 server.listen(PORT, () => {
   console.log(`Fixture test server running at http://localhost:${PORT}`);
-  console.log(`  Static:  index.html, dashboard.html, delegates.html, transactions.html, iframes.html`);
+  console.log(`  Static:  index.html, dashboard.html, delegates.html, transactions.html, iframes.html, new-window.html`);
   console.log(`  Iframes: /iframe/banner, /iframe/sidebar/:cat, /iframe/content/:cat/:item`);
   console.log(`  API:     /api/delegates, /api/notifications, /api/csrf-token`);
 });

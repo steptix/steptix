@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — New Window & Tab Test</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 500px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      background: #1a56db;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 18px;
+    }
+
+    .logo-name {
+      font-size: 22px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      color: #111827;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: #6b7280;
+      font-size: 14px;
+      margin-bottom: 28px;
+    }
+
+    .actions {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-window {
+      background: #1a56db;
+      color: #fff;
+    }
+
+    .btn-window:hover { background: #1648c0; }
+    .btn-window:active { background: #143aaa; }
+
+    .btn-tab {
+      background: #059669;
+      color: #fff;
+    }
+
+    .btn-tab:hover { background: #047857; }
+    .btn-tab:active { background: #065f46; }
+
+    .status {
+      margin-top: 20px;
+      padding: 12px 16px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #6b7280;
+    }
+
+    .status-entry {
+      padding: 4px 0;
+    }
+
+    .back-link {
+      display: block;
+      text-align: center;
+      margin-top: 20px;
+      font-size: 13px;
+      color: #1a56db;
+      text-decoration: none;
+    }
+
+    .back-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <div class="logo">
+      <div class="logo-icon">S</div>
+      <span class="logo-name">SecureBank</span>
+    </div>
+
+    <h1>Window & Tab Test</h1>
+    <p class="subtitle">Test opening new browser windows and tabs.</p>
+
+    <div class="actions">
+      <button class="btn btn-window" id="open-window-btn">Open New Window</button>
+      <button class="btn btn-tab" id="open-tab-btn">Open New Tab</button>
+    </div>
+
+    <div class="status" id="status">
+      <div class="status-entry">No windows or tabs opened yet.</div>
+    </div>
+
+    <a href="/dashboard" class="back-link">Back to Dashboard</a>
+  </div>
+
+  <script>
+    var openedWindows = [];
+    var statusEl = document.getElementById('status');
+
+    function logStatus(message) {
+      var entry = document.createElement('div');
+      entry.className = 'status-entry';
+      entry.textContent = new Date().toLocaleTimeString() + ' — ' + message;
+      if (statusEl.querySelector('.status-entry') &&
+          statusEl.querySelector('.status-entry').textContent.includes('No windows or tabs')) {
+        statusEl.innerHTML = '';
+      }
+      statusEl.appendChild(entry);
+    }
+
+    document.getElementById('open-window-btn').addEventListener('click', function () {
+      var w = window.open(
+        '/new-window/popup',
+        'securebank-popup',
+        'width=600,height=400,left=200,top=200,menubar=no,toolbar=no,location=no,status=no'
+      );
+      if (w) {
+        openedWindows.push(w);
+        logStatus('Opened new window (popup)');
+      } else {
+        logStatus('Popup blocked by browser');
+      }
+    });
+
+    document.getElementById('open-tab-btn').addEventListener('click', function () {
+      var w = window.open('/new-window/tab', '_blank');
+      if (w) {
+        openedWindows.push(w);
+        logStatus('Opened new tab');
+      } else {
+        logStatus('New tab blocked by browser');
+      }
+    });
+  </script>
+</body>
+</html>
