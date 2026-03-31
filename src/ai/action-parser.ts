@@ -184,6 +184,7 @@ function parseAction(raw: unknown, index: number): AIAction {
   if (typeof obj['source'] === 'string') action.source = obj['source'];
   if (typeof obj['path'] === 'string') action.path = obj['path'];
   if (typeof obj['as'] === 'string') action.as = obj['as'];
+  if (typeof obj['frame'] === 'string') action.frame = obj['frame'];
 
   const modeRaw = obj['apiMode'];
   if (modeRaw === 'browser' || modeRaw === 'standalone') {

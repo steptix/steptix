@@ -71,6 +71,12 @@ export interface AIAction {
   path?: string;
   /** Variable name to assign the extracted value to (for extract_value) */
   as?: string;
+  /**
+   * CSS selector identifying the <iframe> element in the main page that contains the target element.
+   * When set, the action is executed inside that frame rather than the main page.
+   * Omit for elements in the main page.
+   */
+  frame?: string;
   /** Human-readable description of what this action does */
   description: string;
 }

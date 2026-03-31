@@ -15,6 +15,18 @@
  *     GET  /api/delegates/:id      → returns a single delegate
  *     PUT  /api/delegates/:id      → updates a delegate (requires CSRF token)
  *     GET  /api/notifications      → returns notifications (requires x-api-key)
+ *
+ *   Iframe test page:
+ *     GET /iframes                  → parent page with 3 iframes
+ *     GET /iframe/banner            → top navigation banner (iframe 1)
+ *     GET /iframe/sidebar/:category → sidebar options (iframe 2)
+ *     GET /iframe/content/:cat/:item → main content (iframe 3)
+ *
+ *   Nested iframe test page (2 levels deep):
+ *     GET /nested-iframes                  → wealth dashboard with 1 iframe (advisor-frame)
+ *     GET /iframe/nested/advisor            → advisor portal with 2 nested iframes
+ *     GET /iframe/nested/chat               → chat widget (nested inside advisor)
+ *     GET /iframe/nested/recommendations    → recommendations panel (nested inside advisor)
  */
 
 import http from 'node:http';
@@ -110,6 +122,974 @@ function serveStatic(res: http.ServerResponse, filePath: string): void {
   }
 }
 
+// ─── Iframe content generator ─────────────────────────────────────────────────
+
+const iframeBaseStyle = `
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  a { text-decoration: none; color: inherit; }
+`;
+
+const sidebarItems: Record<string, { label: string; items: { id: string; label: string; icon: string }[] }> = {
+  accounts: {
+    label: 'Accounts',
+    items: [
+      { id: 'overview', label: 'Overview', icon: '\u{1F4CA}' },
+      { id: 'savings', label: 'Savings Account', icon: '\u{1F4B0}' },
+      { id: 'checking', label: 'Checking Account', icon: '\u{1F4B3}' },
+      { id: 'credit-card', label: 'Credit Card', icon: '\u{1F4B3}' },
+    ],
+  },
+  payments: {
+    label: 'Payments',
+    items: [
+      { id: 'transfer', label: 'Transfer Money', icon: '\u{1F4E4}' },
+      { id: 'pay-bills', label: 'Pay Bills', icon: '\u{1F4DD}' },
+      { id: 'scheduled', label: 'Scheduled Payments', icon: '\u{1F4C5}' },
+    ],
+  },
+  support: {
+    label: 'Support',
+    items: [
+      { id: 'faq', label: 'FAQs', icon: '\u{2753}' },
+      { id: 'contact', label: 'Contact Us', icon: '\u{2709}\uFE0F' },
+      { id: 'report', label: 'Report Issue', icon: '\u{26A0}\uFE0F' },
+    ],
+  },
+};
+
+function wrapIframeHtml(title: string, extraStyle: string, body: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+  <style>${iframeBaseStyle}${extraStyle}</style>
+</head>
+<body>${body}</body>
+</html>`;
+}
+
+function generateBannerHtml(): string {
+  const categories = [
+    { id: 'accounts', label: 'Accounts', defaultItem: 'overview' },
+    { id: 'payments', label: 'Payments', defaultItem: 'transfer' },
+    { id: 'support', label: 'Support', defaultItem: 'faq' },
+  ];
+
+  const style = `
+    body { background: #1f2937; color: #f9fafb; height: 64px; display: flex; align-items: center; }
+    .banner { display: flex; align-items: center; width: 100%; padding: 0 24px; gap: 32px; }
+    .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
+    .logo-icon { width: 32px; height: 32px; background: #1a56db; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+    nav { display: flex; gap: 4px; }
+    .nav-link {
+      padding: 8px 18px; border-radius: 6px; font-size: 14px; font-weight: 500;
+      cursor: pointer; transition: background 0.15s; color: #d1d5db; border: none; background: none;
+    }
+    .nav-link:hover { background: #374151; color: #fff; }
+    .nav-link.active { background: #1a56db; color: #fff; }
+  `;
+
+  const links = categories.map(c =>
+    `<button class="nav-link${c.id === 'accounts' ? ' active' : ''}" data-category="${c.id}" data-default="${c.defaultItem}">${c.label}</button>`
+  ).join('\n      ');
+
+  const body = `
+  <div class="banner">
+    <div class="logo">
+      <div class="logo-icon">SB</div>
+      SecureBank Portal
+    </div>
+    <nav aria-label="Main navigation">
+      ${links}
+    </nav>
+  </div>
+  <script>
+    let activeBtn = document.querySelector('.nav-link.active');
+    document.querySelectorAll('.nav-link').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (activeBtn) activeBtn.classList.remove('active');
+        btn.classList.add('active');
+        activeBtn = btn;
+        window.parent.postMessage({
+          type: 'banner-navigate',
+          category: btn.dataset.category,
+          defaultItem: btn.dataset.default
+        }, '*');
+      });
+    });
+  </script>`;
+
+  return wrapIframeHtml('SecureBank — Banner', style, body);
+}
+
+function generateSidebarHtml(category: string): string | null {
+  const cat = sidebarItems[category];
+  if (!cat) return null;
+
+  const style = `
+    body { background: #f9fafb; height: 100%; }
+    .sidebar { padding: 16px 0; }
+    .sidebar-title { padding: 8px 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 20px; font-size: 14px; color: #374151;
+      cursor: pointer; transition: background 0.15s; border: none; background: none;
+      width: 100%; text-align: left;
+    }
+    .nav-item:hover { background: #e5e7eb; }
+    .nav-item.active { background: #dbeafe; color: #1a56db; font-weight: 600; }
+    .nav-item-icon { font-size: 16px; width: 24px; text-align: center; }
+  `;
+
+  const items = cat.items.map((item, i) =>
+    `<button class="nav-item${i === 0 ? ' active' : ''}" data-item="${item.id}" data-category="${category}">
+        <span class="nav-item-icon">${item.icon}</span>
+        ${item.label}
+      </button>`
+  ).join('\n      ');
+
+  const body = `
+  <div class="sidebar">
+    <div class="sidebar-title">${cat.label}</div>
+    ${items}
+  </div>
+  <script>
+    let activeItem = document.querySelector('.nav-item.active');
+    document.querySelectorAll('.nav-item').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (activeItem) activeItem.classList.remove('active');
+        btn.classList.add('active');
+        activeItem = btn;
+        window.parent.postMessage({
+          type: 'sidebar-navigate',
+          category: btn.dataset.category,
+          item: btn.dataset.item
+        }, '*');
+      });
+    });
+  </script>`;
+
+  return wrapIframeHtml(`SecureBank — ${cat.label}`, style, body);
+}
+
+function generateContentHtml(category: string, item: string): string | null {
+  const contentMap: Record<string, Record<string, { title: string; html: string }>> = {
+    accounts: {
+      overview: {
+        title: 'Account Overview',
+        html: `
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-label">Total Balance</div>
+              <div class="stat-value">$24,582.90</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Savings</div>
+              <div class="stat-value">$18,230.50</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Checking</div>
+              <div class="stat-value">$3,852.40</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Credit Available</div>
+              <div class="stat-value">$2,500.00</div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Quick Actions</h3>
+            <div class="button-group">
+              <button class="btn btn-primary" id="btn-view-all" onclick="document.getElementById('details-panel').style.display='block'; this.textContent='Viewing All Accounts';">View All Accounts</button>
+              <button class="btn btn-secondary" id="btn-download" onclick="this.textContent='Downloaded!'; this.disabled=true;">Download Statement</button>
+            </div>
+            <div id="details-panel" style="display:none; margin-top: 16px;">
+              <table class="data-table">
+                <thead><tr><th>Account</th><th>Number</th><th>Balance</th><th>Status</th></tr></thead>
+                <tbody>
+                  <tr><td>Savings Plus</td><td>****4821</td><td>$18,230.50</td><td><span class="badge badge-green">Active</span></td></tr>
+                  <tr><td>Everyday Checking</td><td>****7733</td><td>$3,852.40</td><td><span class="badge badge-green">Active</span></td></tr>
+                  <tr><td>Platinum Card</td><td>****9102</td><td>-$2,500.00</td><td><span class="badge badge-green">Active</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>`,
+      },
+      savings: {
+        title: 'Savings Account',
+        html: `
+          <div class="card">
+            <div class="account-header">
+              <div>
+                <div class="stat-label">Savings Plus &mdash; ****4821</div>
+                <div class="stat-value">$18,230.50</div>
+              </div>
+              <span class="badge badge-green">Active</span>
+            </div>
+            <div class="info-row"><span>Interest Rate:</span><strong>4.25% p.a.</strong></div>
+            <div class="info-row"><span>Last Interest Paid:</span><strong>$64.12 on Mar 1</strong></div>
+          </div>
+          <div class="card">
+            <h3>Recent Transactions</h3>
+            <div id="savings-txns">
+              <table class="data-table">
+                <thead><tr><th>Date</th><th>Description</th><th>Amount</th></tr></thead>
+                <tbody>
+                  <tr><td>Mar 28</td><td>Transfer from Checking</td><td class="amount-positive">+$500.00</td></tr>
+                  <tr><td>Mar 25</td><td>Interest Payment</td><td class="amount-positive">+$64.12</td></tr>
+                  <tr><td>Mar 20</td><td>Withdrawal</td><td class="amount-negative">-$200.00</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <button class="btn btn-secondary" id="btn-load-more" onclick="
+              const tbody = document.querySelector('#savings-txns tbody');
+              const rows = '<tr><td>Mar 15</td><td>Deposit</td><td class=\\'amount-positive\\'>+$1,200.00</td></tr><tr><td>Mar 10</td><td>Withdrawal</td><td class=\\'amount-negative\\'>-$350.00</td></tr>';
+              tbody.insertAdjacentHTML('beforeend', rows);
+              this.textContent = 'All transactions loaded';
+              this.disabled = true;
+            ">Load More</button>
+          </div>`,
+      },
+      checking: {
+        title: 'Checking Account',
+        html: `
+          <div class="card">
+            <div class="account-header">
+              <div>
+                <div class="stat-label">Everyday Checking &mdash; ****7733</div>
+                <div class="stat-value">$3,852.40</div>
+              </div>
+              <span class="badge badge-green">Active</span>
+            </div>
+            <div class="info-row"><span>Monthly Fee:</span><strong>$0.00 (waived)</strong></div>
+            <div class="info-row"><span>Pending Transactions:</span><strong>2</strong></div>
+          </div>
+          <div class="card">
+            <h3>Recent Transactions</h3>
+            <div class="filter-bar">
+              <label for="txn-filter">Filter:</label>
+              <select id="txn-filter" onchange="filterCheckingTxns(this.value)">
+                <option value="all">All</option>
+                <option value="debit">Debits Only</option>
+                <option value="credit">Credits Only</option>
+              </select>
+            </div>
+            <table class="data-table" id="checking-table">
+              <thead><tr><th>Date</th><th>Description</th><th>Type</th><th>Amount</th></tr></thead>
+              <tbody>
+                <tr data-type="debit"><td>Mar 29</td><td>Grocery Mart</td><td>Debit</td><td class="amount-negative">-$87.32</td></tr>
+                <tr data-type="debit"><td>Mar 28</td><td>Electric Company</td><td>Debit</td><td class="amount-negative">-$142.00</td></tr>
+                <tr data-type="credit"><td>Mar 27</td><td>Salary Deposit</td><td>Credit</td><td class="amount-positive">+$3,200.00</td></tr>
+                <tr data-type="debit"><td>Mar 26</td><td>Coffee Shop</td><td>Debit</td><td class="amount-negative">-$5.80</td></tr>
+                <tr data-type="credit"><td>Mar 25</td><td>Refund &mdash; Online Store</td><td>Credit</td><td class="amount-positive">+$29.99</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <script>
+            function filterCheckingTxns(type) {
+              const rows = document.querySelectorAll('#checking-table tbody tr');
+              rows.forEach(row => {
+                if (type === 'all') { row.style.display = ''; }
+                else { row.style.display = row.dataset.type === type ? '' : 'none'; }
+              });
+            }
+          </script>`,
+      },
+      'credit-card': {
+        title: 'Credit Card',
+        html: `
+          <div class="card">
+            <div class="credit-card-visual">
+              <div class="cc-chip"></div>
+              <div class="cc-number">**** **** **** 9102</div>
+              <div class="cc-details">
+                <div><span class="cc-label">Card Holder</span><br>DEMO USER</div>
+                <div><span class="cc-label">Expires</span><br>09/28</div>
+              </div>
+            </div>
+          </div>
+          <div class="stats-grid cols-3">
+            <div class="stat-card"><div class="stat-label">Current Balance</div><div class="stat-value">$2,500.00</div></div>
+            <div class="stat-card"><div class="stat-label">Credit Limit</div><div class="stat-value">$5,000.00</div></div>
+            <div class="stat-card"><div class="stat-label">Available Credit</div><div class="stat-value">$2,500.00</div></div>
+          </div>
+          <div class="card">
+            <h3>Recent Charges</h3>
+            <table class="data-table">
+              <thead><tr><th>Date</th><th>Merchant</th><th>Amount</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr><td>Mar 28</td><td>Online Store</td><td class="amount-negative">-$149.99</td><td><span class="badge badge-green">Posted</span></td></tr>
+                <tr><td>Mar 27</td><td>Restaurant</td><td class="amount-negative">-$52.30</td><td><span class="badge badge-green">Posted</span></td></tr>
+                <tr><td>Mar 26</td><td>Gas Station</td><td class="amount-negative">-$41.20</td><td><span class="badge badge-yellow">Pending</span></td></tr>
+              </tbody>
+            </table>
+            <button class="btn btn-primary" id="btn-pay-balance" onclick="
+              document.getElementById('pay-form').style.display = document.getElementById('pay-form').style.display === 'none' ? 'block' : 'none';
+            ">Pay Balance</button>
+            <div id="pay-form" style="display:none; margin-top: 16px;">
+              <div class="form-group">
+                <label for="pay-amount">Amount</label>
+                <input type="text" id="pay-amount" value="2500.00" class="form-input">
+              </div>
+              <div class="form-group">
+                <label for="pay-from">Pay From</label>
+                <select id="pay-from" class="form-input">
+                  <option>Savings ****4821</option>
+                  <option>Checking ****7733</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" id="btn-confirm-pay" onclick="
+                document.getElementById('pay-form').innerHTML = '<div class=\\'success-msg\\'>Payment of $' + document.getElementById('pay-amount').value + ' submitted successfully!</div>';
+              ">Confirm Payment</button>
+            </div>
+          </div>`,
+      },
+    },
+    payments: {
+      transfer: {
+        title: 'Transfer Money',
+        html: `
+          <div class="card">
+            <h3>New Transfer</h3>
+            <form id="transfer-form" onsubmit="return false;">
+              <div class="form-group">
+                <label for="from-account">From Account</label>
+                <select id="from-account" class="form-input">
+                  <option value="savings">Savings ****4821 — $18,230.50</option>
+                  <option value="checking">Checking ****7733 — $3,852.40</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="to-account">To Account</label>
+                <select id="to-account" class="form-input">
+                  <option value="checking">Checking ****7733</option>
+                  <option value="savings">Savings ****4821</option>
+                  <option value="external">External Account</option>
+                </select>
+              </div>
+              <div id="external-fields" style="display:none;">
+                <div class="form-group">
+                  <label for="bsb">BSB</label>
+                  <input type="text" id="bsb" class="form-input" placeholder="000-000">
+                </div>
+                <div class="form-group">
+                  <label for="ext-account">Account Number</label>
+                  <input type="text" id="ext-account" class="form-input" placeholder="12345678">
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="transfer-amount">Amount ($)</label>
+                <input type="number" id="transfer-amount" class="form-input" placeholder="0.00" min="0" step="0.01">
+              </div>
+              <div class="form-group">
+                <label for="transfer-desc">Description</label>
+                <input type="text" id="transfer-desc" class="form-input" placeholder="Optional description">
+              </div>
+              <button type="submit" class="btn btn-primary" id="btn-submit-transfer">Submit Transfer</button>
+              <div id="transfer-result" style="margin-top: 16px;"></div>
+            </form>
+          </div>
+          <script>
+            document.getElementById('to-account').addEventListener('change', function() {
+              document.getElementById('external-fields').style.display = this.value === 'external' ? 'block' : 'none';
+            });
+            document.getElementById('btn-submit-transfer').addEventListener('click', function() {
+              const amount = document.getElementById('transfer-amount').value;
+              const from = document.getElementById('from-account').selectedOptions[0].text;
+              const to = document.getElementById('to-account').selectedOptions[0].text;
+              if (!amount || parseFloat(amount) <= 0) {
+                document.getElementById('transfer-result').innerHTML = '<div class="error-msg">Please enter a valid amount.</div>';
+                return;
+              }
+              document.getElementById('transfer-result').innerHTML = '<div class="success-msg">Transfer of $' + parseFloat(amount).toFixed(2) + ' from ' + from + ' to ' + to + ' submitted successfully!</div>';
+            });
+          </script>`,
+      },
+      'pay-bills': {
+        title: 'Pay Bills',
+        html: `
+          <div class="card">
+            <h3>Upcoming Bills</h3>
+            <table class="data-table" id="bills-table">
+              <thead><tr><th>Biller</th><th>Due Date</th><th>Amount</th><th>Action</th></tr></thead>
+              <tbody>
+                <tr id="bill-1"><td>Electric Company</td><td>Apr 5</td><td>$142.00</td><td><button class="btn btn-small btn-primary" onclick="payBill('bill-1', 'Electric Company', 142)">Pay Now</button></td></tr>
+                <tr id="bill-2"><td>Internet Provider</td><td>Apr 8</td><td>$79.99</td><td><button class="btn btn-small btn-primary" onclick="payBill('bill-2', 'Internet Provider', 79.99)">Pay Now</button></td></tr>
+                <tr id="bill-3"><td>Water Utility</td><td>Apr 12</td><td>$55.30</td><td><button class="btn btn-small btn-primary" onclick="payBill('bill-3', 'Water Utility', 55.30)">Pay Now</button></td></tr>
+                <tr id="bill-4"><td>Insurance Co.</td><td>Apr 15</td><td>$220.00</td><td><button class="btn btn-small btn-primary" onclick="payBill('bill-4', 'Insurance Co.', 220)">Pay Now</button></td></tr>
+              </tbody>
+            </table>
+            <div id="bill-result" style="margin-top: 16px;"></div>
+          </div>
+          <script>
+            function payBill(rowId, name, amount) {
+              const btn = document.querySelector('#' + rowId + ' button');
+              btn.textContent = 'Paid';
+              btn.disabled = true;
+              btn.classList.remove('btn-primary');
+              btn.classList.add('btn-disabled');
+              document.getElementById('bill-result').innerHTML = '<div class="success-msg">Payment of $' + amount.toFixed(2) + ' to ' + name + ' completed.</div>';
+            }
+          </script>`,
+      },
+      scheduled: {
+        title: 'Scheduled Payments',
+        html: `
+          <div class="card">
+            <h3>Scheduled Payments</h3>
+            <table class="data-table" id="scheduled-table">
+              <thead><tr><th>Recipient</th><th>Frequency</th><th>Next Date</th><th>Amount</th><th>Action</th></tr></thead>
+              <tbody>
+                <tr id="sched-1"><td>Landlord</td><td>Monthly</td><td>Apr 1</td><td>$1,500.00</td><td><button class="btn btn-small btn-danger" onclick="cancelScheduled('sched-1', 'Landlord')">Cancel</button></td></tr>
+                <tr id="sched-2"><td>Gym Membership</td><td>Monthly</td><td>Apr 3</td><td>$49.99</td><td><button class="btn btn-small btn-danger" onclick="cancelScheduled('sched-2', 'Gym Membership')">Cancel</button></td></tr>
+                <tr id="sched-3"><td>Streaming Service</td><td>Monthly</td><td>Apr 10</td><td>$14.99</td><td><button class="btn btn-small btn-danger" onclick="cancelScheduled('sched-3', 'Streaming Service')">Cancel</button></td></tr>
+              </tbody>
+            </table>
+            <div id="sched-result" style="margin-top: 16px;"></div>
+          </div>
+          <div class="card">
+            <h3>Add New Scheduled Payment</h3>
+            <form onsubmit="return false;">
+              <div class="form-group">
+                <label for="sched-recipient">Recipient</label>
+                <input type="text" id="sched-recipient" class="form-input" placeholder="Recipient name">
+              </div>
+              <div class="form-group">
+                <label for="sched-amount">Amount ($)</label>
+                <input type="number" id="sched-amount" class="form-input" placeholder="0.00" min="0" step="0.01">
+              </div>
+              <div class="form-group">
+                <label for="sched-freq">Frequency</label>
+                <select id="sched-freq" class="form-input">
+                  <option>Weekly</option>
+                  <option selected>Monthly</option>
+                  <option>Quarterly</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" id="btn-add-scheduled" onclick="addScheduled()">Add Payment</button>
+              <div id="add-sched-result" style="margin-top: 16px;"></div>
+            </form>
+          </div>
+          <script>
+            function cancelScheduled(rowId, name) {
+              const row = document.getElementById(rowId);
+              row.style.opacity = '0.4';
+              row.style.textDecoration = 'line-through';
+              row.querySelector('button').disabled = true;
+              row.querySelector('button').textContent = 'Cancelled';
+              document.getElementById('sched-result').innerHTML = '<div class="info-msg">Scheduled payment to ' + name + ' has been cancelled.</div>';
+            }
+            let schedCount = 3;
+            function addScheduled() {
+              const name = document.getElementById('sched-recipient').value;
+              const amount = document.getElementById('sched-amount').value;
+              const freq = document.getElementById('sched-freq').value;
+              if (!name || !amount) {
+                document.getElementById('add-sched-result').innerHTML = '<div class="error-msg">Please fill in all fields.</div>';
+                return;
+              }
+              schedCount++;
+              const id = 'sched-' + schedCount;
+              const tbody = document.querySelector('#scheduled-table tbody');
+              tbody.insertAdjacentHTML('beforeend',
+                '<tr id="' + id + '"><td>' + name + '</td><td>' + freq + '</td><td>Apr 30</td><td>$' + parseFloat(amount).toFixed(2) + '</td><td><button class="btn btn-small btn-danger" onclick="cancelScheduled(\\'' + id + '\\', \\'' + name + '\\')">Cancel</button></td></tr>'
+              );
+              document.getElementById('add-sched-result').innerHTML = '<div class="success-msg">Scheduled payment to ' + name + ' added.</div>';
+            }
+          </script>`,
+      },
+    },
+    support: {
+      faq: {
+        title: 'Frequently Asked Questions',
+        html: `
+          <div class="card">
+            <h3>FAQs</h3>
+            <div class="faq-list">
+              <div class="faq-item">
+                <button class="faq-question" onclick="toggleFaq(this)">How do I reset my password?</button>
+                <div class="faq-answer" style="display:none;">Go to the login page and click "Forgot Password". Enter your registered email and follow the instructions sent to your inbox. The reset link expires after 24 hours.</div>
+              </div>
+              <div class="faq-item">
+                <button class="faq-question" onclick="toggleFaq(this)">What are the transfer limits?</button>
+                <div class="faq-answer" style="display:none;">Daily transfer limit is $10,000 for internal transfers and $5,000 for external transfers. You can request a temporary increase by contacting support.</div>
+              </div>
+              <div class="faq-item">
+                <button class="faq-question" onclick="toggleFaq(this)">How do I add a new payee?</button>
+                <div class="faq-answer" style="display:none;">Navigate to Payments &gt; Transfer Money, select "External Account" as the destination, and enter the BSB and account number. The payee will be saved for future transfers.</div>
+              </div>
+              <div class="faq-item">
+                <button class="faq-question" onclick="toggleFaq(this)">Is my data secure?</button>
+                <div class="faq-answer" style="display:none;">Yes. We use 256-bit encryption, multi-factor authentication, and regular security audits. Your session expires after 15 minutes of inactivity.</div>
+              </div>
+              <div class="faq-item">
+                <button class="faq-question" onclick="toggleFaq(this)">How do I dispute a transaction?</button>
+                <div class="faq-answer" style="display:none;">Go to Support &gt; Report Issue and select "Transaction Dispute" as the category. Provide the transaction date and amount, and our team will investigate within 5 business days.</div>
+              </div>
+            </div>
+          </div>
+          <script>
+            function toggleFaq(btn) {
+              const answer = btn.nextElementSibling;
+              const isOpen = answer.style.display !== 'none';
+              answer.style.display = isOpen ? 'none' : 'block';
+              btn.classList.toggle('open', !isOpen);
+            }
+          </script>`,
+      },
+      contact: {
+        title: 'Contact Us',
+        html: `
+          <div class="card">
+            <h3>Contact Support</h3>
+            <form id="contact-form" onsubmit="return false;">
+              <div class="form-group">
+                <label for="contact-name">Your Name</label>
+                <input type="text" id="contact-name" class="form-input" placeholder="Full name">
+              </div>
+              <div class="form-group">
+                <label for="contact-email">Email</label>
+                <input type="email" id="contact-email" class="form-input" placeholder="your@email.com">
+              </div>
+              <div class="form-group">
+                <label for="contact-subject">Subject</label>
+                <select id="contact-subject" class="form-input">
+                  <option value="">Select a topic...</option>
+                  <option>Account Inquiry</option>
+                  <option>Technical Issue</option>
+                  <option>Billing Question</option>
+                  <option>Feedback</option>
+                  <option>Other</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="contact-message">Message</label>
+                <textarea id="contact-message" class="form-input" rows="4" placeholder="Describe your inquiry..."></textarea>
+              </div>
+              <button class="btn btn-primary" id="btn-send-message" onclick="submitContact()">Send Message</button>
+              <div id="contact-result" style="margin-top: 16px;"></div>
+            </form>
+          </div>
+          <div class="card">
+            <h3>Other Ways to Reach Us</h3>
+            <div class="info-row"><span>\u{1F4DE} Phone:</span><strong>1-800-SECURE (732-873)</strong></div>
+            <div class="info-row"><span>\u{2709}\uFE0F Email:</span><strong>support@securebank.com</strong></div>
+            <div class="info-row"><span>\u{1F553} Hours:</span><strong>Mon-Fri 8am-8pm, Sat 9am-5pm</strong></div>
+          </div>
+          <script>
+            function submitContact() {
+              const name = document.getElementById('contact-name').value;
+              const email = document.getElementById('contact-email').value;
+              const subject = document.getElementById('contact-subject').value;
+              const message = document.getElementById('contact-message').value;
+              if (!name || !email || !subject || !message) {
+                document.getElementById('contact-result').innerHTML = '<div class="error-msg">Please fill in all fields.</div>';
+                return;
+              }
+              document.getElementById('contact-result').innerHTML = '<div class="success-msg">Your message has been sent! Reference #SUP-' + Math.floor(1000 + Math.random() * 9000) + '. We\\'ll respond within 24 hours.</div>';
+            }
+          </script>`,
+      },
+      report: {
+        title: 'Report an Issue',
+        html: `
+          <div class="card">
+            <h3>Report an Issue</h3>
+            <form id="report-form" onsubmit="return false;">
+              <div class="form-group">
+                <label for="issue-category">Category</label>
+                <select id="issue-category" class="form-input">
+                  <option value="">Select category...</option>
+                  <option>Transaction Dispute</option>
+                  <option>Unauthorized Access</option>
+                  <option>Card Lost/Stolen</option>
+                  <option>App/Website Bug</option>
+                  <option>Other</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="issue-priority">Priority</label>
+                <div class="radio-group">
+                  <label class="radio-label"><input type="radio" name="priority" value="low"> Low</label>
+                  <label class="radio-label"><input type="radio" name="priority" value="medium" checked> Medium</label>
+                  <label class="radio-label"><input type="radio" name="priority" value="high"> High</label>
+                  <label class="radio-label"><input type="radio" name="priority" value="urgent"> Urgent</label>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="issue-description">Description</label>
+                <textarea id="issue-description" class="form-input" rows="4" placeholder="Describe the issue in detail..."></textarea>
+              </div>
+              <div class="form-group">
+                <label><input type="checkbox" id="issue-contact-me"> Contact me for follow-up</label>
+              </div>
+              <button class="btn btn-primary" id="btn-submit-issue" onclick="submitIssue()">Submit Report</button>
+              <div id="report-result" style="margin-top: 16px;"></div>
+            </form>
+          </div>
+          <script>
+            function submitIssue() {
+              const category = document.getElementById('issue-category').value;
+              const desc = document.getElementById('issue-description').value;
+              const priority = document.querySelector('input[name="priority"]:checked')?.value || 'medium';
+              if (!category || !desc) {
+                document.getElementById('report-result').innerHTML = '<div class="error-msg">Please select a category and provide a description.</div>';
+                return;
+              }
+              const ticketId = 'TKT-' + Math.floor(10000 + Math.random() * 90000);
+              document.getElementById('report-result').innerHTML = '<div class="success-msg">Issue reported successfully!<br>Ticket: <strong>' + ticketId + '</strong><br>Priority: <strong>' + priority.charAt(0).toUpperCase() + priority.slice(1) + '</strong><br>We\\'ll investigate and update you within 48 hours.</div>';
+            }
+          </script>`,
+      },
+    },
+  };
+
+  const contentStyle = `
+    body { background: #f0f4f8; padding: 24px; }
+    h2 { color: #111827; font-size: 22px; margin-bottom: 20px; }
+    h3 { color: #374151; font-size: 16px; margin-bottom: 12px; }
+    .card { background: #fff; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,0.06); padding: 20px; margin-bottom: 20px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+    .stats-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+    .stat-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,0.06); padding: 16px; }
+    .stat-label { font-size: 13px; color: #6b7280; margin-bottom: 4px; }
+    .stat-value { font-size: 22px; font-weight: 700; color: #111827; }
+    .account-header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px; }
+    .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .badge-green { background: #d1fae5; color: #047857; }
+    .badge-yellow { background: #fef3c7; color: #92400e; }
+    .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f3f4f6; font-size: 14px; color: #6b7280; }
+    .info-row:last-child { border-bottom: none; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .data-table th { text-align: left; padding: 10px 12px; background: #f9fafb; color: #6b7280; font-weight: 600; border-bottom: 2px solid #e5e7eb; }
+    .data-table td { padding: 10px 12px; border-bottom: 1px solid #f3f4f6; color: #374151; }
+    .amount-positive { color: #047857; font-weight: 600; }
+    .amount-negative { color: #dc2626; font-weight: 600; }
+    .btn { padding: 10px 20px; border-radius: 7px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; transition: background 0.15s; margin-top: 12px; }
+    .btn-primary { background: #1a56db; color: #fff; }
+    .btn-primary:hover { background: #1e40af; }
+    .btn-secondary { background: #e5e7eb; color: #374151; }
+    .btn-secondary:hover { background: #d1d5db; }
+    .btn-danger { background: #fee2e2; color: #dc2626; }
+    .btn-danger:hover { background: #fecaca; }
+    .btn-small { padding: 5px 12px; font-size: 12px; margin-top: 0; }
+    .btn-disabled { background: #d1d5db; color: #9ca3af; cursor: default; }
+    .button-group { display: flex; gap: 8px; }
+    .form-group { margin-bottom: 16px; }
+    .form-group label { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 4px; }
+    .form-input { width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; font-family: inherit; }
+    .form-input:focus { outline: none; border-color: #1a56db; box-shadow: 0 0 0 3px rgba(26,86,219,0.1); }
+    textarea.form-input { resize: vertical; }
+    .radio-group { display: flex; gap: 16px; margin-top: 4px; }
+    .radio-label { font-size: 14px; font-weight: 400; color: #374151; display: flex; align-items: center; gap: 4px; }
+    .filter-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 14px; }
+    .filter-bar select { padding: 4px 8px; border: 1px solid #d1d5db; border-radius: 4px; }
+    .success-msg { background: #d1fae5; color: #047857; padding: 12px 16px; border-radius: 8px; font-size: 14px; }
+    .error-msg { background: #fee2e2; color: #dc2626; padding: 12px 16px; border-radius: 8px; font-size: 14px; }
+    .info-msg { background: #dbeafe; color: #1e40af; padding: 12px 16px; border-radius: 8px; font-size: 14px; }
+    .faq-list { display: flex; flex-direction: column; gap: 2px; }
+    .faq-item { border-bottom: 1px solid #f3f4f6; }
+    .faq-item:last-child { border-bottom: none; }
+    .faq-question { display: block; width: 100%; text-align: left; padding: 12px 0; font-size: 14px; font-weight: 600; color: #1a56db; cursor: pointer; border: none; background: none; font-family: inherit; }
+    .faq-question:hover { color: #1e40af; }
+    .faq-question::before { content: '\\25B6'; margin-right: 8px; font-size: 10px; display: inline-block; transition: transform 0.15s; }
+    .faq-question.open::before { transform: rotate(90deg); }
+    .faq-answer { padding: 0 0 12px 20px; font-size: 14px; color: #4b5563; line-height: 1.5; }
+    .credit-card-visual { background: linear-gradient(135deg, #1e40af, #7c3aed); color: #fff; border-radius: 12px; padding: 24px; max-width: 380px; }
+    .cc-chip { width: 36px; height: 28px; background: #fbbf24; border-radius: 4px; margin-bottom: 20px; }
+    .cc-number { font-size: 20px; letter-spacing: 2px; margin-bottom: 20px; font-family: monospace; }
+    .cc-details { display: flex; gap: 32px; font-size: 12px; }
+    .cc-label { opacity: 0.7; font-size: 10px; text-transform: uppercase; }
+  `;
+
+  const cat = contentMap[category];
+  if (!cat) return null;
+  const content = cat[item];
+  if (!content) return null;
+
+  return wrapIframeHtml(`SecureBank — ${content.title}`, contentStyle, `<h2>${content.title}</h2>${content.html}`);
+}
+
+function generateIframeContent(pathname: string): string | null {
+  if (pathname === '/iframe/banner') {
+    return generateBannerHtml();
+  }
+
+  const sidebarMatch = pathname.match(/^\/iframe\/sidebar\/([a-z-]+)$/);
+  if (sidebarMatch) {
+    return generateSidebarHtml(sidebarMatch[1]!);
+  }
+
+  const contentMatch = pathname.match(/^\/iframe\/content\/([a-z-]+)\/([a-z-]+)$/);
+  if (contentMatch) {
+    return generateContentHtml(contentMatch[1]!, contentMatch[2]!);
+  }
+
+  // Nested iframe routes
+  const nestedResult = generateNestedIframeContent(pathname);
+  if (nestedResult) return nestedResult;
+
+  return null;
+}
+
+// ─── Nested iframe content (for testing recursive frame capture) ─────────────
+
+function generateNestedIframeContent(pathname: string): string | null {
+  if (pathname === '/iframe/nested/advisor') {
+    return generateAdvisorPortalHtml();
+  }
+  if (pathname === '/iframe/nested/chat') {
+    return generateChatWidgetHtml();
+  }
+  if (pathname === '/iframe/nested/recommendations') {
+    return generateRecommendationsHtml();
+  }
+  return null;
+}
+
+function generateAdvisorPortalHtml(): string {
+  const style = `
+    body { background: #f8fafc; height: 100%; display: flex; flex-direction: column; }
+    .advisor-header {
+      background: #fff; border-bottom: 1px solid #e5e7eb; padding: 16px 20px;
+      display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+    }
+    .advisor-avatar {
+      width: 40px; height: 40px; border-radius: 50%; background: #dbeafe;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; color: #1a56db; font-size: 16px;
+    }
+    .advisor-info { flex: 1; }
+    .advisor-name { font-size: 15px; font-weight: 600; color: #111827; }
+    .advisor-role { font-size: 12px; color: #6b7280; }
+    .advisor-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #047857; font-weight: 600; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; }
+    .portal-body { display: flex; flex: 1; min-height: 0; }
+    #chat-frame { width: 380px; height: 100%; border: none; border-right: 1px solid #e5e7eb; flex-shrink: 0; }
+    #recommendations-frame { flex: 1; height: 100%; border: none; }
+  `;
+
+  const body = `
+  <div class="advisor-header">
+    <div class="advisor-avatar">JM</div>
+    <div class="advisor-info">
+      <div class="advisor-name">Jane Mitchell, CFA</div>
+      <div class="advisor-role">Senior Wealth Advisor</div>
+    </div>
+    <div class="advisor-status">
+      <span class="status-dot"></span>
+      Available
+    </div>
+  </div>
+  <div class="portal-body">
+    <iframe id="chat-frame" name="chat-frame" src="/iframe/nested/chat" title="Advisor chat"></iframe>
+    <iframe id="recommendations-frame" name="recommendations-frame" src="/iframe/nested/recommendations" title="Investment recommendations"></iframe>
+  </div>`;
+
+  return wrapIframeHtml('SecureBank \u2014 Advisor Portal', style, body);
+}
+
+function generateChatWidgetHtml(): string {
+  const style = `
+    body { background: #fff; height: 100%; display: flex; flex-direction: column; }
+    .chat-header {
+      background: #1a56db; color: #fff; padding: 12px 16px;
+      font-size: 14px; font-weight: 600; flex-shrink: 0;
+    }
+    .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.4; }
+    .msg-advisor { background: #f3f4f6; color: #374151; align-self: flex-start; border-bottom-left-radius: 4px; }
+    .msg-user { background: #1a56db; color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
+    .msg-sender { font-size: 11px; font-weight: 600; margin-bottom: 4px; opacity: 0.7; }
+    .msg-time { font-size: 10px; opacity: 0.5; margin-top: 4px; text-align: right; }
+    .chat-input-area {
+      border-top: 1px solid #e5e7eb; padding: 12px; display: flex; gap: 8px; flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 20px;
+      font-size: 13px; font-family: inherit; outline: none;
+    }
+    #chat-input:focus { border-color: #1a56db; }
+    #btn-send {
+      padding: 8px 16px; background: #1a56db; color: #fff; border: none;
+      border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    #btn-send:hover { background: #1e40af; }
+    .typing-indicator { font-size: 12px; color: #6b7280; font-style: italic; padding: 4px 14px; display: none; }
+  `;
+
+  const body = `
+  <div class="chat-header">Chat with Jane Mitchell</div>
+  <div class="chat-messages" id="chat-messages">
+    <div class="msg msg-advisor">
+      <div class="msg-sender">Jane Mitchell</div>
+      Hi! I've reviewed your portfolio. Your equity allocation has performed well this quarter, up 3.8%.
+      <div class="msg-time">10:15 AM</div>
+    </div>
+    <div class="msg msg-user">
+      <div class="msg-sender">You</div>
+      That's great! Should I rebalance given the recent market volatility?
+      <div class="msg-time">10:18 AM</div>
+    </div>
+    <div class="msg msg-advisor">
+      <div class="msg-sender">Jane Mitchell</div>
+      Good question. I'd recommend shifting 5% from equities to bonds to lock in some gains. I've added a rebalancing suggestion to your recommendations panel.
+      <div class="msg-time">10:20 AM</div>
+    </div>
+  </div>
+  <div class="typing-indicator" id="typing-indicator">Jane is typing...</div>
+  <div class="chat-input-area">
+    <input type="text" id="chat-input" placeholder="Type your message..." aria-label="Chat message">
+    <button id="btn-send">Send</button>
+  </div>
+  <script>
+    document.getElementById('btn-send').addEventListener('click', sendMessage);
+    document.getElementById('chat-input').addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') sendMessage();
+    });
+
+    function sendMessage() {
+      const input = document.getElementById('chat-input');
+      const text = input.value.trim();
+      if (!text) return;
+
+      const messages = document.getElementById('chat-messages');
+      const now = new Date();
+      const time = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0') + ' ' + (now.getHours() >= 12 ? 'PM' : 'AM');
+
+      messages.insertAdjacentHTML('beforeend',
+        '<div class="msg msg-user"><div class="msg-sender">You</div>' + text + '<div class="msg-time">' + time + '</div></div>'
+      );
+      input.value = '';
+      messages.scrollTop = messages.scrollHeight;
+
+      // Simulate advisor typing and response
+      document.getElementById('typing-indicator').style.display = 'block';
+      setTimeout(function() {
+        document.getElementById('typing-indicator').style.display = 'none';
+        messages.insertAdjacentHTML('beforeend',
+          '<div class="msg msg-advisor"><div class="msg-sender">Jane Mitchell</div>Thanks for your message. Let me look into that and update your recommendations.<div class="msg-time">' + time + '</div></div>'
+        );
+        messages.scrollTop = messages.scrollHeight;
+      }, 1500);
+    }
+  </script>`;
+
+  return wrapIframeHtml('SecureBank \u2014 Advisor Chat', style, body);
+}
+
+function generateRecommendationsHtml(): string {
+  const style = `
+    body { background: #f8fafc; padding: 20px; }
+    h2 { font-size: 16px; color: #111827; margin-bottom: 16px; }
+    .rec-card {
+      background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+      padding: 16px; margin-bottom: 12px;
+    }
+    .rec-header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px; }
+    .rec-title { font-size: 14px; font-weight: 600; color: #111827; }
+    .rec-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; }
+    .badge-buy { background: #d1fae5; color: #047857; }
+    .badge-rebalance { background: #fef3c7; color: #92400e; }
+    .badge-hold { background: #dbeafe; color: #1d4ed8; }
+    .rec-summary { font-size: 13px; color: #6b7280; margin-bottom: 10px; line-height: 1.4; }
+    .rec-details { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f3f4f6; font-size: 13px; color: #374151; line-height: 1.5; }
+    .rec-detail-row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .rec-detail-label { color: #6b7280; }
+    .rec-detail-value { font-weight: 600; }
+    .btn {
+      padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
+      cursor: pointer; border: none; transition: background 0.15s; margin-top: 8px;
+    }
+    .btn-details { background: #e5e7eb; color: #374151; }
+    .btn-details:hover { background: #d1d5db; }
+    .btn-action { background: #1a56db; color: #fff; margin-left: 8px; }
+    .btn-action:hover { background: #1e40af; }
+    .btn-action:disabled { background: #9ca3af; cursor: default; }
+    .action-msg { font-size: 12px; color: #047857; font-weight: 600; margin-top: 8px; }
+  `;
+
+  const body = `
+  <h2>Recommendations</h2>
+
+  <div class="rec-card" id="rec-1">
+    <div class="rec-header">
+      <div class="rec-title">Rebalance: Reduce Equities</div>
+      <span class="rec-badge badge-rebalance">Rebalance</span>
+    </div>
+    <div class="rec-summary">Shift 5% from equities to bonds to reduce volatility exposure and lock in Q1 gains.</div>
+    <div class="rec-details" id="rec-1-details">
+      <div class="rec-detail-row"><span class="rec-detail-label">Current Equity Allocation</span><span class="rec-detail-value">52%</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Target Equity Allocation</span><span class="rec-detail-value">47%</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Estimated Impact</span><span class="rec-detail-value">-0.3% annual return, -1.2% volatility</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Risk Level</span><span class="rec-detail-value">Low</span></div>
+    </div>
+    <button class="btn btn-details" onclick="toggleDetails('rec-1')">View Details</button>
+    <button class="btn btn-action" id="btn-apply-rec-1" onclick="applyRec('rec-1', 'Rebalance order submitted')">Apply</button>
+    <div class="action-msg" id="rec-1-msg"></div>
+  </div>
+
+  <div class="rec-card" id="rec-2">
+    <div class="rec-header">
+      <div class="rec-title">Buy: Vanguard Total Bond ETF (BND)</div>
+      <span class="rec-badge badge-buy">Buy</span>
+    </div>
+    <div class="rec-summary">Increase bond exposure with a low-cost index ETF. Aligns with the rebalancing recommendation above.</div>
+    <div class="rec-details" id="rec-2-details">
+      <div class="rec-detail-row"><span class="rec-detail-label">Suggested Amount</span><span class="rec-detail-value">$7,142.50</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Current Price</span><span class="rec-detail-value">$72.85</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Yield</span><span class="rec-detail-value">4.2% annual</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Expense Ratio</span><span class="rec-detail-value">0.03%</span></div>
+    </div>
+    <button class="btn btn-details" onclick="toggleDetails('rec-2')">View Details</button>
+    <button class="btn btn-action" id="btn-apply-rec-2" onclick="applyRec('rec-2', 'Buy order for BND placed')">Apply</button>
+    <div class="action-msg" id="rec-2-msg"></div>
+  </div>
+
+  <div class="rec-card" id="rec-3">
+    <div class="rec-header">
+      <div class="rec-title">Hold: S&P 500 Index Fund</div>
+      <span class="rec-badge badge-hold">Hold</span>
+    </div>
+    <div class="rec-summary">Strong YTD performance (+8.2%). Maintain current position and review at end of Q2.</div>
+    <div class="rec-details" id="rec-3-details">
+      <div class="rec-detail-row"><span class="rec-detail-label">Current Value</span><span class="rec-detail-value">$48,200.00</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">YTD Return</span><span class="rec-detail-value">+8.2%</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Next Review</span><span class="rec-detail-value">June 30</span></div>
+      <div class="rec-detail-row"><span class="rec-detail-label">Risk Level</span><span class="rec-detail-value">Medium</span></div>
+    </div>
+    <button class="btn btn-details" onclick="toggleDetails('rec-3')">View Details</button>
+  </div>
+
+  <script>
+    function toggleDetails(id) {
+      var details = document.getElementById(id + '-details');
+      var btn = details.previousElementSibling;
+      // Actually the button is the next sibling after details... let me just use parent
+      var card = document.getElementById(id);
+      var detailBtn = card.querySelector('.btn-details');
+      if (details.style.display === 'none' || details.style.display === '') {
+        details.style.display = 'block';
+        detailBtn.textContent = 'Hide Details';
+      } else {
+        details.style.display = 'none';
+        detailBtn.textContent = 'View Details';
+      }
+    }
+
+    function applyRec(id, message) {
+      var btn = document.getElementById('btn-apply-' + id);
+      btn.disabled = true;
+      btn.textContent = 'Applied';
+      document.getElementById(id + '-msg').textContent = message;
+    }
+  </script>`;
+
+  return wrapIframeHtml('SecureBank \u2014 Recommendations', style, body);
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -142,6 +1122,18 @@ async function handleRequest(
   pathname: string,
   method: string,
 ): Promise<void> {
+  // ── Iframe content (dynamically generated HTML) ────────────────────────────
+  if (pathname.startsWith('/iframe/')) {
+    const iframeHtml = generateIframeContent(pathname);
+    if (iframeHtml) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(iframeHtml);
+    } else {
+      notFound(res);
+    }
+    return;
+  }
+
   // ── Static files ───────────────────────────────────────────────────────────
   if (!pathname.startsWith('/api/')) {
     // Route friendly URLs to their HTML files
@@ -152,6 +1144,8 @@ async function handleRequest(
       '/dashboard': 'dashboard.html',
       '/delegates': 'delegates.html',
       '/transactions': 'transactions.html',
+      '/iframes': 'iframes.html',
+      '/nested-iframes': 'nested-iframes.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {
@@ -269,6 +1263,7 @@ async function handleRequest(
 
 server.listen(PORT, () => {
   console.log(`Fixture test server running at http://localhost:${PORT}`);
-  console.log(`  Static:  index.html, dashboard.html, delegates.html, transactions.html`);
+  console.log(`  Static:  index.html, dashboard.html, delegates.html, transactions.html, iframes.html`);
+  console.log(`  Iframes: /iframe/banner, /iframe/sidebar/:cat, /iframe/content/:cat/:item`);
   console.log(`  API:     /api/delegates, /api/notifications, /api/csrf-token`);
 });

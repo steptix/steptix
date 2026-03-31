@@ -1,6 +1,68 @@
-import type { Page } from 'playwright';
+import type { Page, FrameLocator } from 'playwright';
 import type { AIAction } from '../ai/types.js';
 import { logger } from '../utils/logger.js';
+
+/**
+ * Resolves the locator root for an action.
+ * When action.frame is set, returns a FrameLocator scoped to that iframe.
+ * For nested iframes, the frame selector can chain levels with " >> "
+ * (e.g. "#outer-frame >> #inner-frame"), producing a nested FrameLocator.
+ * Space-separated selectors (e.g. "#outer #inner") are also accepted as a
+ * fallback since AI models sometimes produce CSS-style descendant selectors
+ * instead of the canonical ">>" chain syntax.
+ * Otherwise returns the top-level Page.
+ * Both Page and FrameLocator expose .locator(), so callers are type-compatible.
+ */
+function resolveLocatorRoot(page: Page, frameSelector?: string): Page | FrameLocator {
+  if (!frameSelector) return page;
+
+  // Split on ">>" if present, otherwise fall back to splitting on whitespace.
+  const segments = frameSelector.includes('>>')
+    ? frameSelector.split('>>').map((s) => s.trim()).filter(Boolean)
+    : frameSelector.trim().split(/\s+/);
+
+  let root: Page | FrameLocator = page;
+  for (const segment of segments) {
+    root = root.frameLocator(segment);
+  }
+  return root;
+}
+
+/**
+ * Detect when the AI placed an iframe selector at the start of the element
+ * selector instead of in the frame field. If the first space-separated segment
+ * of `selector` matches an `<iframe>` inside the current frame context, strip
+ * it from the selector and append it to the frame chain.
+ *
+ * Example: frame="#advisor-frame", selector="#chat-frame #chat-input"
+ *       → frame="#advisor-frame >> #chat-frame", selector="#chat-input"
+ */
+async function promoteIframeFromSelector(
+  page: Page,
+  frame: string | undefined,
+  selector: string,
+): Promise<{ frame: string | undefined; selector: string }> {
+  const parts = selector.trim().split(/\s+/);
+  if (parts.length < 2) return { frame, selector };
+
+  const candidate = parts[0]!;
+  // Check if the candidate matches an iframe in the current frame context
+  const root = resolveLocatorRoot(page, frame);
+  const isIframe = await root
+    .locator(`iframe${candidate}`)
+    .count()
+    .catch(() => 0);
+
+  if (isIframe > 0) {
+    const newFrame = frame ? `${frame} >> ${candidate}` : candidate;
+    const newSelector = parts.slice(1).join(' ');
+    logger.debug(`Promoted iframe from selector: frame="${newFrame}", selector="${newSelector}"`);
+    // Recurse in case there are multiple nested iframes in the selector
+    return promoteIframeFromSelector(page, newFrame, newSelector);
+  }
+
+  return { frame, selector };
+}
 
 /** Result of executing a single Playwright action */
 export interface ActionExecutionResult {
@@ -25,88 +87,131 @@ export async function executeAction(
 ): Promise<ActionExecutionResult> {
   logger.subAction(action.description);
 
+  // Auto-promote iframe selectors that the AI accidentally placed in the selector
+  // field instead of the frame field. If the first segment of the selector matches
+  // an iframe inside the current frame context, move it to the frame chain.
+  let effectiveFrame = action.frame;
+  let effectiveSelector = action.selector;
+  if (effectiveSelector) {
+    const promoted = await promoteIframeFromSelector(page, effectiveFrame, effectiveSelector);
+    effectiveFrame = promoted.frame;
+    effectiveSelector = promoted.selector;
+  }
+
+  // Resolve frame context once — used by all locator-based actions and the error handler
+  const root = resolveLocatorRoot(page, effectiveFrame);
+  if (effectiveFrame) {
+    // For nested frames ("A >> B" or "A B"), validate the outermost iframe exists on the page
+    const outerSelector = effectiveFrame.includes('>>')
+      ? effectiveFrame.split('>>')[0]!.trim()
+      : effectiveFrame.trim().split(/\s+/)[0]!;
+    const iframeCount = await page.locator(outerSelector).count();
+    if (iframeCount === 0) {
+      logger.warn(`iframe not found on page: ${outerSelector}`);
+    } else {
+      const selectorCount = effectiveSelector
+        ? await root.locator(effectiveSelector).count().catch(() => 0)
+        : null;
+      logger.debug(
+        `Action scoped to frame: ${effectiveFrame} (${iframeCount} iframe match${iframeCount > 1 ? 'es' : ''}`
+        + (selectorCount !== null ? `, ${selectorCount} element match${selectorCount !== 1 ? 'es' : ''} for "${effectiveSelector}")` : ')'),
+      );
+    }
+  }
+
+  // Build an effective action with promoted frame/selector for use in execution
+  const eff: AIAction = {
+    ...action,
+    ...(effectiveFrame !== undefined ? { frame: effectiveFrame } : {}),
+    ...(effectiveSelector !== undefined ? { selector: effectiveSelector } : {}),
+  };
+
   try {
-    switch (action.action) {
+    switch (eff.action) {
       case 'click':
-        await executeClick(page, action);
+        await executeClick(root, eff);
         break;
 
       case 'type':
-        await executeType(page, action);
+        await executeType(root, eff);
         break;
 
       case 'select':
-        await executeSelect(page, action);
+        await executeSelect(root, eff);
         break;
 
       case 'navigate':
-        await executeNavigate(page, action, baseUrl);
+        // Navigation always operates at the page level — iframes don't navigate independently
+        await executeNavigate(page, eff, baseUrl);
         break;
 
       case 'upload':
-        await executeUpload(page, action);
+        await executeUpload(root, eff);
         break;
 
       case 'hover':
-        await executeHover(page, action);
+        await executeHover(root, eff);
         break;
 
       case 'wait':
-        await executeWait(page, action);
+        await executeWait(page, root, eff);
         break;
 
       case 'scroll':
-        await executeScroll(page, action);
+        // Scroll operates on the page viewport, not a frame element
+        await executeScroll(page, eff);
         break;
 
       case 'switchFrame':
-        // Frame switching is handled at a higher level
-        logger.debug(`switchFrame action: ${action.selector ?? 'default'}`);
+        // Superseded by the per-action "frame" field — kept for backward compatibility
+        logger.debug(`switchFrame ignored — use the "frame" field on individual actions instead`);
         break;
 
       case 'dismiss':
-        await executeDismiss(page, action);
+        await executeDismiss(root, eff);
         break;
 
       case 'keyboard':
       case 'keypress':
-        await executeKeyboard(page, action);
+        // Keyboard events go to the focused element — always page-level
+        await executeKeyboard(page, eff);
         break;
 
       case 'assert':
         // Assertions are evaluated by the AI — no Playwright action needed
-        logger.debug(`assert action: ${action.description}`);
+        logger.debug(`assert action: ${eff.description}`);
         break;
 
       case 'prompt':
         // Prompt actions are handled at the step executor level
-        logger.debug(`prompt action: ${action.question ?? action.description}`);
+        logger.debug(`prompt action: ${eff.question ?? eff.description}`);
         break;
 
       case 'read': {
-        const captured = await executeRead(page, action);
+        const captured = await executeRead(root, eff);
         return { success: true, capturedValue: captured };
       }
 
       case 'count': {
-        const counted = await executeCount(page, action);
+        const counted = await executeCount(root, eff);
         return { success: true, capturedValue: counted };
       }
 
       default:
-        logger.warn(`Unknown action type: ${(action as AIAction).action}`);
+        logger.warn(`Unknown action type: ${(eff as AIAction).action}`);
     }
 
     return { success: true };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    logger.error(`Action failed [${action.action}]: ${errorMessage}`);
+    logger.error(`Action failed [${eff.action}]: ${errorMessage}`);
 
-    // Count how many elements matched the selector for retry context
+    // Count how many elements matched the selector — use the same frame root so the
+    // count is meaningful (0 in the frame, not 0 in the main page for the wrong reason)
     let matchCount: number | undefined;
-    if (action.selector) {
+    if (eff.selector) {
       try {
-        matchCount = await page.locator(action.selector).count();
+        matchCount = await root.locator(eff.selector).count();
       } catch {
         // Selector itself may be invalid — leave matchCount undefined
       }
@@ -115,30 +220,37 @@ export async function executeAction(
     return {
       success: false,
       error: errorMessage,
-      ...(action.selector !== undefined && { failedSelector: action.selector }),
+      ...(eff.selector !== undefined && { failedSelector: eff.selector }),
       ...(matchCount !== undefined && { matchCount }),
     };
   }
 }
 
-async function executeClick(page: Page, action: AIAction): Promise<void> {
+async function executeClick(root: Page | FrameLocator, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
-  await page.locator(selector).locator('visible=true').first().click({ timeout: 10_000 });
+  await root.locator(selector).locator('visible=true').first().click({ timeout: 10_000 });
 }
 
-async function executeType(page: Page, action: AIAction): Promise<void> {
+async function executeType(root: Page | FrameLocator, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
   const value = action.value ?? '';
-  const locator = page.locator(selector).locator('visible=true').first();
+  const locator = root.locator(selector).locator('visible=true').first();
   // Clear existing content first, then type
   await locator.clear({ timeout: 5_000 });
   await locator.fill(value, { timeout: 10_000 });
 }
 
-async function executeSelect(page: Page, action: AIAction): Promise<void> {
+async function executeSelect(root: Page | FrameLocator, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
   const value = action.value ?? '';
-  await page.locator(selector).locator('visible=true').first().selectOption(value, { timeout: 10_000 });
+  const locator = root.locator(selector).locator('visible=true').first();
+  try {
+    // Try matching by value attribute first
+    await locator.selectOption(value, { timeout: 5_000 });
+  } catch {
+    // Fall back to matching by visible label text
+    await locator.selectOption({ label: value }, { timeout: 10_000 });
+  }
 }
 
 async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): Promise<void> {
@@ -159,16 +271,16 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 }
 
-async function executeUpload(page: Page, action: AIAction): Promise<void> {
+async function executeUpload(root: Page | FrameLocator, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
   const filePath = action.filePath ?? action.value ?? '';
   if (!filePath) throw new Error('upload action requires a filePath');
-  await page.locator(selector).locator('visible=true').first().setInputFiles(filePath, { timeout: 10_000 });
+  await root.locator(selector).locator('visible=true').first().setInputFiles(filePath, { timeout: 10_000 });
 }
 
-async function executeHover(page: Page, action: AIAction): Promise<void> {
+async function executeHover(root: Page | FrameLocator, action: AIAction): Promise<void> {
   const selector = requireSelector(action);
-  await page.locator(selector).locator('visible=true').first().hover({ timeout: 10_000 });
+  await root.locator(selector).locator('visible=true').first().hover({ timeout: 10_000 });
 }
 
 /**
@@ -192,7 +304,7 @@ function parseDuration(value: string): number | null {
   return matched ? Math.round(totalMs) : null;
 }
 
-async function executeWait(page: Page, action: AIAction): Promise<void> {
+async function executeWait(page: Page, root: Page | FrameLocator, action: AIAction): Promise<void> {
   const condition = action.condition ?? action.value ?? '';
   const timeout = action.timeout ?? 10_000;
 
@@ -206,18 +318,22 @@ async function executeWait(page: Page, action: AIAction): Promise<void> {
   // Detect CSS selectors: starts with tag name, #, ., or [
   const looksLikeSelector = /^([a-z][a-z0-9]*(\[|#|\.| |,|:)|[#.\[])/.test(condition);
   if (looksLikeSelector) {
-    // CSS selector — use 'attached' state so hidden inputs (type="hidden") don't time out.
-    // Playwright's default state is 'visible', which hidden elements never satisfy.
-    await page.waitForSelector(condition, { state: 'attached', timeout });
+    // When inside a frame, use locator.waitFor() so the wait is scoped to that frame.
+    // At page level, use waitForSelector() with 'attached' so hidden inputs don't time out.
+    if (root !== page) {
+      await root.locator(condition).first().waitFor({ state: 'attached', timeout });
+    } else {
+      await page.waitForSelector(condition, { state: 'attached', timeout });
+    }
   } else if (condition.startsWith('http') || condition.includes('/')) {
-    // URL pattern
+    // URL pattern — always page-level
     await page.waitForURL(condition, { timeout });
   } else if (condition === 'networkidle') {
     await page.waitForLoadState('networkidle', { timeout });
   } else if (condition === 'load') {
     await page.waitForLoadState('load', { timeout });
   } else {
-    // Generic wait for condition text to appear
+    // Generic wait for condition text to appear — always page-level
     await page.waitForFunction(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (text) => (globalThis as any).document.body.textContent?.includes(text) ?? false,
@@ -237,12 +353,12 @@ async function executeScroll(page: Page, action: AIAction): Promise<void> {
   await page.mouse.wheel(deltaX, deltaY);
 }
 
-async function executeDismiss(page: Page, action: AIAction): Promise<void> {
+async function executeDismiss(root: Page | FrameLocator, action: AIAction): Promise<void> {
   const selector = action.selector;
 
   if (selector) {
     try {
-      const locator = page.locator(selector).locator('visible=true').first();
+      const locator = root.locator(selector).locator('visible=true').first();
       if (await locator.isVisible({ timeout: 3_000 })) {
         await locator.click({ timeout: 5_000 });
         return;
@@ -267,7 +383,7 @@ async function executeDismiss(page: Page, action: AIAction): Promise<void> {
 
   for (const pattern of dismissPatterns) {
     try {
-      const el = page.locator(pattern).first();
+      const el = root.locator(pattern).first();
       if (await el.isVisible({ timeout: 1_000 })) {
         await el.click({ timeout: 3_000 });
         logger.debug(`Dismissed element matching: ${pattern}`);
@@ -298,10 +414,10 @@ function requireSelector(action: AIAction): string {
  * Count the number of elements matching a CSS selector.
  * Stores the result as a string (e.g. "3") in resolvedParameters[action.as].
  */
-async function executeCount(page: Page, action: AIAction): Promise<string> {
+async function executeCount(root: Page | FrameLocator, action: AIAction): Promise<string> {
   const selector = requireSelector(action);
   logger.subAction(`count ${selector} → ${action.as ?? '(unnamed)'}`);
-  const count = await page.locator(selector).count();
+  const count = await root.locator(selector).count();
   const result = String(count);
   logger.info(`count: ${count} elements matching "${selector}" → variable "${action.as ?? '(unnamed)'}"`);
   return result;
@@ -310,15 +426,15 @@ async function executeCount(page: Page, action: AIAction): Promise<string> {
 /**
  * Read the value or text content of an element.
  * Tries the element's `value` attribute first (for inputs), falls back to `textContent`.
+ * Uses locator.evaluate() so it works inside both page and FrameLocator contexts.
  */
-async function executeRead(page: Page, action: AIAction): Promise<string> {
+async function executeRead(root: Page | FrameLocator, action: AIAction): Promise<string> {
   const selector = requireSelector(action);
   logger.subAction(`read ${selector} → ${action.as ?? '(unnamed)'}`);
-  const value = await page.$eval(selector, (el) => {
-    if ('value' in el && typeof (el as { value: unknown }).value === 'string') {
-      return (el as { value: string }).value;
-    }
-    return el.textContent?.trim() ?? '';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const value = await root.locator(selector).first().evaluate((el: any) => {
+    if (typeof el.value === 'string') return el.value;
+    return (el.textContent ?? '').trim();
   });
   logger.info(`read captured: "${value}" → variable "${action.as ?? '(unnamed)'}"`);
   return value;
