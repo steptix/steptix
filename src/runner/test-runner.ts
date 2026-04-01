@@ -191,6 +191,7 @@ export async function runTest(
             conversationHistory: [...conversationHistory],
             apiResponseStore,
             csrfTokens,
+            pageTracker: session.pageTracker,
           });
 
           interactiveResults.push(result);
@@ -240,6 +241,7 @@ export async function runTest(
           apiResponseStore,
           csrfTokens,
           resolvedParameters,
+          pageTracker: session.pageTracker,
         });
         if (stepResult.status === 'passed') {
           logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
@@ -256,6 +258,7 @@ export async function runTest(
           apiResponseStore,
           csrfTokens,
           resolvedParameters,
+          pageTracker: session.pageTracker,
         });
       }
 

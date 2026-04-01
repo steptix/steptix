@@ -20,6 +20,7 @@ import { captureDomSnapshot } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
 import { handleObstacles } from '../browser/obstacle-handler.js';
+import type { PageTracker } from '../browser/manager.js';
 import { withRetry } from './retry.js';
 import { logger } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
@@ -39,6 +40,8 @@ export interface StepExecutorOptions {
   csrfTokens: Record<string, string>;
   /** Live parameter map — read actions write captured values here for use in later steps */
   resolvedParameters?: Record<string, string>;
+  /** Tracks all open pages (popups, tabs) — enables switchPage actions */
+  pageTracker?: PageTracker;
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -179,7 +182,8 @@ async function executeStepAttempt(
   priorFailures: PriorFailureContext[] = [],
   attemptNumber: number = 1,
 ): Promise<StepResult> {
-  const { page, config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens } = opts;
+  const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens, pageTracker } = opts;
+  let page = pageTracker ? pageTracker.getActive() : opts.page;
   const maxTurns = config.execution.maxTurns;
 
   // Accumulated across all turns
@@ -204,6 +208,11 @@ async function executeStepAttempt(
 
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
     completedTurns = currentTurn;
+
+    // 0. Refresh active page from tracker (handles switchPage from prior turn)
+    if (pageTracker) {
+      page = pageTracker.getActive();
+    }
 
     // 1. Auto-dismiss obstacles (first turn only)
     if (currentTurn === 1 && config.execution.dismissObstacles) {
@@ -253,6 +262,10 @@ async function executeStepAttempt(
     );
 
     // 5. Build user message (first turn: normal step message; subsequent: continuation prompt)
+    const openPages = pageTracker && pageTracker.count > 1
+      ? await pageTracker.getPageListWithTitles()
+      : undefined;
+
     let userMessage: ChatMessage;
     if (currentTurn === 1) {
       const retryHint = buildRetryContext(priorFailures);
@@ -262,6 +275,7 @@ async function executeStepAttempt(
         domSnapshot,
         screenshotBase64 ?? null,
         conversationHistory,
+        openPages,
       );
     } else {
       userMessage = buildContinuationMessage(
@@ -272,6 +286,7 @@ async function executeStepAttempt(
         domSnapshot,
         screenshotBase64 ?? null,
         currentTurn,
+        openPages,
       );
     }
 
@@ -334,6 +349,42 @@ async function executeStepAttempt(
 
       const subStartTime = Date.now();
       const aiReasoningVal = config.reports.includeAiReasoning ? aiResponse.reasoning : undefined;
+
+      // ── switchPage action ──────────────────────────────────────────────────
+      if (action.action === 'switchPage') {
+        let switchError: string | undefined;
+        if (pageTracker && action.page) {
+          const targetPage = await pageTracker.switchToAsync(action.page);
+          if (targetPage) {
+            page = targetPage;
+            logger.info(`Switched to page: ${action.page} (${targetPage.url()})`);
+          } else {
+            switchError = `switchPage failed: no page matching "${action.page}"`;
+            logger.warn(switchError);
+          }
+        } else if (!pageTracker) {
+          switchError = 'switchPage failed: page tracking is not enabled';
+          logger.warn(switchError);
+        } else {
+          switchError = 'switchPage failed: no "page" field specified';
+          logger.warn(switchError);
+        }
+
+        allSubActions.push({
+          index: allSubActions.length + 1,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          ...(switchError !== undefined && { error: switchError }),
+        });
+
+        if (switchError) {
+          turnFailed = true;
+          turnError = switchError;
+          break;
+        }
+        continue;
+      }
 
       // ── API action types ─────────────────────────────────────────────────────
       if (action.action === 'extract_csrf') {

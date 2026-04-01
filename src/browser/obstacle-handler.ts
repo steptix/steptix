@@ -64,21 +64,41 @@ export async function handleObstacles(page: Page): Promise<ObstacleResult[]> {
     }
   }
 
-  // Also check for any visible dismiss buttons that indicate an overlay is present
-  for (const pattern of DISMISS_BUTTON_PATTERNS) {
+  // Also check for dismiss buttons, but only inside overlay-like containers
+  // (avoid auto-dismissing regular page buttons like "Close Window")
+  const OVERLAY_SCOPES = [
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '.modal', '.modal-overlay',
+    '[data-testid="modal"]',
+    '.cookie-banner', '#cookie-consent',
+    '[data-testid="cookie-banner"]',
+    '[aria-label="cookie consent"]',
+    '.announcement-banner',
+  ];
+
+  for (const scope of OVERLAY_SCOPES) {
     try {
-      const btn = page.locator(pattern).first();
-      if (await btn.isVisible({ timeout: 300 })) {
-        logger.debug(`Found dismissible element: ${pattern}`);
-        await btn.click({ timeout: 3_000 });
-        logger.info(`Auto-dismissed: ${pattern}`);
-        results.push({ found: true, dismissed: true, label: pattern });
-        // Wait for the dismiss animation and any re-render to settle
-        await page.waitForTimeout(500);
-        break; // Only dismiss one at a time
+      const container = page.locator(`${scope}:visible`).first();
+      if (!(await container.isVisible({ timeout: 300 }))) continue;
+
+      for (const pattern of DISMISS_BUTTON_PATTERNS) {
+        try {
+          const btn = container.locator(pattern).first();
+          if (await btn.isVisible({ timeout: 300 })) {
+            logger.debug(`Found dismissible element: ${pattern} inside ${scope}`);
+            await btn.click({ timeout: 3_000 });
+            logger.info(`Auto-dismissed: ${pattern} inside ${scope}`);
+            results.push({ found: true, dismissed: true, label: `${pattern} (${scope})` });
+            await page.waitForTimeout(500);
+            return results; // Dismissed one — return immediately
+          }
+        } catch {
+          // Button not interactable — try next
+        }
       }
     } catch {
-      // Button not interactable — try next
+      // Scope not present — try next
     }
   }
 

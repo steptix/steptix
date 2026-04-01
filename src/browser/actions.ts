@@ -167,6 +167,11 @@ export async function executeAction(
         logger.debug(`switchFrame ignored — use the "frame" field on individual actions instead`);
         break;
 
+      case 'switchPage':
+        // Handled at the step executor level — it needs to update the active page reference
+        logger.debug(`switchPage action: target="${eff.page}" — ${eff.description}`);
+        break;
+
       case 'dismiss':
         await executeDismiss(root, eff);
         break;

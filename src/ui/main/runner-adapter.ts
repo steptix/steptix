@@ -212,6 +212,7 @@ export class UIRunnerAdapter {
       ...(this.apiResponseStore != null && { apiResponseStore: this.apiResponseStore }),
       csrfTokens: this.csrfTokens,
       resolvedParameters: this.resolvedParameters,
+      ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
     });
 
     // Emit sub-actions and screenshots
@@ -450,6 +451,7 @@ export class UIRunnerAdapter {
         apiResponseStore: this.apiResponseStore,
         csrfTokens: this.csrfTokens,
         resolvedParameters: this.resolvedParameters,
+        ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
       });
 
       // Emit sub-actions and screenshots

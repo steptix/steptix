@@ -3,7 +3,7 @@ import { logger } from '../utils/logger.js';
 
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
-  'hover', 'wait', 'scroll', 'switchFrame', 'dismiss',
+  'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'dismiss',
   'assert', 'keyboard', 'keypress', 'prompt',
   'api_call', 'extract_csrf', 'extract_value',
   'read', 'count',
@@ -21,6 +21,11 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   'fetch': 'api_call',
   'csrf': 'extract_csrf',
   'get_csrf': 'extract_csrf',
+  'switch_page': 'switchPage',
+  'switchTab': 'switchPage',
+  'switch_tab': 'switchPage',
+  'switchWindow': 'switchPage',
+  'switch_window': 'switchPage',
 };
 
 /**
@@ -185,6 +190,7 @@ function parseAction(raw: unknown, index: number): AIAction {
   if (typeof obj['path'] === 'string') action.path = obj['path'];
   if (typeof obj['as'] === 'string') action.as = obj['as'];
   if (typeof obj['frame'] === 'string') action.frame = obj['frame'];
+  if (typeof obj['page'] === 'string') action.page = obj['page'];
 
   const modeRaw = obj['apiMode'];
   if (modeRaw === 'browser' || modeRaw === 'standalone') {

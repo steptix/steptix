@@ -9,6 +9,7 @@ export type ActionType =
   | 'wait'
   | 'scroll'
   | 'switchFrame'
+  | 'switchPage'
   | 'dismiss'
   | 'assert'
   | 'keyboard'
@@ -77,6 +78,11 @@ export interface AIAction {
    * Omit for elements in the main page.
    */
   frame?: string;
+  /**
+   * Target page identifier for switchPage actions.
+   * Can be a label ("main", "page:2"), a URL substring, or a title substring.
+   */
+  page?: string;
   /** Human-readable description of what this action does */
   description: string;
 }

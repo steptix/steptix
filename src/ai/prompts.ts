@@ -1,4 +1,5 @@
 import type { ChatMessage } from './types.js';
+import type { PageInfo } from '../browser/manager.js';
 
 /** Viewport dimensions passed to the system prompt */
 export interface ViewportInfo {
@@ -79,6 +80,7 @@ Execute the following test step by returning a JSON object with an array of acti
 14. For "count" actions, set "selector" to the CSS selector to count and "as" to a snake_case variable name. Use "count" when a step asks how many elements exist (e.g. "how many accounts", "count the rows"). The result is stored as a string (e.g. "3") and available as {{variable_name}} in later steps
 15. Set "needs_reeval": true if you have returned all the actions you can plan from the current page state, but more actions are needed to complete the step — e.g. you need to navigate first and then interact with elements on the new page. Omit or set false when the step is complete after the returned actions
 16. For elements inside an <iframe>, set "frame" to the CSS selector of the iframe element (shown in the <!-- comment --> after the <iframe> tag). For **nested iframes** (an iframe inside another iframe), chain the selectors with " >> " from outermost to innermost. Example: if the DOM snapshot shows \`<iframe id="outer"> <!-- #outer -->\n  <iframe id="inner"> <!-- #inner -->\n    <button id="btn">\`, then to click #btn set "frame": "#outer >> #inner", "selector": "#btn". Never put an iframe selector inside the "selector" field — iframe traversal belongs entirely in the "frame" field. Omit "frame" for elements in the main page
+17. When the application opens a new window or tab (via window.open or target="_blank"), the framework tracks all open pages. An "Open Pages" section will appear in the prompt listing each page with its label, URL, and title. Use a "switchPage" action to switch context before interacting with another page: { "action": "switchPage", "page": "page:2", "description": "Switch to popup window" }. After switching, all actions execute against that page and the DOM snapshot will reflect it on the next turn (set "needs_reeval": true after switchPage). Use "switchPage" with "main" to return to the original page. Do NOT use switchPage if there is only one page open
 ${apiContext?.hasApiContext ? `
 ## API Actions (use when the step describes an API call)
 When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.
@@ -109,6 +111,28 @@ ${apiSection}`;
 }
 
 /**
+ * Format the open pages section when multiple pages are tracked.
+ */
+function formatOpenPagesSection(openPages?: PageInfo[]): string {
+  if (!openPages || openPages.length <= 1) return '';
+
+  const lines = openPages.map((p) => {
+    const marker = p.isActive ? '[active] ' : '';
+    const titlePart = p.title ? ` (${p.title})` : '';
+    return `- ${marker}${p.label}: ${p.url}${titlePart}`;
+  });
+
+  return `## Open Pages
+${lines.join('\n')}
+
+To interact with a different page, use a "switchPage" action first:
+{ "action": "switchPage", "page": "<label>", "description": "Switch to <target>" }
+After switching, set "needs_reeval": true so the framework captures the new page's DOM.
+
+`;
+}
+
+/**
  * Build the user message content for a step — text prompt plus screenshot.
  */
 export function buildStepMessage(
@@ -116,13 +140,16 @@ export function buildStepMessage(
   domSnapshot: string,
   screenshotBase64: string | null,
   conversationHistory: string[],
+  openPages?: PageInfo[],
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
       ? `## Prior Steps\n${conversationHistory.join('\n')}\n\n`
       : '';
 
-  const textContent = `${historySection}## Current Step
+  const openPagesSection = formatOpenPagesSection(openPages);
+
+  const textContent = `${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
 
 ## DOM Snapshot
@@ -268,6 +295,7 @@ export function buildContinuationMessage(
   domSnapshot: string,
   screenshotBase64: string | null,
   turnNumber: number,
+  openPages?: PageInfo[],
 ): ChatMessage {
   const actionLines = completedActions.length > 0
     ? completedActions.map((a) => `  - ${a.description}`).join('\n')
@@ -276,6 +304,8 @@ export function buildContinuationMessage(
   const variableLines = Object.entries(capturedVariables).length > 0
     ? Object.entries(capturedVariables).map(([k, v]) => `  ${k} = "${v}"`).join('\n')
     : '  (none)';
+
+  const openPagesSection = formatOpenPagesSection(openPages);
 
   const textContent = `You are continuing the execution of a step.
 
@@ -289,7 +319,7 @@ ${variableLines}
 
 Current URL: ${currentUrl}
 
-## DOM Snapshot
+${openPagesSection}## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
 \`\`\`
