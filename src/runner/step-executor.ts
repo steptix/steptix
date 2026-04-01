@@ -267,13 +267,15 @@ async function executeStepAttempt(
       : undefined;
 
     let userMessage: ChatMessage;
+    const screenshotForAi = config.ai.sendScreenshots ? (screenshotBase64 ?? null) : null;
+
     if (currentTurn === 1) {
       const retryHint = buildRetryContext(priorFailures);
       const enrichedInstruction = retryHint ? `${instruction}${retryHint}` : instruction;
       userMessage = buildStepMessage(
         enrichedInstruction,
         domSnapshot,
-        screenshotBase64 ?? null,
+        screenshotForAi,
         conversationHistory,
         openPages,
       );
@@ -284,7 +286,7 @@ async function executeStepAttempt(
         opts.resolvedParameters ?? {},
         currentUrl,
         domSnapshot,
-        screenshotBase64 ?? null,
+        screenshotForAi,
         currentTurn,
         openPages,
       );
@@ -571,7 +573,7 @@ async function executeStepAttempt(
     const assertMsg = buildAssertionMessage(
       instruction,
       finalDom,
-      finalShot?.base64 ?? null,
+      config.ai.sendScreenshots ? (finalShot?.base64 ?? null) : null,
       apiHistory,
     );
 

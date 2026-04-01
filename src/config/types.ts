@@ -9,6 +9,8 @@ export interface AiConfig {
   maxInputTokens: number;
   /** Use streaming endpoint instead of vision */
   streamResponses: boolean;
+  /** Include a screenshot in each AI request (set false to reduce token usage) */
+  sendScreenshots: boolean;
 }
 
 export interface BrowserConfig {

@@ -11,7 +11,8 @@ export const DEFAULT_CONFIG: Config = {
     ...(process.env['AI_API_KEY'] !== undefined && { apiKey: process.env['AI_API_KEY'] }),
     model: 'gpt-5.4-mini',
     maxInputTokens: 1_000_000,
-    streamResponses: true,
+    streamResponses: false,
+    sendScreenshots: false,
   },
   browser: {
     headed: true,
