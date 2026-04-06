@@ -381,13 +381,20 @@ describe('cycle detection logic', () => {
 import type { Page } from 'playwright';
 import type { Config } from '../src/config/types.js';
 import type { AiClient } from '../src/ai/client.js';
+import { DEFAULT_BROWSER_DIMENSIONS } from '../src/config/browser-dimensions.js';
 import { executeStep } from '../src/runner/step-executor.js';
 
 /** Build a minimal Config for testing */
 function makeConfig(maxTurns = 5): Config {
   return {
     ai: { gatewayUrl: '', model: 'test', maxInputTokens: 1000, streamResponses: false },
-    browser: { headed: false, viewport: { width: 1280, height: 720 }, slowMo: 0, browser: 'chromium' },
+    browser: {
+      headed: false,
+      viewport: { ...DEFAULT_BROWSER_DIMENSIONS },
+      windowSize: { ...DEFAULT_BROWSER_DIMENSIONS },
+      slowMo: 0,
+      browser: 'chromium',
+    },
     tests: { dir: '.', contextDir: '.', pattern: '**/*.md' },
     execution: {
       timeout: 30000,
@@ -430,7 +437,7 @@ function makeMockPage(urlOrFn: string | (() => string) = 'https://app.example.co
     url: vi.fn().mockImplementation(urlFn),
     content: vi.fn().mockResolvedValue('<html><body></body></html>'),
     screenshot: vi.fn().mockResolvedValue(Buffer.from('fakepng')),
-    viewportSize: vi.fn().mockReturnValue({ width: 1280, height: 720 }),
+    viewportSize: vi.fn().mockReturnValue({ ...DEFAULT_BROWSER_DIMENSIONS }),
     locator: vi.fn().mockReturnValue(mockLocator),
     $eval: vi.fn().mockResolvedValue(''),
     evaluate: vi.fn().mockResolvedValue(null),

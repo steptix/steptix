@@ -1,4 +1,5 @@
 import type { Config } from './types.js';
+import { DEFAULT_BROWSER_DIMENSIONS } from './browser-dimensions.js';
 
 export const DEFAULT_CONFIG: Config = {
   api: {
@@ -16,7 +17,8 @@ export const DEFAULT_CONFIG: Config = {
   },
   browser: {
     headed: true,
-    viewport: { width: 1280, height: 720 },
+    viewport: { ...DEFAULT_BROWSER_DIMENSIONS },
+    windowSize: { ...DEFAULT_BROWSER_DIMENSIONS },
     slowMo: 0,
     browser: 'chromium',
   },

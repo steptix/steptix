@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { DEFAULT_BROWSER_DIMENSIONS } from '../config/browser-dimensions.js';
 import { logger } from '../utils/logger.js';
 
 export interface ScreenshotResult {
@@ -21,8 +22,8 @@ export async function captureScreenshot(page: Page): Promise<ScreenshotResult | 
     const viewportSize = page.viewportSize();
     return {
       base64: buffer.toString('base64'),
-      width: viewportSize?.width ?? 1280,
-      height: viewportSize?.height ?? 720,
+      width: viewportSize?.width ?? DEFAULT_BROWSER_DIMENSIONS.width,
+      height: viewportSize?.height ?? DEFAULT_BROWSER_DIMENSIONS.height,
     };
   } catch (err) {
     logger.warn(`Screenshot capture failed: ${String(err)}`);

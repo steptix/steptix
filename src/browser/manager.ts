@@ -184,7 +184,7 @@ export async function launchBrowser(config: BrowserConfig): Promise<BrowserSessi
     `Launching ${browserType} browser (${config.headed ? 'headed' : 'headless'})`,
   );
 
-  const { width, height } = config.viewport ?? { width: 1280, height: 720 };
+  const { width, height } = config.headed ? config.windowSize : config.viewport;
   const launchOptions = {
     headless: !config.headed,
     slowMo: config.slowMo,
@@ -206,7 +206,7 @@ export async function launchBrowser(config: BrowserConfig): Promise<BrowserSessi
   }
 
   const context = await browser.newContext({
-    viewport: config.viewport,
+    viewport: config.headed ? null : config.viewport,
     // Accept all permissions by default
     permissions: ['clipboard-read', 'clipboard-write'],
   });

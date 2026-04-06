@@ -228,6 +228,8 @@ import { defineConfig } from 'ai-ui-automation';
 export default defineConfig({
   browser: {
     headed: true,
+    viewport: { width: 1280, height: 720 },
+    windowSize: { width: 1280, height: 720 },
     browser: 'chromium',
   },
   tests: {
@@ -240,3 +242,52 @@ export default defineConfig({
   },
 });
 ```
+
+### Browser sizing
+
+`viewport` and `windowSize` are used differently depending on whether the browser is headless or headed.
+
+- `windowSize` is used for headed (`headed: true`) runs
+- `viewport` is used for headless (`headed: false`) runs
+
+In other words:
+
+- headed / non-headless: the real browser window is sized from `windowSize`, and Playwright uses `viewport: null`
+- headless: the page render surface is sized from `viewport`, and `windowSize` is not used
+
+#### What `windowSize` means
+
+`windowSize` is the outer browser window size.
+
+That includes browser chrome such as:
+
+- title bar
+- tabs
+- toolbar
+- window borders
+
+So if `windowSize` is `1280x720` in headed mode, the visible page content area inside the window will be smaller than `1280x720`.
+
+#### What `viewport` means
+
+`viewport` is the page content area size that Playwright renders into.
+
+That does not mean the outer browser window size. It means the inner page area used for:
+
+- responsive breakpoints
+- element positions
+- screenshots
+- layout/rendering
+
+This is especially important in headless mode, where there is no real native browser window and Playwright needs a deterministic render size.
+
+#### Why the split exists
+
+Using a fixed Playwright `viewport` inside a headed browser window can cause visible resize or flashing behaviour on some platforms, because the native browser window and the emulated page viewport are not the same thing.
+
+In practice, this showed up as the browser briefly shrinking and resizing on each navigation or action during headed runs on macOS. The browser appeared to "flash" even though the test logic itself was fine.
+
+To avoid that:
+
+- headed mode uses `windowSize`
+- headless mode uses `viewport`

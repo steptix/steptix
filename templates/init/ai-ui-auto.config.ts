@@ -1,5 +1,7 @@
 import { defineConfig } from 'ai-ui-automation';
 
+const defaultBrowserDimensions = { width: 1280, height: 720 };
+
 export default defineConfig({
   ai: {
     gatewayUrl: 'https://aiapi.example.com',
@@ -8,7 +10,8 @@ export default defineConfig({
   },
   browser: {
     headed: true,
-    viewport: { width: 1280, height: 720 },
+    viewport: { ...defaultBrowserDimensions },
+    windowSize: { ...defaultBrowserDimensions },
   },
   tests: {
     dir: './tests',

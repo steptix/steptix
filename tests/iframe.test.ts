@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { parseAIResponse } from '../src/ai/action-parser.js';
 import { executeAction } from '../src/browser/actions.js';
+import { DEFAULT_BROWSER_DIMENSIONS } from '../src/config/browser-dimensions.js';
 import type { Page, FrameLocator, Locator } from 'playwright';
 
 // ─── Parser: frame field ──────────────────────────────────────────────────────
@@ -128,7 +129,7 @@ function makeMockPage(frameLocatorMap: Record<string, FrameLocator> = {}): {
     waitForFunction: vi.fn().mockResolvedValue(undefined),
     waitForTimeout: vi.fn().mockResolvedValue(undefined),
     screenshot: vi.fn().mockResolvedValue(Buffer.from('')),
-    viewportSize: vi.fn().mockReturnValue({ width: 1280, height: 720 }),
+    viewportSize: vi.fn().mockReturnValue({ ...DEFAULT_BROWSER_DIMENSIONS }),
     url: vi.fn().mockReturnValue('http://localhost/'),
     $eval: vi.fn(),
   } as unknown as Page;

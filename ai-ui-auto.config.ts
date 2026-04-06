@@ -1,4 +1,5 @@
 import { defineConfig } from './src/config/types.js';
+import { DEFAULT_BROWSER_DIMENSIONS } from './src/config/browser-dimensions.js';
 
 export default defineConfig({
   ai: {
@@ -10,7 +11,8 @@ export default defineConfig({
   },
   browser: {
     headed: true,
-    viewport: { width: 1280, height: 720 },
+    viewport: { ...DEFAULT_BROWSER_DIMENSIONS },
+    windowSize: { ...DEFAULT_BROWSER_DIMENSIONS },
     slowMo: 0,
     browser: 'chromium',
   },

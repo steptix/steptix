@@ -257,7 +257,7 @@ async function executeStepAttempt(
       baseUrl,
       stepIndex,
       totalSteps,
-      config.browser.viewport,
+      config.browser.headed ? config.browser.windowSize : config.browser.viewport,
       apiContext,
     );
 

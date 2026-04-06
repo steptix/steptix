@@ -16,8 +16,10 @@ export interface AiConfig {
 export interface BrowserConfig {
   /** Show browser window (false = headless) */
   headed: boolean;
-  /** Browser viewport dimensions */
+  /** Headless browser viewport dimensions */
   viewport: { width: number; height: number };
+  /** Headed browser window dimensions */
+  windowSize: { width: number; height: number };
   /** Milliseconds to wait between Playwright actions (for debugging) */
   slowMo: number;
   /** Browser engine to use */
