@@ -184,9 +184,11 @@ export async function launchBrowser(config: BrowserConfig): Promise<BrowserSessi
     `Launching ${browserType} browser (${config.headed ? 'headed' : 'headless'})`,
   );
 
+  const { width, height } = config.viewport ?? { width: 1280, height: 720 };
   const launchOptions = {
     headless: !config.headed,
     slowMo: config.slowMo,
+    args: [`--window-size=${width},${height}`],
   };
 
   let browser: Browser;
