@@ -30,6 +30,7 @@ export interface StepResponse {
   results: StepResultItem[];
   outputs: Record<string, string>;
   error: { step: number; message: string } | null;
+  pageTitle: string;
 }
 
 export interface SessionStatus {

@@ -39,6 +39,7 @@ export interface StepResponse {
   results: StepResultResponse[];
   outputs: Record<string, string>;
   error: { step: number; message: string } | null;
+  pageTitle: string;
 }
 
 export interface SessionState {
@@ -595,6 +596,16 @@ export class SessionManager {
       }
     }
 
+    // Resolve page title if session is still open
+    let pageTitle = '';
+    if (session.status !== 'closed') {
+      try {
+        pageTitle = await session.browserSession.pageTracker.getActive().title();
+      } catch {
+        // browser may be in an intermediate state
+      }
+    }
+
     return {
       sessionId,
       status: overallStatus,
@@ -603,6 +614,7 @@ export class SessionManager {
       results,
       outputs: { ...session.outputs },
       error: errorInfo,
+      pageTitle,
     };
   }
 }

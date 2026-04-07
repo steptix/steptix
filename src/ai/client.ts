@@ -62,9 +62,11 @@ export class AiClient {
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     }
 
-    const content = data.choices[0]?.message?.content;
+    // Support both OpenAI-style (choices[0].message.content) and gateway-style (response) formats
+    const content = data.choices?.[0]?.message?.content
+      ?? (data as unknown as Record<string, unknown>).response as string | undefined;
     if (!content) {
-      throw new Error('AI response contained no content');
+      throw new Error(`AI response contained no content. Response keys: ${Object.keys(data).join(', ')}`);
     }
 
     return content;

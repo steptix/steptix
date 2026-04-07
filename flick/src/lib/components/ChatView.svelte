@@ -7,6 +7,7 @@
     markFirstRequestSent,
     markStale,
     clearStale,
+    renameSession,
   } from "../stores/sessions";
   import { settings } from "../stores/settings";
   import { connectionStatus } from "../stores/connection";
@@ -203,6 +204,12 @@
       };
 
       entries = [...entries, resultEntry];
+
+      // Auto-rename the tab to the current page title
+      if (response.pageTitle) {
+        renameSession(session.id, response.pageTitle);
+      }
+
       await expandWindow();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
