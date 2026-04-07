@@ -7,3 +7,8 @@ memory/
 .env
 .env.*
 !.env.example
+
+# Flick (Tauri app)
+flick/node_modules/
+flick/dist/
+flick/src-tauri/target/

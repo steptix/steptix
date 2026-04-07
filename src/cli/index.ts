@@ -8,6 +8,7 @@ import { registerInitCommand } from './commands/init.js';
 import { registerListCommand } from './commands/list.js';
 import { registerSpecsCommand } from './commands/specs.js';
 import { registerUiCommand } from './commands/ui.js';
+import { registerServeCommand } from './commands/serve.js';
 
 export function createCli(): Command {
   const __filename = fileURLToPath(import.meta.url);
@@ -34,6 +35,7 @@ export function createCli(): Command {
   registerListCommand(program);
   registerSpecsCommand(program);
   registerUiCommand(program);
+  registerServeCommand(program);
 
   return program;
 }

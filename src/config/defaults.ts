@@ -42,4 +42,9 @@ export const DEFAULT_CONFIG: Config = {
     includeAiReasoning: true,
     embedScreenshots: true,
   },
+  server: {
+    host: '127.0.0.1',
+    port: 3100,
+    apiKey: 'dev-api-key',
+  },
 };

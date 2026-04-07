@@ -72,6 +72,15 @@ export interface ApiConfig {
   redactSensitive: boolean;
 }
 
+export interface ServerConfig {
+  /** Host to bind the API server to */
+  host: string;
+  /** Port to listen on */
+  port: number;
+  /** API key for authentication (checked via x-api-key header) */
+  apiKey: string;
+}
+
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
@@ -79,6 +88,7 @@ export interface Config {
   execution: ExecutionConfig;
   reports: ReportsConfig;
   api: ApiConfig;
+  server: ServerConfig;
 }
 
 /** Deeply partial version of Config for user-provided overrides */
