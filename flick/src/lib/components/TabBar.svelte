@@ -7,7 +7,7 @@
     renameSession,
     staleSessions,
   } from "../stores/sessions";
-  import { postSteps } from "../api/client";
+  import { deleteServerSession } from "../api/client";
   import { settings } from "../stores/settings";
   import { confirmDialog } from "../stores/ui";
   import { get } from "svelte/store";
@@ -36,9 +36,9 @@
       onConfirm: async () => {
         const s = get(settings);
         try {
-          await postSteps(s.apiUrl, s.apiKey, id, ["Close the browser"]);
+          await deleteServerSession(s.apiUrl, s.apiKey, id);
         } catch {
-          // session may already be closed
+          // session may already be closed on the server
         }
         deleteSession(id);
       },

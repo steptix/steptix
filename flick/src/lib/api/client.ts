@@ -73,6 +73,19 @@ export async function getSession(
   );
 }
 
+export async function deleteServerSession(
+  apiUrl: string,
+  apiKey: string,
+  sessionId: string,
+): Promise<void> {
+  await request<{ status: string }>(
+    apiUrl,
+    apiKey,
+    "DELETE",
+    `/sessions/${encodeURIComponent(sessionId)}`,
+  );
+}
+
 export async function getSessions(
   apiUrl: string,
   apiKey: string,

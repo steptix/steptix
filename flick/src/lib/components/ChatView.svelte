@@ -46,7 +46,8 @@
   }
 
   let entries: ChatEntry[] = $state([]);
-  let loading = $state(false);
+  let loadingSessionId = $state<string | null>(null);
+  let loading = $derived(loadingSessionId !== null && loadingSessionId === $activeSessionId);
   let scrollContainer: HTMLDivElement | undefined = $state();
   let hasExpanded = false;
 
@@ -139,7 +140,7 @@
     entries = [...entries, userEntry];
     scrollToBottom();
 
-    loading = true;
+    loadingSessionId = session.id;
 
     try {
       const s = get(settings);
@@ -213,7 +214,7 @@
       entries = [...entries, errorEntry];
       showToast(msg, "error");
     } finally {
-      loading = false;
+      loadingSessionId = null;
       scrollToBottom();
       await saveHistory(session.id);
     }

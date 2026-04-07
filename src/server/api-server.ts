@@ -22,7 +22,7 @@ export function createApiServer(config: Config): {
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     if (_req.method === 'OPTIONS') {
       res.sendStatus(204);
       return;
@@ -101,6 +101,17 @@ export function createApiServer(config: Config): {
       }
 
       res.status(200).json(state);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // DELETE /sessions/:id
+  app.delete('/sessions/:id', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const sessionId = String(req.params.id);
+      await sessionManager.closeSession(sessionId);
+      res.status(200).json({ status: 'closed', sessionId });
     } catch (err) {
       next(err);
     }
