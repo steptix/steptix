@@ -28,6 +28,13 @@ import { logger } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
+import type { StepCache, CachedStepData } from '../cache/step-cache.js';
+
+/** Mutable ref for capturing the first-turn AI response data for cache writing. */
+export interface CacheCapture {
+  rawResponse?: string;
+  parsedResponse?: { actions: AIAction[]; reasoning: string; needs_reeval?: boolean };
+}
 
 export interface StepExecutorOptions {
   page: Page;
@@ -44,6 +51,8 @@ export interface StepExecutorOptions {
   resolvedParameters?: Record<string, string>;
   /** Tracks all open pages (popups, tabs) — enables switchPage actions */
   pageTracker?: PageTracker;
+  /** Pre-initialized step cache (undefined = caching disabled) */
+  stepCache?: StepCache;
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -72,7 +81,7 @@ class StepFailureError extends Error {
  * instruction (after stripping optional [prefix] markers like [input: x]).
  * This avoids false positives from button/element names that happen to contain
  * assertion words (e.g. "Click the Verify Code button"). */
-function isAssertionStep(instruction: string): boolean {
+export function isAssertionStep(instruction: string): boolean {
   // Strip leading [prefix] markers such as [input: x] or [interactive]
   const stripped = instruction.replace(/^\[.*?\]\s*/i, '').toLowerCase();
   return /^(verify|assert|check|confirm|ensure|should|must|expect|validate|greater than|less than|equal to)/.test(stripped);
@@ -92,6 +101,39 @@ export async function executeStep(
   let retried = false;
   let priorFailures: PriorFailureContext[] = [];
   let allAiResponses: AiInteraction[] = [];
+  const isAssertion = isAssertionStep(instruction);
+
+  // --- Cache attempt (before normal AI flow) ---
+  if (opts.stepCache && !isAssertion) {
+    const cached = await opts.stepCache.read(stepIndex, opts.resolvedParameters ?? {});
+    if (cached) {
+      logger.info(`Cache HIT for step ${stepIndex} — executing cached actions`);
+      try {
+        const result = await executeStepAttempt(
+          stepIndex,
+          totalSteps,
+          instruction,
+          opts,
+          startTime,
+          false,
+          [],
+          1,
+          cached,
+        );
+        logger.success(`Step ${stepIndex} passed (from cache)`);
+        return result;
+      } catch (err) {
+        logger.warn(`Cached actions failed for step ${stepIndex} — invalidating and falling through to AI`);
+        await opts.stepCache.invalidateStep(stepIndex);
+        // Do NOT propagate failure context — give AI a clean slate
+      }
+    } else {
+      logger.debug(`Cache MISS for step ${stepIndex}`);
+    }
+  }
+
+  // --- Normal AI flow (with cache-write on success) ---
+  const cacheCapture: CacheCapture = {};
 
   const attempt = async (attemptNumber: number): Promise<StepResult> => {
     if (attemptNumber === 2) retried = true;
@@ -105,6 +147,8 @@ export async function executeStep(
       retried,
       priorFailures,
       attemptNumber,
+      undefined,
+      cacheCapture,
     );
   };
 
@@ -121,6 +165,16 @@ export async function executeStep(
       },
     });
 
+    // Write successful AI response to cache (non-assertion steps only)
+    if (opts.stepCache && !isAssertion && cacheCapture.rawResponse && cacheCapture.parsedResponse) {
+      await opts.stepCache.write(
+        stepIndex,
+        cacheCapture.rawResponse,
+        cacheCapture.parsedResponse,
+        opts.resolvedParameters ?? {},
+      );
+    }
+
     // If a prior attempt failed, merge its AI interactions into the successful result
     // so the report shows all attempts, not just the one that succeeded
     if (allAiResponses.length > 0) {
@@ -131,7 +185,7 @@ export async function executeStep(
     }
     return result;
   } catch (err) {
-    // Both attempts failed
+    // All attempts failed
     const durationMs = Date.now() - startTime;
     const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -183,6 +237,8 @@ async function executeStepAttempt(
   retried: boolean,
   priorFailures: PriorFailureContext[] = [],
   attemptNumber: number = 1,
+  cachedResponse?: CachedStepData,
+  cacheCapture?: CacheCapture,
 ): Promise<StepResult> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens, pageTracker } = opts;
   let page = pageTracker ? pageTracker.getActive() : opts.page;
@@ -317,19 +373,48 @@ async function executeStepAttempt(
       userMessage,
     ];
 
-    // 6. Get AI action plan
-    const rawResponse = await aiClient.complete(messages);
-    let aiResponse = parseAIResponse(rawResponse);
+    // 6. Get AI action plan (from cache on turn 1 if available, otherwise call AI)
+    let rawResponse: string;
+    let aiResponse: ReturnType<typeof parseAIResponse>;
+
+    if (cachedResponse && currentTurn === 1) {
+      rawResponse = cachedResponse.rawResponse;
+      aiResponse = {
+        actions: cachedResponse.actions,
+        reasoning: cachedResponse.reasoning,
+        ...(cachedResponse.needs_reeval !== undefined && { needs_reeval: cachedResponse.needs_reeval }),
+      };
+      aiResponseBuffer.push({
+        interaction: {
+          purpose: 'action-plan (cached)',
+          attemptNumber,
+          requestMessages: [],
+          response: rawResponse,
+        },
+        turn: currentTurn,
+      });
+    } else {
+      rawResponse = await aiClient.complete(messages);
+      aiResponse = parseAIResponse(rawResponse);
+
+      // Capture first-turn AI response for cache writing
+      if (currentTurn === 1 && cacheCapture) {
+        cacheCapture.rawResponse = rawResponse;
+        cacheCapture.parsedResponse = aiResponse;
+      }
+
+      aiResponseBuffer.push({
+        interaction: {
+          purpose: 'action-plan',
+          attemptNumber,
+          requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+          response: rawResponse,
+        },
+        turn: currentTurn,
+      });
+    }
+
     lastAiResponse = aiResponse;
-    aiResponseBuffer.push({
-      interaction: {
-        purpose: 'action-plan',
-        attemptNumber,
-        requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-        response: rawResponse,
-      },
-      turn: currentTurn,
-    });
 
     logger.debug(`AI reasoning (turn ${currentTurn}): ${aiResponse.reasoning}`);
 

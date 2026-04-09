@@ -14,6 +14,7 @@ import { generateReport } from '../report/generator.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { logger } from '../utils/logger.js';
 import { ApiResponseStore } from '../api/response-store.js';
+import { StepCache } from '../cache/step-cache.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -113,6 +114,11 @@ export async function runTest(
   const conversationHistory: string[] = [];
   const csrfTokens: Record<string, string> = {};
 
+  // Initialize step cache if enabled
+  const stepCache = config.cache.enabled
+    ? await StepCache.initialize(config.cache.dir, test.title, test.steps)
+    : undefined;
+
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
     ?? config.execution.timeout;
@@ -130,7 +136,7 @@ export async function runTest(
     }
 
     const stepResults = [];
-    const timeoutDeadline = Date.now() + testTimeout;
+    let timeoutDeadline = Date.now() + testTimeout;
     let bail = false;
 
     for (let i = 0; i < test.steps.length; i++) {
@@ -159,12 +165,16 @@ export async function runTest(
         resolvedParameters[inputStep.variable] = value;
         logger.info(`Stored user input as parameter "{{${inputStep.variable}}}"`);
 
+        // Don't count user input time against the test timeout
+        const inputDuration = Date.now() - stepStartTime;
+        timeoutDeadline += inputDuration;
+
         stepResult = {
           index: i + 1,
           instruction,
           status: 'passed',
           subActions: [],
-          durationMs: Date.now() - stepStartTime,
+          durationMs: inputDuration,
           retried: false,
           aiExplanation: `User provided input for "${inputStep.variable}"`,
         };
@@ -192,6 +202,7 @@ export async function runTest(
             apiResponseStore,
             csrfTokens,
             pageTracker: session.pageTracker,
+            ...(stepCache !== undefined && { stepCache }),
           });
 
           interactiveResults.push(result);
@@ -242,6 +253,7 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
+          ...(stepCache !== undefined && { stepCache }),
         });
         if (stepResult.status === 'passed') {
           logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
@@ -259,6 +271,7 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
+          ...(stepCache !== undefined && { stepCache }),
         });
       }
 

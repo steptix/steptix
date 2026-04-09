@@ -81,6 +81,13 @@ export interface ServerConfig {
   apiKey: string;
 }
 
+export interface CacheConfig {
+  /** Enable AI response caching for test steps */
+  enabled: boolean;
+  /** Directory for cache storage (relative to project root) */
+  dir: string;
+}
+
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
@@ -89,6 +96,7 @@ export interface Config {
   reports: ReportsConfig;
   api: ApiConfig;
   server: ServerConfig;
+  cache: CacheConfig;
 }
 
 /** Deeply partial version of Config for user-provided overrides */

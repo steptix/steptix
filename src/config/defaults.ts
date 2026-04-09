@@ -47,4 +47,8 @@ export const DEFAULT_CONFIG: Config = {
     port: 3100,
     apiKey: 'dev-api-key',
   },
+  cache: {
+    enabled: true,
+    dir: '.cache',
+  },
 };

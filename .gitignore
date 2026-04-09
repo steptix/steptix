@@ -3,6 +3,7 @@ dist/
 dist-ui/
 reports/
 memory/
+.cache/
 *.tsbuildinfo
 .env
 .env.*

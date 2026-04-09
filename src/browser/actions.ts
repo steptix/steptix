@@ -91,7 +91,7 @@ export async function executeAction(
   // field instead of the frame field. If the first segment of the selector matches
   // an iframe inside the current frame context, move it to the frame chain.
   let effectiveFrame = action.frame;
-  let effectiveSelector = action.selector;
+  let effectiveSelector = action.selector ? sanitizeCssSelector(action.selector) : action.selector;
   if (effectiveSelector) {
     const promoted = await promoteIframeFromSelector(page, effectiveFrame, effectiveSelector);
     effectiveFrame = promoted.frame;
@@ -309,6 +309,36 @@ function parseDuration(value: string): number | null {
   return matched ? Math.round(totalMs) : null;
 }
 
+/**
+ * Escape special characters commonly found in Tailwind CSS classes that are
+ * invalid in raw CSS selectors (e.g. `.!fixed` → `.\!fixed`).
+ */
+function sanitizeCssSelector(selector: string): string {
+  // Escape `!` when used inside class names (Tailwind important modifier)
+  // e.g.  .!fixed  →  .\!fixed
+  let sanitized = selector.replace(/\.!/g, '.\\!');
+
+  // Escape `/` in class names (Tailwind opacity shorthand)
+  // e.g.  .bg-black/50  →  .bg-black\/50
+  sanitized = sanitized.replace(/(\.[a-zA-Z_][\w-]*)\/(\d+)/g, '$1\\/$2');
+
+  // Escape `@` in class names (Tailwind container query variants)
+  // e.g.  .@lg  →  .\@lg
+  sanitized = sanitized.replace(/\.@/g, '.\\@');
+
+  // Escape unescaped `[` and `]` inside class-name segments.
+  // Tailwind arbitrary values like `.z-[999]` must become `.z-\[999\]` in CSS.
+  // Only target brackets that appear within a class name (after a `.` prefix),
+  // NOT attribute selectors like `div[aria-label="X"]` or `[role="dialog"]`.
+  // We match `.className-[value]` patterns specifically.
+  sanitized = sanitized.replace(
+    /(\.[a-zA-Z_][\w-]*)-(?<!\\)\[([^\]]*)\]/g,
+    '$1-\\[$2\\]',
+  );
+
+  return sanitized;
+}
+
 async function executeWait(page: Page, root: Page | FrameLocator, action: AIAction): Promise<void> {
   const condition = action.condition ?? action.value ?? '';
   const timeout = action.timeout ?? 10_000;
@@ -323,23 +353,28 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
       break;
     }
 
-    case 'selector':
+    case 'selector': {
+      // Sanitize Tailwind-style class names that contain invalid CSS characters
+      const sel = sanitizeCssSelector(condition);
       // When inside a frame, use locator.waitFor() so the wait is scoped to that frame.
       if (root !== page) {
-        await root.locator(condition).first().waitFor({ state: 'visible', timeout });
+        await root.locator(sel).first().waitFor({ state: 'visible', timeout });
       } else {
-        await page.waitForSelector(condition, { state: 'visible', timeout });
+        await page.waitForSelector(sel, { state: 'visible', timeout });
       }
       break;
+    }
 
-    case 'hidden':
+    case 'hidden': {
       // Wait for an element to disappear (spinner, overlay, loading indicator)
+      const hiddenSel = sanitizeCssSelector(condition);
       if (root !== page) {
-        await root.locator(condition).first().waitFor({ state: 'hidden', timeout });
+        await root.locator(hiddenSel).first().waitFor({ state: 'hidden', timeout });
       } else {
-        await page.waitForSelector(condition, { state: 'hidden', timeout });
+        await page.waitForSelector(hiddenSel, { state: 'hidden', timeout });
       }
       break;
+    }
 
     case 'text':
       await page.waitForFunction(

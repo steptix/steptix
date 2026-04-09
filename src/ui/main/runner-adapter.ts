@@ -308,7 +308,7 @@ export class UIRunnerAdapter {
     const testTimeout =
       parseTimeoutMs(parsedTest.frontmatter.timeout ?? parsedTest.config.timeout) ??
       this.config.execution.timeout;
-    const timeoutDeadline = Date.now() + testTimeout;
+    let timeoutDeadline = Date.now() + testTimeout;
 
     // 9. Step execution loop
     this.stepResults = [];
@@ -374,12 +374,16 @@ export class UIRunnerAdapter {
 
         this.emit('runner:resumed', {});
 
+        // Don't count user input time against the test timeout
+        const inputDuration = Date.now() - stepStartTime;
+        timeoutDeadline += inputDuration;
+
         const stepResult: StepResult = {
           index: stepIndex,
           instruction,
           status: 'passed',
           subActions: [],
-          durationMs: Date.now() - stepStartTime,
+          durationMs: inputDuration,
           retried: false,
           aiExplanation: `User provided input for "${variable}"`,
         };
