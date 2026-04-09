@@ -46,23 +46,23 @@ vi.mock('../src/context/loader.js', () => ({
 }));
 
 vi.mock('../src/ai/client.js', () => ({
-  AiClient: vi.fn(() => ({
-    chat: vi.fn(async () => '{}'),
-  })),
+  AiClient: class {
+    chat = vi.fn(async () => '{}');
+  },
 }));
 
 vi.mock('../src/utils/tokens.js', () => ({
-  TokenTracker: vi.fn(() => ({
-    resetStep: vi.fn(),
-    totalTokens: 0,
-  })),
+  TokenTracker: class {
+    resetStep = vi.fn();
+    totalTokens = 0;
+  },
 }));
 
 vi.mock('../src/api/response-store.js', () => ({
-  ApiResponseStore: vi.fn(() => ({
-    store: vi.fn(),
-    getHistory: vi.fn(() => []),
-  })),
+  ApiResponseStore: class {
+    store = vi.fn();
+    getHistory = vi.fn(() => []);
+  },
 }));
 
 vi.mock('../src/browser/screenshot.js', () => ({
