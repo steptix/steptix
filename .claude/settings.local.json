@@ -7,7 +7,9 @@
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
       "Bash(npx tsc:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(powershell.exe -File -)",
+      "Bash(npm audit:*)"
     ]
   }
 }
