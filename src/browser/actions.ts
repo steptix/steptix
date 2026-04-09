@@ -312,54 +312,62 @@ function parseDuration(value: string): number | null {
 async function executeWait(page: Page, root: Page | FrameLocator, action: AIAction): Promise<void> {
   const condition = action.condition ?? action.value ?? '';
   const timeout = action.timeout ?? 10_000;
+  const waitType = action.waitType ?? inferWaitType(condition);
 
-  // Duration-based sleep: "30s", "2m", "500ms", "30 seconds", etc.
-  const durationMs = parseDuration(condition);
-  if (durationMs !== null) {
-    await page.waitForTimeout(durationMs);
-    return;
-  }
-
-  // Natural language URL conditions: "url contains /dashboard", "URL includes login", etc.
-  const urlConditionMatch = condition.match(/^url\s+(contains|includes|matches|has|ends with|starts with)\s+(.+)$/i);
-  if (urlConditionMatch) {
-    const [, verb, fragment] = urlConditionMatch;
-    const lower = verb!.toLowerCase();
-    await page.waitForURL((url) => {
-      const href = url.toString();
-      if (lower === 'starts with') return href.startsWith(fragment!);
-      if (lower === 'ends with') return href.endsWith(fragment!);
-      return href.includes(fragment!);
-    }, { timeout });
-    return;
-  }
-
-  // Detect CSS selectors: starts with tag name, #, ., or [
-  const looksLikeSelector = /^([a-z][a-z0-9]*(\[|#|\.| |,|:)|[#.\[])/.test(condition);
-  if (looksLikeSelector) {
-    // When inside a frame, use locator.waitFor() so the wait is scoped to that frame.
-    // At page level, use waitForSelector() with 'attached' so hidden inputs don't time out.
-    if (root !== page) {
-      await root.locator(condition).first().waitFor({ state: 'attached', timeout });
-    } else {
-      await page.waitForSelector(condition, { state: 'attached', timeout });
+  switch (waitType) {
+    case 'duration': {
+      const durationMs = parseDuration(condition);
+      if (durationMs !== null) {
+        await page.waitForTimeout(durationMs);
+      }
+      break;
     }
-  } else if (condition.startsWith('http') || condition.includes('/')) {
-    // URL pattern — always page-level
-    await page.waitForURL(condition, { timeout });
-  } else if (condition === 'networkidle') {
-    await page.waitForLoadState('networkidle', { timeout });
-  } else if (condition === 'load') {
-    await page.waitForLoadState('load', { timeout });
-  } else {
-    // Generic wait for condition text to appear — always page-level
-    await page.waitForFunction(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (text) => (globalThis as any).document.body.textContent?.includes(text) ?? false,
-      condition,
-      { timeout },
-    );
+
+    case 'selector':
+      // When inside a frame, use locator.waitFor() so the wait is scoped to that frame.
+      if (root !== page) {
+        await root.locator(condition).first().waitFor({ state: 'visible', timeout });
+      } else {
+        await page.waitForSelector(condition, { state: 'visible', timeout });
+      }
+      break;
+
+    case 'text':
+      await page.waitForFunction(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (text) => (globalThis as any).document.body.textContent?.includes(text) ?? false,
+        condition,
+        { timeout },
+      );
+      break;
+
+    case 'url':
+      await page.waitForURL(condition, { timeout });
+      break;
+
+    case 'load':
+      if (condition === 'networkidle' || condition === 'load' || condition === 'domcontentloaded') {
+        await page.waitForLoadState(condition, { timeout });
+      } else {
+        // Default to networkidle for unrecognised load conditions
+        await page.waitForLoadState('networkidle', { timeout });
+      }
+      break;
   }
+}
+
+/**
+ * Fallback heuristic for when the AI omits waitType.
+ * Kept for backward compatibility but should rarely be needed.
+ */
+function inferWaitType(condition: string): NonNullable<AIAction['waitType']> {
+  if (parseDuration(condition) !== null) return 'duration';
+  if (condition === 'networkidle' || condition === 'load' || condition === 'domcontentloaded') return 'load';
+  if (condition.startsWith('http') || condition.startsWith('*')) return 'url';
+  if (/^[#.\[]/.test(condition)) return 'selector';
+  // Tag-like selector: starts with a tag name immediately followed by a selector char (no space)
+  if (/^[a-z][a-z0-9]*[#.\[:]/.test(condition)) return 'selector';
+  return 'text';
 }
 
 async function executeScroll(page: Page, action: AIAction): Promise<void> {

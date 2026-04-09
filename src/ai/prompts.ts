@@ -76,7 +76,12 @@ Execute the following test step by returning a JSON object with an array of acti
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 11. For "select" actions, set "selector" to the <select> element itself (NOT an <option>) and "value" to the visible option text (e.g. "Transaction Dispute"). Never click <option> elements directly — always use the "select" action on the parent <select>
-12. For "wait" actions, set "condition" to a CSS selector, URL pattern (e.g. "**/dashboard"), "url contains /path" for partial URL matching, keyword like "networkidle", or a duration like "30s", "2m", "1m 30s"
+12. For "wait" actions, set "waitType" and "condition":
+   - waitType "load": set condition to "networkidle" (preferred for "wait until page loads" type steps), "load", or "domcontentloaded"
+   - waitType "duration": set condition to a time like "30s", "2m", "1m 30s"
+   - waitType "selector": set condition to a CSS selector to wait for an element to become visible
+   - waitType "text": set condition to text content to wait for on the page (e.g. "Welcome to Dashboard")
+   - waitType "url": set condition to a URL or glob pattern (e.g. "**/dashboard") — only use when the step provides an explicit URL, never guess URLs
 13. For "read" actions, set "selector" to the CSS selector of the element to read and "as" to a snake_case variable name. Use "read" when a step asks you to capture, note, remember, store, or take note of a value from the page (e.g. "capture the residential address", "take note of the balance", "note the email"). If the step specifies a variable name via [store as: name], use that name exactly. Otherwise derive a concise snake_case name from what is being captured (e.g. "residential address" → "residential_address", "account balance" → "account_balance"). Captured values become available as {{variable_name}} in later steps
 14. For "count" actions, set "selector" to the CSS selector to count and "as" to a snake_case variable name. Use "count" when a step asks how many elements exist (e.g. "how many accounts", "count the rows"). The result is stored as a string (e.g. "3") and available as {{variable_name}} in later steps
 15. Set "needs_reeval": true if you have returned all the actions you can plan from the current page state, but more actions are needed to complete the step — e.g. you need to navigate first and then interact with elements on the new page. Omit or set false when the step is complete after the returned actions
