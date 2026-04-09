@@ -8,7 +8,7 @@ tags: [smoke]
 - baseUrl: https://github.com/
 
 ## Parameters
-- username:
+- username: $GITHUB_USERNAME
 - password: 
 
 ## Steps
