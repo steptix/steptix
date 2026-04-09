@@ -43,6 +43,7 @@
     "dotenv": "^17.3.1",
     "electron": "^41.1.0",
     "eventsource-parser": "^2.0.0",
+    "express": "^5.2.1",
     "glob": "^10.3.10",
     "gray-matter": "^4.0.3",
     "handlebars": "^4.7.8",
@@ -58,6 +59,7 @@
     "vite": "^5.4.21"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/handlebars": "^4.1.0",
     "@types/node": "^20.11.0",
     "@types/react": "^19.2.14",
