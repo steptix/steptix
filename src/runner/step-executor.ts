@@ -13,7 +13,9 @@ import {
   buildAssertionMessage,
   buildRetryContext,
 } from '../ai/prompts.js';
-import type { PriorFailureContext, ApiPromptContext } from '../ai/prompts.js';
+import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext } from '../ai/prompts.js';
+import { diagnosePageState } from '../browser/page-state.js';
+import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
 import { parseAIResponse, parseAssertionEvaluation } from '../ai/action-parser.js';
 import { captureDomSnapshot } from '../browser/dom-cleaner.js';
@@ -189,9 +191,10 @@ async function executeStepAttempt(
   // Accumulated across all turns
   const aiResponseBuffer: Array<{ interaction: AiInteraction; turn: number }> = [];
   const allSubActions: SubActionResult[] = [];
-  const allCompletedActions: Array<{ description: string }> = [];
+  const allCompletedActions: Array<{ action: string; description: string; selector?: string }> = [];
   const collectedFailures: PriorFailureContext[] = [];
   const urlHistory: string[] = [];
+  const attemptStartUrl = page.url();
 
   // First-turn state is used for the step result (screenshot / DOM taken at step start)
   let firstTurnDomSnapshot = '';
@@ -217,6 +220,20 @@ async function executeStepAttempt(
     // 1. Auto-dismiss obstacles (first turn only)
     if (currentTurn === 1 && config.execution.dismissObstacles) {
       await handleObstacles(page);
+    }
+
+    // 1b. On retry attempts, diagnose page state and auto-wait if loading
+    let pageDiagnosis: PageStateDiagnosis | undefined;
+    if (attemptNumber > 1 && currentTurn === 1) {
+      pageDiagnosis = await diagnosePageState(page);
+      if (pageDiagnosis.isLoading) {
+        logger.info('Page appears to be loading on retry — waiting for networkidle (up to 5s)');
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {
+          logger.debug('networkidle wait timed out after 5s — proceeding anyway');
+        });
+        // Re-diagnose after waiting
+        pageDiagnosis = await diagnosePageState(page);
+      }
     }
 
     // 2. Capture current page state
@@ -270,7 +287,10 @@ async function executeStepAttempt(
     const screenshotForAi = config.ai.sendScreenshots ? (screenshotBase64 ?? null) : null;
 
     if (currentTurn === 1) {
-      const retryHint = buildRetryContext(priorFailures);
+      const retryInput: RetryDiagnostics | undefined = priorFailures.length > 0
+        ? { failures: priorFailures, ...(pageDiagnosis ? { pageState: pageDiagnosis } : {}), attemptNumber }
+        : undefined;
+      const retryHint = retryInput ? buildRetryContext(retryInput) : '';
       const enrichedInstruction = retryHint ? `${instruction}${retryHint}` : instruction;
       userMessage = buildStepMessage(
         enrichedInstruction,
@@ -514,22 +534,41 @@ async function executeStepAttempt(
         turnFailed = true;
         turnError = result.error;
 
+        // Build list of actions that succeeded before this failure
+        const currentTurnSucceeded = aiResponse.actions
+          .slice(0, aiResponse.actions.indexOf(action))
+          .filter((a) => a.action !== 'assert' && a.action !== 'prompt')
+          .map((a) => ({ action: a.action, description: a.description }));
+        const allSucceeded = [
+          ...allCompletedActions.map((a) => ({ action: a.action, description: a.description })),
+          ...currentTurnSucceeded,
+        ];
+
         // Collect failure context so retry gets richer info
-        if (result.failedSelector) {
-          collectedFailures.push({
-            selector: result.failedSelector,
-            error: result.error ?? 'Unknown error',
-            ...(result.matchCount !== undefined && { matchCount: result.matchCount }),
-            actionType: action.action,
-          });
-        }
+        const currentUrl = page.url();
+        collectedFailures.push({
+          selector: result.failedSelector ?? action.selector ?? '',
+          error: result.error ?? 'Unknown error',
+          ...(result.matchCount !== undefined && { matchCount: result.matchCount }),
+          actionType: action.action,
+          ...(allSucceeded.length > 0 && { completedActions: allSucceeded }),
+          startUrl: attemptStartUrl,
+          failureUrl: currentUrl,
+          navigated: currentUrl !== attemptStartUrl,
+        });
         break;
       }
     }
 
     // Track non-assert/prompt actions for the continuation prompt on the next turn
     allCompletedActions.push(
-      ...aiResponse.actions.filter((a) => a.action !== 'assert' && a.action !== 'prompt'),
+      ...aiResponse.actions
+        .filter((a) => a.action !== 'assert' && a.action !== 'prompt')
+        .map((a) => ({
+          action: a.action,
+          description: a.description,
+          ...(a.selector ? { selector: a.selector } : {}),
+        })),
     );
 
     if (turnFailed) {

@@ -119,7 +119,7 @@ describe('buildContinuationMessage', () => {
   it('includes the original instruction', () => {
     const msg = buildContinuationMessage(
       'check how many accounts this user has',
-      [{ description: 'Navigate to /portfolio' }],
+      [{ action: 'navigate', description: 'Navigate to /portfolio' }],
       {},
       'https://app.example.com/portfolio',
       '<html>...</html>',
@@ -134,8 +134,8 @@ describe('buildContinuationMessage', () => {
     const msg = buildContinuationMessage(
       'check accounts',
       [
-        { description: 'Navigate to /portfolio' },
-        { description: 'Wait for .portfolio-content' },
+        { action: 'navigate', description: 'Navigate to /portfolio' },
+        { action: 'wait', description: 'Wait for .portfolio-content' },
       ],
       {},
       'https://app.example.com/portfolio',
@@ -165,7 +165,7 @@ describe('buildContinuationMessage', () => {
   it('includes captured variables', () => {
     const msg = buildContinuationMessage(
       'check balance',
-      [{ description: 'Read balance' }],
+      [{ action: 'read', description: 'Read balance' }],
       { account_balance: '$1,234.56' },
       'https://app.example.com/',
       '<html></html>',
@@ -180,7 +180,7 @@ describe('buildContinuationMessage', () => {
   it('shows (none) for variables when none captured', () => {
     const msg = buildContinuationMessage(
       'check balance',
-      [{ description: 'Navigate' }],
+      [{ action: 'navigate', description: 'Navigate' }],
       {},
       'https://app.example.com/',
       '<html></html>',
@@ -257,7 +257,7 @@ describe('buildContinuationMessage', () => {
   it('includes turn range in the actions header', () => {
     const msg = buildContinuationMessage(
       'check accounts',
-      [{ description: 'Navigate' }],
+      [{ action: 'navigate', description: 'Navigate' }],
       {},
       'https://app.example.com/',
       '<html></html>',

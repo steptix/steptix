@@ -1,5 +1,6 @@
 import type { ChatMessage } from './types.js';
 import type { PageInfo } from '../browser/manager.js';
+import type { PageStateDiagnosis } from '../browser/page-state.js';
 
 /** Viewport dimensions passed to the system prompt */
 export interface ViewportInfo {
@@ -256,31 +257,145 @@ export interface PriorFailureContext {
   matchCount?: number;
   /** The action type that failed */
   actionType: string;
+  /** Actions that succeeded before the failure occurred */
+  completedActions?: Array<{ action: string; description: string }>;
+  /** URL at the start of the failed attempt */
+  startUrl?: string;
+  /** URL at the moment of failure */
+  failureUrl?: string;
+  /** Whether navigation occurred during the failed attempt */
+  navigated?: boolean;
+}
+
+/** Full diagnostics passed to buildRetryContext on retry attempts */
+export interface RetryDiagnostics {
+  failures: PriorFailureContext[];
+  /** Page state diagnosis captured at the start of the retry attempt */
+  pageState?: PageStateDiagnosis;
+  /** Which attempt number this is (2 = first retry) */
+  attemptNumber: number;
 }
 
 /**
  * Build a retry hint block that is appended to the user message on retry.
- * Tells the AI what was already tried so it picks a different approach.
+ * Provides state-aware context so the AI can diagnose the current page state
+ * rather than blindly trying different selectors.
+ *
+ * Accepts either a plain PriorFailureContext[] (backward-compatible) or
+ * a full RetryDiagnostics object with page state diagnosis.
  */
-export function buildRetryContext(failures: PriorFailureContext[]): string {
-  if (failures.length === 0) return '';
+export function buildRetryContext(input: PriorFailureContext[] | RetryDiagnostics): string {
+  const diagnostics: RetryDiagnostics = Array.isArray(input)
+    ? { failures: input, attemptNumber: 2 }
+    : input;
 
-  const lines = failures.map((f) => {
-    let detail = `- Action "${f.actionType}" with selector \`${f.selector}\` failed: ${f.error}`;
+  if (diagnostics.failures.length === 0) return '';
+
+  const sections: string[] = [];
+
+  // --- Section 1: What happened in the previous attempt ---
+  for (const f of diagnostics.failures) {
+    const completedLines: string[] = [];
+    if (f.completedActions && f.completedActions.length > 0) {
+      completedLines.push('The following actions SUCCEEDED before the failure:');
+      for (const a of f.completedActions) {
+        completedLines.push(`  - ${a.description}`);
+      }
+      completedLines.push('');
+    }
+
+    let failDetail = `Action "${f.actionType}"`;
+    if (f.selector) failDetail += ` with selector \`${f.selector}\``;
+    failDetail += ` failed: ${f.error}`;
     if (f.matchCount !== undefined) {
       if (f.matchCount === 0) {
-        detail += `\n  → No elements matched this selector.`;
+        failDetail += `\n  → No elements matched this selector.`;
       } else if (f.matchCount > 1) {
-        detail += `\n  → ${f.matchCount} elements matched this selector — the first one was used but it was not the right target. Use a more specific selector (e.g. scope with a parent, use :nth-of-type(), :has-text(), or combine with other attributes) to target the correct element.`;
+        failDetail += `\n  → ${f.matchCount} elements matched — use a more specific selector.`;
       }
     }
-    return detail;
-  });
 
-  return `\n\n## Previous Attempt Failed
-The following actions were tried and failed. Choose a DIFFERENT approach — do not reuse the same selectors that failed.
+    sections.push([
+      '### What happened in the previous attempt',
+      ...completedLines,
+      `Then this action FAILED:\n- ${failDetail}`,
+    ].join('\n'));
+  }
 
-${lines.join('\n')}`;
+  // --- Section 2: Page state changed (navigation detected) ---
+  const navigated = diagnostics.failures.find((f) => f.navigated);
+  if (navigated) {
+    sections.push([
+      '### Page state changed during the previous attempt',
+      `- The page navigated from ${navigated.startUrl} to ${navigated.failureUrl}`,
+      '- The prior actions may have partially succeeded — do NOT repeat them blindly.',
+      '- Check the current DOM and screenshot to see if the step is already complete or partially complete.',
+    ].join('\n'));
+  }
+
+  // --- Section 3: Current page state assessment ---
+  const ps = diagnostics.pageState;
+  if (ps) {
+    const stateLines: string[] = [];
+
+    if (ps.documentLoading) {
+      stateLines.push('- The document is still loading (readyState is not "complete").');
+    }
+
+    if (ps.isLoading && ps.loadingIndicators.length > 0) {
+      stateLines.push(
+        `- Loading indicators are visible: ${ps.loadingIndicators.join(', ')}`,
+        '  → Consider using a "wait" action (e.g. wait for networkidle or a specific element) before interacting.',
+      );
+    }
+
+    if (ps.hasErrorOverlay && ps.errorMessages.length > 0) {
+      stateLines.push(
+        `- Error overlay detected: ${ps.errorMessages[0]!.slice(0, 300)}`,
+        '  → Consider dismissing this or addressing the error before retrying the original action.',
+      );
+    }
+
+    if (ps.hasModal) {
+      stateLines.push(
+        '- A modal/dialog is currently visible.',
+        '  → You may need to dismiss it or interact with it before proceeding.',
+      );
+    }
+
+    if (stateLines.length > 0) {
+      sections.push(['### Current page state assessment', ...stateLines].join('\n'));
+    }
+  }
+
+  // --- Section 4: Instructions for this retry ---
+  const instructions: string[] = [];
+  let step = 1;
+
+  instructions.push(`${step++}. LOOK at the screenshot and DOM snapshot carefully — the page may be in a different state than you expect.`);
+
+  if (ps?.isLoading) {
+    instructions.push(`${step++}. Loading indicators are present — use a "wait" action first (e.g. wait for networkidle, or wait for a specific element to appear).`);
+  }
+  if (ps?.hasModal || ps?.hasErrorOverlay) {
+    instructions.push(`${step++}. A modal or error overlay is visible — dismiss it before attempting the original action.`);
+  }
+
+  instructions.push(`${step++}. If the page has navigated, check whether the step is already partially or fully complete.`);
+  instructions.push(`${step++}. Do NOT blindly repeat the same actions — assess what has already been accomplished.`);
+
+  const failedSelectors = diagnostics.failures
+    .map((f) => f.selector)
+    .filter(Boolean);
+  if (failedSelectors.length > 0) {
+    instructions.push(
+      `${step++}. Failed selectors from prior attempt: ${failedSelectors.map((s) => `\`${s}\``).join(', ')} — choose a different selector or approach.`,
+    );
+  }
+
+  sections.push(['### Instructions for this retry', ...instructions].join('\n'));
+
+  return `\n\n## Retry Attempt ${diagnostics.attemptNumber}\n\n${sections.join('\n\n')}`;
 }
 
 /**
@@ -289,7 +404,7 @@ ${lines.join('\n')}`;
  */
 export function buildContinuationMessage(
   originalInstruction: string,
-  completedActions: Array<{ description: string }>,
+  completedActions: Array<{ action: string; description: string; selector?: string }>,
   capturedVariables: Record<string, string>,
   currentUrl: string,
   domSnapshot: string,
