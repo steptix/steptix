@@ -6,7 +6,8 @@
       "Bash(git pull:*)",
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(git push:*)"
     ]
   }
 }
