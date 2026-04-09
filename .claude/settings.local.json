@@ -9,7 +9,10 @@
       "Bash(npx tsc:*)",
       "Bash(git push:*)",
       "Bash(powershell.exe -File -)",
-      "Bash(npm audit:*)"
+      "Bash(npm audit:*)",
+      "Bash(npm outdated:*)",
+      "Bash(npm info:*)",
+      "Bash(npm test:*)"
     ]
   }
 }
