@@ -493,6 +493,42 @@ async function executeStepAttempt(
         continue;
       }
 
+      // ── closePage action ──────────────────────────────────────────────────
+      if (action.action === 'closePage') {
+        let closeError: string | undefined;
+        if (pageTracker && action.page) {
+          const result = await pageTracker.closePage(action.page);
+          if (result.closed) {
+            page = result.activePage;
+            logger.info(`Closed page: ${action.page} — active page is now ${page.url()}`);
+          } else {
+            closeError = `closePage failed: ${result.error}`;
+            logger.warn(closeError);
+          }
+        } else if (!pageTracker) {
+          closeError = 'closePage failed: page tracking is not enabled';
+          logger.warn(closeError);
+        } else {
+          closeError = 'closePage failed: no "page" field specified';
+          logger.warn(closeError);
+        }
+
+        allSubActions.push({
+          index: allSubActions.length + 1,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          ...(closeError !== undefined && { error: closeError }),
+        });
+
+        if (closeError) {
+          turnFailed = true;
+          turnError = closeError;
+          break;
+        }
+        continue;
+      }
+
       // ── API action types ─────────────────────────────────────────────────────
       if (action.action === 'extract_csrf') {
         const csrfResult = await extractCsrfToken(

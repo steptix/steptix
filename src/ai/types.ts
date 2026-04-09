@@ -10,6 +10,7 @@ export type ActionType =
   | 'scroll'
   | 'switchFrame'
   | 'switchPage'
+  | 'closePage'
   | 'dismiss'
   | 'assert'
   | 'keyboard'

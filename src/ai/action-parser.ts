@@ -3,7 +3,7 @@ import { logger } from '../utils/logger.js';
 
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
-  'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'dismiss',
+  'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'closePage', 'dismiss',
   'assert', 'keyboard', 'keypress', 'prompt',
   'api_call', 'extract_csrf', 'extract_value',
   'read', 'count',
@@ -26,6 +26,11 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   'switch_tab': 'switchPage',
   'switchWindow': 'switchPage',
   'switch_window': 'switchPage',
+  'closeTab': 'closePage',
+  'close_tab': 'closePage',
+  'close_page': 'closePage',
+  'closeWindow': 'closePage',
+  'close_window': 'closePage',
 };
 
 /**

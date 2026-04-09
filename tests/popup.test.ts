@@ -1,9 +1,10 @@
 /**
  * Tests for popup/new-tab support:
  * - "switchPage" action type parsing in action-parser
+ * - "closePage" action type parsing in action-parser
  * - "page" field parsing
- * - Action type aliases (switch_page, switchTab, etc.)
- * - PageTracker: tracking, switching, close handling
+ * - Action type aliases (switch_page, switchTab, closeTab, etc.)
+ * - PageTracker: tracking, switching, closing, close handling
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { parseAIResponse } from '../src/ai/action-parser.js';
@@ -14,15 +15,21 @@ import type { Page } from 'playwright';
 
 function mockPage(opts: { url?: string; title?: string; closed?: boolean } = {}): Page {
   const closeHandlers: Array<() => void> = [];
+  let isClosed = opts.closed ?? false;
   const page = {
     url: vi.fn(() => opts.url ?? 'about:blank'),
     title: vi.fn(async () => opts.title ?? ''),
     on: vi.fn((event: string, handler: () => void) => {
       if (event === 'close') closeHandlers.push(handler);
     }),
-    isClosed: vi.fn(() => opts.closed ?? false),
+    isClosed: vi.fn(() => isClosed),
+    close: vi.fn(async () => {
+      isClosed = true;
+      for (const h of closeHandlers) h();
+    }),
     // Expose internal close handlers for testing
     _triggerClose() {
+      isClosed = true;
       for (const h of closeHandlers) h();
     },
   } as unknown as Page & { _triggerClose: () => void };
@@ -82,6 +89,44 @@ describe('parseAIResponse — switchPage action', () => {
     const result = parseAIResponse(raw);
     expect(result.actions[0]?.page).toBeUndefined();
   });
+});
+
+// ─── Parser: closePage action type ─────────────────────────────────────────
+
+describe('parseAIResponse — closePage action', () => {
+  it('parses closePage action with page field', () => {
+    const raw = JSON.stringify({
+      actions: [
+        {
+          action: 'closePage',
+          page: 'page:2',
+          description: 'Close the popup window',
+        },
+      ],
+      reasoning: 'Done with the popup.',
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]?.action).toBe('closePage');
+    expect(result.actions[0]?.page).toBe('page:2');
+  });
+});
+
+// ─── Parser: closePage aliases ──────────────────────────────────────────────
+
+describe('parseAIResponse — closePage aliases', () => {
+  const aliases = ['closeTab', 'close_tab', 'close_page', 'closeWindow', 'close_window'];
+
+  for (const alias of aliases) {
+    it(`normalises "${alias}" to "closePage"`, () => {
+      const raw = JSON.stringify({
+        actions: [{ action: alias, page: 'page:2', description: 'Close' }],
+        reasoning: 'Alias test.',
+      });
+      const result = parseAIResponse(raw);
+      expect(result.actions[0]?.action).toBe('closePage');
+    });
+  }
 });
 
 // ─── Parser: switchPage aliases ─────────────────────────────────────────────
@@ -232,6 +277,65 @@ describe('PageTracker', () => {
       expect(tracker.getActive()).toBe(p3);
 
       p2._triggerClose();
+      expect(tracker.getActive()).toBe(p3);
+      expect(tracker.count).toBe(2);
+    });
+  });
+
+  describe('closePage', () => {
+    it('closes a page by label and falls back to main', async () => {
+      const popup = mockPage({ url: 'http://localhost:8787/popup' });
+      tracker.addPage(popup);
+      tracker.switchTo('page:2');
+      expect(tracker.getActive()).toBe(popup);
+
+      const result = await tracker.closePage('page:2');
+      expect(result.closed).toBe(true);
+      expect(result.activePage).toBe(mainPage);
+      expect(tracker.count).toBe(1);
+    });
+
+    it('closes a page by URL substring', async () => {
+      const popup = mockPage({ url: 'http://localhost:8787/popup' });
+      tracker.addPage(popup);
+
+      const result = await tracker.closePage('/popup');
+      expect(result.closed).toBe(true);
+      expect(tracker.count).toBe(1);
+    });
+
+    it('closes a page by title substring', async () => {
+      const popup = mockPage({ url: 'http://localhost:8787/popup', title: 'Popup Window' });
+      tracker.addPage(popup);
+
+      const result = await tracker.closePage('Popup Window');
+      expect(result.closed).toBe(true);
+      expect(tracker.count).toBe(1);
+    });
+
+    it('refuses to close the main page', async () => {
+      const result = await tracker.closePage('main');
+      expect(result.closed).toBe(false);
+      expect(result.error).toBe('cannot close the main page');
+      expect(tracker.count).toBe(1);
+    });
+
+    it('returns error for no match', async () => {
+      const result = await tracker.closePage('nonexistent');
+      expect(result.closed).toBe(false);
+      expect(result.error).toContain('no page matching');
+    });
+
+    it('closes a non-active page without disrupting active page', async () => {
+      const p2 = mockPage({ url: 'http://localhost:8787/popup' });
+      const p3 = mockPage({ url: 'http://localhost:8787/tab' });
+      tracker.addPage(p2);
+      tracker.addPage(p3);
+      tracker.switchTo('page:3');
+      expect(tracker.getActive()).toBe(p3);
+
+      const result = await tracker.closePage('page:2');
+      expect(result.closed).toBe(true);
       expect(tracker.getActive()).toBe(p3);
       expect(tracker.count).toBe(2);
     });

@@ -172,6 +172,11 @@ export async function executeAction(
         logger.debug(`switchPage action: target="${eff.page}" — ${eff.description}`);
         break;
 
+      case 'closePage':
+        // Handled at the step executor level — it needs to close the page and update the active reference
+        logger.debug(`closePage action: target="${eff.page}" — ${eff.description}`);
+        break;
+
       case 'dismiss':
         await executeDismiss(root, eff);
         break;

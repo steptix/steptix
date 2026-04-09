@@ -134,6 +134,58 @@ export class PageTracker {
     return null;
   }
 
+  /**
+   * Close a page by label, URL substring, or title.
+   * Cannot close the main page. Returns the new active page after closing,
+   * or null if the page was not found or is the main page.
+   */
+  async closePage(identifier: string): Promise<{ closed: boolean; activePage: Page; error?: string }> {
+    // Find the target page (reuse switchToAsync matching logic)
+    let targetIdx = -1;
+
+    // 1. Exact label match
+    targetIdx = this.pages.findIndex((p) => p.label === identifier);
+
+    // 2. URL substring match (case-insensitive)
+    if (targetIdx === -1) {
+      targetIdx = this.pages.findIndex((p) =>
+        p.page.url().toLowerCase().includes(identifier.toLowerCase()),
+      );
+    }
+
+    // 3. Title substring match
+    if (targetIdx === -1) {
+      for (let i = 0; i < this.pages.length; i++) {
+        try {
+          const title = await this.pages[i]!.page.title();
+          if (title.toLowerCase().includes(identifier.toLowerCase())) {
+            targetIdx = i;
+            break;
+          }
+        } catch { /* page may be closed */ }
+      }
+    }
+
+    if (targetIdx === -1) {
+      return { closed: false, activePage: this.getActive(), error: `no page matching "${identifier}"` };
+    }
+
+    if (targetIdx === 0) {
+      return { closed: false, activePage: this.getActive(), error: 'cannot close the main page' };
+    }
+
+    const targetPage = this.pages[targetIdx]!.page;
+    try {
+      await targetPage.close();
+    } catch {
+      // Page may already be closed — the 'close' event handler will clean up
+    }
+
+    // The 'close' event handler (registered in addPage) removes the page from
+    // the array and adjusts activeIndex, so just return the new active page.
+    return { closed: true, activePage: this.getActive() };
+  }
+
   /** Get metadata for all open pages. */
   getPageList(): PageInfo[] {
     return this.pages.map((p, i) => ({

@@ -18,5 +18,6 @@ timeout: 120s
 7. Switch to the new tab page showing "Account Summary"
 8. Verify the account summary table shows 3 rows with Savings, Checking, and Investment accounts
 9. Switch back to the main page and verify the "Window & Tab Test" heading is visible
-10. Switch to the popup window and click the "Close Window" button
-11. Verify we are automatically back on the main page showing the "Window & Tab Test" heading
+10. Close the new tab and verify we are back on the main page showing the "Window & Tab Test" heading
+11. Switch to the popup window and click the "Close Window" button
+12. Verify we are automatically back on the main page showing the "Window & Tab Test" heading
