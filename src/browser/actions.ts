@@ -320,6 +320,20 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
     return;
   }
 
+  // Natural language URL conditions: "url contains /dashboard", "URL includes login", etc.
+  const urlConditionMatch = condition.match(/^url\s+(contains|includes|matches|has|ends with|starts with)\s+(.+)$/i);
+  if (urlConditionMatch) {
+    const [, verb, fragment] = urlConditionMatch;
+    const lower = verb!.toLowerCase();
+    await page.waitForURL((url) => {
+      const href = url.toString();
+      if (lower === 'starts with') return href.startsWith(fragment!);
+      if (lower === 'ends with') return href.endsWith(fragment!);
+      return href.includes(fragment!);
+    }, { timeout });
+    return;
+  }
+
   // Detect CSS selectors: starts with tag name, #, ., or [
   const looksLikeSelector = /^([a-z][a-z0-9]*(\[|#|\.| |,|:)|[#.\[])/.test(condition);
   if (looksLikeSelector) {
