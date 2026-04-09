@@ -43,8 +43,8 @@ export interface AIAction {
   direction?: 'up' | 'down' | 'left' | 'right';
   /** Scroll amount in pixels */
   amount?: number;
-  /** Type of wait to perform: selector, text, url, load, or duration */
-  waitType?: 'selector' | 'text' | 'url' | 'load' | 'duration';
+  /** Type of wait to perform */
+  waitType?: 'selector' | 'hidden' | 'text' | 'url' | 'load' | 'duration' | 'count' | 'attribute' | 'navigation' | 'stable';
   /** Timeout in milliseconds for wait actions */
   timeout?: number;
   /** Keyboard key or shortcut (e.g. "Enter", "Control+a") */

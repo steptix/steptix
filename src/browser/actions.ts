@@ -332,6 +332,15 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
       }
       break;
 
+    case 'hidden':
+      // Wait for an element to disappear (spinner, overlay, loading indicator)
+      if (root !== page) {
+        await root.locator(condition).first().waitFor({ state: 'hidden', timeout });
+      } else {
+        await page.waitForSelector(condition, { state: 'hidden', timeout });
+      }
+      break;
+
     case 'text':
       await page.waitForFunction(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -352,6 +361,69 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
         // Default to networkidle for unrecognised load conditions
         await page.waitForLoadState('networkidle', { timeout });
       }
+      break;
+
+    case 'count': {
+      // Wait until a selector matches at least N elements (default 1)
+      const expectedCount = parseInt(action.expected ?? '1', 10);
+      await page.waitForFunction(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ({ sel, min }) => (globalThis as any).document.querySelectorAll(sel).length >= min,
+        { sel: condition, min: expectedCount },
+        { timeout },
+      );
+      break;
+    }
+
+    case 'attribute': {
+      // Wait for an element's attribute to reach an expected value
+      // condition = CSS selector, expected = "attribute=value" or "!disabled"
+      const selector = action.selector ?? condition;
+      const expr = action.expected ?? condition;
+      const negate = expr.startsWith('!');
+      const attr = negate ? expr.slice(1) : expr.split('=')[0]!;
+      const val = negate ? null : (expr.split('=').slice(1).join('=') || null);
+
+      await page.waitForFunction(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ({ sel, attribute, expected, shouldBeAbsent }) => {
+          const el = (globalThis as any).document.querySelector(sel);
+          if (!el) return false;
+          if (shouldBeAbsent) return !el.hasAttribute(attribute);
+          if (expected === null) return el.hasAttribute(attribute);
+          return el.getAttribute(attribute) === expected;
+        },
+        { sel: selector, attribute: attr, expected: val, shouldBeAbsent: negate },
+        { timeout },
+      );
+      break;
+    }
+
+    case 'navigation': {
+      // Wait for any navigation to occur (URL changes from current)
+      const currentUrl = page.url();
+      await page.waitForURL((url) => url.toString() !== currentUrl, { timeout });
+      break;
+    }
+
+    case 'stable':
+      // Wait for the page to stabilise: network idle + no pending animations
+      await page.waitForLoadState('networkidle', { timeout });
+      // Additional check: wait for no layout shifts / DOM mutations
+      await page.waitForFunction(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        () => new Promise<boolean>((resolve) => {
+          const observer = new (globalThis as any).MutationObserver((_: unknown, obs: { disconnect: () => void }) => {
+            obs.disconnect();
+            resolve(false);
+          });
+          observer.observe((globalThis as any).document.body, {
+            childList: true, subtree: true, attributes: true,
+          });
+          setTimeout(() => { observer.disconnect(); resolve(true); }, 500);
+        }),
+        { timeout },
+      );
       break;
   }
 }
