@@ -2,7 +2,7 @@ import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import type { Page } from 'playwright';
 import type { Config } from '../config/types.js';
-import type { AIAction } from '../ai/types.js';
+import type { AIAction, BranchedAIResponse } from '../ai/types.js';
 import type { StepResult, SubActionResult, AiInteraction, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import {
@@ -12,12 +12,13 @@ import {
   buildContinuationMessage,
   buildAssertionMessage,
   buildRetryContext,
+  buildBranchedStepMessage,
 } from '../ai/prompts.js';
-import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext } from '../ai/prompts.js';
-import { diagnosePageState } from '../browser/page-state.js';
+import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome } from '../ai/prompts.js';
+import { diagnosePageState, waitForPageStability } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
-import { parseAIResponse, parseAssertionEvaluation } from '../ai/action-parser.js';
+import { parseAIResponse, parseAssertionEvaluation, parseBranchedResponse } from '../ai/action-parser.js';
 import { captureDomSnapshot } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
@@ -29,6 +30,7 @@ import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
 import type { StepCache, CachedStepData } from '../cache/step-cache.js';
+import type { StepGroup } from './step-grouper.js';
 
 /** Mutable ref for capturing the first-turn AI response data for cache writing. */
 export interface CacheCapture {
@@ -923,6 +925,224 @@ function extractEndpointPath(url: string): string {
   } catch {
     return url;
   }
+}
+
+/**
+ * Execute a group of conditional steps as a multi-outcome branch.
+ *
+ * Waits for the page to settle, then asks the AI which outcome appeared and
+ * executes the matching step. Steps that don't match are marked "skipped".
+ *
+ * Returns one StepResult per step in the group plus the index of the last
+ * step consumed (so the caller can skip ahead).
+ */
+export async function executeBranchedStep(
+  group: StepGroup,
+  totalSteps: number,
+  opts: StepExecutorOptions,
+): Promise<StepResult[]> {
+  const startTime = Date.now();
+  const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, pageTracker } = opts;
+  const page = pageTracker ? pageTracker.getActive() : opts.page;
+  const timeout = config.execution.timeout * 1000; // seconds → ms
+  const pollInterval = 3000; // 3s between polls
+  const deadline = Date.now() + timeout;
+
+  // Build outcome labels: conditionals first, then continuation
+  const outcomes: BranchOutcome[] = [];
+  const labelMap = new Map<string, { index: number; instruction: string; isConditional: boolean }>();
+  let labelChar = 65; // 'A'
+
+  for (const cs of group.conditionalSteps) {
+    const label = String.fromCharCode(labelChar++);
+    outcomes.push({ label, instruction: cs.instruction, isConditional: true });
+    labelMap.set(label, { index: cs.index, instruction: cs.instruction, isConditional: true });
+  }
+  {
+    const label = String.fromCharCode(labelChar);
+    outcomes.push({ label, instruction: group.continuationStep.instruction, isConditional: false });
+    labelMap.set(label, { index: group.continuationStep.index, instruction: group.continuationStep.instruction, isConditional: false });
+  }
+
+  logger.info(`Branched step: ${outcomes.length} outcomes (${group.conditionalSteps.length} conditional + 1 continuation)`);
+
+  // Wait for page stability before the first evaluation
+  await waitForPageStability(page, {
+    timeoutMs: Math.min(10_000, timeout),
+    quiesceMs: 1000,
+  });
+
+  // Polling loop: ask AI which outcome matches
+  let matched: BranchedAIResponse | null = null;
+  let pollCount = 0;
+  const maxPolls = Math.max(1, Math.ceil(timeout / pollInterval));
+
+  while (Date.now() < deadline && pollCount < maxPolls) {
+    pollCount++;
+
+    const domSnapshot = await captureDomSnapshot(page);
+    const screenshot = await captureScreenshot(page);
+    const screenshotBase64 = screenshot?.base64;
+
+    const openPages = pageTracker && pageTracker.count > 1
+      ? await pageTracker.getPageListWithTitles()
+      : undefined;
+
+    const screenshotForAi = config.ai.sendScreenshots ? (screenshotBase64 ?? null) : null;
+    const userMessage = buildBranchedStepMessage(
+      outcomes,
+      domSnapshot,
+      screenshotForAi,
+      conversationHistory,
+      openPages,
+    );
+
+    const systemPrompt = buildSystemPrompt(
+      contextContent,
+      testName,
+      baseUrl,
+      group.conditionalSteps[0]!.index,
+      totalSteps,
+      config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+    );
+
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      userMessage,
+    ];
+
+    const rawResponse = await aiClient.complete(messages);
+    const branchedResponse = parseBranchedResponse(rawResponse);
+
+    logger.debug(`Branch poll ${pollCount}: matched="${branchedResponse.matched}" — ${branchedResponse.reasoning}`);
+
+    if (branchedResponse.matched !== 'waiting') {
+      matched = branchedResponse;
+      break;
+    }
+
+    // Wait before polling again
+    if (Date.now() + pollInterval < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      // Wait for any page changes to settle
+      await waitForPageStability(page, {
+        timeoutMs: Math.min(5000, deadline - Date.now()),
+        quiesceMs: 500,
+      });
+    }
+  }
+
+  // Build results
+  const results: StepResult[] = [];
+
+  if (!matched) {
+    // Timed out waiting — fail all steps in the group
+    const durationMs = Date.now() - startTime;
+    for (const cs of group.conditionalSteps) {
+      results.push({
+        index: cs.index,
+        instruction: cs.instruction,
+        status: 'failed',
+        subActions: [],
+        durationMs,
+        retried: false,
+        error: `Branched step timed out after ${pollCount} polls — page never settled into a recognisable state`,
+        aiExplanation: 'Timed out waiting for page to settle into one of the expected outcomes',
+      });
+    }
+    results.push({
+      index: group.continuationStep.index,
+      instruction: group.continuationStep.instruction,
+      status: 'failed',
+      subActions: [],
+      durationMs,
+      retried: false,
+      error: 'Branched step timed out — continuation not reached',
+      aiExplanation: 'Timed out waiting for conditional resolution',
+    });
+    return results;
+  }
+
+  // Matched an outcome — execute it through the normal step executor
+  const matchedOutcome = labelMap.get(matched.matched.toUpperCase());
+  if (!matchedOutcome) {
+    // AI returned an unexpected label — treat as failure
+    const durationMs = Date.now() - startTime;
+    for (const cs of group.conditionalSteps) {
+      results.push({
+        index: cs.index,
+        instruction: cs.instruction,
+        status: 'failed',
+        subActions: [],
+        durationMs,
+        retried: false,
+        error: `AI returned unknown outcome label "${matched.matched}"`,
+        aiExplanation: matched.reasoning,
+      });
+    }
+    return results;
+  }
+
+  logger.info(`Branched step resolved: outcome ${matched.matched} → step ${matchedOutcome.index} "${matchedOutcome.instruction}"`);
+
+  // Execute the matched step normally (the AI already returned actions)
+  let matchedResult: StepResult;
+  if (matched.actions.length > 0) {
+    // Execute the actions the AI returned in the branch response
+    matchedResult = await executeStep(
+      matchedOutcome.index,
+      totalSteps,
+      matchedOutcome.instruction,
+      opts,
+    );
+  } else {
+    // No actions needed (e.g. continuation step = "Wait for dashboard" and dashboard is already loaded)
+    matchedResult = {
+      index: matchedOutcome.index,
+      instruction: matchedOutcome.instruction,
+      status: 'passed',
+      subActions: [],
+      durationMs: Date.now() - startTime,
+      retried: false,
+      aiExplanation: matched.reasoning,
+    };
+  }
+
+  // Build results for all steps in the group
+  for (const cs of group.conditionalSteps) {
+    if (cs.index === matchedOutcome.index) {
+      results.push(matchedResult);
+    } else {
+      results.push({
+        index: cs.index,
+        instruction: cs.instruction,
+        status: 'skipped',
+        subActions: [],
+        durationMs: 0,
+        retried: false,
+        aiExplanation: `Skipped: outcome ${matched.matched} matched instead`,
+      });
+    }
+  }
+
+  // Continuation step
+  if (group.continuationStep.index === matchedOutcome.index) {
+    results.push(matchedResult);
+  } else if (matchedOutcome.isConditional) {
+    // A conditional was matched — still need to execute the continuation step after
+    const contResult = await executeStep(
+      group.continuationStep.index,
+      totalSteps,
+      group.continuationStep.instruction,
+      opts,
+    );
+    results.push(contResult);
+  } else {
+    // Continuation was the matched outcome (no conditional fired)
+    results.push(matchedResult);
+  }
+
+  return results;
 }
 
 async function promptUser(question: string): Promise<string> {

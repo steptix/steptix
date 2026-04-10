@@ -3,7 +3,8 @@ import type { StepResult } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser, type BrowserSession } from '../browser/manager.js';
-import { executeStep } from '../runner/step-executor.js';
+import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
+import { identifyStepGroups } from '../runner/step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
@@ -420,12 +421,90 @@ export class SessionManager {
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
       ?? this.config.execution.timeout;
 
+    // Detect conditional step groups for multi-outcome branching
+    const stepGroups = identifyStepGroups(request.steps);
+
     try {
       for (let i = 0; i < request.steps.length; i++) {
         const originalStep = request.steps[i]!;
 
         // Interpolate {{variable}} placeholders
         const interpolated = interpolate(originalStep, resolvedParameters);
+
+        // Check if this step is part of a conditional group
+        const group = stepGroups.get(i);
+        if (group && i === group.conditionalSteps[0]!.index) {
+          logger.info(`Session "${sessionId}": conditional group at step ${i + 1}`);
+
+          const branchedResults = await executeBranchedStep(group, stepsTotal, {
+            page: session.browserSession.pageTracker.getActive(),
+            config: this.config,
+            aiClient: session.aiClient,
+            contextContent: session.contextContent,
+            testName: `session:${sessionId}`,
+            ...(session.sessionConfig.baseUrl !== undefined && {
+              baseUrl: session.sessionConfig.baseUrl,
+            }),
+            conversationHistory: [...session.conversationHistory],
+            apiResponseStore: session.apiResponseStore,
+            csrfTokens: session.csrfTokens,
+            resolvedParameters,
+            pageTracker: session.browserSession.pageTracker,
+          });
+
+          let branchFailed = false;
+          for (const result of branchedResults) {
+            const screenshotValue = result.screenshotBase64
+              ? `data:image/png;base64,${result.screenshotBase64}`
+              : '';
+            const resultStatus: 'passed' | 'failed' | 'error' =
+              result.status === 'skipped' ? 'passed' : result.status;
+
+            results.push({
+              step: request.steps[result.index] ?? result.instruction,
+              status: resultStatus,
+              actions: result.subActions.map((sa) => sa.action),
+              screenshot: screenshotValue,
+              reasoning: result.aiExplanation ?? '',
+              outputs: {},
+            });
+
+            let currentUrl = '';
+            try {
+              currentUrl = session.browserSession.pageTracker.getActive().url();
+            } catch { /* ignore */ }
+
+            session.conversationHistory.push(
+              formatStepHistoryEntry(
+                session.totalStepsExecuted + 1,
+                result.instruction,
+                result.status === 'passed',
+                currentUrl,
+              ),
+            );
+            session.tokenTracker.resetStep();
+            session.totalStepsExecuted++;
+
+            if (result.status === 'failed') {
+              overallStatus = 'failed';
+              errorInfo = { step: result.index, message: result.error ?? 'Step failed' };
+              branchFailed = true;
+            } else {
+              stepsCompleted++;
+            }
+          }
+
+          // Skip past all steps in this group
+          i = group.continuationStep.index;
+
+          if (branchFailed) break;
+          continue;
+        }
+
+        if (group && i !== group.conditionalSteps[0]!.index) {
+          // Part of a group but not the first — already handled
+          continue;
+        }
 
         // Check for skippable steps ([input:] and [interactive])
         if (isSkippableStep(interpolated)) {

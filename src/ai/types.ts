@@ -101,6 +101,16 @@ export interface AIResponse {
   needs_reeval?: boolean;
 }
 
+/** AI response for a branched (conditional) step evaluation */
+export interface BranchedAIResponse {
+  /** Which outcome label matched (e.g. "A", "B") or "waiting" */
+  matched: string;
+  /** Actions to execute for the matched outcome (empty if "waiting") */
+  actions: AIAction[];
+  reasoning: string;
+  needs_reeval?: boolean;
+}
+
 /** Result of an AI assertion evaluation */
 export interface AssertionEvaluation {
   pass: boolean;

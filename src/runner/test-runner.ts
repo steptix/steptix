@@ -7,7 +7,8 @@ import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser } from '../browser/manager.js';
-import { executeStep } from './step-executor.js';
+import { executeStep, executeBranchedStep } from './step-executor.js';
+import { identifyStepGroups } from './step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
 import { generateReport } from '../report/generator.js';
@@ -139,12 +140,64 @@ export async function runTest(
     let timeoutDeadline = Date.now() + testTimeout;
     let bail = false;
 
+    // Detect conditional step groups for multi-outcome branching
+    const stepGroups = identifyStepGroups(test.steps);
+
     for (let i = 0; i < test.steps.length; i++) {
       if (bail) break;
 
       if (Date.now() > timeoutDeadline) {
         logger.error(`Test timeout after ${testTimeout}ms at step ${i + 1}`);
         break;
+      }
+
+      // Check if this step is part of a conditional group
+      const group = stepGroups.get(i);
+      if (group && i === group.conditionalSteps[0]!.index) {
+        // Start of a conditional group — execute as branched step
+        logger.info(`Conditional group detected at step ${i + 1}: ${group.conditionalSteps.length} conditional + 1 continuation`);
+
+        const branchedResults = await executeBranchedStep(group, test.steps.length, {
+          page: session.page,
+          config,
+          aiClient,
+          contextContent,
+          testName: test.title,
+          ...(baseUrl !== undefined && { baseUrl }),
+          conversationHistory: [...conversationHistory],
+          apiResponseStore,
+          csrfTokens,
+          resolvedParameters,
+          pageTracker: session.pageTracker,
+          ...(stepCache !== undefined && { stepCache }),
+        });
+
+        for (const result of branchedResults) {
+          stepResults.push(result);
+          const url = session.page.url();
+          conversationHistory.push(
+            formatStepHistoryEntry(result.index, result.instruction, result.status === 'passed', url),
+          );
+
+          if (result.status === 'failed') {
+            logger.error(`Step ${result.index} FAILED: ${result.error ?? 'unknown error'}`);
+            bail = true;
+          } else if (result.status === 'skipped') {
+            logger.info(`Step ${result.index} skipped (conditional not matched)`);
+          } else {
+            logger.success(`Step ${result.index} passed`);
+          }
+        }
+
+        // Skip past all steps in this group (they've been handled)
+        i = group.continuationStep.index;
+        tokenTracker.resetStep();
+        continue;
+      }
+
+      if (group && i !== group.conditionalSteps[0]!.index) {
+        // This step is part of a group but not the first — already handled
+        continue;
       }
 
       const rawInstruction = test.steps[i] ?? '';

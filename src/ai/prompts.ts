@@ -484,6 +484,90 @@ function buildApiSection(apiContext?: ApiPromptContext): string {
   return `\n## API Response History\nThe following API calls have been made in prior steps of this test:\n\n${apiContext.responseHistory}`;
 }
 
+/** A single outcome in a branched (conditional) step prompt */
+export interface BranchOutcome {
+  /** Label for this outcome, e.g. "A", "B", "C" */
+  label: string;
+  /** The original step instruction */
+  instruction: string;
+  /** Whether this is a conditional step (true) or the continuation/default (false) */
+  isConditional: boolean;
+}
+
+/**
+ * Build the user message for a branched (conditional) step evaluation.
+ *
+ * Instead of asking the AI about one step at a time, this presents all possible
+ * outcomes simultaneously and asks which one matches the current page state.
+ * The AI can also respond with "waiting" if the page hasn't settled yet.
+ */
+export function buildBranchedStepMessage(
+  outcomes: BranchOutcome[],
+  domSnapshot: string,
+  screenshotBase64: string | null,
+  conversationHistory: string[],
+  openPages?: PageInfo[],
+): ChatMessage {
+  const historySection =
+    conversationHistory.length > 0
+      ? `## Prior Steps\n${conversationHistory.join('\n')}\n\n`
+      : '';
+
+  const openPagesSection = formatOpenPagesSection(openPages);
+
+  const outcomeLines = outcomes
+    .map((o) => {
+      const tag = o.isConditional ? '(conditional)' : '(default / continuation)';
+      return `${o.label}) ${o.instruction} ${tag}`;
+    })
+    .join('\n');
+
+  const textContent = `${historySection}${openPagesSection}## Branched Step — Determine Which Outcome Applies
+
+The following outcomes are possible after the previous action. Examine the current page state (DOM and screenshot) and determine which outcome has occurred:
+
+${outcomeLines}
+
+**Instructions:**
+- If one of the conditional outcomes (${outcomes.filter((o) => o.isConditional).map((o) => o.label).join(', ')}) clearly matches the current page state, respond with that outcome's label and the actions needed to complete it.
+- If none of the conditional outcomes match and the page shows the default/continuation state, respond with the continuation label (${outcomes.filter((o) => !o.isConditional).map((o) => o.label).join(', ')}) and any actions needed.
+- If the page is still loading/transitioning and none of these outcomes are clearly visible yet, respond with "waiting".
+
+## DOM Snapshot
+\`\`\`html
+${domSnapshot}
+\`\`\`
+
+[Screenshot is attached as an image — use it to understand the current visual state of the page]
+
+## Response Format
+{
+  "matched": "<label or 'waiting'>",
+  "actions": [...],
+  "reasoning": "Brief explanation of which outcome you see and why"
+}
+
+If matched is "waiting", return an empty actions array. Do NOT guess — if the page hasn't settled, say "waiting".`;
+
+  if (screenshotBase64) {
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text: textContent },
+        {
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${screenshotBase64}` },
+        },
+      ],
+    };
+  }
+
+  return {
+    role: 'user',
+    content: textContent,
+  };
+}
+
 /**
  * Format a completed step as a conversation history entry.
  */

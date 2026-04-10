@@ -1,4 +1,4 @@
-import type { AIAction, AIResponse, AssertionEvaluation, ActionType } from './types.js';
+import type { AIAction, AIResponse, BranchedAIResponse, AssertionEvaluation, ActionType } from './types.js';
 import { logger } from '../utils/logger.js';
 
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
@@ -79,6 +79,45 @@ export function parseAssertionEvaluation(rawResponse: string): AssertionEvaluati
         ? obj['explanation']
         : 'No explanation provided',
   };
+}
+
+/**
+ * Parse the AI response for a branched (conditional) step.
+ * Extracts the `matched` field in addition to standard actions.
+ */
+export function parseBranchedResponse(rawResponse: string): BranchedAIResponse {
+  const jsonString = extractJson(rawResponse);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonString);
+  } catch (err) {
+    throw new Error(
+      `Branched AI response is not valid JSON: ${String(err)}\nRaw response:\n${rawResponse.substring(0, 500)}`,
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('Branched AI response must be a JSON object with a "matched" field');
+  }
+
+  const obj = parsed as Record<string, unknown>;
+
+  const matched = typeof obj['matched'] === 'string' ? obj['matched'] : undefined;
+  if (!matched) {
+    throw new Error('Branched AI response missing required "matched" field');
+  }
+
+  // For "waiting" responses, actions are optional/empty
+  if (matched.toLowerCase() === 'waiting') {
+    const reasoning =
+      typeof obj['reasoning'] === 'string' ? obj['reasoning'] : 'Page still transitioning';
+    return { matched: 'waiting', actions: [], reasoning };
+  }
+
+  // Otherwise parse normally for actions
+  const base = validateAndNormaliseResponse(parsed);
+  return { matched, ...base };
 }
 
 /** Extract JSON from a string that may contain markdown code fences or extra whitespace */
