@@ -24,6 +24,8 @@ export interface BrowserConfig {
   slowMo: number;
   /** Browser engine to use */
   browser: 'chromium' | 'firefox' | 'webkit';
+  /** Capture full-page screenshots (entire scrollable page) instead of viewport-only */
+  fullPageScreenshots: boolean;
 }
 
 export interface TestsConfig {
@@ -46,7 +48,7 @@ export interface ExecutionConfig {
   dismissObstacles: boolean;
   /** Ask user when AI cannot determine next action */
   promptOnAmbiguity: boolean;
-  /** Maximum number of AI turns per step for multi-turn execution (default: 5) */
+  /** Maximum number of AI turns per step for multi-turn execution (default: 15) */
   maxTurns: number;
 }
 

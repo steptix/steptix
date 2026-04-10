@@ -23,7 +23,11 @@ export type ActionType =
   // Capture a DOM value into a test variable
   | 'read'
   // Count elements matching a selector and store the result
-  | 'count';
+  | 'count'
+  // Search the full DOM for specific text, return matching elements with selectors
+  | 'find'
+  // Return the full DOM subtree for a given selector (expand collapsed content)
+  | 'expand';
 
 /** A single action returned by the AI */
 export interface AIAction {

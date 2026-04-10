@@ -7,6 +7,7 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'assert', 'keyboard', 'keypress', 'prompt',
   'api_call', 'extract_csrf', 'extract_value',
   'read', 'count',
+  'find', 'expand',
 ]);
 
 /**
@@ -31,6 +32,9 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   'close_page': 'closePage',
   'closeWindow': 'closePage',
   'close_window': 'closePage',
+  'press': 'keyboard',
+  'key': 'keyboard',
+  'key_press': 'keypress',
 };
 
 /**

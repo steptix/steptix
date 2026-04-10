@@ -159,6 +159,18 @@ describe('parseAIResponse', () => {
     const result = parseAIResponse(raw);
     expect(result.actions[0]?.key).toBe('Enter');
   });
+
+  it('normalises "press" alias to keyboard', () => {
+    const raw = JSON.stringify({
+      actions: [
+        { action: 'press', description: 'Press Escape', key: 'Escape' },
+      ],
+      reasoning: 'Dismiss dialog.',
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]?.action).toBe('keyboard');
+    expect(result.actions[0]?.key).toBe('Escape');
+  });
 });
 
 describe('parseAssertionEvaluation', () => {
@@ -209,5 +221,37 @@ describe('parseAssertionEvaluation', () => {
     const raw = '```json\n' + JSON.stringify({ pass: true, actual: 'logged in', explanation: 'ok' }) + '\n```';
     const result = parseAssertionEvaluation(raw);
     expect(result.pass).toBe(true);
+  });
+});
+
+// ─── Exploration action types (find/expand) ─────────────────────────────────
+
+describe('parseAIResponse — find action', () => {
+  it('parses a find action with value', () => {
+    const raw = JSON.stringify({
+      actions: [{ action: 'find', value: 'ORD-789', description: 'Search for order ORD-789' }],
+      reasoning: 'Need to locate the order row.',
+      needs_reeval: true,
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]?.action).toBe('find');
+    expect(result.actions[0]?.value).toBe('ORD-789');
+    expect(result.needs_reeval).toBe(true);
+  });
+});
+
+describe('parseAIResponse — expand action', () => {
+  it('parses an expand action with selector', () => {
+    const raw = JSON.stringify({
+      actions: [{ action: 'expand', selector: 'table[data-testid="orders"]', description: 'Expand the orders table' }],
+      reasoning: 'Need to see all rows.',
+      needs_reeval: true,
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]?.action).toBe('expand');
+    expect(result.actions[0]?.selector).toBe('table[data-testid="orders"]');
+    expect(result.needs_reeval).toBe(true);
   });
 });

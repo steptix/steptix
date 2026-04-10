@@ -35,7 +35,7 @@ vi.mock('../src/runner/step-executor.js', () => ({
     index: 1,
     instruction: 'mock step',
     status: 'passed',
-    subActions: [{ index: 1, action: { action: 'click', description: 'click' }, durationMs: 10 }],
+    turns: [{ turnNumber: 1, attemptNumber: 1, timestamp: new Date().toISOString(), aiInteractions: [], subActions: [{ index: 1, action: { action: 'click', description: 'click' }, durationMs: 10 }] }],
     durationMs: 100,
     retried: false,
     aiExplanation: 'Did the thing',
@@ -106,6 +106,7 @@ const testConfig: Config = {
     windowSize: { width: 1280, height: 720 },
     slowMo: 0,
     browser: 'chromium',
+    fullPageScreenshots: true,
   },
   tests: {
     dir: './tests',

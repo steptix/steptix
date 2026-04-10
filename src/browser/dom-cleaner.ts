@@ -167,19 +167,47 @@ function prefixIframeComments(content: string, parentPath: string): string {
  * Self-contained browser script as a string expression.
  * This avoids any Node/TypeScript runtime helpers leaking into the browser context.
  *
+ * Produces a **compact, selector-focused** DOM snapshot designed to be paired with
+ * a screenshot. The screenshot provides visual context; this snapshot provides CSS
+ * selectors the AI needs to target elements via Playwright.
+ *
+ * Compact rules:
+ *  - Interactive elements: full attributes, selector comment, position annotation
+ *  - Headings (h1-h6): tag + text for orientation
+ *  - Landmarks (nav, main, header, footer, form, section, article): structural
+ *    container with key attributes only
+ *  - Elements with id/data-testid: structural container (preserves semantic markers)
+ *  - <option>: shown with value + text (needed for select actions)
+ *  - Everything else: tag omitted, children promoted (collapses wrapper divs)
+ *  - Repeated siblings: first 2 shown, rest collapsed with count comment
+ *  - `class` attribute excluded — screenshots provide visual context
+ *
  * Iframes are output with a [iframe:N] placeholder — do NOT recurse into them here.
  * captureDomSnapshot handles frame content via Playwright's Frame API instead.
  */
 const DOM_CLEANER_SCRIPT = `(() => {
   const INTERACTIVE_TAGS = new Set([
     'input', 'button', 'a', 'select', 'textarea', 'label',
+  ]);
+
+  const LANDMARK_TAGS = new Set([
     'nav', 'main', 'header', 'footer', 'form', 'section', 'article',
+  ]);
+
+  const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+
+  const INTERACTIVE_ROLES = new Set([
+    'button', 'link', 'checkbox', 'radio', 'tab', 'menuitem',
+    'option', 'switch', 'slider', 'spinbutton', 'textbox', 'combobox',
+    'searchbox', 'listbox',
   ]);
 
   const SKIP_TAGS = new Set([
     'script', 'style', 'noscript', 'svg', 'canvas', 'video', 'audio',
     'meta', 'link', 'base', 'title',
   ]);
+
+  var MAX_REPEAT = 2;
 
   function isVisible(el) {
     const style = window.getComputedStyle(el);
@@ -190,16 +218,34 @@ const DOM_CLEANER_SCRIPT = `(() => {
     );
   }
 
+  function isInteractiveElement(el) {
+    if (INTERACTIVE_TAGS.has(el.tagName.toLowerCase())) return true;
+    const role = el.getAttribute('role');
+    return role !== null && INTERACTIVE_ROLES.has(role);
+  }
+
   function getAttributes(el) {
     const attrs = [];
     const important = [
-      'id', 'class', 'data-testid', 'name', 'type', 'role', 'aria-label',
+      'id', 'data-testid', 'name', 'type', 'role', 'aria-label',
       'aria-labelledby', 'aria-describedby', 'aria-expanded', 'aria-checked',
       'aria-selected', 'aria-disabled', 'placeholder', 'href', 'src', 'value',
       'checked', 'selected', 'disabled', 'readonly', 'required',
       'for', 'action', 'method', 'title',
     ];
     for (const attr of important) {
+      const val = el.getAttribute(attr);
+      if (val !== null && val !== '') {
+        attrs.push(attr + '="' + val + '"');
+      }
+    }
+    return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
+  }
+
+  function getKeyAttributes(el) {
+    const attrs = [];
+    const keys = ['id', 'data-testid', 'role', 'aria-label', 'name', 'action', 'method'];
+    for (const attr of keys) {
       const val = el.getAttribute(attr);
       if (val !== null && val !== '') {
         attrs.push(attr + '="' + val + '"');
@@ -248,6 +294,16 @@ const DOM_CLEANER_SCRIPT = `(() => {
     return tag;
   }
 
+  function hasRelevantDescendant(el) {
+    const tag = el.tagName.toLowerCase();
+    if (SKIP_TAGS.has(tag)) return false;
+    if (isInteractiveElement(el) || HEADING_TAGS.has(tag) || tag === 'iframe') return true;
+    for (const child of el.children) {
+      if (hasRelevantDescendant(child)) return true;
+    }
+    return false;
+  }
+
   let iframeIdx = 0;
 
   function processElement(el, depth) {
@@ -268,39 +324,329 @@ const DOM_CLEANER_SCRIPT = `(() => {
            + indent + '</iframe>\\n';
     }
 
-    const attrs = getAttributes(el);
-    const text = getVisibleText(el);
-    const selector = buildSelector(el);
-    const isInteractive = INTERACTIVE_TAGS.has(tag);
+    // Option elements: show value and text (children of <select>)
+    if (tag === 'option') {
+      const val = el.getAttribute('value') || '';
+      const text = (el.textContent || '').trim().substring(0, 60);
+      if (text || val) {
+        return indent + '<option value="' + val + '"> ' + text + '</option>\\n';
+      }
+      return '';
+    }
 
-    let output = '';
-    if (isInteractive || text || attrs) {
-      const selectorComment = isInteractive ? ' <!-- ' + selector + ' -->' : '';
-      const posAnnotation = isInteractive ? getPositionAnnotation(el) : '';
+    // Interactive elements: full output with selector and position
+    if (isInteractiveElement(el)) {
+      const attrs = getAttributes(el);
+      const text = getVisibleText(el);
+      const selector = buildSelector(el);
+      const pos = getPositionAnnotation(el);
       const textContent = text ? ' ' + text : '';
-      output += indent + '<' + tag + attrs + '>' + textContent + selectorComment + posAnnotation + '\\n';
-    }
-
-    for (const child of el.children) {
-      output += processElement(child, depth + (isInteractive ? 1 : 0));
-    }
-
-    if (isInteractive || text || attrs) {
-      if (!['input', 'br', 'hr', 'img', 'link', 'meta'].includes(tag)) {
+      const selfClose = ['input', 'br', 'hr', 'img'].includes(tag);
+      let output = indent + '<' + tag + attrs + '>' + textContent + ' <!-- ' + selector + ' -->' + pos + '\\n';
+      if (!selfClose) {
+        output += processChildren(el, depth + 1);
         output += indent + '</' + tag + '>\\n';
       }
+      return output;
     }
+
+    // Headings: text content for orientation
+    if (HEADING_TAGS.has(tag)) {
+      const text = (el.textContent || '').trim().substring(0, 100);
+      if (text) return indent + '<' + tag + '> ' + text + '</' + tag + '>\\n';
+      return '';
+    }
+
+    // Landmarks: structural container with key attributes
+    if (LANDMARK_TAGS.has(tag)) {
+      const attrs = getKeyAttributes(el);
+      const childOutput = processChildren(el, depth + 1);
+      if (!childOutput.trim()) return '';
+      return indent + '<' + tag + attrs + '>\\n' + childOutput + indent + '</' + tag + '>\\n';
+    }
+
+    // Elements with id or data-testid: structural container (preserves semantic markers)
+    if (el.getAttribute('id') || el.getAttribute('data-testid')) {
+      const attrs = getKeyAttributes(el);
+      const childOutput = processChildren(el, depth + 1);
+      if (!childOutput.trim()) return '';
+      return indent + '<' + tag + attrs + '>\\n' + childOutput + indent + '</' + tag + '>\\n';
+    }
+
+    // Everything else: skip tag, pass through children at same depth
+    if (!hasRelevantDescendant(el)) return '';
+    return processChildren(el, depth);
+  }
+
+  function processChildren(parent, depth) {
+    const visible = [];
+    for (const child of parent.children) {
+      const tag = child.tagName.toLowerCase();
+      if (SKIP_TAGS.has(tag)) continue;
+      if (!isVisible(child)) continue;
+      visible.push(child);
+    }
+
+    let output = '';
+    let i = 0;
+
+    while (i < visible.length) {
+      const el = visible[i];
+      const tag = el.tagName.toLowerCase();
+
+      // Count consecutive same-tag siblings
+      let groupEnd = i + 1;
+      while (groupEnd < visible.length && visible[groupEnd].tagName.toLowerCase() === tag) {
+        groupEnd++;
+      }
+      const groupSize = groupEnd - i;
+
+      // Collapse repeated siblings — but never collapse if any sibling in the
+      // overflow group contains interactive or heading descendants.
+      var canCollapse = groupSize > MAX_REPEAT && !isInteractiveElement(el) && !HEADING_TAGS.has(tag);
+      if (canCollapse) {
+        for (let k = i + MAX_REPEAT; k < groupEnd; k++) {
+          if (hasRelevantDescendant(visible[k])) { canCollapse = false; break; }
+        }
+      }
+      if (canCollapse) {
+        for (let k = i; k < i + MAX_REPEAT; k++) {
+          output += processElement(visible[k], depth);
+        }
+        const indent = '  '.repeat(depth);
+        output += indent + '<!-- ' + (groupSize - MAX_REPEAT) + ' more <' + tag + '> -->\\n';
+        i = groupEnd;
+      } else {
+        output += processElement(el, depth);
+        i++;
+      }
+    }
+
     return output;
   }
 
   try {
     const body = document.body;
     if (!body) return '<body>(empty)</body>';
-    return processElement(body, 0) || '<body>(no visible interactive elements)</body>';
+    const result = processChildren(body, 0);
+    return result || '<body>(no visible interactive elements)</body>';
   } catch (err) {
     return '<error>Failed to clean DOM: ' + String(err) + '</error>';
   }
 })()`;
+
+/** Result of a findInDom search */
+export interface DomSearchMatch {
+  /** CSS selector for the matching element */
+  selector: string;
+  /** Tag name of the matching element */
+  tag: string;
+  /** Text content of the matching element (truncated) */
+  text: string;
+  /** Key attributes of the matching element */
+  attributes: string;
+  /** Ancestor chain for orientation (e.g. "main > div#content > table") */
+  context: string;
+}
+
+/**
+ * Search the full DOM for elements containing the given text.
+ * Returns matching elements with their selectors and parent context.
+ * Used by the "find" exploration action.
+ */
+export async function findInDom(page: Page, searchText: string): Promise<DomSearchMatch[]> {
+  const results = await page.evaluate(`(() => {
+    const searchText = ${JSON.stringify(searchText)}.toLowerCase();
+    const SKIP = new Set(['script', 'style', 'noscript', 'svg', 'meta', 'link', 'base', 'title']);
+    const matches = [];
+
+    function buildSelector(el) {
+      const testId = el.getAttribute('data-testid');
+      if (testId) return '[data-testid="' + testId + '"]';
+      const id = el.getAttribute('id');
+      if (id) return '#' + id;
+      const tag = el.tagName.toLowerCase();
+      const name = el.getAttribute('name');
+      if (name) return tag + '[name="' + name + '"]';
+      const ariaLabel = el.getAttribute('aria-label');
+      if (ariaLabel) return tag + '[aria-label="' + ariaLabel + '"]';
+      return tag;
+    }
+
+    function getKeyAttrs(el) {
+      const attrs = [];
+      for (const a of ['id', 'data-testid', 'role', 'name', 'type', 'href']) {
+        const v = el.getAttribute(a);
+        if (v) attrs.push(a + '="' + v + '"');
+      }
+      return attrs.join(' ');
+    }
+
+    function getAncestorChain(el) {
+      const parts = [];
+      let cur = el.parentElement;
+      let depth = 0;
+      while (cur && cur !== document.body && depth < 4) {
+        const tag = cur.tagName.toLowerCase();
+        const id = cur.getAttribute('id');
+        const testId = cur.getAttribute('data-testid');
+        let label = tag;
+        if (testId) label += '[data-testid="' + testId + '"]';
+        else if (id) label += '#' + id;
+        parts.unshift(label);
+        cur = cur.parentElement;
+        depth++;
+      }
+      return parts.join(' > ');
+    }
+
+    function walk(el) {
+      const tag = el.tagName.toLowerCase();
+      if (SKIP.has(tag)) return;
+      const text = (el.textContent || '').trim();
+      if (text.toLowerCase().includes(searchText)) {
+        // Find the most specific element containing the text (leaf-ish match)
+        let hasChildMatch = false;
+        for (const child of el.children) {
+          if ((child.textContent || '').trim().toLowerCase().includes(searchText)) {
+            hasChildMatch = true;
+            break;
+          }
+        }
+        if (!hasChildMatch) {
+          matches.push({
+            selector: buildSelector(el),
+            tag: tag,
+            text: text.substring(0, 200),
+            attributes: getKeyAttrs(el),
+            context: getAncestorChain(el),
+          });
+          if (matches.length >= 10) return;
+        }
+      }
+      if (matches.length < 10) {
+        for (const child of el.children) {
+          walk(child);
+          if (matches.length >= 10) return;
+        }
+      }
+    }
+
+    try {
+      walk(document.body);
+      return matches;
+    } catch (err) {
+      return [{ selector: '', tag: 'error', text: String(err), attributes: '', context: '' }];
+    }
+  })()`) as DomSearchMatch[];
+
+  return results;
+}
+
+/**
+ * Expand the full DOM subtree for a given CSS selector.
+ * Returns a detailed snapshot of that element's children — all elements with
+ * attributes and text, not the compact version. Used by the "expand" action.
+ */
+export async function expandDomSubtree(page: Page, selector: string): Promise<string> {
+  const result = await page.evaluate(`(() => {
+    const selector = ${JSON.stringify(selector)};
+    const SKIP = new Set(['script', 'style', 'noscript', 'svg', 'meta', 'link', 'base', 'title']);
+
+    function getAttrs(el) {
+      const attrs = [];
+      const important = [
+        'id', 'data-testid', 'name', 'type', 'role', 'aria-label',
+        'placeholder', 'href', 'src', 'value', 'checked', 'selected',
+        'disabled', 'readonly', 'for', 'action', 'method', 'title',
+      ];
+      for (const attr of important) {
+        const val = el.getAttribute(attr);
+        if (val !== null && val !== '') {
+          attrs.push(attr + '="' + val + '"');
+        }
+      }
+      return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
+    }
+
+    function buildSelector(el) {
+      const testId = el.getAttribute('data-testid');
+      if (testId) return '[data-testid="' + testId + '"]';
+      const id = el.getAttribute('id');
+      if (id) return '#' + id;
+      const tag = el.tagName.toLowerCase();
+      const name = el.getAttribute('name');
+      if (name) return tag + '[name="' + name + '"]';
+      const ariaLabel = el.getAttribute('aria-label');
+      if (ariaLabel) return tag + '[aria-label="' + ariaLabel + '"]';
+      return tag;
+    }
+
+    function isVisible(el) {
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+    }
+
+    var INTERACTIVE = new Set(['input', 'button', 'a', 'select', 'textarea', 'label']);
+
+    function processEl(el, depth) {
+      const tag = el.tagName.toLowerCase();
+      if (SKIP.has(tag)) return '';
+      if (!isVisible(el)) return '';
+      const indent = '  '.repeat(depth);
+      const attrs = getAttrs(el);
+      let text = '';
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          text += (node.textContent || '').trim();
+        }
+      }
+      text = text.substring(0, 100);
+      const isInt = INTERACTIVE.has(tag);
+      const selectorComment = isInt ? ' <!-- ' + buildSelector(el) + ' -->' : '';
+      const textPart = text ? ' ' + text : '';
+      let output = indent + '<' + tag + attrs + '>' + textPart + selectorComment + '\\n';
+      for (const child of el.children) {
+        output += processEl(child, depth + 1);
+      }
+      if (!['input', 'br', 'hr', 'img'].includes(tag)) {
+        output += indent + '</' + tag + '>\\n';
+      }
+      return output;
+    }
+
+    try {
+      const el = document.querySelector(selector);
+      if (!el) return '[expand] No element found for selector: ' + selector;
+      return processEl(el, 0);
+    } catch (err) {
+      return '[expand] Error: ' + String(err);
+    }
+  })()`) as string;
+
+  return result;
+}
+
+/**
+ * Format findInDom results for inclusion in the AI continuation message.
+ */
+export function formatFindResults(matches: DomSearchMatch[], query: string): string {
+  if (matches.length === 0) {
+    return `### find "${query}"\nNo matches found.`;
+  }
+  const lines = matches.map((m, i) => {
+    const contextPart = m.context ? ` (in ${m.context})` : '';
+    return `${i + 1}. <${m.tag}${m.attributes ? ' ' + m.attributes : ''}> "${m.text}"${contextPart}\n   selector: ${m.selector}`;
+  });
+  return `### find "${query}"\nFound ${matches.length} match${matches.length > 1 ? 'es' : ''}:\n${lines.join('\n')}`;
+}
+
+/**
+ * Format expandDomSubtree results for inclusion in the AI continuation message.
+ */
+export function formatExpandResult(content: string, selector: string): string {
+  return `### expand "${selector}"\n\`\`\`html\n${content}\n\`\`\``;
+}
 
 /**
  * Clean a raw HTML string into a simplified representation.

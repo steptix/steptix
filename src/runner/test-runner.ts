@@ -226,7 +226,7 @@ export async function runTest(
           index: i + 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: inputDuration,
           retried: false,
           aiExplanation: `User provided input for "${inputStep.variable}"`,
@@ -255,7 +255,8 @@ export async function runTest(
             apiResponseStore,
             csrfTokens,
             pageTracker: session.pageTracker,
-            ...(stepCache !== undefined && { stepCache }),
+            // No stepCache — interactive commands are ad-hoc user instructions,
+            // not cacheable steps (and they all share the same stepIndex)
           });
 
           interactiveResults.push(result);
@@ -281,13 +282,13 @@ export async function runTest(
         }
 
         const anyFailed = interactiveResults.some((r) => r.status === 'failed');
-        const allSubActions = interactiveResults.flatMap((r) => r.subActions);
+        const allTurns = interactiveResults.flatMap((r) => r.turns);
 
         stepResult = {
           index: i + 1,
           instruction,
           status: anyFailed ? 'failed' : 'passed',
-          subActions: allSubActions,
+          turns: allTurns,
           durationMs: Date.now() - stepStartTime,
           retried: false,
           aiExplanation: `Interactive mode: executed ${interactiveResults.length} command(s)`,
@@ -354,7 +355,7 @@ export async function runTest(
     const durationMs = Date.now() - startTime;
     const passedSteps = stepResults.filter((s) => s.status === 'passed').length;
     const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
-    const totalSubActions = stepResults.reduce((sum, s) => sum + s.subActions.length, 0);
+    const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
     const timedOut = stepResults.length < test.steps.length && !bail;
     const overallStatus = failedSteps > 0 || timedOut ? 'failed' : 'passed';
 

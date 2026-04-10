@@ -62,15 +62,17 @@ ${stepInfo}
 ${viewportInfo}
 
 ## Your Task
-Execute the following test step by returning a JSON object with an array of actions.
+Execute the following test step by returning a JSON object with ONE action at a time.
+After each action, you will receive an updated screenshot and DOM snapshot showing the result.
+Plan your next action based on the observed result — do not batch multiple actions.
 
 ## Rules
 1. Return ONLY valid JSON — no markdown, no explanation outside JSON
-2. Each action must have: { "action": string, "description": string } plus relevant fields
+2. Return exactly ONE action per response: { "action": string, "description": string } plus relevant fields. After this action executes, you will see the result and can plan the next action
 3. Use CSS selectors. Prefer data-testid > id > aria-label > name > visible text. NEVER use Tailwind utility classes (e.g. .!fixed, .z-[999], .bg-black) in selectors — they contain characters that break CSS parsing. Use semantic selectors instead (role, aria-label, tag, id, data-testid)
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
-5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — action success is determined by whether it throws an error, not by an assertion
-6. If you encounter an unexpected popup/modal/banner, include a "dismiss" action BEFORE your main actions
+5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — you will see the result in the next screenshot
+6. If you encounter an unexpected popup/modal/banner, return a "dismiss" action first — you can continue with your main action on the next turn
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
 8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
 9. For "navigate" actions, set "url" to the full or relative URL
@@ -87,12 +89,16 @@ Execute the following test step by returning a JSON object with an array of acti
    - waitType "attribute": set "selector" to the target element, "expected" to "attribute=value" (e.g. "aria-disabled=false") or "!attribute" to wait for removal (e.g. "!disabled")
    - waitType "navigation": wait for the page to navigate away from the current URL — no condition needed
    - waitType "stable": wait for the page to fully stabilise (network idle and no DOM changes) — no condition needed
+   If the screenshot shows the page is loading or transitioning (visible spinner, blank content, partially loaded), return a "wait" action to let it settle before proceeding
 13. For "read" actions, set "selector" to the CSS selector of the element to read and "as" to a snake_case variable name. Use "read" when a step asks you to capture, note, remember, store, or take note of a value from the page (e.g. "capture the residential address", "take note of the balance", "note the email"). If the step specifies a variable name via [store as: name], use that name exactly. Otherwise derive a concise snake_case name from what is being captured (e.g. "residential address" → "residential_address", "account balance" → "account_balance"). Captured values become available as {{variable_name}} in later steps
 14. For "count" actions, set "selector" to the CSS selector to count and "as" to a snake_case variable name. Use "count" when a step asks how many elements exist (e.g. "how many accounts", "count the rows"). The result is stored as a string (e.g. "3") and available as {{variable_name}} in later steps
-15. Set "needs_reeval": true if you have returned all the actions you can plan from the current page state, but more actions are needed to complete the step — e.g. you need to navigate first and then interact with elements on the new page. Omit or set false when the step is complete after the returned actions. When a "wait" action is your only returned action, strongly prefer "needs_reeval": true — the wait implies the page state is changing and you likely need to observe the result before planning further actions
+15. Set "needs_reeval": true if the current step instruction is NOT yet fully satisfied after this action. Set false (or omit) when the step instruction IS satisfied. IMPORTANT: only consider the current step instruction — do NOT continue into actions that belong to subsequent steps. For example, if the step says "Enter username and password", set needs_reeval: true after entering the username (you still need to enter the password), but set needs_reeval: false after entering the password — do NOT proceed to click Login unless the step says to
 16. For elements inside an <iframe>, set "frame" to the CSS selector of the iframe element (shown in the <!-- comment --> after the <iframe> tag). For **nested iframes** (an iframe inside another iframe), chain the selectors with " >> " from outermost to innermost. Example: if the DOM snapshot shows \`<iframe id="outer"> <!-- #outer -->\n  <iframe id="inner"> <!-- #inner -->\n    <button id="btn">\`, then to click #btn set "frame": "#outer >> #inner", "selector": "#btn". Never put an iframe selector inside the "selector" field — iframe traversal belongs entirely in the "frame" field. Omit "frame" for elements in the main page
 17. When the application opens a new window or tab (via window.open or target="_blank"), the framework tracks all open pages. An "Open Pages" section will appear in the prompt listing each page with its label, URL, and title. Use a "switchPage" action to switch context before interacting with another page: { "action": "switchPage", "page": "page:2", "description": "Switch to popup window" }. After switching, all actions execute against that page and the DOM snapshot will reflect it on the next turn (set "needs_reeval": true after switchPage). Use "switchPage" with "main" to return to the original page. Do NOT use switchPage if there is only one page open
 18. To close a browser tab or popup window, use a "closePage" action: { "action": "closePage", "page": "page:2", "description": "Close the popup window" }. The "page" field accepts the same identifiers as switchPage (label, URL substring, or title substring). You cannot close the main page. After closing, the framework automatically switches back to the main page — set "needs_reeval": true to get the updated DOM snapshot. Use this when a step asks to close a tab, window, or popup
+19. For "find" actions, set "value" to the text to search for in the full DOM. The framework will search the entire page and return matching elements with their selectors. Use this when you need to locate a specific item in a collapsed/summarised list (e.g. finding a specific order in a table). Always set "needs_reeval": true
+20. For "expand" actions, set "selector" to the CSS selector of the element to expand. The framework will return the full DOM subtree for that element. Use this when the compact DOM shows a collapsed summary and you need to see all children (e.g. expanding a table to see all rows). Always set "needs_reeval": true
+21. CRITICAL: Complete ONLY what the current step instruction literally asks for. Do NOT perform follow-up actions that belong to subsequent steps, even if they seem like the obvious next thing to do. Each step is deliberately scoped — the test author has split the workflow into separate steps for a reason. Once the instruction is fulfilled, stop
 ${apiContext?.hasApiContext ? `
 ## API Actions (use when the step describes an API call)
 When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.
@@ -113,11 +119,10 @@ IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "htt
 ## Response Format
 {
   "actions": [
-    { "action": "click", "selector": "#login-btn", "description": "Click the login button" },
-    { "action": "assert", "condition": "dashboard visible", "expected": "balance > 0", "description": "Verify dashboard loaded" }
+    { "action": "click", "selector": "#login-btn", "description": "Click the login button" }
   ],
   "reasoning": "Brief explanation of your approach",
-  "needs_reeval": false
+  "needs_reeval": true
 }
 ${apiSection}`;
 }
@@ -422,6 +427,7 @@ export function buildContinuationMessage(
   screenshotBase64: string | null,
   turnNumber: number,
   openPages?: PageInfo[],
+  explorationResults?: string[],
 ): ChatMessage {
   const actionLines = completedActions.length > 0
     ? completedActions.map((a) => `  - ${a.description}`).join('\n')
@@ -432,6 +438,10 @@ export function buildContinuationMessage(
     : '  (none)';
 
   const openPagesSection = formatOpenPagesSection(openPages);
+
+  const explorationSection = explorationResults && explorationResults.length > 0
+    ? `## Exploration Results\n${explorationResults.join('\n\n')}\n\n`
+    : '';
 
   const textContent = `You are continuing the execution of a step.
 
@@ -445,15 +455,15 @@ ${variableLines}
 
 Current URL: ${currentUrl}
 
-${openPagesSection}## DOM Snapshot
+${openPagesSection}${explorationSection}## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
 \`\`\`
 
 [Screenshot is attached as an image — use it to understand the current visual state of the page]
 
-What actions are needed to complete the original instruction?
-Set needs_reeval: true again only if you still cannot complete the step from this page state.`;
+What is the next action needed to complete the original instruction: "${originalInstruction}"?
+Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps.`;
 
   if (screenshotBase64) {
     return {
