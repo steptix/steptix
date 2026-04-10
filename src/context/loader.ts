@@ -29,6 +29,7 @@ async function loadMdFilesFromDir(dir: string): Promise<LoadedContext['files']> 
     cwd: absDir,
     absolute: true,
     ignore: ['**/node_modules/**'],
+    follow: true, // To follow symbolic links
   });
 
   filePaths.sort();
