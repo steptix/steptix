@@ -1312,6 +1312,8 @@ async function handleRequest(
       '/iframes': 'iframes.html',
       '/nested-iframes': 'nested-iframes.html',
       '/new-window': 'new-window.html',
+      '/mfa-login': 'mfa-login.html',
+      '/mfa': 'mfa.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {
@@ -1429,7 +1431,7 @@ async function handleRequest(
 
 server.listen(PORT, () => {
   console.log(`Fixture test server running at http://localhost:${PORT}`);
-  console.log(`  Static:  index.html, dashboard.html, delegates.html, transactions.html, iframes.html, new-window.html`);
+  console.log(`  Static:  index.html, dashboard.html, delegates.html, transactions.html, iframes.html, new-window.html, mfa-login.html, mfa.html`);
   console.log(`  Iframes: /iframe/banner, /iframe/sidebar/:cat, /iframe/content/:cat/:item`);
   console.log(`  API:     /api/delegates, /api/notifications, /api/csrf-token`);
 });
