@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(node -e ' *)",
+      "Bash(xargs -n 1 git update-ref -d)",
+      "Bash(git tag *)",
+      "Bash(git reflog *)",
+      "Bash(git gc *)",
+      "Bash(git fetch *)"
     ]
   }
 }
