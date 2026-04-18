@@ -60,13 +60,26 @@ function resolveConfigPath(configPath?: string): string | null {
   return null;
 }
 
+/**
+ * Apply environment-derived defaults that must be read after `.env` has been
+ * loaded. Keeping this out of `DEFAULT_CONFIG` avoids ESM import-order issues
+ * where `defaults.ts` evaluates before `loadDefaultEnvFileSync()` runs.
+ */
+function withEnvDefaults(config: Config): Config {
+  const apiKey = process.env['AI_API_KEY'];
+  if (apiKey !== undefined && config.ai.apiKey === undefined) {
+    return { ...config, ai: { ...config.ai, apiKey } };
+  }
+  return config;
+}
+
 /** Load and merge configuration from file + defaults */
 export async function loadConfig(configPath?: string): Promise<Config> {
   const resolvedPath = resolveConfigPath(configPath);
 
   if (!resolvedPath) {
     logger.debug('No config file found, using defaults');
-    return DEFAULT_CONFIG;
+    return withEnvDefaults(DEFAULT_CONFIG);
   }
 
   logger.debug(`Loading config from: ${resolvedPath}`);
@@ -85,11 +98,11 @@ export async function loadConfig(configPath?: string): Promise<Config> {
     }
 
     const userConfig = module.default ?? {};
-    return mergeConfig(DEFAULT_CONFIG, userConfig);
+    return withEnvDefaults(mergeConfig(DEFAULT_CONFIG, userConfig));
   } catch (err) {
     logger.warn(`Failed to load config from ${resolvedPath}: ${String(err)}`);
     logger.warn('Falling back to default configuration');
-    return DEFAULT_CONFIG;
+    return withEnvDefaults(DEFAULT_CONFIG);
   }
 }
 

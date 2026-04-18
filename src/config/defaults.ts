@@ -9,7 +9,6 @@ export const DEFAULT_CONFIG: Config = {
   },
   ai: {
     gatewayUrl: 'https://llm.corp.example',
-    ...(process.env['AI_API_KEY'] !== undefined && { apiKey: process.env['AI_API_KEY'] }),
     model: 'gpt-5.4-mini',
     maxInputTokens: 1_000_000,
     streamResponses: false,
