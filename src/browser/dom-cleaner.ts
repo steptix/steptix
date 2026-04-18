@@ -1,6 +1,16 @@
 import type { Frame, Page } from 'playwright';
 
 /**
+ * DOM snapshot mode:
+ *  - 'compact': action-oriented — only interactive elements, headings, landmarks (default)
+ *  - 'readable': extraction-oriented — preserves visible text content in all elements
+ */
+export type DomMode = 'compact' | 'readable';
+
+/** Maximum character length for readable DOM snapshots (prevents token blowup). */
+const READABLE_DOM_CHAR_LIMIT = 80_000;
+
+/**
  * Capture a cleaned DOM snapshot from the current page.
  * Runs a script in the browser context to extract a simplified, AI-friendly
  * representation of the interactive and semantic elements.
@@ -13,12 +23,21 @@ import type { Frame, Page } from 'playwright';
  *
  * We use a string-based evaluate to avoid TypeScript/esbuild injecting
  * helper functions (like __name) that don't exist in the browser context.
+ *
+ * @param mode - 'compact' (default) for action-oriented DOM, 'readable' for extraction-oriented
  */
-export async function captureDomSnapshot(page: Page): Promise<string> {
-  let snapshot = (await page.evaluate(DOM_CLEANER_SCRIPT) as string | null) ?? '';
+export async function captureDomSnapshot(page: Page, mode: DomMode = 'compact'): Promise<string> {
+  const script = buildDomCleanerScript(mode);
+  let snapshot = (await page.evaluate(script) as string | null) ?? '';
 
   if (snapshot.includes('[iframe:')) {
-    snapshot = await injectFrameContent(page, snapshot);
+    snapshot = await injectFrameContent(page, snapshot, 0, '', mode);
+  }
+
+  // Truncate oversized readable snapshots to prevent token blowup
+  if (mode === 'readable' && snapshot.length > READABLE_DOM_CHAR_LIMIT) {
+    snapshot = snapshot.substring(0, READABLE_DOM_CHAR_LIMIT)
+      + '\n<!-- DOM snapshot truncated — page content exceeds readable mode limit -->';
   }
 
   return snapshot;
@@ -43,6 +62,7 @@ async function injectFrameContent(
   snapshot: string,
   depth: number = 0,
   parentFramePath: string = '',
+  mode: DomMode = 'compact',
 ): Promise<string> {
   const iframeLocators = await root.locator('iframe').all();
   if (iframeLocators.length === 0) return snapshot;
@@ -93,12 +113,12 @@ async function injectFrameContent(
         // (e.g. via postMessage) and the new content hasn't loaded yet.
         await frame.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
         // frame.evaluate() uses CDP — works for both same-origin and cross-origin frames
-        frameContent = await frame.evaluate(DOM_CLEANER_SCRIPT) as string;
+        frameContent = await frame.evaluate(buildDomCleanerScript(mode)) as string;
 
         // Recursively capture nested iframe content within this frame.
         // Pass the current frame path so nested iframe comments show the full chain.
         if (depth < MAX_IFRAME_DEPTH && frameContent.includes('[iframe:')) {
-          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath);
+          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath, mode);
         }
       }
     } catch {
@@ -164,28 +184,34 @@ function prefixIframeComments(content: string, parentPath: string): string {
 }
 
 /**
- * Self-contained browser script as a string expression.
+ * Build the self-contained browser script as a string expression.
  * This avoids any Node/TypeScript runtime helpers leaking into the browser context.
  *
- * Produces a **compact, selector-focused** DOM snapshot designed to be paired with
- * a screenshot. The screenshot provides visual context; this snapshot provides CSS
- * selectors the AI needs to target elements via Playwright.
+ * Produces a DOM snapshot designed to be paired with a screenshot.
  *
- * Compact rules:
- *  - Interactive elements: full attributes, selector comment, position annotation
- *  - Headings (h1-h6): tag + text for orientation
- *  - Landmarks (nav, main, header, footer, form, section, article): structural
- *    container with key attributes only
- *  - Elements with id/data-testid: structural container (preserves semantic markers)
- *  - <option>: shown with value + text (needed for select actions)
- *  - Everything else: tag omitted, children promoted (collapses wrapper divs)
- *  - Repeated siblings: first 2 shown, rest collapsed with count comment
- *  - `class` attribute excluded — screenshots provide visual context
+ * Two modes:
+ *  - **compact** (default): selector-focused, for action steps (click/type).
+ *    Only interactive elements, headings, landmarks, and elements with id/data-testid.
+ *    Everything else is collapsed. Repeated siblings are limited to 2.
+ *
+ *  - **readable**: content-focused, for extraction/assertion steps.
+ *    Preserves visible text in all elements (td, p, span, li, etc.).
+ *    Text-bearing tags are shown with content. Container tags are preserved.
+ *    Repeated siblings are limited to 5. Position annotations are omitted.
  *
  * Iframes are output with a [iframe:N] placeholder — do NOT recurse into them here.
  * captureDomSnapshot handles frame content via Playwright's Frame API instead.
  */
-const DOM_CLEANER_SCRIPT = `(() => {
+function buildDomCleanerScript(mode: DomMode): string {
+  const isReadable = mode === 'readable';
+  const maxRepeat = isReadable ? 5 : 2;
+  const textLimit = isReadable ? 300 : 100;
+
+  return `(() => {
+  var MODE = '${mode}';
+  var MAX_REPEAT = ${maxRepeat};
+  var TEXT_LIMIT = ${textLimit};
+
   const INTERACTIVE_TAGS = new Set([
     'input', 'button', 'a', 'select', 'textarea', 'label',
   ]);
@@ -207,7 +233,18 @@ const DOM_CLEANER_SCRIPT = `(() => {
     'meta', 'link', 'base', 'title',
   ]);
 
-  var MAX_REPEAT = 2;
+  // Tags that bear readable text content (shown in readable mode)
+  var READABLE_TEXT_TAGS = new Set([
+    'td', 'th', 'li', 'p', 'span', 'dd', 'dt', 'em', 'strong', 'b', 'i',
+    'small', 'abbr', 'time', 'code', 'pre', 'blockquote', 'figcaption',
+    'summary', 'caption',
+  ]);
+
+  // Container tags that are preserved in readable mode for structure
+  var READABLE_CONTAINER_TAGS = new Set([
+    'table', 'tr', 'tbody', 'thead', 'tfoot', 'ul', 'ol', 'dl',
+    'figure', 'details', 'div',
+  ]);
 
   function isVisible(el) {
     const style = window.getComputedStyle(el);
@@ -255,6 +292,8 @@ const DOM_CLEANER_SCRIPT = `(() => {
   }
 
   function getPositionAnnotation(el) {
+    // Skip position annotations in readable mode — saves tokens, not needed for reading
+    if (MODE === 'readable') return '';
     try {
       var rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return ' [pos:hidden]';
@@ -276,7 +315,7 @@ const DOM_CLEANER_SCRIPT = `(() => {
         text += (node.textContent || '').trim();
       }
     }
-    return text.trim().substring(0, 100);
+    return text.trim().substring(0, TEXT_LIMIT);
   }
 
   function buildSelector(el) {
@@ -302,6 +341,14 @@ const DOM_CLEANER_SCRIPT = `(() => {
       if (hasRelevantDescendant(child)) return true;
     }
     return false;
+  }
+
+  // In readable mode, check if an element or its descendants have visible text
+  function hasVisibleText(el) {
+    var tag = el.tagName.toLowerCase();
+    if (SKIP_TAGS.has(tag)) return false;
+    var text = (el.textContent || '').trim();
+    return text.length > 0;
   }
 
   let iframeIdx = 0;
@@ -352,7 +399,7 @@ const DOM_CLEANER_SCRIPT = `(() => {
 
     // Headings: text content for orientation
     if (HEADING_TAGS.has(tag)) {
-      const text = (el.textContent || '').trim().substring(0, 100);
+      const text = (el.textContent || '').trim().substring(0, TEXT_LIMIT);
       if (text) return indent + '<' + tag + '> ' + text + '</' + tag + '>\\n';
       return '';
     }
@@ -373,7 +420,35 @@ const DOM_CLEANER_SCRIPT = `(() => {
       return indent + '<' + tag + attrs + '>\\n' + childOutput + indent + '</' + tag + '>\\n';
     }
 
-    // Everything else: skip tag, pass through children at same depth
+    // ── Readable mode: preserve text-bearing and container elements ──
+    if (MODE === 'readable') {
+      // Text-bearing tags: show tag + text content
+      if (READABLE_TEXT_TAGS.has(tag)) {
+        var text = (el.textContent || '').trim().substring(0, TEXT_LIMIT);
+        if (text) {
+          var attrs = getKeyAttributes(el);
+          return indent + '<' + tag + attrs + '> ' + text + ' </' + tag + '>\\n';
+        }
+        return '';
+      }
+
+      // Container tags: preserve structure, recurse into children
+      if (READABLE_CONTAINER_TAGS.has(tag)) {
+        var childOutput = processChildren(el, depth + 1);
+        if (!childOutput.trim()) return '';
+        var attrs = getKeyAttributes(el);
+        return indent + '<' + tag + attrs + '>\\n' + childOutput + indent + '</' + tag + '>\\n';
+      }
+
+      // Other tags in readable mode: still collapse tag but pass through children
+      // (same as compact default below, but we also check for visible text)
+      if (hasVisibleText(el)) {
+        return processChildren(el, depth);
+      }
+      return '';
+    }
+
+    // ── Compact mode default: skip tag, pass through children at same depth ──
     if (!hasRelevantDescendant(el)) return '';
     return processChildren(el, depth);
   }
@@ -434,6 +509,10 @@ const DOM_CLEANER_SCRIPT = `(() => {
     return '<error>Failed to clean DOM: ' + String(err) + '</error>';
   }
 })()`;
+}
+
+/** Pre-built compact script for backward compatibility (used by cleanHtmlString) */
+const DOM_CLEANER_SCRIPT = buildDomCleanerScript('compact');
 
 /** Result of a findInDom search */
 export interface DomSearchMatch {

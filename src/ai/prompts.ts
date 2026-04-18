@@ -1,6 +1,7 @@
 import type { ChatMessage } from './types.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
+import type { DomMode } from '../browser/dom-cleaner.js';
 
 /** Viewport dimensions passed to the system prompt */
 export interface ViewportInfo {
@@ -158,6 +159,7 @@ export function buildStepMessage(
   screenshotBase64: string | null,
   conversationHistory: string[],
   openPages?: PageInfo[],
+  domMode?: DomMode,
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -166,10 +168,14 @@ export function buildStepMessage(
 
   const openPagesSection = formatOpenPagesSection(openPages);
 
+  const domLabel = domMode === 'readable'
+    ? '## DOM Snapshot (readable mode — includes visible text content for value extraction)'
+    : '## DOM Snapshot';
+
   const textContent = `${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
 
-## DOM Snapshot
+${domLabel}
 \`\`\`html
 ${domSnapshot}
 \`\`\`
@@ -232,7 +238,7 @@ export function buildAssertionMessage(
 ${stepInstruction}
 ${apiSection}
 
-## Current Page DOM
+## Current Page DOM (readable mode — includes visible text content)
 \`\`\`html
 ${domSnapshot}
 \`\`\`
@@ -428,6 +434,7 @@ export function buildContinuationMessage(
   turnNumber: number,
   openPages?: PageInfo[],
   explorationResults?: string[],
+  domMode?: DomMode,
 ): ChatMessage {
   const actionLines = completedActions.length > 0
     ? completedActions.map((a) => `  - ${a.description}`).join('\n')
@@ -443,6 +450,10 @@ export function buildContinuationMessage(
     ? `## Exploration Results\n${explorationResults.join('\n\n')}\n\n`
     : '';
 
+  const domLabel = domMode === 'readable'
+    ? '## DOM Snapshot (readable mode — includes visible text content for value extraction)'
+    : '## DOM Snapshot';
+
   const textContent = `You are continuing the execution of a step.
 
 Original instruction: "${originalInstruction}"
@@ -455,7 +466,7 @@ ${variableLines}
 
 Current URL: ${currentUrl}
 
-${openPagesSection}${explorationSection}## DOM Snapshot
+${openPagesSection}${explorationSection}${domLabel}
 \`\`\`html
 ${domSnapshot}
 \`\`\`

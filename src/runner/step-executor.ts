@@ -20,6 +20,7 @@ import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
 import { parseAIResponse, parseAssertionEvaluation, parseBranchedResponse } from '../ai/action-parser.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
+import type { DomMode } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
 import { handleObstacles } from '../browser/obstacle-handler.js';
@@ -87,6 +88,34 @@ export function isAssertionStep(instruction: string): boolean {
   // Strip leading [prefix] markers such as [input: x] or [interactive]
   const stripped = instruction.replace(/^\[.*?\]\s*/i, '').toLowerCase();
   return /^(verify|assert|check|confirm|ensure|should|must|expect|validate|greater than|less than|equal to)/.test(stripped);
+}
+
+/** Determine if a step instruction is asking to extract, read, or capture values from the page.
+ * When true, a richer "readable" DOM snapshot is sent that preserves visible text content
+ * (table cells, paragraphs, spans, etc.) instead of the compact action-oriented DOM.
+ *
+ * Detection heuristics:
+ *  1. Explicit variable storage patterns: [store as: ...], store/save as {{...}}
+ *  2. Extraction verbs at start: get, capture, read, extract, note, record, etc.
+ *  3. Question patterns: "what is the", "how many", "what are the"
+ */
+export function isExtractionStep(instruction: string): boolean {
+  const lower = instruction.toLowerCase();
+
+  // Explicit variable storage patterns (anywhere in instruction)
+  if (/\[store as:/.test(lower)) return true;
+  if (/store\s+(it\s+)?as\s+\{\{/.test(lower)) return true;
+  if (/save\s+(it\s+)?as\s+\{\{/.test(lower)) return true;
+
+  // Strip leading [prefix] markers to check intent verbs
+  const stripped = instruction.replace(/^\[.*?\]\s*/i, '').toLowerCase();
+
+  // Extraction verbs at start of the instruction
+  if (/^(get|capture|read|extract|note|record|store|save|retrieve|collect|grab|copy|take note|what is|what are|how many)/.test(stripped)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -236,6 +265,12 @@ async function executeStepAttempt(
   let page = pageTracker ? pageTracker.getActive() : opts.page;
   const maxTurns = config.execution.maxTurns;
 
+  // Use readable DOM for extraction and assertion steps — preserves visible text content
+  const domMode: DomMode = (isExtractionStep(instruction) || isAssertionStep(instruction)) ? 'readable' : 'compact';
+  if (domMode === 'readable') {
+    logger.debug(`Using readable DOM mode for step: "${instruction.substring(0, 60)}..."`);
+  }
+
   // Accumulated across all turns
   const allTurns: TurnResult[] = [];
   const allCompletedActions: Array<{ action: string; description: string; selector?: string }> = [];
@@ -289,7 +324,7 @@ async function executeStepAttempt(
 
     // 2. Capture current page state (full-page so AI sees content below the fold)
     const turnTimestamp = new Date().toISOString();
-    const domSnapshot = await captureDomSnapshot(page);
+    const domSnapshot = await captureDomSnapshot(page, domMode);
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
@@ -345,6 +380,7 @@ async function executeStepAttempt(
         screenshotForAi,
         conversationHistory,
         openPages,
+        domMode,
       );
     } else {
       userMessage = buildContinuationMessage(
@@ -357,6 +393,7 @@ async function executeStepAttempt(
         currentTurn,
         openPages,
         explorationResults.length > 0 ? explorationResults : undefined,
+        domMode,
       );
     }
 
@@ -688,7 +725,7 @@ async function executeStepAttempt(
       }
 
       // Capture state after action (full-page for report visibility)
-      const postDom = await captureDomSnapshot(page).catch(() => '');
+      const postDom = await captureDomSnapshot(page, domMode).catch(() => '');
       const postShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
       const postShotBase64 = postShot?.base64;
       const postUrl = page.url();
@@ -797,7 +834,7 @@ async function executeStepAttempt(
 
   // 9b. Evaluate assertion if step has one (runs after all turns complete successfully)
   if (!stepFailed && isAssertionStep(instruction)) {
-    const finalDom = await captureDomSnapshot(page);
+    const finalDom = await captureDomSnapshot(page, 'readable');
     const finalShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
 
     const assertAction = lastAiResponse?.actions.find((a) => a.action === 'assert');
