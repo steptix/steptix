@@ -63,6 +63,21 @@ export function loadDefaultEnvFileSync(projectRoot: string = process.cwd()): voi
 }
 
 /**
+ * Parse an env var string as a boolean. Truthy values: "true", "1", "yes", "on"
+ * (case-insensitive). Falsy values: "false", "0", "no", "off". Anything else —
+ * including `undefined` or whitespace — returns `undefined` so callers can
+ * distinguish "not set" from "explicitly false".
+ */
+export function parseBoolEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '') return undefined;
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
+/**
  * Parse a `.env` file into a key-value map.
  *
  * - Lines starting with `#` are comments and are ignored

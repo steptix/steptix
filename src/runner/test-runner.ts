@@ -8,7 +8,9 @@ import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
+import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
+import { runFsdRepl } from './fsd-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
 import { generateReport } from '../report/generator.js';
@@ -137,9 +139,10 @@ export async function runTest(
       });
     }
 
-    const stepResults = [];
+    const stepResults: StepResult[] = [];
     let timeoutDeadline = Date.now() + testTimeout;
     let bail = false;
+    let supervised = false;
 
     // Detect conditional step groups for multi-outcome branching
     const stepGroups = identifyStepGroups(test.steps);
@@ -345,7 +348,66 @@ export async function runTest(
 
       if (stepResult.status === 'failed') {
         logger.error(`Step ${i + 1} FAILED: ${stepResult.error ?? 'unknown error'}`);
-        bail = true;
+
+        const canEnterFsd =
+          config.execution.interactiveOnFailure &&
+          config.browser.headed &&
+          Boolean(process.stdout.isTTY);
+
+        if (canEnterFsd) {
+          supervised = true;
+          const executorOptions: StepExecutorOptions = {
+            page: session.page,
+            config,
+            aiClient,
+            contextContent,
+            testName: test.title,
+            ...(baseUrl !== undefined && { baseUrl }),
+            conversationHistory: [...conversationHistory],
+            apiResponseStore,
+            csrfTokens,
+            resolvedParameters,
+            pageTracker: session.pageTracker,
+          };
+          const adHocResults: StepResult[] = [];
+          const decision = await runFsdRepl({
+            page: session.page,
+            testSteps: test.steps,
+            failedStepIndex: i + 1,
+            executorOptions,
+            adHocResults,
+          });
+
+          stepResults.push(...adHocResults);
+          for (const ad of adHocResults) {
+            conversationHistory.push(
+              formatStepHistoryEntry(
+                ad.index,
+                `(fsd) ${ad.instruction}`,
+                ad.status === 'passed',
+                session.page.url(),
+              ),
+            );
+          }
+
+          if (decision.kind === 'resume') {
+            stepResult.fsdResumed = true;
+            conversationHistory.push(
+              `[fsd] user resumed test at step ${decision.fromStepIndex}`,
+            );
+            // Extend the test timeout so the user's debugging time isn't billed against it
+            timeoutDeadline = Date.now() + testTimeout;
+            // Pre-decrement so the next `i++` lands on the chosen index
+            i = decision.fromStepIndex - 2;
+            tokenTracker.resetStep();
+            continue;
+          }
+
+          // User exited — abort the run
+          bail = true;
+        } else {
+          bail = true;
+        }
       } else {
         logger.success(`Step ${i + 1} passed`);
       }
@@ -382,6 +444,7 @@ export async function runTest(
       ...(baseUrl !== undefined && { baseUrl }),
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
       ...(dataRowVal !== undefined && { dataRow: dataRowVal }),
+      ...(supervised && { supervised: true }),
     };
 
     if (overallStatus === 'failed' && config.ai.diagnoseFailures) {

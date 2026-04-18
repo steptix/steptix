@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_CONFIG } from './defaults.js';
 import type { Config, UserConfig } from './types.js';
+import { parseBoolEnv } from '../env/loader.js';
 import { logger } from '../utils/logger.js';
 
 /** Recursively merge user config over defaults */
@@ -66,11 +67,22 @@ function resolveConfigPath(configPath?: string): string | null {
  * where `defaults.ts` evaluates before `loadDefaultEnvFileSync()` runs.
  */
 function withEnvDefaults(config: Config): Config {
+  let result = config;
+
   const apiKey = process.env['AI_API_KEY'];
-  if (apiKey !== undefined && config.ai.apiKey === undefined) {
-    return { ...config, ai: { ...config.ai, apiKey } };
+  if (apiKey !== undefined && result.ai.apiKey === undefined) {
+    result = { ...result, ai: { ...result.ai, apiKey } };
   }
-  return config;
+
+  const interactiveOnFailure = parseBoolEnv(process.env['INTERACTIVE_ON_FAILURE']);
+  if (interactiveOnFailure !== undefined) {
+    result = {
+      ...result,
+      execution: { ...result.execution, interactiveOnFailure },
+    };
+  }
+
+  return result;
 }
 
 /** Load and merge configuration from file + defaults */

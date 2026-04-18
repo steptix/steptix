@@ -35,6 +35,7 @@ export const DEFAULT_CONFIG: Config = {
     dismissObstacles: true,
     promptOnAmbiguity: true,
     maxTurns: 15,
+    interactiveOnFailure: false,
   },
   reports: {
     outputDir: './reports',
