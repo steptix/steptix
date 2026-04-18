@@ -644,7 +644,6 @@ ai-ui-automation/
 
 | Package       | Purpose                             |
 |---------------|-------------------------------------|
-| `dotenv`      | Environment file parsing            |
 | `undici`      | HTTP client for standalone API calls|
 | `swagger-parser` | OpenAPI spec parsing and validation |
 

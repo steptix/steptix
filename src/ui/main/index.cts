@@ -8,9 +8,39 @@
  * Electron's patched module loader rather than resolving to the npm shim.
  */
 
-import 'dotenv/config';
 import path from 'node:path';
-import { watch, type FSWatcher } from 'node:fs';
+import { readFileSync, watch, type FSWatcher } from 'node:fs';
+
+// Load base `.env` from cwd before anything else. Duplicated here (rather than
+// imported from src/env/loader.ts) because this file compiles to CJS and can't
+// statically require an ESM module. Keep in sync with loadDefaultEnvFileSync.
+(function loadDefaultEnv(): void {
+  const filePath = path.resolve(process.cwd(), '.env');
+  let content: string;
+  try {
+    content = readFileSync(filePath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex < 1) continue;
+    const key = trimmed.substring(0, eqIndex).trim();
+    let value = trimmed.substring(eqIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (key && !(key in process.env)) {
+      process.env[key] = value;
+    }
+  }
+})();
 
 import { app, BrowserWindow } from 'electron';
 
