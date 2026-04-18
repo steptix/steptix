@@ -67,8 +67,15 @@ export function getReportTemplate(): string {
     .step-body { display: none; padding: 0 18px 18px; border-top: 1px solid var(--border); }
     .step.open .step-body { display: block; }
 
+    /* Turns */
+    .turn { margin-top: 14px; }
+    .turn + .turn { margin-top: 18px; padding-top: 14px; border-top: 2px dashed var(--border); }
+    .turn-header { font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+    .turn-time { font-weight: 500; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; color: #6366f1; }
+    .event-time { font-size: 0.7rem; font-weight: 500; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; color: var(--muted); margin-left: auto; }
+
     /* Sub-actions */
-    .sub-actions { margin-top: 14px; }
+    .sub-actions { margin-top: 10px; }
     .sub-action { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; overflow: hidden; }
     .sub-action-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--code-bg); cursor: pointer; }
     .sub-action-header:hover { background: #e9eaec; }
@@ -91,8 +98,14 @@ export function getReportTemplate(): string {
 
     /* Screenshots */
     .screenshot-container { margin-top: 10px; }
-    .screenshot-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
-    .screenshot-img { max-width: 100%; border: 1px solid var(--border); border-radius: 6px; cursor: zoom-in; }
+    .screenshot-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
+    .screenshot-url { font-size: 0.75rem; color: #2563eb; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; margin-bottom: 6px; word-break: break-all; }
+    .screenshot-img { max-width: 280px; max-height: 180px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; cursor: zoom-in; transition: opacity 0.15s; }
+    .screenshot-img:hover { opacity: 0.85; }
+    .turn-screenshot { margin: 10px 0; padding: 10px; background: #f0f7ff; border: 1px solid #bfdbfe; border-radius: 6px; }
+    .turn-screenshot .screenshot-label { color: #1d4ed8; }
+    .step-end-screenshot { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+    .step .badge-fail ~ .step-body .step-end-screenshot .screenshot-label { color: var(--fail); }
 
     /* AI Responses */
     .ai-responses { margin-top: 14px; }

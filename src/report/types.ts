@@ -28,6 +28,10 @@ export interface SubActionResult {
   error?: string;
   /** Populated for api_call sub-actions */
   apiCallData?: ApiCallData;
+  /** Page URL at the time the screenshot was captured */
+  pageUrl?: string;
+  /** ISO 8601 timestamp when this sub-action completed */
+  timestamp?: string;
 }
 
 /** Result of an assertion embedded in a step */
@@ -41,12 +45,30 @@ export interface AiInteraction {
   purpose: string;
   /** Which retry attempt this interaction belongs to (1 = first attempt, 2 = first retry, etc.) */
   attemptNumber?: number;
-  /** Turn number within a multi-turn step (1, 2, 3, …). Absent for single-turn steps. */
-  turnNumber?: number;
   /** Text-only messages sent to the AI (base64 images omitted; screenshots are captured separately) */
   requestMessages?: Array<{ role: string; content: string }>;
   /** The raw response text from the AI */
   response: string;
+  /** Screenshot the AI saw when making this decision (page state at time of AI call) */
+  screenshotBase64?: string;
+  /** Page URL at the time of the AI call */
+  pageUrl?: string;
+  /** ISO 8601 timestamp when the AI was called */
+  timestamp?: string;
+}
+
+/** A single turn within a step (AI decision + resulting actions) */
+export interface TurnResult {
+  /** 1-based turn number */
+  turnNumber: number;
+  /** Which retry attempt this turn belongs to (1 = first attempt, 2 = first retry, etc.) */
+  attemptNumber: number;
+  /** ISO 8601 timestamp when this turn started */
+  timestamp: string;
+  /** The AI interaction(s) for this turn (action-plan, and optionally clarification) */
+  aiInteractions: AiInteraction[];
+  /** Sub-actions executed from this turn's action plan */
+  subActions: SubActionResult[];
 }
 
 /** Result of a single test step */
@@ -55,10 +77,15 @@ export interface StepResult {
   index: number;
   instruction: string;
   status: StepStatus;
-  subActions: SubActionResult[];
+  /** Ordered turns — each groups an AI decision with the sub-actions it produced */
+  turns: TurnResult[];
   assertion?: AssertionResult;
-  /** Screenshot captured at the start of the step */
+  /** AI interaction for the assertion evaluation (runs after all turns) */
+  assertionAiInteraction?: AiInteraction;
+  /** Screenshot captured at the end of the step */
   screenshotBase64?: string;
+  /** Page URL at the time the end-of-step screenshot was captured */
+  pageUrl?: string;
   /** DOM snapshot at the start of the step */
   domSnapshot?: string;
   durationMs: number;
@@ -67,8 +94,6 @@ export interface StepResult {
   error?: string;
   /** AI explanation of what it was attempting (shown on failure) */
   aiExplanation?: string;
-  /** All raw AI responses captured during this step */
-  aiResponses?: AiInteraction[];
 }
 
 /** Complete test run report data */
@@ -106,4 +131,21 @@ export interface RunSummary {
   totalInputTokens: number;
   totalOutputTokens: number;
   reports: TestReport[];
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for migrating consumers that used the old flat arrays
+// ---------------------------------------------------------------------------
+
+/** Extract all sub-actions from a step's turns (replaces step.subActions) */
+export function getAllSubActions(step: StepResult): SubActionResult[] {
+  return step.turns.flatMap((t) => t.subActions);
+}
+
+/** Extract all AI interactions from a step's turns + assertion (replaces step.aiResponses) */
+export function getAllAiInteractions(step: StepResult): AiInteraction[] {
+  const fromTurns = step.turns.flatMap((t) => t.aiInteractions);
+  return step.assertionAiInteraction
+    ? [...fromTurns, step.assertionAiInteraction]
+    : fromTurns;
 }

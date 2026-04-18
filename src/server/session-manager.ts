@@ -463,7 +463,7 @@ export class SessionManager {
             results.push({
               step: request.steps[result.index] ?? result.instruction,
               status: resultStatus,
-              actions: result.subActions.map((sa) => sa.action),
+              actions: result.turns.flatMap((t) => t.subActions).map((sa) => sa.action),
               screenshot: screenshotValue,
               reasoning: result.aiExplanation ?? '',
               outputs: {},
@@ -616,7 +616,7 @@ export class SessionManager {
         results.push({
           step: originalStep,
           status: resultStatus,
-          actions: stepResult.subActions.map((sa) => sa.action),
+          actions: stepResult.turns.flatMap((t) => t.subActions).map((sa) => sa.action),
           screenshot: screenshotValue,
           reasoning: stepResult.aiExplanation ?? '',
           outputs: stepOutputs,

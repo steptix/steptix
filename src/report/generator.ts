@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
-import type { TestReport, StepResult, SubActionResult, AiInteraction, ApiCallData } from './types.js';
+import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
@@ -89,22 +89,36 @@ function renderSteps(steps: StepResult[]): string {
   return steps.map((step) => renderStep(step)).join('\n');
 }
 
+/** Format an ISO timestamp to a short time string (HH:MM:SS) in local timezone */
+function formatTime(isoString?: string): string {
+  if (!isoString) return '';
+  try {
+    return new Date(isoString).toLocaleTimeString('en-AU', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+      timeZone: 'Australia/Sydney',
+    });
+  } catch {
+    return '';
+  }
+}
+
 function renderStep(step: StepResult): string {
   const statusClass = step.status === 'passed' ? 'badge-pass' : step.status === 'failed' ? 'badge-fail' : 'badge-skip';
   const statusIcon = step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '—';
   const duration = formatDuration(step.durationMs);
   const retryBadge = step.retried ? '<span class="badge badge-skip">Retried</span>' : '';
 
-  const subActionsHtml = step.subActions.length > 0
-    ? `<div class="sub-actions">${step.subActions.map(renderSubAction).join('\n')}</div>`
+  // Render turns chronologically
+  const hasMultipleAttempts = new Set(step.turns.map((t) => t.attemptNumber)).size > 1;
+  const turnsHtml = step.turns.length > 0
+    ? step.turns.map((turn) => renderTurn(turn, step.turns.length > 1, hasMultipleAttempts)).join('\n')
     : '';
 
   const assertionHtml = step.assertion
-    ? renderAssertion(step.assertion)
-    : '';
-
-  const aiResponsesHtml = step.aiResponses && step.aiResponses.length > 0
-    ? renderAiResponses(step.aiResponses)
+    ? renderAssertion(step.assertion, step.assertionAiInteraction)
     : '';
 
   const failureHtml = step.status === 'failed'
@@ -115,18 +129,21 @@ function renderStep(step: StepResult): string {
        </div>`
     : '';
 
-  const screenshotHtml = step.screenshotBase64
-    ? `<div class="screenshot-container">
-        <div class="screenshot-label">Page state at step start</div>
-        <img class="screenshot-img" src="${toDataUri(step.screenshotBase64)}" alt="Step screenshot" loading="lazy">
-       </div>`
-    : '';
-
   const domHtml = step.domSnapshot
     ? `<details class="dom-snapshot">
         <summary>DOM Snapshot</summary>
         <pre>${escapeHtml(step.domSnapshot.substring(0, 5000))}</pre>
        </details>`
+    : '';
+
+  const endScreenshotLabel = step.status === 'failed' ? 'Page state at failure' : 'Page state at step end';
+  const endUrlHtml = step.pageUrl ? `<div class="screenshot-url">${escapeHtml(step.pageUrl)}</div>` : '';
+  const endScreenshotHtml = step.screenshotBase64
+    ? `<div class="screenshot-container step-end-screenshot">
+        <div class="screenshot-label">${endScreenshotLabel}</div>
+        ${endUrlHtml}
+        <img class="screenshot-img" src="${toDataUri(step.screenshotBase64)}" alt="Step end screenshot" loading="lazy">
+       </div>`
     : '';
 
   return `<div class="step">
@@ -139,24 +156,96 @@ function renderStep(step: StepResult): string {
     <span class="step-chevron">▼</span>
   </div>
   <div class="step-body">
-    ${screenshotHtml}
     ${domHtml}
-    ${subActionsHtml}
+    ${turnsHtml}
     ${assertionHtml}
-    ${aiResponsesHtml}
     ${failureHtml}
+    ${endScreenshotHtml}
   </div>
 </div>`;
+}
+
+function renderTurn(turn: TurnResult, showTurnHeader: boolean, showAttempt: boolean): string {
+  const timeStr = formatTime(turn.timestamp);
+  const timeLabel = timeStr ? `<span class="turn-time">${timeStr}</span>` : '';
+  const attemptBadge = showAttempt
+    ? ` <span class="badge badge-skip">Attempt ${turn.attemptNumber}</span>`
+    : '';
+
+  const headerHtml = showTurnHeader
+    ? `<div class="turn-header">Turn ${turn.turnNumber}${attemptBadge} ${timeLabel}</div>`
+    : '';
+
+  // AI interactions (action-plan, clarification)
+  const aiHtml = turn.aiInteractions.map((ai) => renderAiInteraction(ai)).join('\n');
+
+  // Sub-actions
+  const subActionsHtml = turn.subActions.length > 0
+    ? `<div class="sub-actions">${turn.subActions.map(renderSubAction).join('\n')}</div>`
+    : '';
+
+  return `<div class="turn">
+  ${headerHtml}
+  ${aiHtml}
+  ${subActionsHtml}
+</div>`;
+}
+
+function renderAiInteraction(ai: AiInteraction): string {
+  const label = escapeHtml(ai.purpose);
+  const pretty = formatJson(tryParseJson(ai.response));
+  const timeStr = formatTime(ai.timestamp);
+  const timeLabel = timeStr ? ` <span class="event-time">${timeStr}</span>` : '';
+
+  const urlHtml = ai.pageUrl ? `<div class="screenshot-url">${escapeHtml(ai.pageUrl)}</div>` : '';
+  const screenshotHtml = ai.screenshotBase64
+    ? `<div class="screenshot-container turn-screenshot">
+        <div class="screenshot-label">Page state at AI decision</div>
+        ${urlHtml}
+        <img class="screenshot-img" src="${toDataUri(ai.screenshotBase64)}" alt="AI decision screenshot" loading="lazy">
+       </div>`
+    : '';
+
+  const requestHtml = ai.requestMessages && ai.requestMessages.length > 0
+    ? ai.requestMessages.map((m) =>
+        `<div class="ai-request-message">
+          <div class="ai-request-role">${escapeHtml(m.role)}</div>
+          <pre class="ai-request-content">${escapeHtml(m.content)}</pre>
+        </div>`,
+      ).join('')
+    : '';
+
+  const requestSection = requestHtml
+    ? `<details class="ai-request">
+        <summary>Request (${ai.requestMessages!.length} message${ai.requestMessages!.length !== 1 ? 's' : ''})</summary>
+        <div class="ai-request-body">${requestHtml}</div>
+      </details>`
+    : '';
+
+  const attemptLabel = ai.attemptNumber && ai.attemptNumber > 1
+    ? ` <span class="badge badge-skip">Attempt ${ai.attemptNumber}</span>`
+    : '';
+
+  return `<details class="ai-response">
+  <summary>AI — ${label}${attemptLabel}${timeLabel}</summary>
+  ${screenshotHtml}
+  ${requestSection}
+  <pre class="json-block">${highlightJson(pretty)}</pre>
+</details>`;
 }
 
 function renderSubAction(sub: SubActionResult): string {
   const actionName = sub.action.action;
   const description = sub.action.description;
+  const timeStr = formatTime(sub.timestamp);
+  const timeLabel = timeStr ? `<span class="event-time">${timeStr}</span>` : '';
   const hasBody = sub.screenshotBase64 || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData;
 
+  const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
   const screenshotHtml = sub.screenshotBase64
     ? `<div class="screenshot-container">
         <div class="screenshot-label">After action</div>
+        ${subUrlHtml}
         <img class="screenshot-img" src="${toDataUri(sub.screenshotBase64)}" alt="Sub-action screenshot" loading="lazy">
        </div>`
     : '';
@@ -188,6 +277,7 @@ function renderSubAction(sub: SubActionResult): string {
     <span class="sub-action-index">${sub.index}</span>
     <span class="action-badge">${escapeHtml(actionName)}</span>
     <span class="sub-action-desc">${escapeHtml(description)}</span>
+    ${timeLabel}
   </div>
   ${hasBody ? `<div class="sub-action-body">${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
@@ -255,10 +345,15 @@ function formatRedactedHeaders(headers: Record<string, string>): string {
 
 function renderAssertion(
   assertion: NonNullable<StepResult['assertion']>,
+  aiInteraction?: AiInteraction,
 ): string {
   const cls = assertion.pass ? 'pass' : 'fail';
   const icon = assertion.pass ? '✓' : '✗';
   const label = assertion.pass ? 'PASSED' : 'FAILED';
+
+  const aiHtml = aiInteraction
+    ? renderAiInteraction(aiInteraction)
+    : '';
 
   return `<div class="assertion-block ${cls}">
   <div class="assertion-title">${icon} Assertion ${label}</div>
@@ -274,46 +369,7 @@ function renderAssertion(
     <span class="assertion-key">Explanation:</span>
     <span>${escapeHtml(assertion.explanation)}</span>
   </div>
-</div>`;
-}
-
-function renderAiResponses(responses: AiInteraction[]): string {
-  const items = responses.map((r) => {
-    const label = escapeHtml(r.purpose);
-    const pretty = formatJson(tryParseJson(r.response));
-
-    const requestHtml = r.requestMessages && r.requestMessages.length > 0
-      ? r.requestMessages.map((m) =>
-          `<div class="ai-request-message">
-            <div class="ai-request-role">${escapeHtml(m.role)}</div>
-            <pre class="ai-request-content">${escapeHtml(m.content)}</pre>
-          </div>`,
-        ).join('')
-      : '';
-
-    const requestSection = requestHtml
-      ? `<details class="ai-request">
-          <summary>Request (${r.requestMessages!.length} message${r.requestMessages!.length !== 1 ? 's' : ''})</summary>
-          <div class="ai-request-body">${requestHtml}</div>
-        </details>`
-      : '';
-
-    const turnLabel = r.turnNumber !== undefined
-      ? ` <span class="badge badge-skip">Turn ${r.turnNumber}</span>`
-      : '';
-    const attemptLabel = r.attemptNumber && r.attemptNumber > 1
-      ? ` <span class="badge badge-skip">Attempt ${r.attemptNumber}</span>`
-      : '';
-    return `<details class="ai-response">
-      <summary>AI response — ${label}${turnLabel}${attemptLabel}</summary>
-      ${requestSection}
-      <pre class="json-block">${highlightJson(pretty)}</pre>
-    </details>`;
-  }).join('\n');
-
-  return `<div class="ai-responses">
-  <div class="ai-responses-title">AI Responses (${responses.length})</div>
-  ${items}
+  ${aiHtml}
 </div>`;
 }
 
