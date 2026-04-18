@@ -14,6 +14,7 @@ export const DEFAULT_CONFIG: Config = {
     maxInputTokens: 1_000_000,
     streamResponses: false,
     sendScreenshots: true,
+    diagnoseFailures: true,
   },
   browser: {
     headed: true,

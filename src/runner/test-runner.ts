@@ -13,6 +13,7 @@ import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
 import { generateReport } from '../report/generator.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
+import { diagnoseFailure } from '../ai/diagnose.js';
 import { logger } from '../utils/logger.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { StepCache } from '../cache/step-cache.js';
@@ -382,6 +383,18 @@ export async function runTest(
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
       ...(dataRowVal !== undefined && { dataRow: dataRowVal }),
     };
+
+    if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
+      logger.info('Running failure diagnosis…');
+      const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent);
+      if (diagnosis) {
+        report.diagnosis = diagnosis;
+        report.tokensUsed = tokenTracker.total;
+        report.inputTokens = tokenTracker.inputTotal;
+        report.outputTokens = tokenTracker.outputTotal;
+        logger.info(`Likely cause (${diagnosis.faultCategory}, ${diagnosis.confidence} confidence): ${diagnosis.rootCause}`);
+      }
+    }
 
     return report;
   } finally {

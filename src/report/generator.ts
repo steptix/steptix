@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
-import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from './types.js';
+import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
@@ -62,6 +62,7 @@ function renderReport(report: TestReport): string {
   const inputTokens = report.inputTokens.toLocaleString();
   const outputTokens = report.outputTokens.toLocaleString();
   const stepsHtml = renderSteps(report.steps);
+  const diagnosisHtml = report.diagnosis ? renderDiagnosis(report.diagnosis) : '';
 
   return template({
     testName: report.testName,
@@ -82,7 +83,44 @@ function renderReport(report: TestReport): string {
     inputTokens,
     outputTokens,
     stepsHtml: new Handlebars.SafeString(stepsHtml),
+    diagnosisHtml: new Handlebars.SafeString(diagnosisHtml),
   });
+}
+
+function renderDiagnosis(diagnosis: FailureDiagnosis): string {
+  const categoryLabel = diagnosis.faultCategory.replace(/-/g, ' ');
+  const evidenceHtml = diagnosis.evidence.length > 0
+    ? `<ul class="diagnosis-evidence">${diagnosis.evidence.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>`
+    : '<div class="diagnosis-root-cause">(no specific observations cited)</div>';
+
+  const aiInteractionHtml = diagnosis.aiInteraction
+    ? renderAiInteraction(diagnosis.aiInteraction)
+    : '';
+
+  return `<div class="diagnosis-block">
+  <div class="diagnosis-header">
+    <span class="diagnosis-title">🔎 Root Cause Analysis</span>
+    <span class="badge badge-cat-${escapeHtml(diagnosis.faultCategory)}">${escapeHtml(categoryLabel)}</span>
+    <span class="badge badge-conf-${escapeHtml(diagnosis.confidence)}">${escapeHtml(diagnosis.confidence)} confidence</span>
+  </div>
+
+  <div class="diagnosis-section">
+    <div class="diagnosis-section-label">What went wrong</div>
+    <div class="diagnosis-root-cause">${escapeHtml(diagnosis.rootCause)}</div>
+  </div>
+
+  <div class="diagnosis-section">
+    <div class="diagnosis-section-label">Evidence</div>
+    ${evidenceHtml}
+  </div>
+
+  <div class="diagnosis-section">
+    <div class="diagnosis-section-label">Suggested fix</div>
+    <div class="diagnosis-fix">${escapeHtml(diagnosis.suggestedFix)}</div>
+  </div>
+
+  ${aiInteractionHtml ? `<div class="diagnosis-section">${aiInteractionHtml}</div>` : ''}
+</div>`;
 }
 
 function renderSteps(steps: StepResult[]): string {

@@ -11,6 +11,8 @@ export interface AiConfig {
   streamResponses: boolean;
   /** Include a screenshot in each AI request (set false to reduce token usage) */
   sendScreenshots: boolean;
+  /** Run a post-failure AI diagnosis pass and attach the result to the report */
+  diagnoseFailures: boolean;
 }
 
 export interface BrowserConfig {

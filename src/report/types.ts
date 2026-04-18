@@ -96,6 +96,29 @@ export interface StepResult {
   aiExplanation?: string;
 }
 
+/** AI-generated root-cause analysis for a failed test run */
+export interface FailureDiagnosis {
+  /** One-paragraph explanation of what actually went wrong */
+  rootCause: string;
+  /**
+   * High-level category of the fault — helps triage who should look at it.
+   *  - test-spec: the step wording was ambiguous / split badly / missing a wait
+   *  - application: a genuine app bug (wrong behaviour, broken UI)
+   *  - flake: timing/selector/network instability
+   *  - environment: config, network, auth issue outside the test
+   *  - unknown: AI could not determine
+   */
+  faultCategory: 'test-spec' | 'application' | 'flake' | 'environment' | 'unknown';
+  /** Concrete observations from the run that support the root cause */
+  evidence: string[];
+  /** Concrete suggested fix — for test-spec issues, prefer a rewritten step list */
+  suggestedFix: string;
+  /** AI's self-rated confidence in the diagnosis */
+  confidence: 'high' | 'medium' | 'low';
+  /** The AI interaction used to produce this diagnosis (for transparency in the report) */
+  aiInteraction?: AiInteraction;
+}
+
 /** Complete test run report data */
 export interface TestReport {
   testName: string;
@@ -119,6 +142,8 @@ export interface TestReport {
   parameters?: Record<string, string>;
   /** Data row number for data-driven tests (1-based) */
   dataRow?: number;
+  /** AI-generated root-cause analysis, populated when the test fails and diagnoseFailures is enabled */
+  diagnosis?: FailureDiagnosis;
 }
 
 /** Summary across all test runs in a session */
