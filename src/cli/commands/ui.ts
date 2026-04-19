@@ -73,11 +73,12 @@ async function uiCommand(
 
   // Spawn the Electron process
   // Unset ELECTRON_RUN_AS_NODE so Electron runs as a full app, not a Node.js subprocess.
-  // On Linux, --no-sandbox and --ozone-platform=x11 are required for display.
+  // On Linux, --no-sandbox is required for display. --ozone-platform-hint=auto
+  // lets Electron pick Wayland when available and fall back to X11.
   const spawnEnv = { ...process.env };
   delete spawnEnv['ELECTRON_RUN_AS_NODE'];
 
-  const extraFlags = process.platform === 'linux' ? ['--no-sandbox', '--ozone-platform=x11'] : [];
+  const extraFlags = process.platform === 'linux' ? ['--no-sandbox', '--ozone-platform-hint=auto'] : [];
 
   const child = spawn(electronPath, [...extraFlags, electronEntry, '--testsDir', testsDir, '--configPath', configPath], {
     stdio: 'inherit',
