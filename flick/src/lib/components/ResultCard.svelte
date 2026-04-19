@@ -119,6 +119,7 @@
     color: #dc2626;
     font-size: 12px;
     border-top: 1px solid #fecaca;
+    user-select: text;
   }
 
   .time {

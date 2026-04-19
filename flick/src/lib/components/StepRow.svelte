@@ -154,6 +154,7 @@
   .step-detail {
     padding: 8px 12px 8px 24px;
     font-size: 12px;
+    user-select: text;
   }
 
   .detail-section {
