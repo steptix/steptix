@@ -40,9 +40,7 @@ pub async fn set_always_on_top(app: tauri::AppHandle, pinned: bool) -> Result<()
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn position_bottom_right(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main").ok_or("window not found")?;
+pub fn position_bottom_right_sync(window: &tauri::WebviewWindow) -> Result<(), String> {
     let monitor = window.current_monitor().map_err(|e| e.to_string())?;
 
     if let Some(monitor) = monitor {
@@ -69,6 +67,12 @@ pub async fn position_bottom_right(app: tauri::AppHandle) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn position_bottom_right(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("window not found")?;
+    position_bottom_right_sync(&window)
 }
 
 #[tauri::command]

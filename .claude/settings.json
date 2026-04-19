@@ -8,7 +8,11 @@
       "Bash(git reflog *)",
       "Bash(git gc *)",
       "Bash(git fetch *)",
-      "Bash(npx svelte-check *)"
+      "Bash(npx svelte-check *)",
+      "Bash(where *)",
+      "Bash(where.exe *)",
+      "Bash(cargo check *)",
+      "Bash(cargo.exe check *)"
     ]
   }
 }

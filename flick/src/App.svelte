@@ -19,12 +19,6 @@
     await loadSettings();
     await loadSessions();
     startConnectionPolling();
-
-    try {
-      await invoke("position_bottom_right");
-    } catch {
-      // ignore in dev mode
-    }
   });
 
   $effect(() => {
