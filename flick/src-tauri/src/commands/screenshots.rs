@@ -50,9 +50,7 @@ pub fn get_screenshot_path(
     filename: String,
 ) -> Result<String, String> {
     let path = screenshots_dir(&app, &session_id).join(&filename);
-    if path.exists() {
-        Ok(path.to_string_lossy().to_string())
-    } else {
-        Err("Screenshot not found".to_string())
-    }
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:image/png;base64,{encoded}"))
 }

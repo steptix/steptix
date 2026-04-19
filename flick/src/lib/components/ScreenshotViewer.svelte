@@ -1,6 +1,5 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { convertFileSrc } from "@tauri-apps/api/core";
 
   interface Props {
     sessionId: string;
@@ -17,11 +16,10 @@
 
   async function loadImage() {
     try {
-      const path = await invoke<string>("get_screenshot_path", {
+      imgSrc = await invoke<string>("get_screenshot_path", {
         sessionId,
         filename,
       });
-      imgSrc = convertFileSrc(path);
     } catch {
       imgSrc = "";
     }
