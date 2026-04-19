@@ -1,5 +1,37 @@
 use tauri::Manager;
 
+#[cfg(windows)]
+fn dwm_frame_insets(hwnd: isize) -> (i32, i32, i32, i32) {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let hwnd = HWND(hwnd as *mut _);
+    let mut window_rect = RECT::default();
+    let mut frame_rect = RECT::default();
+    unsafe {
+        if GetWindowRect(hwnd, &mut window_rect).is_err() {
+            return (0, 0, 0, 0);
+        }
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut frame_rect as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .is_err()
+        {
+            return (0, 0, 0, 0);
+        }
+    }
+    (
+        frame_rect.left - window_rect.left,
+        frame_rect.top - window_rect.top,
+        window_rect.right - frame_rect.right,
+        window_rect.bottom - frame_rect.bottom,
+    )
+}
+
 #[tauri::command]
 pub async fn set_always_on_top(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("window not found")?;
@@ -14,12 +46,22 @@ pub async fn position_bottom_right(app: tauri::AppHandle) -> Result<(), String> 
     let monitor = window.current_monitor().map_err(|e| e.to_string())?;
 
     if let Some(monitor) = monitor {
-        let screen_size = monitor.size();
-        let screen_pos = monitor.position();
-        let win_size = window.inner_size().map_err(|e| e.to_string())?;
+        let work_area = monitor.work_area();
+        let win_size = window.outer_size().map_err(|e| e.to_string())?;
 
-        let x = screen_pos.x + screen_size.width as i32 - win_size.width as i32 - 16;
-        let y = screen_pos.y + screen_size.height as i32 - win_size.height as i32 - 48;
+        #[cfg(windows)]
+        let (right_inset, bottom_inset) = {
+            let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as isize;
+            let (_, _, right, bottom) = dwm_frame_insets(hwnd);
+            (right, bottom)
+        };
+        #[cfg(not(windows))]
+        let (right_inset, bottom_inset) = (0, 0);
+
+        let x = work_area.position.x + work_area.size.width as i32 - win_size.width as i32
+            + right_inset;
+        let y = work_area.position.y + work_area.size.height as i32 - win_size.height as i32
+            + bottom_inset;
 
         window
             .set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))
