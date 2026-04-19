@@ -35,4 +35,15 @@ export default defineConfig({
     includeAiReasoning: true,
     embedScreenshots: true,
   },
+  server: {
+    host: '127.0.0.1',
+    port: 3100,
+    apiKey: (() => {
+      const key = process.env.SERVER_API_KEY;
+      if (!key) {
+        throw new Error('SERVER_API_KEY is not set — add it to your .env file');
+      }
+      return key;
+    })(),
+  },
 });
