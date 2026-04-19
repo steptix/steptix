@@ -28,6 +28,13 @@ export interface BrowserConfig {
   browser: 'chromium' | 'firefox' | 'webkit';
   /** Capture full-page screenshots (entire scrollable page) instead of viewport-only */
   fullPageScreenshots: boolean;
+  /** Apply puppeteer-extra-plugin-stealth to Chromium. Some sites (e.g. Polymer 1
+   *  stacks) break when stealth monkey-patches navigator/chrome internals — turn
+   *  this off to load such sites. Chromium only; default true. */
+  stealth?: boolean;
+  /** Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts
+   *  the site itself needs (cascading failures). Default false. */
+  bypassCSP?: boolean;
 }
 
 export interface TestsConfig {

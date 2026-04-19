@@ -15,6 +15,8 @@ export default defineConfig({
     windowSize: { ...DEFAULT_BROWSER_DIMENSIONS },
     slowMo: 0,
     browser: 'chromium',
+    stealth: false,
+    bypassCSP: false,
   },
   tests: {
     dir: './fixtures/tests',

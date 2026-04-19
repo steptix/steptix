@@ -9,6 +9,8 @@ memory/
 .env.*
 !.env.example
 .claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Flick (Tauri app)
 flick/node_modules/

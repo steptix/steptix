@@ -4,8 +4,15 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
 import { logger } from '../utils/logger.js';
 
-// Apply stealth plugin to avoid bot detection
-stealthChromium.use(StealthPlugin());
+// Apply stealth plugin to avoid bot detection. Gated per-run via
+// BrowserConfig.stealth so sites incompatible with stealth's monkey-patching
+// (e.g. Polymer 1 stacks) can opt out.
+let stealthApplied = false;
+function ensureStealth(): void {
+  if (stealthApplied) return;
+  stealthChromium.use(StealthPlugin());
+  stealthApplied = true;
+}
 
 export interface TrackedPage {
   page: Page;
@@ -252,15 +259,33 @@ export async function launchBrowser(config: BrowserConfig): Promise<BrowserSessi
       browser = await webkit.launch(launchOptions);
       break;
     case 'chromium':
-    default:
-      // Use stealth chromium to bypass bot detection
-      browser = await stealthChromium.launch(launchOptions) as unknown as Browser;
+    default: {
+      // Prefer the installed Google Chrome ("chrome" channel) over bundled
+      // Chromium — bundled Chromium has a fingerprintable codec/component list
+      // that sites like Akamai/Imperva flag as automation.
+      const chromeOpts = { ...launchOptions, channel: 'chrome' };
+      if (config.stealth !== false) {
+        ensureStealth();
+        browser = await stealthChromium.launch(chromeOpts) as unknown as Browser;
+      } else {
+        browser = await chromium.launch(chromeOpts);
+      }
+    }
   }
 
   const context = await browser.newContext({
     viewport: config.headed ? null : config.viewport,
     // Accept all permissions by default
     permissions: ['clipboard-read', 'clipboard-write'],
+    // Do not override userAgent — on the `chrome` channel, the real Chrome UA
+    // is already realistic, and hardcoding a mismatched version trips
+    // user-agent sniffing on some banking sites (Polymer/browserDetection.js).
+    locale: 'en-AU',
+    timezoneId: 'Australia/Sydney',
+    extraHTTPHeaders: {
+      'Accept-Language': 'en-AU,en;q=0.9',
+    },
+    bypassCSP: config.bypassCSP === true,
   });
 
   const page = await context.newPage();
