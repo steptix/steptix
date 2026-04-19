@@ -94,6 +94,10 @@ export interface StepResult {
   error?: string;
   /** AI explanation of what it was attempting (shown on failure) */
   aiExplanation?: string;
+  /** True when this step was typed into the FSD(S) REPL rather than being part of the test file. */
+  fsdAdHoc?: boolean;
+  /** True when the failure on this step triggered the FSD(S) REPL handoff and the user chose to resume. */
+  fsdResumed?: boolean;
 }
 
 /** AI-generated root-cause analysis for a failed test run */
@@ -144,6 +148,8 @@ export interface TestReport {
   dataRow?: number;
   /** AI-generated root-cause analysis, populated when the test fails and diagnoseFailures is enabled */
   diagnosis?: FailureDiagnosis;
+  /** True when the run entered FSD(Supervised) REPL at any point. */
+  supervised?: boolean;
 }
 
 /** Summary across all test runs in a session */

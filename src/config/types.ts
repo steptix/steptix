@@ -52,6 +52,8 @@ export interface ExecutionConfig {
   promptOnAmbiguity: boolean;
   /** Maximum number of AI turns per step for multi-turn execution (default: 15) */
   maxTurns: number;
+  /** Drop into a REPL when a step fails after retries (headed + TTY only). */
+  interactiveOnFailure: boolean;
 }
 
 export interface ReportsConfig {
