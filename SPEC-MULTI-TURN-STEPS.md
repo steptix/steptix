@@ -116,14 +116,6 @@ Step failed: multi-turn limit reached (5 turns).
 Last URL: https://app.example.com/some-page
 ```
 
-### Cycle detection
-
-If the URL at the start of a turn is identical to the URL two turns ago, the executor aborts with:
-
-```
-Step failed: navigation cycle detected — stuck at https://app.example.com/same-page
-```
-
 ### `needs_reeval` on the final turn
 
 If the AI returns `needs_reeval: true` on the last permitted turn, the step fails — the AI is not allowed to request more turns than the cap allows. The error message indicates the step needs simplifying or splitting.

@@ -376,6 +376,71 @@ describe('cycle detection logic', () => {
   });
 });
 
+// ─── Continuation prompt: exploration results ───────────────────────────────
+
+describe('buildContinuationMessage — exploration results', () => {
+  it('includes exploration results when provided', () => {
+    const msg = buildContinuationMessage(
+      'find order ORD-789 and click Delete',
+      [{ action: 'find', description: 'Search for ORD-789' }],
+      {},
+      'https://app.example.com/orders',
+      '<html>...</html>',
+      null,
+      2,
+      undefined,
+      ['### find "ORD-789"\nFound 1 match:\n1. <td> "ORD-789" selector: td'],
+    );
+    const text = typeof msg.content === 'string' ? msg.content : (msg.content as Array<{ type: string; text?: string }>).find((b) => b.type === 'text')?.text ?? '';
+    expect(text).toContain('Exploration Results');
+    expect(text).toContain('find "ORD-789"');
+    expect(text).toContain('Found 1 match');
+  });
+
+  it('omits exploration section when no results', () => {
+    const msg = buildContinuationMessage(
+      'click the button',
+      [{ action: 'click', description: 'Click submit' }],
+      {},
+      'https://app.example.com/',
+      '<html>...</html>',
+      null,
+      2,
+    );
+    const text = typeof msg.content === 'string' ? msg.content : (msg.content as Array<{ type: string; text?: string }>).find((b) => b.type === 'text')?.text ?? '';
+    expect(text).not.toContain('Exploration Results');
+  });
+});
+
+// ─── Format helpers ─────────────────────────────────────────────────────────
+
+import { formatFindResults, formatExpandResult } from '../src/browser/dom-cleaner.js';
+
+describe('formatFindResults', () => {
+  it('formats matches with selectors', () => {
+    const result = formatFindResults([
+      { selector: '#order-789', tag: 'td', text: 'ORD-789', attributes: 'id="order-789"', context: 'table > tbody > tr' },
+    ], 'ORD-789');
+    expect(result).toContain('find "ORD-789"');
+    expect(result).toContain('Found 1 match');
+    expect(result).toContain('#order-789');
+  });
+
+  it('handles no matches', () => {
+    const result = formatFindResults([], 'nonexistent');
+    expect(result).toContain('No matches found');
+  });
+});
+
+describe('formatExpandResult', () => {
+  it('wraps content in code block with selector', () => {
+    const result = formatExpandResult('<table>...</table>', 'table#orders');
+    expect(result).toContain('expand "table#orders"');
+    expect(result).toContain('```html');
+    expect(result).toContain('<table>...</table>');
+  });
+});
+
 // ─── Integration: step-executor with mocked AI client ────────────────────────
 
 import type { Page } from 'playwright';
@@ -394,6 +459,7 @@ function makeConfig(maxTurns = 5): Config {
       windowSize: { ...DEFAULT_BROWSER_DIMENSIONS },
       slowMo: 0,
       browser: 'chromium',
+      fullPageScreenshots: true,
     },
     tests: { dir: '.', contextDir: '.', pattern: '**/*.md' },
     execution: {
@@ -403,6 +469,7 @@ function makeConfig(maxTurns = 5): Config {
       dismissObstacles: false,
       promptOnAmbiguity: false,
       maxTurns,
+
     },
     reports: {
       outputDir: '.',
@@ -486,12 +553,9 @@ describe('executeStep — multi-turn integration', () => {
     });
 
     expect(result.status).toBe('passed');
-    // No AI response should have a turnNumber for single-turn steps
-    if (result.aiResponses) {
-      for (const r of result.aiResponses) {
-        expect(r.turnNumber).toBeUndefined();
-      }
-    }
+    // Single-turn step should have exactly one turn
+    expect(result.turns.length).toBe(1);
+    expect(result.turns[0]!.turnNumber).toBe(1);
   });
 
   it('two-turn step: interactions tagged with turn numbers', async () => {
@@ -530,11 +594,12 @@ describe('executeStep — multi-turn integration', () => {
 
     expect(result.status).toBe('passed');
 
-    // Both AI interactions should have turnNumber set (multi-turn step)
-    expect(result.aiResponses).toBeDefined();
-    expect(result.aiResponses!.length).toBeGreaterThanOrEqual(2);
-    expect(result.aiResponses![0]?.turnNumber).toBe(1);
-    expect(result.aiResponses![1]?.turnNumber).toBe(2);
+    // Multi-turn step should have two turns
+    expect(result.turns.length).toBe(2);
+    expect(result.turns[0]!.turnNumber).toBe(1);
+    expect(result.turns[1]!.turnNumber).toBe(2);
+    expect(result.turns[0]!.aiInteractions.length).toBeGreaterThanOrEqual(1);
+    expect(result.turns[1]!.aiInteractions.length).toBeGreaterThanOrEqual(1);
   });
 
   it('multi-turn: count result stored in resolvedParameters', async () => {
@@ -609,35 +674,4 @@ describe('executeStep — multi-turn integration', () => {
     expect(result.error).toContain('3 turns');
   });
 
-  it('fails when navigation cycle is detected', async () => {
-    // Page cycles: turn 1 = /, turn 2 = /portfolio, turn 3 = / again → cycle detected!
-    const cycleUrls = [
-      'https://app.example.com/',
-      'https://app.example.com/portfolio',
-      'https://app.example.com/',   // same as turn 1 — should trigger cycle
-    ];
-    let urlIdx = 0;
-    const page = makeMockPage(() => cycleUrls[Math.min(urlIdx++, cycleUrls.length - 1)] ?? cycleUrls[0]!);
-
-    const reeval = JSON.stringify({
-      actions: [{ action: 'navigate', url: '/portfolio', description: 'Navigate' }],
-      reasoning: 'Going to portfolio.',
-      needs_reeval: true,
-    });
-
-    const aiClient = makeAiClient([reeval]);
-
-    const result = await executeStep(1, 1, 'navigate to portfolio page', {
-      page,
-      config: makeConfig(5),
-      aiClient,
-      contextContent: '',
-      testName: 'test',
-      conversationHistory: [],
-      csrfTokens: {},
-    });
-
-    expect(result.status).toBe('failed');
-    expect(result.error).toContain('navigation cycle detected');
-  });
 });

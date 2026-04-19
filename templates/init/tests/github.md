@@ -9,7 +9,7 @@ tags: [smoke]
 
 ## Parameters
 - username: $GITHUB_USERNAME
-- password: 
+- password: $GITHUB_PASSWORD
 
 ## Steps
 1. Navigate to the baseUrl

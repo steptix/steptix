@@ -34,7 +34,7 @@ vi.mock('../src/runner/step-executor.js', () => ({
     index: 1,
     instruction: 'mock step',
     status: 'passed',
-    subActions: [{ index: 1, action: { action: 'click', description: 'click button' }, durationMs: 10 }],
+    turns: [{ turnNumber: 1, attemptNumber: 1, timestamp: new Date().toISOString(), aiInteractions: [], subActions: [{ index: 1, action: { action: 'click', description: 'click button' }, durationMs: 10 }] }],
     durationMs: 100,
     retried: false,
     aiExplanation: 'Did the thing',
@@ -105,6 +105,7 @@ const testConfig: Config = {
     windowSize: { width: 1280, height: 720 },
     slowMo: 0,
     browser: 'chromium',
+    fullPageScreenshots: true,
   },
   tests: {
     dir: './tests',
@@ -196,7 +197,7 @@ describe('SessionManager', () => {
           index: 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };
@@ -216,7 +217,7 @@ describe('SessionManager', () => {
           index: 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };
@@ -240,7 +241,7 @@ describe('SessionManager', () => {
           index: 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };
@@ -258,7 +259,7 @@ describe('SessionManager', () => {
           index: 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };
@@ -293,7 +294,7 @@ describe('SessionManager', () => {
             index: 2,
             instruction: 'step 2',
             status: 'failed',
-            subActions: [],
+            turns: [],
             durationMs: 50,
             retried: false,
             error: 'Element not found',
@@ -303,7 +304,7 @@ describe('SessionManager', () => {
           index: callCount,
           instruction: `step ${callCount}`,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };
@@ -354,7 +355,7 @@ describe('SessionManager', () => {
           index: 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };
@@ -378,7 +379,7 @@ describe('SessionManager', () => {
           index: 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };
@@ -400,7 +401,7 @@ describe('SessionManager', () => {
           index: 1,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 50,
           retried: false,
         };

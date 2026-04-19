@@ -146,3 +146,82 @@ export async function diagnosePageState(page: Page): Promise<PageStateDiagnosis>
     documentLoading: raw.readyState !== 'complete',
   };
 }
+
+export interface PageStabilityOptions {
+  /** Maximum time to wait for stability in ms (default: 10_000) */
+  timeoutMs?: number;
+  /** How long the DOM must be mutation-free to be considered quiet (default: 1_000) */
+  quiesceMs?: number;
+  /** Also wait for network idle (default: true) */
+  networkIdle?: boolean;
+}
+
+/**
+ * Wait for the page to reach a stable state before making decisions.
+ * Combines network idle detection with DOM mutation monitoring.
+ * Returns the page state diagnosis once stable, or after timeout.
+ */
+export async function waitForPageStability(
+  page: Page,
+  options?: PageStabilityOptions,
+): Promise<PageStateDiagnosis> {
+  const timeoutMs = options?.timeoutMs ?? 10_000;
+  const quiesceMs = options?.quiesceMs ?? 1_000;
+  const networkIdle = options?.networkIdle ?? true;
+
+  const deadline = Date.now() + timeoutMs;
+
+  // Wait for network idle first (if enabled) — use a shorter timeout so we
+  // still have time for the DOM quiescence check.
+  if (networkIdle) {
+    const netTimeout = Math.min(timeoutMs * 0.6, timeoutMs - quiesceMs - 500);
+    if (netTimeout > 0) {
+      await page
+        .waitForLoadState('networkidle', { timeout: netTimeout })
+        .catch(() => {
+          /* network didn't go idle in time — continue anyway */
+        });
+    }
+  }
+
+  // Now wait for DOM quiescence: no mutations for `quiesceMs` milliseconds.
+  // Uses a string expression (like DIAGNOSE_SCRIPT) to avoid TypeScript DOM type issues.
+  const remaining = deadline - Date.now();
+  if (remaining > quiesceMs) {
+    const qMs = quiesceMs;
+    const rMs = Math.min(remaining, timeoutMs);
+    const domQuiesceScript = `new Promise((resolve) => {
+      let timer = null;
+      const overallTimer = setTimeout(() => {
+        observer.disconnect();
+        resolve();
+      }, ${rMs});
+
+      const resetQuiesce = () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          observer.disconnect();
+          clearTimeout(overallTimer);
+          resolve();
+        }, ${qMs});
+      };
+
+      const observer = new MutationObserver(() => resetQuiesce());
+      observer.observe(document.body || document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+      });
+
+      resetQuiesce();
+    })`;
+
+    await page
+      .evaluate(domQuiesceScript)
+      .catch(() => {
+        /* page navigated or closed — fine, we'll diagnose whatever state we're in */
+      });
+  }
+
+  return diagnosePageState(page);
+}

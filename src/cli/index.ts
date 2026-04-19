@@ -1,4 +1,6 @@
-import 'dotenv/config';
+import { loadDefaultEnvFileSync } from '../env/loader.js';
+loadDefaultEnvFileSync();
+
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

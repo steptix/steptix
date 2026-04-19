@@ -9,11 +9,11 @@ export const DEFAULT_CONFIG: Config = {
   },
   ai: {
     gatewayUrl: 'https://llm.corp.example',
-    ...(process.env['AI_API_KEY'] !== undefined && { apiKey: process.env['AI_API_KEY'] }),
     model: 'gpt-5.4-mini',
     maxInputTokens: 1_000_000,
     streamResponses: false,
-    sendScreenshots: false,
+    sendScreenshots: true,
+    diagnoseFailures: true,
   },
   browser: {
     headed: true,
@@ -21,6 +21,7 @@ export const DEFAULT_CONFIG: Config = {
     windowSize: { ...DEFAULT_BROWSER_DIMENSIONS },
     slowMo: 0,
     browser: 'chromium',
+    fullPageScreenshots: false,
   },
   tests: {
     dir: './tests',
@@ -28,12 +29,12 @@ export const DEFAULT_CONFIG: Config = {
     pattern: '**/*.md',
   },
   execution: {
-    timeout: 60_000,
+    timeout: 3600_000,
     retries: 1,
     screenshotOnFailure: true,
     dismissObstacles: true,
     promptOnAmbiguity: true,
-    maxTurns: 5,
+    maxTurns: 15,
   },
   reports: {
     outputDir: './reports',

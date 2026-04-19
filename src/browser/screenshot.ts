@@ -9,15 +9,24 @@ export interface ScreenshotResult {
 }
 
 /**
- * Capture a full-viewport PNG screenshot and return it as base64.
+ * Capture a PNG screenshot and return it as base64.
+ * @param page - Playwright page
+ * @param fullPage - When true, captures the entire scrollable page instead of just the viewport.
  * Returns null if capture fails (non-fatal).
  */
-export async function captureScreenshot(page: Page): Promise<ScreenshotResult | null> {
+export async function captureScreenshot(page: Page, fullPage = false): Promise<ScreenshotResult | null> {
   try {
     const buffer = await page.screenshot({
       type: 'png',
-      fullPage: false, // Viewport only for performance
+      fullPage,
     });
+
+    if (fullPage) {
+      // For full-page screenshots, read actual dimensions from the PNG header
+      const width = buffer.readUInt32BE(16);
+      const height = buffer.readUInt32BE(20);
+      return { base64: buffer.toString('base64'), width, height };
+    }
 
     const viewportSize = page.viewportSize();
     return {

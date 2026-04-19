@@ -67,8 +67,15 @@ export function getReportTemplate(): string {
     .step-body { display: none; padding: 0 18px 18px; border-top: 1px solid var(--border); }
     .step.open .step-body { display: block; }
 
+    /* Turns */
+    .turn { margin-top: 14px; }
+    .turn + .turn { margin-top: 18px; padding-top: 14px; border-top: 2px dashed var(--border); }
+    .turn-header { font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+    .turn-time { font-weight: 500; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; color: #6366f1; }
+    .event-time { font-size: 0.7rem; font-weight: 500; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; color: var(--muted); margin-left: auto; }
+
     /* Sub-actions */
-    .sub-actions { margin-top: 14px; }
+    .sub-actions { margin-top: 10px; }
     .sub-action { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; overflow: hidden; }
     .sub-action-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--code-bg); cursor: pointer; }
     .sub-action-header:hover { background: #e9eaec; }
@@ -91,8 +98,14 @@ export function getReportTemplate(): string {
 
     /* Screenshots */
     .screenshot-container { margin-top: 10px; }
-    .screenshot-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
-    .screenshot-img { max-width: 100%; border: 1px solid var(--border); border-radius: 6px; cursor: zoom-in; }
+    .screenshot-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
+    .screenshot-url { font-size: 0.75rem; color: #2563eb; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; margin-bottom: 6px; word-break: break-all; }
+    .screenshot-img { max-width: 280px; max-height: 180px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; cursor: zoom-in; transition: opacity 0.15s; }
+    .screenshot-img:hover { opacity: 0.85; }
+    .turn-screenshot { margin: 10px 0; padding: 10px; background: #f0f7ff; border: 1px solid #bfdbfe; border-radius: 6px; }
+    .turn-screenshot .screenshot-label { color: #1d4ed8; }
+    .step-end-screenshot { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+    .step .badge-fail ~ .step-body .step-end-screenshot .screenshot-label { color: var(--fail); }
 
     /* AI Responses */
     .ai-responses { margin-top: 14px; }
@@ -129,6 +142,25 @@ export function getReportTemplate(): string {
     .failure-block { margin-top: 14px; padding: 14px; border-radius: 6px; background: #fef2f2; border: 1px solid #fecaca; }
     .failure-title { font-weight: 700; color: var(--fail); margin-bottom: 6px; }
     .failure-message { font-size: 0.875rem; color: #7f1d1d; font-family: monospace; }
+
+    /* Diagnosis block */
+    .diagnosis-block { margin-bottom: 24px; padding: 18px 20px; border-radius: var(--radius); background: #fffbeb; border: 1px solid #fde68a; box-shadow: var(--shadow); }
+    .diagnosis-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+    .diagnosis-title { font-weight: 700; font-size: 1rem; color: #92400e; }
+    .diagnosis-section { margin-top: 12px; }
+    .diagnosis-section-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 4px; }
+    .diagnosis-root-cause { font-size: 0.95rem; color: #78350f; line-height: 1.55; }
+    .diagnosis-evidence { margin: 0; padding-left: 20px; font-size: 0.875rem; color: #78350f; }
+    .diagnosis-evidence li { margin-bottom: 2px; }
+    .diagnosis-fix { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 10px 14px; color: #14532d; font-size: 0.9rem; white-space: pre-wrap; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; }
+    .badge-cat-test-spec { background: #fef3c7; color: #92400e; }
+    .badge-cat-application { background: #fee2e2; color: var(--fail); }
+    .badge-cat-flake { background: #ede9fe; color: #7c3aed; }
+    .badge-cat-environment { background: #dbeafe; color: #1d4ed8; }
+    .badge-cat-unknown { background: #e5e7eb; color: var(--muted); }
+    .badge-conf-high { background: #dcfce7; color: var(--pass); }
+    .badge-conf-medium { background: #fef3c7; color: #92400e; }
+    .badge-conf-low { background: #fee2e2; color: var(--fail); }
 
     /* Footer */
     .report-footer { margin-top: 32px; text-align: center; font-size: 0.8rem; color: var(--muted); }
@@ -211,6 +243,8 @@ export function getReportTemplate(): string {
       <span class="label">Total Tokens</span>
     </div>
   </div>
+
+  {{{diagnosisHtml}}}
 
   <div class="steps-section">
     <h2>Steps</h2>

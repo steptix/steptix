@@ -8,6 +8,7 @@ memory/
 .env
 .env.*
 !.env.example
+.claude/settings.local.json
 
 # Flick (Tauri app)
 flick/node_modules/

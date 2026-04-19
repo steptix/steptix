@@ -23,7 +23,11 @@ export type ActionType =
   // Capture a DOM value into a test variable
   | 'read'
   // Count elements matching a selector and store the result
-  | 'count';
+  | 'count'
+  // Search the full DOM for specific text, return matching elements with selectors
+  | 'find'
+  // Return the full DOM subtree for a given selector (expand collapsed content)
+  | 'expand';
 
 /** A single action returned by the AI */
 export interface AIAction {
@@ -98,6 +102,16 @@ export interface AIResponse {
    * When true, the AI signals it needs a fresh snapshot before planning remaining actions.
    * The executor will re-evaluate after executing the returned actions.
    */
+  needs_reeval?: boolean;
+}
+
+/** AI response for a branched (conditional) step evaluation */
+export interface BranchedAIResponse {
+  /** Which outcome label matched (e.g. "A", "B") or "waiting" */
+  matched: string;
+  /** Actions to execute for the matched outcome (empty if "waiting") */
+  actions: AIAction[];
+  reasoning: string;
   needs_reeval?: boolean;
 }
 

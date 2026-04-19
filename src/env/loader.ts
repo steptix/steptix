@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { logger } from '../utils/logger.js';
 
@@ -33,6 +34,32 @@ export async function loadEnvFile(
   }
 
   logger.info(`Loaded environment "${envName}" (${Object.keys(vars).length} variables)`);
+}
+
+/**
+ * Synchronously load the base `.env` file from `projectRoot` and merge values
+ * into `process.env`. Silently no-ops if the file does not exist.
+ *
+ * Existing `process.env` values are NOT overridden — shell-provided env vars
+ * take precedence. This matches the previous `dotenv/config` behaviour.
+ */
+export function loadDefaultEnvFileSync(projectRoot: string = process.cwd()): void {
+  const filePath = path.resolve(projectRoot, '.env');
+
+  let content: string;
+  try {
+    content = readFileSync(filePath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+
+  const vars = parseEnvFile(content);
+  for (const [key, value] of Object.entries(vars)) {
+    if (!(key in process.env)) {
+      process.env[key] = value;
+    }
+  }
 }
 
 /**

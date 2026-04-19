@@ -382,7 +382,7 @@ export class UIRunnerAdapter {
           index: stepIndex,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: inputDuration,
           retried: false,
           aiExplanation: `User provided input for "${variable}"`,
@@ -419,7 +419,7 @@ export class UIRunnerAdapter {
           index: stepIndex,
           instruction,
           status: 'passed',
-          subActions: [],
+          turns: [],
           durationMs: 0,
           retried: false,
           aiExplanation: 'Interactive mode completed',
@@ -509,7 +509,7 @@ export class UIRunnerAdapter {
           totalSteps: this.stepResults.length,
           passedSteps: this.stepResults.filter((s) => s.status === 'passed').length,
           failedSteps,
-          totalSubActions: this.stepResults.reduce((sum, s) => sum + s.subActions.length, 0),
+          totalSubActions: this.stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0),
           durationMs,
           tokensUsed: this.tokenTracker.total,
           inputTokens: this.tokenTracker.inputTotal,
@@ -570,7 +570,10 @@ export class UIRunnerAdapter {
    * Emit sub-action and screenshot events for a completed step.
    */
   private emitStepDetails(stepIndex: number, result: StepResult): void {
-    for (const subAction of result.subActions) {
+    const allSubActions = result.turns.flatMap((t) => t.subActions);
+    const allAiInteractions = result.turns.flatMap((t) => t.aiInteractions);
+
+    for (const subAction of allSubActions) {
       this.emit('runner:subaction', { stepIndex, subAction });
 
       if (subAction.screenshotBase64) {
@@ -582,7 +585,7 @@ export class UIRunnerAdapter {
     }
 
     // Emit the step-level screenshot if present and no sub-action screenshots were emitted
-    if (result.screenshotBase64 && result.subActions.every((s) => !s.screenshotBase64)) {
+    if (result.screenshotBase64 && allSubActions.every((s) => !s.screenshotBase64)) {
       this.emit('runner:screenshot', {
         stepIndex,
         dataUrl: `data:image/png;base64,${result.screenshotBase64}`,
@@ -590,10 +593,10 @@ export class UIRunnerAdapter {
     }
 
     // Emit full AI interactions (raw responses + DOM context)
-    if (result.aiResponses && result.aiResponses.length > 0) {
+    if (allAiInteractions.length > 0) {
       this.emit('runner:ai-interactions', {
         stepIndex,
-        aiInteractions: result.aiResponses,
+        aiInteractions: allAiInteractions,
         ...(result.domSnapshot !== undefined && { domSnapshot: result.domSnapshot }),
       });
     }

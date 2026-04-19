@@ -2,8 +2,8 @@ import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import type { Page } from 'playwright';
 import type { Config } from '../config/types.js';
-import type { AIAction } from '../ai/types.js';
-import type { StepResult, SubActionResult, AiInteraction, ApiCallData } from '../report/types.js';
+import type { AIAction, BranchedAIResponse } from '../ai/types.js';
+import type { StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import {
   buildSystemPrompt,
@@ -12,13 +12,15 @@ import {
   buildContinuationMessage,
   buildAssertionMessage,
   buildRetryContext,
+  buildBranchedStepMessage,
 } from '../ai/prompts.js';
-import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext } from '../ai/prompts.js';
-import { diagnosePageState } from '../browser/page-state.js';
+import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome } from '../ai/prompts.js';
+import { diagnosePageState, waitForPageStability } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
-import { parseAIResponse, parseAssertionEvaluation } from '../ai/action-parser.js';
-import { captureDomSnapshot } from '../browser/dom-cleaner.js';
+import { parseAIResponse, parseAssertionEvaluation, parseBranchedResponse } from '../ai/action-parser.js';
+import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
+import type { DomMode } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
 import { handleObstacles } from '../browser/obstacle-handler.js';
@@ -29,6 +31,7 @@ import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
 import type { StepCache, CachedStepData } from '../cache/step-cache.js';
+import type { StepGroup } from './step-grouper.js';
 
 /** Mutable ref for capturing the first-turn AI response data for cache writing. */
 export interface CacheCapture {
@@ -67,12 +70,12 @@ function extractTextFromMessage(msg: ChatMessage): string {
 /** Error subclass that carries failure context for retry enrichment */
 class StepFailureError extends Error {
   failures: PriorFailureContext[];
-  aiResponses: AiInteraction[];
-  constructor(message: string, failures: PriorFailureContext[], aiResponses: AiInteraction[] = []) {
+  turns: TurnResult[];
+  constructor(message: string, failures: PriorFailureContext[], turns: TurnResult[] = []) {
     super(message);
     this.name = 'StepFailureError';
     this.failures = failures;
-    this.aiResponses = aiResponses;
+    this.turns = turns;
   }
 }
 
@@ -85,6 +88,34 @@ export function isAssertionStep(instruction: string): boolean {
   // Strip leading [prefix] markers such as [input: x] or [interactive]
   const stripped = instruction.replace(/^\[.*?\]\s*/i, '').toLowerCase();
   return /^(verify|assert|check|confirm|ensure|should|must|expect|validate|greater than|less than|equal to)/.test(stripped);
+}
+
+/** Determine if a step instruction is asking to extract, read, or capture values from the page.
+ * When true, a richer "readable" DOM snapshot is sent that preserves visible text content
+ * (table cells, paragraphs, spans, etc.) instead of the compact action-oriented DOM.
+ *
+ * Detection heuristics:
+ *  1. Explicit variable storage patterns: [store as: ...], store/save as {{...}}
+ *  2. Extraction verbs at start: get, capture, read, extract, note, record, etc.
+ *  3. Question patterns: "what is the", "how many", "what are the"
+ */
+export function isExtractionStep(instruction: string): boolean {
+  const lower = instruction.toLowerCase();
+
+  // Explicit variable storage patterns (anywhere in instruction)
+  if (/\[store as:/.test(lower)) return true;
+  if (/store\s+(it\s+)?as\s+\{\{/.test(lower)) return true;
+  if (/save\s+(it\s+)?as\s+\{\{/.test(lower)) return true;
+
+  // Strip leading [prefix] markers to check intent verbs
+  const stripped = instruction.replace(/^\[.*?\]\s*/i, '').toLowerCase();
+
+  // Extraction verbs at start of the instruction
+  if (/^(get|capture|read|extract|note|record|store|save|retrieve|collect|grab|copy|take note|what is|what are|how many)/.test(stripped)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -100,7 +131,7 @@ export async function executeStep(
   const startTime = Date.now();
   let retried = false;
   let priorFailures: PriorFailureContext[] = [];
-  let allAiResponses: AiInteraction[] = [];
+  let priorAttemptTurns: TurnResult[] = [];
   const isAssertion = isAssertionStep(instruction);
 
   // --- Cache attempt (before normal AI flow) ---
@@ -157,10 +188,10 @@ export async function executeStep(
       maxRetries: opts.config.execution.retries,
       label: `step ${stepIndex}`,
       onFailure: (err) => {
-        // Collect failure context and AI responses from the attempt for the next retry
+        // Collect failure context and turns from the attempt for the next retry
         if (err instanceof StepFailureError) {
           priorFailures = [...priorFailures, ...err.failures];
-          allAiResponses = [...allAiResponses, ...err.aiResponses];
+          priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
         }
       },
     });
@@ -175,12 +206,12 @@ export async function executeStep(
       );
     }
 
-    // If a prior attempt failed, merge its AI interactions into the successful result
+    // If a prior attempt failed, merge its turns into the successful result
     // so the report shows all attempts, not just the one that succeeded
-    if (allAiResponses.length > 0) {
+    if (priorAttemptTurns.length > 0) {
       return {
         ...result,
-        aiResponses: [...allAiResponses, ...(result.aiResponses ?? [])],
+        turns: [...priorAttemptTurns, ...result.turns],
       };
     }
     return result;
@@ -191,41 +222,31 @@ export async function executeStep(
 
     logger.error(`Step ${stepIndex} FAILED after retry: ${errorMessage}`);
 
-    // Capture failure screenshot
+    // Capture failure screenshot (full-page for report visibility)
     let failureScreenshot: string | undefined;
     if (opts.config.execution.screenshotOnFailure) {
-      const shot = await captureScreenshot(opts.page);
+      const shot = await captureScreenshot(opts.page, opts.config.browser.fullPageScreenshots);
       failureScreenshot = shot?.base64;
     }
 
-    // Collect AI responses from the final failed attempt too
+    // Collect turns from the final failed attempt too
     if (err instanceof StepFailureError) {
-      allAiResponses = [...allAiResponses, ...err.aiResponses];
+      priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
     }
 
     return {
       index: stepIndex,
       instruction,
       status: 'failed',
-      subActions: [],
+      turns: priorAttemptTurns,
       durationMs,
       retried: true,
       ...(failureScreenshot !== undefined && { screenshotBase64: failureScreenshot }),
+      pageUrl: opts.page.url(),
       error: errorMessage,
       aiExplanation: `Failed to execute step after ${opts.config.execution.retries + 1} attempts. Last error: ${errorMessage}`,
-      ...(allAiResponses.length > 0 && { aiResponses: allAiResponses }),
     };
   }
-}
-
-/** Tag AI interactions with turn numbers for multi-turn steps; omit turnNumber for single-turn steps. */
-function tagAiResponses(
-  buffer: Array<{ interaction: AiInteraction; turn: number }>,
-  isMultiTurn: boolean,
-): AiInteraction[] {
-  return buffer.map(({ interaction, turn }) =>
-    isMultiTurn ? { ...interaction, turnNumber: turn } : interaction,
-  );
 }
 
 async function executeStepAttempt(
@@ -244,23 +265,32 @@ async function executeStepAttempt(
   let page = pageTracker ? pageTracker.getActive() : opts.page;
   const maxTurns = config.execution.maxTurns;
 
+  // Use readable DOM for extraction and assertion steps — preserves visible text content
+  const domMode: DomMode = (isExtractionStep(instruction) || isAssertionStep(instruction)) ? 'readable' : 'compact';
+  if (domMode === 'readable') {
+    logger.debug(`Using readable DOM mode for step: "${instruction.substring(0, 60)}..."`);
+  }
+
   // Accumulated across all turns
-  const aiResponseBuffer: Array<{ interaction: AiInteraction; turn: number }> = [];
-  const allSubActions: SubActionResult[] = [];
+  const allTurns: TurnResult[] = [];
   const allCompletedActions: Array<{ action: string; description: string; selector?: string }> = [];
   const collectedFailures: PriorFailureContext[] = [];
-  const urlHistory: string[] = [];
   const attemptStartUrl = page.url();
+  /** Results from find/expand exploration actions — included in the continuation message */
+  const explorationResults: string[] = [];
 
-  // First-turn state is used for the step result (screenshot / DOM taken at step start)
+  // Global sub-action counter (1-based, spans all turns)
+  let globalSubActionIndex = 0;
+
+  // First-turn state is used for the step result (DOM taken at step start)
   let firstTurnDomSnapshot = '';
-  let firstTurnScreenshot: string | undefined;
 
   // Retained from the final turn for aiExplanation and assertion context
   let lastAiResponse: ReturnType<typeof parseAIResponse> | null = null;
   let lastApiContext: ApiPromptContext | undefined;
 
   let assertionResult: StepResult['assertion'];
+  let assertionAiInteraction: AiInteraction | undefined;
   let stepFailed = false;
   let stepError: string | undefined;
   let completedTurns = 0;
@@ -292,26 +322,22 @@ async function executeStepAttempt(
       }
     }
 
-    // 2. Capture current page state
-    const domSnapshot = await captureDomSnapshot(page);
-    const screenshot = await captureScreenshot(page);
+    // 2. Capture current page state (full-page so AI sees content below the fold)
+    const turnTimestamp = new Date().toISOString();
+    const domSnapshot = await captureDomSnapshot(page, domMode);
+    const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
 
     if (currentTurn === 1) {
       firstTurnDomSnapshot = domSnapshot;
-      firstTurnScreenshot = screenshotBase64;
     }
 
-    // 3. Cycle detection: abort if current URL matches URL from two turns ago
-    if (urlHistory.length >= 2 && currentUrl === urlHistory[urlHistory.length - 2]) {
-      throw new StepFailureError(
-        `Step failed: navigation cycle detected — stuck at ${currentUrl}`,
-        [],
-        tagAiResponses(aiResponseBuffer, completedTurns > 1),
-      );
-    }
-    urlHistory.push(currentUrl);
+    // Per-turn accumulators
+    const turnAiInteractions: AiInteraction[] = [];
+    const turnSubActions: SubActionResult[] = [];
+
+
 
     // 4. Build API context and system prompt (rebuilt each turn so API history stays current)
     const apiContext: ApiPromptContext | undefined = contextContent.includes('Type:')
@@ -354,6 +380,7 @@ async function executeStepAttempt(
         screenshotForAi,
         conversationHistory,
         openPages,
+        domMode,
       );
     } else {
       userMessage = buildContinuationMessage(
@@ -365,6 +392,8 @@ async function executeStepAttempt(
         screenshotForAi,
         currentTurn,
         openPages,
+        explorationResults.length > 0 ? explorationResults : undefined,
+        domMode,
       );
     }
 
@@ -384,14 +413,14 @@ async function executeStepAttempt(
         reasoning: cachedResponse.reasoning,
         ...(cachedResponse.needs_reeval !== undefined && { needs_reeval: cachedResponse.needs_reeval }),
       };
-      aiResponseBuffer.push({
-        interaction: {
-          purpose: 'action-plan (cached)',
-          attemptNumber,
-          requestMessages: [],
-          response: rawResponse,
-        },
-        turn: currentTurn,
+      turnAiInteractions.push({
+        purpose: 'action-plan (cached)',
+        attemptNumber,
+        requestMessages: [],
+        response: rawResponse,
+        ...(screenshotBase64 !== undefined && { screenshotBase64 }),
+        pageUrl: currentUrl,
+        timestamp: turnTimestamp,
       });
     } else {
       rawResponse = await aiClient.complete(messages);
@@ -403,14 +432,14 @@ async function executeStepAttempt(
         cacheCapture.parsedResponse = aiResponse;
       }
 
-      aiResponseBuffer.push({
-        interaction: {
-          purpose: 'action-plan',
-          attemptNumber,
-          requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-          response: rawResponse,
-        },
-        turn: currentTurn,
+      turnAiInteractions.push({
+        purpose: 'action-plan',
+        attemptNumber,
+        requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+        response: rawResponse,
+        ...(screenshotBase64 !== undefined && { screenshotBase64 }),
+        pageUrl: currentUrl,
+        timestamp: turnTimestamp,
       });
     }
 
@@ -433,14 +462,12 @@ async function executeStepAttempt(
         clarificationMsg,
       ];
       const clarifiedResponse = await aiClient.complete(clarificationMessages);
-      aiResponseBuffer.push({
-        interaction: {
-          purpose: 'clarification',
-          attemptNumber,
-          requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-          response: clarifiedResponse,
-        },
-        turn: currentTurn,
+      turnAiInteractions.push({
+        purpose: 'clarification',
+        attemptNumber,
+        requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+        response: clarifiedResponse,
+        timestamp: new Date().toISOString(),
       });
       aiResponse = parseAIResponse(clarifiedResponse);
       lastAiResponse = aiResponse;
@@ -477,12 +504,24 @@ async function executeStepAttempt(
           logger.warn(switchError);
         }
 
-        allSubActions.push({
-          index: allSubActions.length + 1,
+        // Capture screenshot on failure for debugging
+        let switchShot: string | undefined;
+        let switchUrl: string | undefined;
+        if (switchError) {
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          switchShot = shot?.base64;
+          switchUrl = page.url();
+        }
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
           action,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(switchError !== undefined && { error: switchError }),
+          ...(switchShot !== undefined && { screenshotBase64: switchShot }),
+          ...(switchUrl !== undefined && { pageUrl: switchUrl }),
+          timestamp: new Date().toISOString(),
         });
 
         if (switchError) {
@@ -513,12 +552,24 @@ async function executeStepAttempt(
           logger.warn(closeError);
         }
 
-        allSubActions.push({
-          index: allSubActions.length + 1,
+        // Capture screenshot on failure for debugging
+        let closeShot: string | undefined;
+        let closeUrl: string | undefined;
+        if (closeError) {
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          closeShot = shot?.base64;
+          closeUrl = page.url();
+        }
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
           action,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(closeError !== undefined && { error: closeError }),
+          ...(closeShot !== undefined && { screenshotBase64: closeShot }),
+          ...(closeUrl !== undefined && { pageUrl: closeUrl }),
+          timestamp: new Date().toISOString(),
         });
 
         if (closeError) {
@@ -542,10 +593,11 @@ async function executeStepAttempt(
 
         const subDuration = Date.now() - subStartTime;
         const subActionResult: SubActionResult = {
-          index: allSubActions.length + 1,
+          index: ++globalSubActionIndex,
           action,
           durationMs: subDuration,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          timestamp: new Date().toISOString(),
         };
 
         if (csrfResult) {
@@ -553,11 +605,14 @@ async function executeStepAttempt(
           csrfTokens['__latest__'] = csrfResult.token;
         } else {
           subActionResult.error = 'CSRF token could not be extracted';
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          if (shot) { subActionResult.screenshotBase64 = shot.base64; }
+          subActionResult.pageUrl = page.url();
           turnFailed = true;
           turnError = subActionResult.error;
         }
 
-        allSubActions.push(subActionResult);
+        turnSubActions.push(subActionResult);
         if (turnFailed) break;
         continue;
       }
@@ -565,11 +620,12 @@ async function executeStepAttempt(
       if (action.action === 'extract_value') {
         // Extraction from prior API responses is handled implicitly by the AI's context —
         // log it as a no-op sub-action so it appears in the report.
-        allSubActions.push({
-          index: allSubActions.length + 1,
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
           action,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          timestamp: new Date().toISOString(),
         });
         continue;
       }
@@ -594,20 +650,67 @@ async function executeStepAttempt(
 
         const subDuration = Date.now() - subStartTime;
         const subActionResult: SubActionResult = {
-          index: allSubActions.length + 1,
+          index: ++globalSubActionIndex,
           action,
           durationMs: subDuration,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(apiSubResult.apiCallData !== undefined && { apiCallData: apiSubResult.apiCallData }),
           ...(apiSubResult.error !== undefined && { error: apiSubResult.error }),
+          timestamp: new Date().toISOString(),
         };
-        allSubActions.push(subActionResult);
+
+        if (apiSubResult.failed) {
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          if (shot) { subActionResult.screenshotBase64 = shot.base64; }
+          subActionResult.pageUrl = page.url();
+        }
+
+        turnSubActions.push(subActionResult);
 
         if (apiSubResult.failed) {
           turnFailed = true;
           turnError = apiSubResult.error;
           break;
         }
+        continue;
+      }
+
+      // ── DOM exploration actions (find/expand) ──────────────────────────────────
+      if (action.action === 'find') {
+        const searchText = action.value ?? action.condition ?? '';
+        const matches = await findInDom(page, searchText);
+        const formatted = formatFindResults(matches, searchText);
+        explorationResults.push(formatted);
+        logger.info(`find "${searchText}": ${matches.length} match(es)`);
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          timestamp: new Date().toISOString(),
+        });
+        // Force needs_reeval so the AI sees the results on the next turn
+        aiResponse.needs_reeval = true;
+        continue;
+      }
+
+      if (action.action === 'expand') {
+        const expandSelector = action.selector ?? '';
+        const subtree = await expandDomSubtree(page, expandSelector);
+        const formatted = formatExpandResult(subtree, expandSelector);
+        explorationResults.push(formatted);
+        logger.info(`expand "${expandSelector}": ${subtree.length} chars`);
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          timestamp: new Date().toISOString(),
+        });
+        // Force needs_reeval so the AI sees the expanded content on the next turn
+        aiResponse.needs_reeval = true;
         continue;
       }
 
@@ -621,19 +724,22 @@ async function executeStepAttempt(
         logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
       }
 
-      // Capture state after action
-      const postDom = await captureDomSnapshot(page).catch(() => '');
-      const postShot = await captureScreenshot(page);
+      // Capture state after action (full-page for report visibility)
+      const postDom = await captureDomSnapshot(page, domMode).catch(() => '');
+      const postShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
       const postShotBase64 = postShot?.base64;
+      const postUrl = page.url();
       const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;
-      allSubActions.push({
-        index: allSubActions.length + 1,
+      turnSubActions.push({
+        index: ++globalSubActionIndex,
         action,
         ...(postShotBase64 !== undefined && { screenshotBase64: postShotBase64 }),
         ...(domSnapshotVal !== undefined && { domSnapshot: domSnapshotVal }),
         ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
         durationMs: subDuration,
         ...(result.error !== undefined && { error: result.error }),
+        pageUrl: postUrl,
+        timestamp: new Date().toISOString(),
       });
 
       // After a successful "wait" on a CSRF-related selector, automatically extract and
@@ -692,11 +798,20 @@ async function executeStepAttempt(
         })),
     );
 
+    // Finalize this turn
+    allTurns.push({
+      turnNumber: currentTurn,
+      attemptNumber,
+      timestamp: turnTimestamp,
+      aiInteractions: turnAiInteractions,
+      subActions: turnSubActions,
+    });
+
     if (turnFailed) {
       throw new StepFailureError(
         turnError ?? 'Step failed',
         collectedFailures,
-        tagAiResponses(aiResponseBuffer, completedTurns > 1),
+        allTurns,
       );
     }
 
@@ -710,7 +825,7 @@ async function executeStepAttempt(
       throw new StepFailureError(
         `Step failed: multi-turn limit reached (${maxTurns} turns).\nLast URL: ${page.url()}`,
         [],
-        tagAiResponses(aiResponseBuffer, true),
+        allTurns,
       );
     }
 
@@ -719,8 +834,8 @@ async function executeStepAttempt(
 
   // 9b. Evaluate assertion if step has one (runs after all turns complete successfully)
   if (!stepFailed && isAssertionStep(instruction)) {
-    const finalDom = await captureDomSnapshot(page);
-    const finalShot = await captureScreenshot(page);
+    const finalDom = await captureDomSnapshot(page, 'readable');
+    const finalShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
 
     const assertAction = lastAiResponse?.actions.find((a) => a.action === 'assert');
 
@@ -743,15 +858,15 @@ async function executeStepAttempt(
       assertMsg,
     ];
     const assertRaw = await aiClient.complete(assertMessages);
-    aiResponseBuffer.push({
-      interaction: {
-        purpose: 'assertion',
-        attemptNumber,
-        requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-        response: assertRaw,
-      },
-      turn: completedTurns,
-    });
+    assertionAiInteraction = {
+      purpose: 'assertion',
+      attemptNumber,
+      requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+      response: assertRaw,
+      ...(finalShot?.base64 !== undefined && { screenshotBase64: finalShot.base64 }),
+      pageUrl: page.url(),
+      timestamp: new Date().toISOString(),
+    };
 
     const evaluation = parseAssertionEvaluation(assertRaw);
 
@@ -771,26 +886,30 @@ async function executeStepAttempt(
   }
 
   const durationMs = Date.now() - startTime;
-  const isMultiTurn = completedTurns > 1;
-  const aiResponses = tagAiResponses(aiResponseBuffer, isMultiTurn);
 
   if (stepFailed) {
-    throw new StepFailureError(stepError ?? 'Step failed', collectedFailures, aiResponses);
+    throw new StepFailureError(stepError ?? 'Step failed', collectedFailures, allTurns);
   }
+
+  // Capture end-of-step screenshot (full-page for report visibility)
+  const endScreenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+  const endScreenshotBase64 = endScreenshot?.base64;
+  const endPageUrl = page.url();
 
   const domSnapshotForStep = config.reports.includeDomSnapshots ? firstTurnDomSnapshot : undefined;
   return {
     index: stepIndex,
     instruction,
     status: 'passed',
-    subActions: allSubActions,
+    turns: allTurns,
     ...(assertionResult !== undefined && { assertion: assertionResult }),
-    ...(firstTurnScreenshot !== undefined && { screenshotBase64: firstTurnScreenshot }),
+    ...(assertionAiInteraction !== undefined && { assertionAiInteraction }),
+    ...(endScreenshotBase64 !== undefined && { screenshotBase64: endScreenshotBase64 }),
+    pageUrl: endPageUrl,
     ...(domSnapshotForStep !== undefined && { domSnapshot: domSnapshotForStep }),
     durationMs,
     retried,
     aiExplanation: lastAiResponse?.reasoning ?? 'No reasoning provided',
-    ...(aiResponses.length > 0 && { aiResponses }),
   };
 }
 
@@ -923,6 +1042,224 @@ function extractEndpointPath(url: string): string {
   } catch {
     return url;
   }
+}
+
+/**
+ * Execute a group of conditional steps as a multi-outcome branch.
+ *
+ * Waits for the page to settle, then asks the AI which outcome appeared and
+ * executes the matching step. Steps that don't match are marked "skipped".
+ *
+ * Returns one StepResult per step in the group plus the index of the last
+ * step consumed (so the caller can skip ahead).
+ */
+export async function executeBranchedStep(
+  group: StepGroup,
+  totalSteps: number,
+  opts: StepExecutorOptions,
+): Promise<StepResult[]> {
+  const startTime = Date.now();
+  const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, pageTracker } = opts;
+  const page = pageTracker ? pageTracker.getActive() : opts.page;
+  const timeout = config.execution.timeout * 1000; // seconds → ms
+  const pollInterval = 3000; // 3s between polls
+  const deadline = Date.now() + timeout;
+
+  // Build outcome labels: conditionals first, then continuation
+  const outcomes: BranchOutcome[] = [];
+  const labelMap = new Map<string, { index: number; instruction: string; isConditional: boolean }>();
+  let labelChar = 65; // 'A'
+
+  for (const cs of group.conditionalSteps) {
+    const label = String.fromCharCode(labelChar++);
+    outcomes.push({ label, instruction: cs.instruction, isConditional: true });
+    labelMap.set(label, { index: cs.index, instruction: cs.instruction, isConditional: true });
+  }
+  {
+    const label = String.fromCharCode(labelChar);
+    outcomes.push({ label, instruction: group.continuationStep.instruction, isConditional: false });
+    labelMap.set(label, { index: group.continuationStep.index, instruction: group.continuationStep.instruction, isConditional: false });
+  }
+
+  logger.info(`Branched step: ${outcomes.length} outcomes (${group.conditionalSteps.length} conditional + 1 continuation)`);
+
+  // Wait for page stability before the first evaluation
+  await waitForPageStability(page, {
+    timeoutMs: Math.min(10_000, timeout),
+    quiesceMs: 1000,
+  });
+
+  // Polling loop: ask AI which outcome matches
+  let matched: BranchedAIResponse | null = null;
+  let pollCount = 0;
+  const maxPolls = Math.max(1, Math.ceil(timeout / pollInterval));
+
+  while (Date.now() < deadline && pollCount < maxPolls) {
+    pollCount++;
+
+    const domSnapshot = await captureDomSnapshot(page);
+    const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+    const screenshotBase64 = screenshot?.base64;
+
+    const openPages = pageTracker && pageTracker.count > 1
+      ? await pageTracker.getPageListWithTitles()
+      : undefined;
+
+    const screenshotForAi = config.ai.sendScreenshots ? (screenshotBase64 ?? null) : null;
+    const userMessage = buildBranchedStepMessage(
+      outcomes,
+      domSnapshot,
+      screenshotForAi,
+      conversationHistory,
+      openPages,
+    );
+
+    const systemPrompt = buildSystemPrompt(
+      contextContent,
+      testName,
+      baseUrl,
+      group.conditionalSteps[0]!.index,
+      totalSteps,
+      config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+    );
+
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      userMessage,
+    ];
+
+    const rawResponse = await aiClient.complete(messages);
+    const branchedResponse = parseBranchedResponse(rawResponse);
+
+    logger.debug(`Branch poll ${pollCount}: matched="${branchedResponse.matched}" — ${branchedResponse.reasoning}`);
+
+    if (branchedResponse.matched !== 'waiting') {
+      matched = branchedResponse;
+      break;
+    }
+
+    // Wait before polling again
+    if (Date.now() + pollInterval < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      // Wait for any page changes to settle
+      await waitForPageStability(page, {
+        timeoutMs: Math.min(5000, deadline - Date.now()),
+        quiesceMs: 500,
+      });
+    }
+  }
+
+  // Build results
+  const results: StepResult[] = [];
+
+  if (!matched) {
+    // Timed out waiting — fail all steps in the group
+    const durationMs = Date.now() - startTime;
+    for (const cs of group.conditionalSteps) {
+      results.push({
+        index: cs.index,
+        instruction: cs.instruction,
+        status: 'failed',
+        turns: [],
+        durationMs,
+        retried: false,
+        error: `Branched step timed out after ${pollCount} polls — page never settled into a recognisable state`,
+        aiExplanation: 'Timed out waiting for page to settle into one of the expected outcomes',
+      });
+    }
+    results.push({
+      index: group.continuationStep.index,
+      instruction: group.continuationStep.instruction,
+      status: 'failed',
+      turns: [],
+      durationMs,
+      retried: false,
+      error: 'Branched step timed out — continuation not reached',
+      aiExplanation: 'Timed out waiting for conditional resolution',
+    });
+    return results;
+  }
+
+  // Matched an outcome — execute it through the normal step executor
+  const matchedOutcome = labelMap.get(matched.matched.toUpperCase());
+  if (!matchedOutcome) {
+    // AI returned an unexpected label — treat as failure
+    const durationMs = Date.now() - startTime;
+    for (const cs of group.conditionalSteps) {
+      results.push({
+        index: cs.index,
+        instruction: cs.instruction,
+        status: 'failed',
+        turns: [],
+        durationMs,
+        retried: false,
+        error: `AI returned unknown outcome label "${matched.matched}"`,
+        aiExplanation: matched.reasoning,
+      });
+    }
+    return results;
+  }
+
+  logger.info(`Branched step resolved: outcome ${matched.matched} → step ${matchedOutcome.index} "${matchedOutcome.instruction}"`);
+
+  // Execute the matched step normally (the AI already returned actions)
+  let matchedResult: StepResult;
+  if (matched.actions.length > 0) {
+    // Execute the actions the AI returned in the branch response
+    matchedResult = await executeStep(
+      matchedOutcome.index,
+      totalSteps,
+      matchedOutcome.instruction,
+      opts,
+    );
+  } else {
+    // No actions needed (e.g. continuation step = "Wait for dashboard" and dashboard is already loaded)
+    matchedResult = {
+      index: matchedOutcome.index,
+      instruction: matchedOutcome.instruction,
+      status: 'passed',
+      turns: [],
+      durationMs: Date.now() - startTime,
+      retried: false,
+      aiExplanation: matched.reasoning,
+    };
+  }
+
+  // Build results for all steps in the group
+  for (const cs of group.conditionalSteps) {
+    if (cs.index === matchedOutcome.index) {
+      results.push(matchedResult);
+    } else {
+      results.push({
+        index: cs.index,
+        instruction: cs.instruction,
+        status: 'skipped',
+        turns: [],
+        durationMs: 0,
+        retried: false,
+        aiExplanation: `Skipped: outcome ${matched.matched} matched instead`,
+      });
+    }
+  }
+
+  // Continuation step
+  if (group.continuationStep.index === matchedOutcome.index) {
+    results.push(matchedResult);
+  } else if (matchedOutcome.isConditional) {
+    // A conditional was matched — still need to execute the continuation step after
+    const contResult = await executeStep(
+      group.continuationStep.index,
+      totalSteps,
+      group.continuationStep.instruction,
+      opts,
+    );
+    results.push(contResult);
+  } else {
+    // Continuation was the matched outcome (no conditional fired)
+    results.push(matchedResult);
+  }
+
+  return results;
 }
 
 async function promptUser(question: string): Promise<string> {
