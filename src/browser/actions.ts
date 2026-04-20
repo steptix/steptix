@@ -569,12 +569,34 @@ async function executeCount(root: Page | FrameLocator, action: AIAction): Promis
  */
 async function executeRead(root: Page | FrameLocator, action: AIAction): Promise<string> {
   const selector = requireSelector(action);
-  logger.subAction(`read ${selector} → ${action.as ?? '(unnamed)'}`);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const value = await root.locator(selector).first().evaluate((el: any) => {
-    if (typeof el.value === 'string') return el.value;
-    return (el.textContent ?? '').trim();
-  });
+  const attribute = action.attribute;
+  const target = attribute ? `@${attribute}` : 'text';
+  logger.subAction(`read ${selector} ${target} → ${action.as ?? '(unnamed)'}`);
+
+  const locator = root.locator(selector).first();
+
+  let value: string;
+  if (attribute) {
+    // For href/src, prefer the resolved absolute URL over the raw attribute string,
+    // which on DOM-string lookup may be a relative path.
+    if (attribute === 'href' || attribute === 'src') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      value = await locator.evaluate((el: any, attr: string) => {
+        const resolved = el[attr];
+        if (typeof resolved === 'string' && resolved.length > 0) return resolved;
+        return typeof el.getAttribute === 'function' ? (el.getAttribute(attr) ?? '') : '';
+      }, attribute);
+    } else {
+      value = (await locator.getAttribute(attribute)) ?? '';
+    }
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    value = await locator.evaluate((el: any) => {
+      if (typeof el.value === 'string') return el.value;
+      return (el.textContent ?? '').trim();
+    });
+  }
+
   logger.info(`read captured: "${value}" → variable "${action.as ?? '(unnamed)'}"`);
   return value;
 }

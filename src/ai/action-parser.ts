@@ -237,6 +237,7 @@ function parseAction(raw: unknown, index: number): AIAction {
   if (typeof obj['source'] === 'string') action.source = obj['source'];
   if (typeof obj['path'] === 'string') action.path = obj['path'];
   if (typeof obj['as'] === 'string') action.as = obj['as'];
+  if (typeof obj['attribute'] === 'string') action.attribute = obj['attribute'];
   if (typeof obj['frame'] === 'string') action.frame = obj['frame'];
   if (typeof obj['page'] === 'string') action.page = obj['page'];
 

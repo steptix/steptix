@@ -80,6 +80,13 @@ export interface AIAction {
   /** Variable name to assign the extracted value to (for extract_value) */
   as?: string;
   /**
+   * For "read" actions, the DOM attribute to capture (e.g. "href", "src", "value").
+   * When omitted, falls back to the element's value (for form inputs) or textContent.
+   * Use this when the displayed text differs from the underlying attribute — e.g.
+   * search-result links where the visible URL is a stylised breadcrumb.
+   */
+  attribute?: string;
+  /**
    * CSS selector identifying the <iframe> element in the main page that contains the target element.
    * When set, the action is executed inside that frame rather than the main page.
    * Omit for elements in the main page.
