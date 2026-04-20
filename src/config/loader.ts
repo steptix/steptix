@@ -74,6 +74,11 @@ function withEnvDefaults(config: Config): Config {
     result = { ...result, ai: { ...result.ai, apiKey } };
   }
 
+  const serverApiKey = process.env['SERVER_API_KEY'];
+  if (serverApiKey !== undefined) {
+    result = { ...result, server: { ...result.server, apiKey: serverApiKey } };
+  }
+
   const interactiveOnFailure = parseBoolEnv(process.env['INTERACTIVE_ON_FAILURE']);
   if (interactiveOnFailure !== undefined) {
     result = {
