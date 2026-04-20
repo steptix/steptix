@@ -53,8 +53,8 @@
                ▼
 ┌──────────────────────────┐    ┌─────────────────────┐
 │   Playwright Browser     │    │   aiapi Gateway     │
-│  - Headed (default)      │    │  POST /v1/vision    │
-│  - Headless (--headless) │    │  POST /v1/stream    │
+│  - Headed (default)      │    │  POST /v2/vision    │
+│  - Headless (--headless) │    │  POST /v2/stream    │
 │  - Multi-page, popups    │    │  Model: gpt-5.4     │
 │  - iframes, file upload  │    │  Input: 1M tokens   │
 └──────────────────────────┘    └─────────────────────┘
@@ -632,9 +632,9 @@ When a step fails:
 
 ## 10. aiapi Gateway Changes
 
-New endpoints required — **existing endpoints remain untouched**.
+The runner now targets the provider-neutral v2 API. v1 remains available for backward compatibility, but this project should use v2.
 
-### 10.1 `POST /v1/vision`
+### 10.1 `POST /v2/vision`
 
 Multimodal chat endpoint supporting text + image content.
 
@@ -668,41 +668,60 @@ Multimodal chat endpoint supporting text + image content.
 }
 ```
 
-**Response:** Same format as existing `/v1/chat` but supports multimodal content.
+**Response:** Provider-neutral envelope.
+
+```json
+{
+  "id": "msg_01ABCXYZ",
+  "object": "response",
+  "created": 1776675600,
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "role": "assistant",
+  "stop_reason": "end_turn",
+  "content": [
+    { "type": "text", "text": "{\"actions\":[],\"reasoning\":\"...\"}" }
+  ],
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 9,
+    "total_tokens": 19
+  }
+}
+```
 
 **Implementation:**
 - Accepts `content` as string (text-only) or array (multimodal)
-- Routes to vision-capable model endpoints
-- OpenAI: uses standard chat completions API (natively supports multimodal)
-- Anthropic: converts `image_url` to Anthropic's `image` content block format
+- Returns provider-neutral `content[]` blocks instead of a v1 `response` string
+- OpenAI and Anthropic are normalized into the same envelope
 - Input token limit: 1,000,000
 
-### 10.2 `POST /v1/stream`
+### 10.2 `POST /v2/stream`
 
 Streaming chat endpoint (supports both text-only and multimodal).
 
-**Request:** Same schema as `/v1/vision` with an implicit `stream: true`.
+**Request:** Same schema as `/v2/vision` with an implicit `stream: true`.
 
-**Response:** Server-Sent Events (SSE) stream.
+**Response:** Provider-neutral Server-Sent Events (SSE).
 
 ```
-data: {"id":"chunk-1","choices":[{"delta":{"content":"{"}}]}
-data: {"id":"chunk-2","choices":[{"delta":{"content":"action"}}]}
-...
+data: {"type":"response.start","response":{"id":"msg_01ABCXYZ","object":"response","created":1776675600,"provider":"anthropic","model":"claude-sonnet-4-5","role":"assistant"}}
+data: {"type":"response.content_block.delta","index":0,"delta":{"type":"text_delta","text":"{"}}
+data: {"type":"response.content_block.delta","index":0,"delta":{"type":"text_delta","text":"\"actions\""}}
+data: {"type":"response.completed","response":{"id":"msg_01ABCXYZ","object":"response","created":1776675600,"provider":"anthropic","model":"claude-sonnet-4-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"{\"actions\":[],\"reasoning\":\"...\"}"}],"usage":{"input_tokens":10,"output_tokens":9,"total_tokens":19}}}
 data: [DONE]
 ```
 
 **Implementation:**
 - Sets `stream: true` on upstream provider request
-- OpenAI: proxies SSE chunks directly
-- Anthropic: converts Anthropic's streaming format to OpenAI-compatible SSE
-- Supports multimodal input (same as `/v1/vision`)
+- OpenAI and Anthropic are normalized into provider-neutral SSE events
+- Supports multimodal input (same as `/v2/vision`)
 - Connection timeout: 120s
 - Input token limit: 1,000,000
 
 ### 10.3 Auth
 
-Both new endpoints use the same Bearer token auth as the existing `/v1/chat`.
+Both v2 endpoints use the same Bearer token auth as the gateway's other routes.
 
 ---
 
@@ -865,7 +884,7 @@ The following actions were tried and failed. Choose a DIFFERENT approach — do 
       ii.   If step has [input: name] prefix → prompt user, store value as parameter, mark passed
       iii.  If step has [interactive] prefix → enter REPL loop for user-driven commands
       iv.   Otherwise, capture DOM snapshot (with position annotations) + screenshot
-      v.    Send to AI via /v1/vision (or /v1/stream), including viewport/device mode
+      v.    Send to AI via /v2/vision (or /v2/stream), including viewport/device mode
       vi.   Parse AI response into action list
       vii.  Capture raw AI response for the report
       viii. If action is "prompt" → ask user, re-send to AI, capture response
@@ -911,7 +930,7 @@ The following actions were tried and failed. Choose a DIFFERENT approach — do 
 
 ### 16.2 Integration Tests
 
-- AI client correctly constructs and sends multimodal payloads to `/v1/vision` and `/v1/stream`
+- AI client correctly constructs and sends multimodal payloads to `/v2/vision` and `/v2/stream`
 - Playwright action executor maps each AI action type to correct browser operation
 - Obstacle handler identifies and dismisses a known modal, then continues
 - SSE stream parser handles chunked responses and `[DONE]` termination

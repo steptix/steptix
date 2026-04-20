@@ -1,9 +1,13 @@
 import type { AiConfig } from '../config/types.js';
 import type {
   ChatMessage,
+  LegacyStreamChunk,
+  LegacyVisionResponse,
+  ResponseContentBlock,
+  StreamEvent,
+  StreamResponseEnvelope,
   VisionRequest,
   VisionResponse,
-  StreamChunk,
 } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
@@ -19,7 +23,7 @@ export class AiClient {
 
   /**
    * Send messages to the AI and get a complete response.
-   * Uses /v1/stream when streamResponses is true, otherwise /v1/vision.
+   * Uses /v2/stream when streamResponses is true, otherwise /v2/vision.
    */
   async complete(messages: ChatMessage[]): Promise<string> {
     if (this.config.streamResponses) {
@@ -28,9 +32,9 @@ export class AiClient {
     return this.completeVision(messages);
   }
 
-  /** Call POST /v1/vision for non-streaming multimodal completion */
+  /** Call POST /v2/vision for non-streaming multimodal completion */
   private async completeVision(messages: ChatMessage[]): Promise<string> {
-    const url = `${this.config.gatewayUrl}/v1/vision`;
+    const url = `${this.config.gatewayUrl}/v2/vision`;
 
     const request: VisionRequest = {
       model: this.config.model,
@@ -52,7 +56,7 @@ export class AiClient {
       throw new Error(`AI API error ${response.status}: ${errorText}`);
     }
 
-    const data = (await response.json()) as VisionResponse;
+    const data = (await response.json()) as VisionResponse | LegacyVisionResponse;
 
     if (data.usage) {
       this.tokenTracker.addUsage(
@@ -62,9 +66,7 @@ export class AiClient {
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     }
 
-    // Support both OpenAI-style (choices[0].message.content) and gateway-style (response) formats
-    const content = data.choices?.[0]?.message?.content
-      ?? (data as unknown as Record<string, unknown>).response as string | undefined;
+    const content = this.extractTextResponse(data);
     if (!content) {
       throw new Error(`AI response contained no content. Response keys: ${Object.keys(data).join(', ')}`);
     }
@@ -72,9 +74,9 @@ export class AiClient {
     return content;
   }
 
-  /** Call POST /v1/stream for streaming multimodal completion, collect full response */
+  /** Call POST /v2/stream for streaming multimodal completion, collect full response */
   private async completeStream(messages: ChatMessage[]): Promise<string> {
-    const url = `${this.config.gatewayUrl}/v1/stream`;
+    const url = `${this.config.gatewayUrl}/v2/stream`;
 
     const request: VisionRequest = {
       model: this.config.model,
@@ -124,27 +126,44 @@ export class AiClient {
         }
 
         try {
-          const chunk = JSON.parse(event.data) as StreamChunk;
+          const parsed = JSON.parse(event.data) as StreamEvent | LegacyStreamChunk;
 
-            // Accumulate content delta
-            const delta = chunk.choices[0]?.delta?.content;
+          if ('type' in parsed) {
+            if (parsed.type === 'response.error') {
+              reject(new Error(parsed.error.message));
+              return;
+            }
+
+            if (parsed.type === 'response.content_block.delta' && parsed.delta.type === 'text_delta') {
+              fullContent += parsed.delta.text;
+            }
+
+            if (parsed.type === 'response.completed') {
+              const completed = parsed.response as StreamResponseEnvelope;
+              promptTokens = completed.usage?.input_tokens ?? promptTokens;
+              completionTokens = completed.usage?.output_tokens ?? completionTokens;
+
+              if (!fullContent) {
+                fullContent = this.extractTextFromBlocks(completed.content);
+              }
+
+              resolve();
+            }
+          } else {
+            const delta = parsed.choices[0]?.delta?.content;
             if (delta) {
               fullContent += delta;
             }
 
-            // Check for usage info (some providers include it in the last chunk)
-            const chunkWithUsage = chunk as StreamChunk & {
-              usage?: { input_tokens: number; output_tokens: number };
-            };
-            if (chunkWithUsage.usage) {
-              promptTokens = chunkWithUsage.usage.input_tokens;
-              completionTokens = chunkWithUsage.usage.output_tokens;
+            if (parsed.usage) {
+              promptTokens = parsed.usage.input_tokens;
+              completionTokens = parsed.usage.output_tokens;
             }
 
-            // Check finish reason
-            if (chunk.choices[0]?.finish_reason === 'stop') {
+            if (parsed.choices[0]?.finish_reason === 'stop') {
               resolve();
             }
+          }
         } catch {
           // Ignore malformed chunks
         }
@@ -180,6 +199,24 @@ export class AiClient {
     }
 
     return fullContent;
+  }
+
+  private extractTextResponse(data: VisionResponse | LegacyVisionResponse): string {
+    if ('content' in data && Array.isArray(data.content)) {
+      return this.extractTextFromBlocks(data.content);
+    }
+
+    const legacy = data as LegacyVisionResponse;
+    return legacy.choices?.[0]?.message?.content
+      ?? ((legacy as Record<string, unknown>).response as string | undefined)
+      ?? '';
+  }
+
+  private extractTextFromBlocks(blocks: ResponseContentBlock[]): string {
+    return blocks
+      .filter((block): block is Extract<ResponseContentBlock, { type: 'text' }> => block.type === 'text')
+      .map((block) => block.text)
+      .join('');
   }
 
   private fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
