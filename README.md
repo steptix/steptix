@@ -243,6 +243,17 @@ export default defineConfig({
 });
 ```
 
+### Environment variables
+
+Some settings are read from `.env` (see [.env.example](./.env.example) for the full list):
+
+| Variable | Purpose |
+| --- | --- |
+| `AI_API_KEY` | API key for the aiapi gateway. Required. |
+| `SERVER_API_KEY` | Shared secret between the API server and Flick. Required. |
+| `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
+| `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
+
 ### Browser sizing
 
 `viewport` and `windowSize` are used differently depending on whether the browser is headless or headed.
