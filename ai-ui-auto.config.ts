@@ -21,6 +21,7 @@ export default defineConfig({
   tests: {
     dir: './fixtures/tests',
     contextDir: './fixtures/context',
+    skillsDir: './fixtures/skills',
     pattern: '**/*.md',
   },
   execution: {

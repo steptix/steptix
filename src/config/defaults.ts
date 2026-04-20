@@ -26,6 +26,7 @@ export const DEFAULT_CONFIG: Config = {
   tests: {
     dir: './tests',
     contextDir: './context',
+    skillsDir: './skills',
     pattern: '**/*.md',
   },
   execution: {
@@ -44,6 +45,7 @@ export const DEFAULT_CONFIG: Config = {
     includeAiReasoning: true,
     embedScreenshots: true,
     openInBrowserAfterRun: false,
+    appendRunHistoryToTestFile: false,
   },
   server: {
     host: '127.0.0.1',

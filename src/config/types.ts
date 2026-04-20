@@ -42,6 +42,8 @@ export interface TestsConfig {
   dir: string;
   /** Directory containing context .md files */
   contextDir: string;
+  /** Directory containing skill .md files (reusable parameterised step macros) */
+  skillsDir: string;
   /** Glob pattern for discovering test files */
   pattern: string;
 }
@@ -78,6 +80,10 @@ export interface ReportsConfig {
    *  default browser. Driven by the OPEN_REPORT_IN_BROWSER_AFTER_RUN env var.
    *  Skipped automatically when the `CI` env var is set. */
   openInBrowserAfterRun: boolean;
+  /** After a test completes, append a "Latest runs" section at the bottom of
+   *  the test .md file linking to generated HTML reports. Driven by the
+   *  APPEND_RUN_HISTORY_TO_TEST_FILE env var. Default false. */
+  appendRunHistoryToTestFile: boolean;
 }
 
 export interface ApiConfig {

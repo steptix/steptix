@@ -7,6 +7,7 @@
  * portable to a future WebSocket backend.
  */
 
+import { resolve as pathResolve } from 'node:path';
 import type { Page } from 'playwright';
 import type { Config } from '../../config/types.js';
 import type { ParsedTest, TestInstance } from '../../parser/types.js';
@@ -273,8 +274,9 @@ export class UIRunnerAdapter {
     // 1. Load config
     this.config = await loadConfig();
 
-    // 2. Parse the test file
-    const parsedTest = await parseTestFile(filePath);
+    // 2. Parse the test file (expanding any [skill: ...] references)
+    const skillsDir = pathResolve(process.cwd(), this.config.tests.skillsDir);
+    const parsedTest = await parseTestFile(filePath, { skillsDir });
     this.test = parsedTest;
 
     // 3. Expand test instances (take first for the UI — no data-driven in UI v1)

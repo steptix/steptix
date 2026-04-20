@@ -2,21 +2,88 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { marked, type Token, type Tokens } from 'marked';
 import { parseFrontmatter } from './frontmatter.js';
-import type { ParsedTest, TestConfig } from './types.js';
+import type { ParsedSkill, ParsedTest, TestConfig } from './types.js';
+import { expandSkills } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
+
+export interface ParseOptions {
+  /** Directory to resolve `[skill: name]` references from. Omit to disable. */
+  skillsDir?: string;
+}
 
 /**
  * Parse a Markdown test file into a structured ParsedTest object.
  * Handles: frontmatter, H1 title, ## Config, ## Parameters, ## Steps sections.
+ * If `skillsDir` is provided, `[skill: name ...]` step references are
+ * expanded inline before the test is returned.
  */
-export async function parseTestFile(filePath: string): Promise<ParsedTest> {
+export async function parseTestFile(
+  filePath: string,
+  options: ParseOptions = {},
+): Promise<ParsedTest> {
   const absPath = path.resolve(filePath);
   const rawContent = await fs.readFile(absPath, 'utf-8');
-  return parseTestContent(rawContent, absPath);
+  const parsed = parseTestContentRaw(rawContent, absPath);
+
+  if (options.skillsDir) {
+    parsed.steps = await expandSkills(parsed.steps, options.skillsDir);
+  }
+
+  return parsed;
 }
 
-/** Parse test content from a string (useful for testing) */
+/**
+ * Parse a Markdown skill file. Skills share the same parser as tests but
+ * additionally read the `## Outputs` section and use the H1 as the skill name.
+ */
+export async function parseSkillFile(filePath: string): Promise<ParsedSkill> {
+  const absPath = path.resolve(filePath);
+  const rawContent = await fs.readFile(absPath, 'utf-8');
+  return parseSkillContent(rawContent, absPath);
+}
+
+/** Parse test content from a string (steps returned verbatim — no skill expansion) */
 export function parseTestContent(rawContent: string, filePath = '<inline>'): ParsedTest {
+  return parseTestContentRaw(rawContent, filePath);
+}
+
+function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
+  const { sections, frontmatter, title } = parseSections(rawContent, filePath);
+
+  return {
+    filePath,
+    title,
+    frontmatter,
+    config: sections.config,
+    parameters: sections.parameters,
+    steps: sections.steps,
+  };
+}
+
+function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
+  const { sections, title } = parseSections(rawContent, filePath);
+
+  return {
+    filePath,
+    name: title || path.basename(filePath, '.md'),
+    parameters: sections.parameters,
+    outputs: sections.outputs,
+    steps: sections.steps,
+  };
+}
+
+interface ParsedSections {
+  config: TestConfig;
+  parameters: Record<string, string>;
+  outputs: string[];
+  steps: string[];
+}
+
+function parseSections(rawContent: string, filePath: string): {
+  sections: ParsedSections;
+  frontmatter: ReturnType<typeof parseFrontmatter>['frontmatter'];
+  title: string;
+} {
   const { frontmatter, body } = parseFrontmatter(rawContent);
 
   const tokens = marked.lexer(body);
@@ -24,9 +91,10 @@ export function parseTestContent(rawContent: string, filePath = '<inline>'): Par
   let title = '';
   const config: TestConfig = {};
   const parameters: Record<string, string> = {};
+  const outputs: string[] = [];
   const steps: string[] = [];
 
-  let currentSection: 'config' | 'parameters' | 'steps' | null = null;
+  let currentSection: 'config' | 'parameters' | 'outputs' | 'steps' | null = null;
 
   for (const token of tokens) {
     if (token.type === 'heading') {
@@ -42,6 +110,8 @@ export function parseTestContent(rawContent: string, filePath = '<inline>'): Par
           currentSection = 'config';
         } else if (lower === 'parameters') {
           currentSection = 'parameters';
+        } else if (lower === 'outputs') {
+          currentSection = 'outputs';
         } else if (lower === 'steps') {
           currentSection = 'steps';
         } else {
@@ -59,27 +129,30 @@ export function parseTestContent(rawContent: string, filePath = '<inline>'): Par
       parseKeyValueList(token as Tokens.List, parameters);
     }
 
+    if (currentSection === 'outputs' && token.type === 'list') {
+      extractOutputs(token as Tokens.List, outputs);
+    }
+
     if (currentSection === 'steps' && token.type === 'list') {
       extractSteps(token as Tokens.List, steps);
     }
   }
 
   if (!title) {
-    logger.warn(`Test file ${filePath} has no H1 title heading`);
+    if (frontmatter.type !== 'skill') {
+      logger.warn(`Test file ${filePath} has no H1 title heading`);
+    }
     title = path.basename(filePath, '.md');
   }
 
   if (steps.length === 0) {
-    logger.warn(`Test file ${filePath} has no steps defined in ## Steps section`);
+    logger.warn(`File ${filePath} has no steps defined in ## Steps section`);
   }
 
   return {
-    filePath,
-    title,
+    sections: { config, parameters, outputs, steps },
     frontmatter,
-    config,
-    parameters,
-    steps,
+    title,
   };
 }
 
@@ -107,6 +180,17 @@ function extractSteps(listToken: Tokens.List, steps: string[]): void {
     if (text) {
       steps.push(text);
     }
+  }
+}
+
+/** Extract output names from a `## Outputs` list. Items may be `- name` or `- name: description`. */
+function extractOutputs(listToken: Tokens.List, outputs: string[]): void {
+  for (const item of listToken.items) {
+    const text = extractPlainText(item.tokens).trim();
+    if (!text) continue;
+    const colonIndex = text.indexOf(':');
+    const name = colonIndex === -1 ? text : text.substring(0, colonIndex).trim();
+    if (name) outputs.push(name);
   }
 }
 

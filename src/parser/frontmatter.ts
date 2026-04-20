@@ -20,11 +20,14 @@ export function parseFrontmatter(rawContent: string): {
 
   const timeoutVal = typeof data['timeout'] === 'string' ? data['timeout'] : undefined;
   const dataFileVal = typeof data['dataFile'] === 'string' ? data['dataFile'] : undefined;
+  const typeRaw = typeof data['type'] === 'string' ? data['type'] : undefined;
+  const typeVal = typeRaw === 'skill' || typeRaw === 'test' ? typeRaw : undefined;
 
   const frontmatter: TestFrontmatter = {
     tags,
     ...(timeoutVal !== undefined && { timeout: timeoutVal }),
     ...(dataFileVal !== undefined && { dataFile: dataFileVal }),
+    ...(typeVal !== undefined && { type: typeVal }),
   };
 
   return {

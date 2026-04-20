@@ -77,9 +77,14 @@ async function runCommand(
     process.exit(0);
   }
 
-  // Parse test files
+  // Parse test files (expanding any [skill: ...] references)
   logger.info(`Discovering tests from ${testFiles.length} file(s)...`);
-  const parsedTests = await Promise.all(testFiles.map(parseTestFile));
+  const skillsDir = path.resolve(process.cwd(), config.tests.skillsDir);
+  const parsedAll = await Promise.all(
+    testFiles.map((f) => parseTestFile(f, { skillsDir })),
+  );
+  // Skip files marked as skills — they're library code, not runnable tests.
+  const parsedTests = parsedAll.filter((t) => t.frontmatter.type !== 'skill');
 
   // Filter by tags
   const tags = opts.tag

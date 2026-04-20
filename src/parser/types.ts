@@ -5,6 +5,8 @@ export interface TestFrontmatter {
   timeout?: string;
   /** Path to JSON/CSV data file for data-driven tests */
   dataFile?: string;
+  /** "skill" marks the file as a reusable step macro, not a runnable test */
+  type?: 'test' | 'skill';
 }
 
 export interface TestConfig {
@@ -26,7 +28,25 @@ export interface ParsedTest {
   config: TestConfig;
   /** Resolved parameter key-value pairs */
   parameters: Record<string, string>;
-  /** Ordered list of natural language step instructions */
+  /** Ordered list of natural language step instructions (skills already expanded) */
+  steps: string[];
+}
+
+/**
+ * A parsed skill: a reusable, parameterised sequence of steps invoked from
+ * a test via `[skill: name arg="value"]`. Skills expand at parse time —
+ * the runner only ever sees the flattened step list on `ParsedTest.steps`.
+ */
+export interface ParsedSkill {
+  /** Absolute path to the skill .md file */
+  filePath: string;
+  /** Skill name (from H1, used as the invocation key) */
+  name: string;
+  /** Declared input parameter names (with optional default/hint text) */
+  parameters: Record<string, string>;
+  /** Declared output names — only these leak back to the caller's scope */
+  outputs: string[];
+  /** Skill body — natural-language steps, may reference {{param}} and other skills */
   steps: string[];
 }
 
