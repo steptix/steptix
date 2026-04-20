@@ -52,6 +52,24 @@ describe('parseAIResponse', () => {
     expect(result.reasoning).toBe('The user wants to log in.');
   });
 
+  it('accepts a single action object without an actions wrapper', () => {
+    // Smaller models sometimes read "Return exactly ONE action per response" literally
+    // and skip the actions array entirely. The parser should treat a bare action object
+    // as a one-element list rather than failing.
+    const raw = JSON.stringify({
+      action: 'keyboard',
+      key: 'Enter',
+      description: 'Submit search',
+      reasoning: 'Press Enter to run the query.',
+      needs_reeval: true,
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]?.action).toBe('keyboard');
+    expect(result.actions[0]?.key).toBe('Enter');
+    expect(result.needs_reeval).toBe(true);
+  });
+
   it('parses a type action with value', () => {
     const raw = JSON.stringify({
       actions: [

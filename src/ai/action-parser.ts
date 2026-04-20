@@ -157,12 +157,19 @@ function validateAndNormaliseResponse(parsed: unknown): AIResponse {
 
   const obj = parsed as Record<string, unknown>;
 
-  // Handle both { actions: [...] } and a bare array [...]
+  // Accept three response shapes:
+  //   1. { actions: [...] }            — canonical
+  //   2. [...]                         — bare array
+  //   3. { action: "...", ... }        — single action object (common with smaller
+  //                                      models that read "Return exactly ONE action"
+  //                                      literally and skip the actions wrapper)
   let rawActions: unknown[];
   if (Array.isArray(obj)) {
     rawActions = obj;
   } else if (Array.isArray(obj['actions'])) {
     rawActions = obj['actions'];
+  } else if (typeof obj['action'] === 'string') {
+    rawActions = [obj];
   } else {
     throw new Error('AI response must have an "actions" array');
   }
