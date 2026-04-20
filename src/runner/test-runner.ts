@@ -1,5 +1,6 @@
 import path from 'node:path';
 import readline from 'node:readline/promises';
+import { spawn } from 'node:child_process';
 import { stdin as input, stdout as output } from 'node:process';
 import type { Config } from '../config/types.js';
 import type { ParsedTest, TestInstance } from '../parser/types.js';
@@ -523,6 +524,7 @@ export async function runTests(
 
   const reports: TestReport[] = [];
   let bailed = false;
+  let lastReportPath: string | undefined;
 
   for (const test of tests) {
     if (bailed) break;
@@ -537,6 +539,7 @@ export async function runTests(
 
       // Save HTML report
       const reportPath = await generateReport(report, config.reports.outputDir);
+      lastReportPath = reportPath;
       logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
 
       if (report.status === 'failed' && options.bail) {
@@ -544,6 +547,10 @@ export async function runTests(
         bailed = true;
       }
     }
+  }
+
+  if (lastReportPath && config.reports.openInBrowserAfterRun && !process.env['CI']) {
+    openInDefaultBrowser(lastReportPath);
   }
 
   const totalTests = reports.length;
@@ -592,5 +599,21 @@ export function parseTimeoutMs(timeout?: string): number | undefined {
     case 'm': return Math.round(value * 60_000);
     case 'ms':
     default: return Math.round(value);
+  }
+}
+
+function openInDefaultBrowser(filePath: string): void {
+  try {
+    const platform = process.platform;
+    if (platform === 'win32') {
+      spawn('cmd', ['/c', 'start', '""', filePath], { detached: true, stdio: 'ignore' }).unref();
+    } else if (platform === 'darwin') {
+      spawn('open', [filePath], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      spawn('xdg-open', [filePath], { detached: true, stdio: 'ignore' }).unref();
+    }
+    logger.info(`Opening report in default browser: ${path.relative(process.cwd(), filePath)}`);
+  } catch (err) {
+    logger.warn(`Failed to open report in browser: ${String(err)}`);
   }
 }

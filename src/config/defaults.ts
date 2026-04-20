@@ -43,6 +43,7 @@ export const DEFAULT_CONFIG: Config = {
     includeDomSnapshots: true,
     includeAiReasoning: true,
     embedScreenshots: true,
+    openInBrowserAfterRun: false,
   },
   server: {
     host: '127.0.0.1',

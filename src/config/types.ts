@@ -74,6 +74,10 @@ export interface ReportsConfig {
   includeAiReasoning: boolean;
   /** Embed screenshots as base64 (vs separate files) */
   embedScreenshots: boolean;
+  /** After a test run completes, open the last generated HTML report in the OS
+   *  default browser. Driven by the OPEN_REPORT_IN_BROWSER_AFTER_RUN env var.
+   *  Skipped automatically when the `CI` env var is set. */
+  openInBrowserAfterRun: boolean;
 }
 
 export interface ApiConfig {

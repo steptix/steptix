@@ -82,6 +82,14 @@ function withEnvDefaults(config: Config): Config {
     };
   }
 
+  const openInBrowserAfterRun = parseBoolEnv(process.env['OPEN_REPORT_IN_BROWSER_AFTER_RUN']);
+  if (openInBrowserAfterRun !== undefined) {
+    result = {
+      ...result,
+      reports: { ...result.reports, openInBrowserAfterRun },
+    };
+  }
+
   return result;
 }
 
