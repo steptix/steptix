@@ -15,6 +15,7 @@ import { runFsdRepl } from './fsd-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
 import { generateReport } from '../report/generator.js';
+import { appendRunHistory } from '../report/history-appender.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { diagnoseFailure } from '../ai/diagnose.js';
 import { logger } from '../utils/logger.js';
@@ -541,6 +542,10 @@ export async function runTests(
       const reportPath = await generateReport(report, config.reports.outputDir);
       lastReportPath = reportPath;
       logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
+
+      if (config.reports.appendRunHistoryToTestFile) {
+        await appendRunHistory(instance.test.filePath, reportPath, report.status, report.date);
+      }
 
       if (report.status === 'failed' && options.bail) {
         logger.warn('Bailing on first failure (--bail flag set)');

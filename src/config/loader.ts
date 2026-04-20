@@ -90,6 +90,14 @@ function withEnvDefaults(config: Config): Config {
     };
   }
 
+  const appendRunHistoryToTestFile = parseBoolEnv(process.env['APPEND_RUN_HISTORY_TO_TEST_FILE']);
+  if (appendRunHistoryToTestFile !== undefined) {
+    result = {
+      ...result,
+      reports: { ...result.reports, appendRunHistoryToTestFile },
+    };
+  }
+
   return result;
 }
 
