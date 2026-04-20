@@ -138,11 +138,11 @@ export type MessageContentBlock =
 
 /** A message in the AI conversation */
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | MessageContentBlock[];
 }
 
-/** Request payload for /v1/vision */
+/** Request payload for /v2/vision */
 export interface VisionRequest {
   model: string;
   messages: ChatMessage[];
@@ -150,30 +150,47 @@ export interface VisionRequest {
   response_format?: { type: 'json_object' | 'text' };
 }
 
-/** A single choice in the AI response */
-export interface ResponseChoice {
-  message: {
-    role: string;
-    content: string;
-  };
-  finish_reason: string;
-}
-
 /** Usage statistics from the API response */
 export interface TokenUsage {
   input_tokens: number;
   output_tokens: number;
+  total_tokens?: number;
 }
 
-/** Response from /v1/vision */
+/** Provider-neutral content blocks returned by /v2 endpoints */
+export type ResponseContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id?: string; name?: string; input?: unknown }
+  | { type: 'image'; source?: unknown };
+
+/** Response from /v2/vision */
 export interface VisionResponse {
   id: string;
-  choices: ResponseChoice[];
-  usage: TokenUsage;
+  object: 'response';
+  created: number;
+  provider: string;
+  model: string;
+  role: string;
+  stop_reason?: string | null;
+  content: ResponseContentBlock[];
+  usage?: TokenUsage;
 }
 
-/** A single SSE chunk from /v1/stream */
-export interface StreamChunk {
+/** Legacy v1 response, still parsed as a fallback during migration */
+export interface LegacyVisionResponse {
+  response?: string;
+  choices?: Array<{
+    message?: {
+      role?: string;
+      content?: string;
+    };
+    finish_reason?: string;
+  }>;
+  usage?: TokenUsage;
+}
+
+/** Legacy SSE chunk from /v1/stream, still parsed as a fallback during migration */
+export interface LegacyStreamChunk {
   id?: string;
   choices: Array<{
     delta: {
@@ -182,4 +199,44 @@ export interface StreamChunk {
     };
     finish_reason?: string | null;
   }>;
+  usage?: TokenUsage;
 }
+
+export interface StreamResponseEnvelope {
+  id: string;
+  object: 'response';
+  created: number;
+  provider: string;
+  model: string;
+  role: string;
+  stop_reason?: string | null;
+  content: ResponseContentBlock[];
+  usage?: TokenUsage;
+}
+
+export type StreamEvent =
+  | {
+      type: 'response.start';
+      response: Pick<StreamResponseEnvelope, 'id' | 'object' | 'created' | 'provider' | 'model' | 'role'>;
+    }
+  | {
+      type: 'response.content_block.delta';
+      index: number;
+      delta: {
+        type: 'text_delta';
+        text: string;
+      };
+    }
+  | {
+      type: 'response.completed';
+      response: StreamResponseEnvelope;
+    }
+  | {
+      type: 'response.error';
+      error: {
+        message: string;
+        type?: string;
+        provider?: string;
+        code?: string;
+      };
+    };
