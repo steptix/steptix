@@ -11,6 +11,7 @@ import { launchBrowser, closeBrowser } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
+import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runFsdRepl } from './fsd-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
@@ -129,6 +130,8 @@ export async function runTest(
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
     ?? config.execution.timeout;
 
+  const hooks = await resolveHooks(test, config);
+
   const session = await launchBrowser(config.browser);
 
   try {
@@ -146,6 +149,69 @@ export async function runTest(
     let bail = false;
     let supervised = false;
 
+    /** Execute every hook instruction in a scope. Returns true on first failure. */
+    const runHookScope = async (
+      scope: 'before' | 'beforeEach' | 'afterEach' | 'after',
+      instructions: string[],
+      hookIndex: number,
+    ): Promise<{ failed: boolean; error?: string }> => {
+      for (const raw of instructions) {
+        const hookInstruction = interpolate(raw, resolvedParameters);
+        logger.info(`Running ${scope} hook: ${hookInstruction}`);
+
+        const result = await executeStep(hookIndex, test.steps.length, hookInstruction, {
+          page: session.page,
+          config,
+          aiClient,
+          contextContent,
+          testName: test.title,
+          ...(baseUrl !== undefined && { baseUrl }),
+          conversationHistory: [...conversationHistory],
+          apiResponseStore,
+          csrfTokens,
+          resolvedParameters,
+          pageTracker: session.pageTracker,
+          dismissalGuidance: hooks.hasAny,
+          // No stepCache — hook results are usually page-state-dependent
+          // (e.g., "accept cookie banner if visible") and shouldn't be replayed blindly.
+        });
+
+        result.hookScope = scope;
+        stepResults.push(result);
+        tokenTracker.resetStep();
+
+        // `before` hooks inform the AI's context for later steps; per-step
+        // hooks are plumbing and would just pollute the conversation history.
+        if (scope === 'before') {
+          conversationHistory.push(
+            formatStepHistoryEntry(
+              hookIndex,
+              `(${scope} hook) ${hookInstruction}`,
+              result.status === 'passed',
+              session.page.url(),
+            ),
+          );
+        }
+
+        if (result.status === 'failed') {
+          return {
+            failed: true,
+            error: result.error ?? `${scope} hook failed`,
+          };
+        }
+      }
+      return { failed: false };
+    };
+
+    // Run `before` hooks (once per test, before any step runs)
+    if (hooks.before.length > 0) {
+      const beforeResult = await runHookScope('before', hooks.before, 0);
+      if (beforeResult.failed) {
+        logger.error(`'before' hook failed — aborting test: ${beforeResult.error}`);
+        bail = true;
+      }
+    }
+
     // Detect conditional step groups for multi-outcome branching
     const stepGroups = identifyStepGroups(test.steps);
 
@@ -155,6 +221,18 @@ export async function runTest(
       if (Date.now() > timeoutDeadline) {
         logger.error(`Test timeout after ${testTimeout}ms at step ${i + 1}`);
         break;
+      }
+
+      const stepSkipsHooks = test.skipHooks[i] ?? false;
+
+      // Run `beforeEach` hooks (skipped when the step is marked [no-hooks])
+      if (hooks.beforeEach.length > 0 && !stepSkipsHooks) {
+        const preResult = await runHookScope('beforeEach', hooks.beforeEach, i + 1);
+        if (preResult.failed) {
+          logger.error(`'beforeEach' hook before step ${i + 1} failed — aborting test: ${preResult.error}`);
+          bail = true;
+          break;
+        }
       }
 
       // Check if this step is part of a conditional group
@@ -176,6 +254,7 @@ export async function runTest(
           resolvedParameters,
           pageTracker: session.pageTracker,
           ...(stepCache !== undefined && { stepCache }),
+          dismissalGuidance: hooks.hasAny,
         });
 
         for (const result of branchedResults) {
@@ -261,6 +340,7 @@ export async function runTest(
             apiResponseStore,
             csrfTokens,
             pageTracker: session.pageTracker,
+            dismissalGuidance: hooks.hasAny,
             // No stepCache — interactive commands are ad-hoc user instructions,
             // not cacheable steps (and they all share the same stepIndex)
           });
@@ -314,6 +394,7 @@ export async function runTest(
           resolvedParameters,
           pageTracker: session.pageTracker,
           ...(stepCache !== undefined && { stepCache }),
+          dismissalGuidance: hooks.hasAny,
         });
         if (stepResult.status === 'passed') {
           logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
@@ -332,6 +413,7 @@ export async function runTest(
           resolvedParameters,
           pageTracker: session.pageTracker,
           ...(stepCache !== undefined && { stepCache }),
+          dismissalGuidance: hooks.hasAny,
         });
       }
 
@@ -370,6 +452,7 @@ export async function runTest(
             csrfTokens,
             resolvedParameters,
             pageTracker: session.pageTracker,
+            dismissalGuidance: hooks.hasAny,
           };
           const adHocResults: StepResult[] = [];
           const decision = await runFsdRepl({
@@ -414,7 +497,25 @@ export async function runTest(
         logger.success(`Step ${i + 1} passed`);
       }
 
+      // Run `afterEach` hooks — skipped on [no-hooks] steps or if the step
+      // bailed (we're about to abort anyway).
+      if (!bail && hooks.afterEach.length > 0 && !stepSkipsHooks) {
+        const postResult = await runHookScope('afterEach', hooks.afterEach, i + 1);
+        if (postResult.failed) {
+          logger.error(`'afterEach' hook after step ${i + 1} failed — aborting test: ${postResult.error}`);
+          bail = true;
+        }
+      }
+
       tokenTracker.resetStep();
+    }
+
+    // Run `after` hooks — best effort, failures logged but don't flip test status.
+    if (hooks.after.length > 0) {
+      const afterResult = await runHookScope('after', hooks.after, test.steps.length + 1);
+      if (afterResult.failed) {
+        logger.warn(`'after' hook failed (test status unchanged): ${afterResult.error}`);
+      }
     }
 
     const durationMs = Date.now() - startTime;

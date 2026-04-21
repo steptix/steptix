@@ -28,8 +28,13 @@ export default defineConfig({
     timeout: 3_600_000,
     retries: 1,
     screenshotOnFailure: true,
-    dismissObstacles: false,
     promptOnAmbiguity: true,
+    // Example project-level hook — runs before every step of every test unless
+    // the test sets `hooks: replace` in frontmatter, or the step is marked
+    // [no-hooks]. Uncomment to enable.
+    // defaultHooks: {
+    //   beforeEach: ['[skill: dismiss_obstacles]'],
+    // },
   },
   reports: {
     outputDir: './reports',

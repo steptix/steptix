@@ -24,7 +24,6 @@ import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, for
 import type { DomMode } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
-import { handleObstacles } from '../browser/obstacle-handler.js';
 import type { PageTracker } from '../browser/manager.js';
 import { withRetry } from './retry.js';
 import { logger } from '../utils/logger.js';
@@ -57,6 +56,9 @@ export interface StepExecutorOptions {
   pageTracker?: PageTracker;
   /** Pre-initialized step cache (undefined = caching disabled) */
   stepCache?: StepCache;
+  /** When true, include dismissal-related guidance in the system prompt and
+   *  retry hints. Enabled by the runner when the test has hooks configured. */
+  dismissalGuidance?: boolean;
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -305,11 +307,6 @@ async function executeStepAttempt(
       page = pageTracker.getActive();
     }
 
-    // 1. Auto-dismiss obstacles (first turn only)
-    if (currentTurn === 1 && config.execution.dismissObstacles) {
-      await handleObstacles(page);
-    }
-
     // 1b. On retry attempts, diagnose page state and auto-wait if loading
     let pageDiagnosis: PageStateDiagnosis | undefined;
     if (attemptNumber > 1 && currentTurn === 1) {
@@ -354,7 +351,9 @@ async function executeStepAttempt(
       : undefined;
     lastApiContext = apiContext;
 
-    const systemPrompt = buildSystemPrompt(contextContent, apiContext);
+    const systemPrompt = buildSystemPrompt(contextContent, apiContext, {
+      dismissalGuidance: opts.dismissalGuidance ?? false,
+    });
     const testInfo = formatTestInfo(
       testName,
       baseUrl,
@@ -373,7 +372,12 @@ async function executeStepAttempt(
 
     if (currentTurn === 1) {
       const retryInput: RetryDiagnostics | undefined = priorFailures.length > 0
-        ? { failures: priorFailures, ...(pageDiagnosis ? { pageState: pageDiagnosis } : {}), attemptNumber }
+        ? {
+            failures: priorFailures,
+            ...(pageDiagnosis ? { pageState: pageDiagnosis } : {}),
+            attemptNumber,
+            dismissalGuidance: opts.dismissalGuidance ?? false,
+          }
         : undefined;
       const retryHint = retryInput ? buildRetryContext(retryInput) : '';
       const enrichedInstruction = retryHint ? `${instruction}${retryHint}` : instruction;
@@ -867,7 +871,9 @@ async function executeStepAttempt(
       assertTestInfo,
     );
 
-    const assertSystemPrompt = buildSystemPrompt(contextContent, lastApiContext);
+    const assertSystemPrompt = buildSystemPrompt(contextContent, lastApiContext, {
+      dismissalGuidance: opts.dismissalGuidance ?? false,
+    });
     const assertMessages: ChatMessage[] = [
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
@@ -1147,7 +1153,9 @@ export async function executeBranchedStep(
       branchedTestInfo,
     );
 
-    const systemPrompt = buildSystemPrompt(contextContent);
+    const systemPrompt = buildSystemPrompt(contextContent, undefined, {
+      dismissalGuidance: opts.dismissalGuidance ?? false,
+    });
 
     const messages = [
       { role: 'system' as const, content: systemPrompt },

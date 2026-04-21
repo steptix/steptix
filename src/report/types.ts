@@ -75,7 +75,9 @@ export interface TurnResult {
 
 /** Result of a single test step */
 export interface StepResult {
-  /** 1-based step number */
+  /** 1-based step number. For hook results, this is the 1-based index of the
+   *  step the hook is associated with (the wrapped step for beforeEach/afterEach,
+   *  0 for `before`, totalSteps+1 for `after`). */
   index: number;
   instruction: string;
   status: StepStatus;
@@ -100,6 +102,8 @@ export interface StepResult {
   fsdAdHoc?: boolean;
   /** True when the failure on this step triggered the FSD(S) REPL handoff and the user chose to resume. */
   fsdResumed?: boolean;
+  /** Hook metadata — absent for regular steps, set for hook executions. */
+  hookScope?: 'before' | 'beforeEach' | 'afterEach' | 'after';
 }
 
 /** AI-generated root-cause analysis for a failed test run */

@@ -64,6 +64,16 @@ export function formatTestInfo(
 }
 
 /**
+ * Options that influence which optional rules are injected into the system prompt.
+ */
+export interface SystemPromptOptions {
+  /** When true, include guidance for handling unexpected popups/modals/banners.
+   *  Only enabled when the test has hooks configured — without hooks, the
+   *  author has signalled no intent to dismiss UI, so we don't nudge the AI. */
+  dismissalGuidance?: boolean;
+}
+
+/**
  * Build the system prompt for step execution.
  * Stable instructional blocks are marked cacheable so aiapi v2 can map them per provider.
  * Volatile per-step state (test name, step counter, viewport) lives in the user message
@@ -72,7 +82,12 @@ export function formatTestInfo(
 export function buildSystemPrompt(
   contextContent: string,
   apiContext?: ApiPromptContext,
+  options: SystemPromptOptions = {},
 ): MessageContentBlock[] {
+  const dismissalRule = options.dismissalGuidance
+    ? '\n6. If you encounter an unexpected popup/modal/banner, return a "dismiss" action first — you can continue with your main action on the next turn'
+    : '';
+
   const blocks: MessageContentBlock[] = [
     textBlock(`You are an expert UI test automation agent. You control a web browser and can also execute API calls.
 
@@ -86,8 +101,7 @@ Plan your next action based on the observed result — do not batch multiple act
 2. Return exactly ONE action per response: { "action": string, "description": string } plus relevant fields. After this action executes, you will see the result and can plan the next action
 3. Use CSS selectors. Prefer data-testid > id > aria-label > name > visible text. NEVER use Tailwind utility classes (e.g. .!fixed, .z-[999], .bg-black) in selectors — they contain characters that break CSS parsing. Use semantic selectors instead (role, aria-label, tag, id, data-testid)
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
-5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — you will see the result in the next screenshot
-6. If you encounter an unexpected popup/modal/banner, return a "dismiss" action first — you can continue with your main action on the next turn
+5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — you will see the result in the next screenshot${dismissalRule}
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
 8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
 9. For "navigate" actions, set "url" to the full or relative URL
@@ -331,6 +345,10 @@ export interface RetryDiagnostics {
   pageState?: PageStateDiagnosis;
   /** Which attempt number this is (2 = first retry) */
   attemptNumber: number;
+  /** When true, include hints that push the AI toward dismissing modals/overlays.
+   *  Only enabled when the test has hooks configured — without hooks, we assume
+   *  dialogs the AI sees are intentional UI, not obstacles. */
+  dismissalGuidance?: boolean;
 }
 
 /**
@@ -407,16 +425,19 @@ export function buildRetryContext(input: PriorFailureContext[] | RetryDiagnostic
     }
 
     if (ps.hasErrorOverlay && ps.errorMessages.length > 0) {
+      const hint = diagnostics.dismissalGuidance
+        ? '  → Consider dismissing this or addressing the error before retrying the original action.'
+        : '  → Address the error before retrying the original action.';
       stateLines.push(
         `- Error overlay detected: ${ps.errorMessages[0]!.slice(0, 300)}`,
-        '  → Consider dismissing this or addressing the error before retrying the original action.',
+        hint,
       );
     }
 
-    if (ps.hasModal) {
+    if (ps.hasModal && diagnostics.dismissalGuidance) {
       stateLines.push(
         '- A modal/dialog is currently visible.',
-        '  → You may need to dismiss it or interact with it before proceeding.',
+        '  → If it is unrelated to the current step, dismiss it; otherwise interact with it.',
       );
     }
 
@@ -434,8 +455,10 @@ export function buildRetryContext(input: PriorFailureContext[] | RetryDiagnostic
   if (ps?.isLoading) {
     instructions.push(`${step++}. Loading indicators are present — use a "wait" action first (e.g. wait for networkidle, or wait for a specific element to appear).`);
   }
-  if (ps?.hasModal || ps?.hasErrorOverlay) {
-    instructions.push(`${step++}. A modal or error overlay is visible — dismiss it before attempting the original action.`);
+  if ((ps?.hasModal || ps?.hasErrorOverlay) && diagnostics.dismissalGuidance) {
+    instructions.push(
+      `${step++}. A modal or overlay is visible — if it's unrelated to the current step, dismiss it; otherwise interact with it.`,
+    );
   }
 
   instructions.push(`${step++}. If the page has navigated, check whether the step is already partially or fully complete.`);

@@ -7,6 +7,38 @@ export interface TestFrontmatter {
   dataFile?: string;
   /** "skill" marks the file as a reusable step macro, not a runnable test */
   type?: 'test' | 'skill';
+  /** "replace" ignores project-level defaultHooks for this test; "merge" (default)
+   *  runs defaults before per-test hooks. */
+  hooks?: 'merge' | 'replace';
+}
+
+/**
+ * Pre/post-step hook instructions, parsed from a `## Hooks` section in a test
+ * markdown file. Each entry is a natural-language step that executes through
+ * the same AI pipeline as a regular step.
+ */
+export interface TestHooks {
+  before: string[];
+  beforeEach: string[];
+  afterEach: string[];
+  after: string[];
+}
+
+export const EMPTY_HOOKS: TestHooks = {
+  before: [],
+  beforeEach: [],
+  afterEach: [],
+  after: [],
+};
+
+/** True when every hook scope is empty. */
+export function hooksAreEmpty(hooks: TestHooks): boolean {
+  return (
+    hooks.before.length === 0 &&
+    hooks.beforeEach.length === 0 &&
+    hooks.afterEach.length === 0 &&
+    hooks.after.length === 0
+  );
 }
 
 export interface TestConfig {
@@ -30,6 +62,11 @@ export interface ParsedTest {
   parameters: Record<string, string>;
   /** Ordered list of natural language step instructions (skills already expanded) */
   steps: string[];
+  /** Parallel to `steps` — true when the step was authored with `[no-hooks]`
+   *  and should skip `beforeEach` / `afterEach` wrapping. */
+  skipHooks: boolean[];
+  /** Pre/post-step hook instructions (skills already expanded). */
+  hooks: TestHooks;
 }
 
 /**

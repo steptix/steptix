@@ -466,7 +466,6 @@ function makeConfig(maxTurns = 5): Config {
       timeout: 30000,
       retries: 0,
       screenshotOnFailure: false,
-      dismissObstacles: false,
       promptOnAmbiguity: false,
       maxTurns,
 

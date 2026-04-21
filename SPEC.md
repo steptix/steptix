@@ -474,8 +474,8 @@ export default defineConfig({
     timeout: 60_000,                       // Default test timeout (ms)
     retries: 1,                            // Retries per step before failure
     screenshotOnFailure: true,
-    dismissObstacles: true,                // Auto-dismiss unexpected modals/banners
     promptOnAmbiguity: true,               // Ask user when AI is unsure
+    // defaultHooks: { beforeEach: ['[skill: dismiss_obstacles]'] },
   },
 
   // Reporting

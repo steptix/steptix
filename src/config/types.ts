@@ -48,6 +48,17 @@ export interface TestsConfig {
   pattern: string;
 }
 
+/**
+ * Project-level default hooks merged into every test's `## Hooks` section.
+ * Per-test `hooks: replace` frontmatter disables merging for that test.
+ */
+export interface DefaultHooksConfig {
+  before?: string[];
+  beforeEach?: string[];
+  afterEach?: string[];
+  after?: string[];
+}
+
 export interface ExecutionConfig {
   /** Default test timeout in milliseconds */
   timeout: number;
@@ -55,14 +66,15 @@ export interface ExecutionConfig {
   retries: number;
   /** Capture screenshot on step failure */
   screenshotOnFailure: boolean;
-  /** Auto-dismiss unexpected modals and banners */
-  dismissObstacles: boolean;
   /** Ask user when AI cannot determine next action */
   promptOnAmbiguity: boolean;
   /** Maximum number of AI turns per step for multi-turn execution (default: 15) */
   maxTurns: number;
   /** Drop into a REPL when a step fails after retries (headed + TTY only). */
   interactiveOnFailure: boolean;
+  /** Default `## Hooks` entries merged into every test unless the test sets
+   *  `hooks: replace` in frontmatter. */
+  defaultHooks?: DefaultHooksConfig;
 }
 
 export interface ReportsConfig {

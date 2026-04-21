@@ -223,15 +223,26 @@ describe('buildRetryContext — page state assessment', () => {
     expect(result).toContain('Session expired');
   });
 
-  it('includes modal info when detected', () => {
+  it('includes modal info when detected and dismissalGuidance is enabled', () => {
+    const diagnostics: RetryDiagnostics = {
+      failures: [baseFailure],
+      pageState: { ...cleanPageState, hasModal: true },
+      attemptNumber: 2,
+      dismissalGuidance: true,
+    };
+    const result = buildRetryContext(diagnostics);
+    expect(result).toContain('modal/dialog is currently visible');
+    expect(result).toContain('dismiss');
+  });
+
+  it('omits modal dismissal hint when dismissalGuidance is disabled', () => {
     const diagnostics: RetryDiagnostics = {
       failures: [baseFailure],
       pageState: { ...cleanPageState, hasModal: true },
       attemptNumber: 2,
     };
     const result = buildRetryContext(diagnostics);
-    expect(result).toContain('modal/dialog is currently visible');
-    expect(result).toContain('dismiss');
+    expect(result).not.toContain('modal/dialog is currently visible');
   });
 
   it('includes document loading state', () => {
@@ -287,6 +298,7 @@ describe('buildRetryContext — instruction numbering', () => {
         documentLoading: false,
       },
       attemptNumber: 2,
+      dismissalGuidance: true,
     };
     const result = buildRetryContext(diagnostics);
     const instructionSection = result.split('Instructions for this retry')[1] ?? '';
