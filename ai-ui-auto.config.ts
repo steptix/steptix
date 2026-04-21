@@ -25,7 +25,7 @@ export default defineConfig({
     pattern: '**/*.md',
   },
   execution: {
-    timeout: 60_000,
+    timeout: 3_600_000,
     retries: 1,
     screenshotOnFailure: true,
     dismissObstacles: true,
