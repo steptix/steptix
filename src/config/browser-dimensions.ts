@@ -4,6 +4,6 @@ export interface BrowserDimensions {
 }
 
 export const DEFAULT_BROWSER_DIMENSIONS: BrowserDimensions = {
-  width: 1280,
-  height: 720,
+  width: 1440,
+  height: 900,
 };
