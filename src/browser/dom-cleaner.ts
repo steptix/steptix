@@ -205,12 +205,10 @@ function prefixIframeComments(content: string, parentPath: string): string {
 function buildDomCleanerScript(mode: DomMode): string {
   const isReadable = mode === 'readable';
   const maxRepeat = isReadable ? 5 : 2;
-  const textLimit = isReadable ? 300 : 100;
 
   return `(() => {
   var MODE = '${mode}';
   var MAX_REPEAT = ${maxRepeat};
-  var TEXT_LIMIT = ${textLimit};
 
   const INTERACTIVE_TAGS = new Set([
     'input', 'button', 'a', 'select', 'textarea', 'label',
@@ -315,7 +313,13 @@ function buildDomCleanerScript(mode: DomMode): string {
         text += (node.textContent || '').trim();
       }
     }
-    return text.trim().substring(0, TEXT_LIMIT);
+    text = text.trim();
+    if (!text) {
+      // Fallback: buttons/links often wrap their label in <span>/<i>/etc.
+      // Use full textContent so the AI can match on visible label text.
+      text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+    }
+    return text;
   }
 
   function buildSelector(el) {
@@ -399,7 +403,7 @@ function buildDomCleanerScript(mode: DomMode): string {
 
     // Headings: text content for orientation
     if (HEADING_TAGS.has(tag)) {
-      const text = (el.textContent || '').trim().substring(0, TEXT_LIMIT);
+      const text = (el.textContent || '').trim();
       if (text) return indent + '<' + tag + '> ' + text + '</' + tag + '>\\n';
       return '';
     }
@@ -424,7 +428,7 @@ function buildDomCleanerScript(mode: DomMode): string {
     if (MODE === 'readable') {
       // Text-bearing tags: show tag + text content
       if (READABLE_TEXT_TAGS.has(tag)) {
-        var text = (el.textContent || '').trim().substring(0, TEXT_LIMIT);
+        var text = (el.textContent || '').trim();
         if (text) {
           var attrs = getKeyAttributes(el);
           return indent + '<' + tag + attrs + '> ' + text + ' </' + tag + '>\\n';
