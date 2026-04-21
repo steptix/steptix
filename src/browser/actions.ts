@@ -341,6 +341,34 @@ function sanitizeCssSelector(selector: string): string {
     '$1-\\[$2\\]',
   );
 
+  // Escape `:` inside ID and class selectors (e.g. React Aria's
+  // `#react-aria-:rb4:` or Tailwind variants like `.hover:bg-blue-500`).
+  // In CSS, `:` starts a pseudo-class, so an unescaped `:` in the middle
+  // of an id or class name truncates the identifier and breaks parsing.
+  // We match `#` or `.` + identifier chars and escape any `:` in that run —
+  // but only when the `:` is NOT followed by a known pseudo-class name.
+  const pseudoClasses = [
+    'hover', 'focus', 'focus-visible', 'focus-within', 'active', 'visited',
+    'link', 'any-link', 'target', 'root', 'scope', 'empty',
+    'first-child', 'last-child', 'only-child', 'first-of-type',
+    'last-of-type', 'only-of-type',
+    'nth-child', 'nth-last-child', 'nth-of-type', 'nth-last-of-type',
+    'not', 'is', 'where', 'has', 'lang', 'dir',
+    'checked', 'disabled', 'enabled', 'required', 'optional',
+    'valid', 'invalid', 'in-range', 'out-of-range',
+    'read-only', 'read-write', 'placeholder-shown',
+    'default', 'indeterminate', 'before', 'after',
+  ];
+  const pseudoRe = new RegExp(`^(?:${pseudoClasses.join('|')})\\b`, 'i');
+  sanitized = sanitized.replace(/[#.][^\s.#\[>+~,]+/g, (part) => {
+    const prefix = part[0];
+    let body = part.slice(1);
+    body = body.replace(/(?<!\\):([^\s.#\[>+~,:]*)/g, (match, rest) => {
+      return pseudoRe.test(rest) ? match : '\\:' + rest;
+    });
+    return prefix + body;
+  });
+
   return sanitized;
 }
 
