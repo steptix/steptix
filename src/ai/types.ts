@@ -133,8 +133,8 @@ export interface AssertionEvaluation {
 
 /** A single content block in a multimodal message */
 export type MessageContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string } };
+  | { type: 'text'; text: string; cache?: boolean }
+  | { type: 'image_url'; image_url: { url: string }; cache?: boolean };
 
 /** A message in the AI conversation */
 export interface ChatMessage {

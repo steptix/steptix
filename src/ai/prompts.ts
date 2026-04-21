@@ -1,4 +1,4 @@
-import type { ChatMessage } from './types.js';
+import type { ChatMessage, MessageContentBlock } from './types.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { DomMode } from '../browser/dom-cleaner.js';
@@ -17,6 +17,17 @@ export interface ApiPromptContext {
   hasApiContext: boolean;
 }
 
+function textBlock(text: string, cache = false): MessageContentBlock {
+  return { type: 'text', text, ...(cache && { cache: true }) };
+}
+
+export function contentBlocksToText(content: string | MessageContentBlock[]): string {
+  if (typeof content === 'string') return content;
+  return content
+    .map((block) => block.type === 'text' ? block.text : '[image]')
+    .join('\n');
+}
+
 /**
  * Classify viewport width into a device mode label.
  */
@@ -27,40 +38,43 @@ function classifyDeviceMode(width: number): string {
 }
 
 /**
- * Build the system prompt for step execution.
- * Includes application context and AI behaviour rules.
+ * Format the volatile per-step "Test Information" section that lives in the user
+ * message (not the system prompt) so it doesn't break the cacheable system prefix.
  */
-export function buildSystemPrompt(
-  contextContent: string,
+export function formatTestInfo(
   testName: string,
   baseUrl?: string,
   currentStep?: number,
   totalSteps?: number,
   viewport?: ViewportInfo,
-  apiContext?: ApiPromptContext,
 ): string {
   const stepInfo =
     currentStep !== undefined && totalSteps !== undefined
       ? `- Current Step: ${currentStep} of ${totalSteps}`
       : '';
-
   const baseUrlInfo = baseUrl ? `- Base URL: ${baseUrl}` : '';
-
   let viewportInfo = '';
   if (viewport) {
     const mode = classifyDeviceMode(viewport.width);
     viewportInfo = `- Viewport: ${viewport.width}×${viewport.height}px (${mode} view)`;
   }
+  return [`## Test Information`, `- Test: ${testName}`, baseUrlInfo, stepInfo, viewportInfo]
+    .filter((line) => line !== '')
+    .join('\n');
+}
 
-  const apiSection = buildApiSection(apiContext);
-
-  return `You are an expert UI test automation agent. You control a web browser and can also execute API calls.
-
-${contextContent ? `## Application Context\n\n${contextContent}\n\n` : ''}## Test Information
-- Test: ${testName}
-${baseUrlInfo}
-${stepInfo}
-${viewportInfo}
+/**
+ * Build the system prompt for step execution.
+ * Stable instructional blocks are marked cacheable so aiapi v2 can map them per provider.
+ * Volatile per-step state (test name, step counter, viewport) lives in the user message
+ * via formatTestInfo() so it doesn't invalidate the cacheable system prefix.
+ */
+export function buildSystemPrompt(
+  contextContent: string,
+  apiContext?: ApiPromptContext,
+): MessageContentBlock[] {
+  const blocks: MessageContentBlock[] = [
+    textBlock(`You are an expert UI test automation agent. You control a web browser and can also execute API calls.
 
 ## Your Task
 Execute the following test step by returning a JSON object with ONE action at a time.
@@ -99,9 +113,17 @@ Plan your next action based on the observed result — do not batch multiple act
 18. To close a browser tab or popup window, use a "closePage" action: { "action": "closePage", "page": "page:2", "description": "Close the popup window" }. The "page" field accepts the same identifiers as switchPage (label, URL substring, or title substring). You cannot close the main page. After closing, the framework automatically switches back to the main page — set "needs_reeval": true to get the updated DOM snapshot. Use this when a step asks to close a tab, window, or popup
 19. For "find" actions, set "value" to the text to search for in the full DOM. The framework will search the entire page and return matching elements with their selectors. Use this when you need to locate a specific item in a collapsed/summarised list (e.g. finding a specific order in a table). Always set "needs_reeval": true
 20. For "expand" actions, set "selector" to the CSS selector of the element to expand. The framework will return the full DOM subtree for that element. Use this when the compact DOM shows a collapsed summary and you need to see all children (e.g. expanding a table to see all rows). Always set "needs_reeval": true
-21. CRITICAL: Complete ONLY what the current step instruction literally asks for. Do NOT perform follow-up actions that belong to subsequent steps, even if they seem like the obvious next thing to do. Each step is deliberately scoped — the test author has split the workflow into separate steps for a reason. Once the instruction is fulfilled, stop
-${apiContext?.hasApiContext ? `
-## API Actions (use when the step describes an API call)
+21. CRITICAL: Complete ONLY what the current step instruction literally asks for. Do NOT perform follow-up actions that belong to subsequent steps, even if they seem like the obvious next thing to do. Each step is deliberately scoped — the test author has split the workflow into separate steps for a reason. Once the instruction is fulfilled, stop`, true),
+  ];
+
+  if (contextContent) {
+    blocks.push(textBlock(`## Application Context
+
+${contextContent}`, true));
+  }
+
+  if (apiContext?.hasApiContext) {
+    blocks.push(textBlock(`## API Actions (use when the step describes an API call)
 When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.
 
 IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "http", "request", or any other value.
@@ -115,17 +137,24 @@ IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "htt
   { "action": "extract_csrf", "selector": "input[name='__RequestVerificationToken']", "source": "/delegates", "description": "Extract CSRF token" }
   Then include the token as a header in the following api_call action.
 - To extract a value from a prior API response for use in the current step:
-  { "action": "extract_value", "from": "step_N", "path": "data.0.id", "as": "delegateId", "description": "..." }` : ''}
+  { "action": "extract_value", "from": "step_N", "path": "data.0.id", "as": "delegateId", "description": "..." }`, true));
+  }
 
-## Response Format
+  blocks.push(textBlock(`## Response Format
 {
   "actions": [
     { "action": "click", "selector": "#login-btn", "description": "Click the login button" }
   ],
   "reasoning": "Brief explanation of your approach",
   "needs_reeval": true
-}
-${apiSection}`;
+}` , true));
+
+  const apiSection = buildApiSection(apiContext);
+  if (apiSection) {
+    blocks.push(textBlock(apiSection));
+  }
+
+  return blocks;
 }
 
 /**
@@ -160,6 +189,7 @@ export function buildStepMessage(
   conversationHistory: string[],
   openPages?: PageInfo[],
   domMode?: DomMode,
+  testInfoSection?: string,
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -168,11 +198,13 @@ export function buildStepMessage(
 
   const openPagesSection = formatOpenPagesSection(openPages);
 
+  const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
+
   const domLabel = domMode === 'readable'
     ? '## DOM Snapshot (readable mode — includes visible text content for value extraction)'
     : '## DOM Snapshot';
 
-  const textContent = `${historySection}${openPagesSection}## Current Step
+  const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
 
 ${domLabel}
@@ -223,6 +255,7 @@ export function buildAssertionMessage(
   domSnapshot: string,
   screenshotBase64: string | null,
   apiResponseHistory?: string,
+  testInfoSection?: string,
 ): ChatMessage {
   const apiSection = apiResponseHistory
     ? `\n\n## Prior API Responses (IMPORTANT — evaluate assertions about "the response" or API data against this section)\n${apiResponseHistory}`
@@ -232,7 +265,9 @@ export function buildAssertionMessage(
     ? 'the current page state AND the prior API responses below. IMPORTANT: If the assertion refers to "the response", API data, or data not visible on the page, evaluate it against the Prior API Responses section, NOT the page DOM.'
     : 'the current page state';
 
-  const textContent = `Evaluate whether the following test assertion PASSES or FAILS based on ${context}.
+  const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
+
+  const textContent = `${testInfoBlock}Evaluate whether the following test assertion PASSES or FAILS based on ${context}.
 
 ## Assertion
 ${stepInstruction}
@@ -435,6 +470,7 @@ export function buildContinuationMessage(
   openPages?: PageInfo[],
   explorationResults?: string[],
   domMode?: DomMode,
+  testInfoSection?: string,
 ): ChatMessage {
   const actionLines = completedActions.length > 0
     ? completedActions.map((a) => `  - ${a.description}`).join('\n')
@@ -454,7 +490,9 @@ export function buildContinuationMessage(
     ? '## DOM Snapshot (readable mode — includes visible text content for value extraction)'
     : '## DOM Snapshot';
 
-  const textContent = `You are continuing the execution of a step.
+  const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
+
+  const textContent = `${testInfoBlock}You are continuing the execution of a step.
 
 Original instruction: "${originalInstruction}"
 
@@ -528,6 +566,7 @@ export function buildBranchedStepMessage(
   screenshotBase64: string | null,
   conversationHistory: string[],
   openPages?: PageInfo[],
+  testInfoSection?: string,
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -536,6 +575,8 @@ export function buildBranchedStepMessage(
 
   const openPagesSection = formatOpenPagesSection(openPages);
 
+  const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
+
   const outcomeLines = outcomes
     .map((o) => {
       const tag = o.isConditional ? '(conditional)' : '(default / continuation)';
@@ -543,7 +584,7 @@ export function buildBranchedStepMessage(
     })
     .join('\n');
 
-  const textContent = `${historySection}${openPagesSection}## Branched Step — Determine Which Outcome Applies
+  const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Branched Step — Determine Which Outcome Applies
 
 The following outcomes are possible after the previous action. Examine the current page state (DOM and screenshot) and determine which outcome has occurred:
 

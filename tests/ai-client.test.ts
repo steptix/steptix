@@ -97,6 +97,33 @@ describe('AiClient v2 gateway integration', () => {
     expect(tokenTracker.checkStepBudget).toHaveBeenCalledWith(1_000_000);
   });
 
+  it('passes cache hints through to aiapi v2 requests', async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.messages[0].content[0]).toEqual({ type: 'text', text: 'Core instructions', cache: true });
+      expect(body.messages[1].content[0]).toEqual({ type: 'text', text: 'Live request data' });
+      return new Response(JSON.stringify({
+        id: 'msg_123',
+        object: 'response',
+        created: 1776692376,
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        role: 'assistant',
+        stop_reason: 'end_turn',
+        content: [
+          { type: 'text', text: '{"actions":[],"reasoning":"ok"}' },
+        ],
+        usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const client = new AiClient(baseConfig, tokenTracker as any);
+    await client.complete([
+      { role: 'system', content: [{ type: 'text', text: 'Core instructions', cache: true }] },
+      { role: 'user', content: [{ type: 'text', text: 'Live request data' }] },
+    ]);
+  });
+
   it('keeps parsing legacy v1-style responses as a fallback during migration', async () => {
     global.fetch = vi.fn(async () => new Response(JSON.stringify({
       response: '{"actions":[],"reasoning":"legacy"}',

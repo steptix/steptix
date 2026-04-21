@@ -13,6 +13,7 @@ import {
   buildAssertionMessage,
   buildRetryContext,
   buildBranchedStepMessage,
+  formatTestInfo,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome } from '../ai/prompts.js';
 import { diagnosePageState, waitForPageStability } from '../browser/page-state.js';
@@ -350,14 +351,13 @@ async function executeStepAttempt(
       : undefined;
     lastApiContext = apiContext;
 
-    const systemPrompt = buildSystemPrompt(
-      contextContent,
+    const systemPrompt = buildSystemPrompt(contextContent, apiContext);
+    const testInfo = formatTestInfo(
       testName,
       baseUrl,
       stepIndex,
       totalSteps,
       config.browser.headed ? config.browser.windowSize : config.browser.viewport,
-      apiContext,
     );
 
     // 5. Build user message (first turn: normal step message; subsequent: continuation prompt)
@@ -381,6 +381,7 @@ async function executeStepAttempt(
         conversationHistory,
         openPages,
         domMode,
+        testInfo,
       );
     } else {
       userMessage = buildContinuationMessage(
@@ -394,6 +395,7 @@ async function executeStepAttempt(
         openPages,
         explorationResults.length > 0 ? explorationResults : undefined,
         domMode,
+        testInfo,
       );
     }
 
@@ -849,14 +851,16 @@ async function executeStepAttempt(
       logger.info(`API response history: ${apiHistory.substring(0, 300)}`);
     }
 
+    const assertTestInfo = formatTestInfo(testName, baseUrl);
     const assertMsg = buildAssertionMessage(
       instruction,
       finalDom,
       config.ai.sendScreenshots ? (finalShot?.base64 ?? null) : null,
       apiHistory,
+      assertTestInfo,
     );
 
-    const assertSystemPrompt = buildSystemPrompt(contextContent, testName, baseUrl, undefined, undefined, undefined, lastApiContext);
+    const assertSystemPrompt = buildSystemPrompt(contextContent, lastApiContext);
     const assertMessages: ChatMessage[] = [
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
@@ -1112,22 +1116,23 @@ export async function executeBranchedStep(
       : undefined;
 
     const screenshotForAi = config.ai.sendScreenshots ? (screenshotBase64 ?? null) : null;
-    const userMessage = buildBranchedStepMessage(
-      outcomes,
-      domSnapshot,
-      screenshotForAi,
-      conversationHistory,
-      openPages,
-    );
-
-    const systemPrompt = buildSystemPrompt(
-      contextContent,
+    const branchedTestInfo = formatTestInfo(
       testName,
       baseUrl,
       group.conditionalSteps[0]!.index,
       totalSteps,
       config.browser.headed ? config.browser.windowSize : config.browser.viewport,
     );
+    const userMessage = buildBranchedStepMessage(
+      outcomes,
+      domSnapshot,
+      screenshotForAi,
+      conversationHistory,
+      openPages,
+      branchedTestInfo,
+    );
+
+    const systemPrompt = buildSystemPrompt(contextContent);
 
     const messages = [
       { role: 'system' as const, content: systemPrompt },

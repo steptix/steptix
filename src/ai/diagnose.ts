@@ -4,6 +4,7 @@ import type { ChatMessage, MessageContentBlock } from './types.js';
 import type { StepResult, TestReport, FailureDiagnosis, AiInteraction } from '../report/types.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { captureDomSnapshot } from '../browser/dom-cleaner.js';
+import { contentBlocksToText } from './prompts.js';
 import { logger } from '../utils/logger.js';
 
 const FAULT_CATEGORIES = ['test-spec', 'application', 'flake', 'environment', 'unknown'] as const;
@@ -70,8 +71,10 @@ export async function diagnoseFailure(
 
     const aiInteraction: AiInteraction = {
       purpose: 'failure-diagnosis',
+      // Flatten the cacheable block structure for the human-readable report; cache hints
+      // only matter on the wire to aiapi, not in the saved interaction log.
       requestMessages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: contentBlocksToText(systemPrompt) },
         { role: 'user', content: contentBlocksToText(userContent) },
       ],
       response: responseText,
@@ -88,8 +91,11 @@ export async function diagnoseFailure(
   }
 }
 
-function buildDiagnoseSystemPrompt(contextContent: string): string {
-  return `You are an expert QA engineer performing post-mortem root-cause analysis on a failed UI test.
+function buildDiagnoseSystemPrompt(contextContent: string): MessageContentBlock[] {
+  const blocks: MessageContentBlock[] = [
+    {
+      type: 'text',
+      text: `You are an expert QA engineer performing post-mortem root-cause analysis on a failed UI test.
 
 You are given:
 - The test specification (steps authored in a markdown file)
@@ -104,7 +110,7 @@ Key signals to look for:
 - The final screenshot and DOM — what state did the page actually end up in versus what the step expected?
 - Ambiguous step wording — does the failing step combine multiple intents into one sentence that the agent might have mis-ordered?
 
-${contextContent ? `## Application Context\n${contextContent}\n\n` : ''}## Response format
+## Response format
 Return ONLY a JSON object (no markdown, no prose) with these fields:
 {
   "rootCause": "one paragraph explaining what actually went wrong (be specific, cite evidence)",
@@ -119,7 +125,20 @@ Fault category guidance:
 - application: a real app defect the test correctly surfaced
 - flake: timing, selector fragility, or network instability
 - environment: config, credentials, or infrastructure outside the test
-- unknown: genuinely insufficient evidence`;
+- unknown: genuinely insufficient evidence`,
+      cache: true,
+    },
+  ];
+
+  if (contextContent) {
+    blocks.push({
+      type: 'text',
+      text: `## Application Context\n${contextContent}`,
+      cache: true,
+    });
+  }
+
+  return blocks;
 }
 
 function buildDiagnoseUserContent(
@@ -248,13 +267,6 @@ function extractJsonObject(text: string): string | null {
     }
   }
   return null;
-}
-
-function contentBlocksToText(content: string | MessageContentBlock[]): string {
-  if (typeof content === 'string') return content;
-  return content
-    .map((block) => block.type === 'text' ? block.text : '[image]')
-    .join('\n');
 }
 
 function truncate(text: string, max: number): string {
