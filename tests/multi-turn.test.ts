@@ -479,6 +479,7 @@ function makeConfig(maxTurns = 5): Config {
       embedScreenshots: true,
     },
     api: { specsDir: '.', requestTimeout: 5000, redactSensitive: false },
+    dom: { preserveClassWrappers: true },
   };
 }
 

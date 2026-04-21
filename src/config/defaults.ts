@@ -56,4 +56,7 @@ export const DEFAULT_CONFIG: Config = {
     enabled: true,
     dir: '.cache',
   },
+  dom: {
+    preserveClassWrappers: true,
+  },
 };

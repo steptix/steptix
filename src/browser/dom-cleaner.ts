@@ -7,6 +7,14 @@ import type { Frame, Page } from 'playwright';
  */
 export type DomMode = 'compact' | 'readable';
 
+/** Options controlling DOM cleaner output beyond mode. */
+export interface DomCleanerOptions {
+  /** Preserve <div>/other wrappers that carry a `class` attribute and contain
+   *  interactive/heading/landmark descendants. Adds grouping context for
+   *  disambiguation at the cost of extra tokens. Default false. */
+  preserveClassWrappers?: boolean;
+}
+
 /** Maximum character length for readable DOM snapshots (prevents token blowup). */
 const READABLE_DOM_CHAR_LIMIT = 80_000;
 
@@ -25,13 +33,18 @@ const READABLE_DOM_CHAR_LIMIT = 80_000;
  * helper functions (like __name) that don't exist in the browser context.
  *
  * @param mode - 'compact' (default) for action-oriented DOM, 'readable' for extraction-oriented
+ * @param options - extra knobs (e.g. preserveClassWrappers)
  */
-export async function captureDomSnapshot(page: Page, mode: DomMode = 'compact'): Promise<string> {
-  const script = buildDomCleanerScript(mode);
+export async function captureDomSnapshot(
+  page: Page,
+  mode: DomMode = 'compact',
+  options: DomCleanerOptions = {},
+): Promise<string> {
+  const script = buildDomCleanerScript(mode, options);
   let snapshot = (await page.evaluate(script) as string | null) ?? '';
 
   if (snapshot.includes('[iframe:')) {
-    snapshot = await injectFrameContent(page, snapshot, 0, '', mode);
+    snapshot = await injectFrameContent(page, snapshot, 0, '', mode, options);
   }
 
   // Truncate oversized readable snapshots to prevent token blowup
@@ -63,6 +76,7 @@ async function injectFrameContent(
   depth: number = 0,
   parentFramePath: string = '',
   mode: DomMode = 'compact',
+  options: DomCleanerOptions = {},
 ): Promise<string> {
   const iframeLocators = await root.locator('iframe').all();
   if (iframeLocators.length === 0) return snapshot;
@@ -113,12 +127,12 @@ async function injectFrameContent(
         // (e.g. via postMessage) and the new content hasn't loaded yet.
         await frame.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
         // frame.evaluate() uses CDP — works for both same-origin and cross-origin frames
-        frameContent = await frame.evaluate(buildDomCleanerScript(mode)) as string;
+        frameContent = await frame.evaluate(buildDomCleanerScript(mode, options)) as string;
 
         // Recursively capture nested iframe content within this frame.
         // Pass the current frame path so nested iframe comments show the full chain.
         if (depth < MAX_IFRAME_DEPTH && frameContent.includes('[iframe:')) {
-          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath, mode);
+          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath, mode, options);
         }
       }
     } catch {
@@ -202,13 +216,15 @@ function prefixIframeComments(content: string, parentPath: string): string {
  * Iframes are output with a [iframe:N] placeholder — do NOT recurse into them here.
  * captureDomSnapshot handles frame content via Playwright's Frame API instead.
  */
-function buildDomCleanerScript(mode: DomMode): string {
+function buildDomCleanerScript(mode: DomMode, options: DomCleanerOptions = {}): string {
   const isReadable = mode === 'readable';
   const maxRepeat = isReadable ? 5 : 2;
+  const preserveClassWrappers = options.preserveClassWrappers === true;
 
   return `(() => {
   var MODE = '${mode}';
   var MAX_REPEAT = ${maxRepeat};
+  var PRESERVE_CLASS_WRAPPERS = ${preserveClassWrappers};
 
   const INTERACTIVE_TAGS = new Set([
     'input', 'button', 'a', 'select', 'textarea', 'label',
@@ -452,8 +468,24 @@ function buildDomCleanerScript(mode: DomMode): string {
       return '';
     }
 
-    // ── Compact mode default: skip tag, pass through children at same depth ──
+    // ── Compact mode default ──
     if (!hasRelevantDescendant(el)) return '';
+
+    // Optionally preserve wrapper tags that carry a class attribute so the AI
+    // can use grouping context (e.g. class="user-card", class="modal-footer")
+    // to disambiguate similar interactive elements in different sections.
+    if (PRESERVE_CLASS_WRAPPERS) {
+      var cls = el.getAttribute('class');
+      if (cls && cls.trim()) {
+        var childOutput = processChildren(el, depth + 1);
+        if (!childOutput.trim()) return '';
+        return indent + '<' + tag + ' class="' + cls + '">\\n'
+             + childOutput
+             + indent + '</' + tag + '>\\n';
+      }
+    }
+
+    // Default: skip tag, pass through children at same depth
     return processChildren(el, depth);
   }
 

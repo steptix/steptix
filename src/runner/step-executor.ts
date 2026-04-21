@@ -326,7 +326,9 @@ async function executeStepAttempt(
 
     // 2. Capture current page state (full-page so AI sees content below the fold)
     const turnTimestamp = new Date().toISOString();
-    const domSnapshot = await captureDomSnapshot(page, domMode);
+    const domSnapshot = await captureDomSnapshot(page, domMode, {
+      preserveClassWrappers: config.dom.preserveClassWrappers,
+    });
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
@@ -732,7 +734,9 @@ async function executeStepAttempt(
       }
 
       // Capture state after action (full-page for report visibility)
-      const postDom = await captureDomSnapshot(page, domMode).catch(() => '');
+      const postDom = await captureDomSnapshot(page, domMode, {
+        preserveClassWrappers: config.dom.preserveClassWrappers,
+      }).catch(() => '');
       const postShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
       const postShotBase64 = postShot?.base64;
       const postUrl = page.url();
@@ -841,7 +845,9 @@ async function executeStepAttempt(
 
   // 9b. Evaluate assertion if step has one (runs after all turns complete successfully)
   if (!stepFailed && isAssertionStep(instruction)) {
-    const finalDom = await captureDomSnapshot(page, 'readable');
+    const finalDom = await captureDomSnapshot(page, 'readable', {
+      preserveClassWrappers: config.dom.preserveClassWrappers,
+    });
     const finalShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
 
     const assertAction = lastAiResponse?.actions.find((a) => a.action === 'assert');
@@ -1114,7 +1120,9 @@ export async function executeBranchedStep(
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
 
-    const domSnapshot = await captureDomSnapshot(page);
+    const domSnapshot = await captureDomSnapshot(page, 'compact', {
+      preserveClassWrappers: config.dom.preserveClassWrappers,
+    });
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
 
