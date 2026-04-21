@@ -296,6 +296,7 @@ async function executeStepAttempt(
   let stepError: string | undefined;
   let completedTurns = 0;
 
+  try {
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
     completedTurns = currentTurn;
 
@@ -893,6 +894,12 @@ async function executeStepAttempt(
       stepFailed = true;
       stepError = `Assertion failed: ${evaluation.explanation}`;
     }
+  }
+
+  } catch (err) {
+    if (err instanceof StepFailureError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new StepFailureError(message, collectedFailures, allTurns);
   }
 
   const durationMs = Date.now() - startTime;
