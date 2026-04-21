@@ -128,60 +128,61 @@ export class AiClient {
     let streamedModel: string | undefined;
 
     await new Promise<void>((resolve, reject) => {
-      const parser = createParser((event) => {
-        if (event.type !== 'event') return;
-        if (event.data === '[DONE]') {
-          resolve();
-          return;
-        }
+      const parser = createParser({
+        onEvent: (event) => {
+          if (event.data === '[DONE]') {
+            resolve();
+            return;
+          }
 
-        try {
-          const parsed = JSON.parse(event.data) as StreamEvent | LegacyStreamChunk;
+          try {
+            const parsed = JSON.parse(event.data) as StreamEvent | LegacyStreamChunk;
 
-          if ('type' in parsed) {
-            if (parsed.type === 'response.error') {
-              reject(new Error(parsed.error.message));
-              return;
-            }
-
-            if (parsed.type === 'response.start') {
-              streamedModel = parsed.response.model ?? streamedModel;
-            }
-
-            if (parsed.type === 'response.content_block.delta' && parsed.delta.type === 'text_delta') {
-              fullContent += parsed.delta.text;
-            }
-
-            if (parsed.type === 'response.completed') {
-              const completed = parsed.response as StreamResponseEnvelope;
-              promptTokens = completed.usage?.input_tokens ?? promptTokens;
-              completionTokens = completed.usage?.output_tokens ?? completionTokens;
-              streamedModel = completed.model ?? streamedModel;
-
-              if (!fullContent) {
-                fullContent = this.extractTextFromBlocks(completed.content);
+            if ('type' in parsed) {
+              if (parsed.type === 'response.error') {
+                reject(new Error(parsed.error.message));
+                return;
               }
 
-              resolve();
-            }
-          } else {
-            const delta = parsed.choices[0]?.delta?.content;
-            if (delta) {
-              fullContent += delta;
-            }
+              if (parsed.type === 'response.start') {
+                streamedModel = parsed.response.model ?? streamedModel;
+              }
 
-            if (parsed.usage) {
-              promptTokens = parsed.usage.input_tokens;
-              completionTokens = parsed.usage.output_tokens;
-            }
+              if (parsed.type === 'response.content_block.delta' && parsed.delta.type === 'text_delta') {
+                fullContent += parsed.delta.text;
+              }
 
-            if (parsed.choices[0]?.finish_reason === 'stop') {
-              resolve();
+              if (parsed.type === 'response.completed') {
+                const completed = parsed.response as StreamResponseEnvelope;
+                promptTokens = completed.usage?.input_tokens ?? promptTokens;
+                completionTokens = completed.usage?.output_tokens ?? completionTokens;
+                streamedModel = completed.model ?? streamedModel;
+
+                if (!fullContent) {
+                  fullContent = this.extractTextFromBlocks(completed.content);
+                }
+
+                resolve();
+              }
+            } else {
+              const delta = parsed.choices[0]?.delta?.content;
+              if (delta) {
+                fullContent += delta;
+              }
+
+              if (parsed.usage) {
+                promptTokens = parsed.usage.input_tokens;
+                completionTokens = parsed.usage.output_tokens;
+              }
+
+              if (parsed.choices[0]?.finish_reason === 'stop') {
+                resolve();
+              }
             }
+          } catch {
+            // Ignore malformed chunks
           }
-        } catch {
-          // Ignore malformed chunks
-        }
+        },
       });
 
       const reader = body.getReader();
