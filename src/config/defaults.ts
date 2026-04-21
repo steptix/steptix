@@ -33,7 +33,7 @@ export const DEFAULT_CONFIG: Config = {
     timeout: 3600_000,
     retries: 1,
     screenshotOnFailure: true,
-    dismissObstacles: true,
+    dismissObstacles: false,
     promptOnAmbiguity: true,
     maxTurns: 15,
     interactiveOnFailure: false,
