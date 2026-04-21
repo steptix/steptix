@@ -74,6 +74,11 @@ function withEnvDefaults(config: Config): Config {
     result = { ...result, ai: { ...result.ai, apiKey } };
   }
 
+  const model = process.env['AI_MODEL'];
+  if (model !== undefined && model.trim().length > 0) {
+    result = { ...result, ai: { ...result.ai, model: model.trim() } };
+  }
+
   const serverApiKey = process.env['SERVER_API_KEY'];
   if (serverApiKey !== undefined) {
     result = { ...result, server: { ...result.server, apiKey: serverApiKey } };

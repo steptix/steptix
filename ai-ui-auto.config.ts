@@ -5,7 +5,7 @@ export default defineConfig({
   ai: {
     gatewayUrl: 'https://llm.corp.example',
     // apiKey: process.env.AI_API_KEY,
-    model: 'gpt-5.4',
+    // model: defaulted via src/config/defaults.ts; override with AI_MODEL in .env
     maxInputTokens: 1_000_000,
     streamResponses: true,
   },

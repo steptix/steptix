@@ -59,7 +59,8 @@ export async function diagnoseFailure(
     ];
 
     const requestStartedAt = new Date().toISOString();
-    const responseText = await aiClient.complete(messages);
+    const completion = await aiClient.complete(messages);
+    const responseText = completion.text;
 
     const parsed = parseDiagnosis(responseText);
     if (!parsed) {
@@ -74,6 +75,7 @@ export async function diagnoseFailure(
         { role: 'user', content: contentBlocksToText(userContent) },
       ],
       response: responseText,
+      model: completion.model,
       timestamp: requestStartedAt,
       ...(finalScreenshot !== undefined && { screenshotBase64: finalScreenshot }),
       ...(pageUrl !== undefined && { pageUrl }),

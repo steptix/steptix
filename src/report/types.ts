@@ -49,6 +49,8 @@ export interface AiInteraction {
   requestMessages?: Array<{ role: string; content: string }>;
   /** The raw response text from the AI */
   response: string;
+  /** The model that served this response (reported by the gateway envelope) */
+  model?: string;
   /** Screenshot the AI saw when making this decision (page state at time of AI call) */
   screenshotBase64?: string;
   /** Page URL at the time of the AI call */

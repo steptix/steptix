@@ -12,6 +12,14 @@ import type {
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
 
+/** Result of a single AI completion, including which model the gateway actually served. */
+export interface CompleteResult {
+  /** The assembled text response from the AI */
+  text: string;
+  /** The model reported by the gateway response envelope, or the configured model if the gateway omitted it */
+  model: string;
+}
+
 export class AiClient {
   private config: AiConfig;
   private tokenTracker: TokenTracker;
@@ -25,7 +33,7 @@ export class AiClient {
    * Send messages to the AI and get a complete response.
    * Uses /v2/stream when streamResponses is true, otherwise /v2/vision.
    */
-  async complete(messages: ChatMessage[]): Promise<string> {
+  async complete(messages: ChatMessage[]): Promise<CompleteResult> {
     if (this.config.streamResponses) {
       return this.completeStream(messages);
     }
@@ -33,7 +41,7 @@ export class AiClient {
   }
 
   /** Call POST /v2/vision for non-streaming multimodal completion */
-  private async completeVision(messages: ChatMessage[]): Promise<string> {
+  private async completeVision(messages: ChatMessage[]): Promise<CompleteResult> {
     const url = `${this.config.gatewayUrl}/v2/vision`;
 
     const request: VisionRequest = {
@@ -71,11 +79,12 @@ export class AiClient {
       throw new Error(`AI response contained no content. Response keys: ${Object.keys(data).join(', ')}`);
     }
 
-    return content;
+    const model = this.extractModel(data) ?? this.config.model;
+    return { text: content, model };
   }
 
   /** Call POST /v2/stream for streaming multimodal completion, collect full response */
-  private async completeStream(messages: ChatMessage[]): Promise<string> {
+  private async completeStream(messages: ChatMessage[]): Promise<CompleteResult> {
     const url = `${this.config.gatewayUrl}/v2/stream`;
 
     const request: VisionRequest = {
@@ -109,13 +118,14 @@ export class AiClient {
   }
 
   /** Consume an SSE stream and accumulate the full content string */
-  private async consumeSseStream(body: ReadableStream<Uint8Array>): Promise<string> {
+  private async consumeSseStream(body: ReadableStream<Uint8Array>): Promise<CompleteResult> {
     const { createParser } = await import('eventsource-parser');
 
     const decoder = new TextDecoder();
     let fullContent = '';
     let promptTokens = 0;
     let completionTokens = 0;
+    let streamedModel: string | undefined;
 
     await new Promise<void>((resolve, reject) => {
       const parser = createParser((event) => {
@@ -134,6 +144,10 @@ export class AiClient {
               return;
             }
 
+            if (parsed.type === 'response.start') {
+              streamedModel = parsed.response.model ?? streamedModel;
+            }
+
             if (parsed.type === 'response.content_block.delta' && parsed.delta.type === 'text_delta') {
               fullContent += parsed.delta.text;
             }
@@ -142,6 +156,7 @@ export class AiClient {
               const completed = parsed.response as StreamResponseEnvelope;
               promptTokens = completed.usage?.input_tokens ?? promptTokens;
               completionTokens = completed.usage?.output_tokens ?? completionTokens;
+              streamedModel = completed.model ?? streamedModel;
 
               if (!fullContent) {
                 fullContent = this.extractTextFromBlocks(completed.content);
@@ -198,7 +213,12 @@ export class AiClient {
       throw new Error('AI stream produced no content');
     }
 
-    return fullContent;
+    return { text: fullContent, model: streamedModel ?? this.config.model };
+  }
+
+  private extractModel(data: VisionResponse | LegacyVisionResponse): string | undefined {
+    const candidate = (data as Record<string, unknown>).model;
+    return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined;
   }
 
   private extractTextResponse(data: VisionResponse | LegacyVisionResponse): string {

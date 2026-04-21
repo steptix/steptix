@@ -526,7 +526,7 @@ function makeAiClient(responses: string[]): AiClient {
     complete: vi.fn().mockImplementation(() => {
       const response = responses[callCount % responses.length];
       callCount++;
-      return Promise.resolve(response);
+      return Promise.resolve({ text: response, model: 'test-model' });
     }),
   } as unknown as AiClient;
 }

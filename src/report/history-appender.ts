@@ -17,6 +17,7 @@ export async function appendRunHistory(
   reportPath: string,
   status: string,
   date: string,
+  model?: string,
 ): Promise<void> {
   let content: string;
   try {
@@ -30,7 +31,8 @@ export async function appendRunHistory(
   const reportUrl = absReport.startsWith('/') ? `file://${absReport}` : `file:///${absReport}`;
 
   const timestamp = formatTimestamp(date);
-  const newEntry = `- [${timestamp} — ${status}](${reportUrl})`;
+  const modelSuffix = model ? ` — ${model}` : '';
+  const newEntry = `- [${timestamp} — ${status}${modelSuffix}](${reportUrl})`;
 
   const existingEntries = extractEntries(content);
   const entries = [newEntry, ...existingEntries].slice(0, MAX_ENTRIES);

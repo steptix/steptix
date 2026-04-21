@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
 import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis } from './types.js';
+import { getAllAiInteractions } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
@@ -63,6 +64,7 @@ function renderReport(report: TestReport): string {
   const outputTokens = report.outputTokens.toLocaleString();
   const stepsHtml = renderSteps(report.steps);
   const diagnosisHtml = report.diagnosis ? renderDiagnosis(report.diagnosis) : '';
+  const modelSummary = summarizeModels(report);
 
   return template({
     testName: report.testName,
@@ -82,9 +84,49 @@ function renderReport(report: TestReport): string {
     tokensUsed,
     inputTokens,
     outputTokens,
+    modelSummary,
     stepsHtml: new Handlebars.SafeString(stepsHtml),
     diagnosisHtml: new Handlebars.SafeString(diagnosisHtml),
   });
+}
+
+/**
+ * Count AI interactions per model across every captured interaction in the report.
+ * The map is ordered by call count, descending.
+ */
+function collectModelCounts(report: TestReport): Map<string, number> {
+  const counts = new Map<string, number>();
+  const pushInteraction = (ai: AiInteraction): void => {
+    if (!ai.model) return;
+    counts.set(ai.model, (counts.get(ai.model) ?? 0) + 1);
+  };
+
+  for (const step of report.steps) {
+    for (const ai of getAllAiInteractions(step)) pushInteraction(ai);
+  }
+  if (report.diagnosis?.aiInteraction) pushInteraction(report.diagnosis.aiInteraction);
+
+  return new Map([...counts.entries()].sort((a, b) => b[1] - a[1]));
+}
+
+/**
+ * Build a label describing the model(s) that served this run.
+ * Returns a single name ("claude-sonnet-4-5") or a combined label with call counts
+ * ("claude-sonnet-4-5 (12), gpt-4o (2)") when more than one was served.
+ */
+function summarizeModels(report: TestReport): string {
+  const counts = collectModelCounts(report);
+  if (counts.size === 0) return '';
+  if (counts.size === 1) return [...counts.keys()][0]!;
+  return [...counts.entries()]
+    .map(([name, n]) => `${name} (${n})`)
+    .join(', ');
+}
+
+/** Return the single most-used model in the report, or undefined if none were captured. */
+export function getPrimaryModel(report: TestReport): string | undefined {
+  const counts = collectModelCounts(report);
+  return counts.size > 0 ? [...counts.keys()][0] : undefined;
 }
 
 function renderDiagnosis(diagnosis: FailureDiagnosis): string {
@@ -264,8 +306,12 @@ function renderAiInteraction(ai: AiInteraction): string {
     ? ` <span class="badge badge-skip">Attempt ${ai.attemptNumber}</span>`
     : '';
 
+  const modelLabel = ai.model
+    ? ` <span class="ai-model">${escapeHtml(ai.model)}</span>`
+    : '';
+
   return `<details class="ai-response">
-  <summary>AI — ${label}${attemptLabel}${timeLabel}</summary>
+  <summary>AI — ${label}${attemptLabel}${modelLabel}${timeLabel}</summary>
   ${screenshotHtml}
   ${requestSection}
   <pre class="json-block">${highlightJson(pretty)}</pre>

@@ -14,7 +14,7 @@ import { identifyStepGroups } from './step-grouper.js';
 import { runFsdRepl } from './fsd-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
-import { generateReport } from '../report/generator.js';
+import { generateReport, getPrimaryModel } from '../report/generator.js';
 import { appendRunHistory } from '../report/history-appender.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { diagnoseFailure } from '../ai/diagnose.js';
@@ -544,7 +544,7 @@ export async function runTests(
       logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
 
       if (config.reports.appendRunHistoryToTestFile) {
-        await appendRunHistory(instance.test.filePath, reportPath, report.status, report.date);
+        await appendRunHistory(instance.test.filePath, reportPath, report.status, report.date, getPrimaryModel(report));
       }
 
       if (report.status === 'failed' && options.bail) {

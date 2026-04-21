@@ -73,6 +73,7 @@ export function getReportTemplate(): string {
     .turn-header { font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
     .turn-time { font-weight: 500; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; color: #6366f1; }
     .event-time { font-size: 0.7rem; font-weight: 500; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; color: var(--muted); margin-left: auto; }
+    .ai-model { font-size: 0.7rem; font-weight: 500; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; color: #4338ca; background: #eef2ff; padding: 0.1rem 0.35rem; border-radius: 0.25rem; }
 
     /* Sub-actions */
     .sub-actions { margin-top: 10px; }
@@ -197,6 +198,12 @@ export function getReportTemplate(): string {
       <div class="meta-item">
         <span class="meta-label">Base URL</span>
         <span class="meta-value">{{baseUrl}}</span>
+      </div>
+      {{/if}}
+      {{#if modelSummary}}
+      <div class="meta-item">
+        <span class="meta-label">AI Model</span>
+        <span class="meta-value">{{modelSummary}}</span>
       </div>
       {{/if}}
       {{#if dataRow}}

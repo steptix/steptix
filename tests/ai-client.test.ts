@@ -61,7 +61,8 @@ describe('AiClient v2 gateway integration', () => {
     const client = new AiClient(baseConfig, tokenTracker as any);
     const result = await client.complete([{ role: 'user', content: 'Hello' }]);
 
-    expect(result).toBe('{"actions":[],"reasoning":"ok"}');
+    expect(result.text).toBe('{"actions":[],"reasoning":"ok"}');
+    expect(result.model).toBe('claude-sonnet-4-5');
     expect(tokenTracker.addUsage).toHaveBeenCalledWith(12, 8);
     expect(tokenTracker.checkStepBudget).toHaveBeenCalledWith(1_000_000);
   });
@@ -90,7 +91,8 @@ describe('AiClient v2 gateway integration', () => {
     const client = new AiClient({ ...baseConfig, streamResponses: true }, tokenTracker as any);
     const result = await client.complete([{ role: 'user', content: 'Hello' }]);
 
-    expect(result).toBe('hello world');
+    expect(result.text).toBe('hello world');
+    expect(result.model).toBe('claude-sonnet-4-5');
     expect(tokenTracker.addUsage).toHaveBeenCalledWith(21, 5);
     expect(tokenTracker.checkStepBudget).toHaveBeenCalledWith(1_000_000);
   });
@@ -105,7 +107,8 @@ describe('AiClient v2 gateway integration', () => {
     const client = new AiClient(baseConfig, tokenTracker as any);
     const result = await client.complete([{ role: 'user', content: 'Hello' }]);
 
-    expect(result).toBe('{"actions":[],"reasoning":"legacy"}');
+    expect(result.text).toBe('{"actions":[],"reasoning":"legacy"}');
+    expect(result.model).toBe('gpt-4o');
     expect(tokenTracker.addUsage).toHaveBeenCalledWith(10, 4);
   });
 });

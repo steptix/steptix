@@ -423,7 +423,8 @@ async function executeStepAttempt(
         timestamp: turnTimestamp,
       });
     } else {
-      rawResponse = await aiClient.complete(messages);
+      const completion = await aiClient.complete(messages);
+      rawResponse = completion.text;
       aiResponse = parseAIResponse(rawResponse);
 
       // Capture first-turn AI response for cache writing
@@ -437,6 +438,7 @@ async function executeStepAttempt(
         attemptNumber,
         requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
         response: rawResponse,
+        model: completion.model,
         ...(screenshotBase64 !== undefined && { screenshotBase64 }),
         pageUrl: currentUrl,
         timestamp: turnTimestamp,
@@ -461,12 +463,14 @@ async function executeStepAttempt(
         { role: 'assistant', content: rawResponse },
         clarificationMsg,
       ];
-      const clarifiedResponse = await aiClient.complete(clarificationMessages);
+      const clarifiedCompletion = await aiClient.complete(clarificationMessages);
+      const clarifiedResponse = clarifiedCompletion.text;
       turnAiInteractions.push({
         purpose: 'clarification',
         attemptNumber,
         requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
         response: clarifiedResponse,
+        model: clarifiedCompletion.model,
         timestamp: new Date().toISOString(),
       });
       aiResponse = parseAIResponse(clarifiedResponse);
@@ -857,12 +861,14 @@ async function executeStepAttempt(
       { role: 'system', content: assertSystemPrompt },
       assertMsg,
     ];
-    const assertRaw = await aiClient.complete(assertMessages);
+    const assertCompletion = await aiClient.complete(assertMessages);
+    const assertRaw = assertCompletion.text;
     assertionAiInteraction = {
       purpose: 'assertion',
       attemptNumber,
       requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
       response: assertRaw,
+      model: assertCompletion.model,
       ...(finalShot?.base64 !== undefined && { screenshotBase64: finalShot.base64 }),
       pageUrl: page.url(),
       timestamp: new Date().toISOString(),
@@ -1128,7 +1134,7 @@ export async function executeBranchedStep(
       userMessage,
     ];
 
-    const rawResponse = await aiClient.complete(messages);
+    const { text: rawResponse } = await aiClient.complete(messages);
     const branchedResponse = parseBranchedResponse(rawResponse);
 
     logger.debug(`Branch poll ${pollCount}: matched="${branchedResponse.matched}" — ${branchedResponse.reasoning}`);
