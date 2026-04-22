@@ -2,7 +2,7 @@
 tags: [smoke]
 ---
 
-# Example Login Test
+# GitHub Login Test
 
 ## Config
 - baseUrl: https://github.com/
