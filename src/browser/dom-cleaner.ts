@@ -1,7 +1,7 @@
 import type { Frame, Page } from 'playwright';
 
 /** Maximum character length for DOM snapshots (prevents token blowup). */
-const DOM_SNAPSHOT_CHAR_LIMIT = 80_000;
+const DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
 
 /**
  * Capture a raw DOM snapshot from the current page.
