@@ -86,7 +86,7 @@ async function promptInteractive(hint: string): Promise<string> {
     if (hint) {
       console.log(`\n🎮 Interactive mode — ${hint}`);
     } else {
-      console.log(`\n🎮 Interactive mode — type instructions to execute, "done" to continue`);
+      console.log(`\n🎮 Interactive mode — type instructions to execute, "done" to continue, "exit" to end the test`);
     }
     const answer = await rl.question(`  > `);
     return answer.trim();
@@ -322,10 +322,16 @@ export async function runTest(
         const interactiveResults: StepResult[] = [];
         let interactiveIndex = 1;
 
+        let userExited = false;
         // eslint-disable-next-line no-constant-condition
         while (true) {
           const userInstruction = await promptInteractive(interactiveStep.hint);
           if (!userInstruction || userInstruction.toLowerCase() === 'done') break;
+          const lower = userInstruction.toLowerCase();
+          if (lower === 'exit' || lower === 'quit') {
+            userExited = true;
+            break;
+          }
 
           logger.step(i + 1, test.steps.length, `(interactive ${interactiveIndex}) ${userInstruction}`);
 
@@ -377,9 +383,15 @@ export async function runTest(
           turns: allTurns,
           durationMs: Date.now() - stepStartTime,
           retried: false,
-          aiExplanation: `Interactive mode: executed ${interactiveResults.length} command(s)`,
+          aiExplanation: userExited
+            ? `Interactive mode: user exited after ${interactiveResults.length} command(s)`
+            : `Interactive mode: executed ${interactiveResults.length} command(s)`,
           ...(anyFailed && { error: 'One or more interactive commands failed' }),
         };
+        if (userExited) {
+          logger.info('Interactive mode: user exited — stopping test and generating report');
+          bail = true;
+        }
       } else if (outputStep) {
         stepResult = await executeStep(i + 1, test.steps.length, outputStep.enrichedInstruction, {
           page: session.page,
