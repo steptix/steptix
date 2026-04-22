@@ -84,7 +84,7 @@ describe('formatTestInfo', () => {
 describe('buildStepMessage test info prepending', () => {
   it('prepends Test Information at the top of the user message text', () => {
     const testInfo = formatTestInfo('Login flow', 'https://example.com', 1, 1);
-    const msg = buildStepMessage('Click login', '<html></html>', null, [], undefined, undefined, testInfo);
+    const msg = buildStepMessage('Click login', '<html></html>', null, [], undefined, testInfo);
 
     expect(typeof msg.content).toBe('string');
     const text = msg.content as string;

@@ -212,7 +212,7 @@ function renderStep(step: StepResult): string {
   const domHtml = step.domSnapshot
     ? `<details class="dom-snapshot">
         <summary>DOM Snapshot</summary>
-        <pre>${escapeHtml(step.domSnapshot.substring(0, 5000))}</pre>
+        <pre>${escapeHtml(step.domSnapshot)}</pre>
        </details>`
     : '';
 
@@ -337,7 +337,7 @@ function renderSubAction(sub: SubActionResult): string {
   const domHtml = sub.domSnapshot
     ? `<details class="dom-snapshot">
         <summary>DOM after action</summary>
-        <pre>${escapeHtml(sub.domSnapshot.substring(0, 3000))}</pre>
+        <pre>${escapeHtml(sub.domSnapshot)}</pre>
        </details>`
     : '';
 

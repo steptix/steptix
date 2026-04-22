@@ -1,27 +1,14 @@
 import type { Frame, Page } from 'playwright';
 
-/**
- * DOM snapshot mode:
- *  - 'compact': action-oriented — only interactive elements, headings, landmarks (default)
- *  - 'readable': extraction-oriented — preserves visible text content in all elements
- */
-export type DomMode = 'compact' | 'readable';
-
-/** Options controlling DOM cleaner output beyond mode. */
-export interface DomCleanerOptions {
-  /** Preserve <div>/other wrappers that carry a `class` attribute and contain
-   *  interactive/heading/landmark descendants. Adds grouping context for
-   *  disambiguation at the cost of extra tokens. Default false. */
-  preserveClassWrappers?: boolean;
-}
-
-/** Maximum character length for readable DOM snapshots (prevents token blowup). */
-const READABLE_DOM_CHAR_LIMIT = 80_000;
+/** Maximum character length for DOM snapshots (prevents token blowup). */
+const DOM_SNAPSHOT_CHAR_LIMIT = 80_000;
 
 /**
- * Capture a cleaned DOM snapshot from the current page.
- * Runs a script in the browser context to extract a simplified, AI-friendly
- * representation of the interactive and semantic elements.
+ * Capture a raw DOM snapshot from the current page.
+ *
+ * Emits the body tree almost verbatim — every element with every attribute —
+ * stripping only `<script>` / `<style>` tags and HTML comments. Invisible
+ * elements, text nodes, and wrapper divs are preserved.
  *
  * Iframes are handled in two steps:
  *  1. The browser script marks each iframe with a placeholder ([iframe:N]).
@@ -31,26 +18,18 @@ const READABLE_DOM_CHAR_LIMIT = 80_000;
  *
  * We use a string-based evaluate to avoid TypeScript/esbuild injecting
  * helper functions (like __name) that don't exist in the browser context.
- *
- * @param mode - 'compact' (default) for action-oriented DOM, 'readable' for extraction-oriented
- * @param options - extra knobs (e.g. preserveClassWrappers)
  */
-export async function captureDomSnapshot(
-  page: Page,
-  mode: DomMode = 'compact',
-  options: DomCleanerOptions = {},
-): Promise<string> {
-  const script = buildDomCleanerScript(mode, options);
+export async function captureDomSnapshot(page: Page): Promise<string> {
+  const script = buildDomCleanerScript();
   let snapshot = (await page.evaluate(script) as string | null) ?? '';
 
   if (snapshot.includes('[iframe:')) {
-    snapshot = await injectFrameContent(page, snapshot, 0, '', mode, options);
+    snapshot = await injectFrameContent(page, snapshot, 0, '');
   }
 
-  // Truncate oversized readable snapshots to prevent token blowup
-  if (mode === 'readable' && snapshot.length > READABLE_DOM_CHAR_LIMIT) {
-    snapshot = snapshot.substring(0, READABLE_DOM_CHAR_LIMIT)
-      + '\n<!-- DOM snapshot truncated — page content exceeds readable mode limit -->';
+  if (snapshot.length > DOM_SNAPSHOT_CHAR_LIMIT) {
+    snapshot = snapshot.substring(0, DOM_SNAPSHOT_CHAR_LIMIT)
+      + '\n<!-- DOM snapshot truncated — page content exceeds size limit -->';
   }
 
   return snapshot;
@@ -75,8 +54,6 @@ async function injectFrameContent(
   snapshot: string,
   depth: number = 0,
   parentFramePath: string = '',
-  mode: DomMode = 'compact',
-  options: DomCleanerOptions = {},
 ): Promise<string> {
   const iframeLocators = await root.locator('iframe').all();
   if (iframeLocators.length === 0) return snapshot;
@@ -89,22 +66,11 @@ async function injectFrameContent(
   if (parentFramePath) {
     result = prefixIframeComments(result, parentFramePath);
   }
-  // Track which placeholder index we're at — only visible iframes get an index,
-  // matching the browser script's iframeIdx counter which skips non-visible elements.
-  let visibleIdx = 0;
 
+  let idx = 0;
   for (const iframeLoc of iframeLocators) {
-    // Match the DOM cleaner's isVisible check (display/visibility/opacity).
-    // The callback runs in the browser; use `any` to avoid needing DOM lib types.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const visible = await iframeLoc.evaluate((el: any) => {
-      const style = el.ownerDocument.defaultView.getComputedStyle(el);
-      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-    }).catch(() => false);
-    if (!visible) continue;
-
-    const placeholder = `[iframe:${visibleIdx}]`;
-    visibleIdx++;
+    const placeholder = `[iframe:${idx}]`;
+    idx++;
 
     if (!result.includes(placeholder)) continue;
 
@@ -127,12 +93,12 @@ async function injectFrameContent(
         // (e.g. via postMessage) and the new content hasn't loaded yet.
         await frame.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
         // frame.evaluate() uses CDP — works for both same-origin and cross-origin frames
-        frameContent = await frame.evaluate(buildDomCleanerScript(mode, options)) as string;
+        frameContent = await frame.evaluate(buildDomCleanerScript()) as string;
 
         // Recursively capture nested iframe content within this frame.
         // Pass the current frame path so nested iframe comments show the full chain.
         if (depth < MAX_IFRAME_DEPTH && frameContent.includes('[iframe:')) {
-          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath, mode, options);
+          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath);
         }
       }
     } catch {
@@ -201,354 +167,110 @@ function prefixIframeComments(content: string, parentPath: string): string {
  * Build the self-contained browser script as a string expression.
  * This avoids any Node/TypeScript runtime helpers leaking into the browser context.
  *
- * Produces a DOM snapshot designed to be paired with a screenshot.
- *
- * Two modes:
- *  - **compact** (default): selector-focused, for action steps (click/type).
- *    Only interactive elements, headings, landmarks, and elements with id/data-testid.
- *    Everything else is collapsed. Repeated siblings are limited to 2.
- *
- *  - **readable**: content-focused, for extraction/assertion steps.
- *    Preserves visible text in all elements (td, p, span, li, etc.).
- *    Text-bearing tags are shown with content. Container tags are preserved.
- *    Repeated siblings are limited to 5. Position annotations are omitted.
- *
- * Iframes are output with a [iframe:N] placeholder — do NOT recurse into them here.
- * captureDomSnapshot handles frame content via Playwright's Frame API instead.
+ * Emits every element under `<body>` as raw, indented HTML:
+ *  - All attributes are preserved (attribute values with `"` are HTML-escaped).
+ *  - `<script>` and `<style>` subtrees are omitted.
+ *  - HTML comment nodes are dropped; text nodes are kept (whitespace collapsed).
+ *  - Iframes are emitted as `[iframe:N]` placeholders; captureDomSnapshot replaces
+ *    them via Playwright's Frame API (CDP-backed, cross-origin-safe).
  */
-function buildDomCleanerScript(mode: DomMode, options: DomCleanerOptions = {}): string {
-  const isReadable = mode === 'readable';
-  const maxRepeat = isReadable ? 5 : 2;
-  const preserveClassWrappers = options.preserveClassWrappers === true;
-
+function buildDomCleanerScript(): string {
   return `(() => {
-  var MODE = '${mode}';
-  var MAX_REPEAT = ${maxRepeat};
-  var PRESERVE_CLASS_WRAPPERS = ${preserveClassWrappers};
-
-  const INTERACTIVE_TAGS = new Set([
-    'input', 'button', 'a', 'select', 'textarea', 'label',
+  var SKIP_TAGS = new Set(['script', 'style']);
+  var SELF_CLOSING_TAGS = new Set([
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+    'link', 'meta', 'param', 'source', 'track', 'wbr',
   ]);
-
-  const LANDMARK_TAGS = new Set([
-    'nav', 'main', 'header', 'footer', 'form', 'section', 'article',
-  ]);
-
-  const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
-
-  const INTERACTIVE_ROLES = new Set([
-    'button', 'link', 'checkbox', 'radio', 'tab', 'menuitem',
-    'option', 'switch', 'slider', 'spinbutton', 'textbox', 'combobox',
-    'searchbox', 'listbox',
-  ]);
-
-  const SKIP_TAGS = new Set([
-    'script', 'style', 'noscript', 'svg', 'canvas', 'video', 'audio',
-    'meta', 'link', 'base', 'title',
-  ]);
-
-  // Tags that bear readable text content (shown in readable mode)
-  var READABLE_TEXT_TAGS = new Set([
-    'td', 'th', 'li', 'p', 'span', 'dd', 'dt', 'em', 'strong', 'b', 'i',
-    'small', 'abbr', 'time', 'code', 'pre', 'blockquote', 'figcaption',
-    'summary', 'caption',
-  ]);
-
-  // Container tags that are preserved in readable mode for structure
-  var READABLE_CONTAINER_TAGS = new Set([
-    'table', 'tr', 'tbody', 'thead', 'tfoot', 'ul', 'ol', 'dl',
-    'figure', 'details', 'div',
-  ]);
-
-  function isVisible(el) {
-    const style = window.getComputedStyle(el);
-    return (
-      style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
-      style.opacity !== '0'
-    );
-  }
-
-  function isInteractiveElement(el) {
-    if (INTERACTIVE_TAGS.has(el.tagName.toLowerCase())) return true;
-    const role = el.getAttribute('role');
-    return role !== null && INTERACTIVE_ROLES.has(role);
-  }
-
-  function getAttributes(el) {
-    const attrs = [];
-    const important = [
-      'id', 'data-testid', 'name', 'type', 'role', 'aria-label',
-      'aria-labelledby', 'aria-describedby', 'aria-expanded', 'aria-checked',
-      'aria-selected', 'aria-disabled', 'placeholder', 'href', 'src', 'value',
-      'checked', 'selected', 'disabled', 'readonly', 'required',
-      'for', 'action', 'method', 'title',
-    ];
-    for (const attr of important) {
-      const val = el.getAttribute(attr);
-      if (val !== null && val !== '') {
-        attrs.push(attr + '="' + val + '"');
-      }
-    }
-    return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
-  }
-
-  function getKeyAttributes(el) {
-    const attrs = [];
-    const keys = ['id', 'data-testid', 'role', 'aria-label', 'name', 'action', 'method'];
-    for (const attr of keys) {
-      const val = el.getAttribute(attr);
-      if (val !== null && val !== '') {
-        attrs.push(attr + '="' + val + '"');
-      }
-    }
-    return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
-  }
-
-  function getPositionAnnotation(el) {
-    // Skip position annotations in readable mode — saves tokens, not needed for reading
-    if (MODE === 'readable') return '';
-    try {
-      var rect = el.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return ' [pos:hidden]';
-      return ' [pos:' + Math.round(rect.x) + ',' + Math.round(rect.y) + ' ' + Math.round(rect.width) + 'x' + Math.round(rect.height) + ']';
-    } catch (e) {
-      return '';
-    }
-  }
-
-  function getVisibleText(el) {
-    if (el.tagName.toLowerCase() === 'input') {
-      if (el.value) return '[value="' + el.value + '"]';
-      if (el.placeholder) return '[placeholder="' + el.placeholder + '"]';
-      return '';
-    }
-    let text = '';
-    for (const node of el.childNodes) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        text += (node.textContent || '').trim();
-      }
-    }
-    text = text.trim();
-    if (!text) {
-      // Fallback: buttons/links often wrap their label in <span>/<i>/etc.
-      // Use full textContent so the AI can match on visible label text.
-      text = (el.textContent || '').trim().replace(/\s+/g, ' ');
-    }
-    return text;
-  }
 
   function buildSelector(el) {
-    const testId = el.getAttribute('data-testid');
+    var testId = el.getAttribute('data-testid');
     if (testId) return '[data-testid="' + testId + '"]';
-    const id = el.getAttribute('id');
+    var id = el.getAttribute('id');
     if (id) return '#' + id;
-    const tag = el.tagName.toLowerCase();
-    const name = el.getAttribute('name');
+    var tag = el.tagName.toLowerCase();
+    var name = el.getAttribute('name');
     if (name) return tag + '[name="' + name + '"]';
-    const ariaLabel = el.getAttribute('aria-label');
+    var ariaLabel = el.getAttribute('aria-label');
     if (ariaLabel) return tag + '[aria-label="' + ariaLabel + '"]';
-    const src = el.getAttribute('src');
+    var src = el.getAttribute('src');
     if (src && tag === 'iframe') return tag + '[src="' + src + '"]';
     return tag;
   }
 
-  function hasRelevantDescendant(el) {
-    const tag = el.tagName.toLowerCase();
-    if (SKIP_TAGS.has(tag)) return false;
-    if (isInteractiveElement(el) || HEADING_TAGS.has(tag) || tag === 'iframe') return true;
-    for (const child of el.children) {
-      if (hasRelevantDescendant(child)) return true;
+  function escapeAttr(v) {
+    return String(v == null ? '' : v).replace(/"/g, '&quot;');
+  }
+
+  function getAttributes(el) {
+    var out = '';
+    var attrs = el.attributes;
+    for (var i = 0; i < attrs.length; i++) {
+      var a = attrs[i];
+      out += ' ' + a.name + '="' + escapeAttr(a.value) + '"';
     }
-    return false;
+    return out;
   }
 
-  // In readable mode, check if an element or its descendants have visible text
-  function hasVisibleText(el) {
-    var tag = el.tagName.toLowerCase();
-    if (SKIP_TAGS.has(tag)) return false;
-    var text = (el.textContent || '').trim();
-    return text.length > 0;
-  }
-
-  let iframeIdx = 0;
+  var iframeIdx = 0;
 
   function processElement(el, depth) {
-    const tag = el.tagName.toLowerCase();
+    var tag = el.tagName.toLowerCase();
     if (SKIP_TAGS.has(tag)) return '';
-    if (!isVisible(el)) return '';
 
-    const indent = '  '.repeat(depth);
+    var indent = '  '.repeat(depth);
 
-    // Iframes: output a placeholder keyed by index.
-    // captureDomSnapshot replaces these with real frame content via Playwright's Frame API.
     if (tag === 'iframe') {
-      const attrs = getAttributes(el);
-      const frameSelector = buildSelector(el);
-      const idx = iframeIdx++;
+      var attrs = getAttributes(el);
+      var frameSelector = buildSelector(el);
+      var idx = iframeIdx++;
       return indent + '<iframe' + attrs + '> <!-- ' + frameSelector + ' -->\\n'
            + indent + '  [iframe:' + idx + ']\\n'
            + indent + '</iframe>\\n';
     }
 
-    // Option elements: show value and text (children of <select>)
-    if (tag === 'option') {
-      const val = el.getAttribute('value') || '';
-      const text = (el.textContent || '').trim().substring(0, 60);
-      if (text || val) {
-        return indent + '<option value="' + val + '"> ' + text + '</option>\\n';
-      }
-      return '';
+    var attrs = getAttributes(el);
+
+    if (SELF_CLOSING_TAGS.has(tag)) {
+      return indent + '<' + tag + attrs + '>\\n';
     }
 
-    // Interactive elements: full output with selector and position
-    if (isInteractiveElement(el)) {
-      const attrs = getAttributes(el);
-      const text = getVisibleText(el);
-      const selector = buildSelector(el);
-      const pos = getPositionAnnotation(el);
-      const textContent = text ? ' ' + text : '';
-      const selfClose = ['input', 'br', 'hr', 'img'].includes(tag);
-      let output = indent + '<' + tag + attrs + '>' + textContent + ' <!-- ' + selector + ' -->' + pos + '\\n';
-      if (!selfClose) {
-        output += processChildren(el, depth + 1);
-        output += indent + '</' + tag + '>\\n';
-      }
-      return output;
-    }
-
-    // Headings: text content for orientation
-    if (HEADING_TAGS.has(tag)) {
-      const text = (el.textContent || '').trim();
-      if (text) return indent + '<' + tag + '> ' + text + '</' + tag + '>\\n';
-      return '';
-    }
-
-    // Landmarks: structural container with key attributes
-    if (LANDMARK_TAGS.has(tag)) {
-      const attrs = getKeyAttributes(el);
-      const childOutput = processChildren(el, depth + 1);
-      if (!childOutput.trim()) return '';
-      return indent + '<' + tag + attrs + '>\\n' + childOutput + indent + '</' + tag + '>\\n';
-    }
-
-    // Elements with id or data-testid: structural container (preserves semantic markers)
-    if (el.getAttribute('id') || el.getAttribute('data-testid')) {
-      const attrs = getKeyAttributes(el);
-      const childOutput = processChildren(el, depth + 1);
-      if (!childOutput.trim()) return '';
-      return indent + '<' + tag + attrs + '>\\n' + childOutput + indent + '</' + tag + '>\\n';
-    }
-
-    // ── Readable mode: preserve text-bearing and container elements ──
-    if (MODE === 'readable') {
-      // Text-bearing tags: show tag + text content
-      if (READABLE_TEXT_TAGS.has(tag)) {
-        var text = (el.textContent || '').trim();
-        if (text) {
-          var attrs = getKeyAttributes(el);
-          return indent + '<' + tag + attrs + '> ' + text + ' </' + tag + '>\\n';
-        }
-        return '';
-      }
-
-      // Container tags: preserve structure, recurse into children
-      if (READABLE_CONTAINER_TAGS.has(tag)) {
-        var childOutput = processChildren(el, depth + 1);
-        if (!childOutput.trim()) return '';
-        var attrs = getKeyAttributes(el);
-        return indent + '<' + tag + attrs + '>\\n' + childOutput + indent + '</' + tag + '>\\n';
-      }
-
-      // Other tags in readable mode: still collapse tag but pass through children
-      // (same as compact default below, but we also check for visible text)
-      if (hasVisibleText(el)) {
-        return processChildren(el, depth);
-      }
-      return '';
-    }
-
-    // ── Compact mode default ──
-    if (!hasRelevantDescendant(el)) return '';
-
-    // Optionally preserve wrapper tags that carry a class attribute so the AI
-    // can use grouping context (e.g. class="user-card", class="modal-footer")
-    // to disambiguate similar interactive elements in different sections.
-    if (PRESERVE_CLASS_WRAPPERS) {
-      var cls = el.getAttribute('class');
-      if (cls && cls.trim()) {
-        var childOutput = processChildren(el, depth + 1);
-        if (!childOutput.trim()) return '';
-        return indent + '<' + tag + ' class="' + cls + '">\\n'
-             + childOutput
-             + indent + '</' + tag + '>\\n';
-      }
-    }
-
-    // Default: skip tag, pass through children at same depth
-    return processChildren(el, depth);
+    var childOutput = processChildNodes(el, depth + 1);
+    return indent + '<' + tag + attrs + '>\\n'
+         + childOutput
+         + indent + '</' + tag + '>\\n';
   }
 
-  function processChildren(parent, depth) {
-    const visible = [];
-    for (const child of parent.children) {
-      const tag = child.tagName.toLowerCase();
-      if (SKIP_TAGS.has(tag)) continue;
-      if (!isVisible(child)) continue;
-      visible.push(child);
-    }
-
-    let output = '';
-    let i = 0;
-
-    while (i < visible.length) {
-      const el = visible[i];
-      const tag = el.tagName.toLowerCase();
-
-      // Count consecutive same-tag siblings
-      let groupEnd = i + 1;
-      while (groupEnd < visible.length && visible[groupEnd].tagName.toLowerCase() === tag) {
-        groupEnd++;
-      }
-      const groupSize = groupEnd - i;
-
-      // Collapse repeated siblings — but never collapse if any sibling in the
-      // overflow group contains interactive or heading descendants.
-      var canCollapse = groupSize > MAX_REPEAT && !isInteractiveElement(el) && !HEADING_TAGS.has(tag);
-      if (canCollapse) {
-        for (let k = i + MAX_REPEAT; k < groupEnd; k++) {
-          if (hasRelevantDescendant(visible[k])) { canCollapse = false; break; }
+  function processChildNodes(parent, depth) {
+    var output = '';
+    var indent = '  '.repeat(depth);
+    var nodes = parent.childNodes;
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (node.nodeType === 1) {
+        // ELEMENT_NODE
+        output += processElement(node, depth);
+      } else if (node.nodeType === 3) {
+        // TEXT_NODE — collapse whitespace, drop if empty
+        var text = (node.textContent || '').replace(/\\s+/g, ' ').trim();
+        if (text) {
+          output += indent + text + '\\n';
         }
       }
-      if (canCollapse) {
-        for (let k = i; k < i + MAX_REPEAT; k++) {
-          output += processElement(visible[k], depth);
-        }
-        const indent = '  '.repeat(depth);
-        output += indent + '<!-- ' + (groupSize - MAX_REPEAT) + ' more <' + tag + '> -->\\n';
-        i = groupEnd;
-      } else {
-        output += processElement(el, depth);
-        i++;
-      }
+      // COMMENT_NODE (8) and others: drop
     }
-
     return output;
   }
 
   try {
-    const body = document.body;
+    var body = document.body;
     if (!body) return '<body>(empty)</body>';
-    const result = processChildren(body, 0);
-    return result || '<body>(no visible interactive elements)</body>';
+    var result = processChildNodes(body, 0);
+    return result || '<body>(no content)</body>';
   } catch (err) {
-    return '<error>Failed to clean DOM: ' + String(err) + '</error>';
+    return '<error>Failed to capture DOM: ' + String(err) + '</error>';
   }
 })()`;
 }
-
-/** Pre-built compact script for backward compatibility (used by cleanHtmlString) */
-const DOM_CLEANER_SCRIPT = buildDomCleanerScript('compact');
 
 /** Result of a findInDom search */
 export interface DomSearchMatch {

@@ -123,15 +123,6 @@ export interface CacheConfig {
   dir: string;
 }
 
-export interface DomConfig {
-  /** In compact mode, preserve wrapper elements that have a `class` attribute and
-   *  contain interactive/heading/landmark descendants. Adds grouping context (e.g.
-   *  `class="user-card"`, `class="modal-footer"`) so the AI can disambiguate between
-   *  similar-looking interactive elements in different sections.
-   *  Tradeoff: extra tokens and deeper nesting. Default true. */
-  preserveClassWrappers: boolean;
-}
-
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
@@ -141,7 +132,6 @@ export interface Config {
   api: ApiConfig;
   server: ServerConfig;
   cache: CacheConfig;
-  dom: DomConfig;
 }
 
 /** Deeply partial version of Config for user-provided overrides */

@@ -1,7 +1,6 @@
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
-import type { DomMode } from '../browser/dom-cleaner.js';
 
 /** Viewport dimensions passed to the system prompt */
 export interface ViewportInfo {
@@ -99,7 +98,7 @@ Plan your next action based on the observed result — do not batch multiple act
 ## Rules
 1. Return ONLY valid JSON — no markdown, no explanation outside JSON
 2. Return exactly ONE action per response: { "action": string, "description": string } plus relevant fields. After this action executes, you will see the result and can plan the next action
-3. Use CSS selectors. Prefer data-testid > id > aria-label > name > visible text. NEVER use Tailwind utility classes (e.g. .!fixed, .z-[999], .bg-black) in selectors — they contain characters that break CSS parsing. Use semantic selectors instead (role, aria-label, tag, id, data-testid)
+3. Use CSS selectors. When the step names an element by its visible label/text (e.g. "Click the Verify Code button"), FIRST locate the element in the DOM by matching that exact visible text, then build a selector targeting that specific element. Do NOT pick a different element just because its data-testid, id, or class contains a similar-looking substring — testids are often mislabeled or refer to a nearby element (e.g. data-testid="button-verifyOtp" on a "Didn't get a code?" link, not on the "Verify code" button). Once you have identified the correct element by its text, prefer stable attributes on that element: data-testid > id > aria-label > name > text-based selector (e.g. button:has-text("Verify code")). NEVER use Tailwind utility classes (e.g. .!fixed, .z-[999], .bg-black) in selectors — they contain characters that break CSS parsing. Use semantic selectors instead (role, aria-label, tag, id, data-testid)
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
 5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — you will see the result in the next screenshot${dismissalRule}
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
@@ -202,7 +201,6 @@ export function buildStepMessage(
   screenshotBase64: string | null,
   conversationHistory: string[],
   openPages?: PageInfo[],
-  domMode?: DomMode,
   testInfoSection?: string,
 ): ChatMessage {
   const historySection =
@@ -214,14 +212,10 @@ export function buildStepMessage(
 
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
-  const domLabel = domMode === 'readable'
-    ? '## DOM Snapshot (readable mode — includes visible text content for value extraction)'
-    : '## DOM Snapshot';
-
   const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
 
-${domLabel}
+## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
 \`\`\`
@@ -492,7 +486,6 @@ export function buildContinuationMessage(
   turnNumber: number,
   openPages?: PageInfo[],
   explorationResults?: string[],
-  domMode?: DomMode,
   testInfoSection?: string,
 ): ChatMessage {
   const actionLines = completedActions.length > 0
@@ -509,10 +502,6 @@ export function buildContinuationMessage(
     ? `## Exploration Results\n${explorationResults.join('\n\n')}\n\n`
     : '';
 
-  const domLabel = domMode === 'readable'
-    ? '## DOM Snapshot (readable mode — includes visible text content for value extraction)'
-    : '## DOM Snapshot';
-
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
   const textContent = `${testInfoBlock}You are continuing the execution of a step.
@@ -527,7 +516,7 @@ ${variableLines}
 
 Current URL: ${currentUrl}
 
-${openPagesSection}${explorationSection}${domLabel}
+${openPagesSection}${explorationSection}## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
 \`\`\`
