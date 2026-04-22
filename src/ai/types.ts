@@ -27,7 +27,9 @@ export type ActionType =
   // Search the full DOM for specific text, return matching elements with selectors
   | 'find'
   // Return the full DOM subtree for a given selector (expand collapsed content)
-  | 'expand';
+  | 'expand'
+  // Explicit no-op: AI signals the step/instruction is already satisfied
+  | 'noop';
 
 /** A single action returned by the AI */
 export interface AIAction {

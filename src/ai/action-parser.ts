@@ -8,6 +8,7 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'api_call', 'extract_csrf', 'extract_value',
   'read', 'count',
   'find', 'expand',
+  'noop',
 ]);
 
 /**

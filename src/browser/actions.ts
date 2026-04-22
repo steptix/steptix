@@ -207,6 +207,10 @@ export async function executeAction(
         return { success: true, capturedValue: counted };
       }
 
+      case 'noop':
+        logger.debug(`noop action: ${eff.description}`);
+        break;
+
       default:
         logger.warn(`Unknown action type: ${(eff as AIAction).action}`);
     }

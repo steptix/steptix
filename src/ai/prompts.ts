@@ -524,7 +524,7 @@ ${domSnapshot}
 [Screenshot is attached as an image — use it to understand the current visual state of the page]
 
 What is the next action needed to complete the original instruction: "${originalInstruction}"?
-Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps.`;
+Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "action": "noop", "description": "<why nothing is needed>", "needs_reeval": false }.`;
 
   if (screenshotBase64) {
     return {
