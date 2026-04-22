@@ -16,12 +16,11 @@ import {
   formatTestInfo,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome } from '../ai/prompts.js';
-import { diagnosePageState, waitForPageStability } from '../browser/page-state.js';
+import { diagnosePageState, waitForPageStability, PageActivityTracker } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
 import { parseAIResponse, parseAssertionEvaluation, parseBranchedResponse } from '../ai/action-parser.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
-import type { DomMode } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
 import type { PageTracker } from '../browser/manager.js';
@@ -268,12 +267,6 @@ async function executeStepAttempt(
   let page = pageTracker ? pageTracker.getActive() : opts.page;
   const maxTurns = config.execution.maxTurns;
 
-  // Use readable DOM for extraction and assertion steps — preserves visible text content
-  const domMode: DomMode = (isExtractionStep(instruction) || isAssertionStep(instruction)) ? 'readable' : 'compact';
-  if (domMode === 'readable') {
-    logger.debug(`Using readable DOM mode for step: "${instruction.substring(0, 60)}..."`);
-  }
-
   // Accumulated across all turns
   const allTurns: TurnResult[] = [];
   const allCompletedActions: Array<{ action: string; description: string; selector?: string }> = [];
@@ -281,6 +274,21 @@ async function executeStepAttempt(
   const attemptStartUrl = page.url();
   /** Results from find/expand exploration actions — included in the continuation message */
   const explorationResults: string[] = [];
+
+  // Stall detection: if the AI keeps issuing "wait" actions but the page
+  // (URL + DOM) is unchanged AND the network is idle, the prior action likely
+  // didn't register. Fail fast instead of burning turns on a stuck page.
+  let activityTrackers = new Map<Page, PageActivityTracker>();
+  const trackerFor = (p: Page): PageActivityTracker => {
+    let t = activityTrackers.get(p);
+    if (!t) { t = new PageActivityTracker(p); activityTrackers.set(p, t); }
+    return t;
+  };
+  trackerFor(page); // attach to initial page
+  let prevPageFingerprint: string | undefined;
+  let lastActionWasWait = false;
+  let stallCount = 0;
+  const STALL_LIMIT = 2;
 
   // Global sub-action counter (1-based, spans all turns)
   let globalSubActionIndex = 0;
@@ -306,6 +314,7 @@ async function executeStepAttempt(
     if (pageTracker) {
       page = pageTracker.getActive();
     }
+    const tracker = trackerFor(page);
 
     // 1b. On retry attempts, diagnose page state and auto-wait if loading
     let pageDiagnosis: PageStateDiagnosis | undefined;
@@ -323,9 +332,7 @@ async function executeStepAttempt(
 
     // 2. Capture current page state (full-page so AI sees content below the fold)
     const turnTimestamp = new Date().toISOString();
-    const domSnapshot = await captureDomSnapshot(page, domMode, {
-      preserveClassWrappers: config.dom.preserveClassWrappers,
-    });
+    const domSnapshot = await captureDomSnapshot(page);
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
@@ -333,6 +340,32 @@ async function executeStepAttempt(
     if (currentTurn === 1) {
       firstTurnDomSnapshot = domSnapshot;
     }
+
+    // Stall detection: if the prior turn's action was a "wait" and neither the
+    // page (URL + DOM) nor the network moved since then, the preceding click
+    // (or whatever triggered the wait) likely didn't register. Bail out instead
+    // of burning more turns.
+    const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
+    if (currentTurn > 1 && lastActionWasWait) {
+      const unchanged = pageFingerprint === prevPageFingerprint;
+      const networkIdle = tracker.isIdle();
+      if (unchanged && networkIdle) {
+        stallCount++;
+        logger.warn(
+          `Stall detected (${stallCount}/${STALL_LIMIT}): page unchanged since last turn, network idle, last action was "wait" — prior action may not have registered`,
+        );
+        if (stallCount >= STALL_LIMIT) {
+          throw new StepFailureError(
+            `Step stalled: page did not advance after prior action across ${stallCount + 1} turns (URL, DOM, and network all quiet). The preceding action may not have registered — check selector targeting and element interactability.`,
+            [],
+            allTurns,
+          );
+        }
+      } else {
+        stallCount = 0;
+      }
+    }
+    prevPageFingerprint = pageFingerprint;
 
     // Per-turn accumulators
     const turnAiInteractions: AiInteraction[] = [];
@@ -387,7 +420,6 @@ async function executeStepAttempt(
         screenshotForAi,
         conversationHistory,
         openPages,
-        domMode,
         testInfo,
       );
     } else {
@@ -401,7 +433,6 @@ async function executeStepAttempt(
         currentTurn,
         openPages,
         explorationResults.length > 0 ? explorationResults : undefined,
-        domMode,
         testInfo,
       );
     }
@@ -738,9 +769,7 @@ async function executeStepAttempt(
       }
 
       // Capture state after action (full-page for report visibility)
-      const postDom = await captureDomSnapshot(page, domMode, {
-        preserveClassWrappers: config.dom.preserveClassWrappers,
-      }).catch(() => '');
+      const postDom = await captureDomSnapshot(page).catch(() => '');
       const postShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
       const postShotBase64 = postShot?.base64;
       const postUrl = page.url();
@@ -813,6 +842,10 @@ async function executeStepAttempt(
         })),
     );
 
+    // Remember whether this turn's effective action was a "wait" so next turn
+    // can detect a stall (wait → nothing changed → wait again).
+    lastActionWasWait = aiResponse.actions.some((a) => a.action === 'wait');
+
     // Finalize this turn
     allTurns.push({
       turnNumber: currentTurn,
@@ -849,9 +882,7 @@ async function executeStepAttempt(
 
   // 9b. Evaluate assertion if step has one (runs after all turns complete successfully)
   if (!stepFailed && isAssertionStep(instruction)) {
-    const finalDom = await captureDomSnapshot(page, 'readable', {
-      preserveClassWrappers: config.dom.preserveClassWrappers,
-    });
+    const finalDom = await captureDomSnapshot(page);
     const finalShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
 
     const assertAction = lastAiResponse?.actions.find((a) => a.action === 'assert');
@@ -912,6 +943,9 @@ async function executeStepAttempt(
     if (err instanceof StepFailureError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new StepFailureError(message, collectedFailures, allTurns);
+  } finally {
+    for (const t of activityTrackers.values()) t.dispose();
+    activityTrackers = new Map();
   }
 
   const durationMs = Date.now() - startTime;
@@ -1126,9 +1160,7 @@ export async function executeBranchedStep(
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
 
-    const domSnapshot = await captureDomSnapshot(page, 'compact', {
-      preserveClassWrappers: config.dom.preserveClassWrappers,
-    });
+    const domSnapshot = await captureDomSnapshot(page);
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
 

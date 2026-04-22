@@ -1,4 +1,43 @@
-import type { Page } from 'playwright';
+import type { Page, Request } from 'playwright';
+
+/**
+ * Tracks in-flight network requests for a Page so callers can cheaply ask
+ * "is the network idle right now?" without a timeout-based probe.
+ *
+ * Attach once per step (listeners live until `dispose()` is called).
+ */
+export class PageActivityTracker {
+  private inFlight = 0;
+  private readonly onRequest: (req: Request) => void;
+  private readonly onFinished: (req: Request) => void;
+  private readonly onFailed: (req: Request) => void;
+
+  constructor(private readonly page: Page) {
+    this.onRequest = () => { this.inFlight++; };
+    this.onFinished = () => { this.inFlight = Math.max(0, this.inFlight - 1); };
+    this.onFailed = () => { this.inFlight = Math.max(0, this.inFlight - 1); };
+    page.on('request', this.onRequest);
+    page.on('requestfinished', this.onFinished);
+    page.on('requestfailed', this.onFailed);
+  }
+
+  /** True when there are no outstanding requests. */
+  isIdle(): boolean {
+    return this.inFlight <= 0;
+  }
+
+  /** Number of requests currently in flight. */
+  get pendingCount(): number {
+    return Math.max(0, this.inFlight);
+  }
+
+  /** Remove listeners. Safe to call multiple times. */
+  dispose(): void {
+    this.page.off('request', this.onRequest);
+    this.page.off('requestfinished', this.onFinished);
+    this.page.off('requestfailed', this.onFailed);
+  }
+}
 
 /** Diagnosis of the current page state, used to inform retry decisions */
 export interface PageStateDiagnosis {
