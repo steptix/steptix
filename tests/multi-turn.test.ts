@@ -515,6 +515,8 @@ function makeMockPage(urlOrFn: string | (() => string) = 'https://app.example.co
     goto: vi.fn().mockResolvedValue(null),
     mouse: { wheel: vi.fn().mockResolvedValue(null) },
     keyboard: { press: vi.fn().mockResolvedValue(null) },
+    on: vi.fn(),
+    off: vi.fn(),
   } as unknown as Page;
 }
 
