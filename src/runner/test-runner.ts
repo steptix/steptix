@@ -296,6 +296,7 @@ export async function runTest(
       const interactiveStep = !inputStep ? parseInteractiveStep(instruction) : null;
       const outputStep = !inputStep && !interactiveStep ? parseOutputStep(instruction) : null;
       let stepResult: StepResult;
+      let interactiveResults: StepResult[] = [];
 
       if (inputStep) {
         const stepStartTime = Date.now();
@@ -319,7 +320,6 @@ export async function runTest(
       } else if (interactiveStep) {
         // Interactive REPL — user types instructions that execute as AI steps
         const stepStartTime = Date.now();
-        const interactiveResults: StepResult[] = [];
         let interactiveIndex = 1;
 
         let userExited = false;
@@ -351,6 +351,8 @@ export async function runTest(
             // not cacheable steps (and they all share the same stepIndex)
           });
 
+          result.instruction = `(interactive ${interactiveIndex}) ${userInstruction}`;
+          result.interactiveChild = true;
           interactiveResults.push(result);
 
           // Add to conversation history so subsequent interactive commands have context
@@ -430,6 +432,9 @@ export async function runTest(
       }
 
       stepResults.push(stepResult);
+      if (interactiveStep) {
+        stepResults.push(...interactiveResults);
+      }
 
       // Add to conversation history (text summary only)
       const currentUrl = session.page.url();

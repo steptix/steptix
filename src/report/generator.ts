@@ -65,6 +65,7 @@ function renderReport(report: TestReport): string {
   const stepsHtml = renderSteps(report.steps);
   const diagnosisHtml = report.diagnosis ? renderDiagnosis(report.diagnosis) : '';
   const modelSummary = summarizeModels(report);
+  const scriptText = buildScriptText(report.steps);
 
   return template({
     testName: report.testName,
@@ -87,7 +88,31 @@ function renderReport(report: TestReport): string {
     modelSummary,
     stepsHtml: new Handlebars.SafeString(stepsHtml),
     diagnosisHtml: new Handlebars.SafeString(diagnosisHtml),
+    scriptText,
   });
+}
+
+/**
+ * Build a replayable test script from the captured steps.
+ * Skips `[interactive]` header rows (their children carry the actual commands)
+ * and strips `(interactive N)` / `(fsd)` prefixes so the output is ready
+ * to paste into a .md test file.
+ */
+function buildScriptText(steps: StepResult[]): string {
+  const INTERACTIVE_HEADER = /^\[interactive\]/i;
+  const PREFIX = /^\((?:interactive\s+\d+|fsd)\)\s*/i;
+  const lines: string[] = [];
+  let n = 1;
+  for (const step of steps) {
+    if (step.hookScope) continue;
+    const raw = step.instruction.trim();
+    if (INTERACTIVE_HEADER.test(raw)) continue;
+    const cleaned = raw.replace(PREFIX, '').trim();
+    if (!cleaned) continue;
+    lines.push(`${n}. ${cleaned}`);
+    n++;
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -166,7 +191,19 @@ function renderDiagnosis(diagnosis: FailureDiagnosis): string {
 }
 
 function renderSteps(steps: StepResult[]): string {
-  return steps.map((step) => renderStep(step)).join('\n');
+  const out: string[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!;
+    if (step.interactiveChild) continue; // handled by its parent
+    const children: StepResult[] = [];
+    if (/^\[interactive\]/i.test(step.instruction)) {
+      while (i + 1 < steps.length && steps[i + 1]!.interactiveChild) {
+        children.push(steps[++i]!);
+      }
+    }
+    out.push(renderStep(step, children));
+  }
+  return out.join('\n');
 }
 
 /** Format an ISO timestamp to a short time string (HH:MM:SS) in local timezone */
@@ -185,7 +222,7 @@ function formatTime(isoString?: string): string {
   }
 }
 
-function renderStep(step: StepResult): string {
+function renderStep(step: StepResult, interactiveChildren: StepResult[] = []): string {
   const statusClass = step.status === 'passed' ? 'badge-pass' : step.status === 'failed' ? 'badge-fail' : 'badge-skip';
   const statusIcon = step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '—';
   const duration = formatDuration(step.durationMs);
@@ -226,10 +263,25 @@ function renderStep(step: StepResult): string {
        </div>`
     : '';
 
-  return `<div class="step">
+  const childStepClass = step.interactiveChild ? ' step-interactive-child' : '';
+  const stepNumberLabel = step.interactiveChild
+    ? escapeHtml(step.instruction.match(/^\(interactive\s+(\d+)\)/i)?.[0] ?? `Step ${step.index}`)
+    : `Step ${step.index}`;
+  const displayedInstruction = step.interactiveChild
+    ? step.instruction.replace(/^\(interactive\s+\d+\)\s*/i, '')
+    : step.instruction;
+
+  const interactiveChildrenHtml = interactiveChildren.length > 0
+    ? `<div class="interactive-children">
+        <div class="interactive-children-label">User-typed commands</div>
+        ${interactiveChildren.map((c) => renderStep(c)).join('\n')}
+       </div>`
+    : '';
+
+  return `<div class="step${childStepClass}">
   <div class="step-header">
-    <span class="step-number">Step ${step.index}</span>
-    <span class="step-instruction">${escapeHtml(step.instruction)}</span>
+    <span class="step-number">${stepNumberLabel}</span>
+    <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
     ${retryBadge}
     <span class="step-duration">${duration}</span>
     <span class="badge ${statusClass}">${statusIcon} ${step.status.toUpperCase()}</span>
@@ -240,6 +292,7 @@ function renderStep(step: StepResult): string {
     ${turnsHtml}
     ${assertionHtml}
     ${failureHtml}
+    ${interactiveChildrenHtml}
     ${endScreenshotHtml}
   </div>
 </div>`;

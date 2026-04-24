@@ -100,6 +100,8 @@ export interface StepResult {
   aiExplanation?: string;
   /** True when this step was typed into the FSD(S) REPL rather than being part of the test file. */
   fsdAdHoc?: boolean;
+  /** True when this step is a user-typed command captured inside an [interactive] step. */
+  interactiveChild?: boolean;
   /** True when the failure on this step triggered the FSD(S) REPL handoff and the user chose to resume. */
   fsdResumed?: boolean;
   /** Hook metadata — absent for regular steps, set for hook executions. */
