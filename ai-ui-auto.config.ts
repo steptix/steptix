@@ -7,7 +7,7 @@ export default defineConfig({
     // apiKey: process.env.AI_API_KEY,
     // model: defaulted via src/config/defaults.ts; override with AI_MODEL in .env
     maxInputTokens: 1_000_000,
-    streamResponses: true,
+    streamResponses: false,
     sendScreenshots: false,
   },
   browser: {
