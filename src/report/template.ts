@@ -33,10 +33,16 @@ export function getReportTemplate(): string {
     /* Header */
     .report-header { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 24px; box-shadow: var(--shadow); }
     .report-header h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 16px; }
-    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-    .meta-item { display: flex; flex-direction: column; }
+    .meta-grid { display: flex; flex-wrap: wrap; gap: 12px; }
+    .meta-item { display: flex; flex-direction: column; min-width: 0; flex: 1 1 200px; }
+    .meta-item-wide { flex: 1 0 100%; }
+    .meta-item-grow { flex: 2 1 200px; }
     .meta-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 2px; }
-    .meta-value { font-size: 0.95rem; font-weight: 500; }
+    .meta-value { font-size: 0.95rem; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+    .meta-url-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .meta-url { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; color: #2563eb; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+    .meta-url:hover { text-decoration: underline; }
+    .meta-url-row .copy-btn { flex-shrink: 0; }
 
     /* Status badges */
     .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -210,16 +216,28 @@ export function getReportTemplate(): string {
         <span class="meta-label">Duration</span>
         <span class="meta-value">{{duration}}</span>
       </div>
-      {{#if baseUrl}}
-      <div class="meta-item">
-        <span class="meta-label">Base URL</span>
-        <span class="meta-value">{{baseUrl}}</span>
-      </div>
-      {{/if}}
       {{#if modelSummary}}
-      <div class="meta-item">
+      <div class="meta-item meta-item-grow">
         <span class="meta-label">AI Model</span>
         <span class="meta-value">{{modelSummary}}</span>
+      </div>
+      {{/if}}
+      {{#if baseUrl}}
+      <div class="meta-item meta-item-wide">
+        <span class="meta-label">Base URL</span>
+        <span class="meta-value meta-url-row">
+          <a class="meta-url" href="{{baseUrl}}" target="_blank" rel="noopener" title="{{baseUrl}}">{{baseUrl}}</a>
+          <button class="copy-btn" type="button" data-copy="{{baseUrl}}" title="Copy URL"><span class="copy-btn-label">Copy</span></button>
+        </span>
+      </div>
+      {{/if}}
+      {{#if filePath}}
+      <div class="meta-item meta-item-wide">
+        <span class="meta-label">Test file</span>
+        <span class="meta-value meta-url-row">
+          <span class="meta-url" title="{{filePath}}">{{filePath}}</span>
+          <button class="copy-btn" type="button" data-copy="{{filePath}}" title="Copy path"><span class="copy-btn-label">Copy</span></button>
+        </span>
       </div>
       {{/if}}
       {{#if dataRow}}
@@ -339,9 +357,12 @@ export function getReportTemplate(): string {
     btn.addEventListener('click', function(e) {
       e.stopPropagation();
       e.preventDefault();
-      var content = btn.parentElement.nextElementSibling;
-      if (!content) return;
-      var text = content.textContent || '';
+      var text = btn.getAttribute('data-copy');
+      if (text == null) {
+        var content = btn.parentElement.nextElementSibling;
+        if (!content) return;
+        text = content.textContent || '';
+      }
       var done = function() {
         var label = btn.querySelector('.copy-btn-label');
         var original = label ? label.textContent : '';

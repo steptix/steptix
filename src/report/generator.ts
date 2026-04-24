@@ -76,6 +76,7 @@ function renderReport(report: TestReport): string {
     date,
     duration,
     baseUrl: report.baseUrl,
+    filePath: report.filePath,
     dataRow: report.dataRow,
     tags: report.tags,
     totalSteps: report.totalSteps,
