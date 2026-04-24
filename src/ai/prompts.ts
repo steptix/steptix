@@ -98,7 +98,36 @@ Plan your next action based on the observed result — do not batch multiple act
 ## Rules
 1. Return ONLY valid JSON — no markdown, no explanation outside JSON
 2. Return exactly ONE action per response: { "action": string, "description": string } plus relevant fields. After this action executes, you will see the result and can plan the next action. EXCEPTION: you MAY chain a single "wait" action immediately after a triggering action (click/type/select/navigate/keypress) in the same response when the step instruction names a specific completion condition (a destination URL, a visible element, a count, a text label). Chaining lets Playwright block server-side through redirect chains and async renders with zero polling overhead. Do NOT chain speculative waits — only chain when the completion condition is stated in the instruction
-3. Use CSS selectors. When the step names an element by its visible label/text (e.g. "Click the Verify Code button"), FIRST locate the element in the DOM by matching that exact visible text, then build a selector targeting that specific element. Do NOT pick a different element just because its data-testid, id, or class contains a similar-looking substring — testids are often mislabeled or refer to a nearby element (e.g. data-testid="button-verifyOtp" on a "Didn't get a code?" link, not on the "Verify code" button). Once you have identified the correct element by its text, prefer stable attributes on that element: data-testid > id > aria-label > name > text-based selector (e.g. button:has-text("Verify code")). NEVER use Tailwind utility classes (e.g. .!fixed, .z-[999], .bg-black) in selectors — they contain characters that break CSS parsing. Use semantic selectors instead (role, aria-label, tag, id, data-testid)
+3. SELECTOR STRATEGY. Write selectors that stay correct when the UI changes cosmetically. Follow this process:
+
+   Step A — identify the element by its visible label first. When the step names an element ("Click the Verify code button"), locate it in the DOM snapshot by matching that visible text. Do NOT pick a different element just because its data-testid, id, or class contains a similar-looking substring — testids are often mislabeled or attached to a neighbouring element (e.g. data-testid="button-verifyOtp" on a "Didn't get a code?" link, not on the "Verify code" button). Verify you have found the right element before picking a selector for it.
+
+   Step B — pick the highest-ranked stable handle available ON that element, in this order:
+     1. [data-testid="..."] — author-intended test handle (also accept data-test, data-qa, data-cy if the app uses them)
+     2. #id — only if the id looks stable. Skip ids that look auto-generated (:r1a:, radix-:r3:, react-aria-:rb4:, long random strings). Those change on every render
+     3. [role="button"][name="..."] or [role="link"][name="..."] — accessible role + name; very stable across framework changes
+     4. [aria-label="..."] — accessible name (especially for icon-only buttons)
+     5. [name="..."] — form-field name attribute
+     6. tag:text-is("exact label") — visible text, EXACT match. Preferred for short labels like "New", "OK", "Save", "Login" where substring match would overreach (e.g. "New" matching "News", "Renewal", "Newer")
+     7. tag:has-text("substring") — visible text, substring match. Use only when the exact label is long enough that substring is unambiguous, or when :text-is is not practical
+     8. Parent-scoped combinations — #site-nav a:text-is("Login"), [data-testid="toolbar"] button:has-text("Save"). Use when the element itself has no stable handle but a nearby ancestor does
+     9. nth=N or :nth-child(N) — LAST RESORT. Use only when the page genuinely has multiple interchangeable elements and you need the Nth. Do NOT use nth= to disambiguate between elements that have distinguishing attributes or text — scope to a parent instead
+
+   Step C — disambiguation by scope, not position. If multiple elements match your selector, prefer scoping to the nearest meaningful container (a landmark like #main, nav, [role="dialog"], [data-testid="..."]) over reaching for nth=0. Position is fragile; scope is semantic.
+
+   Never in selectors:
+   - Tailwind utility classes (.bg-blue-500, .!fixed, .z-[999], .hover:bg-red) — they contain characters that break CSS parsing and change on every design tweak
+   - Auto-generated ids like #\\:r1a\\: or #radix-123 — regenerate on every render
+   - :nth-child to disambiguate between elements that have unique text or attributes
+   - State pseudo-classes (:visible, :hidden, :disabled) — see rule 12; use waitType for state
+
+   Cookbook — canonical patterns:
+   - Button with a unique label → button:text-is("Sign in"), or [role="button"][name="Sign in"]
+   - Link in a nav with a short label → nav a:text-is("New") (scoped + exact-match)
+   - Input by its label → label:text-is("Email") + input, or input[name="email"] if available
+   - Row in a table → tr:has-text("paul@example.com") (substring OK here — the value is specific)
+   - Dismissing a dialog → [role="dialog"] button:text-is("Cancel")
+   - Icon-only button → [aria-label="Close"]
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
 5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — you will see the result in the next screenshot${dismissalRule}
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
