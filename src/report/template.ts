@@ -167,12 +167,11 @@ export function getReportTemplate(): string {
     .badge-conf-medium { background: #fef3c7; color: #92400e; }
     .badge-conf-low { background: #fee2e2; color: var(--fail); }
 
-    /* Interactive children (nested user-typed commands inside an [interactive] step) */
-    .interactive-children { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-    .interactive-children-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 8px; }
-    .step-interactive-child { box-shadow: none; margin-bottom: 8px; }
-    .step-interactive-child .step-header { padding: 10px 14px; }
-    .step-interactive-child .step-number { min-width: 90px; font-size: 0.7rem; }
+    /* Interactive banner — marks where an [interactive] prompt opened, followed by user-typed commands as numbered sub-steps. */
+    .interactive-banner { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 10px; padding: 8px 14px; background: #eef2ff; border: 1px solid #c7d2fe; border-left: 3px solid #6366f1; border-radius: 6px; }
+    .interactive-banner-label { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #4338ca; }
+    .interactive-banner-hint { font-size: 0.85rem; color: #3730a3; font-style: italic; }
+    .step-interactive-child .step-number { min-width: 70px; }
 
     /* Test script */
     .script-block { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }

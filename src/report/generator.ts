@@ -194,16 +194,33 @@ function renderSteps(steps: StepResult[]): string {
   const out: string[] = [];
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
-    if (step.interactiveChild) continue; // handled by its parent
-    const children: StepResult[] = [];
-    if (/^\[interactive\]/i.test(step.instruction)) {
+    if (step.interactiveChild) continue; // handled when we meet the parent
+
+    const interactiveMatch = step.instruction.match(/^\[interactive\]\s*(.*)$/i);
+    if (interactiveMatch) {
+      const hint = interactiveMatch[1]!.trim();
+      out.push(renderInteractiveBanner(step.index, hint));
+      let subIdx = 1;
       while (i + 1 < steps.length && steps[i + 1]!.interactiveChild) {
-        children.push(steps[++i]!);
+        const child = steps[++i]!;
+        const typed = child.instruction.replace(/^\(interactive\s+\d+\)\s*/i, '');
+        out.push(renderStep(child, { numberLabel: `Step ${step.index}.${subIdx}`, displayInstruction: typed }));
+        subIdx++;
       }
+      continue;
     }
-    out.push(renderStep(step, children));
+
+    out.push(renderStep(step));
   }
   return out.join('\n');
+}
+
+function renderInteractiveBanner(stepIndex: number, hint: string): string {
+  const hintHtml = hint ? `<span class="interactive-banner-hint">${escapeHtml(hint)}</span>` : '';
+  return `<div class="interactive-banner">
+    <span class="interactive-banner-label">Step ${stepIndex} · Interactive prompt</span>
+    ${hintHtml}
+  </div>`;
 }
 
 /** Format an ISO timestamp to a short time string (HH:MM:SS) in local timezone */
@@ -222,7 +239,12 @@ function formatTime(isoString?: string): string {
   }
 }
 
-function renderStep(step: StepResult, interactiveChildren: StepResult[] = []): string {
+interface RenderStepOverrides {
+  numberLabel?: string;
+  displayInstruction?: string;
+}
+
+function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): string {
   const statusClass = step.status === 'passed' ? 'badge-pass' : step.status === 'failed' ? 'badge-fail' : 'badge-skip';
   const statusIcon = step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '—';
   const duration = formatDuration(step.durationMs);
@@ -264,23 +286,12 @@ function renderStep(step: StepResult, interactiveChildren: StepResult[] = []): s
     : '';
 
   const childStepClass = step.interactiveChild ? ' step-interactive-child' : '';
-  const stepNumberLabel = step.interactiveChild
-    ? escapeHtml(step.instruction.match(/^\(interactive\s+(\d+)\)/i)?.[0] ?? `Step ${step.index}`)
-    : `Step ${step.index}`;
-  const displayedInstruction = step.interactiveChild
-    ? step.instruction.replace(/^\(interactive\s+\d+\)\s*/i, '')
-    : step.instruction;
-
-  const interactiveChildrenHtml = interactiveChildren.length > 0
-    ? `<div class="interactive-children">
-        <div class="interactive-children-label">User-typed commands</div>
-        ${interactiveChildren.map((c) => renderStep(c)).join('\n')}
-       </div>`
-    : '';
+  const stepNumberLabel = overrides.numberLabel ?? `Step ${step.index}`;
+  const displayedInstruction = overrides.displayInstruction ?? step.instruction;
 
   return `<div class="step${childStepClass}">
   <div class="step-header">
-    <span class="step-number">${stepNumberLabel}</span>
+    <span class="step-number">${escapeHtml(stepNumberLabel)}</span>
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
     ${retryBadge}
     <span class="step-duration">${duration}</span>
@@ -292,7 +303,6 @@ function renderStep(step: StepResult, interactiveChildren: StepResult[] = []): s
     ${turnsHtml}
     ${assertionHtml}
     ${failureHtml}
-    ${interactiveChildrenHtml}
     ${endScreenshotHtml}
   </div>
 </div>`;
