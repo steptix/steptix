@@ -106,7 +106,7 @@ Plan your next action based on the observed result — do not batch multiple act
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 11. For "select" actions, set "selector" to the <select> element itself (NOT an <option>) and "value" to the visible option text (e.g. "Transaction Dispute"). Never click <option> elements directly — always use the "select" action on the parent <select>
-12. For "wait" actions, set "waitType" and "condition":
+12. For "wait" actions, set "waitType" and "condition". IMPORTANT: keep selectors as pure CSS — describe WHAT element, and let "waitType" describe WHAT STATE. Never encode state (visibility, hidden, enabled, disabled, presence) in the selector itself via pseudo-classes like ":visible", ":hidden", ":not(:visible)", ":disabled", ":empty". The framework applies the correct Playwright state automatically based on "waitType", so adding state pseudos to the selector is redundant and commonly fails.
    - waitType "load": set condition to "networkidle" (preferred for "wait until page loads" type steps), "load", or "domcontentloaded"
    - waitType "duration": set condition to a time like "30s", "2m", "1m 30s"
    - waitType "selector": set condition to a CSS selector to wait for an element to become visible

@@ -362,6 +362,11 @@ function sanitizeCssSelector(selector: string): string {
     'valid', 'invalid', 'in-range', 'out-of-range',
     'read-only', 'read-write', 'placeholder-shown',
     'default', 'indeterminate', 'before', 'after',
+    // Playwright-specific pseudo-classes — valid inside locator() selectors.
+    // The AI should prefer dedicated waitTypes over encoding state in selectors
+    // (see prompt rule 12), but these are legitimate for click/type/select
+    // selectors (:has-text() is especially useful for disambiguation).
+    'visible', 'hidden', 'has-text', 'text', 'nth-match', 'light',
   ];
   const pseudoRe = new RegExp(`^(?:${pseudoClasses.join('|')})\\b`, 'i');
   sanitized = sanitized.replace(/[#.][^\s.#\[>+~,]+/g, (part) => {
@@ -391,8 +396,12 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
     }
 
     case 'selector': {
+      // Strip a trailing ":visible" — visibility is already enforced via
+      // state:'visible' below, so encoding it in the selector is redundant
+      // and was a common AI failure mode (the sanitizer mangled the colon).
+      const rawSel = condition.replace(/:visible$/, '');
       // Sanitize Tailwind-style class names that contain invalid CSS characters
-      const sel = sanitizeCssSelector(condition);
+      const sel = sanitizeCssSelector(rawSel);
       // When inside a frame, use locator.waitFor() so the wait is scoped to that frame.
       if (root !== page) {
         await root.locator(sel).first().waitFor({ state: 'visible', timeout });
@@ -403,8 +412,13 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
     }
 
     case 'hidden': {
+      // Strip a trailing ":hidden" or ":not(:visible)" — hiddenness is enforced
+      // via state:'hidden' below, so encoding it in the selector is redundant.
+      const rawHidden = condition
+        .replace(/:hidden$/, '')
+        .replace(/:not\(:visible\)$/, '');
       // Wait for an element to disappear (spinner, overlay, loading indicator)
-      const hiddenSel = sanitizeCssSelector(condition);
+      const hiddenSel = sanitizeCssSelector(rawHidden);
       if (root !== page) {
         await root.locator(hiddenSel).first().waitFor({ state: 'hidden', timeout });
       } else {
