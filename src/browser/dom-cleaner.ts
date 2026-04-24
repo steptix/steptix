@@ -1,7 +1,40 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
 
 /** Maximum character length for DOM snapshots (prevents token blowup). */
 const DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
+
+/**
+ * Load a browser-side script once at module init. Scripts live in ./scripts/
+ * and are copied alongside the compiled output (see package.json build step).
+ */
+function loadScript(name: string): string {
+  const url = new URL(`./scripts/${name}`, import.meta.url);
+  return readFileSync(fileURLToPath(url), 'utf8');
+}
+
+/** Template-substitute __TOKEN__ placeholders with the given string values. */
+function substitute(template: string, bindings: Record<string, string>): string {
+  let out = template;
+  for (const [k, v] of Object.entries(bindings)) {
+    out = out.split(`__${k}__`).join(v);
+  }
+  return out;
+}
+
+const CAPTURE_DOM_TEMPLATE = loadScript('capture-dom.js');
+const FIND_IN_DOM_TEMPLATE = loadScript('find-in-dom.js');
+
+/** Options for captureDomSnapshot. */
+export interface CaptureDomOptions {
+  /** Collapse long repetitive sibling runs (table rows, list items, card grids)
+   *  into head + omission marker + tail. See stories/collapse-repetitive-dom.md */
+  collapseRepetitiveDom?: boolean | undefined;
+  /** Replace <svg> geometry with a placeholder comment, keeping the opening tag
+   *  and any <title>/<desc> children. Defaults to true in DEFAULT_CONFIG. */
+  compactSvg?: boolean | undefined;
+}
 
 /**
  * Capture a raw DOM snapshot from the current page.
@@ -19,12 +52,14 @@ const DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
  * We use a string-based evaluate to avoid TypeScript/esbuild injecting
  * helper functions (like __name) that don't exist in the browser context.
  */
-export async function captureDomSnapshot(page: Page): Promise<string> {
-  const script = buildDomCleanerScript();
+export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {}): Promise<string> {
+  const collapse = opts.collapseRepetitiveDom === true;
+  const compactSvg = opts.compactSvg !== false;
+  const script = buildDomCleanerScript(collapse, compactSvg);
   let snapshot = (await page.evaluate(script) as string | null) ?? '';
 
   if (snapshot.includes('[iframe:')) {
-    snapshot = await injectFrameContent(page, snapshot, 0, '');
+    snapshot = await injectFrameContent(page, snapshot, 0, '', collapse, compactSvg);
   }
 
   if (snapshot.length > DOM_SNAPSHOT_CHAR_LIMIT) {
@@ -54,6 +89,8 @@ async function injectFrameContent(
   snapshot: string,
   depth: number = 0,
   parentFramePath: string = '',
+  collapse: boolean = false,
+  compactSvg: boolean = true,
 ): Promise<string> {
   const iframeLocators = await root.locator('iframe').all();
   if (iframeLocators.length === 0) return snapshot;
@@ -93,12 +130,12 @@ async function injectFrameContent(
         // (e.g. via postMessage) and the new content hasn't loaded yet.
         await frame.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
         // frame.evaluate() uses CDP — works for both same-origin and cross-origin frames
-        frameContent = await frame.evaluate(buildDomCleanerScript()) as string;
+        frameContent = await frame.evaluate(buildDomCleanerScript(collapse, compactSvg)) as string;
 
         // Recursively capture nested iframe content within this frame.
         // Pass the current frame path so nested iframe comments show the full chain.
         if (depth < MAX_IFRAME_DEPTH && frameContent.includes('[iframe:')) {
-          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath);
+          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath, collapse, compactSvg);
         }
       }
     } catch {
@@ -163,118 +200,28 @@ function prefixIframeComments(content: string, parentPath: string): string {
   );
 }
 
+/** Collapse thresholds — see [stories/collapse-repetitive-dom.md] for rationale. */
+const COLLAPSE_MIN_RUN = 50;
+const COLLAPSE_HEAD = 3;
+const COLLAPSE_TAIL = 1;
+
 /**
- * Build the self-contained browser script as a string expression.
- * This avoids any Node/TypeScript runtime helpers leaking into the browser context.
- *
- * Emits the `<body>` element and its descendants as raw, indented HTML:
- *  - All attributes are preserved (attribute values with `"` are HTML-escaped).
- *  - `<script>` and `<style>` subtrees are omitted.
- *  - HTML comment nodes are dropped; text nodes are kept (whitespace collapsed).
- *  - Iframes are emitted as `[iframe:N]` placeholders; captureDomSnapshot replaces
- *    them via Playwright's Frame API (CDP-backed, cross-origin-safe).
+ * Build the self-contained browser script by substituting placeholders into the
+ * template in [./scripts/capture-dom.js]. See that file for what the script does.
  */
-function buildDomCleanerScript(): string {
-  return `(() => {
-  var SKIP_TAGS = new Set(['script', 'style']);
-  var SELF_CLOSING_TAGS = new Set([
-    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-    'link', 'meta', 'param', 'source', 'track', 'wbr',
-  ]);
-
-  function buildSelector(el) {
-    var testId = el.getAttribute('data-testid');
-    if (testId) return '[data-testid="' + testId + '"]';
-    var id = el.getAttribute('id');
-    if (id) return '#' + id;
-    var tag = el.tagName.toLowerCase();
-    var name = el.getAttribute('name');
-    if (name) return tag + '[name="' + name + '"]';
-    var ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel) return tag + '[aria-label="' + ariaLabel + '"]';
-    var src = el.getAttribute('src');
-    if (src && tag === 'iframe') return tag + '[src="' + src + '"]';
-    return tag;
-  }
-
-  function escapeAttr(v) {
-    return String(v == null ? '' : v).replace(/"/g, '&quot;');
-  }
-
-  function getAttributes(el) {
-    var out = '';
-    var attrs = el.attributes;
-    for (var i = 0; i < attrs.length; i++) {
-      var a = attrs[i];
-      out += ' ' + a.name + '="' + escapeAttr(a.value) + '"';
-    }
-    return out;
-  }
-
-  var iframeIdx = 0;
-
-  function processElement(el, depth) {
-    var tag = el.tagName.toLowerCase();
-    if (SKIP_TAGS.has(tag)) return '';
-
-    var indent = '  '.repeat(depth);
-
-    if (tag === 'iframe') {
-      var attrs = getAttributes(el);
-      var frameSelector = buildSelector(el);
-      var idx = iframeIdx++;
-      return indent + '<iframe' + attrs + '> <!-- ' + frameSelector + ' -->\\n'
-           + indent + '  [iframe:' + idx + ']\\n'
-           + indent + '</iframe>\\n';
-    }
-
-    var attrs = getAttributes(el);
-
-    if (SELF_CLOSING_TAGS.has(tag)) {
-      return indent + '<' + tag + attrs + '>\\n';
-    }
-
-    var childOutput = processChildNodes(el, depth + 1);
-    return indent + '<' + tag + attrs + '>\\n'
-         + childOutput
-         + indent + '</' + tag + '>\\n';
-  }
-
-  function processChildNodes(parent, depth) {
-    var output = '';
-    var indent = '  '.repeat(depth);
-    var nodes = parent.childNodes;
-    for (var i = 0; i < nodes.length; i++) {
-      var node = nodes[i];
-      if (node.nodeType === 1) {
-        // ELEMENT_NODE
-        output += processElement(node, depth);
-      } else if (node.nodeType === 3) {
-        // TEXT_NODE — collapse whitespace, drop if empty
-        var text = (node.textContent || '').replace(/\\s+/g, ' ').trim();
-        if (text) {
-          output += indent + text + '\\n';
-        }
-      }
-      // COMMENT_NODE (8) and others: drop
-    }
-    return output;
-  }
-
-  try {
-    var body = document.body;
-    if (!body) return '<body>(empty)</body>';
-    var result = processElement(body, 0);
-    return result || '<body>(no content)</body>';
-  } catch (err) {
-    return '<error>Failed to capture DOM: ' + String(err) + '</error>';
-  }
-})()`;
+function buildDomCleanerScript(collapse: boolean = false, compactSvg: boolean = true): string {
+  return substitute(CAPTURE_DOM_TEMPLATE, {
+    COLLAPSE: collapse ? 'true' : 'false',
+    COLLAPSE_MIN_RUN: String(COLLAPSE_MIN_RUN),
+    COLLAPSE_HEAD: String(COLLAPSE_HEAD),
+    COLLAPSE_TAIL: String(COLLAPSE_TAIL),
+    COMPACT_SVG: compactSvg ? 'true' : 'false',
+  });
 }
 
 /** Result of a findInDom search */
 export interface DomSearchMatch {
-  /** CSS selector for the matching element */
+  /** CSS selector for the matching element (stable — auto-chains nth-of-type when no direct id/testid/name/aria-label) */
   selector: string;
   /** Tag name of the matching element */
   tag: string;
@@ -286,104 +233,60 @@ export interface DomSearchMatch {
   context: string;
 }
 
+/** Aggregate result of a findInDom call. */
+export interface DomSearchResult {
+  /** Matches returned (capped at FIND_DISPLAY_CAP). */
+  matches: DomSearchMatch[];
+  /** Total leaf-like matches discovered in the walked subtree (may exceed matches.length). */
+  totalMatches: number;
+  /** True when the walk hit FIND_HARD_MAX and stopped counting further. totalMatches is then a lower bound. */
+  hitHardMax: boolean;
+  /** Error message when the container selector was provided but matched nothing. */
+  containerError?: string;
+}
+
+/** Maximum matches returned to the AI per find call. */
+const FIND_DISPLAY_CAP = 50;
+/** Hard ceiling on counting — the walker exits when this is reached. */
+const FIND_HARD_MAX = 500;
+
 /**
- * Search the full DOM for elements containing the given text.
- * Returns matching elements with their selectors and parent context.
+ * Search the DOM for elements containing the given text.
+ *
+ * Walks the subtree rooted at `containerSelector` (if provided, else `document.body`)
+ * and returns up to FIND_DISPLAY_CAP leaf-like matches (an element is "leaf-like" when
+ * no direct child also contains the text). The walker keeps counting past the display
+ * cap up to FIND_HARD_MAX so the caller can report "N of M" and the AI can decide
+ * whether to refine the query or narrow the scope.
+ *
+ * Selectors are stable: if the matched element has no direct `data-testid`/`id`/`name`/
+ * `aria-label`, the result is a chained selector anchored at the nearest addressable
+ * ancestor, with `nth-of-type(N)` steps in between.
+ *
  * Used by the "find" exploration action.
  */
-export async function findInDom(page: Page, searchText: string): Promise<DomSearchMatch[]> {
-  const results = await page.evaluate(`(() => {
-    const searchText = ${JSON.stringify(searchText)}.toLowerCase();
-    const SKIP = new Set(['script', 'style', 'noscript', 'svg', 'meta', 'link', 'base', 'title']);
-    const matches = [];
-
-    function buildSelector(el) {
-      const testId = el.getAttribute('data-testid');
-      if (testId) return '[data-testid="' + testId + '"]';
-      const id = el.getAttribute('id');
-      if (id) return '#' + id;
-      const tag = el.tagName.toLowerCase();
-      const name = el.getAttribute('name');
-      if (name) return tag + '[name="' + name + '"]';
-      const ariaLabel = el.getAttribute('aria-label');
-      if (ariaLabel) return tag + '[aria-label="' + ariaLabel + '"]';
-      return tag;
-    }
-
-    function getKeyAttrs(el) {
-      const attrs = [];
-      for (const a of ['id', 'data-testid', 'role', 'name', 'type', 'href']) {
-        const v = el.getAttribute(a);
-        if (v) attrs.push(a + '="' + v + '"');
-      }
-      return attrs.join(' ');
-    }
-
-    function getAncestorChain(el) {
-      const parts = [];
-      let cur = el.parentElement;
-      let depth = 0;
-      while (cur && cur !== document.body && depth < 4) {
-        const tag = cur.tagName.toLowerCase();
-        const id = cur.getAttribute('id');
-        const testId = cur.getAttribute('data-testid');
-        let label = tag;
-        if (testId) label += '[data-testid="' + testId + '"]';
-        else if (id) label += '#' + id;
-        parts.unshift(label);
-        cur = cur.parentElement;
-        depth++;
-      }
-      return parts.join(' > ');
-    }
-
-    function walk(el) {
-      const tag = el.tagName.toLowerCase();
-      if (SKIP.has(tag)) return;
-      const text = (el.textContent || '').trim();
-      if (text.toLowerCase().includes(searchText)) {
-        // Find the most specific element containing the text (leaf-ish match)
-        let hasChildMatch = false;
-        for (const child of el.children) {
-          if ((child.textContent || '').trim().toLowerCase().includes(searchText)) {
-            hasChildMatch = true;
-            break;
-          }
-        }
-        if (!hasChildMatch) {
-          matches.push({
-            selector: buildSelector(el),
-            tag: tag,
-            text: text.substring(0, 200),
-            attributes: getKeyAttrs(el),
-            context: getAncestorChain(el),
-          });
-          if (matches.length >= 10) return;
-        }
-      }
-      if (matches.length < 10) {
-        for (const child of el.children) {
-          walk(child);
-          if (matches.length >= 10) return;
-        }
-      }
-    }
-
-    try {
-      walk(document.body);
-      return matches;
-    } catch (err) {
-      return [{ selector: '', tag: 'error', text: String(err), attributes: '', context: '' }];
-    }
-  })()`) as DomSearchMatch[];
-
-  return results;
+export async function findInDom(
+  page: Page,
+  searchText: string,
+  containerSelector?: string,
+): Promise<DomSearchResult> {
+  const containerJson = containerSelector ? JSON.stringify(containerSelector) : null;
+  const script = substitute(FIND_IN_DOM_TEMPLATE, {
+    SEARCH_TEXT: JSON.stringify(searchText),
+    CONTAINER_EXPR: containerJson ? `document.querySelector(${containerJson})` : 'document.body',
+    CONTAINER_LABEL: containerJson ?? '""',
+    DISPLAY_CAP: String(FIND_DISPLAY_CAP),
+    HARD_MAX: String(FIND_HARD_MAX),
+  });
+  return await page.evaluate(script) as DomSearchResult;
 }
 
 /**
  * Expand the full DOM subtree for a given CSS selector.
- * Returns a detailed snapshot of that element's children — all elements with
- * attributes and text, not the compact version. Used by the "expand" action.
+ * Returns a detailed snapshot of that element's children — every visible
+ * element with attributes and text. Used by the "expand" action, typically
+ * after the AI sees a "N similar elements omitted" marker and wants to
+ * inspect a specific item's contents.
  */
 export async function expandDomSubtree(page: Page, selector: string): Promise<string> {
   const result = await page.evaluate(`(() => {
@@ -467,15 +370,34 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
 /**
  * Format findInDom results for inclusion in the AI continuation message.
  */
-export function formatFindResults(matches: DomSearchMatch[], query: string): string {
-  if (matches.length === 0) {
-    return `### find "${query}"\nNo matches found.`;
+export function formatFindResults(result: DomSearchResult, query: string, containerSelector?: string): string {
+  const scopePart = containerSelector ? ` (in ${containerSelector})` : '';
+  const header = `### find "${query}"${scopePart}`;
+
+  if (result.containerError) {
+    return `${header}\n${result.containerError}. Widen the scope or omit the container.`;
   }
-  const lines = matches.map((m, i) => {
+  if (result.matches.length === 0) {
+    return `${header}\nNo matches found.`;
+  }
+
+  const lines = result.matches.map((m, i) => {
     const contextPart = m.context ? ` (in ${m.context})` : '';
     return `${i + 1}. <${m.tag}${m.attributes ? ' ' + m.attributes : ''}> "${m.text}"${contextPart}\n   selector: ${m.selector}`;
   });
-  return `### find "${query}"\nFound ${matches.length} match${matches.length > 1 ? 'es' : ''}:\n${lines.join('\n')}`;
+
+  const shown = result.matches.length;
+  const total = result.totalMatches;
+  let summary: string;
+  if (shown === total) {
+    summary = `Found ${total} match${total === 1 ? '' : 'es'}:`;
+  } else if (result.hitHardMax) {
+    summary = `Found ${shown} of ${total}+ matches (counting stopped at ${total}; showing first ${shown}). Refine the query or narrow the container to see specific items.`;
+  } else {
+    summary = `Found ${shown} of ${total} matches (showing first ${shown}). Refine the query or narrow the container to see more.`;
+  }
+
+  return `${header}\n${summary}\n${lines.join('\n')}`;
 }
 
 /**

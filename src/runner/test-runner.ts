@@ -569,7 +569,10 @@ export async function runTest(
 
     if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
       logger.info('Running failure diagnosis…');
-      const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent);
+      const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
+        collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
+        compactSvg: config.browser.compactSvg,
+      });
       if (diagnosis) {
         report.diagnosis = diagnosis;
         report.tokensUsed = tokenTracker.total;

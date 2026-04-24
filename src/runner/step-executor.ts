@@ -356,7 +356,7 @@ async function executeStepAttempt(
 
     // 2. Capture current page state (full-page so AI sees content below the fold)
     const turnTimestamp = new Date().toISOString();
-    const domSnapshot = await captureDomSnapshot(page);
+    const domSnapshot = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg });
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
@@ -746,10 +746,13 @@ async function executeStepAttempt(
       // ── DOM exploration actions (find/expand) ──────────────────────────────────
       if (action.action === 'find') {
         const searchText = action.value ?? action.condition ?? '';
-        const matches = await findInDom(page, searchText);
-        const formatted = formatFindResults(matches, searchText);
+        const scope = action.selector;
+        const result = await findInDom(page, searchText, scope);
+        const formatted = formatFindResults(result, searchText, scope);
         explorationResults.push(formatted);
-        logger.info(`find "${searchText}": ${matches.length} match(es)`);
+        const scopeLog = scope ? ` in "${scope}"` : '';
+        const totalLabel = result.hitHardMax ? `${result.totalMatches}+` : `${result.totalMatches}`;
+        logger.info(`find "${searchText}"${scopeLog}: ${result.matches.length} shown / ${totalLabel} total`);
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
@@ -810,7 +813,7 @@ async function executeStepAttempt(
       }
 
       // Capture state after action (full-page for report visibility)
-      const postDom = await captureDomSnapshot(page).catch(() => '');
+      const postDom = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg }).catch(() => '');
       const postShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
       const postShotBase64 = postShot?.base64;
       const postUrl = page.url();
@@ -923,7 +926,7 @@ async function executeStepAttempt(
 
   // 9b. Evaluate assertion if step has one (runs after all turns complete successfully)
   if (!stepFailed && isAssertionStep(instruction)) {
-    const finalDom = await captureDomSnapshot(page);
+    const finalDom = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg });
     const finalShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
 
     const assertAction = lastAiResponse?.actions.find((a) => a.action === 'assert');
@@ -1201,7 +1204,7 @@ export async function executeBranchedStep(
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
 
-    const domSnapshot = await captureDomSnapshot(page);
+    const domSnapshot = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg });
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
 

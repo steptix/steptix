@@ -3,7 +3,7 @@ import type { AiClient } from './client.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import type { StepResult, TestReport, FailureDiagnosis, AiInteraction } from '../report/types.js';
 import { captureScreenshot } from '../browser/screenshot.js';
-import { captureDomSnapshot } from '../browser/dom-cleaner.js';
+import { captureDomSnapshot, type CaptureDomOptions } from '../browser/dom-cleaner.js';
 import { contentBlocksToText } from './prompts.js';
 import { logger } from '../utils/logger.js';
 
@@ -30,6 +30,7 @@ export async function diagnoseFailure(
   page: Page,
   aiClient: AiClient,
   contextContent: string,
+  opts: CaptureDomOptions = {},
 ): Promise<FailureDiagnosis | null> {
   try {
     const failingStep = report.steps.find((s) => s.status === 'failed');
@@ -44,7 +45,7 @@ export async function diagnoseFailure(
     // is already closed or unresponsive we fall back to what the step captured.
     const [screenshot, domSnapshot] = await Promise.all([
       captureScreenshot(page).catch(() => null),
-      captureDomSnapshot(page).catch(() => ''),
+      captureDomSnapshot(page, { collapseRepetitiveDom: opts.collapseRepetitiveDom, compactSvg: opts.compactSvg }).catch(() => ''),
     ]);
 
     const finalScreenshot = screenshot?.base64 ?? subject.screenshotBase64;
@@ -152,7 +153,7 @@ function buildDiagnoseUserContent(
   const stepsSection = formatStepResults(report.steps);
   const failingDetails = formatFailingStepDetails(subject);
   const domSection = finalDom
-    ? `\n## Final DOM snapshot (compact)\n\n\`\`\`html\n${truncate(finalDom, 8000)}\n\`\`\`\n`
+    ? `\n## Final DOM snapshot\n\n\`\`\`html\n${truncate(finalDom, 8000)}\n\`\`\`\n`
     : '';
 
   const textBody = `${summary}\n\n${stepsSection}\n\n${failingDetails}${domSection}\n## Task\nProduce the diagnosis JSON now.`;

@@ -35,6 +35,14 @@ export interface BrowserConfig {
   /** Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts
    *  the site itself needs (cascading failures). Default false. */
   bypassCSP?: boolean;
+  /** Collapse long repetitive sibling runs (table rows, list items, card grids)
+   *  in DOM snapshots into head + omission marker + tail. Reduces token usage on
+   *  pages with hundreds of similar elements. Default true. */
+  collapseRepetitiveDom?: boolean | undefined;
+  /** Strip inner geometry (paths, shapes) from <svg> elements in DOM snapshots,
+   *  keeping the opening tag + <title>/<desc> children only. Large SVG icon sets
+   *  are the biggest per-element token cost on many sites. Default true. */
+  compactSvg?: boolean | undefined;
 }
 
 export interface TestsConfig {

@@ -6,7 +6,7 @@ export default defineConfig({
   ai: {
     gatewayUrl: 'https://aiapi.example.com',
     // apiKey: process.env.AI_API_KEY,
-    model: 'gpt-5.4',
+    model: 'gpt-5.4-mini',
   },
   browser: {
     headed: true,

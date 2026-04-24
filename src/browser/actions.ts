@@ -321,8 +321,9 @@ function parseDuration(value: string): number | null {
 /**
  * Escape special characters commonly found in Tailwind CSS classes that are
  * invalid in raw CSS selectors (e.g. `.!fixed` → `.\!fixed`).
+ * Exported for tests only.
  */
-function sanitizeCssSelector(selector: string): string {
+export function sanitizeCssSelector(selector: string): string {
   // Escape `!` when used inside class names (Tailwind important modifier)
   // e.g.  .!fixed  →  .\!fixed
   let sanitized = selector.replace(/\.!/g, '.\\!');
@@ -335,14 +336,22 @@ function sanitizeCssSelector(selector: string): string {
   // e.g.  .@lg  →  .\@lg
   sanitized = sanitized.replace(/\.@/g, '.\\@');
 
-  // Escape unescaped `[` and `]` inside class-name segments.
-  // Tailwind arbitrary values like `.z-[999]` must become `.z-\[999\]` in CSS.
-  // Only target brackets that appear within a class name (after a `.` prefix),
-  // NOT attribute selectors like `div[aria-label="X"]` or `[role="dialog"]`.
-  // We match `.className-[value]` patterns specifically.
+  // Escape unescaped `[` and `]` inside Tailwind arbitrary-value class names.
+  // Tailwind compiles `.z-[999]` to `.z-\[999\]` in CSS, so the AI-written form
+  // needs the same escape to match.
+  //
+  // Ambiguity: `.classname-[href='/logout']` is valid CSS meaning
+  // "class ending in '-' followed by attribute selector [href='/logout']". When
+  // the bracket content contains `=` it's almost certainly an attribute selector
+  // (Tailwind values very rarely contain `=` — only URL query strings, which are
+  // vanishingly rare in practice). In that case leave the brackets alone so
+  // Playwright parses the attribute selector normally.
   sanitized = sanitized.replace(
     /(\.[a-zA-Z_][\w-]*)-(?<!\\)\[([^\]]*)\]/g,
-    '$1-\\[$2\\]',
+    (match, classPart, bracketContent) => {
+      if (bracketContent.includes('=')) return match;
+      return classPart + '-\\[' + bracketContent + '\\]';
+    },
   );
 
   // Escape `:` inside ID and class selectors (e.g. React Aria's
