@@ -56,10 +56,9 @@ function isMutatingAction(action: AIAction): boolean {
   return MUTATING_ACTIONS.has(action.action);
 }
 
-/** Mutable ref for capturing the first-turn AI response data for cache writing. */
+/** Mutable ref for capturing all AI turns for cache writing. */
 export interface CacheCapture {
-  rawResponse?: string;
-  parsedResponse?: { actions: AIAction[]; reasoning: string; needs_reeval?: boolean };
+  turns: CachedStepData[];
 }
 
 export interface StepExecutorOptions {
@@ -160,13 +159,11 @@ export async function executeStep(
   let retried = false;
   let priorFailures: PriorFailureContext[] = [];
   let priorAttemptTurns: TurnResult[] = [];
-  const isAssertion = isAssertionStep(instruction);
-
   // --- Cache attempt (before normal AI flow) ---
-  if (opts.stepCache && opts.cacheEnabled && !isAssertion) {
+  if (opts.stepCache && opts.cacheEnabled) {
     const cached = await opts.stepCache.read(stepIndex, opts.resolvedParameters ?? {});
     if (cached) {
-      logger.info(`Cache HIT for step ${stepIndex} — executing cached actions`);
+      logger.info(`Cache HIT for step ${stepIndex} — replaying ${cached.length} cached turn(s)`);
       try {
         const result = await executeStepAttempt(
           stepIndex,
@@ -192,7 +189,7 @@ export async function executeStep(
   }
 
   // --- Normal AI flow (with cache-write on success) ---
-  const cacheCapture: CacheCapture = {};
+  const cacheCapture: CacheCapture = { turns: [] };
 
   const attempt = async (attemptNumber: number): Promise<StepResult> => {
     if (attemptNumber === 2) retried = true;
@@ -224,12 +221,11 @@ export async function executeStep(
       },
     });
 
-    // Write successful AI response to cache (non-assertion steps only)
-    if (opts.stepCache && opts.cacheEnabled && !isAssertion && cacheCapture.rawResponse && cacheCapture.parsedResponse) {
+    // Write all turns to cache on success (non-assertion steps only)
+    if (opts.stepCache && opts.cacheEnabled && cacheCapture.turns.length > 0) {
       await opts.stepCache.write(
         stepIndex,
-        cacheCapture.rawResponse,
-        cacheCapture.parsedResponse,
+        cacheCapture.turns,
         opts.resolvedParameters ?? {},
       );
     }
@@ -286,7 +282,7 @@ async function executeStepAttempt(
   retried: boolean,
   priorFailures: PriorFailureContext[] = [],
   attemptNumber: number = 1,
-  cachedResponse?: CachedStepData,
+  cachedTurns?: CachedStepData[],
   cacheCapture?: CacheCapture,
 ): Promise<StepResult> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens, pageTracker } = opts;
@@ -472,12 +468,13 @@ async function executeStepAttempt(
     let rawResponse: string;
     let aiResponse: ReturnType<typeof parseAIResponse>;
 
-    if (cachedResponse && currentTurn === 1) {
-      rawResponse = cachedResponse.rawResponse;
+    const cachedTurn = cachedTurns?.[currentTurn - 1];
+    if (cachedTurn) {
+      rawResponse = cachedTurn.rawResponse;
       aiResponse = {
-        actions: cachedResponse.actions,
-        reasoning: cachedResponse.reasoning,
-        ...(cachedResponse.needs_reeval !== undefined && { needs_reeval: cachedResponse.needs_reeval }),
+        actions: cachedTurn.actions,
+        reasoning: cachedTurn.reasoning,
+        ...(cachedTurn.needs_reeval !== undefined && { needs_reeval: cachedTurn.needs_reeval }),
       };
       turnAiInteractions.push({
         purpose: 'action-plan (cached)',
@@ -493,12 +490,6 @@ async function executeStepAttempt(
       rawResponse = completion.text;
       aiResponse = parseAIResponse(rawResponse);
 
-      // Capture first-turn AI response for cache writing
-      if (currentTurn === 1 && cacheCapture) {
-        cacheCapture.rawResponse = rawResponse;
-        cacheCapture.parsedResponse = aiResponse;
-      }
-
       turnAiInteractions.push({
         purpose: 'action-plan',
         attemptNumber,
@@ -508,6 +499,16 @@ async function executeStepAttempt(
         ...(screenshotBase64 !== undefined && { screenshotBase64 }),
         pageUrl: currentUrl,
         timestamp: turnTimestamp,
+      });
+    }
+
+    // Capture this turn for cache writing
+    if (cacheCapture) {
+      cacheCapture.turns.push({
+        rawResponse,
+        actions: aiResponse.actions,
+        reasoning: aiResponse.reasoning,
+        ...(aiResponse.needs_reeval !== undefined && { needs_reeval: aiResponse.needs_reeval }),
       });
     }
 
