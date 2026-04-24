@@ -418,17 +418,65 @@ import { formatFindResults, formatExpandResult } from '../src/browser/dom-cleane
 
 describe('formatFindResults', () => {
   it('formats matches with selectors', () => {
-    const result = formatFindResults([
-      { selector: '#order-789', tag: 'td', text: 'ORD-789', attributes: 'id="order-789"', context: 'table > tbody > tr' },
-    ], 'ORD-789');
+    const result = formatFindResults({
+      matches: [
+        { selector: '#order-789', tag: 'td', text: 'ORD-789', attributes: 'id="order-789"', context: 'table > tbody > tr' },
+      ],
+      totalMatches: 1,
+      hitHardMax: false,
+    }, 'ORD-789');
     expect(result).toContain('find "ORD-789"');
     expect(result).toContain('Found 1 match');
     expect(result).toContain('#order-789');
   });
 
   it('handles no matches', () => {
-    const result = formatFindResults([], 'nonexistent');
+    const result = formatFindResults({ matches: [], totalMatches: 0, hitHardMax: false }, 'nonexistent');
     expect(result).toContain('No matches found');
+  });
+
+  it('signals truncation when total exceeds shown', () => {
+    const matches = Array.from({ length: 50 }, (_, i) => ({
+      selector: `#row-${i}`,
+      tag: 'tr',
+      text: `row ${i}`,
+      attributes: '',
+      context: '',
+    }));
+    const result = formatFindResults({ matches, totalMatches: 247, hitHardMax: false }, 'row');
+    expect(result).toContain('Found 50 of 247 matches');
+    expect(result).toContain('Refine the query');
+  });
+
+  it('signals hard-max with a + suffix', () => {
+    const matches = Array.from({ length: 50 }, (_, i) => ({
+      selector: `#row-${i}`,
+      tag: 'tr',
+      text: `row ${i}`,
+      attributes: '',
+      context: '',
+    }));
+    const result = formatFindResults({ matches, totalMatches: 500, hitHardMax: true }, 'row');
+    expect(result).toContain('500+');
+  });
+
+  it('reports container errors', () => {
+    const result = formatFindResults(
+      { matches: [], totalMatches: 0, hitHardMax: false, containerError: 'No element matches container selector: "#nope"' },
+      'foo',
+      '#nope',
+    );
+    expect(result).toContain('No element matches container selector');
+    expect(result).toContain('(in #nope)');
+  });
+
+  it('includes container in header when scoped', () => {
+    const result = formatFindResults(
+      { matches: [{ selector: '#x', tag: 'td', text: 'foo', attributes: '', context: '' }], totalMatches: 1, hitHardMax: false },
+      'foo',
+      '#orders',
+    );
+    expect(result).toContain('find "foo" (in #orders)');
   });
 });
 

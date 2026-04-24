@@ -9,7 +9,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   ai: {
     gatewayUrl: 'https://llm.corp.example',
-    model: 'anthropic-haiku-4-5',
+    model: 'gpt-5.4-mini',
     maxInputTokens: 1_000_000,
     streamResponses: false,
     sendScreenshots: true,
@@ -22,6 +22,8 @@ export const DEFAULT_CONFIG: Config = {
     slowMo: 0,
     browser: 'chromium',
     fullPageScreenshots: false,
+    collapseRepetitiveDom: true,
+    compactSvg: true,
   },
   tests: {
     dir: './tests',
