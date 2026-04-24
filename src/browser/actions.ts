@@ -439,7 +439,7 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
     case 'text':
       await page.waitForFunction(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (text) => (globalThis as any).document.body.textContent?.includes(text) ?? false,
+        (text) => (globalThis as any).document.body?.textContent?.includes(text) ?? false,
         condition,
         { timeout },
       );

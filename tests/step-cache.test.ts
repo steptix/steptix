@@ -153,7 +153,7 @@ describe('StepCache', () => {
     const metaPath = path.join(tmpDir, 'my-test', 'meta.json');
     const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
     expect(meta.stepsHash).toBe(computeStepsHash(testSteps));
-    expect(meta.schemaVersion).toBe(1);
+    expect(meta.schemaVersion).toBe(2);
   });
 
   it('returns null on cache miss', async () => {
@@ -171,12 +171,12 @@ describe('StepCache', () => {
       reasoning: 'test',
     };
 
-    await cache.write(1, rawResponse, parsed, {});
+    await cache.write(1, [{ rawResponse, ...parsed }], {});
     const result = await cache.read(1, {});
 
     expect(result).not.toBeNull();
-    expect(result!.actions).toEqual(parsed.actions);
-    expect(result!.reasoning).toBe('test');
+    expect(result![0]!.actions).toEqual(parsed.actions);
+    expect(result![0]!.reasoning).toBe('test');
   });
 
   it('handles parameter interpolation on write/read roundtrip', async () => {
@@ -189,19 +189,19 @@ describe('StepCache', () => {
     };
 
     // Write with alice's params
-    await cache.write(1, rawResponse, parsed, { username: 'alice' });
+    await cache.write(1, [{ rawResponse, ...parsed }], { username: 'alice' });
 
     // Read with bob's params — should get bob's value
     const result = await cache.read(1, { username: 'bob' });
     expect(result).not.toBeNull();
-    expect(result!.actions[0]!.value).toBe('bob');
+    expect(result![0]!.actions[0]!.value).toBe('bob');
   });
 
   it('invalidates step cache', async () => {
     const cache = await StepCache.initialize(tmpDir, 'My Test', testSteps);
 
     const rawResponse = '{"actions":[],"reasoning":"test"}';
-    await cache.write(1, rawResponse, { actions: [], reasoning: 'test' }, {});
+    await cache.write(1, [{ rawResponse, actions: [], reasoning: 'test' }], {});
 
     // Verify it's there
     expect(await cache.read(1, {})).not.toBeNull();
@@ -214,7 +214,7 @@ describe('StepCache', () => {
   it('invalidates entire cache when steps change', async () => {
     // First run — write step 1
     const cache1 = await StepCache.initialize(tmpDir, 'My Test', testSteps);
-    await cache1.write(1, '{"actions":[],"reasoning":"v1"}', { actions: [], reasoning: 'v1' }, {});
+    await cache1.write(1, [{ rawResponse: '{"actions":[],"reasoning":"v1"}', actions: [], reasoning: 'v1' }], {});
     expect(await cache1.read(1, {})).not.toBeNull();
 
     // Second run with different steps — cache should be cleared
@@ -227,9 +227,9 @@ describe('StepCache', () => {
     const cache = await StepCache.initialize(tmpDir, 'My Test', testSteps);
 
     const rawResponse = '{"actions":[],"reasoning":"multi","needs_reeval":true}';
-    await cache.write(1, rawResponse, { actions: [], reasoning: 'multi', needs_reeval: true }, {});
+    await cache.write(1, [{ rawResponse, actions: [], reasoning: 'multi', needs_reeval: true }], {});
 
     const result = await cache.read(1, {});
-    expect(result!.needs_reeval).toBe(true);
+    expect(result![0]!.needs_reeval).toBe(true);
   });
 });

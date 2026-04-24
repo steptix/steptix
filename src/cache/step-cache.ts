@@ -5,13 +5,14 @@ import type { AIAction, AIResponse } from '../ai/types.js';
 import { interpolate } from '../parser/parameters.js';
 import { logger } from '../utils/logger.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 interface CacheMeta {
   stepsHash: string;
   schemaVersion: number;
 }
 
+/** One AI turn's worth of cached data. */
 export interface CachedStepData {
   rawResponse: string;
   actions: AIAction[];
@@ -19,11 +20,9 @@ export interface CachedStepData {
   needs_reeval?: boolean;
 }
 
+/** On-disk format: array of turns (schema v2). */
 interface CachedStepFile {
-  rawResponse: string;
-  actions: AIAction[];
-  reasoning: string;
-  needs_reeval?: boolean;
+  turns: CachedStepData[];
 }
 
 export class StepCache {
@@ -67,45 +66,43 @@ export class StepCache {
   }
 
   /** Read a cached AI response for a step, forward-interpolating parameter values. */
+  /** Read all cached turns for a step, forward-interpolating parameter values. */
   async read(
     stepIndex: number,
     resolvedParams: Record<string, string>,
-  ): Promise<CachedStepData | null> {
+  ): Promise<CachedStepData[] | null> {
     const filePath = this.stepPath(stepIndex);
 
     try {
       const raw = await fs.readFile(filePath, 'utf-8');
       const cached: CachedStepFile = JSON.parse(raw);
 
-      const actions = forwardInterpolate(cached.actions, resolvedParams);
-      const rawResponse = interpolate(cached.rawResponse, resolvedParams);
+      if (!Array.isArray(cached.turns) || cached.turns.length === 0) return null;
 
-      return {
-        rawResponse,
-        actions,
-        reasoning: cached.reasoning,
-        ...(cached.needs_reeval !== undefined && { needs_reeval: cached.needs_reeval }),
-      };
+      return cached.turns.map((turn) => ({
+        rawResponse: interpolate(turn.rawResponse, resolvedParams),
+        actions: forwardInterpolate(turn.actions, resolvedParams),
+        reasoning: turn.reasoning,
+        ...(turn.needs_reeval !== undefined && { needs_reeval: turn.needs_reeval }),
+      }));
     } catch {
       return null;
     }
   }
 
-  /** Write an AI response to cache, reverse-interpolating parameter values to placeholders. */
+  /** Write all turns for a step to cache, reverse-interpolating parameter values. */
   async write(
     stepIndex: number,
-    rawResponse: string,
-    parsed: AIResponse,
+    turns: CachedStepData[],
     resolvedParams: Record<string, string>,
   ): Promise<void> {
-    const actions = reverseInterpolate(parsed.actions, resolvedParams);
-    const templateRawResponse = reverseInterpolateString(rawResponse, resolvedParams);
-
     const data: CachedStepFile = {
-      rawResponse: templateRawResponse,
-      actions,
-      reasoning: parsed.reasoning,
-      ...(parsed.needs_reeval !== undefined && { needs_reeval: parsed.needs_reeval }),
+      turns: turns.map((turn) => ({
+        rawResponse: reverseInterpolateString(turn.rawResponse, resolvedParams),
+        actions: reverseInterpolate(turn.actions, resolvedParams),
+        reasoning: turn.reasoning,
+        ...(turn.needs_reeval !== undefined && { needs_reeval: turn.needs_reeval }),
+      })),
     };
 
     try {
@@ -124,8 +121,49 @@ export class StepCache {
     }
   }
 
+  /** Read cached assertion JS code for a step, forward-interpolating parameter values. */
+  async readAssertionCode(
+    stepIndex: number,
+    resolvedParams: Record<string, string>,
+  ): Promise<string | null> {
+    try {
+      const raw = await fs.readFile(this.assertionPath(stepIndex), 'utf-8');
+      const { code } = JSON.parse(raw) as { code: string };
+      return interpolate(code, resolvedParams);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Cache assertion JS code for a step, reverse-interpolating parameter values. */
+  async writeAssertionCode(
+    stepIndex: number,
+    code: string,
+    resolvedParams: Record<string, string>,
+  ): Promise<void> {
+    try {
+      const templateCode = reverseInterpolateString(code, resolvedParams);
+      await fs.writeFile(this.assertionPath(stepIndex), JSON.stringify({ code: templateCode }, null, 2));
+    } catch (err) {
+      logger.warn(`Failed to write assertion code cache for step ${stepIndex}: ${String(err)}`);
+    }
+  }
+
+  /** Delete cached assertion code for a step. */
+  async invalidateAssertionCode(stepIndex: number): Promise<void> {
+    try {
+      await fs.unlink(this.assertionPath(stepIndex));
+    } catch {
+      // Already gone — fine
+    }
+  }
+
   private stepPath(stepIndex: number): string {
     return path.join(this.cacheDir, `step-${stepIndex}.json`);
+  }
+
+  private assertionPath(stepIndex: number): string {
+    return path.join(this.cacheDir, `step-${stepIndex}-assertion.json`);
   }
 }
 

@@ -99,6 +99,9 @@ export function getReportTemplate(): string {
     .assertion-title { font-weight: 700; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
     .assertion-row { display: flex; gap: 12px; margin-bottom: 4px; font-size: 0.875rem; }
     .assertion-key { font-weight: 600; min-width: 90px; color: var(--muted); }
+    .assertion-code { margin-top: 8px; font-size: 0.8rem; }
+    .assertion-code summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+    .assertion-code pre { margin: 6px 0 0; padding: 8px; background: var(--code-bg); border-radius: 4px; overflow-x: auto; max-height: 200px; font-size: 0.78rem; }
 
     /* Reasoning */
     .reasoning-block { margin-top: 10px; font-size: 0.85rem; color: var(--muted); font-style: italic; padding: 8px 12px; background: var(--code-bg); border-radius: 5px; border-left: 3px solid var(--border); }

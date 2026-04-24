@@ -509,6 +509,20 @@ function renderAssertion(
     ? renderAiInteraction(aiInteraction)
     : '';
 
+  const cacheIndicator = assertion.fromCache !== undefined
+    ? `<div class="assertion-row">
+    <span class="assertion-key">Source:</span>
+    <span>${assertion.fromCache ? '⚡ cached (no AI call)' : '🤖 AI generated'}</span>
+  </div>`
+    : '';
+
+  const codeBlock = assertion.assertionCode
+    ? `<details class="assertion-code">
+    <summary>Assertion code</summary>
+    <pre><code>${escapeHtml(assertion.assertionCode)}</code></pre>
+  </details>`
+    : '';
+
   return `<div class="assertion-block ${cls}">
   <div class="assertion-title">${icon} Assertion ${label}</div>
   <div class="assertion-row">
@@ -523,6 +537,8 @@ function renderAssertion(
     <span class="assertion-key">Explanation:</span>
     <span>${escapeHtml(assertion.explanation)}</span>
   </div>
+  ${cacheIndicator}
+  ${codeBlock}
   ${aiHtml}
 </div>`;
 }

@@ -131,6 +131,8 @@ export interface AssertionEvaluation {
   actual: string;
   /** Explanation of why the assertion passed or failed */
   explanation: string;
+  /** Whether this result was served from the assertion code cache (no AI call made) */
+  fromCache?: boolean | undefined;
 }
 
 /** A single content block in a multimodal message */
