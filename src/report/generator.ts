@@ -289,7 +289,13 @@ function renderAiInteraction(ai: AiInteraction): string {
   const requestHtml = ai.requestMessages && ai.requestMessages.length > 0
     ? ai.requestMessages.map((m) =>
         `<div class="ai-request-message">
-          <div class="ai-request-role">${escapeHtml(m.role)}</div>
+          <div class="ai-request-role">
+            <span>${escapeHtml(m.role)}</span>
+            <button type="button" class="copy-btn" data-copy-target="next" title="Copy to clipboard" aria-label="Copy ${escapeHtml(m.role)} message">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span class="copy-btn-label">Copy</span>
+            </button>
+          </div>
           <pre class="ai-request-content">${escapeHtml(m.content)}</pre>
         </div>`,
       ).join('')

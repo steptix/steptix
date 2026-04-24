@@ -8,6 +8,7 @@ export default defineConfig({
     // model: defaulted via src/config/defaults.ts; override with AI_MODEL in .env
     maxInputTokens: 1_000_000,
     streamResponses: true,
+    sendScreenshots: false,
   },
   browser: {
     headed: true,

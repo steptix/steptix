@@ -52,7 +52,7 @@ export const DEFAULT_CONFIG: Config = {
     apiKey: 'dev-api-key',
   },
   cache: {
-    enabled: true,
+    enabled: false,
     dir: '.cache',
   },
 };

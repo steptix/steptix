@@ -212,15 +212,17 @@ export function buildStepMessage(
 
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
+  const screenshotNote = screenshotBase64
+    ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]'
+    : '';
+
   const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
 
 ## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
-\`\`\`
-
-[Screenshot is attached as an image — use it to understand the current visual state of the page]`;
+\`\`\`${screenshotNote}`;
 
   if (screenshotBase64) {
     return {
@@ -519,9 +521,7 @@ Current URL: ${currentUrl}
 ${openPagesSection}${explorationSection}## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
-\`\`\`
-
-[Screenshot is attached as an image — use it to understand the current visual state of the page]
+\`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
 What is the next action needed to complete the original instruction: "${originalInstruction}"?
 Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "action": "noop", "description": "<why nothing is needed>", "needs_reeval": false }.`;
@@ -610,9 +610,7 @@ ${outcomeLines}
 ## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
-\`\`\`
-
-[Screenshot is attached as an image — use it to understand the current visual state of the page]
+\`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
 ## Response Format
 {
