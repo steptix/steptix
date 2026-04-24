@@ -6,9 +6,9 @@ const DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
 /**
  * Capture a raw DOM snapshot from the current page.
  *
- * Emits the body tree almost verbatim — every element with every attribute —
- * stripping only `<script>` / `<style>` tags and HTML comments. Invisible
- * elements, text nodes, and wrapper divs are preserved.
+ * Emits the `<body>` element and its tree almost verbatim — every element
+ * with every attribute — stripping only `<script>` / `<style>` tags and HTML
+ * comments. Invisible elements, text nodes, and wrapper divs are preserved.
  *
  * Iframes are handled in two steps:
  *  1. The browser script marks each iframe with a placeholder ([iframe:N]).
@@ -167,7 +167,7 @@ function prefixIframeComments(content: string, parentPath: string): string {
  * Build the self-contained browser script as a string expression.
  * This avoids any Node/TypeScript runtime helpers leaking into the browser context.
  *
- * Emits every element under `<body>` as raw, indented HTML:
+ * Emits the `<body>` element and its descendants as raw, indented HTML:
  *  - All attributes are preserved (attribute values with `"` are HTML-escaped).
  *  - `<script>` and `<style>` subtrees are omitted.
  *  - HTML comment nodes are dropped; text nodes are kept (whitespace collapsed).
@@ -264,7 +264,7 @@ function buildDomCleanerScript(): string {
   try {
     var body = document.body;
     if (!body) return '<body>(empty)</body>';
-    var result = processChildNodes(body, 0);
+    var result = processElement(body, 0);
     return result || '<body>(no content)</body>';
   } catch (err) {
     return '<error>Failed to capture DOM: ' + String(err) + '</error>';
