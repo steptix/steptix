@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — Portfolio Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; }
+    .header { background: #1a1a2e; color: white; padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { font-size: 1.25rem; }
+    .header .user { font-size: 0.875rem; opacity: 0.8; }
+    .page-total { background: white; border-bottom: 2px solid #e2e8f0; padding: 20px 32px; }
+    .page-total h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; margin-bottom: 4px; }
+    .page-total .amount { font-size: 2.5rem; font-weight: 700; color: #1a1a2e; }
+    .page-total .subtitle { font-size: 0.85rem; color: #64748b; margin-top: 4px; }
+    .summary-cards { display: flex; gap: 16px; padding: 24px 32px; }
+    .card { background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 20px; flex: 1; }
+    .card .label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin-bottom: 8px; }
+    .card .value { font-size: 1.5rem; font-weight: 700; }
+    .card .value.positive { color: #16a34a; }
+    .card .value.negative { color: #dc2626; }
+    .card .change { font-size: 0.8rem; margin-top: 4px; color: #64748b; }
+    main { padding: 0 32px 32px; }
+    section { margin-bottom: 32px; }
+    section h2 { font-size: 1rem; font-weight: 600; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #e2e8f0; }
+    table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; border: 1px solid #e2e8f0; }
+    th { background: #f8fafc; padding: 10px 16px; text-align: left; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; border-bottom: 1px solid #e2e8f0; }
+    td { padding: 10px 16px; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+    .amount-cell { text-align: right; font-variant-numeric: tabular-nums; }
+    .gain { color: #16a34a; }
+    .loss { color: #dc2626; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 500; }
+    .badge.active { background: #dcfce7; color: #16a34a; }
+    .badge.closed { background: #fee2e2; color: #dc2626; }
+    .badge.pending { background: #fef9c3; color: #854d0e; }
+    .totals-row td { font-weight: 700; background: #f8fafc; border-top: 2px solid #e2e8f0; }
+    ul.holdings-list { list-style: none; background: white; border-radius: 8px; border: 1px solid #e2e8f0; overflow: hidden; }
+    ul.holdings-list li { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid #f1f5f9; }
+    ul.holdings-list li:last-child { border-bottom: none; }
+    .holding-name { font-weight: 500; }
+    .holding-ticker { font-size: 0.78rem; color: #64748b; margin-top: 2px; }
+    .holding-value { text-align: right; }
+    .holding-value .val { font-weight: 600; }
+    .holding-value .pct { font-size: 0.78rem; color: #64748b; }
+    .alerts-list { background: white; border-radius: 8px; border: 1px solid #e2e8f0; overflow: hidden; }
+    .alert-item { padding: 14px 16px; border-bottom: 1px solid #f1f5f9; display: flex; gap: 12px; align-items: flex-start; }
+    .alert-item:last-child { border-bottom: none; }
+    .alert-icon { font-size: 1.2rem; }
+    .alert-body .title { font-weight: 500; font-size: 0.9rem; }
+    .alert-body .desc { font-size: 0.82rem; color: #64748b; margin-top: 2px; }
+    .alert-body .date { font-size: 0.78rem; color: #94a3b8; margin-top: 4px; }
+  </style>
+</head>
+<body>
+
+<header class="header">
+  <h1>SecureBank Portfolio</h1>
+  <span class="user">demo@securebank.com</span>
+</header>
+
+<!-- Single-element target: total portfolio value -->
+<div class="page-total">
+  <h2>Total Portfolio Value</h2>
+  <div id="portfolio-total" class="amount">$148,320.50</div>
+  <div class="subtitle">As of 25 Apr 2026 · 4 accounts · 12 holdings</div>
+</div>
+
+<!-- Summary cards — simple single-element assertions -->
+<div class="summary-cards">
+  <div class="card">
+    <div class="label">Cash &amp; Savings</div>
+    <div id="cash-total" class="value">$24,582.90</div>
+    <div class="change">2 accounts</div>
+  </div>
+  <div class="card">
+    <div class="label">Investments</div>
+    <div id="investments-total" class="value">$118,150.00</div>
+    <div class="change">10 holdings</div>
+  </div>
+  <div class="card">
+    <div class="label">Today's Gain/Loss</div>
+    <div id="daily-change" class="value positive">+$842.30</div>
+    <div class="change">+0.57% today</div>
+  </div>
+  <div class="card">
+    <div class="label">Open Positions</div>
+    <div id="open-positions" class="value">10</div>
+    <div class="change">across 3 sectors</div>
+  </div>
+</div>
+
+<main>
+
+  <!-- Section 1: Large transactions table (50 rows) — tests collapsed-DOM assertions -->
+  <section>
+    <h2>Transaction History</h2>
+    <table id="transactions-table">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Description</th>
+          <th>Category</th>
+          <th>Account</th>
+          <th class="amount-cell">Amount</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="transactions-body">
+        <tr><td>2026-04-25</td><td>Woolworths Supermarket</td><td>Groceries</td><td>Everyday Checking</td><td class="amount-cell loss">-$127.45</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-25</td><td>Salary — Acme Corp</td><td>Income</td><td>Everyday Checking</td><td class="amount-cell gain">+$4,800.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-24</td><td>Netflix Subscription</td><td>Entertainment</td><td>Everyday Checking</td><td class="amount-cell loss">-$22.99</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-24</td><td>Electricity — AGL</td><td>Utilities</td><td>Everyday Checking</td><td class="amount-cell loss">-$183.60</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-23</td><td>Transfer to Savings</td><td>Transfer</td><td>Everyday Checking</td><td class="amount-cell loss">-$500.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-23</td><td>Coles Supermarket</td><td>Groceries</td><td>Everyday Checking</td><td class="amount-cell loss">-$94.20</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-22</td><td>Petrol Station — BP</td><td>Transport</td><td>Everyday Checking</td><td class="amount-cell loss">-$78.50</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-22</td><td>Restaurant — The Grill</td><td>Dining</td><td>Everyday Checking</td><td class="amount-cell loss">-$62.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-21</td><td>Amazon Purchase</td><td>Shopping</td><td>Everyday Checking</td><td class="amount-cell loss">-$45.99</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-21</td><td>Dividend — BHP</td><td>Investment</td><td>Investment Account</td><td class="amount-cell gain">+$320.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-20</td><td>Gym Membership</td><td>Health</td><td>Everyday Checking</td><td class="amount-cell loss">-$59.99</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-20</td><td>Telstra Mobile</td><td>Utilities</td><td>Everyday Checking</td><td class="amount-cell loss">-$55.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-19</td><td>Public Transport</td><td>Transport</td><td>Everyday Checking</td><td class="amount-cell loss">-$18.40</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-19</td><td>Interest — Savings Plus</td><td>Interest</td><td>Savings Plus</td><td class="amount-cell gain">+$89.30</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-18</td><td>JB Hi-Fi — Headphones</td><td>Shopping</td><td>Everyday Checking</td><td class="amount-cell loss">-$249.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-18</td><td>Coffee Shop</td><td>Dining</td><td>Everyday Checking</td><td class="amount-cell loss">-$6.50</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-17</td><td>Chemist Warehouse</td><td>Health</td><td>Everyday Checking</td><td class="amount-cell loss">-$34.90</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-17</td><td>Brokerage — CBA purchase</td><td>Investment</td><td>Investment Account</td><td class="amount-cell loss">-$2,450.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-16</td><td>Woolworths Supermarket</td><td>Groceries</td><td>Everyday Checking</td><td class="amount-cell loss">-$112.30</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-16</td><td>ATM Withdrawal</td><td>Cash</td><td>Everyday Checking</td><td class="amount-cell loss">-$200.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-15</td><td>Rent Payment</td><td>Housing</td><td>Everyday Checking</td><td class="amount-cell loss">-$1,850.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-15</td><td>Spotify</td><td>Entertainment</td><td>Everyday Checking</td><td class="amount-cell loss">-$11.99</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-14</td><td>Salary — Acme Corp (bonus)</td><td>Income</td><td>Everyday Checking</td><td class="amount-cell gain">+$1,200.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-14</td><td>Council Rates</td><td>Housing</td><td>Everyday Checking</td><td class="amount-cell loss">-$420.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-13</td><td>Petrol Station — Shell</td><td>Transport</td><td>Everyday Checking</td><td class="amount-cell loss">-$82.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-13</td><td>Insurance — NRMA</td><td>Insurance</td><td>Everyday Checking</td><td class="amount-cell loss">-$145.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-12</td><td>Dividend — CSL</td><td>Investment</td><td>Investment Account</td><td class="amount-cell gain">+$215.50</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-12</td><td>Coles Supermarket</td><td>Groceries</td><td>Everyday Checking</td><td class="amount-cell loss">-$88.40</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-11</td><td>Restaurant — Sushi Train</td><td>Dining</td><td>Everyday Checking</td><td class="amount-cell loss">-$48.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-11</td><td>Online Transfer — received</td><td>Transfer</td><td>Savings Plus</td><td class="amount-cell gain">+$500.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-10</td><td>Parking — City Council</td><td>Transport</td><td>Everyday Checking</td><td class="amount-cell loss">-$12.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-10</td><td>Brokerage — ANZ sale</td><td>Investment</td><td>Investment Account</td><td class="amount-cell gain">+$3,100.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-09</td><td>Apple App Store</td><td>Entertainment</td><td>Everyday Checking</td><td class="amount-cell loss">-$4.99</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-09</td><td>Medical — GP Visit</td><td>Health</td><td>Everyday Checking</td><td class="amount-cell loss">-$85.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-08</td><td>Woolworths Supermarket</td><td>Groceries</td><td>Everyday Checking</td><td class="amount-cell loss">-$103.60</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-08</td><td>Interest — Savings Plus</td><td>Interest</td><td>Savings Plus</td><td class="amount-cell gain">+$91.20</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-07</td><td>Coffee Shop</td><td>Dining</td><td>Everyday Checking</td><td class="amount-cell loss">-$6.50</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-07</td><td>Transfer to Savings</td><td>Transfer</td><td>Everyday Checking</td><td class="amount-cell loss">-$300.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-06</td><td>Telstra NBN</td><td>Utilities</td><td>Everyday Checking</td><td class="amount-cell loss">-$89.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-06</td><td>Dividend — WES</td><td>Investment</td><td>Investment Account</td><td class="amount-cell gain">+$178.20</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-05</td><td>Pharmacy</td><td>Health</td><td>Everyday Checking</td><td class="amount-cell loss">-$28.50</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-05</td><td>Salary — Acme Corp</td><td>Income</td><td>Everyday Checking</td><td class="amount-cell gain">+$4,800.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-04</td><td>Coles Supermarket</td><td>Groceries</td><td>Everyday Checking</td><td class="amount-cell loss">-$76.90</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-04</td><td>Petrol Station — BP</td><td>Transport</td><td>Everyday Checking</td><td class="amount-cell loss">-$71.20</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-03</td><td>Brokerage — BHP purchase</td><td>Investment</td><td>Investment Account</td><td class="amount-cell loss">-$1,800.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-03</td><td>Restaurant — Italian</td><td>Dining</td><td>Everyday Checking</td><td class="amount-cell loss">-$95.00</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-02</td><td>Amazon Purchase</td><td>Shopping</td><td>Everyday Checking</td><td class="amount-cell loss">-$32.50</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-02</td><td>Interest — Savings Plus</td><td>Interest</td><td>Savings Plus</td><td class="amount-cell gain">+$88.40</td><td><span class="badge active">Cleared</span></td></tr>
+        <tr><td>2026-04-01</td><td>Gym Membership</td><td>Health</td><td>Everyday Checking</td><td class="amount-cell loss">-$59.99</td><td><span class="badge active">Cleared</span></td></tr>
+        <!-- Row 50 is the summary row -->
+        <tr class="totals-row">
+          <td colspan="4"><strong>April 2026 Net</strong></td>
+          <td id="transactions-net" class="amount-cell gain">+$5,209.60</td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Section 2: Holdings list — tests list-based assertions -->
+  <section>
+    <h2>Investment Holdings</h2>
+    <ul id="holdings-list" class="holdings-list">
+      <li data-ticker="BHP">
+        <div><div class="holding-name">BHP Group Ltd</div><div class="holding-ticker">ASX: BHP · 120 units</div></div>
+        <div class="holding-value"><div class="val gain">$6,240.00</div><div class="pct gain">+2.3% today</div></div>
+      </li>
+      <li data-ticker="CBA">
+        <div><div class="holding-name">Commonwealth Bank</div><div class="holding-ticker">ASX: CBA · 45 units</div></div>
+        <div class="holding-value"><div class="val gain">$6,592.50</div><div class="pct loss">-0.4% today</div></div>
+      </li>
+      <li data-ticker="CSL">
+        <div><div class="holding-name">CSL Limited</div><div class="holding-ticker">ASX: CSL · 18 units</div></div>
+        <div class="holding-value"><div class="val gain">$5,148.00</div><div class="pct gain">+1.1% today</div></div>
+      </li>
+      <li data-ticker="WES">
+        <div><div class="holding-name">Wesfarmers Ltd</div><div class="holding-ticker">ASX: WES · 65 units</div></div>
+        <div class="holding-value"><div class="val gain">$4,290.00</div><div class="pct gain">+0.8% today</div></div>
+      </li>
+      <li data-ticker="ANZ">
+        <div><div class="holding-name">ANZ Banking Group</div><div class="holding-ticker">ASX: ANZ · 200 units</div></div>
+        <div class="holding-value"><div class="val">$5,900.00</div><div class="pct loss">-0.2% today</div></div>
+      </li>
+      <li data-ticker="NAB">
+        <div><div class="holding-name">National Australia Bank</div><div class="holding-ticker">ASX: NAB · 150 units</div></div>
+        <div class="holding-value"><div class="val gain">$5,175.00</div><div class="pct gain">+0.5% today</div></div>
+      </li>
+      <li data-ticker="WBC">
+        <div><div class="holding-name">Westpac Banking</div><div class="holding-ticker">ASX: WBC · 220 units</div></div>
+        <div class="holding-value"><div class="val gain">$5,698.00</div><div class="pct gain">+0.3% today</div></div>
+      </li>
+      <li data-ticker="RIO">
+        <div><div class="holding-name">Rio Tinto Ltd</div><div class="holding-ticker">ASX: RIO · 30 units</div></div>
+        <div class="holding-value"><div class="val gain">$4,560.00</div><div class="pct gain">+1.8% today</div></div>
+      </li>
+      <li data-ticker="MQG">
+        <div><div class="holding-name">Macquarie Group</div><div class="holding-ticker">ASX: MQG · 22 units</div></div>
+        <div class="holding-value"><div class="val gain">$5,082.50</div><div class="pct gain">+0.9% today</div></div>
+      </li>
+      <li data-ticker="TLS">
+        <div><div class="holding-name">Telstra Group</div><div class="holding-ticker">ASX: TLS · 800 units</div></div>
+        <div class="holding-value"><div class="val">$3,464.00</div><div class="pct loss">-0.6% today</div></div>
+      </li>
+    </ul>
+    <!-- Holdings total — cross-element assertion: must equal sum of holding values -->
+    <div style="text-align:right; padding: 12px 16px; font-weight: 700; font-size: 1.1rem;">
+      Total: <span id="holdings-total">$52,150.00</span>
+    </div>
+  </section>
+
+  <!-- Section 3: Alerts list — tests count and content assertions -->
+  <section>
+    <h2>Active Alerts <span id="alert-count" style="font-size:0.85rem;font-weight:400;color:#64748b;">(5)</span></h2>
+    <div class="alerts-list" id="alerts-list">
+      <div class="alert-item" data-severity="high">
+        <div class="alert-icon">🔴</div>
+        <div class="alert-body">
+          <div class="title">Unusual login detected</div>
+          <div class="desc">Login from new device in Sydney, NSW at 2:14 AM</div>
+          <div class="date">25 Apr 2026, 02:14</div>
+        </div>
+      </div>
+      <div class="alert-item" data-severity="high">
+        <div class="alert-icon">🔴</div>
+        <div class="alert-body">
+          <div class="title">Large transaction pending</div>
+          <div class="desc">Outgoing transfer of $8,500 to external account is pending review</div>
+          <div class="date">24 Apr 2026, 18:32</div>
+        </div>
+      </div>
+      <div class="alert-item" data-severity="medium">
+        <div class="alert-icon">🟡</div>
+        <div class="alert-body">
+          <div class="title">Account balance below threshold</div>
+          <div class="desc">Everyday Checking balance fell below your $500 alert threshold</div>
+          <div class="date">24 Apr 2026, 11:05</div>
+        </div>
+      </div>
+      <div class="alert-item" data-severity="low">
+        <div class="alert-icon">🟢</div>
+        <div class="alert-body">
+          <div class="title">Dividend received</div>
+          <div class="desc">BHP dividend of $320.00 credited to Investment Account</div>
+          <div class="date">21 Apr 2026, 09:00</div>
+        </div>
+      </div>
+      <div class="alert-item" data-severity="low">
+        <div class="alert-icon">🟢</div>
+        <div class="alert-body">
+          <div class="title">Statement ready</div>
+          <div class="desc">Your April 2026 statement is available to download</div>
+          <div class="date">19 Apr 2026, 08:00</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

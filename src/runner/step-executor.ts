@@ -10,7 +10,7 @@ import {
   buildStepMessage,
   buildClarificationMessage,
   buildContinuationMessage,
-  buildAssertionMessage,
+  buildAssertionCodePrompt,
   buildRetryContext,
   buildBranchedStepMessage,
   formatTestInfo,
@@ -19,7 +19,7 @@ import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOut
 import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
-import { parseAIResponse, parseAssertionEvaluation, parseBranchedResponse } from '../ai/action-parser.js';
+import { parseAIResponse, parseAssertionCode, parseBranchedResponse } from '../ai/action-parser.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
@@ -77,8 +77,10 @@ export interface StepExecutorOptions {
   resolvedParameters?: Record<string, string>;
   /** Tracks all open pages (popups, tabs) — enables switchPage actions */
   pageTracker?: PageTracker;
-  /** Pre-initialized step cache (undefined = caching disabled) */
+  /** Pre-initialized step cache — always present; action caching gated by cacheEnabled */
   stepCache?: StepCache;
+  /** When true, step action responses are read from / written to the step cache */
+  cacheEnabled?: boolean;
   /** When true, include dismissal-related guidance in the system prompt and
    *  retry hints. Enabled by the runner when the test has hooks configured. */
   dismissalGuidance?: boolean;
@@ -161,7 +163,7 @@ export async function executeStep(
   const isAssertion = isAssertionStep(instruction);
 
   // --- Cache attempt (before normal AI flow) ---
-  if (opts.stepCache && !isAssertion) {
+  if (opts.stepCache && opts.cacheEnabled && !isAssertion) {
     const cached = await opts.stepCache.read(stepIndex, opts.resolvedParameters ?? {});
     if (cached) {
       logger.info(`Cache HIT for step ${stepIndex} — executing cached actions`);
@@ -223,7 +225,7 @@ export async function executeStep(
     });
 
     // Write successful AI response to cache (non-assertion steps only)
-    if (opts.stepCache && !isAssertion && cacheCapture.rawResponse && cacheCapture.parsedResponse) {
+    if (opts.stepCache && opts.cacheEnabled && !isAssertion && cacheCapture.rawResponse && cacheCapture.parsedResponse) {
       await opts.stepCache.write(
         stepIndex,
         cacheCapture.rawResponse,
@@ -926,62 +928,95 @@ async function executeStepAttempt(
 
   // 9b. Evaluate assertion if step has one (runs after all turns complete successfully)
   if (!stepFailed && isAssertionStep(instruction)) {
-    const finalDom = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg });
-    const finalShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+    const MAX_ASSERTION_ATTEMPTS = 2;
+    let assertionAttempt = 0;
 
-    const assertAction = lastAiResponse?.actions.find((a) => a.action === 'assert');
+    while (assertionResult === undefined && assertionAttempt < MAX_ASSERTION_ATTEMPTS) {
+      assertionAttempt++;
 
-    const apiHistory = lastApiContext?.responseHistory;
-    logger.info(`Assertion context — API response history present: ${!!apiHistory}, length: ${apiHistory?.length ?? 0}`);
-    if (apiHistory) {
-      logger.info(`API response history: ${apiHistory.substring(0, 300)}`);
-    }
+      // Try assertion code cache on first attempt only
+      let assertionCode = assertionAttempt === 1 && opts.stepCache
+        ? await opts.stepCache.readAssertionCode(stepIndex, opts.resolvedParameters ?? {})
+        : null;
+      const fromCache = assertionCode !== null;
 
-    const assertTestInfo = formatTestInfo(testName, baseUrl);
-    const assertMsg = buildAssertionMessage(
-      instruction,
-      finalDom,
-      config.ai.sendScreenshots ? (finalShot?.base64 ?? null) : null,
-      apiHistory,
-      assertTestInfo,
-    );
+      if (!assertionCode) {
+        // Cache miss or retry: capture full uncompacted DOM and ask AI to write assertion code
+        const fullDom = await captureDomSnapshot(page, { collapseRepetitiveDom: false, compactSvg: false });
+        const finalShot = config.ai.sendScreenshots
+          ? await captureScreenshot(page, config.browser.fullPageScreenshots)
+          : null;
 
-    const assertSystemPrompt = buildSystemPrompt(contextContent, lastApiContext, {
-      dismissalGuidance: opts.dismissalGuidance ?? false,
-    });
-    const assertMessages: ChatMessage[] = [
-      { role: 'system', content: assertSystemPrompt },
-      assertMsg,
-    ];
-    const assertCompletion = await aiClient.complete(assertMessages);
-    const assertRaw = assertCompletion.text;
-    assertionAiInteraction = {
-      purpose: 'assertion',
-      attemptNumber,
-      requestMessages: assertMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-      response: assertRaw,
-      model: assertCompletion.model,
-      ...(finalShot?.base64 !== undefined && { screenshotBase64: finalShot.base64 }),
-      pageUrl: page.url(),
-      timestamp: new Date().toISOString(),
-    };
+        const assertTestInfo = formatTestInfo(testName, baseUrl);
+        const codeMsg = buildAssertionCodePrompt(
+          instruction,
+          fullDom,
+          finalShot?.base64 ?? null,
+          assertTestInfo,
+        );
+        const assertSystemPrompt = buildSystemPrompt(contextContent, lastApiContext, {
+          dismissalGuidance: opts.dismissalGuidance ?? false,
+        });
+        const codeCompletion = await aiClient.complete([
+          { role: 'system', content: assertSystemPrompt },
+          codeMsg,
+        ]);
 
-    const evaluation = parseAssertionEvaluation(assertRaw);
+        assertionAiInteraction = {
+          purpose: 'assertion',
+          attemptNumber,
+          requestMessages: [
+            { role: 'system', content: extractTextFromMessage({ role: 'system', content: assertSystemPrompt }) },
+            { role: 'user', content: extractTextFromMessage(codeMsg) },
+          ],
+          response: codeCompletion.text,
+          model: codeCompletion.model,
+          ...(finalShot?.base64 !== undefined && { screenshotBase64: finalShot.base64 }),
+          pageUrl: page.url(),
+          timestamp: new Date().toISOString(),
+        };
 
-    assertionResult = {
-      pass: evaluation.pass,
-      actual: evaluation.actual,
-      expected: assertAction?.expected ?? instruction,
-      explanation: evaluation.explanation,
-    };
+        assertionCode = parseAssertionCode(codeCompletion.text);
+        if (opts.stepCache) {
+          await opts.stepCache.writeAssertionCode(stepIndex, assertionCode, opts.resolvedParameters ?? {});
+        }
+      }
 
-    logger.assertion(evaluation.pass, evaluation.actual, assertionResult.expected);
+      // Run the assertion code in the browser
+      let evalResult: { pass: boolean; actual: string } | null = null;
+      try {
+        evalResult = await page.evaluate(assertionCode) as { pass: boolean; actual: string } | null;
+        if (!evalResult || typeof evalResult.pass !== 'boolean' || typeof evalResult.actual !== 'string') {
+          throw new Error(`Assertion code returned unexpected shape: ${JSON.stringify(evalResult)}`);
+        }
+      } catch (codeErr) {
+        logger.warn(`Assertion code failed (attempt ${assertionAttempt}/${MAX_ASSERTION_ATTEMPTS}): ${String(codeErr)}`);
+        if (opts.stepCache) await opts.stepCache.invalidateAssertionCode(stepIndex);
+        if (assertionAttempt >= MAX_ASSERTION_ATTEMPTS) {
+          throw new Error(`Assertion code failed after ${MAX_ASSERTION_ATTEMPTS} attempts: ${String(codeErr)}`);
+        }
+        continue;
+      }
 
-    if (!evaluation.pass) {
-      stepFailed = true;
-      stepError = `Assertion failed: ${evaluation.explanation}`;
-    }
-  }
+      assertionResult = {
+        pass: evalResult.pass,
+        actual: evalResult.actual,
+        expected: instruction,
+        explanation: evalResult.pass
+          ? 'Assertion passed'
+          : `Assertion failed — got: ${evalResult.actual}`,
+        fromCache,
+        assertionCode,
+      };
+
+      logger.assertion(evalResult.pass, evalResult.actual, instruction);
+
+      if (!evalResult.pass) {
+        stepFailed = true;
+        stepError = `Assertion failed: ${assertionResult.explanation}`;
+      }
+    } // end while
+  } // end isAssertionStep
 
   } catch (err) {
     if (err instanceof StepFailureError) throw err;

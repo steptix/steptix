@@ -1314,6 +1314,7 @@ async function handleRequest(
       '/new-window': 'new-window.html',
       '/mfa-login': 'mfa-login.html',
       '/mfa': 'mfa.html',
+      '/assertions': 'assertions.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

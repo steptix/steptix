@@ -87,6 +87,32 @@ export function parseAssertionEvaluation(rawResponse: string): AssertionEvaluati
 }
 
 /**
+ * Parse the AI response for an assertion code generation request.
+ * Extracts the `code` field — a self-executing JS function string.
+ */
+export function parseAssertionCode(rawResponse: string): string {
+  const jsonString = extractJson(rawResponse);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonString);
+  } catch (err) {
+    throw new Error(`Assertion code response is not valid JSON: ${String(err)}`);
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error('Assertion code response must be a JSON object');
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj['code'] !== 'string' || !obj['code'].trim()) {
+    throw new Error('Assertion code response missing "code" field');
+  }
+
+  return obj['code'];
+}
+
+/**
  * Parse the AI response for a branched (conditional) step.
  * Extracts the `matched` field in addition to standard actions.
  */

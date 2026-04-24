@@ -124,8 +124,49 @@ export class StepCache {
     }
   }
 
+  /** Read cached assertion JS code for a step, forward-interpolating parameter values. */
+  async readAssertionCode(
+    stepIndex: number,
+    resolvedParams: Record<string, string>,
+  ): Promise<string | null> {
+    try {
+      const raw = await fs.readFile(this.assertionPath(stepIndex), 'utf-8');
+      const { code } = JSON.parse(raw) as { code: string };
+      return interpolate(code, resolvedParams);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Cache assertion JS code for a step, reverse-interpolating parameter values. */
+  async writeAssertionCode(
+    stepIndex: number,
+    code: string,
+    resolvedParams: Record<string, string>,
+  ): Promise<void> {
+    try {
+      const templateCode = reverseInterpolateString(code, resolvedParams);
+      await fs.writeFile(this.assertionPath(stepIndex), JSON.stringify({ code: templateCode }, null, 2));
+    } catch (err) {
+      logger.warn(`Failed to write assertion code cache for step ${stepIndex}: ${String(err)}`);
+    }
+  }
+
+  /** Delete cached assertion code for a step. */
+  async invalidateAssertionCode(stepIndex: number): Promise<void> {
+    try {
+      await fs.unlink(this.assertionPath(stepIndex));
+    } catch {
+      // Already gone — fine
+    }
+  }
+
   private stepPath(stepIndex: number): string {
     return path.join(this.cacheDir, `step-${stepIndex}.json`);
+  }
+
+  private assertionPath(stepIndex: number): string {
+    return path.join(this.cacheDir, `step-${stepIndex}-assertion.json`);
   }
 }
 

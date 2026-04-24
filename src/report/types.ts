@@ -37,6 +37,8 @@ export interface SubActionResult {
 /** Result of an assertion embedded in a step */
 export interface AssertionResult extends AssertionEvaluation {
   expected: string;
+  /** The cached JS code used to evaluate this assertion */
+  assertionCode?: string | undefined;
 }
 
 /** A single captured AI response during step execution */

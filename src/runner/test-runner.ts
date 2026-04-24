@@ -121,10 +121,10 @@ export async function runTest(
   const conversationHistory: string[] = [];
   const csrfTokens: Record<string, string> = {};
 
-  // Initialize step cache if enabled
-  const stepCache = config.cache.enabled
-    ? await StepCache.initialize(config.cache.dir, test.title, test.steps)
-    : undefined;
+  // Always initialize cache — used for assertion code even when action caching is off.
+  // StepCache.initialize is idempotent (creates dir, writes meta). The stepCache
+  // reference is passed to all steps; action caching is further gated by config.cache.enabled.
+  const stepCache = await StepCache.initialize(config.cache.dir, test.title, test.steps);
 
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
@@ -253,7 +253,8 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
-          ...(stepCache !== undefined && { stepCache }),
+          stepCache,
+          cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
         });
 
@@ -407,7 +408,8 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
-          ...(stepCache !== undefined && { stepCache }),
+          stepCache,
+          cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
         });
         if (stepResult.status === 'passed') {
@@ -426,7 +428,8 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
-          ...(stepCache !== undefined && { stepCache }),
+          stepCache,
+          cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
         });
       }

@@ -361,6 +361,55 @@ Respond with ONLY this JSON format:
   };
 }
 
+/**
+ * Asks the AI to write a self-executing JavaScript snippet that extracts the relevant
+ * value(s) from the current page DOM and evaluates whether the assertion passes.
+ *
+ * The returned code is cached keyed on test name + step index, so subsequent runs
+ * execute it directly with no AI call.
+ */
+export function buildAssertionCodePrompt(
+  stepInstruction: string,
+  domSnapshot: string,
+  screenshotBase64: string | null,
+  testInfoSection?: string,
+): ChatMessage {
+  const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
+
+  const textContent = `${testInfoBlock}Write a self-executing JavaScript function that evaluates the following test assertion against the current page DOM.
+
+## Assertion
+${stepInstruction}
+
+## Current Page DOM (full, uncompacted)
+\`\`\`html
+${domSnapshot}
+\`\`\`
+
+Requirements for the code:
+- Must be a self-executing function: \`(() => { ... })()\`
+- Must return \`{ pass: boolean, actual: string }\`
+- If an element is not found, return \`{ pass: false, actual: "element not found: <selector>" }\` — do NOT throw
+- For numeric comparisons, strip currency symbols and commas before parsing
+- For cross-element assertions, query each element separately and compare
+
+Respond with ONLY this JSON:
+{
+  "code": "(() => { ... })()"
+}`;
+
+  if (screenshotBase64) {
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text: textContent },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshotBase64}` } },
+      ],
+    };
+  }
+  return { role: 'user', content: textContent };
+}
+
 /** Context from a prior failed attempt, used to guide the AI on retry */
 export interface PriorFailureContext {
   /** The selector that was tried */
