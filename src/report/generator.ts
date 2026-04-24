@@ -271,7 +271,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
   const domHtml = step.domSnapshot
     ? `<details class="dom-snapshot">
-        <summary>DOM Snapshot</summary>
+        <summary>DOM Snapshot<button class="copy-btn" type="button" title="Copy DOM"><span class="copy-btn-label">Copy</span></button></summary>
         <pre>${escapeHtml(step.domSnapshot)}</pre>
        </details>`
     : '';
@@ -406,7 +406,7 @@ function renderSubAction(sub: SubActionResult): string {
 
   const domHtml = sub.domSnapshot
     ? `<details class="dom-snapshot">
-        <summary>DOM after action</summary>
+        <summary>DOM after action<button class="copy-btn" type="button" title="Copy DOM"><span class="copy-btn-label">Copy</span></button></summary>
         <pre>${escapeHtml(sub.domSnapshot)}</pre>
        </details>`
     : '';

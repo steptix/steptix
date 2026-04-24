@@ -146,7 +146,11 @@ export function getReportTemplate(): string {
     .ai-request-content { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; padding: 10px 12px; margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; background: var(--surface); color: var(--text); }
 
     .dom-snapshot { margin-top: 10px; }
-    .dom-snapshot summary { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; cursor: pointer; margin-bottom: 6px; }
+    .dom-snapshot summary { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; cursor: pointer; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; list-style: none; }
+    .dom-snapshot summary::-webkit-details-marker { display: none; }
+    .dom-snapshot summary::before { content: '▶'; font-size: 0.7rem; color: var(--muted); line-height: 0.75rem; width: 0.8rem; display: inline-block; }
+    .dom-snapshot[open] summary::before { content: '▼'; }
+    .dom-snapshot summary .copy-btn { margin-left: auto; }
     .dom-snapshot pre { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.75rem; background: var(--code-bg); padding: 12px; border-radius: 5px; overflow-x: auto; max-height: 300px; overflow-y: auto; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
 
     /* Failure block */
