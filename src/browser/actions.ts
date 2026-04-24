@@ -472,9 +472,26 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
     }
 
     case 'navigation': {
-      // Wait for any navigation to occur (URL changes from current)
-      const currentUrl = page.url();
-      await page.waitForURL((url) => url.toString() !== currentUrl, { timeout });
+      // Wait for navigation to occur AND settle. Resolves on the final URL of
+      // a redirect chain, not the first hop (SSO/OAuth flows chain through
+      // several intermediate URLs).
+      const startUrl = page.url();
+      await page.waitForURL((url) => url.toString() !== startUrl, { timeout });
+      // After the first change, give the URL up to 1.5s to stabilise by
+      // re-checking at short intervals — if it keeps moving, we're mid-chain.
+      const stableDeadline = Date.now() + 1_500;
+      let lastUrl = page.url();
+      let lastChangeAt = Date.now();
+      while (Date.now() < stableDeadline) {
+        await page.waitForTimeout(150);
+        const currentUrl = page.url();
+        if (currentUrl !== lastUrl) {
+          lastUrl = currentUrl;
+          lastChangeAt = Date.now();
+        } else if (Date.now() - lastChangeAt >= 400) {
+          break;
+        }
+      }
       break;
     }
 

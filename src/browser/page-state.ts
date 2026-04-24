@@ -191,8 +191,115 @@ export interface PageStabilityOptions {
   timeoutMs?: number;
   /** How long the DOM must be mutation-free to be considered quiet (default: 1_000) */
   quiesceMs?: number;
-  /** Also wait for network idle (default: true) */
+  /**
+   * Also wait for network idle (default: false).
+   * Defaults to false because SPAs with websockets, analytics beacons, or
+   * long-polls never reach networkidle, making it a poor blocking signal.
+   * DOM quiescence is the primary settle signal.
+   */
   networkIdle?: boolean;
+}
+
+/**
+ * Cheap fingerprint of the page's user-visible state.
+ * Used to detect "something changed after the action ran" without capturing
+ * the full DOM snapshot. Stable enough for equality comparison, coarse enough
+ * that cosmetic animations and analytics pings don't flap it.
+ */
+export interface PageSignal {
+  url: string;
+  /** Composite fingerprint: body html length : text length : element count */
+  domFingerprint: string;
+}
+
+const FINGERPRINT_SCRIPT = `(() => {
+  const body = document.body;
+  if (!body) return { bodyLen: 0, textLen: 0, elCount: 0 };
+  const html = body.innerHTML || '';
+  const text = body.textContent || '';
+  const els = body.getElementsByTagName('*').length;
+  return { bodyLen: html.length, textLen: text.length, elCount: els };
+})()`;
+
+export async function capturePageSignal(page: Page): Promise<PageSignal> {
+  try {
+    const fp = (await page.evaluate(FINGERPRINT_SCRIPT)) as {
+      bodyLen: number;
+      textLen: number;
+      elCount: number;
+    };
+    return {
+      url: page.url(),
+      domFingerprint: `${fp.bodyLen}:${fp.textLen}:${fp.elCount}`,
+    };
+  } catch {
+    // Page may have navigated away mid-evaluate — return a synthetic signal
+    // that will compare unequal to any prior.
+    return { url: page.url(), domFingerprint: `navigating:${Date.now()}` };
+  }
+}
+
+export interface PostActionSettleOptions {
+  /** Page signal captured before the triggering action executed */
+  preSignal: PageSignal;
+  /** Hard cap on total wait time (default 3500ms) */
+  timeoutMs?: number;
+  /** If the signal hasn't changed for this long, treat the action as a no-op (default 1200ms) */
+  noChangeTimeoutMs?: number;
+  /** Once the signal has changed, require this much quiet time before declaring settled (default 600ms) */
+  settleMs?: number;
+  /** Poll cadence (default 150ms) */
+  pollMs?: number;
+}
+
+/**
+ * Wait for the page to finish reacting to an action.
+ *
+ * Strategy: pre/post diff with early exit.
+ *   - Poll the page signal (URL + DOM fingerprint) at `pollMs` cadence.
+ *   - If the signal has changed and has been stable for `settleMs`, we're done.
+ *   - If the signal has never changed and `noChangeTimeoutMs` has elapsed, the
+ *     action was a no-op; return (don't burn the full timeout).
+ *   - If neither condition is hit, bail at `timeoutMs`.
+ *
+ * Deliberately does NOT wait for `networkidle` — SPAs with websockets,
+ * long-polls, or analytics beacons never reach it, producing long dead waits
+ * even when the user-visible page is stable.
+ */
+export async function waitForPostActionSettle(
+  page: Page,
+  options: PostActionSettleOptions,
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 3_500;
+  const noChangeTimeoutMs = options.noChangeTimeoutMs ?? 1_200;
+  const settleMs = options.settleMs ?? 600;
+  const pollMs = options.pollMs ?? 150;
+
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+  let lastSignal = options.preSignal;
+  let lastChangeAt = start;
+  let everChanged = false;
+
+  while (Date.now() < deadline) {
+    if (page.isClosed()) return;
+
+    const current = await capturePageSignal(page);
+    if (
+      current.url !== lastSignal.url ||
+      current.domFingerprint !== lastSignal.domFingerprint
+    ) {
+      everChanged = true;
+      lastChangeAt = Date.now();
+      lastSignal = current;
+    }
+
+    const sinceChange = Date.now() - lastChangeAt;
+    if (everChanged && sinceChange >= settleMs) return;
+    if (!everChanged && sinceChange >= noChangeTimeoutMs) return;
+
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 /**
@@ -206,7 +313,9 @@ export async function waitForPageStability(
 ): Promise<PageStateDiagnosis> {
   const timeoutMs = options?.timeoutMs ?? 10_000;
   const quiesceMs = options?.quiesceMs ?? 1_000;
-  const networkIdle = options?.networkIdle ?? true;
+  // Default to false: networkidle is a poor signal on SPAs (websockets, long-polls,
+  // analytics beacons keep it busy even when the page is visually stable).
+  const networkIdle = options?.networkIdle ?? false;
 
   const deadline = Date.now() + timeoutMs;
 

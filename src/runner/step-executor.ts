@@ -16,7 +16,7 @@ import {
   formatTestInfo,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome } from '../ai/prompts.js';
-import { diagnosePageState, waitForPageStability, PageActivityTracker } from '../browser/page-state.js';
+import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
 import { parseAIResponse, parseAssertionEvaluation, parseBranchedResponse } from '../ai/action-parser.js';
@@ -31,6 +31,30 @@ import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
 import type { StepCache, CachedStepData } from '../cache/step-cache.js';
 import type { StepGroup } from './step-grouper.js';
+
+/**
+ * Actions that may mutate the page and therefore warrant a post-action settle
+ * to let the SPA/legacy app react before we snapshot for the next turn.
+ * Observational / control-flow actions are excluded — they don't trigger
+ * page changes so a settle is pure overhead.
+ */
+const MUTATING_ACTIONS: ReadonlySet<AIAction['action']> = new Set([
+  'click',
+  'type',
+  'select',
+  'navigate',
+  'upload',
+  'hover',
+  'keyboard',
+  'keypress',
+  'dismiss',
+  'scroll',
+  'wait',
+]);
+
+function isMutatingAction(action: AIAction): boolean {
+  return MUTATING_ACTIONS.has(action.action);
+}
 
 /** Mutable ref for capturing the first-turn AI response data for cache writing. */
 export interface CacheCapture {
@@ -759,8 +783,25 @@ async function executeStepAttempt(
       }
 
       // ── Browser action types ─────────────────────────────────────────────────
+      // Capture a pre-action page signal (cheap URL + DOM fingerprint) so we can
+      // detect "did anything actually change" after the action runs. Skip for
+      // observational / control-flow actions that don't mutate the page.
+      const preSignal = isMutatingAction(action)
+        ? await capturePageSignal(page).catch(() => undefined)
+        : undefined;
+
       const result = await executeAction(page, action, baseUrl);
       const subDuration = Date.now() - subStartTime;
+
+      // Post-action settle: waits for the page to reflect the action's effect
+      // (SPA route swap, redirect chain, toast render, etc.) before we capture
+      // the next snapshot. Exits early on "no change at all" (no-op) or once
+      // the signal has been stable for settleMs. See waitForPostActionSettle.
+      if (preSignal && result.success) {
+        await waitForPostActionSettle(page, { preSignal }).catch(() => {
+          /* settle errors are non-fatal — proceed to capture post-state */
+        });
+      }
 
       // Store captured value from "read" / "count" actions into the live parameter map
       if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
