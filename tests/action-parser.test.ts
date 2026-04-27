@@ -35,6 +35,28 @@ describe('extractJson', () => {
     const json = '[{"action":"click","description":"Click OK"}]';
     expect(extractJson(json)).toBe(json);
   });
+
+  it('returns only the FIRST complete value when the model emits two JSON objects', () => {
+    // Repro of a real gpt-5.4-mini failure: bare action object followed by the
+    // wrapped { actions: [...] } form, both complete and concatenated.
+    const raw = '{"action":"type","value":"x","description":"d"}\n{"actions":[{"action":"type","value":"x","description":"d"}],"reasoning":"r"}';
+    const extracted = extractJson(raw);
+    expect(JSON.parse(extracted)).toEqual({
+      action: 'type',
+      value: 'x',
+      description: 'd',
+    });
+  });
+
+  it('respects braces inside string literals', () => {
+    const raw = '{"action":"type","value":"hello { world }","description":"d"} trailing junk';
+    const extracted = extractJson(raw);
+    expect(JSON.parse(extracted)).toEqual({
+      action: 'type',
+      value: 'hello { world }',
+      description: 'd',
+    });
+  });
 });
 
 describe('parseAIResponse', () => {

@@ -161,20 +161,73 @@ export function extractJson(text: string): string {
     return codeFenceMatch[1].trim();
   }
 
-  // Find the first { or [ and extract from there to matching closing brace
+  // Find the first { or [ and walk braces with depth counting to find the matching
+  // close. This isolates the FIRST complete JSON value, ignoring trailing prose or
+  // — more importantly — additional JSON objects emitted by indecisive models that
+  // return a bare action object followed by a wrapped { actions: [...] } form.
+  //
+  // Example raw AI response we have seen from gpt-5.4-mini:
+  //
+  //   {
+  //     "action": "click",
+  //     "selector": "button[type=submit]",
+  //     "description": "Click the Sign in button"
+  //   }
+  //   {
+  //     "actions": [
+  //       {
+  //         "action": "click",
+  //         "selector": "button[type=submit]",
+  //         "description": "Click the Sign in button"
+  //       }
+  //     ],
+  //     "reasoning": "Submitting the login form."
+  //   }
+  //
+  // Both blocks are valid JSON and describe the same action; we keep only the
+  // first and discard the rest.
   const firstBrace = trimmed.search(/[{[]/);
   if (firstBrace === -1) {
     throw new Error('No JSON object or array found in response');
   }
 
-  const jsonStart = trimmed.substring(firstBrace);
-  const lastBrace = Math.max(jsonStart.lastIndexOf('}'), jsonStart.lastIndexOf(']'));
+  const end = findMatchingBrace(trimmed, firstBrace);
+  return end === -1 ? trimmed.substring(firstBrace) : trimmed.substring(firstBrace, end + 1);
+}
 
-  if (lastBrace === -1) {
-    return jsonStart;
+/**
+ * Find the index of the brace that matches the opening brace at `start`,
+ * accounting for nested braces and string literals (with escape sequences).
+ * Returns -1 if no matching close is found.
+ */
+function findMatchingBrace(text: string, start: number): number {
+  const open = text[start];
+  if (open !== '{' && open !== '[') return -1;
+  const close = open === '{' ? '}' : ']';
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === '\\') escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
   }
-
-  return jsonStart.substring(0, lastBrace + 1);
+  return -1;
 }
 
 function validateAndNormaliseResponse(parsed: unknown): AIResponse {
