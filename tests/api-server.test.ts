@@ -270,14 +270,16 @@ describe('API Server', () => {
       expect(body.error).toContain('strings');
     });
 
-    it('returns 400 when session ID exceeds 128 chars', async () => {
-      const longId = 'x'.repeat(129);
+    it('returns 400 when session ID exceeds 1024 chars', async () => {
+      // Limit was raised to 1024 to accommodate absolute file paths used as
+      // session IDs by the VS Code extension (Windows paths can be long).
+      const longId = 'x'.repeat(1025);
       const { status, body } = await api('POST', `/sessions/${longId}/steps`, {
         steps: ['Click button'],
       });
 
       expect(status).toBe(400);
-      expect(body.error).toContain('128');
+      expect(body.error).toContain('1024');
     });
 
     it('returns 400 when config sent on non-first request', async () => {
@@ -361,6 +363,122 @@ describe('API Server', () => {
 
       expect(status).toBe(200);
       expect(body.sessionId).toBe('my session');
+    });
+  });
+
+  describe('SSE streaming (?stream=1)', () => {
+    /** Read SSE frames from a streaming response into an array of {event, data}. */
+    async function readSseStream(
+      res: Response,
+    ): Promise<Array<{ event: string; data: any }>> {
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      const events: Array<{ event: string; data: any }> = [];
+      let currentEvent = 'message';
+      let currentData: string[] = [];
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).replace(/\r$/, '');
+          buf = buf.slice(nl + 1);
+          if (line === '') {
+            if (currentData.length > 0 || currentEvent !== 'message') {
+              try {
+                events.push({ event: currentEvent, data: JSON.parse(currentData.join('\n')) });
+              } catch {
+                events.push({ event: currentEvent, data: currentData.join('\n') });
+              }
+            }
+            currentEvent = 'message';
+            currentData = [];
+            continue;
+          }
+          if (line.startsWith(':')) continue;
+          const colon = line.indexOf(':');
+          const field = colon < 0 ? line : line.slice(0, colon);
+          const value = (colon < 0 ? '' : line.slice(colon + 1)).replace(/^ /, '');
+          if (field === 'event') currentEvent = value;
+          else if (field === 'data') currentData.push(value);
+        }
+      }
+      return events;
+    }
+
+    it('emits step:start, step:pass, done frames in order', { timeout: 30_000 }, async () => {
+      const res = await fetch(`${baseUrl}/sessions/stream-1/steps?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({ steps: ['Click', 'Wait'], sourceLines: [10, 20] }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/event-stream');
+
+      const events = await readSseStream(res);
+      const types = events.map((e) => e.event);
+
+      // First step: start + pass
+      expect(types).toContain('step:start');
+      expect(types).toContain('step:pass');
+      expect(types[types.length - 1]).toBe('done');
+
+      // Source lines round-trip
+      const startEvents = events.filter((e) => e.event === 'step:start');
+      expect(startEvents.length).toBe(2);
+      expect(startEvents[0]!.data.line).toBe(10);
+      expect(startEvents[1]!.data.line).toBe(20);
+
+      const doneEvent = events[events.length - 1]!;
+      expect(doneEvent.data.status).toBe('passed');
+    });
+
+    it('falls back to step index when sourceLines omitted', { timeout: 30_000 }, async () => {
+      const res = await fetch(`${baseUrl}/sessions/stream-2/steps?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({ steps: ['Only'] }),
+      });
+
+      const events = await readSseStream(res);
+      const start = events.find((e) => e.event === 'step:start');
+      expect(start!.data.line).toBe(1);
+    });
+  });
+
+  describe('per-request env injection', () => {
+    it('accepts env in request body without crashing', async () => {
+      // Full assertion that env reaches the AiClient lives in session-manager unit
+      // tests; here we just confirm the API surface accepts and runs the request.
+      const { status, body } = await api('POST', '/sessions/env-1/steps', {
+        steps: ['Click'],
+        env: { AI_API_KEY: 'overridden-key', AI_MODEL: 'overridden-model' },
+      });
+
+      expect(status).toBe(200);
+      expect(body.status).toBe('passed');
+    });
+
+    it('does not leak env into server process.env', async () => {
+      const before = process.env['AI_API_KEY'];
+      await api('POST', '/sessions/env-2/steps', {
+        steps: ['Click'],
+        env: { AI_API_KEY: 'should-not-leak' },
+      });
+      expect(process.env['AI_API_KEY']).toBe(before);
     });
   });
 });

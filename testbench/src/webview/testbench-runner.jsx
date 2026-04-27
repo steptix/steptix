@@ -2,11 +2,11 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { createRoot } from "react-dom/client";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import { getLinesFromSelections as getLinesFromSelectionsPure, toggleLineInSet } from "./selection-lines.js";
-import { remapLineForChanges, remapLineSet, remapLineMap } from "./line-tracking.js";
-import { getGutterContextMenuItems } from "./gutter-menu.js";
-import { shouldSnapshotSelection, getSelectionsToRestore } from "./gutter-rightclick.js";
-import appSettings from "./app-settings.json";
+import { getLinesFromSelections as getLinesFromSelectionsPure, toggleLineInSet } from "./lib/selection-lines.js";
+import { remapLineForChanges, remapLineSet, remapLineMap } from "./lib/line-tracking.js";
+import { getGutterContextMenuItems } from "./lib/gutter-menu.js";
+import { shouldSnapshotSelection, getSelectionsToRestore } from "./lib/gutter-rightclick.js";
+import { hostBridge } from "./lib/host-bridge.js";
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -14,36 +14,13 @@ self.MonacoEnvironment = {
   },
 };
 
-const INITIAL_SCRIPT = [
-  "Navigate to the login page at https://app.example.com/login",
-  "Enter username 'qa_user@example.com' in the email field",
-  "Enter password 'TestPass123!' in the password field",
-  "Click the 'Sign In' button",
-  "Verify the dashboard heading reads 'Welcome back'",
-  "Click the 'New Report' button in the top navigation",
-  "Set report name to 'Q4 Summary' and click Save",
-].join("\n");
-
-const MOCK_ERRORS = {
-  5: {
-    message: "Assertion failed: Expected element text to equal 'Welcome back' but got 'Welcome, QA User'",
-    detail: `AssertionError: text mismatch
-  Expected : "Welcome back"
-  Received : "Welcome, QA User"
-  
-  Selector  : h1.dashboard-heading
-  Timeout   : 5000ms
-  Elapsed   : 312ms
-  
-  Stack:
-    at verifyText (runner.js:142)
-    at executeStep (runner.js:89)`,
-  },
-};
+// Empty until the host posts the test file's content via { type: 'init' }.
+// (Standalone preview falls back to a tiny placeholder.)
+const INITIAL_SCRIPT = hostBridge.isHosted
+  ? ""
+  : "## Steps\n1. (preview) waiting for host to send the document\n";
 
 const STATUS = { IDLE: "idle", RUNNING: "running", PASS: "pass", FAIL: "fail", SKIP: "skip" };
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const ChevronIcon = ({ open }) => (
   <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>
@@ -239,23 +216,9 @@ function TestBenchRunner() {
     setPaused(false);
   };
 
-  const waitForRunControl = async () => {
-    while (pausedRef.current && !stopRef.current) {
-      await sleep(50);
-    }
-    return !stopRef.current;
-  };
-
-  const controlledSleep = async (ms) => {
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      if (!(await waitForRunControl())) return false;
-      await sleep(Math.min(50, end - Date.now()));
-    }
-    return waitForRunControl();
-  };
-
-  const executeSteps = useCallback(async (selectedSteps, preserveSelection = true, label = "selected lines") => {
+  // Execute by sending a `run` message to the host. Per-step events flow back
+  // via the message subscription effect below.
+  const executeSteps = useCallback((selectedSteps, _preserveSelection = true, label = "selected lines") => {
     if (runningRef.current || selectedSteps.length === 0) return;
 
     runningRef.current = true;
@@ -265,63 +228,24 @@ function TestBenchRunner() {
     setPaused(false);
     setBreakpointStop(null);
 
-    log(`▶ Starting ${label}: ${selectedSteps.map((step) => step.id).join(", ")}`, "start");
+    const lineIds = selectedSteps.map((step) => step.id);
 
-    for (const step of selectedSteps) {
-      if (!(await waitForRunControl())) {
-        log("■ Run stopped", "fail");
-        finishRun();
-        return;
-      }
+    // Mark targeted lines as running and clear any stale errors so the
+    // gutter reflects intent immediately, before the host echoes back.
+    setStatuses((prev) => {
+      const next = { ...prev };
+      for (const id of lineIds) next[id] = STATUS.RUNNING;
+      return next;
+    });
+    setErrors((prev) => {
+      const next = { ...prev };
+      for (const id of lineIds) delete next[id];
+      return next;
+    });
 
-      if (breakpoints.has(step.id) && step.id !== selectedSteps[0].id) {
-        setSelectedId(step.id);
-        setBreakpointStop(step.id);
-        log(`Stopped at breakpoint on line ${step.id}`, "start");
-        finishRun();
-        return;
-      }
-
-      setSelectedId(step.id);
-      if (!preserveSelection) {
-        setSelectedLines(new Set([step.id]));
-        selectEditorLine(step.id);
-      }
-      setStatuses((prev) => ({ ...prev, [step.id]: STATUS.RUNNING }));
-      log(`Running step ${step.id}…`);
-
-      const duration = 600 + Math.random() * 800;
-      if (!(await controlledSleep(duration))) {
-        setStatuses((prev) => ({ ...prev, [step.id]: STATUS.IDLE }));
-        log("■ Run stopped", "fail");
-        finishRun();
-        return;
-      }
-
-      if (!step.text.trim()) {
-        setStatuses((prev) => ({ ...prev, [step.id]: STATUS.SKIP }));
-        setErrors((prev) => { const next = { ...prev }; delete next[step.id]; return next; });
-        log(`Skipped blank line ${step.id}`, "info");
-        continue;
-      }
-
-      if (MOCK_ERRORS[step.id]) {
-        setStatuses((prev) => ({ ...prev, [step.id]: STATUS.FAIL }));
-        setErrors((prev) => ({ ...prev, [step.id]: MOCK_ERRORS[step.id] }));
-        log(`✗ Step ${step.id} failed: ${MOCK_ERRORS[step.id].message}`, "fail");
-        editorRef.current?.focus();
-        finishRun();
-        return;
-      }
-
-      setStatuses((prev) => ({ ...prev, [step.id]: STATUS.PASS }));
-      setErrors((prev) => { const next = { ...prev }; delete next[step.id]; return next; });
-      log(`✓ Step ${step.id} passed`, "pass");
-    }
-
-    log(`✓ ${label[0].toUpperCase()}${label.slice(1)} completed`, "pass");
-    finishRun();
-  }, [breakpoints, selectEditorLine]);
+    log(`▶ Starting ${label}: ${lineIds.join(", ")}`, "start");
+    hostBridge.postRun(lineIds);
+  }, []);
 
   const runSelected = useCallback(() => {
     const editor = editorRef.current;
@@ -360,11 +284,14 @@ function TestBenchRunner() {
   };
 
   const handlePauseResume = () => {
+    // Pause/resume is a future feature (server-side breakpoint pause/resume
+    // is not yet implemented). Visible state stays in sync with whatever the
+    // user toggles, but no transport effect for now.
     if (!runningRef.current) return;
     const nextPaused = !pausedRef.current;
     pausedRef.current = nextPaused;
     setPaused(nextPaused);
-    log(nextPaused ? "Paused run" : "Resumed run", "start");
+    log(nextPaused ? "Pause requested (not yet supported)" : "Resume requested (not yet supported)", "info");
   };
 
   const handleStop = () => {
@@ -372,6 +299,8 @@ function TestBenchRunner() {
     stopRef.current = true;
     pausedRef.current = false;
     setPaused(false);
+    hostBridge.postStop();
+    log("■ Stop requested", "fail");
   };
 
   useEffect(() => {
@@ -424,7 +353,8 @@ function TestBenchRunner() {
         automaticLayout: true,
         renderLineHighlight: "all",
         contextmenu: false,
-        wordWrap: appSettings?.editor?.wordWrap === false ? "off" : "on",
+        // Initial wordWrap; host overrides it via { type: 'init' } / 'settingsChanged'.
+        wordWrap: "on",
       });
 
       editorRef.current = editor;
@@ -539,6 +469,108 @@ function TestBenchRunner() {
   useEffect(() => {
     selectedLinesRef.current = selectedLines;
   }, [selectedLines]);
+
+  // Track text the host most recently sent us so we don't echo it back as
+  // an `edit` (which would create a feedback loop).
+  const hostShadowText = useRef(null);
+
+  // Host messaging — subscribe once, post `ready`, then react to inbound
+  // messages (init, runEvent, runError, documentChanged, settingsChanged).
+  useEffect(() => {
+    if (!hostBridge.isHosted) return;
+
+    const unsubscribe = hostBridge.subscribe((msg) => {
+      switch (msg.type) {
+        case "init":
+          hostShadowText.current = msg.text;
+          setScriptText(msg.text);
+          if (editorRef.current) {
+            const model = editorRef.current.getModel();
+            if (model && model.getValue() !== msg.text) {
+              model.setValue(msg.text);
+            }
+          }
+          break;
+
+        case "documentChanged":
+          hostShadowText.current = msg.text;
+          if (editorRef.current) {
+            const model = editorRef.current.getModel();
+            if (model && model.getValue() !== msg.text) {
+              model.setValue(msg.text);
+            }
+          }
+          setScriptText(msg.text);
+          break;
+
+        case "runEvent": {
+          const event = msg.event;
+          if (event.type === "step:start") {
+            setStatuses((prev) => ({ ...prev, [event.line]: STATUS.RUNNING }));
+            setErrors((prev) => { const next = { ...prev }; delete next[event.line]; return next; });
+            log(`Running step on line ${event.line}…`);
+          } else if (event.type === "step:pass") {
+            setStatuses((prev) => ({ ...prev, [event.line]: STATUS.PASS }));
+            log(`✓ Step on line ${event.line} passed`, "pass");
+          } else if (event.type === "step:fail") {
+            setStatuses((prev) => ({ ...prev, [event.line]: STATUS.FAIL }));
+            setErrors((prev) => ({
+              ...prev,
+              [event.line]: { message: event.error, detail: event.error },
+            }));
+            log(`✗ Step on line ${event.line} failed: ${event.error}`, "fail");
+          } else if (event.type === "output") {
+            log(event.msg, event.kind === "error" ? "fail" : "info");
+          } else if (event.type === "done") {
+            log(event.status === "passed" ? "✓ Run completed" : `■ Run ended (${event.status})`,
+                event.status === "passed" ? "pass" : "fail");
+            runningRef.current = false;
+            pausedRef.current = false;
+            setRunning(false);
+            setPaused(false);
+          }
+          break;
+        }
+
+        case "runError": {
+          const payload = msg.payload;
+          log(`${payload.code}: ${payload.diagnosis}. ${payload.fix}`, "fail");
+          // Pin the error to whatever line is currently running, or to the
+          // cursor line if nothing is running.
+          const targetLine = selectedId;
+          setErrors((prev) => ({
+            ...prev,
+            [targetLine]: { message: `${payload.code}: ${payload.diagnosis}`, detail: payload.fix },
+          }));
+          runningRef.current = false;
+          setRunning(false);
+          break;
+        }
+
+        case "settingsChanged":
+          if (editorRef.current && typeof msg.wordWrap === "boolean") {
+            editorRef.current.updateOptions({ wordWrap: msg.wordWrap ? "on" : "off" });
+          }
+          break;
+
+        default:
+          break;
+      }
+    });
+
+    hostBridge.postReady();
+    return unsubscribe;
+    // selectedId intentionally omitted — handler reads latest via closure refresh on each render of subscribe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Push edits back to the host so the underlying TextDocument stays in sync.
+  // Skip if the change came from the host (avoids an init→edit→documentChanged loop).
+  useEffect(() => {
+    if (!hostBridge.isHosted) return;
+    if (hostShadowText.current === scriptText) return;
+    hostBridge.postEdit(scriptText);
+  }, [scriptText]);
 
   useEffect(() => {
     const host = editorHostRef.current;

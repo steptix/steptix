@@ -21,7 +21,38 @@ export interface StepRequest {
   config?: { baseUrl?: string; timeout?: string };
   steps: string[];
   parameters?: Record<string, string>;
+  /**
+   * Per-request environment variables (e.g. AI_API_KEY, AI_MODEL). Applied to
+   * the session's config only — never written to the server's process.env, so
+   * concurrent sessions and the server itself remain isolated.
+   */
+  env?: Record<string, string>;
+  /**
+   * Reserved for future breakpoint pause/resume support. Currently logged and
+   * ignored — the run executes to completion.
+   */
+  breakpoints?: number[];
+  /**
+   * 1-based source-document line for each entry in `steps`. When present,
+   * step events carry the original line so the client can render gutter
+   * status against the document. Defaults to step index when omitted.
+   */
+  sourceLines?: number[];
 }
+
+/**
+ * Run-time event the session manager emits per step. The streaming HTTP
+ * endpoint converts these to SSE frames; the non-streaming endpoint ignores
+ * them.
+ */
+export type RunEvent =
+  | { type: 'step:start'; line: number }
+  | { type: 'step:pass'; line: number; output?: string; screenshot?: string }
+  | { type: 'step:fail'; line: number; error: string; screenshot?: string }
+  | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
+  | { type: 'done'; status: 'passed' | 'failed' | 'error' };
+
+export type RunEventListener = (event: RunEvent) => void;
 
 export interface StepResultResponse {
   step: string;
@@ -147,6 +178,29 @@ function isSkippableStep(instruction: string): boolean {
 }
 
 /**
+ * Build a per-session AiConfig with optional env overrides applied. Only
+ * `apiKey` and `model` are honoured today — these are the env knobs a `.env`
+ * shipped from a client realistically wants to override per session. Server
+ * process.env is never mutated.
+ */
+function applyEnvToAiConfig(
+  baseConfig: import('../config/types.js').AiConfig,
+  envOverrides: Record<string, string> | undefined,
+): import('../config/types.js').AiConfig {
+  if (!envOverrides) return baseConfig;
+  const next = { ...baseConfig };
+  const apiKey = envOverrides['AI_API_KEY'];
+  if (typeof apiKey === 'string' && apiKey.length > 0) {
+    next.apiKey = apiKey;
+  }
+  const model = envOverrides['AI_MODEL'];
+  if (typeof model === 'string' && model.trim().length > 0) {
+    next.model = model.trim();
+  }
+  return next;
+}
+
+/**
  * Check if the browser context has been closed (e.g. after a "Close the browser" step).
  */
 function isBrowserClosed(browserSession: BrowserSession): boolean {
@@ -173,10 +227,15 @@ export class SessionManager {
   /**
    * Execute a batch of steps within a named session.
    * Creates the session on first use. Queues requests if the session is busy.
+   *
+   * Pass `onEvent` to receive per-step events as they happen (used by the
+   * streaming endpoint). The returned promise still resolves with the full
+   * StepResponse on completion.
    */
   async executeSteps(
     sessionId: string,
     request: StepRequest,
+    onEvent?: RunEventListener,
   ): Promise<StepResponse> {
     let session = this.sessions.get(sessionId);
 
@@ -194,15 +253,24 @@ export class SessionManager {
       );
     }
 
-    // Create session if it does not exist
+    // Create session if it does not exist. Per-request env is applied at
+    // session-creation time only — once an AiClient is bound to a session,
+    // changing env mid-session is intentionally not supported.
     if (!session) {
-      session = await this.createSession(sessionId, request.config);
+      session = await this.createSession(sessionId, request.config, request.env);
+    }
+
+    if (request.breakpoints && request.breakpoints.length > 0) {
+      logger.warn(
+        `Session "${sessionId}": ${request.breakpoints.length} breakpoint(s) requested but ` +
+          `pause/resume is not yet implemented — run will execute to completion.`,
+      );
     }
 
     // Queue the work onto the session's promise chain so requests execute sequentially
     const resultPromise = new Promise<StepResponse>((resolve, reject) => {
       session.queueTail = session.queueTail
-        .then(() => this.executeStepsInternal(session, sessionId, request))
+        .then(() => this.executeStepsInternal(session, sessionId, request, onEvent))
         .then(resolve, reject);
     });
 
@@ -354,12 +422,17 @@ export class SessionManager {
   private async createSession(
     sessionId: string,
     sessionConfig?: { baseUrl?: string; timeout?: string },
+    envOverrides?: Record<string, string>,
   ): Promise<ManagedSession> {
     logger.info(`Creating session "${sessionId}"`);
 
+    // Apply per-request env to a fresh ai config copy. Server's process.env is
+    // never mutated; concurrent sessions stay isolated.
+    const aiConfig = applyEnvToAiConfig(this.config.ai, envOverrides);
+
     const browserSession = await launchBrowser(this.config.browser);
     const tokenTracker = new TokenTracker();
-    const aiClient = new AiClient(this.config.ai, tokenTracker);
+    const aiClient = new AiClient(aiConfig, tokenTracker);
     const apiResponseStore = new ApiResponseStore();
 
     // Load context files once per session
@@ -402,6 +475,7 @@ export class SessionManager {
     session: ManagedSession,
     sessionId: string,
     request: StepRequest,
+    onEvent?: RunEventListener,
   ): Promise<StepResponse> {
     session.status = 'executing';
 
@@ -410,6 +484,24 @@ export class SessionManager {
     let stepsCompleted = 0;
     let overallStatus: 'passed' | 'failed' | 'error' = 'passed';
     let errorInfo: { step: number; message: string } | null = null;
+
+    // Map a 1-based step index to the source-document line. When the client
+    // doesn't supply sourceLines we echo the step index — some clients (e.g.
+    // headless runners) don't track source positions.
+    const sourceLineFor = (stepIndex0: number): number => {
+      const explicit = request.sourceLines?.[stepIndex0];
+      return typeof explicit === 'number' ? explicit : stepIndex0 + 1;
+    };
+
+    const emit = (event: RunEvent): void => {
+      if (!onEvent) return;
+      try {
+        onEvent(event);
+      } catch (err) {
+        // A failing listener must not crash the run.
+        logger.warn(`Session "${sessionId}": run-event listener threw: ${String(err)}`);
+      }
+    };
 
     // Build the parameter map: session outputs as base, request parameters as overrides
     const resolvedParameters: Record<string, string> = {
@@ -509,6 +601,7 @@ export class SessionManager {
         // Check for skippable steps ([input:] and [interactive])
         if (isSkippableStep(interpolated)) {
           logger.info(`Session "${sessionId}": skipping step ${i + 1} (input/interactive not supported in API mode)`);
+          emit({ type: 'step:start', line: sourceLineFor(i) });
           results.push({
             step: originalStep,
             status: 'passed',
@@ -517,6 +610,7 @@ export class SessionManager {
             reasoning: 'Skipped: [input] and [interactive] steps are not supported in API mode',
             outputs: {},
           });
+          emit({ type: 'step:pass', line: sourceLineFor(i), output: 'skipped' });
           stepsCompleted++;
           session.totalStepsExecuted++;
           continue;
@@ -538,6 +632,8 @@ export class SessionManager {
           session.totalStepsExecuted + stepsTotal - i,
           stepInstruction,
         );
+
+        emit({ type: 'step:start', line: sourceLineFor(i) });
 
         // Execute the step
         let stepResult: StepResult;
@@ -587,6 +683,13 @@ export class SessionManager {
             screenshot: errorScreenshot,
             reasoning: message,
             outputs: {},
+          });
+
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error: message,
+            ...(errorScreenshot && { screenshot: errorScreenshot }),
           });
 
           overallStatus = 'error';
@@ -647,6 +750,12 @@ export class SessionManager {
           logger.success(
             `Session "${sessionId}" step ${i + 1} passed`,
           );
+          emit({
+            type: 'step:pass',
+            line: sourceLineFor(i),
+            ...(stepResult.aiExplanation && { output: stepResult.aiExplanation }),
+            ...(screenshotValue && { screenshot: screenshotValue }),
+          });
         } else {
           // Step failed
           overallStatus = 'failed';
@@ -657,6 +766,12 @@ export class SessionManager {
           logger.error(
             `Session "${sessionId}" step ${i + 1} FAILED: ${stepResult.error ?? 'unknown'}`,
           );
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error: stepResult.error ?? 'Step failed',
+            ...(screenshotValue && { screenshot: screenshotValue }),
+          });
           break;
         }
 
@@ -684,6 +799,8 @@ export class SessionManager {
         // browser may be in an intermediate state
       }
     }
+
+    emit({ type: 'done', status: overallStatus });
 
     return {
       sessionId,

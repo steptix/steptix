@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   getLinesFromSelections,
   toggleLineInSet,
-} from "../selection-lines.js";
+} from "../src/webview/lib/selection-lines.js";
 
 const sel = (sLine, sCol, eLine, eCol) => ({
   startLineNumber: sLine,

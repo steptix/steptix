@@ -1,8 +1,14 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import type { Config } from '../config/types.js';
-import { SessionManager, type StepRequest } from './session-manager.js';
+import { SessionManager, type RunEvent, type StepRequest } from './session-manager.js';
 import { logger } from '../utils/logger.js';
+
+/** Write a single SSE frame. */
+function writeSseEvent(res: Response, event: RunEvent): void {
+  res.write(`event: ${event.type}\n`);
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
 
 // ---------------------------------------------------------------------------
 // App factory
@@ -41,13 +47,16 @@ export function createApiServer(config: Config): {
   });
 
   // POST /sessions/:id/steps
+  // ?stream=1 → SSE stream of per-step events, otherwise plain JSON response.
   app.post('/sessions/:id/steps', async (req: Request, res: Response, next: NextFunction) => {
+    const streaming = req.query['stream'] === '1';
+
     try {
       const sessionId = String(req.params.id);
 
       // Validate session ID length
-      if (sessionId.length > 128) {
-        res.status(400).json({ error: 'Session ID must be 128 characters or fewer' });
+      if (sessionId.length > 1024) {
+        res.status(400).json({ error: 'Session ID must be 1024 characters or fewer' });
         return;
       }
 
@@ -71,6 +80,66 @@ export function createApiServer(config: Config): {
       }
       if (body.parameters !== undefined) {
         request.parameters = body.parameters as Record<string, string>;
+      }
+      if (body.env !== undefined && body.env !== null && typeof body.env === 'object') {
+        request.env = body.env as Record<string, string>;
+      }
+      if (body.breakpoints !== undefined && Array.isArray(body.breakpoints)) {
+        request.breakpoints = body.breakpoints as number[];
+      }
+      if (body.sourceLines !== undefined && Array.isArray(body.sourceLines)) {
+        request.sourceLines = body.sourceLines as number[];
+      }
+
+      if (streaming) {
+        // Open SSE stream. Headers must be set before any res.write().
+        // Note: don't set Connection: keep-alive explicitly — Node's HTTP
+        // keep-alive socket pool can hold the connection open after res.end()
+        // and keep server.close() blocked. The default is keep-alive anyway,
+        // and SSE consumers don't require it.
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering if any
+        res.flushHeaders();
+
+        // Use res.on('close') for client disconnect — req.on('close') fires
+        // when express.json() finishes parsing the body, which would falsely
+        // signal a disconnect immediately.
+        let clientGone = false;
+        res.on('close', () => {
+          clientGone = true;
+        });
+
+        // Periodic comment frame so intermediaries don't time the connection
+        // out (typical proxy idle window is 30s).
+        const keepalive = setInterval(() => {
+          if (clientGone) return;
+          try {
+            res.write(': keep-alive\n\n');
+          } catch {
+            // socket may be gone
+          }
+        }, 25_000);
+
+        try {
+          await sessionManager.executeSteps(sessionId, request, (event) => {
+            if (clientGone) return;
+            writeSseEvent(res, event);
+          });
+        } catch (err) {
+          if (!clientGone) {
+            const message = err instanceof Error ? err.message : String(err);
+            writeSseEvent(res, { type: 'output', msg: `Server error: ${message}`, kind: 'error' });
+            writeSseEvent(res, { type: 'done', status: 'error' });
+          }
+        } finally {
+          clearInterval(keepalive);
+          if (!clientGone) {
+            res.end();
+          }
+        }
+        return;
       }
 
       const result = await sessionManager.executeSteps(sessionId, request);

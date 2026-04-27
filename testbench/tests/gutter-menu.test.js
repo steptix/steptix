@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getGutterContextMenuItems } from "../gutter-menu.js";
+import { getGutterContextMenuItems } from "../src/webview/lib/gutter-menu.js";
 
 describe("getGutterContextMenuItems", () => {
   it("returns no items when no line was right-clicked", () => {

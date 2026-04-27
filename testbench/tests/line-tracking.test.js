@@ -4,7 +4,7 @@ import {
   remapLineForChanges,
   remapLineSet,
   remapLineMap,
-} from "../line-tracking.js";
+} from "../src/webview/lib/line-tracking.js";
 
 // Build a Monaco-shaped IModelContentChange.
 const change = (sLine, sCol, eLine, eCol, text) => ({

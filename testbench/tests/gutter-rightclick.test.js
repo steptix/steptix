@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   shouldSnapshotSelection,
   getSelectionsToRestore,
-} from "../gutter-rightclick.js";
+} from "../src/webview/lib/gutter-rightclick.js";
 
 describe("shouldSnapshotSelection", () => {
   it("returns true for right-click (button 2)", () => {
