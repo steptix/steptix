@@ -8,6 +8,7 @@ import { getGutterContextMenuItems } from "./lib/gutter-menu.js";
 import { shouldSnapshotSelection, getSelectionsToRestore } from "./lib/gutter-rightclick.js";
 import { hostBridge } from "./lib/host-bridge.js";
 import { clearRunningStatuses } from "./lib/status-cleanup.js";
+import { nextBreakpointStop } from "./lib/breakpoint.js";
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -90,6 +91,9 @@ function TestBenchRunner() {
   const stopRef = useRef(false);
   const selectedLinesRef = useRef(new Set([1]));
   const preservedSelectionsRef = useRef(null);
+  // Remembers the breakpoint trim line for the in-flight run, so the `done`
+  // handler can decide whether to land the yellow arrow on it.
+  const pausedAtRef = useRef(null);
 
   const isLight = theme === "light";
   const colors = {
@@ -262,7 +266,11 @@ function TestBenchRunner() {
     stopRef.current = false;
     setRunning(true);
     setPaused(false);
-    setBreakpointStop(pausedAt);
+    // Clear any prior pause indicator and stash the new trim point — the
+    // arrow lands on `pausedAt` only when the run reaches it cleanly
+    // (handled in the `done` event branch below via nextBreakpointStop).
+    setBreakpointStop(null);
+    pausedAtRef.current = pausedAt;
 
     const lineIds = runnable.map((step) => step.id);
 
@@ -325,15 +333,25 @@ function TestBenchRunner() {
     }
   };
 
-  const handlePauseResume = () => {
-    // Pause/resume is a future feature (server-side breakpoint pause/resume
-    // is not yet implemented). Visible state stays in sync with whatever the
-    // user toggles, but no transport effect for now.
-    if (!runningRef.current) return;
-    const nextPaused = !pausedRef.current;
-    pausedRef.current = nextPaused;
-    setPaused(nextPaused);
-    log(nextPaused ? "Pause requested (not yet supported)" : "Resume requested (not yet supported)", "info");
+  const handleResume = () => {
+    // Continue from a breakpoint pause: rerun starting at the paused-at line,
+    // letting the same breakpoint trim logic stop at the next breakpoint
+    // (if any). Arrow disappears the moment we kick the run off.
+    if (runningRef.current) return;
+    const target = breakpointStop;
+    if (target == null) return;
+    setBreakpointStop(null);
+    const editor = editorRef.current;
+    if (editor) {
+      editor.setPosition({ lineNumber: target, column: 1 });
+      editor.focus();
+    }
+    setSelectedId(target);
+    setSelectedLines(new Set());
+    selectedLinesRef.current = new Set();
+    const startIdx = steps.findIndex((step) => step.id === target);
+    if (startIdx === -1) return;
+    executeSteps(steps.slice(startIdx), false, `from breakpoint at line ${target}`);
   };
 
   const handleStop = () => {
@@ -662,6 +680,11 @@ function TestBenchRunner() {
             // blinking — happens when Stop/abort cuts a step off mid-flight
             // and no step:pass / step:fail ever arrives for it.
             setStatuses((prev) => clearRunningStatuses(prev));
+            // Land the breakpoint arrow only if we reached the trim point
+            // cleanly. Failures, aborts, and errors leave the gutter clean.
+            const arrow = nextBreakpointStop(pausedAtRef.current, event.status);
+            setBreakpointStop(arrow);
+            pausedAtRef.current = null;
           }
           break;
         }
@@ -967,8 +990,13 @@ function TestBenchRunner() {
         >
           Close Session
         </button>
-        <button onClick={handlePauseResume} disabled={!running} style={{ padding: "6px 12px", background: paused ? "#172554" : "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: paused ? "#93c5fd" : colors.muted, fontSize: 11, cursor: running ? "pointer" : "not-allowed" }}>
-          {paused ? "Resume" : "Pause"}
+        <button
+          onClick={handleResume}
+          disabled={running || breakpointStop == null}
+          title={breakpointStop != null ? `Resume from breakpoint on line ${breakpointStop}` : "Resume — only available when paused at a breakpoint"}
+          style={{ padding: "6px 12px", background: breakpointStop != null ? (isLight ? "#fef3c7" : "#3a2a05") : "transparent", border: `1px solid ${breakpointStop != null ? "#fbbf24" : colors.borderStrong}`, borderRadius: 5, color: breakpointStop != null ? (isLight ? "#92400e" : "#fbbf24") : colors.muted, fontSize: 11, cursor: !running && breakpointStop != null ? "pointer" : "not-allowed", fontWeight: breakpointStop != null ? 600 : 400 }}
+        >
+          {breakpointStop != null ? `▶ Resume (line ${breakpointStop})` : "Resume"}
         </button>
         <button onClick={handleStop} disabled={!running} style={{ padding: "6px 12px", background: running ? "#2a1010" : "transparent", border: "1px solid #5a2020", borderRadius: 5, color: running ? "#f87171" : "#5f3940", fontSize: 11, cursor: running ? "pointer" : "not-allowed" }}>
           Stop
