@@ -9,7 +9,7 @@ import { shouldSnapshotSelection, getSelectionsToRestore } from "./lib/gutter-ri
 import { hostBridge } from "./lib/host-bridge.js";
 import { clearRunningStatuses } from "./lib/status-cleanup.js";
 import { nextBreakpointStop } from "./lib/breakpoint.js";
-import { collectVariables, parseParametersInline, maskIfSecretInlineInline } from "./lib/variables-panel.js";
+import { collectVariables, parseParametersInline, maskIfSecretInline } from "./lib/variables-panel.js";
 
 self.MonacoEnvironment = {
   getWorker() {
