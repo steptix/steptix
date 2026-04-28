@@ -57,4 +57,6 @@ export const hostBridge = {
   postStop() { post({ type: 'stop' }); },
   postEdit(text) { post({ type: 'edit', text }); },
   postRestartSession() { post({ type: 'restartSession' }); },
+  postPromptResponse(text) { post({ type: 'promptResponse', text }); },
+  postPromptCancel() { post({ type: 'promptCancel' }); },
 };

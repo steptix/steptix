@@ -125,6 +125,62 @@ export function extractSteps(text: string): { line: number; instruction: string 
 }
 
 // ---------------------------------------------------------------------------
+// Step-class classifier — recognises [input: var] and [interactive] markers
+// inside step instructions so the host runner can pause for the user.
+// ---------------------------------------------------------------------------
+
+const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)$/i;
+const INTERACTIVE_STEP_PATTERN = /^\[interactive\]\s*(.*)$/i;
+
+export type ClassifiedStep =
+  | { kind: 'step'; line: number; instruction: string }
+  | { kind: 'input'; line: number; varName: string; prompt: string }
+  | { kind: 'interactive'; line: number; hint: string };
+
+/**
+ * Pull out the steps the user wants to run, classifying each one as a normal
+ * step, an `[input: var]` placeholder, or an `[interactive]` REPL handoff.
+ *
+ * If `requestedLines` is empty, every step in the document is returned.
+ * Otherwise, only steps whose source line is in the set, preserving order.
+ */
+export function classifySelectedSteps(
+  text: string,
+  requestedLines: number[],
+): ClassifiedStep[] {
+  const all = extractSteps(text);
+  const filtered =
+    requestedLines.length === 0
+      ? all
+      : all.filter((s) => requestedLines.includes(s.line));
+
+  return filtered.map((s) => classifyOne(s));
+}
+
+function classifyOne(step: { line: number; instruction: string }): ClassifiedStep {
+  const inputMatch = step.instruction.match(INPUT_STEP_PATTERN);
+  if (inputMatch) {
+    return {
+      kind: 'input',
+      line: step.line,
+      varName: inputMatch[1]!,
+      prompt: (inputMatch[2] ?? '').trim() || `Enter value for {{${inputMatch[1]}}}`,
+    };
+  }
+  const interactiveMatch = step.instruction.match(INTERACTIVE_STEP_PATTERN);
+  if (interactiveMatch) {
+    return {
+      kind: 'interactive',
+      line: step.line,
+      hint:
+        (interactiveMatch[1] ?? '').trim() ||
+        'Type instructions to run, "done" to continue, "exit" to stop',
+    };
+  }
+  return { kind: 'step', line: step.line, instruction: step.instruction };
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 

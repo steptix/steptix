@@ -82,12 +82,32 @@ export interface HostSettingsChangedMsg {
   wordWrap: boolean;
 }
 
+/**
+ * Ask the user to type something. `mode: 'input'` is one-shot (filling a
+ * `[input: var]` slot). `mode: 'interactive'` keeps the composer open
+ * across submissions until the host posts `promptDone`.
+ */
+export interface HostPromptMsg {
+  type: 'prompt';
+  mode: 'input' | 'interactive';
+  message: string;
+  /** For mode === 'input', the {{var}} this answer fills. */
+  varName?: string;
+}
+
+/** Tell the webview to hide its composer — the prompt cycle is over. */
+export interface HostPromptDoneMsg {
+  type: 'promptDone';
+}
+
 export type HostToWebviewMsg =
   | HostInitMsg
   | HostDocumentChangedMsg
   | HostRunEventMsg
   | HostRunErrorMsg
-  | HostSettingsChangedMsg;
+  | HostSettingsChangedMsg
+  | HostPromptMsg
+  | HostPromptDoneMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -120,13 +140,26 @@ export interface WebviewRestartSessionMsg {
   type: 'restartSession';
 }
 
+/** User submitted text into the composer. Newlines preserved as-is. */
+export interface WebviewPromptResponseMsg {
+  type: 'promptResponse';
+  text: string;
+}
+
+/** User clicked Cancel (or hit Stop while a prompt was open). */
+export interface WebviewPromptCancelMsg {
+  type: 'promptCancel';
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
   | WebviewRunAllMsg
   | WebviewStopMsg
   | WebviewEditMsg
-  | WebviewRestartSessionMsg;
+  | WebviewRestartSessionMsg
+  | WebviewPromptResponseMsg
+  | WebviewPromptCancelMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -140,7 +173,9 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'documentChanged' ||
     t === 'runEvent' ||
     t === 'runError' ||
-    t === 'settingsChanged'
+    t === 'settingsChanged' ||
+    t === 'prompt' ||
+    t === 'promptDone'
   );
 }
 
@@ -153,7 +188,9 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'runAll' ||
     t === 'stop' ||
     t === 'edit' ||
-    t === 'restartSession'
+    t === 'restartSession' ||
+    t === 'promptResponse' ||
+    t === 'promptCancel'
   );
 }
 

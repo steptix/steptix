@@ -3,6 +3,7 @@ import {
   ApiClient,
   ApiClientError,
   EnvParseError,
+  classifySelectedSteps,
   extractSteps,
   parseConfig,
   parseParameters,
@@ -10,6 +11,7 @@ import {
   reportError,
   resolveEnvFile,
   resolveSection,
+  type ClassifiedStep,
   type ErrorPayload,
   type HostToWebviewMsg,
   type RunEvent,
@@ -46,6 +48,8 @@ export class RunController {
    * accepts config on the first request. Reset by `closeSession`.
    */
   private configSentForSession = false;
+  /** Resolver for the currently open prompt, if any. */
+  private pendingPrompt: { resolve: (text: string | null) => void } | null = null;
 
   constructor(private readonly ctx: RunContext) {}
 
@@ -58,7 +62,23 @@ export class RunController {
   }
 
   stop(): void {
+    // Cancel any open prompt first so the run-loop unblocks immediately.
+    this.cancelPrompt();
     this.active?.abort();
+  }
+
+  /** Called by the editor-provider when the webview submits text. */
+  resolvePrompt(text: string): void {
+    const p = this.pendingPrompt;
+    this.pendingPrompt = null;
+    if (p) p.resolve(text);
+  }
+
+  /** Called by the editor-provider when the user clicks Cancel. */
+  cancelPrompt(): void {
+    const p = this.pendingPrompt;
+    this.pendingPrompt = null;
+    if (p) p.resolve(null);
   }
 
   /**
@@ -182,10 +202,10 @@ export class RunController {
     }
     const apiKey = env['SERVER_API_KEY'].trim();
 
-    // 4. Extract step instructions for the requested lines
+    // 4. Classify the requested lines into normal steps / [input:] / [interactive].
     const text = this.ctx.document.getText();
-    const allSteps = extractStepsForRun(text, lines);
-    if (allSteps.length === 0) {
+    const classified = classifySelectedSteps(text, lines);
+    if (classified.length === 0) {
       const payload = reportError('TB021', {});
       return this.fail(payload, log);
     }
@@ -203,62 +223,267 @@ export class RunController {
     if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
 
     log(
-      `running ${allSteps.length} step(s) on ${serverUrl}` +
+      `running ${classified.length} item(s) on ${serverUrl}` +
         (sessionConfig.baseUrl ? ` baseUrl=${sessionConfig.baseUrl}` : '') +
         (Object.keys(resolvedParameters).length > 0
           ? ` parameters=[${Object.keys(resolvedParameters).join(',')}]`
           : ''),
     );
 
-    // 5. Stream events
     const sessionId = filePath;
     const client = new ApiClient({ serverUrl, apiKey });
     const ac = new AbortController();
     this.active = ac;
 
-    // The server rejects `config` on a follow-up request to an existing
-    // session. Only include it on the first F5 after a fresh session was
-    // created (or after the user explicitly hits "Restart Session").
+    // Mutable parameters bag — `[input:]` answers get folded in here as the
+    // run progresses, so subsequent steps can reference them.
+    const params: Record<string, string> = { ...resolvedParameters };
+    let anyFailed = false;
+
+    try {
+      let i = 0;
+      while (i < classified.length) {
+        if (ac.signal.aborted) break;
+        const item = classified[i]!;
+
+        if (item.kind === 'step') {
+          // Take the largest contiguous block of normal steps starting at i
+          // and send it as a single streamSteps request.
+          const block: ClassifiedStep[] = [];
+          while (i < classified.length && classified[i]!.kind === 'step') {
+            block.push(classified[i]!);
+            i++;
+          }
+          const ok = await this.runStepBlock({
+            block,
+            client,
+            sessionId,
+            env,
+            params,
+            sessionConfig,
+            signal: ac.signal,
+            log,
+          });
+          if (!ok) {
+            anyFailed = true;
+            break;
+          }
+          continue;
+        }
+
+        if (item.kind === 'input') {
+          log(`prompt input on line ${item.line} → {{${item.varName}}}`);
+          const answer = await this.requestPrompt({
+            mode: 'input',
+            message: item.prompt,
+            varName: item.varName,
+          });
+          if (answer === null) {
+            log(`input on line ${item.line} canceled — aborting run`);
+            break;
+          }
+          params[item.varName] = answer;
+          this.postOutput(`✎ ${item.varName} ← ${maskIfSecret(item.varName, answer)}`, 'info');
+          i++;
+          continue;
+        }
+
+        if (item.kind === 'interactive') {
+          log(`interactive on line ${item.line}: ${item.hint}`);
+          const exitedCleanly = await this.runInteractive({
+            hint: item.hint,
+            client,
+            sessionId,
+            env,
+            params,
+            sessionConfig,
+            signal: ac.signal,
+            log,
+          });
+          if (!exitedCleanly) break;
+          i++;
+          continue;
+        }
+      }
+
+      // Mark config as sent so the next F5 reuses the existing session.
+      this.configSentForSession = true;
+
+      // Final `done` for the webview's "running" state. Status reflects
+      // whether anything failed.
+      const status: 'passed' | 'failed' | 'aborted' =
+        ac.signal.aborted ? 'aborted' : anyFailed ? 'failed' : 'passed';
+      this.post({ type: 'runEvent', event: { type: 'done', status } });
+      log(`run ${status}`);
+      return { ok: !anyFailed };
+    } catch (err) {
+      const payload = mapApiErrorToPayload(err, { serverUrl, envPath: envResolution.path });
+      this.post({ type: 'runEvent', event: { type: 'done', status: 'error' } });
+      return this.fail(payload, log);
+    } finally {
+      this.active = null;
+      // Belt-and-braces — if a prompt was somehow still open, drop it.
+      this.cancelPrompt();
+      this.post({ type: 'promptDone' });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // State-machine helpers
+  // -------------------------------------------------------------------------
+
+  /** Run a contiguous block of normal steps. Returns false if we should stop. */
+  private async runStepBlock(args: {
+    block: ClassifiedStep[];
+    client: ApiClient;
+    sessionId: string;
+    env: Record<string, string>;
+    params: Record<string, string>;
+    sessionConfig: { baseUrl?: string; timeout?: string };
+    signal: AbortSignal;
+    log: (line: string) => void;
+  }): Promise<boolean> {
+    const { block, client, sessionId, env, params, sessionConfig, signal, log } = args;
     const includeConfig = !this.configSentForSession;
+    const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
+    const stepLines = block.map((b) => b.line);
 
     try {
       const events = client.streamSteps(
         sessionId,
         {
-          steps: allSteps.map((s) => s.instruction),
-          sourceLines: allSteps.map((s) => s.line),
+          steps: stepInstructions,
+          sourceLines: stepLines,
           env,
           ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
             config: sessionConfig,
           }),
-          ...(Object.keys(resolvedParameters).length > 0 && {
-            parameters: resolvedParameters,
-          }),
+          ...(Object.keys(params).length > 0 && { parameters: params }),
         },
-        ac.signal,
+        signal,
       );
 
+      let sawFail = false;
       for await (const event of events) {
         log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
+        if (event.type === 'step:fail') sawFail = true;
+        // Suppress the per-block 'done' — the outer loop emits one final
+        // 'done' for the whole run.
+        if (event.type === 'done') continue;
         this.post({ type: 'runEvent', event });
       }
-
-      // Mark config as sent so the next F5 reuses the existing session.
-      // Only set after the stream completed without throwing — if the run
-      // failed before the server created the session, we want the next try
-      // to include config again.
+      // After the first successful block, the server has the session.
       this.configSentForSession = true;
-
-      log(`run completed`);
-      return { ok: true };
+      return !sawFail;
     } catch (err) {
-      const payload = mapApiErrorToPayload(err, { serverUrl, envPath: envResolution.path });
-      // Tell the webview the run is over (so the UI can clear "running" state).
-      this.post({ type: 'runEvent', event: { type: 'done', status: 'error' } as RunEvent });
-      return this.fail(payload, log);
-    } finally {
-      this.active = null;
+      throw err;
     }
+  }
+
+  /**
+   * Run the interactive REPL: keep the composer open, treat each user
+   * submission as a single ad-hoc step (or REPL command). Returns true if
+   * the user exited cleanly (`done` / `exit`), false to abort the whole run.
+   */
+  private async runInteractive(args: {
+    hint: string;
+    client: ApiClient;
+    sessionId: string;
+    env: Record<string, string>;
+    params: Record<string, string>;
+    sessionConfig: { baseUrl?: string; timeout?: string };
+    signal: AbortSignal;
+    log: (line: string) => void;
+  }): Promise<boolean> {
+    const { hint, client, sessionId, env, params, sessionConfig, signal, log } = args;
+
+    // Open the composer once. Subsequent loops re-await without re-posting.
+    const firstAnswer = await this.requestPrompt({ mode: 'interactive', message: hint });
+    let answer: string | null = firstAnswer;
+
+    while (answer !== null) {
+      if (signal.aborted) return false;
+      const trimmed = answer.trim();
+      const lower = trimmed.toLowerCase();
+
+      if (lower === 'done' || lower === 'exit' || lower === ':exit') {
+        return true;
+      }
+      if (lower === ':quit') {
+        return false;
+      }
+      if (lower === ':help') {
+        this.postOutput(INTERACTIVE_HELP, 'info');
+      } else if (lower === ':list') {
+        const stepLines = listStepInstructions(this.ctx.document.getText());
+        this.postOutput(stepLines || '(no steps in this file)', 'info');
+      } else if (trimmed.startsWith(':')) {
+        this.postOutput(`unknown command "${trimmed}". Type :help for the list.`, 'warn');
+      } else if (trimmed.length > 0) {
+        // Send as a one-step ad-hoc run.
+        log(`interactive step: ${trimmed}`);
+        this.postOutput(`> ${trimmed}`, 'info');
+        try {
+          const events = client.streamSteps(
+            sessionId,
+            {
+              steps: [trimmed],
+              sourceLines: [0],
+              env,
+              ...(!this.configSentForSession &&
+                Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),
+              ...(Object.keys(params).length > 0 && { parameters: params }),
+            },
+            signal,
+          );
+          for await (const event of events) {
+            if (event.type === 'done') continue;
+            this.post({ type: 'runEvent', event });
+          }
+          this.configSentForSession = true;
+        } catch (err) {
+          this.postOutput(
+            `interactive step errored: ${err instanceof Error ? err.message : String(err)}`,
+            'error',
+          );
+        }
+      }
+
+      // Re-arm the prompt for the next submission.
+      answer = await this.requestPrompt({ mode: 'interactive', message: hint });
+    }
+    // Cancel — abort the whole run.
+    return false;
+  }
+
+  /**
+   * Show the composer in the webview and resolve once the user submits or
+   * cancels. Returns null if canceled (or if a prior prompt is still open,
+   * which shouldn't happen in normal flow).
+   */
+  private requestPrompt(opts: {
+    mode: 'input' | 'interactive';
+    message: string;
+    varName?: string;
+  }): Promise<string | null> {
+    if (this.pendingPrompt) {
+      // Defensive — a previous prompt was never resolved. Drop it.
+      this.pendingPrompt.resolve(null);
+      this.pendingPrompt = null;
+    }
+    return new Promise<string | null>((resolve) => {
+      this.pendingPrompt = { resolve };
+      this.post({
+        type: 'prompt',
+        mode: opts.mode,
+        message: opts.message,
+        ...(opts.varName !== undefined && { varName: opts.varName }),
+      });
+    });
+  }
+
+  private postOutput(msg: string, kind: 'info' | 'warn' | 'error'): void {
+    this.post({ type: 'runEvent', event: { type: 'output', msg, kind } });
   }
 
   /** Run every step in the document. */
@@ -282,19 +507,26 @@ export class RunController {
   }
 }
 
-/**
- * Pick the steps to actually send. When `requestedLines` is empty, return
- * every step in the document. Otherwise, return only the steps whose source
- * line is in the set, preserving document order.
- */
-function extractStepsForRun(
-  text: string,
-  requestedLines: number[],
-): { line: number; instruction: string }[] {
-  const all = extractSteps(text);
-  if (requestedLines.length === 0) return all;
-  const set = new Set(requestedLines);
-  return all.filter((s) => set.has(s.line));
+const INTERACTIVE_HELP = [
+  'Interactive mode commands:',
+  '  :help          show this message',
+  '  :list          list all numbered step lines from the file',
+  '  :exit / done   end interactive mode and continue the run',
+  '  :quit          abort the entire run',
+  'Anything else is sent as a single ad-hoc step against the live session.',
+].join('\n');
+
+function listStepInstructions(text: string): string {
+  return extractSteps(text)
+    .map((s) => `  ${s.line.toString().padStart(3, ' ')}  ${s.instruction}`)
+    .join('\n');
+}
+
+function maskIfSecret(varName: string, value: string): string {
+  if (/password|secret|token|apikey|api_key/i.test(varName)) {
+    return value.length === 0 ? '(empty)' : '*'.repeat(Math.min(value.length, 8));
+  }
+  return value;
 }
 
 function mapApiErrorToPayload(

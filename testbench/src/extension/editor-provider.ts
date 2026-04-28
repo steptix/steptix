@@ -180,6 +180,12 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
           3000,
         );
         break;
+      case 'promptResponse':
+        controller.resolvePrompt(msg.text);
+        break;
+      case 'promptCancel':
+        controller.cancelPrompt();
+        break;
       case 'edit': {
         // Persist webview edits back to the TextDocument.
         const edit = new vscode.WorkspaceEdit();

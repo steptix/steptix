@@ -75,6 +75,11 @@ function TestBenchRunner() {
   const [runLog, setRunLog] = useState([]);
   const [monacoReady, setMonacoReady] = useState(false);
   const [editorLoadError, setEditorLoadError] = useState(null);
+  // Composer state — the inline prompt UI for [input:] / [interactive].
+  // null means "no prompt active". Otherwise: { mode, message, varName? }.
+  const [pendingPrompt, setPendingPrompt] = useState(null);
+  const [composerText, setComposerText] = useState("");
+  const composerInputRef = useRef(null);
 
   const editorHostRef = useRef(null);
   const editorRef = useRef(null);
@@ -360,6 +365,30 @@ function TestBenchRunner() {
     editor.executeEdits("renumber", edits);
   };
 
+  const submitComposer = () => {
+    if (!pendingPrompt) return;
+    const text = composerText;
+    hostBridge.postPromptResponse(text);
+    if (pendingPrompt.mode === "interactive") {
+      // Stay open — host will either send another `prompt` (after a step
+      // runs) or `promptDone` (when the user typed done/exit). Clear the
+      // textarea so the next input starts fresh.
+      setComposerText("");
+    } else {
+      // One-shot input — hide composer immediately; host will follow up
+      // with promptDone but the UX feels snappier this way.
+      setPendingPrompt(null);
+      setComposerText("");
+    }
+  };
+
+  const cancelComposer = () => {
+    if (!pendingPrompt) return;
+    hostBridge.postPromptCancel();
+    setPendingPrompt(null);
+    setComposerText("");
+  };
+
   const handleCloseSession = () => {
     hostBridge.postRestartSession();
     log("↻ Close session requested — next run will start a fresh browser", "info");
@@ -638,6 +667,22 @@ function TestBenchRunner() {
           if (editorRef.current && typeof msg.wordWrap === "boolean") {
             editorRef.current.updateOptions({ wordWrap: msg.wordWrap ? "on" : "off" });
           }
+          break;
+
+        case "prompt":
+          // Show / update the composer. Clear any leftover text only when
+          // mode changes — re-arming an interactive prompt should keep what
+          // the user is mid-typing if the host posts back-to-back.
+          setPendingPrompt({ mode: msg.mode, message: msg.message, varName: msg.varName });
+          setComposerText("");
+          // Focus the textarea on next tick so it's ready for input.
+          setTimeout(() => composerInputRef.current?.focus(), 0);
+          log(`▸ ${msg.mode === "input" ? "Input needed" : "Interactive mode"}: ${msg.message}`, "info");
+          break;
+
+        case "promptDone":
+          setPendingPrompt(null);
+          setComposerText("");
           break;
 
         default:
@@ -974,6 +1019,46 @@ function TestBenchRunner() {
               </div>
             ))}
           </div>
+
+          {pendingPrompt && (
+            <div style={{ borderTop: `1px solid ${colors.border}`, background: isLight ? "#fffbeb" : "#1f1a0a", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ fontSize: 10, color: isLight ? "#92400e" : "#fbbf24", letterSpacing: 1, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+                <span>⏸</span>
+                <span>WAITING FOR INPUT{pendingPrompt.mode === "interactive" ? " — INTERACTIVE" : ""}</span>
+              </div>
+              <div style={{ fontSize: 11, color: colors.text, whiteSpace: "pre-wrap" }}>
+                {pendingPrompt.message}
+                {pendingPrompt.varName && (
+                  <span style={{ color: colors.muted }}> {` → {{${pendingPrompt.varName}}}`}</span>
+                )}
+              </div>
+              <textarea
+                ref={composerInputRef}
+                value={composerText}
+                onChange={(e) => setComposerText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submitComposer();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    cancelComposer();
+                  }
+                }}
+                placeholder={pendingPrompt.mode === "interactive" ? "Type a step, or :help / :list / done / :quit…" : "Type your answer and press Enter…"}
+                rows={pendingPrompt.mode === "interactive" ? 2 : 1}
+                style={{ width: "100%", resize: "vertical", padding: "6px 8px", fontFamily: "JetBrains Mono, monospace", fontSize: 11, lineHeight: 1.5, background: colors.panel, color: colors.text, border: `1px solid ${colors.borderStrong}`, borderRadius: 4, outline: "none", boxSizing: "border-box" }}
+              />
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button onClick={cancelComposer} style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 4, color: colors.muted, fontSize: 10, cursor: "pointer" }}>
+                  Cancel
+                </button>
+                <button onClick={submitComposer} style={{ padding: "4px 14px", background: "linear-gradient(135deg, #1d4ed8, #2563eb)", border: "none", borderRadius: 4, color: "#fff", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>
+                  Send <Kbd>↵</Kbd>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
