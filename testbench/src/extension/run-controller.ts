@@ -380,6 +380,13 @@ export class RunController {
 
       let sawFail = false;
       for await (const event of events) {
+        // First event proves the server has accepted the request and
+        // bound the session config. Set the flag NOW (not after the loop)
+        // so that a Stop / abort / network drop mid-stream still leaves
+        // the next F5 in a state where it skips `config` — otherwise the
+        // server rejects with "Config can only be provided on the first
+        // request".
+        this.configSentForSession = true;
         log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
         if (event.type === 'step:fail') sawFail = true;
         // Suppress the per-block 'done' — the outer loop emits one final
@@ -387,8 +394,6 @@ export class RunController {
         if (event.type === 'done') continue;
         this.post({ type: 'runEvent', event });
       }
-      // After the first successful block, the server has the session.
-      this.configSentForSession = true;
       return !sawFail;
     } catch (err) {
       throw err;
@@ -445,10 +450,13 @@ export class RunController {
             signal,
           );
           for await (const event of events) {
+            // Same rationale as runStepBlock — set on first event so an
+            // abort mid-step leaves the flag in the right state for the
+            // next request.
+            this.configSentForSession = true;
             if (event.type === 'done') continue;
             this.post({ type: 'runEvent', event });
           }
-          this.configSentForSession = true;
         } catch (err) {
           this.postOutput(
             `interactive step errored: ${err instanceof Error ? err.message : String(err)}`,
