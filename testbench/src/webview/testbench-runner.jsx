@@ -203,6 +203,16 @@ function TestBenchRunner() {
     setContextMenu(null);
   };
 
+  const handleClearStatusesMenuClick = () => {
+    setContextMenu(null);
+    // Clears every per-line gutter status (running / pass / fail / skip) and
+    // the inline error panel. Run log is intentionally left alone — that's
+    // the user's history of what happened.
+    setStatuses({});
+    setErrors({});
+    setBreakpointStop(null);
+  };
+
   const handleRunStepMenuClick = () => {
     if (!contextMenu) return;
     setContextMenu(null);
@@ -996,6 +1006,7 @@ function TestBenchRunner() {
           const handlers = {
             "toggle-breakpoint": handleBreakpointMenuClick,
             "run-step": handleRunStepMenuClick,
+            "clear-statuses": handleClearStatusesMenuClick,
           };
           return (
             <div onClick={(event) => event.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, zIndex: 20, minWidth: 150, padding: 4, background: colors.menu, border: `1px solid ${colors.borderStrong}`, borderRadius: 6, boxShadow: "0 12px 30px #0008" }}>

@@ -60,4 +60,26 @@ describe("getGutterContextMenuItems", () => {
     assert.ok(bpItem);
     assert.equal(bpItem.disabled, false);
   });
+
+  it("includes a Clear Statuses item regardless of selection", () => {
+    const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running: false });
+    const clearItem = items.find((item) => item.id === "clear-statuses");
+    assert.ok(clearItem, "expected a clear-statuses item");
+    assert.equal(clearItem.label, "Clear");
+    assert.equal(clearItem.disabled, false);
+  });
+
+  it("Clear is enabled even when nothing is selected", () => {
+    const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running: false, selectedLineCount: 0 });
+    const clearItem = items.find((item) => item.id === "clear-statuses");
+    assert.equal(clearItem.disabled, false);
+  });
+
+  it("Clear is disabled while a run is in progress", () => {
+    // Mid-run, RUNNING entries are about to be replaced — let the run finish
+    // (or the user click Stop) before clearing.
+    const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running: true });
+    const clearItem = items.find((item) => item.id === "clear-statuses");
+    assert.equal(clearItem.disabled, true);
+  });
 });

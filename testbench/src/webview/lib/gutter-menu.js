@@ -30,5 +30,13 @@ export function getGutterContextMenuItems({
       label: runStepLabel,
       disabled: !!running,
     },
+    {
+      id: "clear-statuses",
+      label: "Clear",
+      // Mid-run, the gutter is actively reflecting RUNNING/PASS/FAIL state;
+      // clearing would just be undone on the next event. Wait for Stop or
+      // completion before allowing it.
+      disabled: !!running,
+    },
   ];
 }
