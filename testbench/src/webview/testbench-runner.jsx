@@ -255,15 +255,18 @@ function TestBenchRunner() {
 
     const lineIds = runnable.map((step) => step.id);
 
-    // Mark targeted lines as running and clear any stale errors so the
-    // gutter reflects intent immediately, before the host echoes back.
-    setStatuses((prev) => {
-      const next = { ...prev };
-      for (const id of lineIds) next[id] = STATUS.RUNNING;
-      return next;
-    });
+    // Clear any stale errors on targeted lines. Don't pre-mark them as
+    // RUNNING — only the line the server is actively executing should
+    // blink. The `step:start` events drive that per-line state.
     setErrors((prev) => {
       const next = { ...prev };
+      for (const id of lineIds) delete next[id];
+      return next;
+    });
+    setStatuses((prev) => {
+      const next = { ...prev };
+      // Also clear any prior pass/fail indicator on these lines so the
+      // gutter doesn't show a stale ✓ or ✗ before the new run starts.
       for (const id of lineIds) delete next[id];
       return next;
     });
