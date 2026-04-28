@@ -10,6 +10,13 @@ import { isTestFile } from 'ai-ui-automation-runner-core';
  *   - the document body has no `## Steps` heading.
  */
 export function shouldClaimDocument(document: vscode.TextDocument): boolean {
+  // Source Control diffs and other read-only views use schemes like `git`,
+  // `gitlens`, `vscode-scm`, `diff`, etc. The custom editor must stay out
+  // of those — diff/compare views need the plain text editor to render
+  // change decorations and inline edits.
+  if (document.uri.scheme !== 'file' && document.uri.scheme !== 'untitled') {
+    return false;
+  }
   const settings = vscode.workspace.getConfiguration('testbench');
   if (settings.get<boolean>('openMarkdownAsTest') === false) return false;
   return isTestFile(document.getText());

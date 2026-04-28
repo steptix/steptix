@@ -38,6 +38,21 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
     const ts = () => new Date().toISOString().slice(11, 23);
     out.appendLine(`[${ts()}] resolveCustomTextEditor: ${document.uri.fsPath}`);
 
+    // Source Control diffs and similar read-only views use schemes like
+    // `git`, `gitlens`, `vscode-scm`, `diff`. The custom editor must stay
+    // out — close the panel async so VS Code can fall back to the default
+    // diff editor. Synchronous dispose during resolveCustomTextEditor
+    // races claimWebview/setInput; the setTimeout sidesteps that.
+    if (document.uri.scheme !== 'file' && document.uri.scheme !== 'untitled') {
+      out.appendLine(`[${ts()}]   non-file scheme "${document.uri.scheme}" — yielding to default editor`);
+      panel.webview.options = { enableScripts: false };
+      panel.webview.html = '';
+      setTimeout(() => {
+        try { panel.dispose(); } catch { /* already gone */ }
+      }, 0);
+      return;
+    }
+
     const claim = shouldClaimDocument(document);
     out.appendLine(`[${ts()}]   shouldClaimDocument=${claim} (testbench.openMarkdownAsTest=${vscode.workspace.getConfiguration('testbench').get('openMarkdownAsTest')})`);
 
