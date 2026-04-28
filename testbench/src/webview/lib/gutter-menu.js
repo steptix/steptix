@@ -32,11 +32,18 @@ export function getGutterContextMenuItems({
     },
     {
       id: "clear-statuses",
-      label: "Clear",
+      label: "Clear Statuses",
       // Mid-run, the gutter is actively reflecting RUNNING/PASS/FAIL state;
       // clearing would just be undone on the next event. Wait for Stop or
       // completion before allowing it.
       disabled: !!running,
+    },
+    {
+      id: "clear-breakpoints",
+      label: "Clear Breakpoints",
+      // Safe to remove breakpoints any time — the trim logic only consults
+      // the set when a run is dispatched, not mid-stream.
+      disabled: false,
     },
   ];
 }

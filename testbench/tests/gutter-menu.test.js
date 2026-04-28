@@ -61,25 +61,40 @@ describe("getGutterContextMenuItems", () => {
     assert.equal(bpItem.disabled, false);
   });
 
-  it("includes a Clear Statuses item regardless of selection", () => {
+  it("includes a Clear Statuses item with the rename label", () => {
     const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running: false });
     const clearItem = items.find((item) => item.id === "clear-statuses");
     assert.ok(clearItem, "expected a clear-statuses item");
-    assert.equal(clearItem.label, "Clear");
+    assert.equal(clearItem.label, "Clear Statuses");
     assert.equal(clearItem.disabled, false);
   });
 
-  it("Clear is enabled even when nothing is selected", () => {
+  it("Clear Statuses is enabled even when nothing is selected", () => {
     const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running: false, selectedLineCount: 0 });
     const clearItem = items.find((item) => item.id === "clear-statuses");
     assert.equal(clearItem.disabled, false);
   });
 
-  it("Clear is disabled while a run is in progress", () => {
-    // Mid-run, RUNNING entries are about to be replaced — let the run finish
-    // (or the user click Stop) before clearing.
+  it("Clear Statuses is disabled while a run is in progress", () => {
     const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running: true });
     const clearItem = items.find((item) => item.id === "clear-statuses");
     assert.equal(clearItem.disabled, true);
+  });
+
+  it("includes a Clear Breakpoints item", () => {
+    const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running: false });
+    const clearBp = items.find((item) => item.id === "clear-breakpoints");
+    assert.ok(clearBp, "expected a clear-breakpoints item");
+    assert.equal(clearBp.label, "Clear Breakpoints");
+  });
+
+  it("Clear Breakpoints is enabled regardless of run state", () => {
+    // Removing breakpoints during a run is fine — the trim logic only looks
+    // at the breakpoint set when a run is dispatched, not mid-stream.
+    for (const running of [false, true]) {
+      const items = getGutterContextMenuItems({ lineNumber: 3, hasBreakpoint: false, running });
+      const clearBp = items.find((item) => item.id === "clear-breakpoints");
+      assert.equal(clearBp.disabled, false, `running=${running}`);
+    }
   });
 });

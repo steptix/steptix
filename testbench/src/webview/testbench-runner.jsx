@@ -217,6 +217,14 @@ function TestBenchRunner() {
     setBreakpointStop(null);
   };
 
+  const handleClearBreakpointsMenuClick = () => {
+    setContextMenu(null);
+    setBreakpoints(new Set());
+    // Drop the paused-at arrow too — without breakpoints the pause indicator
+    // is meaningless.
+    setBreakpointStop(null);
+  };
+
   const handleRunStepMenuClick = () => {
     if (!contextMenu) return;
     setContextMenu(null);
@@ -1035,6 +1043,7 @@ function TestBenchRunner() {
             "toggle-breakpoint": handleBreakpointMenuClick,
             "run-step": handleRunStepMenuClick,
             "clear-statuses": handleClearStatusesMenuClick,
+            "clear-breakpoints": handleClearBreakpointsMenuClick,
           };
           return (
             <div onClick={(event) => event.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, zIndex: 20, minWidth: 150, padding: 4, background: colors.menu, border: `1px solid ${colors.borderStrong}`, borderRadius: 6, boxShadow: "0 12px 30px #0008" }}>
