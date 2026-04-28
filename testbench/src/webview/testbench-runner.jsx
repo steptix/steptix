@@ -51,8 +51,14 @@ const Kbd = ({ children }) => (
   </span>
 );
 
+function detectVscodeTheme() {
+  const cls = document.body.classList;
+  if (cls.contains("vscode-light") || cls.contains("vscode-high-contrast-light")) return "light";
+  return "dark";
+}
+
 function TestBenchRunner() {
-  const [theme, setTheme] = useState("light");
+  const [theme, setTheme] = useState(detectVscodeTheme);
   const [scriptText, setScriptText] = useState(INITIAL_SCRIPT);
   const [statuses, setStatuses] = useState({});
   const [errors, setErrors] = useState({});
@@ -220,14 +226,29 @@ function TestBenchRunner() {
   const executeSteps = useCallback((selectedSteps, _preserveSelection = true, label = "selected lines") => {
     if (runningRef.current || selectedSteps.length === 0) return;
 
+    // Honor breakpoints client-side: the server doesn't pause on them yet, so
+    // we trim the step list to stop before the first breakpoint encountered
+    // after the start line. The first step is always allowed to run, even if
+    // it sits on a breakpoint — that's how the user "continues past" one.
+    const sortedSteps = [...selectedSteps].sort((a, b) => a.id - b.id);
+    let pausedAt = null;
+    const runnable = [sortedSteps[0]];
+    for (let i = 1; i < sortedSteps.length; i++) {
+      if (breakpoints.has(sortedSteps[i].id)) {
+        pausedAt = sortedSteps[i].id;
+        break;
+      }
+      runnable.push(sortedSteps[i]);
+    }
+
     runningRef.current = true;
     pausedRef.current = false;
     stopRef.current = false;
     setRunning(true);
     setPaused(false);
-    setBreakpointStop(null);
+    setBreakpointStop(pausedAt);
 
-    const lineIds = selectedSteps.map((step) => step.id);
+    const lineIds = runnable.map((step) => step.id);
 
     // Mark targeted lines as running and clear any stale errors so the
     // gutter reflects intent immediately, before the host echoes back.
@@ -243,8 +264,11 @@ function TestBenchRunner() {
     });
 
     log(`▶ Starting ${label}: ${lineIds.join(", ")}`, "start");
+    if (pausedAt != null) {
+      log(`⏸ Will pause before breakpoint on line ${pausedAt} — press F5 again to continue`, "info");
+    }
     hostBridge.postRun(lineIds);
-  }, []);
+  }, [breakpoints]);
 
   const runSelected = useCallback(() => {
     const editor = editorRef.current;
@@ -300,6 +324,40 @@ function TestBenchRunner() {
     setPaused(false);
     hostBridge.postStop();
     log("■ Stop requested", "fail");
+  };
+
+  const handleRenumber = () => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model || selectedLines.size < 2) return;
+
+    const selected = [...selectedLines].sort((a, b) => a - b);
+    const firstSelected = selected[0];
+
+    // Continue from the last `N.` prefix above the first selected line.
+    const NUM_PREFIX = /^(\s*)(\d+)\.(\s)/;
+    let next = 1;
+    for (let line = firstSelected - 1; line >= 1; line--) {
+      const match = model.getLineContent(line).match(NUM_PREFIX);
+      if (match) { next = parseInt(match[2], 10) + 1; break; }
+    }
+
+    const edits = [];
+    for (const line of selected) {
+      const content = model.getLineContent(line);
+      const match = content.match(NUM_PREFIX);
+      if (!match) continue;
+      const indent = match[1];
+      const oldDigits = match[2];
+      edits.push({
+        range: new monaco.Range(line, indent.length + 1, line, indent.length + 1 + oldDigits.length),
+        text: String(next),
+        forceMoveMarkers: false,
+      });
+      next++;
+    }
+    if (edits.length === 0) return;
+    editor.executeEdits("renumber", edits);
   };
 
   const handleCloseSession = () => {
@@ -474,6 +532,15 @@ function TestBenchRunner() {
     monaco.editor.setTheme(isLight ? "testbench-light" : "testbench-dark");
   }, [isLight]);
 
+  // VS Code toggles `vscode-light` / `vscode-dark` / `vscode-high-contrast`
+  // classes on <body> when the user changes their color theme. Observe and
+  // mirror so the webview follows the IDE without a manual toggle.
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(detectVscodeTheme()));
+    observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     selectedLinesRef.current = selectedLines;
   }, [selectedLines]);
@@ -481,6 +548,12 @@ function TestBenchRunner() {
   // Track text the host most recently sent us so we don't echo it back as
   // an `edit` (which would create a feedback loop).
   const hostShadowText = useRef(null);
+  // Edits we've posted to the host but haven't yet seen echoed back as
+  // `documentChanged`. Each `applyEdit` on the host triggers
+  // onDidChangeTextDocument which echoes back; while edits are in flight, the
+  // model is ahead of the host and we must not call setValue (it would scroll
+  // to top and drop the in-flight keystrokes).
+  const pendingEditEchoes = useRef(0);
 
   // Host messaging — subscribe once, post `ready`, then react to inbound
   // messages. We subscribe unconditionally; postReady is a no-op if the host
@@ -501,6 +574,13 @@ function TestBenchRunner() {
 
         case "documentChanged":
           hostShadowText.current = msg.text;
+          // If this is just an echo of an edit we sent, accept the host's
+          // view but don't touch the model — the keystrokes are already there
+          // and setValue would reset cursor/scroll.
+          if (pendingEditEchoes.current > 0) {
+            pendingEditEchoes.current--;
+            break;
+          }
           if (editorRef.current) {
             const model = editorRef.current.getModel();
             if (model && model.getValue() !== msg.text) {
@@ -579,6 +659,7 @@ function TestBenchRunner() {
     if (!hostBridge.isHosted) return;
     if (hostShadowText.current === null) return;
     if (hostShadowText.current === scriptText) return;
+    pendingEditEchoes.current++;
     hostBridge.postEdit(scriptText);
   }, [scriptText]);
 
@@ -719,7 +800,7 @@ function TestBenchRunner() {
 
   return (
     <div style={{
-      minHeight: "100vh",
+      height: "100vh",
       background: colors.page,
       fontFamily: "JetBrains Mono, 'Cascadia Code', monospace",
       color: colors.text,
@@ -741,9 +822,6 @@ function TestBenchRunner() {
         .tb-selected-line { background: var(--selected-line) !important; }
         .tb-selected-line-number {
           background: var(--selected-line);
-          background-clip: content-box;
-          padding-left: 8px;
-          border-radius: 4px;
           color: ${colors.textStrong} !important;
           font-weight: 700;
         }
@@ -796,25 +874,24 @@ function TestBenchRunner() {
         .tb-breakpoint-stopped::before { content: "▶"; color: ${isLight ? "#b45309" : "#fbbf24"}; background: ${isLight ? "#fef3c7" : "#2a2210"}; box-shadow: 0 0 8px ${isLight ? "#fcd34d88" : "#fbbf2455"}; pointer-events: none; }
       `}</style>
 
-      <div style={{ padding: "14px 20px", borderBottom: `1px solid ${colors.border}`, display: "flex", alignItems: "center", gap: 16, background: colors.header }}>
-        <div>
-          <div style={{ fontSize: 11, color: colors.faint, letterSpacing: 2, fontWeight: 700 }}>TESTBENCH</div>
-          <div style={{ fontSize: 16, fontFamily: "Syne, sans-serif", fontWeight: 800, color: colors.textStrong }}>
-            Login Flow — Smoke Test
-          </div>
-        </div>
+      <div style={{ padding: "8px 12px", borderBottom: `1px solid ${colors.border}`, display: "flex", alignItems: "center", gap: 8, background: colors.header }}>
         <div style={{ flex: 1 }} />
 
         {runCount > 0 && (
-          <div style={{ display: "flex", gap: 12, fontSize: 11 }}>
+          <div style={{ display: "flex", gap: 12, fontSize: 11, marginRight: 8 }}>
             <span style={{ color: "#22c55e" }}>✓ {passCount} passed</span>
             {failCount > 0 && <span style={{ color: "#f87171" }}>✗ {failCount} failed</span>}
             <span style={{ color: colors.faint }}>{runCount}/{steps.length} steps</span>
           </div>
         )}
 
-        <button onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: "pointer" }}>
-          {isLight ? "Dark" : "Light"}
+        <button
+          onClick={handleRenumber}
+          disabled={running || selectedLines.size < 2}
+          title="Rewrite the leading '1.' / '2.' prefixes on the selected lines so they're sequential. Continues from the last numbered line above the selection."
+          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running || selectedLines.size < 2 ? "not-allowed" : "pointer" }}
+        >
+          Renumber
         </button>
         <button onClick={handleReset} disabled={running} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: "pointer" }}>
           Reset
@@ -839,14 +916,8 @@ function TestBenchRunner() {
       </div>
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        <div style={{ flex: 1, minWidth: 0, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-          <div data-testid="toolbar" role="toolbar" aria-label="Editor toolbar" style={{ display: "flex", gap: 16, fontSize: 10, color: colors.faint, padding: "4px 4px 0", alignItems: "center", flexWrap: "wrap" }}>
-            <button onMouseDown={(event) => event.preventDefault()} onClick={runSelected} disabled={running || !monacoReady} style={{ padding: "2px 8px", background: running ? "#1a2a1a" : isLight ? "#eef2f7" : "#1e2433", border: `1px solid ${colors.borderStrong}`, borderRadius: 3, fontSize: 10, color: running ? "#4ade80" : colors.muted, fontFamily: "JetBrains Mono, monospace", cursor: running || !monacoReady ? "not-allowed" : "pointer" }}>
-              F5
-            </button>
-          </div>
-
-          <div style={{ flex: 1, minHeight: 0, overflow: "hidden", border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.panel }}>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden", background: colors.panel }}>
             <div ref={editorHostRef} style={{ width: "100%", height: "100%" }} />
             {editorLoadError && (
               <div style={{ padding: 16, color: "#f87171", fontSize: 12 }}>
@@ -856,7 +927,7 @@ function TestBenchRunner() {
           </div>
 
           {errors[selectedId] && (
-            <div style={{ flexShrink: 0 }}>
+            <div style={{ flexShrink: 0, padding: "0 8px 8px" }}>
               <ErrorPanel error={errors[selectedId]} />
             </div>
           )}

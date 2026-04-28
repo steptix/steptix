@@ -1,4 +1,3 @@
----
 tags: [smoke]
 ---
 
@@ -13,10 +12,10 @@ tags: [smoke]
 
 ## Steps
 1. Navigate to the baseUrl
-3. Click Sign in
-4. Enter the username {{username}}
-5. Enter the password {{password}}
-6. Click the Sign in button
-2. [interactive]
+2. Click Sign in
+3. Enter the username {{username}}
+4. Enter the password {{password}}
+5. Click the Sign in button
+6. [interactive]
 7. Click logout
-- Click "Sign out" button
+8. Click "Sign out" button
