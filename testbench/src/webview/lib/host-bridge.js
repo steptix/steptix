@@ -7,13 +7,20 @@
  * outside VS Code).
  */
 
+// `acquireVsCodeApi()` may only be called once per webview. The host's HTML
+// shim calls it first and stashes the handle on window.__tbVsCodeApi — pick
+// that up if present, otherwise fall back to acquiring it ourselves (for
+// browser-standalone dev where there's no shim).
 let vscodeApi = null;
-try {
-  // acquireVsCodeApi may only be called once per webview.
-  // eslint-disable-next-line no-undef
-  vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
-} catch {
-  vscodeApi = null;
+if (typeof window !== 'undefined' && window.__tbVsCodeApi) {
+  vscodeApi = window.__tbVsCodeApi;
+} else {
+  try {
+    // eslint-disable-next-line no-undef
+    vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+  } catch {
+    vscodeApi = null;
+  }
 }
 
 const subscribers = new Set();
@@ -49,4 +56,5 @@ export const hostBridge = {
   postRunAll() { post({ type: 'runAll' }); },
   postStop() { post({ type: 'stop' }); },
   postEdit(text) { post({ type: 'edit', text }); },
+  postRestartSession() { post({ type: 'restartSession' }); },
 };

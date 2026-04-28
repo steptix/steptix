@@ -14,11 +14,10 @@ self.MonacoEnvironment = {
   },
 };
 
-// Empty until the host posts the test file's content via { type: 'init' }.
-// (Standalone preview falls back to a tiny placeholder.)
-const INITIAL_SCRIPT = hostBridge.isHosted
-  ? ""
-  : "## Steps\n1. (preview) waiting for host to send the document\n";
+// Always start empty. The host posts `init` with the document text shortly
+// after the webview mounts; the standalone-dev case (opening the bundle in a
+// browser without VS Code) is handled by allowing edits in the empty editor.
+const INITIAL_SCRIPT = "";
 
 const STATUS = { IDLE: "idle", RUNNING: "running", PASS: "pass", FAIL: "fail", SKIP: "skip" };
 
@@ -303,6 +302,15 @@ function TestBenchRunner() {
     log("■ Stop requested", "fail");
   };
 
+  const handleCloseSession = () => {
+    hostBridge.postRestartSession();
+    log("↻ Close session requested — next run will start a fresh browser", "info");
+    // Clear local UI state for a clean slate.
+    setStatuses({});
+    setErrors({});
+    setBreakpointStop(null);
+  };
+
   useEffect(() => {
     if (!editorHostRef.current || editorRef.current) return;
     try {
@@ -475,10 +483,9 @@ function TestBenchRunner() {
   const hostShadowText = useRef(null);
 
   // Host messaging — subscribe once, post `ready`, then react to inbound
-  // messages (init, runEvent, runError, documentChanged, settingsChanged).
+  // messages. We subscribe unconditionally; postReady is a no-op if the host
+  // bridge can't reach VS Code (standalone-dev), so this is safe.
   useEffect(() => {
-    if (!hostBridge.isHosted) return;
-
     const unsubscribe = hostBridge.subscribe((msg) => {
       switch (msg.type) {
         case "init":
@@ -565,9 +572,12 @@ function TestBenchRunner() {
   }, []);
 
   // Push edits back to the host so the underlying TextDocument stays in sync.
-  // Skip if the change came from the host (avoids an init→edit→documentChanged loop).
+  // Skip until we've received `init` (otherwise our empty initial state would
+  // wipe the host document before init arrives) and skip when the change
+  // came from the host (avoids an init→edit→documentChanged loop).
   useEffect(() => {
     if (!hostBridge.isHosted) return;
+    if (hostShadowText.current === null) return;
     if (hostShadowText.current === scriptText) return;
     hostBridge.postEdit(scriptText);
   }, [scriptText]);
@@ -809,6 +819,14 @@ function TestBenchRunner() {
         <button onClick={handleReset} disabled={running} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: "pointer" }}>
           Reset
         </button>
+        <button
+          onClick={handleCloseSession}
+          disabled={running}
+          title="Close the server-side session for this file. Next run starts a fresh browser with the current Config."
+          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running ? "not-allowed" : "pointer" }}
+        >
+          Close Session
+        </button>
         <button onClick={handlePauseResume} disabled={!running} style={{ padding: "6px 12px", background: paused ? "#172554" : "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: paused ? "#93c5fd" : colors.muted, fontSize: 11, cursor: running ? "pointer" : "not-allowed" }}>
           {paused ? "Resume" : "Pause"}
         </button>
@@ -890,6 +908,10 @@ function TestBenchRunner() {
     </div>
   );
 }
+
+// Hide the inline diagnostic loading message once React mounts.
+const loading = document.getElementById("testbench-loading");
+if (loading) loading.style.display = "none";
 
 const root = createRoot(document.getElementById("root"));
 root.render(<TestBenchRunner />);

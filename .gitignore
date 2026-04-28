@@ -16,3 +16,7 @@ memory/
 flick/node_modules/
 flick/dist/
 flick/src-tauri/target/
+
+# TestBench (VS Code extension)
+testbench/.vscode-test/
+testbench/*.vsix

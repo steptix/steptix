@@ -116,12 +116,17 @@ export interface WebviewEditMsg {
   text: string;
 }
 
+export interface WebviewRestartSessionMsg {
+  type: 'restartSession';
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
   | WebviewRunAllMsg
   | WebviewStopMsg
-  | WebviewEditMsg;
+  | WebviewEditMsg
+  | WebviewRestartSessionMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -142,7 +147,14 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
 export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
   if (!value || typeof value !== 'object') return false;
   const t = (value as { type?: unknown }).type;
-  return t === 'ready' || t === 'run' || t === 'runAll' || t === 'stop' || t === 'edit';
+  return (
+    t === 'ready' ||
+    t === 'run' ||
+    t === 'runAll' ||
+    t === 'stop' ||
+    t === 'edit' ||
+    t === 'restartSession'
+  );
 }
 
 export function isRunEvent(value: unknown): value is RunEvent {

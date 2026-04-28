@@ -35,6 +35,16 @@ export function registerCommands(
       ctrl.stop();
     }),
 
+    vscode.commands.registerCommand('testbench.restartSession', async () => {
+      const ctrl = activeController(provider);
+      if (!ctrl) return notifyNoActive();
+      await ctrl.closeSession();
+      vscode.window.setStatusBarMessage(
+        'TestBench: session closed — next F5 starts a fresh browser',
+        3000,
+      );
+    }),
+
     vscode.commands.registerCommand('testbench.toggleBreakpoint', () => {
       // Wired in webview today; this command exists so users can bind it via
       // keybindings.json. Phase 2 work.

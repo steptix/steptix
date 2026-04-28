@@ -19,3 +19,4 @@ tags: [smoke]
 6. Click the Sign in button
 2. [interactive]
 7. Click logout
+- Click "Sign out" button

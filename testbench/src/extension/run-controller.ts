@@ -4,9 +4,12 @@ import {
   ApiClientError,
   EnvParseError,
   extractSteps,
+  parseConfig,
+  parseParameters,
   readEnvFile,
   reportError,
   resolveEnvFile,
+  resolveSection,
   type ErrorPayload,
   type HostToWebviewMsg,
   type RunEvent,
@@ -37,6 +40,12 @@ export class RunController {
   private active: AbortController | null = null;
   /** Last resolved .env path — exposed for the "Reveal .env" command. */
   private lastResolvedEnvPath: string | null = null;
+  /**
+   * True once a run has succeeded for this controller's session. Subsequent
+   * F5s skip the `config` field in the request body, since the server only
+   * accepts config on the first request. Reset by `closeSession`.
+   */
+  private configSentForSession = false;
 
   constructor(private readonly ctx: RunContext) {}
 
@@ -50,6 +59,48 @@ export class RunController {
 
   stop(): void {
     this.active?.abort();
+  }
+
+  /**
+   * Tell the server to drop this session and close its browser. Safe to call
+   * even when no run is in flight. Returns once the DELETE has been issued
+   * (best-effort — the server may already be gone).
+   */
+  async closeSession(): Promise<void> {
+    const out = getOutputChannel();
+    const ts = () => new Date().toISOString().slice(11, 23);
+
+    // Resolve env just to get SERVER_URL + SERVER_API_KEY. Anything missing
+    // is silently ignored — we want close to be cheap and forgiving.
+    const settings = vscode.workspace.getConfiguration('testbench');
+    const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
+    const filePath = this.ctx.document.uri.fsPath;
+
+    const envResolution = await resolveEnvFile({
+      testFile: filePath,
+      workspaceRoot: this.ctx.workspaceFolder.uri.fsPath,
+      fallbackPath: fallbackSetting,
+    });
+    if (!envResolution.hit) return;
+
+    let env: Record<string, string>;
+    try {
+      env = await readEnvFile(envResolution.path);
+    } catch {
+      return;
+    }
+    const serverUrl = env['SERVER_URL']?.trim();
+    const apiKey = env['SERVER_API_KEY']?.trim();
+    if (!serverUrl || !apiKey) return;
+
+    out.appendLine(`[${ts()}] closing server session for ${filePath}`);
+    this.active?.abort();
+
+    const client = new ApiClient({ serverUrl, apiKey });
+    await client.closeSession(filePath);
+    // Reset so the next F5 sends config to recreate the session.
+    this.configSentForSession = false;
+    out.appendLine(`[${ts()}] session closed`);
   }
 
   /** Send the `init` message to the webview after it reports ready. */
@@ -139,13 +190,36 @@ export class RunController {
       return this.fail(payload, log);
     }
 
-    log(`running ${allSteps.length} step(s) on ${serverUrl}`);
+    // Parse Config / Parameters from the test file. $VAR references in
+    // values are resolved against the loaded .env so secrets stay out of
+    // the file under source control.
+    const rawConfig = parseConfig(text);
+    const rawParameters = parseParameters(text);
+    const resolvedParameters = resolveSection(rawParameters, env);
+    const sessionConfig: { baseUrl?: string; timeout?: string } = {};
+    const baseUrl = rawConfig['baseUrl'];
+    if (baseUrl) sessionConfig.baseUrl = resolveValue(baseUrl, env);
+    const timeout = rawConfig['timeout'];
+    if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
+
+    log(
+      `running ${allSteps.length} step(s) on ${serverUrl}` +
+        (sessionConfig.baseUrl ? ` baseUrl=${sessionConfig.baseUrl}` : '') +
+        (Object.keys(resolvedParameters).length > 0
+          ? ` parameters=[${Object.keys(resolvedParameters).join(',')}]`
+          : ''),
+    );
 
     // 5. Stream events
     const sessionId = filePath;
     const client = new ApiClient({ serverUrl, apiKey });
     const ac = new AbortController();
     this.active = ac;
+
+    // The server rejects `config` on a follow-up request to an existing
+    // session. Only include it on the first F5 after a fresh session was
+    // created (or after the user explicitly hits "Restart Session").
+    const includeConfig = !this.configSentForSession;
 
     try {
       const events = client.streamSteps(
@@ -154,6 +228,12 @@ export class RunController {
           steps: allSteps.map((s) => s.instruction),
           sourceLines: allSteps.map((s) => s.line),
           env,
+          ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
+            config: sessionConfig,
+          }),
+          ...(Object.keys(resolvedParameters).length > 0 && {
+            parameters: resolvedParameters,
+          }),
         },
         ac.signal,
       );
@@ -162,6 +242,12 @@ export class RunController {
         log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
         this.post({ type: 'runEvent', event });
       }
+
+      // Mark config as sent so the next F5 reuses the existing session.
+      // Only set after the stream completed without throwing — if the run
+      // failed before the server created the session, we want the next try
+      // to include config again.
+      this.configSentForSession = true;
 
       log(`run completed`);
       return { ok: true };
@@ -244,4 +330,11 @@ function mapApiErrorToPayload(
 function timestamp(): string {
   const d = new Date();
   return d.toISOString().slice(11, 23);
+}
+
+/** Resolve a `$VAR` reference against env, or return the literal value. */
+function resolveValue(value: string, env: Record<string, string>): string {
+  if (!value.startsWith('$')) return value;
+  const name = value.slice(1);
+  return env[name] ?? value;
 }

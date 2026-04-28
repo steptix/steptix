@@ -34,14 +34,31 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
     panel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
-    // Hand non-test markdown back to the default editor.
-    if (!shouldClaimDocument(document)) {
-      panel.dispose();
-      await openAsPlainMarkdown(document.uri);
+    const out = getOutputChannel();
+    const ts = () => new Date().toISOString().slice(11, 23);
+    out.appendLine(`[${ts()}] resolveCustomTextEditor: ${document.uri.fsPath}`);
+
+    const claim = shouldClaimDocument(document);
+    out.appendLine(`[${ts()}]   shouldClaimDocument=${claim} (testbench.openMarkdownAsTest=${vscode.workspace.getConfiguration('testbench').get('openMarkdownAsTest')})`);
+
+    // For non-test markdown, render a redirect page rather than disposing the
+    // panel. Disposing inside resolveCustomTextEditor races with VS Code's
+    // internal claimWebview/setInput flow and triggers OverlayWebview errors.
+    // The redirect button calls vscode.openWith on click — the user's one
+    // click is the price of staying out of VS Code's lifecycle.
+    if (!claim) {
+      panel.webview.options = { enableScripts: true };
+      panel.webview.html = buildNonTestRedirectHtml();
+      panel.webview.onDidReceiveMessage(async (raw: unknown) => {
+        if (raw && typeof raw === 'object' && (raw as { type?: string }).type === 'openAsText') {
+          await openAsPlainMarkdown(document.uri);
+        }
+      });
       return;
     }
 
     const folder = workspaceFolderFor(document.uri);
+    out.appendLine(`[${ts()}]   workspaceFolder=${folder?.uri.fsPath ?? '(none)'}`);
     if (!folder) {
       panel.webview.options = { enableScripts: false };
       panel.webview.html = buildNoWorkspaceHtml();
@@ -54,7 +71,6 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
         vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview'),
       ],
     };
-    panel.webview.html = await buildWebviewHtml(this.context, panel.webview);
 
     const controller = new RunController({
       document,
@@ -63,14 +79,28 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
     });
     this.controllers.set(document.uri, controller);
 
-    // Forward webview → host messages.
+    // CRITICAL: attach the message listener BEFORE setting webview.html.
+    // Setting .html starts the webview's script execution, which can post
+    // `ready` immediately. VS Code drops messages whose listener isn't
+    // attached yet — that races our init handshake.
     const sub = panel.webview.onDidReceiveMessage((raw: unknown) => {
+      // Diagnostic channel: the inline boot script in webview-html posts
+      // `webviewError` and `boot` events directly to the host so we can see
+      // CSP/script-load failures in the TestBench output channel.
+      if (raw && typeof raw === 'object' && (raw as { type?: string }).type === 'webviewError') {
+        const r = raw as { label?: string; detail?: string };
+        getOutputChannel().appendLine(`[webview ${r.label}] ${r.detail}`);
+        return;
+      }
       if (!isWebviewMsg(raw)) {
         getOutputChannel().appendLine(`ignored unknown webview message: ${JSON.stringify(raw)}`);
         return;
       }
       void this.handleWebviewMessage(controller, document, raw);
     });
+
+    // Now that the message listener is attached, hand the webview its HTML.
+    panel.webview.html = await buildWebviewHtml(this.context, panel.webview);
 
     // Forward external document edits → webview so the editor stays in sync.
     const docSub = vscode.workspace.onDidChangeTextDocument((e) => {
@@ -92,6 +122,10 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
 
     panel.onDidDispose(() => {
       controller.stop();
+      // Best-effort: tell the server to drop the session + close its browser.
+      // Errors here don't matter — the user closed the tab; the server will
+      // garbage-collect on its own schedule too.
+      void controller.closeSession().catch(() => {});
       this.controllers.delete(document.uri);
       sub.dispose();
       docSub.dispose();
@@ -109,6 +143,9 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
         const wordWrap = vscode.workspace
           .getConfiguration('testbench')
           .get<boolean>('editor.wordWrap', true);
+        getOutputChannel().appendLine(
+          `[webview ready] sending init: ${document.getText().length} chars, wordWrap=${wordWrap}`,
+        );
         controller.sendInit(wordWrap);
         break;
       }
@@ -120,6 +157,13 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
         break;
       case 'stop':
         controller.stop();
+        break;
+      case 'restartSession':
+        await controller.closeSession();
+        vscode.window.setStatusBarMessage(
+          'TestBench: session closed — next F5 starts a fresh browser',
+          3000,
+        );
         break;
       case 'edit': {
         // Persist webview edits back to the TextDocument.
@@ -144,5 +188,32 @@ function buildNoWorkspaceHtml(): string {
 </head><body>
 <h2>TB030: TestBench needs an open folder.</h2>
 <p>File → Open Folder and pick the folder containing your tests.</p>
+</body></html>`;
+}
+
+function buildNonTestRedirectHtml(): string {
+  // Shown when a .md without a "## Steps" heading lands on the TestBench
+  // editor. Clicking the button posts back to the host which re-opens the
+  // file in the default text editor.
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>TestBench</title>
+<style>
+  body{font-family:-apple-system,Segoe UI,sans-serif;padding:32px;color:#ddd;background:#1e1e1e;min-height:100vh;box-sizing:border-box;margin:0;}
+  h2{color:#4ec9b0;margin-top:0;}
+  p{line-height:1.55;}
+  button{margin-top:16px;padding:8px 14px;background:#0e639c;color:#fff;border:0;border-radius:4px;font-size:13px;cursor:pointer;}
+  button:hover{background:#1177bb;}
+  code{background:#252526;padding:2px 6px;border-radius:3px;}
+</style>
+</head><body>
+<h2>Not a TestBench test file</h2>
+<p>This Markdown file has no <code>## Steps</code> heading, so there's nothing for TestBench to run.</p>
+<button id="open-text">Open as Plain Markdown</button>
+<script>
+  const vscode = acquireVsCodeApi();
+  document.getElementById('open-text').addEventListener('click', () => {
+    vscode.postMessage({ type: 'openAsText' });
+  });
+</script>
 </body></html>`;
 }
