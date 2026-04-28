@@ -3,6 +3,7 @@ import {
   ApiClient,
   ApiClientError,
   EnvParseError,
+  isUserAbort,
   classifySelectedSteps,
   extractSteps,
   interpretReplCommand,
@@ -319,6 +320,13 @@ export class RunController {
       log(`run ${status}`);
       return { ok: !anyFailed };
     } catch (err) {
+      // User-initiated Stop is the expected outcome of clicking Stop, not an
+      // error. Suppress the noisy TB014 toast and just close the run cleanly.
+      if (isUserAbort(err)) {
+        this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+        log('run aborted by user');
+        return { ok: true };
+      }
       const payload = mapApiErrorToPayload(err, { serverUrl, envPath: envResolution.path });
       this.post({ type: 'runEvent', event: { type: 'done', status: 'error' } });
       return this.fail(payload, log);
@@ -528,8 +536,10 @@ function mapApiErrorToPayload(
       case 'stream-dropped':
         return reportError('TB014', { serverUrl: ctx.serverUrl, reason: err.message });
       case 'aborted':
-        // User-initiated stop is not a real error — fold into a benign code.
-        return reportError('TB014', { serverUrl: ctx.serverUrl, reason: 'aborted by user' });
+        // Defense-in-depth — runLines's catch already intercepts user
+        // aborts via isUserAbort() and emits done(aborted) without an
+        // error toast. This branch is unreachable in normal flow.
+        return reportError('TB014', { serverUrl: ctx.serverUrl, reason: 'aborted' });
       case 'connect-failed':
       default:
         return reportError('TB010', { serverUrl: ctx.serverUrl, reason: err.message });

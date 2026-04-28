@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { ApiClient, ApiClientError } from '../dist/api-client.js';
+import { ApiClient, ApiClientError, isUserAbort } from '../dist/api-client.js';
 
 function streamingResponse(chunks, status = 200) {
   const encoder = new TextEncoder();
@@ -136,4 +136,29 @@ test('streamSteps: encodes session ID with special chars', async () => {
   const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: fetchImpl });
   await collect(client.streamSteps('C:\\path with spaces\\file.md', { steps: ['x'] }, new AbortController().signal));
   assert.match(captured, /sessions\/C%3A%5Cpath%20with%20spaces%5Cfile\.md\/steps/);
+});
+
+// ---------------------------------------------------------------------------
+// isUserAbort — used by the run-controller to distinguish Stop from network failure
+// ---------------------------------------------------------------------------
+
+test('isUserAbort: true for ApiClientError with kind=aborted', () => {
+  assert.equal(isUserAbort(new ApiClientError('aborted', 'aborted')), true);
+});
+
+test('isUserAbort: false for other ApiClientError kinds', () => {
+  for (const kind of ['connect-failed', 'unauthorized', 'not-found', 'server-error', 'stream-dropped']) {
+    assert.equal(isUserAbort(new ApiClientError(kind, kind)), false, kind);
+  }
+});
+
+test('isUserAbort: false for plain Error', () => {
+  assert.equal(isUserAbort(new Error('aborted')), false);
+});
+
+test('isUserAbort: false for non-error values', () => {
+  assert.equal(isUserAbort(null), false);
+  assert.equal(isUserAbort(undefined), false);
+  assert.equal(isUserAbort('aborted'), false);
+  assert.equal(isUserAbort({ kind: 'aborted' }), false);
 });

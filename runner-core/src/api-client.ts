@@ -46,6 +46,15 @@ export class ApiClientError extends Error {
   }
 }
 
+/**
+ * True when the error represents a user-initiated abort (e.g. Stop button)
+ * rather than a network failure. Callers use this to suppress the noisy
+ * "connection lost" error toast on intentional cancellation.
+ */
+export function isUserAbort(err: unknown): boolean {
+  return err instanceof ApiClientError && err.kind === 'aborted';
+}
+
 export interface ApiClientOptions {
   serverUrl: string;
   apiKey: string;
