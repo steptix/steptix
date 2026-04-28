@@ -10,6 +10,7 @@ import { hostBridge } from "./lib/host-bridge.js";
 import { clearRunningStatuses } from "./lib/status-cleanup.js";
 import { nextBreakpointStop } from "./lib/breakpoint.js";
 import { collectVariables, parseParametersInline, maskIfSecretInline } from "./lib/variables-panel.js";
+import { computeRunnable } from "./lib/runnable-trim.js";
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -260,22 +261,23 @@ function TestBenchRunner() {
 
   // Execute by sending a `run` message to the host. Per-step events flow back
   // via the message subscription effect below.
-  const executeSteps = useCallback((selectedSteps, _preserveSelection = true, label = "selected lines") => {
+  const executeSteps = useCallback((selectedSteps, _preserveSelection = true, label = "selected lines", options = {}) => {
     if (runningRef.current || selectedSteps.length === 0) return;
 
-    // Honor breakpoints client-side: the server doesn't pause on them yet, so
-    // we trim the step list to stop before the first breakpoint encountered
-    // after the start line. The first step is always allowed to run, even if
-    // it sits on a breakpoint — that's how the user "continues past" one.
-    const sortedSteps = [...selectedSteps].sort((a, b) => a.id - b.id);
-    let pausedAt = null;
-    const runnable = [sortedSteps[0]];
-    for (let i = 1; i < sortedSteps.length; i++) {
-      if (breakpoints.has(sortedSteps[i].id)) {
-        pausedAt = sortedSteps[i].id;
-        break;
+    // Trim the step list at the first breakpoint encountered. By default, a
+    // breakpoint on the first selected line stops execution before it; Resume
+    // passes skipBreakpointAtStart so it can continue past its own pause.
+    const { runnable, pausedAt } = computeRunnable(selectedSteps, breakpoints, options);
+
+    if (runnable.length === 0) {
+      // Hit a breakpoint on the very first line — nothing to send to the
+      // server. Land the arrow now and let the user decide (Resume / Stop).
+      if (pausedAt != null) {
+        log(`⏸ Paused at breakpoint on line ${pausedAt}`, "info");
+        setBreakpointStop(pausedAt);
+        pausedAtRef.current = null;
       }
-      runnable.push(sortedSteps[i]);
+      return;
     }
 
     runningRef.current = true;
@@ -369,7 +371,11 @@ function TestBenchRunner() {
     selectedLinesRef.current = new Set();
     const startIdx = steps.findIndex((step) => step.id === target);
     if (startIdx === -1) return;
-    executeSteps(steps.slice(startIdx), false, `from breakpoint at line ${target}`);
+    executeSteps(steps.slice(startIdx), false, `from breakpoint at line ${target}`, {
+      // Skip the breakpoint check on the first step — that's the line the
+      // user is explicitly resuming through.
+      skipBreakpointAtStart: true,
+    });
   };
 
   const handleStop = () => {
