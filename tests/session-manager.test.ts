@@ -413,6 +413,90 @@ describe('SessionManager', () => {
       expect(executeStep).not.toHaveBeenCalled();
     });
 
+    it('emits a capture event for each [output:] variable extracted', async () => {
+      vi.mocked(executeStep).mockClear();
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['orderId'] = 'ORD-789';
+        }
+        return {
+          index: 1,
+          instruction: 'mocked',
+          status: 'passed',
+          turns: [],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const events: { type: string; line?: number; name?: string; value?: string }[] = [];
+      await manager.executeSteps(
+        'session-1',
+        { steps: ['[output: orderId] Get the order ID'] },
+        (event) => events.push(event as any),
+      );
+
+      const captures = events.filter((e) => e.type === 'capture');
+      expect(captures).toHaveLength(1);
+      expect(captures[0]).toEqual({
+        type: 'capture',
+        line: 1,
+        name: 'orderId',
+        value: 'ORD-789',
+      });
+    });
+
+    it('emits multiple capture events when a step extracts multiple vars', async () => {
+      vi.mocked(executeStep).mockClear();
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['firstName'] = 'Alice';
+          opts.resolvedParameters['lastName'] = 'Smith';
+        }
+        return {
+          index: 1,
+          instruction: 'mocked',
+          status: 'passed',
+          turns: [],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const events: { type: string; name?: string }[] = [];
+      await manager.executeSteps(
+        'session-1',
+        { steps: ['[output: firstName] [output: lastName] Get the user details'] },
+        (event) => events.push(event as any),
+      );
+
+      const captures = events.filter((e) => e.type === 'capture');
+      expect(captures.map((c) => c.name).sort()).toEqual(['firstName', 'lastName']);
+    });
+
+    it('does NOT emit a capture event when [output:] var was not actually extracted', async () => {
+      vi.mocked(executeStep).mockClear();
+      // Mock returns without setting resolvedParameters['orderId']
+      vi.mocked(executeStep).mockImplementationOnce(async () => ({
+        index: 1,
+        instruction: 'mocked',
+        status: 'passed',
+        turns: [],
+        durationMs: 50,
+        retried: false,
+      }));
+
+      const events: { type: string }[] = [];
+      await manager.executeSteps(
+        'session-1',
+        { steps: ['[output: missingVar] Try to get something'] },
+        (event) => events.push(event as any),
+      );
+
+      const captures = events.filter((e) => e.type === 'capture');
+      expect(captures).toHaveLength(0);
+    });
+
     it('parses single [output: var] prefix correctly', async () => {
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
         // The instruction should have the [output:] stripped and [store as:] appended

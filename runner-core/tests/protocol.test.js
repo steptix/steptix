@@ -44,7 +44,7 @@ test('isWebviewMsg: rejects garbage', () => {
 });
 
 test('isRunEvent: accepts every event variant', () => {
-  for (const type of ['step:start', 'step:pass', 'step:fail', 'output', 'done']) {
+  for (const type of ['step:start', 'step:pass', 'step:fail', 'output', 'capture', 'done']) {
     assert.equal(isRunEvent({ type }), true, type);
   }
 });

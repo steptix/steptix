@@ -9,6 +9,7 @@ import { shouldSnapshotSelection, getSelectionsToRestore } from "./lib/gutter-ri
 import { hostBridge } from "./lib/host-bridge.js";
 import { clearRunningStatuses } from "./lib/status-cleanup.js";
 import { nextBreakpointStop } from "./lib/breakpoint.js";
+import { collectVariables, parseParametersInline, maskIfSecretInlineInline } from "./lib/variables-panel.js";
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -82,6 +83,14 @@ function TestBenchRunner() {
   const [pendingPrompt, setPendingPrompt] = useState(null);
   const [composerText, setComposerText] = useState("");
   const composerInputRef = useRef(null);
+  // Live values for the Variables panel: [input:] answers we collected and
+  // [output:] captures the server emitted via `capture` events. Declared
+  // parameter values are derived from the script + workspace .env at run
+  // start (we don't have direct access to .env here; the host fills these
+  // when it sees the prompt cycle, and parseParameters' raw $VARs render
+  // as-is when no .env data is available).
+  const [runtimeVariables, setRuntimeVariables] = useState({});
+  const [variablesCollapsed, setVariablesCollapsed] = useState(false);
 
   const editorHostRef = useRef(null);
   const editorRef = useRef(null);
@@ -332,6 +341,7 @@ function TestBenchRunner() {
     setSelectedLines(new Set());
     selectedLinesRef.current = new Set();
     setRunLog([]);
+    setRuntimeVariables({});
     stopRef.current = true;
     finishRun();
     const editor = editorRef.current;
@@ -408,6 +418,13 @@ function TestBenchRunner() {
   const submitComposer = () => {
     if (!pendingPrompt) return;
     const text = composerText;
+    // Stash [input: var] answers for the Variables panel — the host already
+    // pipes them into per-request parameters; this just lets the UI reflect
+    // them immediately.
+    if (pendingPrompt.mode === "input" && pendingPrompt.varName) {
+      const varName = pendingPrompt.varName;
+      setRuntimeVariables((prev) => ({ ...prev, [varName]: text }));
+    }
     hostBridge.postPromptResponse(text);
     if (pendingPrompt.mode === "interactive") {
       // Stay open — host will either send another `prompt` (after a step
@@ -677,6 +694,9 @@ function TestBenchRunner() {
             log(`✗ Step on line ${event.line} failed: ${event.error}`, "fail");
           } else if (event.type === "output") {
             log(event.msg, event.kind === "error" ? "fail" : "info");
+          } else if (event.type === "capture") {
+            setRuntimeVariables((prev) => ({ ...prev, [event.name]: event.value }));
+            log(`✎ ${event.name} ← ${maskIfSecretInline(event.name, event.value)}`, "info");
           } else if (event.type === "done") {
             log(event.status === "passed" ? "✓ Run completed" : `■ Run ended (${event.status})`,
                 event.status === "passed" ? "pass" : "fail");
@@ -888,6 +908,15 @@ function TestBenchRunner() {
     };
   }, [resizingOutput]);
 
+  const variablesRows = useMemo(() => {
+    // Show declared `## Parameters` values raw ($VAR placeholders included).
+    // The host resolves them against .env when sending the request, but the
+    // webview never sees that resolution. Live captures fill in real values
+    // via the runtime map.
+    const declared = parseParametersInline(scriptText);
+    return collectVariables(scriptText, declared, runtimeVariables);
+  }, [scriptText, runtimeVariables]);
+
   const passCount = Object.values(statuses).filter((status) => status === STATUS.PASS).length;
   const failCount = Object.values(statuses).filter((status) => status === STATUS.FAIL).length;
   const runCount = Object.values(statuses).filter((status) => status !== STATUS.IDLE).length;
@@ -1059,6 +1088,46 @@ function TestBenchRunner() {
         <div onMouseDown={() => setResizingOutput(true)} onMouseEnter={() => setSplitterHover(true)} onMouseLeave={() => setSplitterHover(false)} title="Resize output log" style={{ width: 5, flexShrink: 0, cursor: "col-resize", background: resizingOutput ? "#1d4ed8" : splitterHover ? colors.border : "transparent", borderLeft: resizingOutput || splitterHover ? "none" : `1px solid ${colors.border}`, transition: "background 120ms ease" }} />
 
         <div style={{ width: outputWidth, flexShrink: 0, background: colors.panelAlt, display: "flex", flexDirection: "column" }}>
+          {variablesRows.length > 0 && (
+            <div style={{ borderBottom: `1px solid ${colors.border}`, background: colors.panelAlt, flexShrink: 0 }}>
+              <div
+                onClick={() => setVariablesCollapsed((v) => !v)}
+                style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 10, color: colors.faint, letterSpacing: 2, fontWeight: 700, userSelect: "none" }}
+              >
+                <ChevronIcon open={!variablesCollapsed} />
+                <span>VARIABLES</span>
+                <span style={{ marginLeft: "auto", letterSpacing: 0, fontWeight: 400 }}>
+                  {variablesRows.length}
+                </span>
+              </div>
+              {!variablesCollapsed && (
+                <div style={{ padding: "0 10px 8px", display: "flex", flexDirection: "column", gap: 2, maxHeight: 220, overflowY: "auto" }}>
+                  {variablesRows.map((row) => {
+                    const hasValue = row.value !== undefined && row.value !== "";
+                    const display = hasValue ? maskIfSecretInline(row.name, String(row.value)) : "(unset)";
+                    const badgeColor =
+                      row.source === "param"
+                        ? isLight ? "#1e40af" : "#60a5fa"
+                        : row.source === "input"
+                          ? isLight ? "#7c3aed" : "#c4b5fd"
+                          : isLight ? "#15803d" : "#4ade80";
+                    return (
+                      <div key={row.name} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, padding: "2px 6px", borderRadius: 3, fontFamily: "JetBrains Mono, monospace" }}>
+                        <span style={{ fontSize: 8, fontWeight: 700, color: badgeColor, letterSpacing: 0.5, minWidth: 38, textTransform: "uppercase" }}>
+                          {row.source}
+                        </span>
+                        <span style={{ color: colors.textStrong, minWidth: 0, flexShrink: 0 }}>{row.name}</span>
+                        <span style={{ color: colors.faint }}>=</span>
+                        <span style={{ color: hasValue ? colors.text : colors.faint, fontStyle: hasValue ? "normal" : "italic", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={display}>
+                          {display}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
           <div style={{ padding: "10px 14px", borderBottom: `1px solid ${colors.border}`, fontSize: 10, color: colors.faint, letterSpacing: 2, fontWeight: 700 }}>
             OUTPUT LOG
           </div>

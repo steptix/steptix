@@ -43,12 +43,29 @@ export interface OutputEvent {
   kind: 'info' | 'warn' | 'error';
 }
 
+/**
+ * Emitted whenever an `[output: var]` step extracts a value. Lets the
+ * webview update the Variables panel live as captures happen.
+ */
+export interface CaptureEvent {
+  type: 'capture';
+  line: number;
+  name: string;
+  value: string;
+}
+
 export interface DoneEvent {
   type: 'done';
   status: RunStatus;
 }
 
-export type RunEvent = StepStartEvent | StepPassEvent | StepFailEvent | OutputEvent | DoneEvent;
+export type RunEvent =
+  | StepStartEvent
+  | StepPassEvent
+  | StepFailEvent
+  | OutputEvent
+  | CaptureEvent
+  | DoneEvent;
 
 // ---------------------------------------------------------------------------
 // Host → webview
@@ -202,6 +219,7 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'step:pass' ||
     t === 'step:fail' ||
     t === 'output' ||
+    t === 'capture' ||
     t === 'done'
   );
 }

@@ -50,6 +50,7 @@ export type RunEvent =
   | { type: 'step:pass'; line: number; output?: string; screenshot?: string }
   | { type: 'step:fail'; line: number; error: string; screenshot?: string }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
+  | { type: 'capture'; line: number; name: string; value: string }
   | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' };
 
 export type RunEventListener = (event: RunEvent) => void;
@@ -714,6 +715,15 @@ export class SessionManager {
             stepOutputs[varName] = resolvedParameters[varName]!;
             // Accumulate into session outputs
             session.outputs[varName] = resolvedParameters[varName]!;
+            // Surface the capture to streaming clients so the Variables
+            // panel can update live. We only emit for values that were
+            // actually set — missing extractions stay silent.
+            emit({
+              type: 'capture',
+              line: sourceLineFor(i),
+              name: varName,
+              value: resolvedParameters[varName]!,
+            });
           }
         }
 
