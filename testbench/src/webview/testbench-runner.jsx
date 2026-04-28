@@ -11,6 +11,7 @@ import { clearRunningStatuses } from "./lib/status-cleanup.js";
 import { nextBreakpointStop } from "./lib/breakpoint.js";
 import { collectVariables, parseParametersInline, maskIfSecretInline } from "./lib/variables-panel.js";
 import { computeRunnable } from "./lib/runnable-trim.js";
+import { filterToStepLines } from "./lib/step-lines-inline.js";
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -264,10 +265,21 @@ function TestBenchRunner() {
   const executeSteps = useCallback((selectedSteps, _preserveSelection = true, label = "selected lines", options = {}) => {
     if (runningRef.current || selectedSteps.length === 0) return;
 
-    // Trim the step list at the first breakpoint encountered. By default, a
-    // breakpoint on the first selected line stops execution before it; Resume
-    // passes skipBreakpointAtStart so it can continue past its own pause.
-    const { runnable, pausedAt } = computeRunnable(selectedSteps, breakpoints, options);
+    // The selection can include non-step lines (headings / blanks / prose).
+    // Filter to real step lines first so the breakpoint trim operates on
+    // the same line set the host will actually run; otherwise a breakpoint
+    // on the first real step gets bypassed when the user starts running
+    // from a heading or blank line above it.
+    //
+    // Edge case: no step lines in the selection at all — then we just hand
+    // the raw line ids to the host and let resolveRunLines expand them.
+    // No trim is applicable in that case.
+    const stepOnly = filterToStepLines(scriptText, selectedSteps);
+    const trimInput = stepOnly.length > 0 ? stepOnly : selectedSteps;
+    const { runnable, pausedAt } =
+      stepOnly.length > 0
+        ? computeRunnable(stepOnly, breakpoints, options)
+        : { runnable: trimInput, pausedAt: null };
 
     if (runnable.length === 0) {
       // Hit a breakpoint on the very first line — nothing to send to the
