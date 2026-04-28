@@ -6,6 +6,7 @@ import {
   isUserAbort,
   classifySelectedSteps,
   extractSteps,
+  resolveRunLines,
   interpretReplCommand,
   maskIfSecret,
   parseConfig,
@@ -206,8 +207,12 @@ export class RunController {
     const apiKey = env['SERVER_API_KEY'].trim();
 
     // 4. Classify the requested lines into normal steps / [input:] / [interactive].
+    // Expand the user's raw selection to actual step lines first — clicking
+    // on a heading or blank line should run the steps below it rather than
+    // failing with TB021.
     const text = this.ctx.document.getText();
-    const classified = classifySelectedSteps(text, lines);
+    const effectiveLines = resolveRunLines(text, lines);
+    const classified = classifySelectedSteps(text, effectiveLines);
     if (classified.length === 0) {
       const payload = reportError('TB021', {});
       return this.fail(payload, log);

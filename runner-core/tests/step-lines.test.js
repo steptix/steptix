@@ -8,6 +8,7 @@ import {
   isTestFile,
   nearestStepAtOrAbove,
   nearestStepAtOrBelow,
+  resolveRunLines,
 } from '../dist/step-lines.js';
 
 test('isTestFile: detects ## Steps', () => {
@@ -193,6 +194,65 @@ test('classifySelectedSteps: mixes step / input / interactive in order', () => {
   assert.equal(got[2].kind, 'step');
   assert.equal(got[3].kind, 'interactive');
   assert.equal(got[4].kind, 'step');
+});
+
+// ---------------------------------------------------------------------------
+// resolveRunLines — translates a user line selection into the actual step
+// lines to run. Falls back to "all steps at or below first selected line"
+// when the selection itself contains no step lines (e.g. user clicked the
+// "## Steps" heading or a blank line).
+// ---------------------------------------------------------------------------
+
+const SAMPLE = [
+  '# Title',          // 1
+  '## Steps',         // 2
+  '1. step a',        // 3
+  '2. step b',        // 4
+  '',                 // 5
+  '3. step c',        // 6
+].join('\n');
+
+test('resolveRunLines: empty selection returns every step line', () => {
+  assert.deepEqual(resolveRunLines(SAMPLE, []), [3, 4, 6]);
+});
+
+test('resolveRunLines: selection that is already a step line passes through', () => {
+  assert.deepEqual(resolveRunLines(SAMPLE, [4]), [4]);
+});
+
+test('resolveRunLines: keeps step lines, drops non-step lines from a mixed selection', () => {
+  // User selected the heading + first two steps; only the steps survive.
+  assert.deepEqual(resolveRunLines(SAMPLE, [2, 3, 4]), [3, 4]);
+});
+
+test('resolveRunLines: heading-only selection falls back to all steps at or below', () => {
+  // Cursor on "## Steps" (line 2) — selection has no step lines, so we run
+  // every step at or below line 2: lines 3, 4, 6.
+  assert.deepEqual(resolveRunLines(SAMPLE, [2]), [3, 4, 6]);
+});
+
+test('resolveRunLines: blank-line-only selection falls back to next step downward', () => {
+  // Cursor on the blank line 5 — fallback returns step lines >= 5: just line 6.
+  assert.deepEqual(resolveRunLines(SAMPLE, [5]), [6]);
+});
+
+test('resolveRunLines: selection past the last step returns empty (nothing to run)', () => {
+  const text = SAMPLE + '\n7. trailing prose without numbered list under Steps';
+  // Last line is 7 but the "## Steps" section ends at line 6 in this layout
+  // (no further headings, so the section runs to EOF — but the trailing
+  // line is still a step at line 7). Pick a line guaranteed past EOF:
+  assert.deepEqual(resolveRunLines(SAMPLE, [99]), []);
+});
+
+test('resolveRunLines: mixed selection with one valid step keeps just that step', () => {
+  // Lines 1, 5, 6 — only 6 is a step.
+  assert.deepEqual(resolveRunLines(SAMPLE, [1, 5, 6]), [6]);
+});
+
+test('resolveRunLines: selection above Steps falls back to all steps', () => {
+  // Cursor on line 1 (# Title). No step lines selected → fall back to steps
+  // at or below line 1, which means every step.
+  assert.deepEqual(resolveRunLines(SAMPLE, [1]), [3, 4, 6]);
 });
 
 test('classifySelectedSteps: ignores [input:]-shaped text outside Steps section', () => {

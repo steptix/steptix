@@ -157,6 +157,32 @@ export function classifySelectedSteps(
   return filtered.map((s) => classifyOne(s));
 }
 
+/**
+ * Translate a user's line selection into the step lines that should actually
+ * run. The contract:
+ *
+ *  - Empty `requestedLines` → every step in the document.
+ *  - If any selected line is a step line, return only those (preserving
+ *    document order).
+ *  - If the selection contains no step lines (user clicked a heading,
+ *    blank line, prose), fall back to "every step at or below the first
+ *    selected line" — so clicking `## Steps` and pressing Run executes
+ *    the whole section instead of failing with TB021.
+ *  - If the fallback finds nothing (selection is past the last step),
+ *    return `[]` — caller decides how to surface that.
+ */
+export function resolveRunLines(text: string, requestedLines: number[]): number[] {
+  const all = extractSteps(text);
+  if (requestedLines.length === 0) return all.map((s) => s.line);
+
+  const requested = new Set(requestedLines);
+  const matched = all.filter((s) => requested.has(s.line)).map((s) => s.line);
+  if (matched.length > 0) return matched;
+
+  const minSelected = Math.min(...requestedLines);
+  return all.filter((s) => s.line >= minSelected).map((s) => s.line);
+}
+
 function classifyOne(step: { line: number; instruction: string }): ClassifiedStep {
   const inputMatch = step.instruction.match(INPUT_STEP_PATTERN);
   if (inputMatch) {
