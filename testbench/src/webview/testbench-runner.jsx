@@ -373,12 +373,22 @@ function TestBenchRunner() {
   };
 
   const handleStop = () => {
-    if (!runningRef.current) return;
-    stopRef.current = true;
-    pausedRef.current = false;
-    setPaused(false);
-    hostBridge.postStop();
-    log("■ Stop requested", "fail");
+    // Two cases — both should respond to Stop:
+    //   1. A run is in progress → tell the host to abort.
+    //   2. We're paused at a breakpoint → clear the pause so the user
+    //      can pick a fresh starting point.
+    if (runningRef.current) {
+      stopRef.current = true;
+      pausedRef.current = false;
+      setPaused(false);
+      hostBridge.postStop();
+      log("■ Stop requested", "fail");
+    }
+    if (breakpointStop != null) {
+      setBreakpointStop(null);
+      pausedAtRef.current = null;
+      log("■ Breakpoint pause cleared", "info");
+    }
   };
 
   const handleRenumber = () => {
@@ -1035,7 +1045,7 @@ function TestBenchRunner() {
         >
           {breakpointStop != null ? `▶ Resume (line ${breakpointStop})` : "Resume"}
         </button>
-        <button onClick={handleStop} disabled={!running} style={{ padding: "6px 12px", background: running ? "#2a1010" : "transparent", border: "1px solid #5a2020", borderRadius: 5, color: running ? "#f87171" : "#5f3940", fontSize: 11, cursor: running ? "pointer" : "not-allowed" }}>
+        <button onClick={handleStop} disabled={!running && breakpointStop == null} style={{ padding: "6px 12px", background: (running || breakpointStop != null) ? "#2a1010" : "transparent", border: "1px solid #5a2020", borderRadius: 5, color: (running || breakpointStop != null) ? "#f87171" : "#5f3940", fontSize: 11, cursor: (running || breakpointStop != null) ? "pointer" : "not-allowed" }}>
           Stop
         </button>
         <button onClick={runSelected} disabled={running || !monacoReady} style={{ padding: "6px 16px", background: running ? "#1a2a1a" : "linear-gradient(135deg, #1d4ed8, #2563eb)", border: "none", borderRadius: 5, color: running ? "#4ade80" : "#fff", fontSize: 12, cursor: running || !monacoReady ? "not-allowed" : "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
