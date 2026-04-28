@@ -230,6 +230,14 @@ export class RunController {
     const timeout = rawConfig['timeout'];
     if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
 
+    // Surface resolved parameter values to the Variables panel. The webview
+    // never sees .env, so without this message it can only display the raw
+    // `$VAR` placeholders. Secret-named entries get masked at render time
+    // by maskIfSecretInline.
+    if (Object.keys(resolvedParameters).length > 0) {
+      this.post({ type: 'parametersResolved', values: { ...resolvedParameters } });
+    }
+
     log(
       `running ${classified.length} item(s) on ${serverUrl}` +
         (sessionConfig.baseUrl ? ` baseUrl=${sessionConfig.baseUrl}` : '') +

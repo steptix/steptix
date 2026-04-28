@@ -782,6 +782,16 @@ function TestBenchRunner() {
           setComposerText("");
           break;
 
+        case "parametersResolved":
+          // Host has loaded .env and resolved $VAR references. Fold the
+          // values into runtimeVariables so the panel shows real values
+          // instead of $VAR placeholders. Existing maskIfSecretInline
+          // (name-pattern based) still applies at render time.
+          if (msg.values && typeof msg.values === "object") {
+            setRuntimeVariables((prev) => ({ ...prev, ...msg.values }));
+          }
+          break;
+
         default:
           break;
       }

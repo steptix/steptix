@@ -11,6 +11,7 @@ test('isHostMsg: accepts every host variant', () => {
     'settingsChanged',
     'prompt',
     'promptDone',
+    'parametersResolved',
   ]) {
     assert.equal(isHostMsg({ type }), true, type);
   }

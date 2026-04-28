@@ -117,6 +117,18 @@ export interface HostPromptDoneMsg {
   type: 'promptDone';
 }
 
+/**
+ * Resolved `## Parameters` map. Sent at run start once the host has loaded
+ * .env and substituted `$VAR` references — lets the Variables panel show
+ * real values instead of the raw `$VAR` placeholders the webview parsed
+ * from the source. Secret-named entries (password / token / apikey...)
+ * are still masked at render time by the existing maskIfSecret helper.
+ */
+export interface HostParametersResolvedMsg {
+  type: 'parametersResolved';
+  values: Record<string, string>;
+}
+
 export type HostToWebviewMsg =
   | HostInitMsg
   | HostDocumentChangedMsg
@@ -124,7 +136,8 @@ export type HostToWebviewMsg =
   | HostRunErrorMsg
   | HostSettingsChangedMsg
   | HostPromptMsg
-  | HostPromptDoneMsg;
+  | HostPromptDoneMsg
+  | HostParametersResolvedMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -192,7 +205,8 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'runError' ||
     t === 'settingsChanged' ||
     t === 'prompt' ||
-    t === 'promptDone'
+    t === 'promptDone' ||
+    t === 'parametersResolved'
   );
 }
 
