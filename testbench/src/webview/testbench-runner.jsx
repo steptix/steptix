@@ -7,6 +7,7 @@ import { remapLineForChanges, remapLineSet, remapLineMap } from "./lib/line-trac
 import { getGutterContextMenuItems } from "./lib/gutter-menu.js";
 import { shouldSnapshotSelection, getSelectionsToRestore } from "./lib/gutter-rightclick.js";
 import { hostBridge } from "./lib/host-bridge.js";
+import { clearRunningStatuses } from "./lib/status-cleanup.js";
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -647,6 +648,10 @@ function TestBenchRunner() {
             pausedRef.current = false;
             setRunning(false);
             setPaused(false);
+            // Demote any line still marked RUNNING so the gutter stops
+            // blinking — happens when Stop/abort cuts a step off mid-flight
+            // and no step:pass / step:fail ever arrives for it.
+            setStatuses((prev) => clearRunningStatuses(prev));
           }
           break;
         }

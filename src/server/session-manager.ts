@@ -50,7 +50,7 @@ export type RunEvent =
   | { type: 'step:pass'; line: number; output?: string; screenshot?: string }
   | { type: 'step:fail'; line: number; error: string; screenshot?: string }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
-  | { type: 'done'; status: 'passed' | 'failed' | 'error' };
+  | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' };
 
 export type RunEventListener = (event: RunEvent) => void;
 
@@ -236,6 +236,7 @@ export class SessionManager {
     sessionId: string,
     request: StepRequest,
     onEvent?: RunEventListener,
+    signal?: AbortSignal,
   ): Promise<StepResponse> {
     let session = this.sessions.get(sessionId);
 
@@ -270,7 +271,7 @@ export class SessionManager {
     // Queue the work onto the session's promise chain so requests execute sequentially
     const resultPromise = new Promise<StepResponse>((resolve, reject) => {
       session.queueTail = session.queueTail
-        .then(() => this.executeStepsInternal(session, sessionId, request, onEvent))
+        .then(() => this.executeStepsInternal(session, sessionId, request, onEvent, signal))
         .then(resolve, reject);
     });
 
@@ -476,13 +477,14 @@ export class SessionManager {
     sessionId: string,
     request: StepRequest,
     onEvent?: RunEventListener,
+    signal?: AbortSignal,
   ): Promise<StepResponse> {
     session.status = 'executing';
 
     const results: StepResultResponse[] = [];
     const stepsTotal = request.steps.length;
     let stepsCompleted = 0;
-    let overallStatus: 'passed' | 'failed' | 'error' = 'passed';
+    let overallStatus: 'passed' | 'failed' | 'error' | 'aborted' = 'passed';
     let errorInfo: { step: number; message: string } | null = null;
 
     // Map a 1-based step index to the source-document line. When the client
@@ -518,6 +520,14 @@ export class SessionManager {
 
     try {
       for (let i = 0; i < request.steps.length; i++) {
+        // Check abort BEFORE starting each step. We don't try to interrupt
+        // a step mid-flight (Playwright actions / AI calls aren't reliably
+        // cancelable today) — between-step granularity is the contract.
+        if (signal?.aborted) {
+          overallStatus = 'aborted';
+          logger.info(`Session "${sessionId}": run aborted by client at step ${i + 1}/${stepsTotal}`);
+          break;
+        }
         const originalStep = request.steps[i]!;
 
         // Interpolate {{variable}} placeholders

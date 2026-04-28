@@ -320,6 +320,77 @@ describe('SessionManager', () => {
       expect(response.error).toEqual({ step: 1, message: 'Element not found' });
     });
 
+    it('aborts between steps when the AbortSignal is triggered', async () => {
+      let callCount = 0;
+      vi.mocked(executeStep).mockImplementation(async () => {
+        callCount++;
+        return {
+          index: callCount,
+          instruction: `step ${callCount}`,
+          status: 'passed',
+          turns: [],
+          durationMs: 10,
+          retried: false,
+        };
+      });
+
+      const ac = new AbortController();
+      // Abort after the first step completes — the loop should stop before
+      // running step 2.
+      const onEvent = (event: { type: string; line?: number; status?: string }) => {
+        if (event.type === 'step:pass' && callCount === 1) ac.abort();
+      };
+
+      const response = await manager.executeSteps(
+        'session-1',
+        { steps: ['Step 1', 'Step 2', 'Step 3'] },
+        onEvent,
+        ac.signal,
+      );
+
+      expect(callCount).toBe(1);
+      expect(response.status).toBe('aborted');
+      expect(response.stepsCompleted).toBe(1);
+      expect(response.stepsTotal).toBe(3);
+    });
+
+    it('does not start any step if the signal is already aborted', async () => {
+      vi.mocked(executeStep).mockClear();
+      const ac = new AbortController();
+      ac.abort();
+
+      const response = await manager.executeSteps(
+        'session-1',
+        { steps: ['Step 1', 'Step 2'] },
+        undefined,
+        ac.signal,
+      );
+
+      expect(executeStep).not.toHaveBeenCalled();
+      expect(response.status).toBe('aborted');
+      expect(response.stepsCompleted).toBe(0);
+    });
+
+    it('emits a done event with status=aborted when interrupted', async () => {
+      const events: { type: string; status?: string }[] = [];
+      const onEvent = (event: { type: string; status?: string }) => {
+        events.push(event);
+        if (event.type === 'step:pass') ac.abort();
+      };
+      const ac = new AbortController();
+
+      await manager.executeSteps(
+        'session-1',
+        { steps: ['Step 1', 'Step 2'] },
+        onEvent,
+        ac.signal,
+      );
+
+      const doneEvent = events.find((e) => e.type === 'done');
+      expect(doneEvent).toBeDefined();
+      expect(doneEvent?.status).toBe('aborted');
+    });
+
     it('skips [input:] steps', async () => {
       const response = await manager.executeSteps('session-1', {
         steps: ['[input: username] Enter your username'],

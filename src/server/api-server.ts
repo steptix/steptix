@@ -106,9 +106,15 @@ export function createApiServer(config: Config): {
         // Use res.on('close') for client disconnect — req.on('close') fires
         // when express.json() finishes parsing the body, which would falsely
         // signal a disconnect immediately.
+        //
+        // The AbortController lets sessionManager.executeSteps see the
+        // disconnect and stop processing further steps; without it the
+        // server would burn through every queued step before noticing.
+        const abortController = new AbortController();
         let clientGone = false;
         res.on('close', () => {
           clientGone = true;
+          abortController.abort();
         });
 
         // Periodic comment frame so intermediaries don't time the connection
@@ -123,10 +129,15 @@ export function createApiServer(config: Config): {
         }, 25_000);
 
         try {
-          await sessionManager.executeSteps(sessionId, request, (event) => {
-            if (clientGone) return;
-            writeSseEvent(res, event);
-          });
+          await sessionManager.executeSteps(
+            sessionId,
+            request,
+            (event) => {
+              if (clientGone) return;
+              writeSseEvent(res, event);
+            },
+            abortController.signal,
+          );
         } catch (err) {
           if (!clientGone) {
             const message = err instanceof Error ? err.message : String(err);

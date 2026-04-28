@@ -442,6 +442,51 @@ describe('API Server', () => {
       expect(doneEvent.data.status).toBe('passed');
     });
 
+    it('aborts the in-flight run when the client disconnects', { timeout: 30_000 }, async () => {
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      vi.mocked(executeStep).mockClear();
+      // Slow each mocked step so we can disconnect after the first one.
+      vi.mocked(executeStep).mockImplementation(async (idx) => {
+        await new Promise((r) => setTimeout(r, 200));
+        return {
+          index: idx,
+          instruction: `step ${idx}`,
+          status: 'passed',
+          turns: [],
+          durationMs: 200,
+          retried: false,
+        };
+      });
+
+      const ac = new AbortController();
+      const reqPromise = fetch(`${baseUrl}/sessions/abort-1/steps?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({ steps: ['s1', 's2', 's3', 's4', 's5'] }),
+        signal: ac.signal,
+      });
+
+      // Wait long enough for step 1 to start (and probably finish), then
+      // abort the fetch to simulate the user clicking Stop.
+      await new Promise((r) => setTimeout(r, 250));
+      ac.abort();
+
+      // The fetch should reject (it was aborted).
+      await reqPromise.catch(() => {});
+
+      // Give the server a moment to notice the disconnect and unwind.
+      await new Promise((r) => setTimeout(r, 800));
+
+      const callsAfterAbort = vi.mocked(executeStep).mock.calls.length;
+      // We requested 5 steps. If the server propagates abort, fewer than 5
+      // executeStep calls should have fired before the loop tore down.
+      expect(callsAfterAbort).toBeLessThan(5);
+    });
+
     it('falls back to step index when sourceLines omitted', { timeout: 30_000 }, async () => {
       const res = await fetch(`${baseUrl}/sessions/stream-2/steps?stream=1`, {
         method: 'POST',
