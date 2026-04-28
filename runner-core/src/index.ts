@@ -5,3 +5,4 @@ export * from './sse-parser.js';
 export * from './api-client.js';
 export * from './protocol.js';
 export * from './test-meta.js';
+export * from './repl.js';

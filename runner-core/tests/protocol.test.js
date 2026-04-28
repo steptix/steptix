@@ -3,7 +3,15 @@ import { strict as assert } from 'node:assert';
 import { isHostMsg, isRunEvent, isWebviewMsg } from '../dist/protocol.js';
 
 test('isHostMsg: accepts every host variant', () => {
-  for (const type of ['init', 'documentChanged', 'runEvent', 'runError', 'settingsChanged']) {
+  for (const type of [
+    'init',
+    'documentChanged',
+    'runEvent',
+    'runError',
+    'settingsChanged',
+    'prompt',
+    'promptDone',
+  ]) {
     assert.equal(isHostMsg({ type }), true, type);
   }
 });
@@ -16,7 +24,16 @@ test('isHostMsg: rejects garbage', () => {
 });
 
 test('isWebviewMsg: accepts every webview variant', () => {
-  for (const type of ['ready', 'run', 'runAll', 'stop', 'edit']) {
+  for (const type of [
+    'ready',
+    'run',
+    'runAll',
+    'stop',
+    'edit',
+    'restartSession',
+    'promptResponse',
+    'promptCancel',
+  ]) {
     assert.equal(isWebviewMsg({ type }), true, type);
   }
 });

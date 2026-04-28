@@ -5,6 +5,8 @@ import {
   EnvParseError,
   classifySelectedSteps,
   extractSteps,
+  interpretReplCommand,
+  maskIfSecret,
   parseConfig,
   parseParameters,
   readEnvFile,
@@ -403,31 +405,24 @@ export class RunController {
 
     while (answer !== null) {
       if (signal.aborted) return false;
-      const trimmed = answer.trim();
-      const lower = trimmed.toLowerCase();
 
-      if (lower === 'done' || lower === 'exit' || lower === ':exit') {
-        return true;
-      }
-      if (lower === ':quit') {
-        return false;
-      }
-      if (lower === ':help') {
-        this.postOutput(INTERACTIVE_HELP, 'info');
-      } else if (lower === ':list') {
-        const stepLines = listStepInstructions(this.ctx.document.getText());
-        this.postOutput(stepLines || '(no steps in this file)', 'info');
-      } else if (trimmed.startsWith(':')) {
-        this.postOutput(`unknown command "${trimmed}". Type :help for the list.`, 'warn');
-      } else if (trimmed.length > 0) {
-        // Send as a one-step ad-hoc run.
-        log(`interactive step: ${trimmed}`);
-        this.postOutput(`> ${trimmed}`, 'info');
+      const action = interpretReplCommand(answer, () =>
+        listStepInstructions(this.ctx.document.getText()),
+      );
+
+      if (action.kind === 'exit-section') return true;
+      if (action.kind === 'quit-run') return false;
+
+      if (action.kind === 'output') {
+        this.postOutput(action.msg, action.level);
+      } else if (action.kind === 'send-step') {
+        log(`interactive step: ${action.text}`);
+        this.postOutput(`> ${action.text}`, 'info');
         try {
           const events = client.streamSteps(
             sessionId,
             {
-              steps: [trimmed],
+              steps: [action.text],
               sourceLines: [0],
               env,
               ...(!this.configSentForSession &&
@@ -448,6 +443,7 @@ export class RunController {
           );
         }
       }
+      // action.kind === 'noop' — fall through and re-prompt.
 
       // Re-arm the prompt for the next submission.
       answer = await this.requestPrompt({ mode: 'interactive', message: hint });
@@ -507,26 +503,10 @@ export class RunController {
   }
 }
 
-const INTERACTIVE_HELP = [
-  'Interactive mode commands:',
-  '  :help          show this message',
-  '  :list          list all numbered step lines from the file',
-  '  :exit / done   end interactive mode and continue the run',
-  '  :quit          abort the entire run',
-  'Anything else is sent as a single ad-hoc step against the live session.',
-].join('\n');
-
 function listStepInstructions(text: string): string {
   return extractSteps(text)
     .map((s) => `  ${s.line.toString().padStart(3, ' ')}  ${s.instruction}`)
     .join('\n');
-}
-
-function maskIfSecret(varName: string, value: string): string {
-  if (/password|secret|token|apikey|api_key/i.test(varName)) {
-    return value.length === 0 ? '(empty)' : '*'.repeat(Math.min(value.length, 8));
-  }
-  return value;
 }
 
 function mapApiErrorToPayload(

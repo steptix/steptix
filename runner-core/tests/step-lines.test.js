@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   classifyLines,
+  classifySelectedSteps,
   extractSteps,
   isStepLine,
   isTestFile,
@@ -113,4 +114,96 @@ test('extractSteps: returns instructions with line numbers', () => {
     { line: 2, instruction: 'Click button' },
     { line: 3, instruction: 'Wait for page' },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// classifySelectedSteps — recognises [input:] / [interactive] markers
+// ---------------------------------------------------------------------------
+
+test('classifySelectedSteps: empty requestedLines runs every step', () => {
+  const text = ['## Steps', '1. one', '2. two'].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.deepEqual(got, [
+    { kind: 'step', line: 2, instruction: 'one' },
+    { kind: 'step', line: 3, instruction: 'two' },
+  ]);
+});
+
+test('classifySelectedSteps: filters by requestedLines and preserves order', () => {
+  const text = ['## Steps', '1. one', '2. two', '3. three'].join('\n');
+  const got = classifySelectedSteps(text, [4, 2]); // out-of-order input
+  assert.deepEqual(got, [
+    { kind: 'step', line: 2, instruction: 'one' },
+    { kind: 'step', line: 4, instruction: 'three' },
+  ]);
+});
+
+test('classifySelectedSteps: tags [input: var] with prompt text', () => {
+  const text = ['## Steps', '1. [input: username] Enter your username'].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.deepEqual(got, [
+    { kind: 'input', line: 2, varName: 'username', prompt: 'Enter your username' },
+  ]);
+});
+
+test('classifySelectedSteps: [input: var] without prompt text uses default', () => {
+  const text = ['## Steps', '1. [input: code]'].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.equal(got[0].kind, 'input');
+  assert.equal(got[0].varName, 'code');
+  assert.equal(got[0].prompt, 'Enter value for {{code}}');
+});
+
+test('classifySelectedSteps: [interactive] tags with hint', () => {
+  const text = ['## Steps', '1. [interactive] explore the page'].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.deepEqual(got, [
+    { kind: 'interactive', line: 2, hint: 'explore the page' },
+  ]);
+});
+
+test('classifySelectedSteps: [interactive] without hint uses default', () => {
+  const text = ['## Steps', '1. [interactive]'].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.equal(got[0].kind, 'interactive');
+  assert.match(got[0].hint, /done.*continue/i);
+});
+
+test('classifySelectedSteps: [input:] is case-insensitive', () => {
+  const text = ['## Steps', '1. [INPUT: token] paste here', '2. [Interactive] poke'].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.equal(got[0].kind, 'input');
+  assert.equal(got[0].varName, 'token');
+  assert.equal(got[1].kind, 'interactive');
+});
+
+test('classifySelectedSteps: mixes step / input / interactive in order', () => {
+  const text = [
+    '## Steps',
+    '1. open homepage',
+    '2. [input: user] username?',
+    '3. login as {{user}}',
+    '4. [interactive] verify the dashboard',
+    '5. logout',
+  ].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.equal(got.length, 5);
+  assert.equal(got[0].kind, 'step');
+  assert.equal(got[1].kind, 'input');
+  assert.equal(got[2].kind, 'step');
+  assert.equal(got[3].kind, 'interactive');
+  assert.equal(got[4].kind, 'step');
+});
+
+test('classifySelectedSteps: ignores [input:]-shaped text outside Steps section', () => {
+  const text = [
+    '# Notes',
+    '1. [input: foo] not a step',
+    '## Steps',
+    '1. real step',
+  ].join('\n');
+  const got = classifySelectedSteps(text, []);
+  assert.equal(got.length, 1);
+  assert.equal(got[0].kind, 'step');
+  assert.equal(got[0].instruction, 'real step');
 });
