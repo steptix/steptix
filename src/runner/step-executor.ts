@@ -1028,8 +1028,12 @@ async function executeStepAttempt(
     throw new StepFailureError(stepError ?? 'Step failed', collectedFailures, allTurns);
   }
 
-  // Capture end-of-step screenshot (full-page for report visibility)
-  const endScreenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+  // Capture end-of-step screenshot (full-page for report visibility).
+  // Gated by captureScreenshotsPerAction so users can fully suppress non-failure
+  // captures. On-failure / diagnose captures still fire.
+  const endScreenshot = config.browser.captureScreenshotsPerAction !== false
+    ? await captureScreenshot(page, config.browser.fullPageScreenshots)
+    : null;
   const endScreenshotBase64 = endScreenshot?.base64;
   const endPageUrl = page.url();
 

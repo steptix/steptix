@@ -12,7 +12,7 @@ export const DEFAULT_CONFIG: Config = {
     model: 'gpt-5.4-mini',
     maxInputTokens: 1_000_000,
     streamResponses: false,
-    sendScreenshots: true,
+    sendScreenshots: false,
     diagnoseFailures: true,
   },
   browser: {

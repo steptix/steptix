@@ -284,7 +284,11 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
         ${endUrlHtml}
         <img class="screenshot-img" src="${toDataUri(step.screenshotBase64)}" alt="Step end screenshot" loading="lazy">
        </div>`
-    : '';
+    : `<div class="screenshot-container step-end-screenshot screenshot-disabled">
+        <div class="screenshot-label">${endScreenshotLabel}</div>
+        ${endUrlHtml}
+        <div class="screenshot-placeholder">Screenshot not captured — set <code>browser.captureScreenshotsPerAction: true</code> to enable.</div>
+       </div>`;
 
   const childStepClass = step.interactiveChild ? ' step-interactive-child' : '';
   const stepNumberLabel = overrides.numberLabel ?? `Step ${step.index}`;
@@ -348,7 +352,11 @@ function renderAiInteraction(ai: AiInteraction): string {
         ${urlHtml}
         <img class="screenshot-img" src="${toDataUri(ai.screenshotBase64)}" alt="AI decision screenshot" loading="lazy">
        </div>`
-    : '';
+    : `<div class="screenshot-container turn-screenshot screenshot-disabled">
+        <div class="screenshot-label">Page state at AI decision</div>
+        ${urlHtml}
+        <div class="screenshot-placeholder">Screenshot not captured — set <code>browser.captureScreenshotsPerAction: true</code> to enable.</div>
+       </div>`;
 
   const requestHtml = ai.requestMessages && ai.requestMessages.length > 0
     ? ai.requestMessages.map((m) =>
@@ -402,7 +410,11 @@ function renderSubAction(sub: SubActionResult): string {
         ${subUrlHtml}
         <img class="screenshot-img" src="${toDataUri(sub.screenshotBase64)}" alt="Sub-action screenshot" loading="lazy">
        </div>`
-    : '';
+    : `<div class="screenshot-container screenshot-disabled">
+        <div class="screenshot-label">After action</div>
+        ${subUrlHtml}
+        <div class="screenshot-placeholder">Screenshot not captured — set <code>browser.captureScreenshotsPerAction: true</code> to enable.</div>
+       </div>`;
 
   const domHtml = sub.domSnapshot
     ? `<details class="dom-snapshot">

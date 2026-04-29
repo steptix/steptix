@@ -116,6 +116,8 @@ export function getReportTemplate(): string {
     .turn-screenshot .screenshot-label { color: #1d4ed8; }
     .step-end-screenshot { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
     .step .badge-fail ~ .step-body .step-end-screenshot .screenshot-label { color: var(--fail); }
+    .screenshot-placeholder { font-size: 0.8rem; color: var(--muted); padding: 8px 10px; background: #f8fafc; border: 1px dashed var(--border); border-radius: 6px; max-width: 480px; }
+    .screenshot-placeholder code { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; padding: 1px 4px; background: #e2e8f0; border-radius: 3px; }
 
     /* AI Responses */
     .ai-responses { margin-top: 14px; }
