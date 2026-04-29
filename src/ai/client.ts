@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   LegacyStreamChunk,
   LegacyVisionResponse,
+  MessageContentBlock,
   ResponseContentBlock,
   StreamEvent,
   StreamResponseEnvelope,
@@ -11,6 +12,30 @@ import type {
 } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
+
+let nextRequestId = 1;
+
+/**
+ * Strip large image base64 payloads from messages so the trace dump remains
+ * readable. Images get replaced with `<image:dataUrl-N-bytes>` markers.
+ * Text blocks are kept verbatim — they ARE the prompt, and seeing them is
+ * the whole point of the trace.
+ */
+function summarizeMessagesForTrace(messages: ChatMessage[]): unknown {
+  return messages.map((m) => {
+    if (typeof m.content === 'string') {
+      return { role: m.role, content: m.content };
+    }
+    const blocks = (m.content as MessageContentBlock[]).map((b) => {
+      if (b.type === 'image_url') {
+        const len = b.image_url?.url?.length ?? 0;
+        return { type: 'image_url', stripped: `<image:dataUrl-${len}-bytes>` };
+      }
+      return b;
+    });
+    return { role: m.role, content: blocks };
+  });
+}
 
 /** Result of a single AI completion, including which model the gateway actually served. */
 export interface CompleteResult {
@@ -43,6 +68,7 @@ export class AiClient {
   /** Call POST /v2/vision for non-streaming multimodal completion */
   private async completeVision(messages: ChatMessage[]): Promise<CompleteResult> {
     const url = `${this.config.gatewayUrl}/v2/vision`;
+    const requestId = nextRequestId++;
 
     const request: VisionRequest = {
       model: this.config.model,
@@ -51,7 +77,15 @@ export class AiClient {
       response_format: { type: 'json_object' },
     };
 
-    logger.debug(`POST ${url} (${messages.length} messages)`);
+    logger.debug(`POST ${url} (${messages.length} messages) [req#${requestId}]`);
+    logger.trace(`ai.request#${requestId}`, {
+      url,
+      method: 'POST',
+      model: this.config.model,
+      maxTokens: 4096,
+      messageCount: messages.length,
+      messages: summarizeMessagesForTrace(messages),
+    });
 
     const response = await this.fetchWithAuth(url, {
       method: 'POST',
@@ -61,6 +95,11 @@ export class AiClient {
 
     if (!response.ok) {
       const errorText = await response.text();
+      logger.trace(`ai.response#${requestId}`, {
+        status: response.status,
+        ok: false,
+        body: errorText,
+      });
       throw new Error(`AI API error ${response.status}: ${errorText}`);
     }
 
@@ -75,6 +114,15 @@ export class AiClient {
     }
 
     const content = this.extractTextResponse(data);
+    logger.trace(`ai.response#${requestId}`, {
+      status: response.status,
+      ok: true,
+      model: this.extractModel(data),
+      usage: data.usage,
+      content,
+      raw: data,
+    });
+
     if (!content) {
       throw new Error(`AI response contained no content. Response keys: ${Object.keys(data).join(', ')}`);
     }
@@ -86,6 +134,7 @@ export class AiClient {
   /** Call POST /v2/stream for streaming multimodal completion, collect full response */
   private async completeStream(messages: ChatMessage[]): Promise<CompleteResult> {
     const url = `${this.config.gatewayUrl}/v2/stream`;
+    const requestId = nextRequestId++;
 
     const request: VisionRequest = {
       model: this.config.model,
@@ -94,7 +143,16 @@ export class AiClient {
       response_format: { type: 'json_object' },
     };
 
-    logger.debug(`POST ${url} (streaming, ${messages.length} messages)`);
+    logger.debug(`POST ${url} (streaming, ${messages.length} messages) [req#${requestId}]`);
+    logger.trace(`ai.request#${requestId}`, {
+      url,
+      method: 'POST',
+      streaming: true,
+      model: this.config.model,
+      maxTokens: 4096,
+      messageCount: messages.length,
+      messages: summarizeMessagesForTrace(messages),
+    });
 
     const response = await this.fetchWithAuth(url, {
       method: 'POST',
@@ -107,6 +165,11 @@ export class AiClient {
 
     if (!response.ok) {
       const errorText = await response.text();
+      logger.trace(`ai.response#${requestId}`, {
+        status: response.status,
+        ok: false,
+        body: errorText,
+      });
       throw new Error(`AI API stream error ${response.status}: ${errorText}`);
     }
 
@@ -114,7 +177,15 @@ export class AiClient {
       throw new Error('AI stream response has no body');
     }
 
-    return this.consumeSseStream(response.body);
+    const result = await this.consumeSseStream(response.body);
+    logger.trace(`ai.response#${requestId}`, {
+      status: response.status,
+      ok: true,
+      streaming: true,
+      model: result.model,
+      content: result.text,
+    });
+    return result;
   }
 
   /** Consume an SSE stream and accumulate the full content string */

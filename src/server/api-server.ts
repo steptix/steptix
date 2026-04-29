@@ -90,6 +90,22 @@ export function createApiServer(config: Config): {
       if (body.sourceLines !== undefined && Array.isArray(body.sourceLines)) {
         request.sourceLines = body.sourceLines as number[];
       }
+      if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
+        const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
+        const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);
+        const validFiles = new Set(['off', 'compact', 'full']);
+        const out: {
+          consoleLogLevel?: 'silent' | 'error' | 'warn' | 'info' | 'debug';
+          serverFileLogLevel?: 'off' | 'compact' | 'full';
+        } = {};
+        if (typeof lg.consoleLogLevel === 'string' && validLevels.has(lg.consoleLogLevel)) {
+          out.consoleLogLevel = lg.consoleLogLevel as 'silent' | 'error' | 'warn' | 'info' | 'debug';
+        }
+        if (typeof lg.serverFileLogLevel === 'string' && validFiles.has(lg.serverFileLogLevel)) {
+          out.serverFileLogLevel = lg.serverFileLogLevel as 'off' | 'compact' | 'full';
+        }
+        if (out.consoleLogLevel || out.serverFileLogLevel) request.logging = out;
+      }
 
       if (streaming) {
         // Open SSE stream. Headers must be set before any res.write().

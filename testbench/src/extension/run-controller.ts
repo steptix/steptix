@@ -230,6 +230,10 @@ export class RunController {
     const timeout = rawConfig['timeout'];
     if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
 
+    // Resolve per-run logging overrides. Precedence: test frontmatter ('## Config')
+    // wins, then VS Code settings, then server default (omitted ⇒ no override).
+    const logging = resolveLoggingOverride(rawConfig, settings);
+
     // Surface resolved parameter values to the Variables panel. The webview
     // never sees .env, so without this message it can only display the raw
     // `$VAR` placeholders. Secret-named entries get masked at render time
@@ -277,6 +281,7 @@ export class RunController {
             env,
             params,
             sessionConfig,
+            logging,
             signal: ac.signal,
             log,
           });
@@ -313,6 +318,7 @@ export class RunController {
             env,
             params,
             sessionConfig,
+            logging,
             signal: ac.signal,
             log,
           });
@@ -363,10 +369,11 @@ export class RunController {
     env: Record<string, string>;
     params: Record<string, string>;
     sessionConfig: { baseUrl?: string; timeout?: string };
+    logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, params, sessionConfig, signal, log } = args;
+    const { block, client, sessionId, env, params, sessionConfig, logging, signal, log } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -382,6 +389,7 @@ export class RunController {
             config: sessionConfig,
           }),
           ...(Object.keys(params).length > 0 && { parameters: params }),
+          ...(logging && { logging }),
         },
         signal,
       );
@@ -420,10 +428,11 @@ export class RunController {
     env: Record<string, string>;
     params: Record<string, string>;
     sessionConfig: { baseUrl?: string; timeout?: string };
+    logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<boolean> {
-    const { hint, client, sessionId, env, params, sessionConfig, signal, log } = args;
+    const { hint, client, sessionId, env, params, sessionConfig, logging, signal, log } = args;
 
     // Open the composer once. Subsequent loops re-await without re-posting.
     const firstAnswer = await this.requestPrompt({ mode: 'interactive', message: hint });
@@ -454,6 +463,7 @@ export class RunController {
               ...(!this.configSentForSession &&
                 Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),
               ...(Object.keys(params).length > 0 && { parameters: params }),
+              ...(logging && { logging }),
             },
             signal,
           );
@@ -580,4 +590,49 @@ function resolveValue(value: string, env: Record<string, string>): string {
   if (!value.startsWith('$')) return value;
   const name = value.slice(1);
   return env[name] ?? value;
+}
+
+const VALID_LOG_LEVELS = new Set(['silent', 'error', 'warn', 'info', 'debug']);
+const VALID_LOG_FILES = new Set(['off', 'compact', 'full']);
+
+type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
+type LogFileMode = 'off' | 'compact' | 'full';
+
+interface LoggingOverride {
+  consoleLogLevel?: LogLevel;
+  serverFileLogLevel?: LogFileMode;
+}
+
+/**
+ * Decide what `logging` field to put on the streamSteps body.
+ *
+ * Precedence (highest first):
+ *   1. Test file's `## Config` block — `consoleLogLevel:` / `serverFileLogLevel:`.
+ *   2. VS Code workspace settings — `testbench.consoleLogLevel` /
+ *      `testbench.serverFileLogLevel`.
+ *   3. Server-side default (returned as undefined ⇒ no override sent).
+ *
+ * Empty strings are treated as "not set" so a workspace setting of `""` falls
+ * through to the server default exactly like an absent setting.
+ */
+function resolveLoggingOverride(
+  rawConfig: Record<string, string>,
+  settings: vscode.WorkspaceConfiguration,
+): LoggingOverride | undefined {
+  const settingLevel = (settings.get<string>('consoleLogLevel') ?? '').trim();
+  const settingFile = (settings.get<string>('serverFileLogLevel') ?? '').trim();
+  const fmLevel = (rawConfig['consoleLogLevel'] ?? '').trim();
+  const fmFile = (rawConfig['serverFileLogLevel'] ?? '').trim();
+
+  const levelRaw = fmLevel || settingLevel;
+  const fileRaw = fmFile || settingFile;
+
+  const out: LoggingOverride = {};
+  if (levelRaw && VALID_LOG_LEVELS.has(levelRaw)) {
+    out.consoleLogLevel = levelRaw as LogLevel;
+  }
+  if (fileRaw && VALID_LOG_FILES.has(fileRaw)) {
+    out.serverFileLogLevel = fileRaw as LogFileMode;
+  }
+  return (out.consoleLogLevel || out.serverFileLogLevel) ? out : undefined;
 }

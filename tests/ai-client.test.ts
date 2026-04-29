@@ -10,6 +10,7 @@ vi.mock('../src/utils/logger.js', () => ({
     error: vi.fn(),
     success: vi.fn(),
     step: vi.fn(),
+    trace: vi.fn(),
   },
 }));
 

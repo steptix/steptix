@@ -19,7 +19,8 @@ import { generateReport, getPrimaryModel } from '../report/generator.js';
 import { appendRunHistory } from '../report/history-appender.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { diagnoseFailure } from '../ai/diagnose.js';
-import { logger } from '../utils/logger.js';
+import { logger, setLogLevel, getLogLevel, type ConsoleLogLevel } from '../utils/logger.js';
+import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { StepCache } from '../cache/step-cache.js';
 
@@ -131,6 +132,47 @@ export async function runTest(
     ?? config.execution.timeout;
 
   const hooks = await resolveHooks(test, config);
+
+  // Per-test logging overrides from the test's `## Config` block. The block
+  // can carry `consoleLogLevel:` and `serverFileLogLevel:` keys; either falls
+  // back to the global `config.logging.*` when absent or invalid. Validated
+  // against the same allow-lists the CLI / server use elsewhere.
+  const VALID_LEVELS: readonly ConsoleLogLevel[] = ['silent', 'error', 'warn', 'info', 'debug'];
+  const VALID_FILES: readonly Config['logging']['serverFileLogLevel'][] = ['off', 'compact', 'full'];
+  const testLevel = test.config.consoleLogLevel?.trim();
+  const testFile = test.config.serverFileLogLevel?.trim();
+  const effectiveLevel: ConsoleLogLevel =
+    (testLevel && VALID_LEVELS.includes(testLevel as ConsoleLogLevel))
+      ? (testLevel as ConsoleLogLevel)
+      : config.logging.consoleLogLevel;
+  const fileMode: Config['logging']['serverFileLogLevel'] =
+    (testFile && VALID_FILES.includes(testFile as Config['logging']['serverFileLogLevel']))
+      ? (testFile as Config['logging']['serverFileLogLevel'])
+      : config.logging.serverFileLogLevel;
+  if (testLevel && !VALID_LEVELS.includes(testLevel as ConsoleLogLevel)) {
+    logger.warn(`Ignoring invalid '## Config: consoleLogLevel: ${testLevel}' — expected one of: ${VALID_LEVELS.join(', ')}`);
+  }
+  if (testFile && !VALID_FILES.includes(testFile as Config['logging']['serverFileLogLevel'])) {
+    logger.warn(`Ignoring invalid '## Config: serverFileLogLevel: ${testFile}' — expected one of: ${VALID_FILES.join(', ')}`);
+  }
+  const previousLevel = getLogLevel();
+  setLogLevel(effectiveLevel);
+
+  // Per-run log file. Mirrors the server-side path (SessionManager) so a
+  // direct CLI run leaves the same forensic trail under `<reportsDir>/logs/`.
+  // failures to open are swallowed and never break the run.
+  const runLog = fileMode === 'off'
+    ? null
+    : openRunLogFile(test.title, config.reports.outputDir);
+  if (runLog) {
+    runLog.stream.write(
+      `# test=${test.title} startedAt=${new Date().toISOString()} steps=${test.steps.length} mode=${fileMode}\n`,
+    );
+    logger.info(`Run log: ${runLog.path}`);
+  }
+  const removeFileBridges = runLog
+    ? attachRunLogBridges(runLog, fileMode)
+    : () => {};
 
   const session = await launchBrowser(config.browser);
 
@@ -588,6 +630,12 @@ export async function runTest(
     return report;
   } finally {
     await closeBrowser(session);
+    removeFileBridges();
+    setLogLevel(previousLevel);
+    if (runLog) {
+      runLog.stream.write(`# endedAt=${new Date().toISOString()}\n`);
+      runLog.dispose();
+    }
   }
 }
 

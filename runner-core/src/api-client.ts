@@ -8,6 +8,9 @@
 import { SseParser, type SseFrame } from './sse-parser.js';
 import type { RunEvent } from './protocol.js';
 
+export type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
+export type LogFileMode = 'off' | 'compact' | 'full';
+
 export interface StreamStepsRequest {
   steps: string[];
   /** Per-line break indices (1-based step indices into `steps`). */
@@ -18,6 +21,15 @@ export interface StreamStepsRequest {
   config?: { baseUrl?: string; timeout?: string };
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */
   sourceLines?: number[];
+  /**
+   * Per-request logging override. Each field falls back to the server's
+   * configured default when omitted. Override scope is this request only —
+   * the server restores its default after the run completes.
+   */
+  logging?: {
+    consoleLogLevel?: LogLevel;
+    serverFileLogLevel?: LogFileMode;
+  };
 }
 
 export type ApiErrorKind =

@@ -46,6 +46,18 @@
           "type": "boolean",
           "default": true,
           "description": "Open Markdown files containing a '## Steps' heading in the TestBench editor by default. Disable to keep all .md files in the plain editor."
+        },
+        "testbench.consoleLogLevel": {
+          "type": "string",
+          "enum": ["", "silent", "error", "warn", "info", "debug"],
+          "default": "",
+          "description": "Console + output-panel log threshold for test runs. Leave blank to use the server's configured default. A test's '## Config: consoleLogLevel' setting overrides this."
+        },
+        "testbench.serverFileLogLevel": {
+          "type": "string",
+          "enum": ["", "off", "compact", "full"],
+          "default": "",
+          "description": "Per-run log file written by the server under reports/logs/. 'off' disables; 'compact' = log lines only; 'full' = log lines + AI request/response trace. Leave blank to use the server's configured default. A test's '## Config: serverFileLogLevel' setting overrides this."
         }
       }
     },

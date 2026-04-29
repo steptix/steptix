@@ -57,4 +57,8 @@ export const DEFAULT_CONFIG: Config = {
     enabled: false,
     dir: '.cache',
   },
+  logging: {
+    consoleLogLevel: 'info',
+    serverFileLogLevel: 'compact',
+  },
 };

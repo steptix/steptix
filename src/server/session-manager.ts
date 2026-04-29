@@ -11,7 +11,15 @@ import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { parseTimeoutMs } from '../runner/test-runner.js';
-import { logger } from '../utils/logger.js';
+import {
+  logger,
+  addLogCallback,
+  shouldEmit,
+  setLogLevel,
+  getLogLevel,
+  type ConsoleLogLevel,
+} from '../utils/logger.js';
+import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +46,18 @@ export interface StepRequest {
    * status against the document. Defaults to step index when omitted.
    */
   sourceLines?: number[];
+  /**
+   * Per-request logging override. Lets a testbench user flip verbosity on a
+   * single run (e.g. `consoleLogLevel: 'debug'` + `serverFileLogLevel: 'full'`
+   * for a hung run) without restarting the server. Each field falls back to
+   * the server-level `logging.*` config when omitted. The override scope is
+   * this single request — the server-level setting is restored when the run
+   * completes.
+   */
+  logging?: {
+    consoleLogLevel?: ConsoleLogLevel;
+    serverFileLogLevel?: 'off' | 'compact' | 'full';
+  };
 }
 
 /**
@@ -506,6 +526,52 @@ export class SessionManager {
       }
     };
 
+    // Resolve per-request logging overrides. The server-level config supplies
+    // defaults; the request body can flip them for this single run. Restored
+    // in the finally block so the override scope is one request.
+    const requestedLevel = request.logging?.consoleLogLevel;
+    const fileMode = request.logging?.serverFileLogLevel ?? this.config.logging.serverFileLogLevel;
+    const previousLevel = getLogLevel();
+    setLogLevel(requestedLevel ?? this.config.logging.consoleLogLevel);
+
+    // Bridge logger calls into the SSE stream as `output` events so the client
+    // can see what's happening inside a step. Without this, a hanging step
+    // produces only `step:start` followed by silence — the user has no signal
+    // about which sub-action is stuck. The bridge mirrors the configured log
+    // level (via `shouldEmit`) so the testbench output panel matches the
+    // server console.
+    //
+    // Caveat: logger callbacks are process-global, so concurrent sessions in
+    // the same server will see each other's logs. Acceptable for the dev
+    // testbench; if multi-tenancy is needed later, switch to AsyncLocalStorage.
+    const removeLogBridge = onEvent
+      ? addLogCallback((level, message) => {
+          if (!shouldEmit(level)) return;
+          const kind: 'info' | 'warn' | 'error' =
+            level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info';
+          emit({ type: 'output', msg: message, kind });
+        })
+      : () => {};
+
+    // Per-run log file. Mode is governed by `logging.serverFileLogLevel`:
+    //   - 'off':     skip the file entirely
+    //   - 'compact': inline log lines only (no AI trace blocks)
+    //   - 'full':    inline log lines + full AI request/response trace blocks
+    // The file always captures every level regardless of `logging.consoleLogLevel`,
+    // so a quiet server still produces a complete forensic trail when enabled.
+    const runLog = fileMode === 'off'
+      ? null
+      : openRunLogFile(sessionId, this.config.reports.outputDir);
+    if (runLog) {
+      runLog.stream.write(
+        `# session=${sessionId} startedAt=${new Date().toISOString()} steps=${stepsTotal} mode=${fileMode}\n`,
+      );
+      logger.info(`Run log: ${runLog.path}`);
+    }
+    const removeFileBridges = runLog
+      ? attachRunLogBridges(runLog, fileMode)
+      : () => {};
+
     // Build the parameter map: session outputs as base, request parameters as overrides
     const resolvedParameters: Record<string, string> = {
       ...session.outputs,
@@ -807,6 +873,15 @@ export class SessionManager {
       // Restore status unless session was closed
       if (session.status !== 'closed') {
         session.status = 'active';
+      }
+      removeLogBridge();
+      removeFileBridges();
+      setLogLevel(previousLevel);
+      if (runLog) {
+        runLog.stream.write(
+          `# endedAt=${new Date().toISOString()} status=${overallStatus}\n`,
+        );
+        runLog.dispose();
       }
     }
 

@@ -46,6 +46,10 @@ export interface TestConfig {
   baseUrl?: string;
   /** Override test timeout */
   timeout?: string;
+  /** Per-test console log threshold override: silent | error | warn | info | debug. */
+  consoleLogLevel?: string;
+  /** Per-test server-side log-file mode override: off | compact | full. */
+  serverFileLogLevel?: string;
 }
 
 /** A single parsed test file */

@@ -25,7 +25,7 @@ import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
 import type { PageTracker } from '../browser/manager.js';
 import { withRetry } from './retry.js';
-import { logger } from '../utils/logger.js';
+import { logger, traceOp } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
@@ -341,21 +341,27 @@ async function executeStepAttempt(
     // 1b. On retry attempts, diagnose page state and auto-wait if loading
     let pageDiagnosis: PageStateDiagnosis | undefined;
     if (attemptNumber > 1 && currentTurn === 1) {
-      pageDiagnosis = await diagnosePageState(page);
+      pageDiagnosis = await traceOp(`page.diagnose (turn ${currentTurn})`, () => diagnosePageState(page));
       if (pageDiagnosis.isLoading) {
         logger.info('Page appears to be loading on retry — waiting for networkidle (up to 5s)');
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {
+        await traceOp('page.waitForLoadState networkidle (5s cap)', () =>
+          page.waitForLoadState('networkidle', { timeout: 5000 }),
+        ).catch(() => {
           logger.debug('networkidle wait timed out after 5s — proceeding anyway');
         });
         // Re-diagnose after waiting
-        pageDiagnosis = await diagnosePageState(page);
+        pageDiagnosis = await traceOp(`page.diagnose (post-wait, turn ${currentTurn})`, () => diagnosePageState(page));
       }
     }
 
     // 2. Capture current page state (full-page so AI sees content below the fold)
     const turnTimestamp = new Date().toISOString();
-    const domSnapshot = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg });
-    const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+    const domSnapshot = await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
+      captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg }),
+    );
+    const screenshot = await traceOp(`captureScreenshot (turn ${currentTurn})`, () =>
+      captureScreenshot(page, config.browser.fullPageScreenshots),
+    );
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
 
@@ -486,7 +492,7 @@ async function executeStepAttempt(
         timestamp: turnTimestamp,
       });
     } else {
-      const completion = await aiClient.complete(messages);
+      const completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages));
       rawResponse = completion.text;
       aiResponse = parseAIResponse(rawResponse);
 
@@ -796,7 +802,9 @@ async function executeStepAttempt(
         ? await capturePageSignal(page).catch(() => undefined)
         : undefined;
 
-      const result = await executeAction(page, action, baseUrl);
+      const result = await traceOp(`action.${action.action}: ${action.description}`, () =>
+        executeAction(page, action, baseUrl),
+      );
       const subDuration = Date.now() - subStartTime;
 
       // Post-action settle: waits for the page to reflect the action's effect
@@ -804,7 +812,9 @@ async function executeStepAttempt(
       // the next snapshot. Exits early on "no change at all" (no-op) or once
       // the signal has been stable for settleMs. See waitForPostActionSettle.
       if (preSignal && result.success) {
-        await waitForPostActionSettle(page, { preSignal }).catch(() => {
+        await traceOp(`settle.post-action (${action.action})`, () =>
+          waitForPostActionSettle(page, { preSignal }),
+        ).catch(() => {
           /* settle errors are non-fatal — proceed to capture post-state */
         });
       }
@@ -816,8 +826,12 @@ async function executeStepAttempt(
       }
 
       // Capture state after action (full-page for report visibility)
-      const postDom = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg }).catch(() => '');
-      const postShot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+      const postDom = await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
+        captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg }),
+      ).catch(() => '');
+      const postShot = await traceOp(`captureScreenshot (post-${action.action})`, () =>
+        captureScreenshot(page, config.browser.fullPageScreenshots),
+      );
       const postShotBase64 = postShot?.base64;
       const postUrl = page.url();
       const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;

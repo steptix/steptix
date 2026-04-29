@@ -131,6 +131,32 @@ export interface CacheConfig {
   dir: string;
 }
 
+/**
+ * Logging configuration. Controls what gets emitted to the console / SSE
+ * output panel and what gets written to the per-run log file under
+ * `reports/logs/`.
+ */
+export interface LoggingConfig {
+  /**
+   * Threshold for the console + testbench SSE output stream. Levels are
+   * suppressed below this threshold:
+   *   - 'silent': nothing
+   *   - 'error':  errors only
+   *   - 'warn':   errors + warnings
+   *   - 'info':   errors + warnings + info (no debug noise)
+   *   - 'debug':  everything, including BEGIN/END traceOp markers
+   * The run log file always captures every level regardless of this setting.
+   */
+  consoleLogLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
+  /**
+   * Per-run server log file mode:
+   *   - 'off':     no file written
+   *   - 'compact': inline log lines only (no AI request/response payloads)
+   *   - 'full':    log lines + full AI request/response trace blocks
+   */
+  serverFileLogLevel: 'off' | 'compact' | 'full';
+}
+
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
@@ -140,6 +166,7 @@ export interface Config {
   api: ApiConfig;
   server: ServerConfig;
   cache: CacheConfig;
+  logging: LoggingConfig;
 }
 
 /** Deeply partial version of Config for user-provided overrides */

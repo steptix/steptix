@@ -5,6 +5,8 @@ tags: [smoke]
 
 ## Config
 - baseUrl: https://github.com/
+- consoleLogLevel: debug
+- serverFileLogLevel: full
 
 ## Parameters
 - username: $GITHUB_USERNAME
@@ -19,3 +21,9 @@ tags: [smoke]
 6. [interactive]
 7. Click logout
 8. Click "Sign out" button
+
+<!-- latest-runs:start -->
+## Latest runs
+
+- [2026-04-29 02:57:48Z — passed](file:///C:/Projects/vibe/ai-ui-automation/reports/2026-04-29_02-57-48-github-login-test.html)
+<!-- latest-runs:end -->

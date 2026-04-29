@@ -77,7 +77,15 @@ vi.mock('../src/utils/logger.js', () => ({
     warn: vi.fn(),
     success: vi.fn(),
     step: vi.fn(),
+    debug: vi.fn(),
+    trace: vi.fn(),
   },
+  addLogCallback: vi.fn(() => () => {}),
+  addTraceCallback: vi.fn(() => () => {}),
+  isVerbose: vi.fn(() => false),
+  shouldEmit: vi.fn(() => true),
+  setLogLevel: vi.fn(),
+  getLogLevel: vi.fn(() => 'info'),
 }));
 
 // ---------------------------------------------------------------------------
@@ -136,6 +144,14 @@ const testConfig: Config = {
     host: '127.0.0.1',
     port: 0, // Will be overridden by random port
     apiKey: API_KEY,
+  },
+  cache: {
+    enabled: false,
+    dir: '.cache',
+  },
+  logging: {
+    consoleLogLevel: 'silent',
+    serverFileLogLevel: 'off',
   },
 };
 
