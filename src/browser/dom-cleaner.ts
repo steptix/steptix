@@ -5,6 +5,33 @@ import type { Frame, Page } from 'playwright';
 /** Maximum character length for DOM snapshots (prevents token blowup). */
 const DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
 
+/** Hard timeout for the main page evaluate. Pages with stuck JS otherwise hang forever. */
+const PAGE_EVALUATE_TIMEOUT_MS = 30_000;
+/** Hard timeout for each iframe evaluate. Cross-origin / busy frames otherwise hang the whole capture. */
+const FRAME_EVALUATE_TIMEOUT_MS = 10_000;
+/** Timeout for resolving an iframe element handle. */
+const IFRAME_HANDLE_TIMEOUT_MS = 5_000;
+
+/**
+ * Run target.evaluate with a hard timeout. Playwright's evaluate has no built-in
+ * timeout — if the page's JS thread is stuck (long task, infinite loop, blocking
+ * sync XHR, etc.) the call blocks indefinitely. We race against a setTimeout so
+ * the snapshot can degrade gracefully instead of hanging the whole runner.
+ */
+async function evaluateWithTimeout<T>(target: Page | Frame, script: string, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      target.evaluate(script) as Promise<T>,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`evaluate timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Load a browser-side script once at module init. Scripts live in ./scripts/
  * and are copied alongside the compiled output (see package.json build step).
@@ -56,7 +83,12 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
   const collapse = opts.collapseRepetitiveDom === true;
   const compactSvg = opts.compactSvg !== false;
   const script = buildDomCleanerScript(collapse, compactSvg);
-  let snapshot = (await page.evaluate(script) as string | null) ?? '';
+  let snapshot: string;
+  try {
+    snapshot = (await evaluateWithTimeout<string | null>(page, script, PAGE_EVALUATE_TIMEOUT_MS)) ?? '';
+  } catch (err) {
+    return `<error>DOM capture timed out: ${String(err)}</error>`;
+  }
 
   if (snapshot.includes('[iframe:')) {
     snapshot = await injectFrameContent(page, snapshot, 0, '', collapse, compactSvg);
@@ -120,7 +152,7 @@ async function injectFrameContent(
 
     let frameContent: string;
     try {
-      const handle = await iframeLoc.elementHandle();
+      const handle = await iframeLoc.elementHandle({ timeout: IFRAME_HANDLE_TIMEOUT_MS });
       const frame = handle ? await handle.contentFrame() : null;
       if (!frame) {
         frameContent = '[frame content unavailable]';
@@ -129,8 +161,17 @@ async function injectFrameContent(
         // This handles cases where a prior action updated the iframe's src
         // (e.g. via postMessage) and the new content hasn't loaded yet.
         await frame.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
-        // frame.evaluate() uses CDP — works for both same-origin and cross-origin frames
-        frameContent = await frame.evaluate(buildDomCleanerScript(collapse, compactSvg)) as string;
+        // frame.evaluate() uses CDP — works for both same-origin and cross-origin frames.
+        // Wrapped in evaluateWithTimeout so a frame with stuck JS can't hang the whole capture.
+        try {
+          frameContent = await evaluateWithTimeout<string>(
+            frame,
+            buildDomCleanerScript(collapse, compactSvg),
+            FRAME_EVALUATE_TIMEOUT_MS,
+          );
+        } catch {
+          frameContent = '[frame content unavailable — evaluate timed out]';
+        }
 
         // Recursively capture nested iframe content within this frame.
         // Pass the current frame path so nested iframe comments show the full chain.
