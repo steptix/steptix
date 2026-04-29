@@ -1,5 +1,6 @@
+import { basename } from 'node:path';
 import type { Config } from '../config/types.js';
-import type { StepResult } from '../report/types.js';
+import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser, type BrowserSession } from '../browser/manager.js';
@@ -11,6 +12,7 @@ import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { parseTimeoutMs } from '../runner/test-runner.js';
+import { generateReport } from '../report/generator.js';
 import {
   logger,
   addLogCallback,
@@ -502,7 +504,11 @@ export class SessionManager {
   ): Promise<StepResponse> {
     session.status = 'executing';
 
+    const runStartTime = Date.now();
     const results: StepResultResponse[] = [];
+    /** Full StepResult records accumulated across this request — used to
+     *  generate the per-run HTML report at the end. */
+    const fullStepResults: StepResult[] = [];
     const stepsTotal = request.steps.length;
     let stepsCompleted = 0;
     let overallStatus: 'passed' | 'failed' | 'error' | 'aborted' = 'passed';
@@ -761,6 +767,16 @@ export class SessionManager {
             reasoning: message,
             outputs: {},
           });
+          fullStepResults.push({
+            index: i + 1,
+            instruction: originalStep,
+            status: 'failed',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error: message,
+            ...(errorScreenshot && { screenshotBase64: errorScreenshot.replace(/^data:image\/png;base64,/, '') }),
+          });
 
           emit({
             type: 'step:fail',
@@ -810,6 +826,7 @@ export class SessionManager {
           reasoning: stepResult.aiExplanation ?? '',
           outputs: stepOutputs,
         });
+        fullStepResults.push({ ...stepResult, instruction: originalStep });
 
         // Update conversation history
         let currentUrl = '';
@@ -892,6 +909,46 @@ export class SessionManager {
         pageTitle = await session.browserSession.pageTracker.getActive().title();
       } catch {
         // browser may be in an intermediate state
+      }
+    }
+
+    // Generate an HTML report for this run. Mirrors the CLI test-runner
+    // behaviour so testbench F5 produces the same artifact under
+    // `<reports.outputDir>/`. Failures here are logged but never break the
+    // run — the SSE stream has already delivered everything the client needs.
+    if (fullStepResults.length > 0) {
+      try {
+        const reportStatus: 'passed' | 'failed' =
+          overallStatus === 'passed' ? 'passed' : 'failed';
+        const passedSteps = fullStepResults.filter((s) => s.status === 'passed').length;
+        const failedSteps = fullStepResults.filter((s) => s.status === 'failed').length;
+        const totalSubActions = fullStepResults.reduce(
+          (sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0),
+          0,
+        );
+        const testName = basename(sessionId, '.md').replace(/^.*[\\/]/, '') || sessionId;
+        const report: TestReport = {
+          testName,
+          filePath: sessionId,
+          tags: [],
+          status: reportStatus,
+          steps: fullStepResults,
+          totalSteps: stepsTotal,
+          passedSteps,
+          failedSteps,
+          totalSubActions,
+          durationMs: Date.now() - runStartTime,
+          tokensUsed: session.tokenTracker.total,
+          inputTokens: session.tokenTracker.inputTotal,
+          outputTokens: session.tokenTracker.outputTotal,
+          date: new Date().toISOString(),
+          ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
+          ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
+        };
+        const reportPath = await generateReport(report, this.config.reports.outputDir);
+        logger.info(`Report saved: ${reportPath}`);
+      } catch (err) {
+        logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);
       }
     }
 

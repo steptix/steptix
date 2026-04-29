@@ -65,6 +65,11 @@ vi.mock('../src/api/response-store.js', () => ({
   },
 }));
 
+vi.mock('../src/report/generator.js', () => ({
+  generateReport: vi.fn(async () => '/tmp/fake-report.html'),
+  getPrimaryModel: vi.fn(() => 'mock-model'),
+}));
+
 vi.mock('../src/browser/screenshot.js', () => ({
   captureScreenshot: vi.fn(async () => ({ base64: 'fakeScreenshotBase64' })),
 }));
