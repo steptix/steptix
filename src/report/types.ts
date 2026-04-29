@@ -36,9 +36,22 @@ export interface SubActionResult {
 
 /** Result of an assertion embedded in a step */
 export interface AssertionResult extends AssertionEvaluation {
+  /** Index of this assert action within the step (0-based, in execution order) */
+  assertIndex: number;
+  /** Turn number this assert was evaluated in (1-based) */
+  turnNumber: number;
+  /** Sub-action index within the step (1-based, interleaved with other sub-actions) */
+  subActionIndex: number;
+  /** Human-readable label from the AI's `assert` action */
+  description: string;
+  /** Natural-language statement of what is being checked */
+  condition: string;
+  /** Expected value/state */
   expected: string;
   /** The cached JS code used to evaluate this assertion */
   assertionCode?: string | undefined;
+  /** AI interaction that generated the JS code (only when not from cache) */
+  aiInteraction?: AiInteraction | undefined;
 }
 
 /** A single captured AI response during step execution */
@@ -85,9 +98,8 @@ export interface StepResult {
   status: StepStatus;
   /** Ordered turns — each groups an AI decision with the sub-actions it produced */
   turns: TurnResult[];
-  assertion?: AssertionResult;
-  /** AI interaction for the assertion evaluation (runs after all turns) */
-  assertionAiInteraction?: AiInteraction;
+  /** All assertions evaluated during this step, in execution order */
+  assertions?: AssertionResult[];
   /** Screenshot captured at the end of the step */
   screenshotBase64?: string;
   /** Page URL at the time the end-of-step screenshot was captured */
@@ -183,10 +195,11 @@ export function getAllSubActions(step: StepResult): SubActionResult[] {
   return step.turns.flatMap((t) => t.subActions);
 }
 
-/** Extract all AI interactions from a step's turns + assertion (replaces step.aiResponses) */
+/** Extract all AI interactions from a step's turns + assertion code generations */
 export function getAllAiInteractions(step: StepResult): AiInteraction[] {
   const fromTurns = step.turns.flatMap((t) => t.aiInteractions);
-  return step.assertionAiInteraction
-    ? [...fromTurns, step.assertionAiInteraction]
-    : fromTurns;
+  const fromAssertions = (step.assertions ?? [])
+    .map((a) => a.aiInteraction)
+    .filter((i): i is AiInteraction => i !== undefined);
+  return [...fromTurns, ...fromAssertions];
 }

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
-import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis } from './types.js';
+import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis, AssertionResult } from './types.js';
 import { getAllAiInteractions } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
@@ -257,9 +257,9 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ? step.turns.map((turn) => renderTurn(turn, step.turns.length > 1, hasMultipleAttempts)).join('\n')
     : '';
 
-  const assertionHtml = step.assertion
-    ? renderAssertion(step.assertion, step.assertionAiInteraction)
-    : '';
+  const assertionHtml = (step.assertions ?? [])
+    .map((a) => renderAssertion(a))
+    .join('\n');
 
   const failureHtml = step.status === 'failed'
     ? `<div class="failure-block">
@@ -497,16 +497,13 @@ function formatRedactedHeaders(headers: Record<string, string>): string {
   return JSON.stringify(redacted, null, 2);
 }
 
-function renderAssertion(
-  assertion: NonNullable<StepResult['assertion']>,
-  aiInteraction?: AiInteraction,
-): string {
+function renderAssertion(assertion: AssertionResult): string {
   const cls = assertion.pass ? 'pass' : 'fail';
   const icon = assertion.pass ? '✓' : '✗';
   const label = assertion.pass ? 'PASSED' : 'FAILED';
 
-  const aiHtml = aiInteraction
-    ? renderAiInteraction(aiInteraction)
+  const aiHtml = assertion.aiInteraction
+    ? renderAiInteraction(assertion.aiInteraction)
     : '';
 
   const cacheIndicator = assertion.fromCache !== undefined
@@ -524,7 +521,11 @@ function renderAssertion(
     : '';
 
   return `<div class="assertion-block ${cls}">
-  <div class="assertion-title">${icon} Assertion ${label}</div>
+  <div class="assertion-title">${icon} ${escapeHtml(assertion.description)} — ${label}</div>
+  <div class="assertion-row">
+    <span class="assertion-key">Condition:</span>
+    <span>${escapeHtml(assertion.condition)}</span>
+  </div>
   <div class="assertion-row">
     <span class="assertion-key">Expected:</span>
     <span>${escapeHtml(assertion.expected)}</span>
@@ -536,6 +537,10 @@ function renderAssertion(
   <div class="assertion-row">
     <span class="assertion-key">Explanation:</span>
     <span>${escapeHtml(assertion.explanation)}</span>
+  </div>
+  <div class="assertion-row">
+    <span class="assertion-key">Turn / sub-action:</span>
+    <span>turn ${assertion.turnNumber}, sub-action ${assertion.subActionIndex}</span>
   </div>
   ${cacheIndicator}
   ${codeBlock}

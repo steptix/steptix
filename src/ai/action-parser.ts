@@ -1,4 +1,4 @@
-import type { AIAction, AIResponse, BranchedAIResponse, AssertionEvaluation, ActionType } from './types.js';
+import type { AIAction, AIResponse, BranchedAIResponse, ActionType } from './types.js';
 import { logger } from '../utils/logger.js';
 
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
@@ -55,35 +55,6 @@ export function parseAIResponse(rawResponse: string): AIResponse {
   }
 
   return validateAndNormaliseResponse(parsed);
-}
-
-/**
- * Parse an assertion evaluation response from the AI.
- */
-export function parseAssertionEvaluation(rawResponse: string): AssertionEvaluation {
-  const jsonString = extractJson(rawResponse);
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonString);
-  } catch (err) {
-    throw new Error(`Assertion response is not valid JSON: ${String(err)}`);
-  }
-
-  if (typeof parsed !== 'object' || parsed === null) {
-    throw new Error('Assertion response must be a JSON object');
-  }
-
-  const obj = parsed as Record<string, unknown>;
-
-  return {
-    pass: Boolean(obj['pass']),
-    actual: typeof obj['actual'] === 'string' ? obj['actual'] : String(obj['actual'] ?? ''),
-    explanation:
-      typeof obj['explanation'] === 'string'
-        ? obj['explanation']
-        : 'No explanation provided',
-  };
 }
 
 /**
@@ -340,6 +311,38 @@ function parseAction(raw: unknown, index: number): AIAction {
       if (typeof v === 'string') safeHeaders[k] = v;
     }
     action.apiHeaders = safeHeaders;
+  }
+
+  // Assert-specific optional fields
+  if (action.action === 'assert') {
+    const rawPoll = obj['poll'];
+    if (typeof rawPoll === 'object' && rawPoll !== null && !Array.isArray(rawPoll)) {
+      const pollObj = rawPoll as Record<string, unknown>;
+      const poll: { timeoutMs?: number; intervalMs?: number } = {};
+      if (typeof pollObj['timeoutMs'] === 'number') poll.timeoutMs = pollObj['timeoutMs'];
+      if (typeof pollObj['intervalMs'] === 'number') poll.intervalMs = pollObj['intervalMs'];
+      action.poll = poll;
+    } else if (rawPoll === true) {
+      action.poll = {};
+    }
+
+    const rawAgainst = obj['against'];
+    if (rawAgainst === 'dom' || rawAgainst === 'api' || rawAgainst === 'both') {
+      action.against = rawAgainst;
+    }
+
+    // Required fields for assert: description, condition, expected.
+    // (description is already populated above with a fallback; reject if it
+    // was the synthetic fallback rather than a real value.)
+    if (typeof obj['description'] !== 'string' || !obj['description'].trim()) {
+      throw new Error(`Assert action at index ${index} missing required "description" field`);
+    }
+    if (typeof obj['condition'] !== 'string' || !obj['condition'].trim()) {
+      throw new Error(`Assert action at index ${index} missing required "condition" field`);
+    }
+    if (typeof obj['expected'] !== 'string' || !obj['expected'].trim()) {
+      throw new Error(`Assert action at index ${index} missing required "expected" field`);
+    }
   }
 
   return action;

@@ -101,6 +101,22 @@ export interface AIAction {
   page?: string;
   /** Human-readable description of what this action does */
   description: string;
+  /**
+   * For "assert" actions: bounded polling on the assertion JS code. When set,
+   * the framework re-evaluates the cached/generated code in a loop until
+   * `pass: true` or the timeout is hit. Used for eventual-consistency cases
+   * (e.g. "the toast eventually shows Saved") where no deterministic Playwright
+   * wait primitive fits. Defaults: timeoutMs 5000, intervalMs 250.
+   */
+  poll?: { timeoutMs?: number; intervalMs?: number };
+  /**
+   * For "assert" actions: which context the assertion evaluates against.
+   * - `'dom'` (default): assertion JS queries `document.*` only.
+   * - `'api'`: assertion is purely about prior API responses; DOM is not sent
+   *   to the AI when generating code.
+   * - `'both'`: both DOM and API context are available.
+   */
+  against?: 'dom' | 'api' | 'both';
 }
 
 /** The structured response from the AI for a test step */

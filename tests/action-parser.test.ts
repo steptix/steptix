@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseAIResponse,
-  parseAssertionEvaluation,
   extractJson,
 } from '../src/ai/action-parser.js';
 
@@ -180,7 +179,12 @@ describe('parseAIResponse', () => {
   it('parses assert action with expected field', () => {
     const raw = JSON.stringify({
       actions: [
-        { action: 'assert', description: 'Check balance', expected: '$1,234.56' },
+        {
+          action: 'assert',
+          description: 'Check balance',
+          condition: 'visible balance text',
+          expected: '$1,234.56',
+        },
       ],
       reasoning: 'Verifying.',
     });
@@ -213,56 +217,6 @@ describe('parseAIResponse', () => {
   });
 });
 
-describe('parseAssertionEvaluation', () => {
-  it('parses a passing assertion', () => {
-    const raw = JSON.stringify({
-      pass: true,
-      actual: '$1,234.56',
-      explanation: 'The balance displayed matches the expected value.',
-    });
-    const result = parseAssertionEvaluation(raw);
-    expect(result.pass).toBe(true);
-    expect(result.actual).toBe('$1,234.56');
-    expect(result.explanation).toContain('balance');
-  });
-
-  it('parses a failing assertion', () => {
-    const raw = JSON.stringify({
-      pass: false,
-      actual: '$999.00',
-      explanation: 'The displayed balance does not match.',
-    });
-    const result = parseAssertionEvaluation(raw);
-    expect(result.pass).toBe(false);
-    expect(result.actual).toBe('$999.00');
-  });
-
-  it('provides default explanation when missing', () => {
-    const raw = JSON.stringify({ pass: true, actual: 'ok' });
-    const result = parseAssertionEvaluation(raw);
-    expect(result.explanation).toBe('No explanation provided');
-  });
-
-  it('coerces non-string actual to string', () => {
-    const raw = JSON.stringify({ pass: false, actual: 42, explanation: 'wrong' });
-    const result = parseAssertionEvaluation(raw);
-    expect(result.actual).toBe('42');
-  });
-
-  it('throws on invalid JSON', () => {
-    expect(() => parseAssertionEvaluation('{ bad json }')).toThrow();
-  });
-
-  it('throws when response is not an object', () => {
-    expect(() => parseAssertionEvaluation('"just a string"')).toThrow('JSON object');
-  });
-
-  it('parses from markdown code fence', () => {
-    const raw = '```json\n' + JSON.stringify({ pass: true, actual: 'logged in', explanation: 'ok' }) + '\n```';
-    const result = parseAssertionEvaluation(raw);
-    expect(result.pass).toBe(true);
-  });
-});
 
 // ─── Exploration action types (find/expand) ─────────────────────────────────
 

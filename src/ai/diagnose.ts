@@ -194,12 +194,15 @@ function formatFailingStepDetails(step: StepResult): string {
   if (step.error) parts.push(`Error: ${step.error}`);
   if (step.aiExplanation) parts.push(`AI explanation: ${step.aiExplanation}`);
 
-  if (step.assertion) {
-    parts.push(
-      `Assertion: expected "${step.assertion.expected}"`,
-      `Actual: "${step.assertion.actual}"`,
-      `Assertion result: ${step.assertion.pass ? 'pass' : 'fail'} — ${step.assertion.explanation}`,
-    );
+  if (step.assertions && step.assertions.length > 0) {
+    for (const a of step.assertions) {
+      parts.push(
+        `Assertion: ${a.description}`,
+        `  Expected: "${a.expected}"`,
+        `  Actual: "${a.actual}"`,
+        `  Result: ${a.pass ? 'pass' : 'fail'} — ${a.explanation}`,
+      );
+    }
   }
 
   if (step.turns.length > 0) {

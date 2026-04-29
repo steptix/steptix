@@ -153,7 +153,7 @@ describe('StepCache', () => {
     const metaPath = path.join(tmpDir, 'my-test', 'meta.json');
     const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
     expect(meta.stepsHash).toBe(computeStepsHash(testSteps));
-    expect(meta.schemaVersion).toBe(2);
+    expect(meta.schemaVersion).toBe(3);
   });
 
   it('returns null on cache miss', async () => {

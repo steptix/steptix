@@ -590,7 +590,7 @@ describe('executeStep — multi-turn integration', () => {
     });
     const aiClient = makeAiClient([aiResponse]);
 
-    // Use an instruction that does NOT trigger isAssertionStep
+    // Plain action instruction — the AI returns a click and no assert
     const result = await executeStep(1, 1, 'click the submit button', {
       page,
       config: makeConfig(),

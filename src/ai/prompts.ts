@@ -133,9 +133,9 @@ Plan your next action based on the observed result — do not batch multiple act
    - Dismissing a dialog → [role="dialog"] button:text-is("Cancel")
    - Icon-only button → [aria-label="Close"]
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
-5. Only include an "assert" action when the step instruction explicitly asks to verify, check, or confirm something. Do NOT add an assert to confirm that a click or other action succeeded — you will see the result in the next screenshot${dismissalRule}
+5. Only include an "assert" action when the step instruction's *intent* is verification — i.e. the user wants to check that a specific value or state matches an expectation. Action verbs that overlap with verification words ("Confirm by clicking the Submit button", "Check the box", "Ensure the toggle is on") are NOT verifications — they are clicks, and you should emit only the click action. Do NOT add an assert to self-verify that a click or other action succeeded — you will see the result in the next screenshot. A failed assert immediately fails the step, so be deliberate${dismissalRule}
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
-8. For "assert" actions, set "condition" to what you're checking and "expected" to the expected value
+8. For "assert" actions, you MUST set: "description" (short report label like "Modal title equals 'Done'"), "condition" (natural-language statement of what is being checked, e.g. "visible modal title text"), and "expected" (the concrete expected value, e.g. "Done"). Optional fields: "poll": { "timeoutMs": 5000, "intervalMs": 250 } when the instruction implies eventual consistency ("eventually shows", "after a moment") and no deterministic wait primitive fits; "against": "dom" | "api" | "both" (default "dom") — set "api" for assertions purely about prior API responses
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 11. For "select" actions, set "selector" to the <select> element itself (NOT an <option>) and "value" to the visible option text (e.g. "Transaction Dispute"). Never click <option> elements directly — always use the "select" action on the parent <select>
@@ -304,87 +304,48 @@ export function buildClarificationMessage(
 }
 
 /**
- * Build the assertion evaluation prompt.
- * Asks the AI to evaluate whether the current page state (and/or prior API responses) satisfies the step assertion.
- */
-export function buildAssertionMessage(
-  stepInstruction: string,
-  domSnapshot: string,
-  screenshotBase64: string | null,
-  apiResponseHistory?: string,
-  testInfoSection?: string,
-): ChatMessage {
-  const apiSection = apiResponseHistory
-    ? `\n\n## Prior API Responses (IMPORTANT — evaluate assertions about "the response" or API data against this section)\n${apiResponseHistory}`
-    : '';
-
-  const context = apiResponseHistory
-    ? 'the current page state AND the prior API responses below. IMPORTANT: If the assertion refers to "the response", API data, or data not visible on the page, evaluate it against the Prior API Responses section, NOT the page DOM.'
-    : 'the current page state';
-
-  const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
-
-  const textContent = `${testInfoBlock}Evaluate whether the following test assertion PASSES or FAILS based on ${context}.
-
-## Assertion
-${stepInstruction}
-${apiSection}
-
-## Current Page DOM (readable mode — includes visible text content)
-\`\`\`html
-${domSnapshot}
-\`\`\`
-
-Respond with ONLY this JSON format:
-{
-  "pass": true or false,
-  "actual": "the actual value you found",
-  "explanation": "brief explanation of why it passes or fails"
-}`;
-
-  if (screenshotBase64) {
-    return {
-      role: 'user',
-      content: [
-        { type: 'text', text: textContent },
-        {
-          type: 'image_url',
-          image_url: { url: `data:image/png;base64,${screenshotBase64}` },
-        },
-      ],
-    };
-  }
-
-  return {
-    role: 'user',
-    content: textContent,
-  };
-}
-
-/**
- * Asks the AI to write a self-executing JavaScript snippet that extracts the relevant
- * value(s) from the current page DOM and evaluates whether the assertion passes.
+ * Asks the AI to write a self-executing JavaScript snippet that evaluates a
+ * single `assert` action's condition + expected against the current page DOM
+ * (and/or prior API responses, depending on `against`).
  *
- * The returned code is cached keyed on test name + step index, so subsequent runs
- * execute it directly with no AI call.
+ * The returned code is cached keyed on (stepIndex, assertIndex, fingerprint),
+ * so subsequent runs execute it directly with no AI call.
  */
 export function buildAssertionCodePrompt(
-  stepInstruction: string,
-  domSnapshot: string,
+  assertDescription: string,
+  assertCondition: string,
+  assertExpected: string,
+  domSnapshot: string | null,
   screenshotBase64: string | null,
+  apiResponseHistory?: string,
+  against: 'dom' | 'api' | 'both' = 'dom',
   testInfoSection?: string,
 ): ChatMessage {
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
-  const textContent = `${testInfoBlock}Write a self-executing JavaScript function that evaluates the following test assertion against the current page DOM.
+  const apiSection = (against !== 'dom' && apiResponseHistory)
+    ? `\n\n## Prior API Responses (assertions about API data are evaluated against this section)\n${apiResponseHistory}\n`
+    : '';
+
+  const domSection = (against !== 'api' && domSnapshot)
+    ? `\n\n## Current Page DOM (full, uncompacted)\n\`\`\`html\n${domSnapshot}\n\`\`\``
+    : '';
+
+  const contextNote = against === 'api'
+    ? 'The assertion is evaluated against prior API responses, NOT the page DOM. The code must NOT call `document.*` — instead, embed the relevant API response value as a literal string and compare.'
+    : against === 'both'
+      ? 'The assertion may reference either the page DOM or prior API responses. If referencing API data, embed the relevant value as a literal in the code rather than fetching at runtime.'
+      : 'The assertion is evaluated against the current page DOM.';
+
+  const textContent = `${testInfoBlock}Write a self-executing JavaScript function that evaluates the following assertion.
+
+${contextNote}
 
 ## Assertion
-${stepInstruction}
-
-## Current Page DOM (full, uncompacted)
-\`\`\`html
-${domSnapshot}
-\`\`\`
+- Description: ${assertDescription}
+- Condition: ${assertCondition}
+- Expected: ${assertExpected}
+${domSection}${apiSection}
 
 Requirements for the code:
 - Must be a self-executing function: \`(() => { ... })()\`

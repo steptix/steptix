@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — Revoke Access</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; padding: 40px; }
+    .card { max-width: 540px; margin: 0 auto; background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 32px; }
+    h1 { font-size: 1.25rem; margin-bottom: 8px; }
+    p { color: #64748b; margin-bottom: 20px; line-height: 1.5; }
+    .delegate { background: #f8fafc; border-radius: 6px; padding: 14px; margin-bottom: 24px; }
+    .delegate .name { font-weight: 600; }
+    .delegate .email { font-size: 0.85rem; color: #64748b; }
+    .actions { display: flex; gap: 12px; }
+    button { padding: 10px 18px; border-radius: 6px; border: 1px solid #cbd5e1; background: white; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+    button.danger { background: #dc2626; color: white; border-color: #dc2626; }
+    button.danger:hover { background: #b91c1c; }
+    button:hover { background: #f1f5f9; }
+    #status-block { margin-top: 24px; padding: 16px; border-radius: 6px; display: none; }
+    #status-block.removed { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    #status-block .title { font-weight: 600; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Revoke Delegate Access</h1>
+    <p>You are about to permanently remove this delegate's access to your account. This cannot be undone.</p>
+
+    <div class="delegate">
+      <div class="name" id="delegate-name">Alice Johnson</div>
+      <div class="email" id="delegate-email">alice@example.com</div>
+      <div class="email" id="delegate-status">Status: Active</div>
+    </div>
+
+    <div class="actions">
+      <button id="cancel-btn">Cancel</button>
+      <button id="remove-btn" class="danger">Permanently remove access</button>
+    </div>
+
+    <div id="status-block">
+      <div class="title" id="status-title"></div>
+      <div id="status-message"></div>
+    </div>
+  </div>
+
+  <script>
+    const removeBtn = document.getElementById('remove-btn');
+    const statusBlock = document.getElementById('status-block');
+    const statusTitle = document.getElementById('status-title');
+    const statusMessage = document.getElementById('status-message');
+    const delegateStatus = document.getElementById('delegate-status');
+
+    removeBtn.addEventListener('click', () => {
+      delegateStatus.textContent = 'Status: Access removed';
+      statusBlock.classList.add('removed');
+      statusTitle.textContent = 'Access removed';
+      statusMessage.textContent = 'Alice Johnson can no longer access your account.';
+      removeBtn.disabled = true;
+      removeBtn.textContent = 'Access removed';
+    });
+  </script>
+</body>
+</html>
