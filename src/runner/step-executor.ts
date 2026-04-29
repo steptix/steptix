@@ -351,15 +351,9 @@ async function executeStepAttempt(
     const turnTimestamp = new Date().toISOString();
     const domSnapshot = await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
       captureDomSnapshot(page, {
-        collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
-        compactSvg: config.browser.compactSvg,
-        hideHiddenInputs: config.browser.hideHiddenInputs,
-        hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
-        hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+        ...config.browser.domNoiseReduction,
         maxIframeDepth: config.browser.maxIframeDepth,
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-        useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
-        dropUnstableIds: config.browser.dropUnstableIds,
       }),
     );
     // Capture if either consumer needs it: AI (sees this frame on the current turn)
@@ -886,15 +880,9 @@ async function executeStepAttempt(
       // Capture state after action (full-page for report visibility)
       const postDom = await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
         captureDomSnapshot(page, {
-          collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
-          compactSvg: config.browser.compactSvg,
-          hideHiddenInputs: config.browser.hideHiddenInputs,
-          hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
-          hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+          ...config.browser.domNoiseReduction,
           maxIframeDepth: config.browser.maxIframeDepth,
           domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-          useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
-          dropUnstableIds: config.browser.dropUnstableIds,
         }),
       ).catch(() => '');
       // The post-action shot is only consumed by the report filmstrip — the AI
@@ -1436,15 +1424,9 @@ export async function executeBranchedStep(
     pollCount++;
 
     const domSnapshot = await captureDomSnapshot(page, {
-      collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
-      compactSvg: config.browser.compactSvg,
-      hideHiddenInputs: config.browser.hideHiddenInputs,
-      hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
-      hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+      ...config.browser.domNoiseReduction,
       maxIframeDepth: config.browser.maxIframeDepth,
       domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-      useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
-      dropUnstableIds: config.browser.dropUnstableIds,
     });
     // Capture if either consumer needs it: AI (sees this frame on this poll)
     // or report (per-action filmstrip via captureScreenshotsPerAction).

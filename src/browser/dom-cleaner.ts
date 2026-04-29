@@ -134,7 +134,7 @@ export interface CaptureDomOptions {
    *  Default true in DEFAULT_CONFIG. */
   useDomAttributeAllowlist?: boolean | undefined;
   /** Strip `id` attributes that match known framework-generated unstable
-   *  patterns (UNSTABLE_ID_PATTERNS). Default true in DEFAULT_CONFIG. */
+   *  patterns (UNSTABLE_ID_PATTERNS). Default false in DEFAULT_CONFIG. */
   dropUnstableIds?: boolean | undefined;
 }
 
@@ -161,7 +161,7 @@ function resolveOptions(opts: CaptureDomOptions): ResolvedDomOptions {
     maxIframeDepth: opts.maxIframeDepth ?? DEFAULT_MAX_IFRAME_DEPTH,
     domSnapshotCharLimit: opts.domSnapshotCharLimit ?? DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT,
     useAttributeAllowlist: opts.useDomAttributeAllowlist !== false,
-    dropUnstableIds: opts.dropUnstableIds !== false,
+    dropUnstableIds: opts.dropUnstableIds === true,
   };
 }
 
@@ -230,7 +230,7 @@ async function injectFrameContent(
     maxIframeDepth: DEFAULT_MAX_IFRAME_DEPTH,
     domSnapshotCharLimit: DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT,
     useAttributeAllowlist: true,
-    dropUnstableIds: true,
+    dropUnstableIds: false,
   },
 ): Promise<string> {
   const iframeLocators = await root.locator('iframe').all();

@@ -15,6 +15,48 @@ export interface AiConfig {
   diagnoseFailures: boolean;
 }
 
+/**
+ * Group of independent toggles that reduce DOM-snapshot noise — the
+ * primary lever for keeping AI input compact on framework-heavy pages.
+ *
+ * Each flag is independent. Hard-cap settings that are NOT noise filters
+ * (`maxIframeDepth`, `domSnapshotCharLimit`) live flat on `BrowserConfig`
+ * since they're safety guards rather than reductions.
+ */
+export interface DomNoiseReductionConfig {
+  /** Collapse long repetitive sibling runs (table rows, list items, card
+   *  grids) in DOM snapshots into head + omission marker + tail. Reduces
+   *  token usage on pages with hundreds of similar elements. Default true. */
+  collapseRepetitiveDom?: boolean | undefined;
+  /** Strip inner geometry (paths, shapes) from <svg> elements in DOM
+   *  snapshots, keeping the opening tag + <title>/<desc> children only.
+   *  Large SVG icon sets are the biggest per-element token cost on many
+   *  sites. Default true. */
+  compactSvg?: boolean | undefined;
+  /** Drop `<input type="hidden">` elements from DOM snapshots. They are
+   *  never interactable by the AI and often carry long opaque values
+   *  (CSRF tokens, encoded state). Default true. */
+  hideHiddenInputs?: boolean | undefined;
+  /** Drop elements (and their subtrees) whose computed style is
+   *  `display: none`. Slightly costlier to detect — requires
+   *  `getComputedStyle` per element — but cuts large amounts of
+   *  off-screen template/menu markup on many SPAs. Default true. */
+  hideDisplayNoneElements?: boolean | undefined;
+  /** Drop elements (and their subtrees) marked `aria-hidden="true"`.
+   *  Default true. */
+  hideAriaHiddenElements?: boolean | undefined;
+  /** Restrict attributes emitted in the whole-page DOM snapshot to a
+   *  curated allowlist (id, data-testid, name, type, role, aria-*, alt,
+   *  label, etc.). Drops framework noise like `data-react-*`, `data-emotion`,
+   *  long Tailwind/Bootstrap class strings, etc. Default true. */
+  useDomAttributeAllowlist?: boolean | undefined;
+  /** Drop `id` attributes that match known framework-generated unstable
+   *  patterns (React 18 useId, Radix UI, Headless UI, MUI, React server-
+   *  streaming). Prevents the AI from picking a selector that won't
+   *  survive the next render. Default false (opt-in). */
+  dropUnstableIds?: boolean | undefined;
+}
+
 export interface BrowserConfig {
   /** Show browser window (false = headless) */
   headed: boolean;
@@ -35,28 +77,9 @@ export interface BrowserConfig {
   /** Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts
    *  the site itself needs (cascading failures). Default false. */
   bypassCSP?: boolean;
-  /** Collapse long repetitive sibling runs (table rows, list items, card grids)
-   *  in DOM snapshots into head + omission marker + tail. Reduces token usage on
-   *  pages with hundreds of similar elements. Default true. */
-  collapseRepetitiveDom?: boolean | undefined;
-  /** Strip inner geometry (paths, shapes) from <svg> elements in DOM snapshots,
-   *  keeping the opening tag + <title>/<desc> children only. Large SVG icon sets
-   *  are the biggest per-element token cost on many sites. Default true. */
-  compactSvg?: boolean | undefined;
-  /** Drop `<input type="hidden">` elements from DOM snapshots. They are never
-   *  interactable by the AI and often carry long opaque values (CSRF tokens,
-   *  encoded state). Default true. */
-  hideHiddenInputs?: boolean | undefined;
-  /** Drop elements (and their subtrees) whose computed style is
-   *  `display: none`. They are not rendered and not interactable. Slightly
-   *  costlier to detect — requires `getComputedStyle` per element — but cuts
-   *  large amounts of off-screen template/menu markup on many SPAs.
-   *  Default true. */
-  hideDisplayNoneElements?: boolean | undefined;
-  /** Drop elements (and their subtrees) marked `aria-hidden="true"`. These
-   *  are explicitly hidden from assistive tech and are typically decorative.
-   *  Default true. */
-  hideAriaHiddenElements?: boolean | undefined;
+  /** DOM snapshot noise-reduction toggles — the primary lever for keeping
+   *  AI input compact on framework-heavy pages. See DomNoiseReductionConfig. */
+  domNoiseReduction?: DomNoiseReductionConfig | undefined;
   /** Maximum nesting depth for recursive iframe content capture in DOM
    *  snapshots. Iframes deeper than this are emitted as a placeholder
    *  comment instead of recursing. Default 5. */
@@ -73,23 +96,6 @@ export interface BrowserConfig {
    *  per turn regardless of this flag — the AI needs them in its request.
    *  Default true. */
   captureScreenshotsPerAction?: boolean | undefined;
-  /** Restrict attributes emitted in the whole-page DOM snapshot to a curated
-   *  allowlist (id, data-testid, name, type, role, aria-*, alt, label, etc.).
-   *  Drops framework noise like `data-react-*`, `data-emotion`, `data-v-`,
-   *  long `class` strings on Tailwind/Bootstrap pages, etc.
-   *  When `false`, every attribute on every element is emitted (legacy
-   *  behavior — useful for debugging selector issues).
-   *  Default true. */
-  useDomAttributeAllowlist?: boolean | undefined;
-  /** Drop `id` attributes that match known framework-generated unstable
-   *  patterns (React 18 useId like `:r0:` / `:rA:`, Radix UI `radix-:r3:`,
-   *  Headless UI `headlessui-listbox-:r0:`, MUI `mui-12`, React server-
-   *  streaming `:R0:`). Prevents the AI from picking a selector that won't
-   *  survive the next render. The element is still emitted — only the `id`
-   *  attribute is stripped, so buildSelector falls back through
-   *  `data-testid > name > aria-label > chained nth-of-type`.
-   *  Default true. */
-  dropUnstableIds?: boolean | undefined;
 }
 
 export interface TestsConfig {

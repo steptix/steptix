@@ -615,15 +615,9 @@ export async function runTest(
     if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
       logger.info('Running failure diagnosis…');
       const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
-        collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
-        compactSvg: config.browser.compactSvg,
-        hideHiddenInputs: config.browser.hideHiddenInputs,
-        hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
-        hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+        ...config.browser.domNoiseReduction,
         maxIframeDepth: config.browser.maxIframeDepth,
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-        useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
-        dropUnstableIds: config.browser.dropUnstableIds,
       });
       if (diagnosis) {
         report.diagnosis = diagnosis;
