@@ -88,7 +88,7 @@ export interface StepResultResponse {
 
 export interface StepResponse {
   sessionId: string;
-  status: 'passed' | 'failed' | 'error';
+  status: 'passed' | 'failed' | 'error' | 'aborted';
   stepsCompleted: number;
   stepsTotal: number;
   results: StepResultResponse[];
