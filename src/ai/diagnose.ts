@@ -45,7 +45,7 @@ export async function diagnoseFailure(
     // is already closed or unresponsive we fall back to what the step captured.
     const [screenshot, domSnapshot] = await Promise.all([
       captureScreenshot(page).catch(() => null),
-      captureDomSnapshot(page, { collapseRepetitiveDom: opts.collapseRepetitiveDom, compactSvg: opts.compactSvg }).catch(() => ''),
+      captureDomSnapshot(page, opts).catch(() => ''),
     ]);
 
     const finalScreenshot = screenshot?.base64 ?? subject.screenshotBase64;

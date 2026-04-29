@@ -350,7 +350,15 @@ async function executeStepAttempt(
     // 2. Capture current page state (full-page so AI sees content below the fold)
     const turnTimestamp = new Date().toISOString();
     const domSnapshot = await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
-      captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg }),
+      captureDomSnapshot(page, {
+        collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
+        compactSvg: config.browser.compactSvg,
+        hideHiddenInputs: config.browser.hideHiddenInputs,
+        hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
+        hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+        maxIframeDepth: config.browser.maxIframeDepth,
+        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+      }),
     );
     const screenshot = await traceOp(`captureScreenshot (turn ${currentTurn})`, () =>
       captureScreenshot(page, config.browser.fullPageScreenshots),
@@ -870,7 +878,15 @@ async function executeStepAttempt(
 
       // Capture state after action (full-page for report visibility)
       const postDom = await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
-        captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg }),
+        captureDomSnapshot(page, {
+          collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
+          compactSvg: config.browser.compactSvg,
+          hideHiddenInputs: config.browser.hideHiddenInputs,
+          hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
+          hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        }),
       ).catch(() => '');
       const postShot = await traceOp(`captureScreenshot (post-${action.action})`, () =>
         captureScreenshot(page, config.browser.fullPageScreenshots),
@@ -1089,7 +1105,13 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     if (!assertionCode) {
       const fullDom = p.against === 'api'
         ? null
-        : await captureDomSnapshot(p.page, { collapseRepetitiveDom: false, compactSvg: false });
+        : await captureDomSnapshot(p.page, {
+            collapseRepetitiveDom: false,
+            compactSvg: false,
+            hideHiddenInputs: false,
+            hideDisplayNoneElements: false,
+            hideAriaHiddenElements: false,
+          });
       const finalShot = p.sendScreenshots && p.against !== 'api'
         ? await captureScreenshot(p.page, p.fullPageScreenshots)
         : null;
@@ -1393,7 +1415,15 @@ export async function executeBranchedStep(
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
 
-    const domSnapshot = await captureDomSnapshot(page, { collapseRepetitiveDom: config.browser.collapseRepetitiveDom, compactSvg: config.browser.compactSvg });
+    const domSnapshot = await captureDomSnapshot(page, {
+      collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
+      compactSvg: config.browser.compactSvg,
+      hideHiddenInputs: config.browser.hideHiddenInputs,
+      hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
+      hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+      maxIframeDepth: config.browser.maxIframeDepth,
+      domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+    });
     const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
     const screenshotBase64 = screenshot?.base64;
 

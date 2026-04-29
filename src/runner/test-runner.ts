@@ -617,6 +617,11 @@ export async function runTest(
       const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
         collapseRepetitiveDom: config.browser.collapseRepetitiveDom,
         compactSvg: config.browser.compactSvg,
+        hideHiddenInputs: config.browser.hideHiddenInputs,
+        hideDisplayNoneElements: config.browser.hideDisplayNoneElements,
+        hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
+        maxIframeDepth: config.browser.maxIframeDepth,
+        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
       });
       if (diagnosis) {
         report.diagnosis = diagnosis;

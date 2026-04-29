@@ -5,11 +5,14 @@
 // helper functions like __name never leak into the browser context.
 //
 // Placeholder substitution:
-//   __COLLAPSE__           → `true` / `false`        (boolean literal)
-//   __COLLAPSE_MIN_RUN__   → integer literal
-//   __COLLAPSE_HEAD__      → integer literal
-//   __COLLAPSE_TAIL__      → integer literal
-//   __COMPACT_SVG__        → `true` / `false`        (boolean literal)
+//   __COLLAPSE__              → `true` / `false`        (boolean literal)
+//   __COLLAPSE_MIN_RUN__      → integer literal
+//   __COLLAPSE_HEAD__         → integer literal
+//   __COLLAPSE_TAIL__         → integer literal
+//   __COMPACT_SVG__           → `true` / `false`        (boolean literal)
+//   __HIDE_HIDDEN_INPUTS__    → `true` / `false`        (boolean literal)
+//   __HIDE_DISPLAY_NONE__     → `true` / `false`        (boolean literal)
+//   __HIDE_ARIA_HIDDEN__      → `true` / `false`        (boolean literal)
 //
 // When `collapse` is true, contiguous runs of same-tag sibling elements of length
 // >= COLLAPSE_MIN_RUN are emitted as COLLAPSE_HEAD leading items + an omission
@@ -19,6 +22,12 @@
 // When `compactSvg` is true, <svg> elements keep their opening tag + attributes,
 // preserve only <title>/<desc> children (the accessible-name carriers), and emit
 // a short "<!-- svg contents omitted -->" marker in place of geometry.
+//
+// When `hideHiddenInputs` is true, `<input type="hidden">` elements are dropped.
+// When `hideDisplayNoneElements` is true, elements whose computed `display` is
+// `none` are dropped together with their subtrees (requires getComputedStyle).
+// When `hideAriaHiddenElements` is true, elements with `aria-hidden="true"`
+// are dropped together with their subtrees.
 
 (() => {
   var SKIP_TAGS = new Set(['script', 'style']);
@@ -32,6 +41,26 @@
   var COLLAPSE_HEAD = __COLLAPSE_HEAD__;
   var COLLAPSE_TAIL = __COLLAPSE_TAIL__;
   var COMPACT_SVG = __COMPACT_SVG__;
+  var HIDE_HIDDEN_INPUTS = __HIDE_HIDDEN_INPUTS__;
+  var HIDE_DISPLAY_NONE = __HIDE_DISPLAY_NONE__;
+  var HIDE_ARIA_HIDDEN = __HIDE_ARIA_HIDDEN__;
+
+  // Cheap-then-expensive filter: returns a short reason string when this element
+  // (and its subtree) should be replaced with a placeholder, or '' if it should
+  // be emitted normally. Order matters — getComputedStyle is the costliest check,
+  // so attribute checks run first and short-circuit.
+  function hideReason(el, tag) {
+    if (HIDE_HIDDEN_INPUTS && tag === 'input') {
+      var t = (el.getAttribute('type') || '').toLowerCase();
+      if (t === 'hidden') return 'input[type=hidden]';
+    }
+    if (HIDE_ARIA_HIDDEN && el.getAttribute('aria-hidden') === 'true') return 'aria-hidden';
+    if (HIDE_DISPLAY_NONE) {
+      var cs = window.getComputedStyle(el);
+      if (cs && cs.display === 'none') return 'display:none';
+    }
+    return '';
+  }
 
   // CSS-escape a value for use inside [attr="<value>"] selectors.
   // Backslash and the matching quote must be escaped per CSS syntax.
@@ -80,6 +109,23 @@
   function processElement(el, depth) {
     var tag = el.tagName.toLowerCase();
     if (SKIP_TAGS.has(tag)) return '';
+    var hideWhy = hideReason(el, tag);
+    if (hideWhy) {
+      // Keep iframeIdx aligned with Playwright's locator('iframe').all() walk
+      // in injectFrameContent — that walk visits iframes regardless of visibility,
+      // so we still need to "consume" indices for hidden iframes / iframe-bearing
+      // subtrees inside the hidden element, even though their content is replaced
+      // with a placeholder.
+      iframeIdx += countIframesIn(el);
+      // Emit a tag-only placeholder so DOM structure (and nth-of-type / nth-child
+      // positions) remains intact for selector generation. Attributes are dropped
+      // — the element isn't a target, so id/class/aria etc. are pure noise.
+      var phIndent = '  '.repeat(depth);
+      if (SELF_CLOSING_TAGS.has(tag)) {
+        return phIndent + '<' + tag + '> <!-- hidden: ' + hideWhy + ' -->\n';
+      }
+      return phIndent + '<' + tag + '><!-- hidden: ' + hideWhy + ' --></' + tag + '>\n';
+    }
 
     var indent = '  '.repeat(depth);
 

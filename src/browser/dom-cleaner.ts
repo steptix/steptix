@@ -2,8 +2,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
 
-/** Maximum character length for DOM snapshots (prevents token blowup). */
-const DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
+/** Default maximum character length for DOM snapshots (prevents token blowup).
+ *  Overridable per-call via CaptureDomOptions.domSnapshotCharLimit. */
+const DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
+/** Default maximum nesting depth for recursive iframe content capture.
+ *  Overridable per-call via CaptureDomOptions.maxIframeDepth. */
+const DEFAULT_MAX_IFRAME_DEPTH = 5;
 
 /** Hard timeout for the main page evaluate. Pages with stuck JS otherwise hang forever. */
 const PAGE_EVALUATE_TIMEOUT_MS = 30_000;
@@ -61,14 +65,53 @@ export interface CaptureDomOptions {
   /** Replace <svg> geometry with a placeholder comment, keeping the opening tag
    *  and any <title>/<desc> children. Defaults to true in DEFAULT_CONFIG. */
   compactSvg?: boolean | undefined;
+  /** Drop `<input type="hidden">` elements. Default true in DEFAULT_CONFIG. */
+  hideHiddenInputs?: boolean | undefined;
+  /** Drop elements (and subtrees) whose computed `display` is `none`.
+   *  Default true in DEFAULT_CONFIG. */
+  hideDisplayNoneElements?: boolean | undefined;
+  /** Drop elements (and subtrees) marked `aria-hidden="true"`.
+   *  Default true in DEFAULT_CONFIG. */
+  hideAriaHiddenElements?: boolean | undefined;
+  /** Maximum nesting depth for recursive iframe content capture.
+   *  Default 5 in DEFAULT_CONFIG. */
+  maxIframeDepth?: number | undefined;
+  /** Hard character cap on the rendered DOM snapshot.
+   *  Default 100000 in DEFAULT_CONFIG. */
+  domSnapshotCharLimit?: number | undefined;
+}
+
+/** Resolved, all-fields-present option set used internally. */
+interface ResolvedDomOptions {
+  collapse: boolean;
+  compactSvg: boolean;
+  hideHiddenInputs: boolean;
+  hideDisplayNone: boolean;
+  hideAriaHidden: boolean;
+  maxIframeDepth: number;
+  domSnapshotCharLimit: number;
+}
+
+function resolveOptions(opts: CaptureDomOptions): ResolvedDomOptions {
+  return {
+    collapse: opts.collapseRepetitiveDom === true,
+    compactSvg: opts.compactSvg !== false,
+    hideHiddenInputs: opts.hideHiddenInputs !== false,
+    hideDisplayNone: opts.hideDisplayNoneElements !== false,
+    hideAriaHidden: opts.hideAriaHiddenElements !== false,
+    maxIframeDepth: opts.maxIframeDepth ?? DEFAULT_MAX_IFRAME_DEPTH,
+    domSnapshotCharLimit: opts.domSnapshotCharLimit ?? DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT,
+  };
 }
 
 /**
  * Capture a raw DOM snapshot from the current page.
  *
  * Emits the `<body>` element and its tree almost verbatim — every element
- * with every attribute — stripping only `<script>` / `<style>` tags and HTML
- * comments. Invisible elements, text nodes, and wrapper divs are preserved.
+ * with every attribute — stripping `<script>` / `<style>` tags and HTML
+ * comments. Text nodes and wrapper divs are preserved. Hidden elements
+ * (`<input type="hidden">`, `display: none`, `aria-hidden="true"`) are
+ * dropped by default; see CaptureDomOptions to opt out.
  *
  * Iframes are handled in two steps:
  *  1. The browser script marks each iframe with a placeholder ([iframe:N]).
@@ -80,9 +123,8 @@ export interface CaptureDomOptions {
  * helper functions (like __name) that don't exist in the browser context.
  */
 export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {}): Promise<string> {
-  const collapse = opts.collapseRepetitiveDom === true;
-  const compactSvg = opts.compactSvg !== false;
-  const script = buildDomCleanerScript(collapse, compactSvg);
+  const resolved = resolveOptions(opts);
+  const script = buildDomCleanerScript(resolved);
   let snapshot: string;
   try {
     snapshot = (await evaluateWithTimeout<string | null>(page, script, PAGE_EVALUATE_TIMEOUT_MS)) ?? '';
@@ -91,25 +133,22 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
   }
 
   if (snapshot.includes('[iframe:')) {
-    snapshot = await injectFrameContent(page, snapshot, 0, '', collapse, compactSvg);
+    snapshot = await injectFrameContent(page, snapshot, 0, '', resolved);
   }
 
-  if (snapshot.length > DOM_SNAPSHOT_CHAR_LIMIT) {
-    snapshot = snapshot.substring(0, DOM_SNAPSHOT_CHAR_LIMIT)
+  if (snapshot.length > resolved.domSnapshotCharLimit) {
+    snapshot = snapshot.substring(0, resolved.domSnapshotCharLimit)
       + '\n<!-- DOM snapshot truncated — page content exceeds size limit -->';
   }
 
   return snapshot;
 }
 
-/** Maximum nesting depth for recursive iframe content capture. */
-const MAX_IFRAME_DEPTH = 3;
-
 /**
  * Replace [iframe:N] placeholders in the snapshot with the actual DOM content
  * of each child frame, captured via Playwright's Frame API.
  *
- * Recurses into nested iframes up to MAX_IFRAME_DEPTH levels deep.
+ * Recurses into nested iframes up to opts.maxIframeDepth levels deep.
  *
  * IMPORTANT: We iterate iframe *elements* in DOM order (via locator) rather
  * than using page.frames(), because page.frames() returns frames in attachment
@@ -121,8 +160,15 @@ async function injectFrameContent(
   snapshot: string,
   depth: number = 0,
   parentFramePath: string = '',
-  collapse: boolean = false,
-  compactSvg: boolean = true,
+  opts: ResolvedDomOptions = {
+    collapse: false,
+    compactSvg: true,
+    hideHiddenInputs: true,
+    hideDisplayNone: true,
+    hideAriaHidden: true,
+    maxIframeDepth: DEFAULT_MAX_IFRAME_DEPTH,
+    domSnapshotCharLimit: DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT,
+  },
 ): Promise<string> {
   const iframeLocators = await root.locator('iframe').all();
   if (iframeLocators.length === 0) return snapshot;
@@ -166,7 +212,7 @@ async function injectFrameContent(
         try {
           frameContent = await evaluateWithTimeout<string>(
             frame,
-            buildDomCleanerScript(collapse, compactSvg),
+            buildDomCleanerScript(opts),
             FRAME_EVALUATE_TIMEOUT_MS,
           );
         } catch {
@@ -175,8 +221,8 @@ async function injectFrameContent(
 
         // Recursively capture nested iframe content within this frame.
         // Pass the current frame path so nested iframe comments show the full chain.
-        if (depth < MAX_IFRAME_DEPTH && frameContent.includes('[iframe:')) {
-          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath, collapse, compactSvg);
+        if (depth < opts.maxIframeDepth && frameContent.includes('[iframe:')) {
+          frameContent = await injectFrameContent(frame, frameContent, depth + 1, framePath, opts);
         }
       }
     } catch {
@@ -250,13 +296,16 @@ const COLLAPSE_TAIL = 1;
  * Build the self-contained browser script by substituting placeholders into the
  * template in [./scripts/capture-dom.js]. See that file for what the script does.
  */
-function buildDomCleanerScript(collapse: boolean = false, compactSvg: boolean = true): string {
+function buildDomCleanerScript(opts: ResolvedDomOptions): string {
   return substitute(CAPTURE_DOM_TEMPLATE, {
-    COLLAPSE: collapse ? 'true' : 'false',
+    COLLAPSE: opts.collapse ? 'true' : 'false',
     COLLAPSE_MIN_RUN: String(COLLAPSE_MIN_RUN),
     COLLAPSE_HEAD: String(COLLAPSE_HEAD),
     COLLAPSE_TAIL: String(COLLAPSE_TAIL),
-    COMPACT_SVG: compactSvg ? 'true' : 'false',
+    COMPACT_SVG: opts.compactSvg ? 'true' : 'false',
+    HIDE_HIDDEN_INPUTS: opts.hideHiddenInputs ? 'true' : 'false',
+    HIDE_DISPLAY_NONE: opts.hideDisplayNone ? 'true' : 'false',
+    HIDE_ARIA_HIDDEN: opts.hideAriaHidden ? 'true' : 'false',
   });
 }
 

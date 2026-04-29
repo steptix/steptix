@@ -24,6 +24,11 @@ export const DEFAULT_CONFIG: Config = {
     fullPageScreenshots: false,
     collapseRepetitiveDom: true,
     compactSvg: true,
+    hideHiddenInputs: true,
+    hideDisplayNoneElements: true,
+    hideAriaHiddenElements: true,
+    maxIframeDepth: 5,
+    domSnapshotCharLimit: 300_000,
   },
   tests: {
     dir: './tests',

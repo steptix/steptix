@@ -43,6 +43,28 @@ export interface BrowserConfig {
    *  keeping the opening tag + <title>/<desc> children only. Large SVG icon sets
    *  are the biggest per-element token cost on many sites. Default true. */
   compactSvg?: boolean | undefined;
+  /** Drop `<input type="hidden">` elements from DOM snapshots. They are never
+   *  interactable by the AI and often carry long opaque values (CSRF tokens,
+   *  encoded state). Default true. */
+  hideHiddenInputs?: boolean | undefined;
+  /** Drop elements (and their subtrees) whose computed style is
+   *  `display: none`. They are not rendered and not interactable. Slightly
+   *  costlier to detect — requires `getComputedStyle` per element — but cuts
+   *  large amounts of off-screen template/menu markup on many SPAs.
+   *  Default true. */
+  hideDisplayNoneElements?: boolean | undefined;
+  /** Drop elements (and their subtrees) marked `aria-hidden="true"`. These
+   *  are explicitly hidden from assistive tech and are typically decorative.
+   *  Default true. */
+  hideAriaHiddenElements?: boolean | undefined;
+  /** Maximum nesting depth for recursive iframe content capture in DOM
+   *  snapshots. Iframes deeper than this are emitted as a placeholder
+   *  comment instead of recursing. Default 5. */
+  maxIframeDepth?: number | undefined;
+  /** Hard character cap on the rendered DOM snapshot. Snapshots that exceed
+   *  this length are truncated with a marker. Prevents runaway token usage
+   *  on pathologically large pages. Default 300000. */
+  domSnapshotCharLimit?: number | undefined;
 }
 
 export interface TestsConfig {
