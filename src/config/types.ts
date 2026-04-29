@@ -65,6 +65,14 @@ export interface BrowserConfig {
    *  this length are truncated with a marker. Prevents runaway token usage
    *  on pathologically large pages. Default 300000. */
   domSnapshotCharLimit?: number | undefined;
+  /** Capture a screenshot before/after every action and on each AI turn.
+   *  When `false`, per-action screenshots are skipped to reduce runtime cost,
+   *  but end-of-step and on-failure captures still fire so HTML reports
+   *  retain visual context.
+   *  Note: when `ai.sendScreenshots` is true, screenshots are still captured
+   *  per turn regardless of this flag — the AI needs them in its request.
+   *  Default true. */
+  captureScreenshotsPerAction?: boolean | undefined;
 }
 
 export interface TestsConfig {

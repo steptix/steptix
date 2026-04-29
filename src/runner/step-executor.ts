@@ -360,9 +360,14 @@ async function executeStepAttempt(
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
       }),
     );
-    const screenshot = await traceOp(`captureScreenshot (turn ${currentTurn})`, () =>
-      captureScreenshot(page, config.browser.fullPageScreenshots),
-    );
+    // Capture if either consumer needs it: AI (sees this frame on the current turn)
+    // or report (per-action filmstrip via captureScreenshotsPerAction).
+    const wantPreTurnShot = config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
+    const screenshot = wantPreTurnShot
+      ? await traceOp(`captureScreenshot (turn ${currentTurn})`, () =>
+          captureScreenshot(page, config.browser.fullPageScreenshots),
+        )
+      : null;
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
 
@@ -888,9 +893,14 @@ async function executeStepAttempt(
           domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
         }),
       ).catch(() => '');
-      const postShot = await traceOp(`captureScreenshot (post-${action.action})`, () =>
-        captureScreenshot(page, config.browser.fullPageScreenshots),
-      );
+      // The post-action shot is only consumed by the report filmstrip — the AI
+      // sees the next pre-turn capture rather than this one — so it gates only
+      // on captureScreenshotsPerAction, not on ai.sendScreenshots.
+      const postShot = config.browser.captureScreenshotsPerAction !== false
+        ? await traceOp(`captureScreenshot (post-${action.action})`, () =>
+            captureScreenshot(page, config.browser.fullPageScreenshots),
+          )
+        : null;
       const postShotBase64 = postShot?.base64;
       const postUrl = page.url();
       const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;
@@ -1424,7 +1434,12 @@ export async function executeBranchedStep(
       maxIframeDepth: config.browser.maxIframeDepth,
       domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
     });
-    const screenshot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+    // Capture if either consumer needs it: AI (sees this frame on this poll)
+    // or report (per-action filmstrip via captureScreenshotsPerAction).
+    const wantPollShot = config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
+    const screenshot = wantPollShot
+      ? await captureScreenshot(page, config.browser.fullPageScreenshots)
+      : null;
     const screenshotBase64 = screenshot?.base64;
 
     const openPages = pageTracker && pageTracker.count > 1

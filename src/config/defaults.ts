@@ -29,6 +29,7 @@ export const DEFAULT_CONFIG: Config = {
     hideAriaHiddenElements: true,
     maxIframeDepth: 5,
     domSnapshotCharLimit: 300_000,
+    captureScreenshotsPerAction: false,
   },
   tests: {
     dir: './tests',
