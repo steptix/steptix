@@ -73,6 +73,23 @@ export interface BrowserConfig {
    *  per turn regardless of this flag — the AI needs them in its request.
    *  Default true. */
   captureScreenshotsPerAction?: boolean | undefined;
+  /** Restrict attributes emitted in the whole-page DOM snapshot to a curated
+   *  allowlist (id, data-testid, name, type, role, aria-*, alt, label, etc.).
+   *  Drops framework noise like `data-react-*`, `data-emotion`, `data-v-`,
+   *  long `class` strings on Tailwind/Bootstrap pages, etc.
+   *  When `false`, every attribute on every element is emitted (legacy
+   *  behavior — useful for debugging selector issues).
+   *  Default true. */
+  useDomAttributeAllowlist?: boolean | undefined;
+  /** Drop `id` attributes that match known framework-generated unstable
+   *  patterns (React 18 useId like `:r0:` / `:rA:`, Radix UI `radix-:r3:`,
+   *  Headless UI `headlessui-listbox-:r0:`, MUI `mui-12`, React server-
+   *  streaming `:R0:`). Prevents the AI from picking a selector that won't
+   *  survive the next render. The element is still emitted — only the `id`
+   *  attribute is stripped, so buildSelector falls back through
+   *  `data-testid > name > aria-label > chained nth-of-type`.
+   *  Default true. */
+  dropUnstableIds?: boolean | undefined;
 }
 
 export interface TestsConfig {

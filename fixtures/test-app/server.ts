@@ -1316,6 +1316,7 @@ async function handleRequest(
       '/mfa': 'mfa.html',
       '/assertions': 'assertions.html',
       '/confirm-action': 'confirm-action.html',
+      '/dom-noise': 'dom-noise.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

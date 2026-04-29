@@ -358,6 +358,8 @@ async function executeStepAttempt(
         hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
         maxIframeDepth: config.browser.maxIframeDepth,
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
+        dropUnstableIds: config.browser.dropUnstableIds,
       }),
     );
     // Capture if either consumer needs it: AI (sees this frame on the current turn)
@@ -891,6 +893,8 @@ async function executeStepAttempt(
           hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
           maxIframeDepth: config.browser.maxIframeDepth,
           domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+          useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
+          dropUnstableIds: config.browser.dropUnstableIds,
         }),
       ).catch(() => '');
       // The post-action shot is only consumed by the report filmstrip — the AI
@@ -1125,6 +1129,8 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
             hideHiddenInputs: false,
             hideDisplayNoneElements: false,
             hideAriaHiddenElements: false,
+            useDomAttributeAllowlist: false,
+            dropUnstableIds: false,
           });
       const finalShot = p.sendScreenshots && p.against !== 'api'
         ? await captureScreenshot(p.page, p.fullPageScreenshots)
@@ -1437,6 +1443,8 @@ export async function executeBranchedStep(
       hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
       maxIframeDepth: config.browser.maxIframeDepth,
       domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+      useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
+      dropUnstableIds: config.browser.dropUnstableIds,
     });
     // Capture if either consumer needs it: AI (sees this frame on this poll)
     // or report (per-action filmstrip via captureScreenshotsPerAction).

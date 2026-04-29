@@ -622,6 +622,8 @@ export async function runTest(
         hideAriaHiddenElements: config.browser.hideAriaHiddenElements,
         maxIframeDepth: config.browser.maxIframeDepth,
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        useDomAttributeAllowlist: config.browser.useDomAttributeAllowlist,
+        dropUnstableIds: config.browser.dropUnstableIds,
       });
       if (diagnosis) {
         report.diagnosis = diagnosis;

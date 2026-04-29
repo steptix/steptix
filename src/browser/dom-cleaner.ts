@@ -9,6 +9,56 @@ const DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT = 100_000;
  *  Overridable per-call via CaptureDomOptions.maxIframeDepth. */
 const DEFAULT_MAX_IFRAME_DEPTH = 5;
 
+/**
+ * Curated allowlist of DOM attributes to emit when CaptureDomOptions
+ * .useDomAttributeAllowlist is true (the default).
+ *
+ * Drives both:
+ *  - The whole-page snapshot in capture-dom.js (substituted via
+ *    `__ALLOWED_ATTRS_JSON__`).
+ *  - The targeted `expand` subtree view in expandDomSubtree below.
+ *
+ * Both paths additionally include all `aria-*` attributes (see the runtime
+ * walks in each script). expandDomSubtree also includes all `data-*`
+ * attributes for full fidelity when the AI zooms in.
+ *
+ * Keep this list in sync with the selector hierarchy used by buildSelector
+ * (data-testid > id > name > aria-label) — dropping any of those four
+ * breaks selector generation downstream.
+ */
+const ALLOWED_DOM_ATTRIBUTES: readonly string[] = [
+  'id', 'data-testid', 'name', 'type', 'role', 'alt', 'label',
+  'placeholder', 'href', 'src', 'value', 'checked', 'selected',
+  'disabled', 'readonly', 'for', 'action', 'method', 'title',
+];
+
+/**
+ * Regex source strings (no flags / no leading '/') for IDs that are almost
+ * certainly framework-generated and unstable across re-renders. When
+ * CaptureDomOptions.dropUnstableIds is true, an `id` attribute matching any
+ * of these is omitted from the snapshot — `buildSelector` then falls back
+ * through `data-testid > name > aria-label > chained nth-of-type` instead of
+ * proposing a selector that won't survive the next render.
+ *
+ * Patterns are deliberately conservative — high precision, low recall.
+ * Numeric / UUID-shaped IDs are NOT matched because they're often legitimate
+ * stable database row IDs.
+ *
+ * Substituted into capture-dom.js as a JSON array via __UNSTABLE_ID_PATTERNS_JSON__.
+ */
+const UNSTABLE_ID_PATTERNS: readonly string[] = [
+  // React 18 useId — lowercase: ":r0:", ":r1f:", ":rA:" (mixed-case suffix)
+  '^:r[A-Za-z0-9]+:?$',
+  // React server-streaming useId — uppercase: ":R0:", ":Rabc:"
+  '^:R[A-Za-z0-9]+:?$',
+  // Radix UI — wraps a React useId: "radix-:r3:", "radix-:r3a:"
+  '^radix-:r[A-Za-z0-9]+:$',
+  // Headless UI — namespaced React useId: "headlessui-listbox-button-:r0:"
+  '^headlessui-[a-z-]+-:r[A-Za-z0-9]+:$',
+  // MUI v4/v5 auto-generated: "mui-1", "mui-12"
+  '^mui-\\d+$',
+];
+
 /** Hard timeout for the main page evaluate. Pages with stuck JS otherwise hang forever. */
 const PAGE_EVALUATE_TIMEOUT_MS = 30_000;
 /** Hard timeout for each iframe evaluate. Cross-origin / busy frames otherwise hang the whole capture. */
@@ -79,6 +129,13 @@ export interface CaptureDomOptions {
   /** Hard character cap on the rendered DOM snapshot.
    *  Default 100000 in DEFAULT_CONFIG. */
   domSnapshotCharLimit?: number | undefined;
+  /** Restrict emitted attributes to the curated ALLOWED_DOM_ATTRIBUTES list
+   *  (plus all aria-*). When false, every attribute is emitted (legacy).
+   *  Default true in DEFAULT_CONFIG. */
+  useDomAttributeAllowlist?: boolean | undefined;
+  /** Strip `id` attributes that match known framework-generated unstable
+   *  patterns (UNSTABLE_ID_PATTERNS). Default true in DEFAULT_CONFIG. */
+  dropUnstableIds?: boolean | undefined;
 }
 
 /** Resolved, all-fields-present option set used internally. */
@@ -90,6 +147,8 @@ interface ResolvedDomOptions {
   hideAriaHidden: boolean;
   maxIframeDepth: number;
   domSnapshotCharLimit: number;
+  useAttributeAllowlist: boolean;
+  dropUnstableIds: boolean;
 }
 
 function resolveOptions(opts: CaptureDomOptions): ResolvedDomOptions {
@@ -101,6 +160,8 @@ function resolveOptions(opts: CaptureDomOptions): ResolvedDomOptions {
     hideAriaHidden: opts.hideAriaHiddenElements !== false,
     maxIframeDepth: opts.maxIframeDepth ?? DEFAULT_MAX_IFRAME_DEPTH,
     domSnapshotCharLimit: opts.domSnapshotCharLimit ?? DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT,
+    useAttributeAllowlist: opts.useDomAttributeAllowlist !== false,
+    dropUnstableIds: opts.dropUnstableIds !== false,
   };
 }
 
@@ -168,6 +229,8 @@ async function injectFrameContent(
     hideAriaHidden: true,
     maxIframeDepth: DEFAULT_MAX_IFRAME_DEPTH,
     domSnapshotCharLimit: DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT,
+    useAttributeAllowlist: true,
+    dropUnstableIds: true,
   },
 ): Promise<string> {
   const iframeLocators = await root.locator('iframe').all();
@@ -306,6 +369,10 @@ function buildDomCleanerScript(opts: ResolvedDomOptions): string {
     HIDE_HIDDEN_INPUTS: opts.hideHiddenInputs ? 'true' : 'false',
     HIDE_DISPLAY_NONE: opts.hideDisplayNone ? 'true' : 'false',
     HIDE_ARIA_HIDDEN: opts.hideAriaHidden ? 'true' : 'false',
+    USE_ATTR_ALLOWLIST: opts.useAttributeAllowlist ? 'true' : 'false',
+    ALLOWED_ATTRS_JSON: JSON.stringify(ALLOWED_DOM_ATTRIBUTES),
+    DROP_UNSTABLE_IDS: opts.dropUnstableIds ? 'true' : 'false',
+    UNSTABLE_ID_PATTERNS_JSON: JSON.stringify(UNSTABLE_ID_PATTERNS),
   });
 }
 
@@ -385,15 +452,25 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
 
     function getAttrs(el) {
       const attrs = [];
-      const important = [
-        'id', 'data-testid', 'name', 'type', 'role', 'aria-label',
-        'placeholder', 'href', 'src', 'value', 'checked', 'selected',
-        'disabled', 'readonly', 'for', 'action', 'method', 'title',
-      ];
+      const important = ${JSON.stringify(ALLOWED_DOM_ATTRIBUTES)};
       for (const attr of important) {
         const val = el.getAttribute(attr);
         if (val !== null && val !== '') {
           attrs.push(attr + '="' + val + '"');
+        }
+      }
+      // Walk all attributes once and pick up the prefix-match families:
+      //   - aria-*  (full accessibility surface)
+      //   - data-*  (test/state hooks; expand is zoomed-in so full fidelity)
+      // Skip data-testid since it's already in the named list above.
+      const allAttrs = el.attributes;
+      for (let i = 0; i < allAttrs.length; i++) {
+        const a = allAttrs[i];
+        if (a.value === '') continue;
+        if (a.name.indexOf('aria-') === 0) {
+          attrs.push(a.name + '="' + a.value + '"');
+        } else if (a.name.indexOf('data-') === 0 && a.name !== 'data-testid') {
+          attrs.push(a.name + '="' + a.value + '"');
         }
       }
       return attrs.length > 0 ? ' ' + attrs.join(' ') : '';

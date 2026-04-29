@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — DOM Noise Fixture</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; padding: 40px; }
+    h1 { font-size: 1.5rem; margin-bottom: 16px; }
+    h2 { font-size: 1.05rem; margin: 24px 0 8px; color: #334155; }
+    section { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin-bottom: 18px; }
+    button { padding: 8px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: white; cursor: pointer; font-size: 0.9rem; }
+    input[type="text"], input[type="email"] { padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 0.9rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    td, th { padding: 6px 10px; border: 1px solid #e2e8f0; font-size: 0.85rem; text-align: left; }
+    .hidden-by-class { display: none; }
+    .visually-hidden { visibility: hidden; }
+    .stable-marker { color: #16a34a; font-weight: 600; }
+    .unstable-marker { color: #dc2626; font-weight: 600; }
+    code { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.85em; background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>DOM Noise Fixture</h1>
+  <p>Exercises every flag added to <code>captureDomSnapshot</code>: hidden-element subtree dropping, attribute allowlist, unstable-id detection, repetitive-run collapsing, SVG compaction.</p>
+
+  <!-- ─── Hidden elements ────────────────────────────────────────────────── -->
+  <section id="hidden-elements">
+    <h2>Hidden elements</h2>
+
+    <!-- Should be dropped by hideHiddenInputs -->
+    <input type="hidden" name="csrf_token" value="long-opaque-token-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" data-testid="csrf-input">
+    <input type="hidden" name="form_state" value='{"step":"review","attempts":3,"tokenHash":"deadbeef"}'>
+
+    <!-- Should be dropped by hideDisplayNoneElements (inline style) -->
+    <div id="hidden-inline-style" style="display: none">
+      <p>This entire subtree should not appear in the snapshot.</p>
+      <button data-testid="hidden-button-inline">I should not be visible to the AI</button>
+    </div>
+
+    <!-- Should be dropped by hideDisplayNoneElements (computed via class) -->
+    <div id="hidden-by-class" class="hidden-by-class">
+      <p>Hidden via stylesheet — only catchable with getComputedStyle.</p>
+      <button data-testid="hidden-button-class">Class-hidden button</button>
+    </div>
+
+    <!-- visibility: hidden — reserves space, current flags do NOT drop it -->
+    <div id="visually-hidden" class="visually-hidden">
+      <p>visibility:hidden — should still appear in snapshot (only display:none subtrees drop).</p>
+    </div>
+
+    <!-- Should be dropped by hideAriaHiddenElements (whole subtree) -->
+    <div id="aria-hidden-wrapper" aria-hidden="true">
+      <p>Decorative content that's hidden from assistive tech.</p>
+      <button data-testid="aria-hidden-button">Inert button</button>
+    </div>
+
+    <!-- Visible but with aria-describedby pointing to a description -->
+    <p id="visible-paragraph">Visible content with semantic markup.</p>
+  </section>
+
+  <!-- ─── Attribute noise ────────────────────────────────────────────────── -->
+  <section id="attribute-noise">
+    <h2>Attribute noise (allowlist test)</h2>
+
+    <!-- Framework noise that should be dropped when useDomAttributeAllowlist is true -->
+    <button
+      id="login-button"
+      data-testid="login-submit"
+      name="login"
+      type="submit"
+      role="button"
+      aria-label="Submit login form"
+      aria-describedby="login-help"
+      aria-pressed="false"
+      aria-controls="login-form"
+      aria-expanded="false"
+      title="Click to log in"
+      data-react-checksum="abc123"
+      data-emotion="css-9k4j2x"
+      data-v-7a8b9c="true"
+      data-styled="sc-1h2j3k"
+      data-track-event="login.submit"
+      data-track-category="auth"
+      data-gtm-vis-recent-on-screen-1024="13125_125"
+      data-analytics-id="cta-login-primary"
+      data-cy="login-cta"
+      class="px-4 py-2 mt-3 mb-2 rounded-lg bg-blue-500 hover:bg-blue-600 focus:bg-blue-700 active:bg-blue-800 text-white font-semibold shadow-md transition-colors duration-200 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed sm:px-6 sm:py-3 md:text-base lg:px-8"
+      style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); padding-inline: 1rem; padding-block: 0.5rem; border-radius: 0.375rem; box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);"
+    >Log in</button>
+    <p id="login-help">Use your registered email address.</p>
+
+    <!-- Form input with all selector primitives -->
+    <label for="email-input">Email</label>
+    <input
+      id="email-input"
+      name="email"
+      type="email"
+      placeholder="you@example.com"
+      value=""
+      required
+      aria-label="Email address"
+      aria-describedby="email-help"
+      data-testid="email-field"
+    >
+    <p id="email-help">We'll never share your email.</p>
+
+    <!-- Image with alt + framework noise -->
+    <img
+      src="/static/logo.png"
+      alt="SecureBank logo"
+      title="Home"
+      data-react-component="Logo"
+      data-emotion="css-logo-12ab"
+      data-v-logo123
+    >
+
+    <!-- Anchor with stable href + noise -->
+    <a
+      href="/dashboard"
+      id="dashboard-link"
+      aria-label="Go to dashboard"
+      data-track-event="nav.dashboard"
+      data-react-link="true"
+    >Dashboard</a>
+  </section>
+
+  <!-- ─── Unstable IDs (React, Radix, Headless UI, MUI) ──────────────────── -->
+  <section id="unstable-ids">
+    <h2>Unstable IDs (React/Radix/Headless UI/MUI generated)</h2>
+
+    <!-- All of these IDs should be dropped when dropUnstableIds is true.
+         buildSelector should fall back to data-testid. -->
+    <button id=":r0:" data-testid="react-useid-lower">React useId (lowercase): <code class="unstable-marker">:r0:</code></button>
+    <button id=":rA:" data-testid="react-useid-mixed">React useId (mixed-case): <code class="unstable-marker">:rA:</code></button>
+    <button id=":r1f:" data-testid="react-useid-multichar">React useId (multi-char): <code class="unstable-marker">:r1f:</code></button>
+    <button id=":R0:" data-testid="react-server-streaming">React server-streaming: <code class="unstable-marker">:R0:</code></button>
+    <button id="radix-:r3:" data-testid="radix-component">Radix UI: <code class="unstable-marker">radix-:r3:</code></button>
+    <button id="headlessui-listbox-button-:r0:" data-testid="headless-component">Headless UI listbox: <code class="unstable-marker">headlessui-listbox-button-:r0:</code></button>
+    <button id="mui-12" data-testid="mui-component">MUI auto-id: <code class="unstable-marker">mui-12</code></button>
+    <button id="mui-3" data-testid="mui-component-2">MUI auto-id (short): <code class="unstable-marker">mui-3</code></button>
+
+    <!-- These IDs should NOT be dropped — they are stable, human-authored or domain-meaningful. -->
+    <button id="submit-btn" data-testid="stable-submit">Stable: <code class="stable-marker">submit-btn</code></button>
+    <button id="user-profile-link" data-testid="stable-link">Stable: <code class="stable-marker">user-profile-link</code></button>
+    <button id="account-12345" data-testid="stable-numeric-suffix">Stable (numeric domain ID): <code class="stable-marker">account-12345</code></button>
+    <button id="user_email_field" data-testid="stable-snake-case">Stable: <code class="stable-marker">user_email_field</code></button>
+  </section>
+
+  <!-- ─── Repetitive run (table) ─────────────────────────────────────────── -->
+  <section id="long-table">
+    <h2>Long repetitive run (table) — exercises collapseRepetitiveDom</h2>
+    <table id="transactions-table" data-testid="transactions">
+      <thead>
+        <tr><th>Date</th><th>Description</th><th>Amount</th></tr>
+      </thead>
+      <tbody id="transactions-body">
+        <!-- 60 rows generated by JS below — collapseRepetitiveDom should
+             collapse them into head + omission marker + tail. -->
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ─── Decorative SVG ─────────────────────────────────────────────────── -->
+  <section id="svg-section">
+    <h2>Decorative SVG — exercises compactSvg</h2>
+    <svg width="120" height="120" viewBox="0 0 120 120" aria-label="Lock icon" role="img">
+      <title>Account locked</title>
+      <desc>Padlock with shackle in the closed position.</desc>
+      <rect x="30" y="55" width="60" height="50" rx="6" fill="#1f2937"/>
+      <path d="M40 55 V40 a20 20 0 0 1 40 0 V55" stroke="#1f2937" stroke-width="6" fill="none"/>
+      <circle cx="60" cy="78" r="5" fill="#fbbf24"/>
+      <rect x="58" y="78" width="4" height="14" fill="#fbbf24"/>
+    </svg>
+  </section>
+
+  <!-- ─── Selector-fidelity reference (every primitive on one element) ──── -->
+  <section id="selector-fidelity">
+    <h2>Selector primitives reference</h2>
+    <input
+      id="primitives-input"
+      data-testid="primitives-input-testid"
+      name="primitives_input_name"
+      type="text"
+      role="textbox"
+      placeholder="every primitive present"
+      value=""
+      aria-label="Primitives input"
+      title="primitives reference"
+    >
+  </section>
+
+  <script>
+    // Generate 60 rows so collapseRepetitiveDom kicks in (threshold is 50).
+    const tbody = document.getElementById('transactions-body');
+    for (let i = 1; i <= 60; i++) {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>2026-04-' + String(i % 28 + 1).padStart(2, '0') + '</td>' +
+        '<td>Transaction #' + i + '</td>' +
+        '<td>$' + (i * 12.34).toFixed(2) + '</td>';
+      tbody.appendChild(tr);
+    }
+  </script>
+</body>
+</html>

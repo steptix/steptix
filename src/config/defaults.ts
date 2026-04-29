@@ -30,6 +30,8 @@ export const DEFAULT_CONFIG: Config = {
     maxIframeDepth: 5,
     domSnapshotCharLimit: 300_000,
     captureScreenshotsPerAction: false,
+    useDomAttributeAllowlist: true,
+    dropUnstableIds: true,
   },
   tests: {
     dir: './tests',

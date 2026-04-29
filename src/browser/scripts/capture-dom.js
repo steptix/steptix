@@ -13,6 +13,10 @@
 //   __HIDE_HIDDEN_INPUTS__    → `true` / `false`        (boolean literal)
 //   __HIDE_DISPLAY_NONE__     → `true` / `false`        (boolean literal)
 //   __HIDE_ARIA_HIDDEN__      → `true` / `false`        (boolean literal)
+//   __USE_ATTR_ALLOWLIST__    → `true` / `false`        (boolean literal)
+//   __ALLOWED_ATTRS_JSON__    → JSON-stringified string[]
+//   __DROP_UNSTABLE_IDS__     → `true` / `false`        (boolean literal)
+//   __UNSTABLE_ID_PATTERNS_JSON__ → JSON-stringified string[] of regex sources
 //
 // When `collapse` is true, contiguous runs of same-tag sibling elements of length
 // >= COLLAPSE_MIN_RUN are emitted as COLLAPSE_HEAD leading items + an omission
@@ -28,6 +32,14 @@
 // `none` are dropped together with their subtrees (requires getComputedStyle).
 // When `hideAriaHiddenElements` is true, elements with `aria-hidden="true"`
 // are dropped together with their subtrees.
+//
+// When `useDomAttributeAllowlist` is true, only attributes in ALLOWED_ATTRS
+// (substituted via __ALLOWED_ATTRS_JSON__) plus all aria-* are emitted.
+// Otherwise every attribute is emitted (legacy / debugging mode).
+//
+// When `dropUnstableIds` is true, an `id` attribute matching any of the
+// UNSTABLE_ID_REGEXES (React useId, Radix, Headless UI, MUI, etc.) is
+// stripped from emission. The element itself is still emitted.
 
 (() => {
   var SKIP_TAGS = new Set(['script', 'style']);
@@ -44,6 +56,18 @@
   var HIDE_HIDDEN_INPUTS = __HIDE_HIDDEN_INPUTS__;
   var HIDE_DISPLAY_NONE = __HIDE_DISPLAY_NONE__;
   var HIDE_ARIA_HIDDEN = __HIDE_ARIA_HIDDEN__;
+  var USE_ATTR_ALLOWLIST = __USE_ATTR_ALLOWLIST__;
+  var ALLOWED_ATTRS = new Set(__ALLOWED_ATTRS_JSON__);
+  var DROP_UNSTABLE_IDS = __DROP_UNSTABLE_IDS__;
+  var UNSTABLE_ID_REGEXES = __UNSTABLE_ID_PATTERNS_JSON__.map(function (s) { return new RegExp(s); });
+
+  function isUnstableId(value) {
+    if (!value) return false;
+    for (var i = 0; i < UNSTABLE_ID_REGEXES.length; i++) {
+      if (UNSTABLE_ID_REGEXES[i].test(value)) return true;
+    }
+    return false;
+  }
 
   // Cheap-then-expensive filter: returns a short reason string when this element
   // (and its subtree) should be replaced with a placeholder, or '' if it should
@@ -97,9 +121,23 @@
   function getAttributes(el) {
     var out = '';
     var attrs = el.attributes;
-    for (var i = 0; i < attrs.length; i++) {
-      var a = attrs[i];
-      out += ' ' + a.name + '="' + escapeAttr(a.value) + '"';
+    if (!USE_ATTR_ALLOWLIST) {
+      for (var i = 0; i < attrs.length; i++) {
+        var a = attrs[i];
+        if (DROP_UNSTABLE_IDS && a.name === 'id' && isUnstableId(a.value)) continue;
+        out += ' ' + a.name + '="' + escapeAttr(a.value) + '"';
+      }
+      return out;
+    }
+    // Allowlist mode: keep curated names + all aria-*. Drops framework noise
+    // like data-react-*, data-emotion, data-v-*, long Tailwind class strings,
+    // verbose inline style, etc.
+    for (var j = 0; j < attrs.length; j++) {
+      var b = attrs[j];
+      if (DROP_UNSTABLE_IDS && b.name === 'id' && isUnstableId(b.value)) continue;
+      if (ALLOWED_ATTRS.has(b.name) || b.name.indexOf('aria-') === 0) {
+        out += ' ' + b.name + '="' + escapeAttr(b.value) + '"';
+      }
     }
     return out;
   }
