@@ -50,6 +50,17 @@ export interface TestConfig {
   consoleLogLevel?: string;
   /** Per-test server-side log-file mode override: off | compact | full. */
   serverFileLogLevel?: string;
+  /** Connect to a live Chrome over CDP instead of launching a fresh browser.
+   *  Value is the port Chrome was started with (`--remote-debugging-port=<port>`).
+   *  Presence of this key enables CDP mode for this test. */
+  cdp?: string;
+  /** Which tab to drive when connecting over CDP. One of:
+   *   - `new` (default) — open a fresh tab.
+   *   - `<integer>` — attach to the Nth existing tab (zero-indexed).
+   *   - `url~<substring>` — first tab whose URL contains the substring.
+   *   - `title~<substring>` — first tab whose title contains the substring.
+   *   - `active` — the most recently focused tab. */
+  cdpTab?: string;
 }
 
 /** A single parsed test file */

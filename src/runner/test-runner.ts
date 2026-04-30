@@ -3,11 +3,11 @@ import readline from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { stdin as input, stdout as output } from 'node:process';
 import type { Config } from '../config/types.js';
-import type { ParsedTest, TestInstance } from '../parser/types.js';
+import type { ParsedTest, TestConfig, TestInstance } from '../parser/types.js';
 import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
-import { launchBrowser, closeBrowser } from '../browser/manager.js';
+import { launchBrowser, closeBrowser, type CdpLaunchOptions } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
@@ -97,6 +97,26 @@ async function promptInteractive(hint: string): Promise<string> {
 }
 
 /**
+ * Read `cdp:` and `cdpTab:` from a test's `## Config` block. Returns
+ * `undefined` (the launchBrowser default) when CDP is not requested. Throws
+ * with a clear error if the port value is malformed — better to fail fast
+ * here than after the browser has been touched.
+ */
+function parseCdpOptionsFromTestConfig(testConfig: TestConfig): CdpLaunchOptions | undefined {
+  const raw = testConfig.cdp?.trim();
+  if (!raw) return undefined;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(
+      `Invalid '## Config: cdp: ${raw}' — expected a TCP port number ` +
+      `(e.g. \`cdp: 9222\` to attach to Chrome started with --remote-debugging-port=9222).`,
+    );
+  }
+  const tab = testConfig.cdpTab?.trim();
+  return tab ? { port, tab } : { port };
+}
+
+/**
  * Run a single test instance (ParsedTest with resolved parameters).
  * Handles browser lifecycle, step execution, and report generation.
  */
@@ -174,7 +194,8 @@ export async function runTest(
     ? attachRunLogBridges(runLog, fileMode)
     : () => {};
 
-  const session = await launchBrowser(config.browser);
+  const cdpOptions = parseCdpOptionsFromTestConfig(test.config);
+  const session = await launchBrowser(config.browser, cdpOptions);
 
   try {
     // Navigate to base URL if provided

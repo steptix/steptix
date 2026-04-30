@@ -39,6 +39,20 @@ describe('parseTestContent', () => {
     expect(result.config.timeout).toBe('30s');
   });
 
+  it('parses ## Config section cdp port shorthand', () => {
+    const md = `# Test\n\n## Config\n- baseUrl: http://localhost:3000\n- cdp: 9222\n\n## Steps\n- Visit home\n`;
+    const result = parseTestContent(md);
+    expect(result.config.cdp).toBe('9222');
+    expect(result.config.cdpTab).toBeUndefined();
+  });
+
+  it('parses ## Config section cdpTab variants', () => {
+    const md = `# Test\n\n## Config\n- cdp: 9222\n- cdpTab: url~example.com\n\n## Steps\n- Visit home\n`;
+    const result = parseTestContent(md);
+    expect(result.config.cdp).toBe('9222');
+    expect(result.config.cdpTab).toBe('url~example.com');
+  });
+
   it('parses ## Parameters section', () => {
     const md = `# Test\n\n## Parameters\n- email: user@example.com\n- password: $TEST_PASS\n\n## Steps\n- Login\n`;
     const result = parseTestContent(md);
