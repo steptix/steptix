@@ -12,7 +12,7 @@ import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
 import { resolveHooks, type ResolvedHooks } from './hooks.js';
-import { runFsdRepl } from './fsd-repl.js';
+import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
 import { generateReport, getPrimaryModel } from '../report/generator.js';
@@ -74,22 +74,6 @@ async function promptUserForInput(promptText: string): Promise<string> {
   try {
     console.log(`\n🔑 User input required:`);
     const answer = await rl.question(`  ${promptText}: `);
-    return answer.trim();
-  } finally {
-    rl.close();
-  }
-}
-
-/** Prompt the user for a free-form instruction in interactive mode */
-async function promptInteractive(hint: string): Promise<string> {
-  const rl = readline.createInterface({ input, output });
-  try {
-    if (hint) {
-      console.log(`\n🎮 Interactive mode — ${hint}`);
-    } else {
-      console.log(`\n🎮 Interactive mode — type instructions to execute, "done" to continue, "exit" to end the test`);
-    }
-    const answer = await rl.question(`  > `);
     return answer.trim();
   } finally {
     rl.close();
@@ -210,7 +194,7 @@ export async function runTest(
     const stepResults: StepResult[] = [];
     let timeoutDeadline = Date.now() + testTimeout;
     let bail = false;
-    let supervised = false;
+    let humanIntervened = false;
 
     /** Execute every hook instruction in a scope. Returns true on first failure. */
     const runHookScope = async (
@@ -382,24 +366,18 @@ export async function runTest(
           aiExplanation: `User provided input for "${inputStep.variable}"`,
         };
       } else if (interactiveStep) {
-        // Interactive REPL — user types instructions that execute as AI steps
+        // Planned interactive step — hand off to the unified REPL.
         const stepStartTime = Date.now();
-        let interactiveIndex = 1;
+        humanIntervened = true;
 
-        let userExited = false;
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const userInstruction = await promptInteractive(interactiveStep.hint);
-          if (!userInstruction || userInstruction.toLowerCase() === 'done') break;
-          const lower = userInstruction.toLowerCase();
-          if (lower === 'exit' || lower === 'quit') {
-            userExited = true;
-            break;
-          }
-
-          logger.step(i + 1, test.steps.length, `(interactive ${interactiveIndex}) ${userInstruction}`);
-
-          const result = await executeStep(i + 1, test.steps.length, userInstruction, {
+        const adHocResults: StepResult[] = [];
+        const decision = await runInteractiveRepl({
+          page: session.page,
+          testSteps: test.steps,
+          currentStepIndex: i + 1,
+          entryReason: 'planned',
+          ...(interactiveStep.hint && { hint: interactiveStep.hint }),
+          executorOptions: {
             page: session.page,
             config,
             aiClient,
@@ -409,38 +387,43 @@ export async function runTest(
             conversationHistory: [...conversationHistory],
             apiResponseStore,
             csrfTokens,
+            resolvedParameters,
             pageTracker: session.pageTracker,
             dismissalGuidance: hooks.hasAny,
-            // No stepCache — interactive commands are ad-hoc user instructions,
-            // not cacheable steps (and they all share the same stepIndex)
-          });
+          },
+          adHocResults,
+        });
 
-          result.instruction = `(interactive ${interactiveIndex}) ${userInstruction}`;
-          result.interactiveChild = true;
-          interactiveResults.push(result);
-
-          // Add to conversation history so subsequent interactive commands have context
-          const currentUrl = session.page.url();
+        // Re-shape the ad-hoc results so the report renderer can group them
+        // under the [interactive] banner and number them as Step N.M.
+        let childIdx = 1;
+        for (const ad of adHocResults) {
+          // Skip /screenshot synthetic rows from the interactive-child grouping —
+          // they keep their `interactiveAdHoc` flag and render as standalone entries.
+          if (ad.instruction === '[interactive: screenshot]') continue;
+          ad.instruction = `(interactive ${childIdx}) ${ad.instruction}`;
+          ad.interactiveChild = true;
           conversationHistory.push(
             formatStepHistoryEntry(
               i + 1,
-              `(interactive) ${userInstruction}`,
-              result.status === 'passed',
-              currentUrl,
+              ad.instruction,
+              ad.status === 'passed',
+              session.page.url(),
             ),
           );
-
-          if (result.status === 'passed') {
-            logger.success(`Interactive command passed`);
-          } else {
-            logger.error(`Interactive command failed: ${result.error ?? 'unknown error'}`);
-          }
-
-          interactiveIndex++;
+          childIdx++;
         }
+        interactiveResults = adHocResults;
 
         const anyFailed = interactiveResults.some((r) => r.status === 'failed');
         const allTurns = interactiveResults.flatMap((r) => r.turns);
+
+        const explanation =
+          decision.kind === 'exit'
+            ? `Interactive mode: user exited after ${interactiveResults.length} command(s)`
+            : decision.kind === 'resume'
+              ? `Interactive mode: user resumed at step ${decision.fromStepIndex} after ${interactiveResults.length} command(s)`
+              : `Interactive mode: executed ${interactiveResults.length} command(s)`;
 
         stepResult = {
           index: i + 1,
@@ -449,14 +432,35 @@ export async function runTest(
           turns: allTurns,
           durationMs: Date.now() - stepStartTime,
           retried: false,
-          aiExplanation: userExited
-            ? `Interactive mode: user exited after ${interactiveResults.length} command(s)`
-            : `Interactive mode: executed ${interactiveResults.length} command(s)`,
+          aiExplanation: explanation,
           ...(anyFailed && { error: 'One or more interactive commands failed' }),
+          ...(decision.kind === 'resume' && { interactiveResumed: true }),
         };
-        if (userExited) {
+
+        if (decision.kind === 'exit') {
           logger.info('Interactive mode: user exited — stopping test and generating report');
           bail = true;
+        } else if (decision.kind === 'resume') {
+          // Push the parent + children before jumping so the report stays in order.
+          stepResults.push(stepResult);
+          stepResults.push(...interactiveResults);
+          conversationHistory.push(
+            formatStepHistoryEntry(
+              i + 1,
+              instruction,
+              stepResult.status === 'passed',
+              session.page.url(),
+            ),
+          );
+          conversationHistory.push(
+            `[interactive] user resumed test at step ${decision.fromStepIndex}`,
+          );
+          // Refresh the timeout — debugging shouldn't be billed against the test.
+          timeoutDeadline = Date.now() + testTimeout;
+          // Pre-decrement so the loop's `i++` lands on the chosen index.
+          i = decision.fromStepIndex - 2;
+          tokenTracker.resetStep();
+          continue;
         }
       } else if (outputStep) {
         stepResult = await executeStep(i + 1, test.steps.length, outputStep.enrichedInstruction, {
@@ -474,6 +478,7 @@ export async function runTest(
           stepCache,
           cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
+          testSteps: test.steps,
         });
         if (stepResult.status === 'passed') {
           logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
@@ -494,6 +499,7 @@ export async function runTest(
           stepCache,
           cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
+          testSteps: test.steps,
         });
       }
 
@@ -513,16 +519,49 @@ export async function runTest(
         ),
       );
 
+      // ── runnerControl from the AI clarification REPL ───────────────────────
+      // The user took control inside the clarification prompt (typed /repl,
+      // then /resume or /exit). Honour that BEFORE the failure-handoff path —
+      // a /exit must be final, not re-trigger the failure REPL on top.
+      if (stepResult.runnerControl) {
+        humanIntervened = true;
+        if (stepResult.runnerControl.adHocResults) {
+          stepResults.push(...stepResult.runnerControl.adHocResults);
+          for (const ad of stepResult.runnerControl.adHocResults) {
+            conversationHistory.push(
+              formatStepHistoryEntry(
+                ad.index,
+                `(interactive) ${ad.instruction}`,
+                ad.status === 'passed',
+                session.page.url(),
+              ),
+            );
+          }
+        }
+        if (stepResult.runnerControl.kind === 'resume') {
+          conversationHistory.push(
+            `[interactive] user resumed test at step ${stepResult.runnerControl.fromStepIndex} from clarification REPL`,
+          );
+          timeoutDeadline = Date.now() + testTimeout;
+          i = stepResult.runnerControl.fromStepIndex - 2;
+          tokenTracker.resetStep();
+          continue;
+        }
+        // kind === 'exit' — user chose to abort. Don't drop into the failure REPL.
+        bail = true;
+        continue;
+      }
+
       if (stepResult.status === 'failed') {
         logger.error(`Step ${i + 1} FAILED: ${stepResult.error ?? 'unknown error'}`);
 
-        const canEnterFsd =
+        const canEnterRepl =
           config.execution.interactiveOnFailure &&
           config.browser.headed &&
           Boolean(process.stdout.isTTY);
 
-        if (canEnterFsd) {
-          supervised = true;
+        if (canEnterRepl) {
+          humanIntervened = true;
           const executorOptions: StepExecutorOptions = {
             page: session.page,
             config,
@@ -538,10 +577,11 @@ export async function runTest(
             dismissalGuidance: hooks.hasAny,
           };
           const adHocResults: StepResult[] = [];
-          const decision = await runFsdRepl({
+          const decision = await runInteractiveRepl({
             page: session.page,
             testSteps: test.steps,
-            failedStepIndex: i + 1,
+            currentStepIndex: i + 1,
+            entryReason: 'failure',
             executorOptions,
             adHocResults,
           });
@@ -551,7 +591,7 @@ export async function runTest(
             conversationHistory.push(
               formatStepHistoryEntry(
                 ad.index,
-                `(fsd) ${ad.instruction}`,
+                `(interactive) ${ad.instruction}`,
                 ad.status === 'passed',
                 session.page.url(),
               ),
@@ -559,9 +599,9 @@ export async function runTest(
           }
 
           if (decision.kind === 'resume') {
-            stepResult.fsdResumed = true;
+            stepResult.interactiveResumed = true;
             conversationHistory.push(
-              `[fsd] user resumed test at step ${decision.fromStepIndex}`,
+              `[interactive] user resumed test at step ${decision.fromStepIndex}`,
             );
             // Extend the test timeout so the user's debugging time isn't billed against it
             timeoutDeadline = Date.now() + testTimeout;
@@ -571,8 +611,17 @@ export async function runTest(
             continue;
           }
 
-          // User exited — abort the run
-          bail = true;
+          if (decision.kind === 'continue') {
+            // User chose to leave the failed step as failed and proceed with
+            // the next step anyway. Don't bail — fall through to the normal loop.
+            conversationHistory.push(
+              `[interactive] user continued past failed step ${i + 1}`,
+            );
+            timeoutDeadline = Date.now() + testTimeout;
+          } else {
+            // /exit — abort the run.
+            bail = true;
+          }
         } else {
           bail = true;
         }
@@ -630,7 +679,7 @@ export async function runTest(
       ...(baseUrl !== undefined && { baseUrl }),
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
       ...(dataRowVal !== undefined && { dataRow: dataRowVal }),
-      ...(supervised && { supervised: true }),
+      ...(humanIntervened && { humanIntervened: true }),
     };
 
     if (overallStatus === 'failed' && config.ai.diagnoseFailures) {

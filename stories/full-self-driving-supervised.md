@@ -1,5 +1,15 @@
 # Full Self Driving (Supervised)
 
+> **Superseded by [unified-interactive-repl.md](unified-interactive-repl.md).**
+> The post-failure handoff described below is now part of the unified
+> `[interactive]` REPL. Command vocabulary is `/`-prefixed
+> (`/continue`, `/resume`, `/screenshot`, `/exit`); annotation fields
+> were renamed (`fsdAdHoc` → `interactiveAdHoc`, `fsdResumed` →
+> `interactiveResumed`, `supervised` → `humanIntervened`).
+> The `INTERACTIVE_ON_FAILURE` env var and the
+> `execution.interactiveOnFailure` config field still gate the
+> failure-handoff trigger and are unchanged.
+
 ## Context
 
 When a test step fails after retries are exhausted, the current runner closes the browser and writes the report. The human loses all of the page state that caused the failure — cookies, local storage, modal dialogs, multi-step form input, whatever was on-screen. The only way to reproduce the conditions under which the test broke is to re-run it from scratch.

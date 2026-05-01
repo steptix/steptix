@@ -25,6 +25,8 @@ import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
 import type { PageTracker } from '../browser/manager.js';
 import { withRetry } from './retry.js';
+import { runInteractiveRepl } from './interactive-repl.js';
+import type { InteractiveReader } from './interactive-repl.js';
 import { logger, traceOp } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
@@ -85,6 +87,11 @@ export interface StepExecutorOptions {
   /** When true, include dismissal-related guidance in the system prompt and
    *  retry hints. Enabled by the runner when the test has hooks configured. */
   dismissalGuidance?: boolean;
+  /** Full ordered step list for the test. Forwarded to the AI clarification
+   *  REPL so its `/list` and `/resume` menus can drive the outer step loop.
+   *  Optional — when absent, the REPL still works but `/resume` only allows
+   *  the immediate-next-step default. */
+  testSteps?: string[];
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -320,6 +327,13 @@ async function executeStepAttempt(
   let stepFailed = false;
   let stepError: string | undefined;
   let completedTurns = 0;
+  /** Set when the user takes control inside the AI clarification REPL. The post-loop
+   *  return uses this to short-circuit with the right `runnerControl` payload so the
+   *  test-runner doesn't double-prompt. */
+  let controlSignal: { kind: 'resume'; fromStepIndex: number } | { kind: 'exit' } | null = null;
+  /** Ad-hoc StepResults produced inside the clarification REPL (typed Flick steps,
+   *  /screenshot captures). Returned via a side-channel for the runner to merge. */
+  const clarificationAdHoc: StepResult[] = [];
 
   try {
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
@@ -525,11 +539,33 @@ async function executeStepAttempt(
     // 7. Handle prompt actions (ambiguity resolution)
     const promptAction = aiResponse.actions.find((a) => a.action === 'prompt');
     if (promptAction && config.execution.promptOnAmbiguity) {
-      const userAnswer = await promptUser(promptAction.question ?? promptAction.description);
-      const clarificationMsg = buildClarificationMessage(
-        promptAction.question ?? promptAction.description,
-        userAnswer,
-      );
+      const question = promptAction.question ?? promptAction.description;
+      const outcome = await promptUserWithReplEscape({
+        question,
+        page,
+        testSteps: opts.testSteps ?? [],
+        currentStepIndex: stepIndex,
+        executorOptions: opts,
+        adHocResults: clarificationAdHoc,
+      });
+
+      if (outcome.kind === 'exit' || outcome.kind === 'resume') {
+        controlSignal = outcome.kind === 'exit'
+          ? { kind: 'exit' }
+          : { kind: 'resume', fromStepIndex: outcome.fromStepIndex };
+        // Push the (incomplete) turn so the report retains the AI's question.
+        allTurns.push({
+          turnNumber: currentTurn,
+          attemptNumber,
+          timestamp: turnTimestamp,
+          aiInteractions: turnAiInteractions,
+          subActions: turnSubActions,
+        });
+        break;
+      }
+
+      const userAnswer = outcome.text;
+      const clarificationMsg = buildClarificationMessage(question, userAnswer);
       const clarificationMessages: ChatMessage[] = [
         { role: 'system', content: systemPrompt },
         userMessage,
@@ -1015,6 +1051,40 @@ async function executeStepAttempt(
   }
 
   const durationMs = Date.now() - startTime;
+
+  if (controlSignal) {
+    // User took control inside the AI clarification REPL. Return a fully
+    // formed StepResult with `runnerControl` set so the test-runner can
+    // jump or bail without re-entering the failure-handoff REPL on top.
+    const isExit = controlSignal.kind === 'exit';
+    const endPageUrl = page.url();
+    const adHocPayload = clarificationAdHoc.length > 0
+      ? { adHocResults: clarificationAdHoc }
+      : {};
+    const runnerControl: StepResult['runnerControl'] = isExit
+      ? { kind: 'exit', ...adHocPayload }
+      : {
+          kind: 'resume',
+          fromStepIndex: (controlSignal as { kind: 'resume'; fromStepIndex: number }).fromStepIndex,
+          ...adHocPayload,
+        };
+    return {
+      index: stepIndex,
+      instruction,
+      status: isExit ? 'failed' : 'passed',
+      turns: allTurns,
+      ...(assertionResults.length > 0 && { assertions: assertionResults }),
+      pageUrl: endPageUrl,
+      durationMs,
+      retried,
+      aiExplanation: isExit
+        ? 'User exited the AI clarification REPL'
+        : `User resumed from the AI clarification REPL at step ${(controlSignal as { kind: 'resume'; fromStepIndex: number }).fromStepIndex}`,
+      ...(isExit && { error: 'user exited from clarification REPL' }),
+      ...(controlSignal.kind === 'resume' && { interactiveResumed: true }),
+      runnerControl,
+    };
+  }
 
   if (stepFailed) {
     throw new StepFailureError(stepError ?? 'Step failed', collectedFailures, allTurns);
@@ -1600,6 +1670,98 @@ export async function executeBranchedStep(
   return results;
 }
 
+/**
+ * Outcome of the AI clarification prompt. The caller switches on `kind`:
+ *  - `answer`  → today's flow: build clarification message, re-call AI.
+ *  - `resume`  → bubble up to the test-runner via `runnerControl.resume`.
+ *  - `exit`    → bubble up to the test-runner via `runnerControl.exit`.
+ */
+export type ClarificationOutcome =
+  | { kind: 'answer'; text: string }
+  | { kind: 'resume'; fromStepIndex: number }
+  | { kind: 'exit' };
+
+export interface PromptUserWithReplEscapeContext {
+  question: string;
+  page: Page;
+  testSteps: string[];
+  /** 1-based index of the step the AI asked the question about. */
+  currentStepIndex: number;
+  /** Forwarded to runInteractiveRepl for ad-hoc Flick steps. */
+  executorOptions: StepExecutorOptions;
+  /** Accumulator for ad-hoc REPL StepResults. Caller appends them to the run. */
+  adHocResults: StepResult[];
+  /** Optional injected reader (tests). When set, wrapper does NOT close it. */
+  reader?: InteractiveReader;
+  /** Optional output sink (tests). Defaults to console.log. */
+  write?: (line: string) => void;
+}
+
+/**
+ * One-shot clarification prompt with a `/repl` escape hatch.
+ *
+ * The prompt accepts exactly two kinds of input:
+ *  - `/repl` (case-insensitive) → opens the unified interactive REPL with
+ *    `entryReason: 'clarification'`.
+ *  - anything else → treated verbatim as the answer text and returned to the
+ *    caller for the existing AI re-prompt round-trip.
+ *
+ * Other slash commands are NOT recognised at this prompt — typing `/exit`
+ * here returns it as the literal answer. Rationale: the prompt is "the AI
+ * is waiting for your answer"; mixing commands at that level blurs what
+ * input the system expects. Use `/repl` to take control.
+ */
+export async function promptUserWithReplEscape(
+  ctx: PromptUserWithReplEscapeContext,
+): Promise<ClarificationOutcome> {
+  const ownsReader = ctx.reader === undefined;
+  const reader: InteractiveReader = ctx.reader ?? (() => {
+    const rl = readline.createInterface({ input, output });
+    return {
+      question: (prompt: string) => rl.question(prompt),
+      close: () => rl.close(),
+    };
+  })();
+  const write = ctx.write ?? ((s: string): void => { console.log(s); });
+
+  try {
+    write('');
+    write('⚠  AI needs clarification:');
+    if (ctx.question) write(`  ${ctx.question}`);
+    write('  Type your answer, or /repl to take control.');
+    const raw = await reader.question('  Your answer: ');
+    const trimmed = raw.trim();
+
+    if (trimmed.toLowerCase() === '/repl') {
+      const decision = await runInteractiveRepl({
+        page: ctx.page,
+        testSteps: ctx.testSteps,
+        currentStepIndex: ctx.currentStepIndex,
+        entryReason: 'clarification',
+        clarificationQuestion: ctx.question,
+        executorOptions: ctx.executorOptions,
+        adHocResults: ctx.adHocResults,
+        // Always hand a reader to the REPL so it doesn't open a second readline
+        // on the same stdin — share whichever one we own.
+        reader,
+        ...(ctx.write !== undefined && { write: ctx.write }),
+      });
+      if (decision.kind === 'continue') return { kind: 'answer', text: '' };
+      if (decision.kind === 'resume') {
+        return { kind: 'resume', fromStepIndex: decision.fromStepIndex };
+      }
+      return { kind: 'exit' };
+    }
+
+    return { kind: 'answer', text: trimmed };
+  } finally {
+    if (ownsReader) {
+      reader.close();
+    }
+  }
+}
+
+/** @deprecated Kept for callers that still want the bare prompt. New code should use `promptUserWithReplEscape`. */
 async function promptUser(question: string): Promise<string> {
   const rl = readline.createInterface({ input, output });
   try {
@@ -1610,3 +1772,5 @@ async function promptUser(question: string): Promise<string> {
     rl.close();
   }
 }
+// Suppress unused-export warning — kept intentionally as a deprecated fallback.
+void promptUser;

@@ -168,20 +168,29 @@ At step 3, the test pauses and the user enters a REPL:
 
 ```
 🎮 Interactive mode — Explore the dashboard
-  > Click on the Settings menu
-  ✓ Interactive command passed
-
-🎮 Interactive mode — Explore the dashboard
-  > Verify the account name shows "John Smith"
-  ✓ Interactive command passed
-
-🎮 Interactive mode — Explore the dashboard
-  > done
+   Type /help for commands, /continue to advance, /exit to abort.
+> Click on the Settings menu
+✓ ad-hoc step passed
+> Verify the account name shows "John Smith"
+✓ ad-hoc step passed
+> /continue
 ```
 
-Each instruction is executed as a full AI step with screenshots, DOM snapshots, and retry logic. Conversation history accumulates across interactive commands so the AI maintains context. Type `done` or press Enter on an empty line to exit interactive mode and continue with the next test step. The optional text after `[interactive]` is shown as a hint on each prompt.
+Each instruction is executed as a full AI step with screenshots, DOM snapshots, and retry logic. Conversation history accumulates across interactive commands so the AI maintains context.
 
-If any interactive command fails, the overall step is marked as failed.
+REPL commands (all `/`-prefixed):
+
+| Command       | Effect                                                  |
+| ------------- | ------------------------------------------------------- |
+| `/continue`   | Leave the REPL and run the next step.                   |
+| `/resume`     | Open a menu to jump to any step in the test.            |
+| `/screenshot` | Capture the current page into the report on demand.     |
+| `/list`       | Print numbered step list with current-step marker.      |
+| `/help`       | Show command list.                                      |
+| `/exit`       | Abort the entire run (alias: `/quit`).                  |
+| *(any other)* | Executed as a single ad-hoc Flick step.                 |
+
+If any interactive command fails, the overall step is marked as failed. The same REPL is also opened automatically when a step fails after retries — see the `interactiveOnFailure` execution config (env var `INTERACTIVE_ON_FAILURE=true`) for the post-failure handoff. In that mode the REPL banner reads "🛑 Step failed" instead of "🎮 Interactive mode" and the `/resume` menu defaults to the step after the failure.
 
 ---
 

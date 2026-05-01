@@ -96,16 +96,19 @@ function renderReport(report: TestReport): string {
 /**
  * Build a replayable test script from the captured steps.
  * Skips `[interactive]` header rows (their children carry the actual commands)
- * and strips `(interactive N)` / `(fsd)` prefixes so the output is ready
- * to paste into a .md test file.
+ * and `[interactive: …]` synthetic rows (e.g. screenshots) and strips
+ * `(interactive N)` / `(fsd)` prefixes so the output is ready to paste
+ * into a .md test file. The `(fsd)` prefix is accepted for back-compat
+ * with reports written before the FSD/interactive merge.
  */
 function buildScriptText(steps: StepResult[]): string {
-  const INTERACTIVE_HEADER = /^\[interactive\]/i;
-  const PREFIX = /^\((?:interactive\s+\d+|fsd)\)\s*/i;
+  const INTERACTIVE_HEADER = /^\[interactive(?::|\])/i;
+  const PREFIX = /^\((?:interactive\s+\d+|fsd|interactive)\)\s*/i;
   const lines: string[] = [];
   let n = 1;
   for (const step of steps) {
     if (step.hookScope) continue;
+    if (step.interactiveAdHoc) continue;
     const raw = step.instruction.trim();
     if (INTERACTIVE_HEADER.test(raw)) continue;
     const cleaned = raw.replace(PREFIX, '').trim();

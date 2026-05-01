@@ -419,7 +419,7 @@ export class RunController {
   /**
    * Run the interactive REPL: keep the composer open, treat each user
    * submission as a single ad-hoc step (or REPL command). Returns true if
-   * the user exited cleanly (`done` / `exit`), false to abort the whole run.
+   * the user advanced cleanly (/continue), false to abort the whole run (/exit).
    */
   private async runInteractive(args: {
     hint: string;
@@ -450,6 +450,19 @@ export class RunController {
 
       if (action.kind === 'output') {
         this.postOutput(action.msg, action.level);
+      } else if (action.kind === 'resume') {
+        // /resume is not yet wired into the testbench's run-controller — the
+        // server-driven flow doesn't currently support arbitrary jumps. Surface
+        // the limitation and stay in the REPL.
+        this.postOutput(
+          '/resume is not yet supported in the testbench — use /continue or /exit, or run from the CLI for resume support.',
+          'warn',
+        );
+      } else if (action.kind === 'screenshot') {
+        this.postOutput(
+          '/screenshot is not yet wired in the testbench — run from the CLI for on-demand captures.',
+          'warn',
+        );
       } else if (action.kind === 'send-step') {
         log(`interactive step: ${action.text}`);
         this.postOutput(`> ${action.text}`, 'info');

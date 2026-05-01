@@ -139,7 +139,7 @@ The output panel has two sub-sections: the **Step Output** area and the **Steeri
   - The instruction is added to the session's conversation history so subsequent steps have context.
   - The loop continues — the user can type more instructions without resuming.
   - Manual steps executed in the steering window are **not** written back to the test file.
-- Typing `done` or clicking **Resume** ends the steering session and resumes the test.
+- Typing `/continue` or clicking **Resume** ends the steering session and resumes the test. Other slash commands (`/exit`, `/help`, `/list`) follow the same vocabulary as the CLI REPL.
 - When the run is not paused, the steering input is visually disabled with placeholder text: `"Paused at a breakpoint to use steering"`.
 
 ---
@@ -194,7 +194,7 @@ User options:
 ### 4.5 Interactive Steps (`[interactive]`)
 
 - When the runner reaches an `[interactive]` step, execution automatically pauses and the Steering Window activates — identical to a breakpoint pause.
-- The step is considered complete when the user clicks **Resume** or types `done`.
+- The step is considered complete when the user clicks **Resume** or types `/continue`.
 
 ---
 

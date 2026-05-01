@@ -112,14 +112,32 @@ export interface StepResult {
   error?: string;
   /** AI explanation of what it was attempting (shown on failure) */
   aiExplanation?: string;
-  /** True when this step was typed into the FSD(S) REPL rather than being part of the test file. */
-  fsdAdHoc?: boolean;
+  /** True when this step was typed into the interactive REPL rather than being part of the test file. */
+  interactiveAdHoc?: boolean;
   /** True when this step is a user-typed command captured inside an [interactive] step. */
   interactiveChild?: boolean;
-  /** True when the failure on this step triggered the FSD(S) REPL handoff and the user chose to resume. */
-  fsdResumed?: boolean;
+  /** True when this step triggered the interactive REPL (planned [interactive] or post-failure handoff)
+   *  and the user chose to resume from a different step. */
+  interactiveResumed?: boolean;
   /** Hook metadata — absent for regular steps, set for hook executions. */
   hookScope?: 'before' | 'beforeEach' | 'afterEach' | 'after';
+  /**
+   * Out-of-band control signal from `executeStep` to the test-runner step loop.
+   * Currently set only when the user takes control inside the AI clarification REPL.
+   *
+   *  - `resume` → the test-runner jumps the outer loop to `fromStepIndex` (1-based)
+   *    instead of advancing to `i + 1`.
+   *  - `exit`   → the test-runner sets `bail = true` immediately, BEFORE the
+   *    failure-handoff path, so a `/exit` from the clarification REPL doesn't
+   *    re-trigger the failure REPL on top of the user's chosen abort.
+   *
+   * `adHocResults` carries any StepResults produced inside the clarification REPL
+   * (typed Flick steps, /screenshot captures); the runner appends them after the
+   * parent step.
+   */
+  runnerControl?:
+    | { kind: 'resume'; fromStepIndex: number; adHocResults?: StepResult[] }
+    | { kind: 'exit'; adHocResults?: StepResult[] };
 }
 
 /** AI-generated root-cause analysis for a failed test run */
@@ -170,8 +188,8 @@ export interface TestReport {
   dataRow?: number;
   /** AI-generated root-cause analysis, populated when the test fails and diagnoseFailures is enabled */
   diagnosis?: FailureDiagnosis;
-  /** True when the run entered FSD(Supervised) REPL at any point. */
-  supervised?: boolean;
+  /** True when the run entered the interactive REPL at any point (planned [interactive] step or post-failure handoff). */
+  humanIntervened?: boolean;
 }
 
 /** Summary across all test runs in a session */

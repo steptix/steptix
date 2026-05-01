@@ -119,16 +119,22 @@ side, the one with its own scrollbar). Hidden by default; reveals on a
 
 ### REPL commands accepted in `[interactive]` mode
 
-Handled in the host without server calls:
+Handled in the host without server calls. Commands are `/`-prefixed; see
+[stories/unified-interactive-repl.md](../../stories/unified-interactive-repl.md)
+for the canonical surface.
 
-| Command           | Effect                                                |
-|-------------------|-------------------------------------------------------|
-| `:help`           | Echo the list of commands into the log               |
-| `:list`           | Echo all step lines from the source file             |
-| `:exit` / `done`  | End the interactive block, run continues             |
-| `:quit`           | End the run entirely (same as Stop)                  |
+| Command       | Effect                                                  |
+|---------------|---------------------------------------------------------|
+| `/help`       | Echo the list of commands into the log                 |
+| `/list`       | Echo all step lines from the source file               |
+| `/continue`   | End the interactive block, run continues               |
+| `/exit`       | End the run entirely (same as Stop; alias `/quit`)     |
 
-Deferred: `:screenshot` (needs a server endpoint), `:resume` (CLI-only).
+Deferred in the testbench: `/screenshot` (needs a server endpoint),
+`/resume` (run-controller currently can't jump). Both surface a
+"not yet supported in the testbench" warning when typed; the CLI runner
+honours both. Bare-word `done` / `exit` and the previous-design `:`-prefix
+inputs print a one-line deprecation hint pointing at the new command.
 
 ## Protocol additions
 

@@ -152,7 +152,7 @@ timeout: 60s
 ### Special step prefixes
 
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
-- `[interactive] optional hint` -- opens an interactive REPL for ad-hoc commands (type `done` to continue)
+- `[interactive] optional hint` -- opens an interactive REPL (commands are `/`-prefixed: `/continue` advance, `/resume` jump to any step, `/screenshot` capture, `/help` for the full list)
 
 ## How it works: execution pipeline
 
@@ -173,7 +173,7 @@ When you run a test, here's what happens end to end:
        ↓
 [runTest() — step loop]
   ├─ [input: var]   → prompt user, store value
-  ├─ [interactive]  → REPL until "done"
+  ├─ [interactive]  → REPL until /continue (or /resume / /exit)
   └─ Normal step    → executeStep()
        ↓
 [src/runner/step-executor.ts — executeStep()]
