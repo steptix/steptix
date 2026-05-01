@@ -3,6 +3,7 @@ import { parseSkillFile } from '../parser/markdown.js';
 import { interpolate } from '../parser/parameters.js';
 import type { ParsedSkill } from '../parser/types.js';
 import { logger } from '../utils/logger.js';
+import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
 
 /**
  * Parse-time expansion of `[skill: name arg="value" out.x="alias"]` step
@@ -10,8 +11,6 @@ import { logger } from '../utils/logger.js';
  * the runner sees no skill machinery.
  */
 
-const SKILL_INVOCATION_RE = /^\s*\[skill:\s*([\w-]+)((?:\s+[\w.]+="[^"]*")*)\s*\](.*)$/;
-const ARG_RE = /([\w.]+)="([^"]*)"/g;
 const STORE_AS_RE = /\[store\s+as:\s*(\w+)\]/g;
 const PLACEHOLDER_RE = /\{\{(\w+)\}\}/g;
 
@@ -88,28 +87,21 @@ async function expandRecursive(
   return out;
 }
 
-/** Match `[skill: name ...]` at the start of a step; trailing text is treated as a human-readable comment and discarded. */
+/**
+ * Match `[skill: name ...]` at the start of a step. Trailing text after the
+ * closing `]` is treated as a human-readable comment and discarded.
+ *
+ * Returns `null` if the line is not a skill invocation. Throws
+ * `SkillCallSyntaxError` if the line opens as one but is malformed.
+ */
 function parseSkillCall(step: string): SkillCall | null {
-  const match = SKILL_INVOCATION_RE.exec(step);
-  if (!match) return null;
-
-  const [, name, argsRaw] = match;
-  if (!name) return null;
-
-  const args: Record<string, string> = {};
-  const outputAliases: Record<string, string> = {};
-
-  for (const argMatch of (argsRaw ?? '').matchAll(ARG_RE)) {
-    const [, key, value] = argMatch;
-    if (!key || value === undefined) continue;
-    if (key.startsWith('out.')) {
-      outputAliases[key.slice(4)] = value;
-    } else {
-      args[key] = value;
-    }
-  }
-
-  return { name, args, outputAliases };
+  const parsed = parseSkillCallSyntax(step);
+  if (!parsed) return null;
+  return {
+    name: parsed.name,
+    args: parsed.args,
+    outputAliases: parsed.outputAliases,
+  };
 }
 
 const skillCache = new Map<string, ParsedSkill>();

@@ -282,6 +282,123 @@ type: skill
     expect(result[0]).toBe('Read [store as: __skill1_x]');
     expect(result[1]).toBe('Read [store as: __skill2_x]');
   });
+
+  describe('bare-identifier shorthand', () => {
+    it('expands a bare param to a {{name}} placeholder forwarded to the skill body', async () => {
+      await writeSkill(
+        'login',
+        `---
+type: skill
+---
+# login
+## Parameters
+- password: required
+## Steps
+1. Type "{{password}}" into the password field
+`,
+      );
+
+      const result = await expandSkills(['[skill: login password]'], tmpDir);
+
+      // The shorthand sets args.password = "{{password}}", so after the
+      // skill body is interpolated, the literal `{{password}}` survives in the
+      // expanded step — to be resolved against the caller's parameter scope at
+      // runtime.
+      expect(result).toEqual([
+        'Type "{{password}}" into the password field',
+      ]);
+    });
+
+    it('mixes bare and explicit args in one call', async () => {
+      await writeSkill(
+        'login',
+        `---
+type: skill
+---
+# login
+## Parameters
+- username: required
+- password: required
+- role: required
+## Steps
+1. Type "{{username}}" / "{{password}}" with role "{{role}}"
+`,
+      );
+
+      const result = await expandSkills(
+        ['[skill: login username password role="admin"]'],
+        tmpDir,
+      );
+
+      expect(result).toEqual([
+        'Type "{{username}}" / "{{password}}" with role "admin"',
+      ]);
+    });
+
+    it('bare `out.name` validates against declared outputs and leaks under that name', async () => {
+      await writeSkill(
+        'count',
+        `---
+type: skill
+---
+# count
+## Outputs
+- result_count
+## Steps
+1. Count rows [store as: result_count]
+`,
+      );
+
+      const result = await expandSkills(
+        ['[skill: count out.result_count]', 'Total: {{result_count}}'],
+        tmpDir,
+      );
+
+      expect(result).toEqual([
+        'Count rows [store as: result_count]',
+        'Total: {{result_count}}',
+      ]);
+    });
+
+    it('bare `out.<name>` for an undeclared output throws (catches typos)', async () => {
+      await writeSkill(
+        'count',
+        `---
+type: skill
+---
+# count
+## Outputs
+- result_count
+## Steps
+1. Count rows [store as: result_count]
+`,
+      );
+
+      await expect(
+        expandSkills(['[skill: count out.resultcount]'], tmpDir),
+      ).rejects.toThrow(/no declared output "resultcount"/);
+    });
+  });
+
+  describe('syntax errors are surfaced', () => {
+    it('throws a SkillCallSyntaxError with caret diagnostic on unterminated quote', async () => {
+      await expect(
+        expandSkills(['[skill: login password="{{password}}]'], tmpDir),
+      ).rejects.toThrow(/unterminated string for argument 'password'/);
+    });
+
+    it('throws on missing closing bracket', async () => {
+      await expect(
+        expandSkills(['[skill: foo'], tmpDir),
+      ).rejects.toThrow(/expected '\]'/);
+    });
+
+    it('throws on an unquoted `key=value` argument', async () => {
+      await expect(
+        expandSkills(['[skill: foo bar=baz]'], tmpDir),
+      ).rejects.toThrow(/expected '"' after '=' for argument 'bar'/);
+    });
+  });
 });
 
 describe('parseTestFile with skillsDir', () => {
