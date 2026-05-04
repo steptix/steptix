@@ -100,6 +100,7 @@ function makeTest(steps: string[]): ParsedTest {
     parameters: {},
     steps,
     skipHooks: steps.map(() => false),
+    toolCalls: steps.map(() => null),
     hooks: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
 }

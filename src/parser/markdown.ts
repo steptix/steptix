@@ -4,6 +4,8 @@ import { marked, type Token, type Tokens } from 'marked';
 import { parseFrontmatter } from './frontmatter.js';
 import type { ParsedSkill, ParsedTest, TestConfig, TestHooks } from './types.js';
 import { expandSkills } from '../skills/expander.js';
+import { parseToolCall } from '../tools/tool-call-parser.js';
+import type { ToolCall } from '../tools/types.js';
 import { logger } from '../utils/logger.js';
 
 /** Prefix marker on a step that opts out of beforeEach / afterEach hooks. */
@@ -39,6 +41,16 @@ export async function parseTestFile(
       afterEach: await expandSkills(parsed.hooks.afterEach, options.skillsDir),
       after: await expandSkills(parsed.hooks.after, options.skillsDir),
     };
+    // Skill bodies may themselves contain `[tool: ...]` lines that surface
+    // only after expansion, so re-derive the parallel toolCalls array against
+    // the expanded steps. skipHooks is also re-extended to match length.
+    parsed.toolCalls = parsed.steps.map((s) => parseToolCall(s));
+    while (parsed.skipHooks.length < parsed.steps.length) {
+      parsed.skipHooks.push(false);
+    }
+    if (parsed.skipHooks.length > parsed.steps.length) {
+      parsed.skipHooks.length = parsed.steps.length;
+    }
   }
 
   return parsed;
@@ -70,6 +82,7 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
     parameters: sections.parameters,
     steps: sections.steps,
     skipHooks: sections.skipHooks,
+    toolCalls: sections.toolCalls,
     hooks: sections.hooks,
   };
 }
@@ -93,6 +106,8 @@ interface ParsedSections {
   steps: string[];
   /** Parallel to `steps` — true when the authored line began with `[no-hooks]`. */
   skipHooks: boolean[];
+  /** Parallel to `steps` — non-null when the line is a `[tool: ...]` invocation. */
+  toolCalls: (ToolCall | null)[];
   hooks: TestHooks;
 }
 
@@ -111,6 +126,7 @@ function parseSections(rawContent: string, filePath: string): {
   const outputs: string[] = [];
   const steps: string[] = [];
   const skipHooks: boolean[] = [];
+  const toolCalls: (ToolCall | null)[] = [];
   const hooks: TestHooks = {
     before: [],
     beforeEach: [],
@@ -160,7 +176,7 @@ function parseSections(rawContent: string, filePath: string): {
     }
 
     if (currentSection === 'steps' && token.type === 'list') {
-      extractSteps(token as Tokens.List, steps, skipHooks);
+      extractSteps(token as Tokens.List, steps, skipHooks, toolCalls);
     }
 
     if (currentSection === 'hooks' && token.type === 'list') {
@@ -180,7 +196,7 @@ function parseSections(rawContent: string, filePath: string): {
   }
 
   return {
-    sections: { config, parameters, outputs, steps, skipHooks, hooks },
+    sections: { config, parameters, outputs, steps, skipHooks, toolCalls, hooks },
     frontmatter,
     title,
   };
@@ -203,12 +219,15 @@ function parseKeyValueList(listToken: Tokens.List, target: Record<string, string
   }
 }
 
-/** Extract ordered steps from a list token, stripping `[no-hooks]` markers and
- *  recording their positions in the parallel `skipHooks` array. */
+/** Extract ordered steps from a list token, stripping `[no-hooks]` markers,
+ *  recording their positions in the parallel `skipHooks` array, and parsing
+ *  any `[tool: ...]` lines into the parallel `toolCalls` array. Tool-call
+ *  syntax errors throw at parse time with a caret diagnostic. */
 function extractSteps(
   listToken: Tokens.List,
   steps: string[],
   skipHooks: boolean[],
+  toolCalls: (ToolCall | null)[],
 ): void {
   for (const item of listToken.items) {
     const text = extractPlainText(item.tokens).trim();
@@ -216,8 +235,10 @@ function extractSteps(
     const noHooks = NO_HOOKS_MARKER.test(text);
     const cleaned = noHooks ? text.replace(NO_HOOKS_MARKER, '').trim() : text;
     if (!cleaned) continue;
+    const toolCall = parseToolCall(cleaned);
     steps.push(cleaned);
     skipHooks.push(noHooks);
+    toolCalls.push(toolCall);
   }
 }
 

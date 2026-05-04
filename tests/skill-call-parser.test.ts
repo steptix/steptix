@@ -129,7 +129,7 @@ describe('parseSkillCall — syntax errors', () => {
       throw new Error('expected throw');
     } catch (e) {
       expect(e).toBeInstanceOf(SkillCallSyntaxError);
-      expect((e as SkillCallSyntaxError).reason).toMatch(/skill name missing/);
+      expect((e as SkillCallSyntaxError).reason).toMatch(/name missing/);
     }
   });
 

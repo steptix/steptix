@@ -153,6 +153,228 @@ timeout: 60s
 
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
 - `[interactive] optional hint` -- opens an interactive REPL (commands are `/`-prefixed: `/continue` advance, `/resume` jump to any step, `/screenshot` capture, `/help` for the full list)
+- `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory (see [Skills](#skills))
+- `[tool: name args]` -- run deterministic TypeScript code with full Playwright access (see [Tools](#tools))
+
+## Tools
+
+Tools are deterministic TypeScript functions you can call from a test step. They are how you escape natural-language prose into real code when:
+
+- The work isn't on the page — fetching an OTP from a test inbox, signing a JWT, hashing a password, calling a backend API to seed test data.
+- The action is mechanically tricky for the AI — HTML5 drag-and-drop, file downloads, multi-page choreography that races on Playwright events.
+- You want determinism — anything the AI shouldn't decide on the fly.
+
+A tool gets the live Playwright `page`, `context`, and `browser` (the same instances the rest of the test uses), reads/writes the test's variable scope, and is callable from any step or skill via `[tool: name ...]` — including the same shorthand syntax skill calls support.
+
+### Project layout
+
+Tools live in their own TypeScript subproject so they get the full IDE experience (autocomplete, typecheck, lint) without polluting the test markdown. A typical project looks like this:
+
+```
+my-test-project/
+├── ai-ui-auto.config.ts          ← framework config
+├── tests/
+│   └── login-flow.md             ← natural-language tests
+├── skills/
+│   └── login_via_otp.md          ← reusable step macros
+└── tools/                        ← own JS project
+    ├── package.json              ← own deps
+    ├── tsconfig.json             ← own TS config
+    └── src/
+        ├── uuid.ts               ← rung 1 (bare function)
+        ├── check_health.ts       ← rung 2 (`tool()` helper)
+        └── fetch_otp.ts          ← rung 3 (`defineTool({...})`)
+```
+
+The `tools/` folder is just a path. Point `tools.dir` at any directory you like — alongside the tests, in a sibling repo, or `node_modules/@your-org/test-tools/dist` if you want a versioned shared catalogue across projects.
+
+### One-time setup
+
+Inside your test project's `tools/` directory:
+
+**1. Create `tools/package.json`**
+
+```json
+{
+  "name": "my-project-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "ai-ui-automation": "^1.0.0",
+    "playwright": "^1.59.1",
+    "typescript": "^5.5.0"
+  }
+}
+```
+
+**2. Create `tools/tsconfig.json`**
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true
+  },
+  "include": ["src/**/*.ts"]
+}
+```
+
+**3. Install**
+
+```bash
+cd tools
+npm install
+```
+
+That's it. VS Code now autocompletes `context.request.`, `page.locator(...)`, etc. inside your tool files.
+
+**4. Tell the framework where the tools live**
+
+In `ai-ui-auto.config.ts`:
+
+```ts
+export default {
+  tests: {
+    toolsDir: './tools/src',
+  },
+};
+```
+
+(`./tools/src` is the default — you only need this entry if you want a different path.)
+
+### Writing a tool
+
+Three ways to write a tool, in order of ceremony. Pick whichever fits the job; you can mix them in the same project freely.
+
+#### Rung 1 — bare function (zero ceremony)
+
+The filename becomes the tool name. Whatever the function returns becomes the single output, named after the tool. No imports needed.
+
+```ts
+// tools/src/uuid.ts
+import crypto from 'node:crypto';
+
+export default () => crypto.randomUUID();
+```
+
+Call it from a test:
+
+```markdown
+1. [tool: uuid out.id]
+2. Verify the request id was {{id}}
+```
+
+#### Rung 2 — `tool()` helper (recommended for most cases)
+
+`tool()` is a thin wrapper that gives you full IDE autocomplete on the destructured scope without any type annotation. The single argument is a `ToolScope`: framework values (`page`, `context`, `browser`, `step`, `log`, `args`) plus all caller-supplied args spread to the top level for direct destructuring.
+
+```ts
+// tools/src/check_health.ts
+import { tool } from 'ai-ui-automation/tools';
+
+export default tool(async ({ baseUrl, context }) => {
+  const res = await context.request.get(`${baseUrl}/health`);
+  return res.ok();
+});
+```
+
+Call it from a test:
+
+```markdown
+## Steps
+1. [tool: check_health baseUrl out.healthy]
+2. Assert {{healthy}} is "true"
+```
+
+You can put multiple tools in one file via named exports — the export key serves as the tool name:
+
+```ts
+// tools/src/strings.ts
+import { tool } from 'ai-ui-automation/tools';
+
+export const slugify = tool<{ s: string }>(({ s }) =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+
+export const upper = tool<{ s: string }>(({ s }) => s.toUpperCase());
+```
+
+Both `[tool: slugify s="Hello World"]` and `[tool: upper s="quiet"]` work.
+
+#### Rung 3 — `defineTool({...})` (full schema)
+
+When you want a parameter schema with types, multiple outputs, descriptions for the report, or validation at startup:
+
+```ts
+// tools/src/fetch_otp.ts
+import { defineTool } from 'ai-ui-automation/tools';
+
+export default defineTool({
+  name: 'fetch_otp',
+  description: 'Fetch the most recent 6-digit OTP from a test inbox',
+  parameters: {
+    email:     { type: 'string', description: 'inbox to read' },
+    timeoutMs: { type: 'number', default: 30000 },
+  },
+  outputs: {
+    otp: { type: 'string' },
+  },
+  async run({ email, timeoutMs }, { step, log }) {
+    log.info(`polling inbox for ${email}`);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const res = await fetch(`https://test-inbox.local/${email}/latest`);
+      const body = (await res.json()) as { body: string };
+      const match = body.body.match(/\b(\d{6})\b/);
+      if (match) {
+        step.setVar('otp', match[1]);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error('timed out waiting for OTP');
+  },
+});
+```
+
+### Calling a tool
+
+Tool calls support the same shorthand syntax as skill calls:
+
+```markdown
+## Steps
+1. [tool: fetch_otp email]                              ← bare arg = "{{email}}"
+2. [tool: fetch_otp email="alice@test.local"]           ← explicit value
+3. [tool: fetch_otp email out.otp]                      ← capture under declared name
+4. [tool: fetch_otp email out.otp="primary_otp"]        ← capture under alias
+```
+
+Tool calls are also valid inside skills (`skills/*.md`) and inside hooks (`## Hooks` section), so you can mix them freely with natural-language steps.
+
+### What a tool can do
+
+Inside `run` (rung 3) or the function body (rung 1/2), you have:
+
+| Name      | Type                         | What it is |
+|-----------|------------------------------|---|
+| `page`    | `playwright.Page`            | The page the test is currently driving |
+| `context` | `playwright.BrowserContext`  | Cookies, storage, `.request`, `.pages()` |
+| `browser` | `playwright.Browser`         | For opening incognito contexts, etc. |
+| `step`    | `{ getVar, setVar, expect }` | Reads/writes the test's variable scope |
+| `log`     | `{ info, warn, error }`      | Lands entries in the HTML report |
+| `args`    | `Record<string, unknown>`    | Full bag of caller-supplied args (rung 2 only) |
+
+Tool failures abort the step (no implicit retries — tool errors are deterministic, not flakiness). Every tool call appears in the HTML report with its args, duration, captured outputs, and any logs.
 
 ## How it works: execution pipeline
 

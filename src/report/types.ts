@@ -138,6 +138,13 @@ export interface StepResult {
   runnerControl?:
     | { kind: 'resume'; fromStepIndex: number; adHocResults?: StepResult[] }
     | { kind: 'exit'; adHocResults?: StepResult[] };
+  /** Set when this step was a `[tool: ...]` invocation rather than an AI step. */
+  toolStep?: {
+    name: string;
+    args: Record<string, unknown>;
+    outputs: Record<string, string>;
+    logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }>;
+  };
 }
 
 /** AI-generated root-cause analysis for a failed test run */

@@ -12,6 +12,11 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./tools": {
+      "types": "./src/tools/index.ts",
+      "import": "./src/tools/index.ts",
+      "default": "./src/tools/index.ts"
     }
   },
   "scripts": {

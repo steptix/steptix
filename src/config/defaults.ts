@@ -39,6 +39,7 @@ export const DEFAULT_CONFIG: Config = {
     dir: './tests',
     contextDir: './context',
     skillsDir: './skills',
+    toolsDir: './tools/src',
     pattern: '**/*.md',
   },
   execution: {

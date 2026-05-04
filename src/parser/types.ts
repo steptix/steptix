@@ -80,6 +80,10 @@ export interface ParsedTest {
   /** Parallel to `steps` — true when the step was authored with `[no-hooks]`
    *  and should skip `beforeEach` / `afterEach` wrapping. */
   skipHooks: boolean[];
+  /** Parallel to `steps` — when non-null, the step is a `[tool: ...]` call
+   *  rather than a natural-language instruction. The runner dispatches these
+   *  to the tool executor instead of the AI loop. */
+  toolCalls: (import('../tools/types.js').ToolCall | null)[];
   /** Pre/post-step hook instructions (skills already expanded). */
   hooks: TestHooks;
 }

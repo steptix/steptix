@@ -23,6 +23,8 @@ import { logger, setLogLevel, getLogLevel, type ConsoleLogLevel } from '../utils
 import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { StepCache } from '../cache/step-cache.js';
+import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
+import { executeToolStep } from '../tools/executor.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -180,6 +182,19 @@ export async function runTest(
 
   const cdpOptions = parseCdpOptionsFromTestConfig(test.config);
   const session = await launchBrowser(config.browser, cdpOptions);
+
+  // Load the tool catalogue once per test. Node caches dynamic imports so
+  // subsequent loads are cheap; failures are surfaced as a fatal startup
+  // error so a misconfigured tools/ dir doesn't silently degrade tool calls
+  // into "tool not found" runtime errors.
+  let toolCatalogue: ToolCatalogue;
+  try {
+    const toolsDir = path.resolve(process.cwd(), config.tests.toolsDir);
+    toolCatalogue = await loadToolCatalogue(toolsDir);
+  } catch (err) {
+    logger.error(`Failed to load tool catalogue: ${(err as Error).message}`);
+    throw err;
+  }
 
   try {
     // Navigate to base URL if provided
@@ -483,6 +498,48 @@ export async function runTest(
         if (stepResult.status === 'passed') {
           logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
         }
+      } else if (test.toolCalls[i]) {
+        // [tool: ...] step — dispatch deterministic code with live page/context/browser.
+        const stepStartTime = Date.now();
+        const call = test.toolCalls[i]!;
+        const activePage = session.pageTracker.getActive();
+        const outcome = await executeToolStep(call, {
+          page: activePage,
+          context: session.context,
+          browser: session.browser,
+          resolvedParameters,
+          catalogue: toolCatalogue,
+        });
+        const passed = outcome.status === 'passed';
+        if (passed) {
+          logger.success(`[tool: ${call.name}] passed in ${outcome.durationMs}ms`);
+        } else {
+          logger.error(`[tool: ${call.name}] failed: ${outcome.error ?? 'unknown error'}`);
+        }
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: passed ? 'passed' : 'failed',
+          turns: [],
+          durationMs: Date.now() - stepStartTime,
+          retried: false,
+          ...(outcome.error !== undefined && { error: outcome.error }),
+          aiExplanation: passed
+            ? `Tool "${call.name}" produced outputs: ${
+                Object.keys(outcome.outputs).length
+                  ? Object.entries(outcome.outputs)
+                      .map(([k, v]) => `${k}="${v}"`)
+                      .join(', ')
+                  : '(none)'
+              }`
+            : `Tool "${call.name}" failed`,
+          toolStep: {
+            name: outcome.toolName,
+            args: outcome.args,
+            outputs: outcome.outputs,
+            logs: outcome.logs,
+          },
+        };
       } else {
         stepResult = await executeStep(i + 1, test.steps.length, instruction, {
           page: session.page,
