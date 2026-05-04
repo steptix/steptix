@@ -272,6 +272,8 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
        </div>`
     : '';
 
+  const toolHtml = step.toolStep ? renderToolStep(step.toolStep) : '';
+
   const domHtml = step.domSnapshot
     ? `<details class="dom-snapshot">
         <summary>DOM Snapshot<button class="copy-btn" type="button" title="Copy DOM"><span class="copy-btn-label">Copy</span></button></summary>
@@ -308,12 +310,69 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   </div>
   <div class="step-body">
     ${domHtml}
+    ${toolHtml}
     ${turnsHtml}
     ${assertionHtml}
     ${failureHtml}
     ${endScreenshotHtml}
   </div>
 </div>`;
+}
+
+/** Render the tool-invocation block for a `[tool: ...]` step.
+ *  Surfaces args, captured outputs, and tool logs alongside the existing
+ *  step chrome — failure forensics for deterministic tool runs.
+ *  Exported for unit-test use; not part of the report's public API. */
+export function renderToolStep(toolStep: NonNullable<StepResult['toolStep']>): string {
+  const argRows = Object.entries(toolStep.args);
+  const argsHtml = argRows.length === 0
+    ? '<div class="tool-empty">(no args)</div>'
+    : `<div class="tool-kv">${argRows
+        .map(([k, v]) => `<div class="tool-kv-row"><span class="tool-kv-key">${escapeHtml(k)}</span><span class="tool-kv-value">${escapeHtml(formatToolValue(v))}</span></div>`)
+        .join('')}</div>`;
+
+  const outputRows = Object.entries(toolStep.outputs);
+  const outputsHtml = outputRows.length === 0
+    ? '<div class="tool-empty">(no outputs captured)</div>'
+    : `<div class="tool-kv">${outputRows
+        .map(([k, v]) => `<div class="tool-kv-row"><span class="tool-kv-key">${escapeHtml(k)}</span><span class="tool-kv-value">${escapeHtml(v)}</span></div>`)
+        .join('')}</div>`;
+
+  const logsHtml = toolStep.logs.length === 0
+    ? ''
+    : `<div class="tool-section">
+        <div class="tool-section-label">Logs</div>
+        <div class="tool-logs">${toolStep.logs
+          .map((l) => `<div class="tool-log-line tool-log-${l.level}">[${l.level}] ${escapeHtml(l.message)}</div>`)
+          .join('')}</div>
+       </div>`;
+
+  return `<div class="tool-block">
+  <div class="tool-header">
+    <span class="tool-title">🔧 Tool</span>
+    <span class="tool-name">${escapeHtml(toolStep.name)}</span>
+  </div>
+  <div class="tool-section">
+    <div class="tool-section-label">Args</div>
+    ${argsHtml}
+  </div>
+  <div class="tool-section">
+    <div class="tool-section-label">Outputs</div>
+    ${outputsHtml}
+  </div>
+  ${logsHtml}
+</div>`;
+}
+
+function formatToolValue(v: unknown): string {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
 }
 
 function renderTurn(turn: TurnResult, showTurnHeader: boolean, showAttempt: boolean): string {

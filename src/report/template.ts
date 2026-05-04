@@ -163,6 +163,24 @@ export function getReportTemplate(): string {
     .failure-title { font-weight: 700; color: var(--fail); margin-bottom: 6px; }
     .failure-message { font-size: 0.875rem; color: #7f1d1d; font-family: monospace; }
 
+    /* Tool-step block — surfaces deterministic tool invocation details */
+    .tool-block { margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: #f5f3ff; border: 1px solid #ddd6fe; }
+    .tool-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+    .tool-title { font-weight: 700; color: #5b21b6; font-size: 0.9rem; }
+    .tool-name { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.85rem; color: #5b21b6; background: #ede9fe; padding: 2px 8px; border-radius: 4px; }
+    .tool-section { margin-top: 10px; }
+    .tool-section-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 4px; }
+    .tool-kv { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.8rem; }
+    .tool-kv-row { display: flex; gap: 8px; padding: 2px 0; align-items: baseline; }
+    .tool-kv-key { color: #6d28d9; flex-shrink: 0; min-width: 80px; }
+    .tool-kv-value { color: var(--text); word-break: break-all; }
+    .tool-empty { font-style: italic; color: var(--muted); font-size: 0.8rem; }
+    .tool-logs { margin: 0; padding: 8px 12px; background: var(--code-bg); border-radius: 4px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.78rem; color: var(--text); white-space: pre-wrap; max-height: 240px; overflow-y: auto; }
+    .tool-log-info { color: var(--text); }
+    .tool-log-warn { color: #b45309; }
+    .tool-log-error { color: var(--fail); }
+    .tool-log-line { padding: 1px 0; }
+
     /* Diagnosis block */
     .diagnosis-block { margin-bottom: 24px; padding: 18px 20px; border-radius: var(--radius); background: #fffbeb; border: 1px solid #fde68a; box-shadow: var(--shadow); }
     .diagnosis-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
