@@ -296,6 +296,34 @@ describe('openPage execution path — real browser', () => {
     await c.close();
   });
 
+  it('closing a named tab by its custom label works end-to-end', async () => {
+    const tracker = new PageTracker(mainPage);
+
+    // Open a named tab the same way the openPage handler does.
+    const named = await context.newPage();
+    await named.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
+    tracker.addPage(named);
+    tracker.relabelPage(named, 'docs');
+
+    // Sanity: switching by custom label resolves to the named page.
+    expect(await tracker.switchToAsync('docs')).toBe(named);
+
+    // Close by the custom label — same path the AI emits when an author
+    // says "Close the docs tab" in a step.
+    const result = await tracker.closePage('docs');
+    expect(result.closed).toBe(true);
+    // Active page falls back to main after a non-main close.
+    expect(result.activePage).toBe(mainPage);
+
+    // The tab is no longer reachable by any identifier (label, URL, title).
+    expect(await tracker.switchToAsync('docs')).toBeNull();
+    // Closing again is a no-op error (page already gone).
+    const second = await tracker.closePage('docs');
+    expect(second.closed).toBe(false);
+
+    expect(named.isClosed()).toBe(true);
+  });
+
   it('opens an arbitrary URL (not from the test-app), proving openPage is not origin-restricted', async () => {
     const tracker = new PageTracker(mainPage);
     // Use a data: URL — guaranteed to be reachable, not on the test-app origin.
