@@ -80,7 +80,11 @@ export interface AIAction {
   source?: string;
   /** JSONPath-style path for extract_value actions (e.g. "data.0.id") */
   path?: string;
-  /** Variable name to assign the extracted value to (for extract_value) */
+  /** Multi-purpose name field:
+   *   - extract_value → variable name for the extracted value
+   *   - openPage      → custom page label so subsequent switchPage calls can
+   *                     target this tab by name (deterministic across re-runs;
+   *                     avoids ambiguity when two tabs share a similar title) */
   as?: string;
   /**
    * For "read" actions, the DOM attribute to capture (e.g. "href", "src", "value").

@@ -27,6 +27,19 @@ export interface PageInfo {
   isActive: boolean;
 }
 
+/** Validation rules for author-supplied custom page labels (the `as` field on
+ *  openPage). Returns null when valid, or a human-readable reason when not. */
+function validateCustomLabel(label: string): string | null {
+  if (!label || typeof label !== 'string') return 'must be a non-empty string';
+  if (label === 'main') return '"main" is reserved for the initial page';
+  if (/^page:\d+$/i.test(label)) return 'must not match the auto-generated `page:N` form';
+  if (!/^[a-z][a-z0-9_-]*$/i.test(label)) {
+    return 'must start with a letter and contain only letters, digits, underscore, or hyphen';
+  }
+  if (label.length > 40) return 'must be 40 characters or fewer';
+  return null;
+}
+
 export class PageTracker {
   private pages: TrackedPage[] = [];
   private activeIndex = 0;
@@ -72,6 +85,31 @@ export class PageTracker {
   /** Get the currently active page. */
   getActive(): Page {
     return this.pages[this.activeIndex]?.page ?? this.pages[0]!.page;
+  }
+
+  /**
+   * Reassign a custom label to an already-tracked page. Used by the openPage
+   * action when the test author supplies an `as` field — the auto-handler
+   * registered the page as `page:N` first, this lets us replace that label
+   * with the author-chosen one for deterministic switchPage targeting.
+   *
+   * Throws on invalid label (reserved name, bad characters, collision).
+   */
+  relabelPage(page: Page, newLabel: string): void {
+    const validation = validateCustomLabel(newLabel);
+    if (validation) {
+      throw new Error(`Invalid page label "${newLabel}": ${validation}`);
+    }
+    if (this.pages.some((p) => p.label === newLabel && p.page !== page)) {
+      throw new Error(`Page label "${newLabel}" is already taken by another page`);
+    }
+    const entry = this.pages.find((p) => p.page === page);
+    if (!entry) {
+      throw new Error(`Cannot relabel: page is not tracked`);
+    }
+    const oldLabel = entry.label;
+    entry.label = newLabel;
+    logger.info(`Page relabelled: ${oldLabel} → ${newLabel} (${page.url()})`);
   }
 
   /**

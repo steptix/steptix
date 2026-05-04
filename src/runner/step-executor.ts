@@ -672,15 +672,32 @@ async function executeStepAttempt(
               timeout: 30_000,
             });
             // The context.on('page') handler in browser/manager.ts already
-            // registered this page — switching to it makes it active for
-            // the rest of this turn and every subsequent step.
+            // registered this page with an auto-label (`page:N`). When the
+            // author supplied `as`, replace that with the custom label so
+            // subsequent switchPage calls can target this page by name —
+            // deterministic across re-runs and immune to "two tabs with the
+            // same title" disambiguation.
+            if (action.as) {
+              try {
+                pageTracker.relabelPage(newPage, action.as);
+              } catch (relabelErr) {
+                openError = `openPage failed: ${(relabelErr as Error).message}`;
+                logger.warn(openError);
+                await newPage.close();
+                throw relabelErr;
+              }
+            }
+            // Switching to it makes it active for the rest of this turn and
+            // every subsequent step.
             const switched = await pageTracker.switchToAsync(newPage.url());
             if (switched) page = switched;
             else page = newPage;
-            logger.info(`Opened new page → ${newPage.url()}`);
+            logger.info(`Opened new page → ${newPage.url()}${action.as ? ` (as "${action.as}")` : ''}`);
           } catch (err) {
-            openError = `openPage failed: ${(err as Error).message}`;
-            logger.warn(openError);
+            if (!openError) {
+              openError = `openPage failed: ${(err as Error).message}`;
+              logger.warn(openError);
+            }
           }
         }
 

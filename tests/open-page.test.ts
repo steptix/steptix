@@ -50,6 +50,23 @@ describe('parseAIResponse — openPage action', () => {
     const result = parseAIResponse(raw);
     expect(result.actions[0]?.action).toBe('openPage');
   });
+
+  it('parses openPage with an `as` label for deterministic switchPage targeting', () => {
+    const raw = JSON.stringify({
+      actions: [
+        {
+          action: 'openPage',
+          url: 'https://docs.example.com',
+          as: 'docs',
+          description: 'Open docs and label as "docs"',
+        },
+      ],
+      reasoning: 'Step asked us to remember this tab as docs.',
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]?.as).toBe('docs');
+    expect(result.actions[0]?.url).toBe('https://docs.example.com');
+  });
 });
 
 // ─── End-to-end: spawn a new page, verify pageTracker registers it ─────────
@@ -169,6 +186,114 @@ describe('openPage execution path — real browser', () => {
 
     await a.close();
     await b.close();
+  });
+
+  it('relabels a tracked page when the author supplies `as`', async () => {
+    const tracker = new PageTracker(mainPage);
+
+    const newPage = await context.newPage();
+    await newPage.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
+    tracker.addPage(newPage);
+
+    // Custom label replaces the auto-generated `page:N` form.
+    tracker.relabelPage(newPage, 'docs');
+
+    const switched = await tracker.switchToAsync('docs');
+    expect(switched).not.toBeNull();
+    expect(switched).toBe(newPage);
+    // Old auto-label no longer matches.
+    const noMatch = await tracker.switchToAsync('page:2');
+    expect(noMatch).toBeNull();
+
+    await newPage.close();
+  });
+
+  it('relabelPage rejects reserved name "main"', async () => {
+    const tracker = new PageTracker(mainPage);
+    const p = await context.newPage();
+    await p.goto(`${baseUrl}/`);
+    tracker.addPage(p);
+    expect(() => tracker.relabelPage(p, 'main')).toThrow(/reserved/);
+    await p.close();
+  });
+
+  it('relabelPage rejects the auto-label format `page:N`', async () => {
+    const tracker = new PageTracker(mainPage);
+    const p = await context.newPage();
+    await p.goto(`${baseUrl}/`);
+    tracker.addPage(p);
+    expect(() => tracker.relabelPage(p, 'page:7')).toThrow(/auto-generated/);
+    await p.close();
+  });
+
+  it('relabelPage rejects illegal characters', async () => {
+    const tracker = new PageTracker(mainPage);
+    const p = await context.newPage();
+    await p.goto(`${baseUrl}/`);
+    tracker.addPage(p);
+    expect(() => tracker.relabelPage(p, 'has spaces')).toThrow(/letters, digits/);
+    expect(() => tracker.relabelPage(p, '1leading_digit')).toThrow(/start with a letter/);
+    await p.close();
+  });
+
+  it('relabelPage rejects collision with another page', async () => {
+    const tracker = new PageTracker(mainPage);
+    const a = await context.newPage();
+    await a.goto(`${baseUrl}/`);
+    tracker.addPage(a);
+    tracker.relabelPage(a, 'first');
+
+    const b = await context.newPage();
+    await b.goto(`${baseUrl}/`);
+    tracker.addPage(b);
+    expect(() => tracker.relabelPage(b, 'first')).toThrow(/already taken/);
+
+    await a.close();
+    await b.close();
+  });
+
+  it('relabelPage on the same page with the same label is a no-op (allowed)', async () => {
+    const tracker = new PageTracker(mainPage);
+    const p = await context.newPage();
+    await p.goto(`${baseUrl}/`);
+    tracker.addPage(p);
+    tracker.relabelPage(p, 'inbox');
+    // Re-applying same label to same page is fine — collision check excludes
+    // the page being relabeled.
+    expect(() => tracker.relabelPage(p, 'inbox')).not.toThrow();
+    await p.close();
+  });
+
+  it('three named tabs: each switchable by exact label even with similar URLs/titles', async () => {
+    const tracker = new PageTracker(mainPage);
+    const dupTitleHtml = (label: string) =>
+      `data:text/html,<title>Document</title><h1>${label}</h1>`;
+
+    // All three tabs have the same title — without naming, switching would be
+    // ambiguous. With `as`, every switch is exact.
+    const a = await context.newPage();
+    await a.goto(dupTitleHtml('alpha'));
+    tracker.addPage(a);
+    tracker.relabelPage(a, 'alpha');
+
+    const b = await context.newPage();
+    await b.goto(dupTitleHtml('beta'));
+    tracker.addPage(b);
+    tracker.relabelPage(b, 'beta');
+
+    const c = await context.newPage();
+    await c.goto(dupTitleHtml('gamma'));
+    tracker.addPage(c);
+    tracker.relabelPage(c, 'gamma');
+
+    expect((await tracker.switchToAsync('alpha'))?.url()).toContain('alpha');
+    expect((await tracker.switchToAsync('beta'))?.url()).toContain('beta');
+    expect((await tracker.switchToAsync('gamma'))?.url()).toContain('gamma');
+    expect((await tracker.switchToAsync('main'))?.url()).toBe(mainPage.url());
+
+    await a.close();
+    await b.close();
+    await c.close();
   });
 
   it('opens an arbitrary URL (not from the test-app), proving openPage is not origin-restricted', async () => {
