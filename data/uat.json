@@ -1,0 +1,17 @@
+{
+  "users": {
+    "admin": {
+      "email": "uat-admin@securebank.example",
+      "password": "$ADMIN_PWD"
+    },
+    "viewer": {
+      "email": "uat-viewer@securebank.example",
+      "password": "$VIEWER_PWD"
+    }
+  },
+  "fixtures": {
+    "minBalance": 100,
+    "expectedTransactionCount": 5,
+    "currency": "USD"
+  }
+}

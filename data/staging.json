@@ -1,0 +1,17 @@
+{
+  "users": {
+    "admin": {
+      "email": "stg-admin@securebank.example",
+      "password": "$ADMIN_PWD"
+    },
+    "viewer": {
+      "email": "stg-viewer@securebank.example",
+      "password": "$VIEWER_PWD"
+    }
+  },
+  "fixtures": {
+    "minBalance": 50,
+    "expectedTransactionCount": 4,
+    "currency": "USD"
+  }
+}

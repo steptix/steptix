@@ -6,6 +6,7 @@ import type { ParsedSkill, ParsedTest, TestConfig, TestHooks } from './types.js'
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import type { ToolCall } from '../tools/types.js';
+import { interpolateEnvData, type EnvDataContext } from './interpolate-env-data.js';
 import { logger } from '../utils/logger.js';
 
 /** Prefix marker on a step that opts out of beforeEach / afterEach hooks. */
@@ -17,6 +18,14 @@ const HOOK_SCOPES = new Set(['before', 'beforeeach', 'aftereach', 'after']);
 export interface ParseOptions {
   /** Directory to resolve `[skill: name]` references from. Omit to disable. */
   skillsDir?: string;
+  /**
+   * Env + structured-data context for `${env.X}` / `${data.X.Y}` interpolation.
+   * Applied after skill expansion to every step, hook entry, parameter value,
+   * and config value. Throws on unknown references so the runner fails fast
+   * with a precise file pointer rather than sending a `${...}` literal to the AI.
+   * Omit to disable env-data interpolation.
+   */
+  envData?: EnvDataContext;
 }
 
 /**
@@ -73,7 +82,48 @@ export async function parseTestFile(
     }
   }
 
+  if (options.envData) {
+    applyEnvDataInterpolation(parsed, { ...options.envData, filePath: absPath });
+  }
+
   return parsed;
+}
+
+/**
+ * Walk every textual surface of a parsed test (steps, hooks, parameters,
+ * config) and substitute `${env.X}` / `${data.X.Y}` against the supplied
+ * context. Mutates in place — callers always pass freshly-parsed tests.
+ *
+ * Tool-call argument strings ARE interpolated (so `[tool: foo bar="${env.X}"]`
+ * works), but the parsed `ToolCall.args` map is rebuilt by re-parsing the
+ * interpolated step text rather than mutating each value individually.
+ */
+function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): void {
+  parsed.steps = parsed.steps.map((s) => interpolateEnvData(s, ctx));
+  parsed.toolCalls = parsed.steps.map((s) => parseToolCall(s));
+
+  parsed.hooks = {
+    before: parsed.hooks.before.map((s) => interpolateEnvData(s, ctx)),
+    beforeEach: parsed.hooks.beforeEach.map((s) => interpolateEnvData(s, ctx)),
+    afterEach: parsed.hooks.afterEach.map((s) => interpolateEnvData(s, ctx)),
+    after: parsed.hooks.after.map((s) => interpolateEnvData(s, ctx)),
+  };
+  parsed.hookToolCalls = {
+    before: parsed.hooks.before.map((s) => parseToolCall(s)),
+    beforeEach: parsed.hooks.beforeEach.map((s) => parseToolCall(s)),
+    afterEach: parsed.hooks.afterEach.map((s) => parseToolCall(s)),
+    after: parsed.hooks.after.map((s) => parseToolCall(s)),
+  };
+
+  for (const [k, v] of Object.entries(parsed.parameters)) {
+    parsed.parameters[k] = interpolateEnvData(v, ctx);
+  }
+
+  // TestConfig is a flat key-value map; only the string fields need substitution.
+  const cfg = parsed.config as Record<string, string | undefined>;
+  for (const [k, v] of Object.entries(cfg)) {
+    if (typeof v === 'string') cfg[k] = interpolateEnvData(v, ctx);
+  }
 }
 
 /**

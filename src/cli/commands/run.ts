@@ -7,7 +7,7 @@ import { parseTestFile, discoverTestFiles } from '../../parser/markdown.js';
 import { filterByTags, runTests } from '../../runner/test-runner.js';
 import { setVerbose, logger } from '../../utils/logger.js';
 import type { RunSummary } from '../../report/types.js';
-import { loadEnvFile } from '../../env/loader.js';
+import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 
 export interface RunOptions {
   config?: string;
@@ -47,14 +47,19 @@ async function runCommand(
     setVerbose(true);
   }
 
-  // Load environment file if --env was specified
-  if (opts.env) {
-    try {
-      await loadEnvFile(opts.env, process.cwd());
-    } catch (err) {
-      console.error(chalk.red(`Error: ${String(err)}`));
-      process.exit(1);
-    }
+  // Resolve env name with precedence: --env flag > AUTOMATION_ENV envvar > unset.
+  // (Per-test frontmatter `env:` overrides come into play below, when no
+  // run-wide selector was supplied.)
+  const cliEnvName = opts.env?.trim() || process.env['AUTOMATION_ENV']?.trim() || undefined;
+
+  // Load env+data bundle for the run-wide selector, if any. Per-test
+  // overrides (frontmatter `env:`) get loaded on demand below.
+  let runBundle;
+  try {
+    runBundle = await resolveEnvBundle({ envName: cliEnvName, projectRoot: process.cwd() });
+  } catch (err) {
+    console.error(chalk.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
   }
 
   // Load config
@@ -77,11 +82,36 @@ async function runCommand(
     process.exit(0);
   }
 
-  // Parse test files (expanding any [skill: ...] references)
+  // Parse test files (expanding any [skill: ...] references).
+  //
+  // Two-pass strategy when there's no run-wide --env: parse once with the
+  // (possibly empty) bundle so we can read frontmatter, then re-parse any
+  // test that declared its own `env:` override with that test's bundle. This
+  // avoids loading a per-test env until we know we need it.
   logger.info(`Discovering tests from ${testFiles.length} file(s)...`);
   const skillsDir = path.resolve(process.cwd(), config.tests.skillsDir);
+  const envDataCtx = cliEnvName
+    ? { env: runBundle.env, data: runBundle.data }
+    : undefined;
   const parsedAll = await Promise.all(
-    testFiles.map((f) => parseTestFile(f, { skillsDir })),
+    testFiles.map(async (f) => {
+      const initial = await parseTestFile(f, {
+        skillsDir,
+        ...(envDataCtx && { envData: envDataCtx }),
+      });
+      // Honour frontmatter env: only when CLI/envvar didn't pin one already.
+      if (!cliEnvName && initial.frontmatter.env) {
+        const perTestBundle = await resolveEnvBundle({
+          envName: initial.frontmatter.env,
+          projectRoot: process.cwd(),
+        });
+        return parseTestFile(f, {
+          skillsDir,
+          envData: { env: perTestBundle.env, data: perTestBundle.data },
+        });
+      }
+      return initial;
+    }),
   );
   // Skip files marked as skills — they're library code, not runnable tests.
   const parsedTests = parsedAll.filter((t) => t.frontmatter.type !== 'skill');

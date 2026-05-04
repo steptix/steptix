@@ -17,6 +17,13 @@ export interface StreamStepsRequest {
   breakpoints?: number[];
   /** Per-request env (e.g. AI_API_KEY). Server applies these to the session, not its own process.env. */
   env?: Record<string, string>;
+  /**
+   * Active environment name. The server uses it to load `.env.<envName>` and
+   * `data/<envName>.json` from its working directory and apply `${env.X}` /
+   * `${data.X.Y}` interpolation to each step. Empty/omitted ⇒ no
+   * env-data interpolation (steps with `${...}` placeholders will fail).
+   */
+  envName?: string;
   parameters?: Record<string, string>;
   config?: { baseUrl?: string; timeout?: string };
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */

@@ -5,6 +5,11 @@ export interface TestFrontmatter {
   timeout?: string;
   /** Path to JSON/CSV data file for data-driven tests */
   dataFile?: string;
+  /** Environment name override — when set, this test always runs against the
+   *  named environment unless the CLI `--env` flag overrides it. Used as an
+   *  escape hatch for tests pinned to a single env (e.g. a smoke test that
+   *  must always hit prod). */
+  env?: string;
   /** "skill" marks the file as a reusable step macro, not a runnable test */
   type?: 'test' | 'skill';
   /** "replace" ignores project-level defaultHooks for this test; "merge" (default)

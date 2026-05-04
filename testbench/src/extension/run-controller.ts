@@ -21,6 +21,7 @@ import {
   type RunEvent,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
+import { EnvSelector } from './env-selector.js';
 
 /** A run-context is one document opened in one editor. */
 export interface RunContext {
@@ -379,12 +380,14 @@ export class RunController {
     const stepLines = block.map((b) => b.line);
 
     try {
+      const activeEnv = EnvSelector.activeEnv();
       const events = client.streamSteps(
         sessionId,
         {
           steps: stepInstructions,
           sourceLines: stepLines,
           env,
+          ...(activeEnv && { envName: activeEnv }),
           ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
             config: sessionConfig,
           }),
@@ -467,12 +470,14 @@ export class RunController {
         log(`interactive step: ${action.text}`);
         this.postOutput(`> ${action.text}`, 'info');
         try {
+          const activeEnv = EnvSelector.activeEnv();
           const events = client.streamSteps(
             sessionId,
             {
               steps: [action.text],
               sourceLines: [0],
               env,
+              ...(activeEnv && { envName: activeEnv }),
               ...(!this.configSentForSession &&
                 Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),
               ...(Object.keys(params).length > 0 && { parameters: params }),

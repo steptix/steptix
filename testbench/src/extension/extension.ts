@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { TestBenchEditorProvider, VIEW_TYPE } from './editor-provider.js';
 import { registerCommands } from './commands/index.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
+import { EnvSelector } from './env-selector.js';
 
 const FIRST_ACTIVATION_KEY = 'testbench.shownActivationToast';
 
@@ -20,6 +21,7 @@ export function activate(context: vscode.ExtensionContext): void {
       supportsMultipleEditorsPerDocument: false,
     }),
     ...registerCommands(provider),
+    new EnvSelector(),
   );
 
   out.appendLine(`[${ts()}] activation complete — ${context.subscriptions.length} disposables`);

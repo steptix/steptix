@@ -8,6 +8,8 @@ import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
+import { interpolateEnvData } from '../parser/interpolate-env-data.js';
+import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { ApiResponseStore } from '../api/response-store.js';
@@ -37,6 +39,15 @@ export interface StepRequest {
    * concurrent sessions and the server itself remain isolated.
    */
   env?: Record<string, string>;
+  /**
+   * Active environment name. When supplied, the server loads `.env.<name>`
+   * and `data/<name>.json` from its CWD, then interpolates `${env.X}` and
+   * `${data.X.Y}` placeholders in each step before the regular `{{...}}`
+   * substitution. Resolution is cached per session — the bundle is loaded
+   * the first time it's requested and reused for subsequent step batches in
+   * the same session.
+   */
+  envName?: string;
   /**
    * Reserved for future breakpoint pause/resume support. Currently logged and
    * ignored — the run executes to completion.
@@ -143,6 +154,8 @@ interface ManagedSession {
   csrfTokens: Record<string, string>;
   contextContent: string;
   queueTail: Promise<void>;
+  /** Cached env+data bundle once `envName` is supplied; reused across step batches. */
+  envBundle?: EnvBundle;
 }
 
 // ---------------------------------------------------------------------------
@@ -584,12 +597,36 @@ export class SessionManager {
       ...(request.parameters ?? {}),
     };
 
+    // Resolve env+data bundle on first request that supplies an envName.
+    // Cached on the session so subsequent batches skip the disk hit. A
+    // request that omits envName never triggers loading and falls through
+    // to plain `{{...}}` interpolation only.
+    const requestedEnvName = request.envName?.trim();
+    if (requestedEnvName && !session.envBundle) {
+      try {
+        session.envBundle = await resolveEnvBundle({ envName: requestedEnvName });
+        logger.info(`Session "${sessionId}": env=${requestedEnvName} loaded`);
+      } catch (err) {
+        logger.error(`Session "${sessionId}": failed to load env "${requestedEnvName}": ${(err as Error).message}`);
+        throw err;
+      }
+    }
+    const envDataCtx = session.envBundle
+      ? { env: session.envBundle.env, data: session.envBundle.data }
+      : null;
+
     // Determine per-step timeout
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
       ?? this.config.execution.timeout;
 
-    // Detect conditional step groups for multi-outcome branching
-    const stepGroups = identifyStepGroups(request.steps);
+    // Detect conditional step groups for multi-outcome branching — interpolate
+    // env/data substitutions first so grouping looks at the final step text
+    // (otherwise `${data.foo}` placeholders could change which steps look
+    // alike for grouping purposes).
+    const interpolatedSteps = envDataCtx
+      ? request.steps.map((s) => interpolateEnvData(s, envDataCtx))
+      : request.steps;
+    const stepGroups = identifyStepGroups(interpolatedSteps);
 
     try {
       for (let i = 0; i < request.steps.length; i++) {
@@ -603,8 +640,12 @@ export class SessionManager {
         }
         const originalStep = request.steps[i]!;
 
-        // Interpolate {{variable}} placeholders
-        const interpolated = interpolate(originalStep, resolvedParameters);
+        // Apply env-data interpolation first (parse-time semantics: fixed for
+        // the whole session), then runtime `{{...}}` parameter substitution.
+        const envInterpolated = envDataCtx
+          ? interpolateEnvData(originalStep, envDataCtx)
+          : originalStep;
+        const interpolated = interpolate(envInterpolated, resolvedParameters);
 
         // Check if this step is part of a conditional group
         const group = stepGroups.get(i);

@@ -1,0 +1,17 @@
+{
+  "users": {
+    "admin": {
+      "email": "demo@securebank.com",
+      "password": "password123"
+    },
+    "viewer": {
+      "email": "viewer@securebank.com",
+      "password": "viewerpass"
+    }
+  },
+  "fixtures": {
+    "minBalance": 0,
+    "expectedTransactionCount": 3,
+    "currency": "USD"
+  }
+}
