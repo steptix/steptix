@@ -25,6 +25,7 @@ import { ApiResponseStore } from '../api/response-store.js';
 import { StepCache } from '../cache/step-cache.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { executeToolStep } from '../tools/executor.js';
+import type { ToolCall } from '../tools/types.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -211,34 +212,97 @@ export async function runTest(
     let bail = false;
     let humanIntervened = false;
 
+    /**
+     * Run a `[tool: ...]` invocation and shape the outcome as a StepResult.
+     * Used for tool-step dispatch in both the main step loop and inside
+     * hook scopes so the dispatch path is identical everywhere.
+     */
+    const runToolStep = async (
+      call: ToolCall,
+      instruction: string,
+      stepIndex: number,
+    ): Promise<StepResult> => {
+      const startedAt = Date.now();
+      const activePage = session.pageTracker.getActive();
+      const outcome = await executeToolStep(call, {
+        page: activePage,
+        context: session.context,
+        browser: session.browser,
+        resolvedParameters,
+        catalogue: toolCatalogue,
+      });
+      const passed = outcome.status === 'passed';
+      if (passed) {
+        logger.success(`[tool: ${call.name}] passed in ${outcome.durationMs}ms`);
+      } else {
+        logger.error(`[tool: ${call.name}] failed: ${outcome.error ?? 'unknown error'}`);
+      }
+      return {
+        index: stepIndex,
+        instruction,
+        status: passed ? 'passed' : 'failed',
+        turns: [],
+        durationMs: Date.now() - startedAt,
+        retried: false,
+        ...(outcome.error !== undefined && { error: outcome.error }),
+        aiExplanation: passed
+          ? `Tool "${call.name}" produced outputs: ${
+              Object.keys(outcome.outputs).length
+                ? Object.entries(outcome.outputs)
+                    .map(([k, v]) => `${k}="${v}"`)
+                    .join(', ')
+                : '(none)'
+            }`
+          : `Tool "${call.name}" failed`,
+        toolStep: {
+          name: outcome.toolName,
+          args: outcome.args,
+          outputs: outcome.outputs,
+          logs: outcome.logs,
+        },
+      };
+    };
+
     /** Execute every hook instruction in a scope. Returns true on first failure. */
     const runHookScope = async (
       scope: 'before' | 'beforeEach' | 'afterEach' | 'after',
       instructions: string[],
+      toolCalls: (ToolCall | null)[],
+      sourceSkills: (string | null)[],
       hookIndex: number,
     ): Promise<{ failed: boolean; error?: string }> => {
-      for (const raw of instructions) {
+      for (let idx = 0; idx < instructions.length; idx++) {
+        const raw = instructions[idx]!;
+        const toolCall = toolCalls[idx] ?? null;
+        const sourceSkill = sourceSkills[idx] ?? null;
         const hookInstruction = interpolate(raw, resolvedParameters);
-        logger.info(`Running ${scope} hook: ${hookInstruction}`);
 
-        const result = await executeStep(hookIndex, test.steps.length, hookInstruction, {
-          page: session.page,
-          config,
-          aiClient,
-          contextContent,
-          testName: test.title,
-          ...(baseUrl !== undefined && { baseUrl }),
-          conversationHistory: [...conversationHistory],
-          apiResponseStore,
-          csrfTokens,
-          resolvedParameters,
-          pageTracker: session.pageTracker,
-          dismissalGuidance: hooks.hasAny,
-          // No stepCache — hook results are usually page-state-dependent
-          // (e.g., "accept cookie banner if visible") and shouldn't be replayed blindly.
-        });
+        let result: StepResult;
+        if (toolCall) {
+          logger.info(`Running ${scope} hook (tool): ${hookInstruction}`);
+          result = await runToolStep(toolCall, hookInstruction, hookIndex);
+        } else {
+          logger.info(`Running ${scope} hook: ${hookInstruction}`);
+          result = await executeStep(hookIndex, test.steps.length, hookInstruction, {
+            page: session.page,
+            config,
+            aiClient,
+            contextContent,
+            testName: test.title,
+            ...(baseUrl !== undefined && { baseUrl }),
+            conversationHistory: [...conversationHistory],
+            apiResponseStore,
+            csrfTokens,
+            resolvedParameters,
+            pageTracker: session.pageTracker,
+            dismissalGuidance: hooks.hasAny,
+            // No stepCache — hook results are usually page-state-dependent
+            // (e.g., "accept cookie banner if visible") and shouldn't be replayed blindly.
+          });
+        }
 
         result.hookScope = scope;
+        if (sourceSkill) result.sourceSkill = sourceSkill;
         stepResults.push(result);
         tokenTracker.resetStep();
 
@@ -267,7 +331,13 @@ export async function runTest(
 
     // Run `before` hooks (once per test, before any step runs)
     if (hooks.before.length > 0) {
-      const beforeResult = await runHookScope('before', hooks.before, 0);
+      const beforeResult = await runHookScope(
+        'before',
+        hooks.before,
+        hooks.toolCalls.before,
+        hooks.sourceSkills.before,
+        0,
+      );
       if (beforeResult.failed) {
         logger.error(`'before' hook failed — aborting test: ${beforeResult.error}`);
         bail = true;
@@ -289,7 +359,13 @@ export async function runTest(
 
       // Run `beforeEach` hooks (skipped when the step is marked [no-hooks])
       if (hooks.beforeEach.length > 0 && !stepSkipsHooks) {
-        const preResult = await runHookScope('beforeEach', hooks.beforeEach, i + 1);
+        const preResult = await runHookScope(
+          'beforeEach',
+          hooks.beforeEach,
+          hooks.toolCalls.beforeEach,
+          hooks.sourceSkills.beforeEach,
+          i + 1,
+        );
         if (preResult.failed) {
           logger.error(`'beforeEach' hook before step ${i + 1} failed — aborting test: ${preResult.error}`);
           bail = true;
@@ -321,6 +397,9 @@ export async function runTest(
         });
 
         for (const result of branchedResults) {
+          // Tag with originating skill if any (result.index is 1-based).
+          const branchSourceSkill = test.sourceSkills[result.index - 1] ?? null;
+          if (branchSourceSkill) result.sourceSkill = branchSourceSkill;
           stepResults.push(result);
           const url = session.page.url();
           conversationHistory.push(
@@ -500,46 +579,8 @@ export async function runTest(
         }
       } else if (test.toolCalls[i]) {
         // [tool: ...] step — dispatch deterministic code with live page/context/browser.
-        const stepStartTime = Date.now();
-        const call = test.toolCalls[i]!;
-        const activePage = session.pageTracker.getActive();
-        const outcome = await executeToolStep(call, {
-          page: activePage,
-          context: session.context,
-          browser: session.browser,
-          resolvedParameters,
-          catalogue: toolCatalogue,
-        });
-        const passed = outcome.status === 'passed';
-        if (passed) {
-          logger.success(`[tool: ${call.name}] passed in ${outcome.durationMs}ms`);
-        } else {
-          logger.error(`[tool: ${call.name}] failed: ${outcome.error ?? 'unknown error'}`);
-        }
-        stepResult = {
-          index: i + 1,
-          instruction,
-          status: passed ? 'passed' : 'failed',
-          turns: [],
-          durationMs: Date.now() - stepStartTime,
-          retried: false,
-          ...(outcome.error !== undefined && { error: outcome.error }),
-          aiExplanation: passed
-            ? `Tool "${call.name}" produced outputs: ${
-                Object.keys(outcome.outputs).length
-                  ? Object.entries(outcome.outputs)
-                      .map(([k, v]) => `${k}="${v}"`)
-                      .join(', ')
-                  : '(none)'
-              }`
-            : `Tool "${call.name}" failed`,
-          toolStep: {
-            name: outcome.toolName,
-            args: outcome.args,
-            outputs: outcome.outputs,
-            logs: outcome.logs,
-          },
-        };
+        // Same path the hook executor uses; see runToolStep above.
+        stepResult = await runToolStep(test.toolCalls[i]!, instruction, i + 1);
       } else {
         stepResult = await executeStep(i + 1, test.steps.length, instruction, {
           page: session.page,
@@ -559,6 +600,12 @@ export async function runTest(
           testSteps: test.steps,
         });
       }
+
+      // Tag the step with its originating skill (if any) so the report can
+      // show a "from skill X" chip even after parse-time expansion has
+      // flattened the call.
+      const stepSourceSkill = test.sourceSkills[i] ?? null;
+      if (stepSourceSkill) stepResult.sourceSkill = stepSourceSkill;
 
       stepResults.push(stepResult);
       if (interactiveStep) {
@@ -689,7 +736,13 @@ export async function runTest(
       // Run `afterEach` hooks — skipped on [no-hooks] steps or if the step
       // bailed (we're about to abort anyway).
       if (!bail && hooks.afterEach.length > 0 && !stepSkipsHooks) {
-        const postResult = await runHookScope('afterEach', hooks.afterEach, i + 1);
+        const postResult = await runHookScope(
+          'afterEach',
+          hooks.afterEach,
+          hooks.toolCalls.afterEach,
+          hooks.sourceSkills.afterEach,
+          i + 1,
+        );
         if (postResult.failed) {
           logger.error(`'afterEach' hook after step ${i + 1} failed — aborting test: ${postResult.error}`);
           bail = true;
@@ -701,7 +754,13 @@ export async function runTest(
 
     // Run `after` hooks — best effort, failures logged but don't flip test status.
     if (hooks.after.length > 0) {
-      const afterResult = await runHookScope('after', hooks.after, test.steps.length + 1);
+      const afterResult = await runHookScope(
+        'after',
+        hooks.after,
+        hooks.toolCalls.after,
+        hooks.sourceSkills.after,
+        test.steps.length + 1,
+      );
       if (afterResult.failed) {
         logger.warn(`'after' hook failed (test status unchanged): ${afterResult.error}`);
       }

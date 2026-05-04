@@ -163,6 +163,10 @@ export function getReportTemplate(): string {
     .failure-title { font-weight: 700; color: var(--fail); margin-bottom: 6px; }
     .failure-message { font-size: 0.875rem; color: #7f1d1d; font-family: monospace; }
 
+    /* Source-skill chip — origin of an expanded step */
+    .badge-skill { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+    .badge-skill::before { content: 'skill: '; opacity: 0.6; }
+
     /* Tool-step block — surfaces deterministic tool invocation details */
     .tool-block { margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: #f5f3ff; border: 1px solid #ddd6fe; }
     .tool-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }

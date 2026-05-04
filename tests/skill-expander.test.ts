@@ -24,7 +24,8 @@ describe('expandSkills', () => {
   it('returns steps unchanged when no skill references are present', async () => {
     const steps = ['Click login', 'Type username'];
     const result = await expandSkills(steps, tmpDir);
-    expect(result).toEqual(steps);
+    expect(result.steps).toEqual(steps);
+    expect(result.sourceSkills).toEqual([null, null]);
   });
 
   it('inlines a skill body and interpolates parameters', async () => {
@@ -47,11 +48,12 @@ type: skill
       tmpDir,
     );
 
-    expect(result).toEqual([
+    expect(result.steps).toEqual([
       'Navigate to https://example.com',
       'Type "GPT-5" into the search box',
       'Verify results loaded',
     ]);
+    expect(result.sourceSkills).toEqual(['search', 'search', null]);
   });
 
   it('strips trailing comment text after the skill bracket', async () => {
@@ -71,7 +73,7 @@ type: skill
       tmpDir,
     );
 
-    expect(result).toEqual(['Do nothing']);
+    expect(result.steps).toEqual(['Do nothing']);
   });
 
   it('namespaces internal capture names so they cannot collide with the caller', async () => {
@@ -89,8 +91,8 @@ type: skill
 
     const result = await expandSkills(['[skill: capture]'], tmpDir);
 
-    expect(result[0]).toBe('Read the value [store as: __skill1_temp]');
-    expect(result[1]).toBe('Type {{__skill1_temp}} into the field');
+    expect(result.steps[0]).toBe('Read the value [store as: __skill1_temp]');
+    expect(result.steps[1]).toBe('Type {{__skill1_temp}} into the field');
   });
 
   it('declared outputs leak under their declared name when no alias is given', async () => {
@@ -112,8 +114,8 @@ type: skill
       tmpDir,
     );
 
-    expect(result[0]).toBe('Count rows [store as: result_count]');
-    expect(result[1]).toBe('The page shows {{result_count}} items');
+    expect(result.steps[0]).toBe('Count rows [store as: result_count]');
+    expect(result.steps[1]).toBe('The page shows {{result_count}} items');
   });
 
   it('renames outputs when caller provides out.<name>="alias"', async () => {
@@ -135,8 +137,8 @@ type: skill
       tmpDir,
     );
 
-    expect(result[0]).toBe('Count rows [store as: my_count]');
-    expect(result[1]).toBe('Total: {{my_count}}');
+    expect(result.steps[0]).toBe('Count rows [store as: my_count]');
+    expect(result.steps[1]).toBe('Total: {{my_count}}');
   });
 
   it('throws when a required parameter is missing', async () => {
@@ -255,11 +257,14 @@ type: skill
 
     const result = await expandSkills(['[skill: outer name="world"]'], tmpDir);
 
-    expect(result).toEqual([
+    expect(result.steps).toEqual([
       'Click start',
       'Type "hello world"',
       'Click finish',
     ]);
+    // Outermost-skill attribution: every step inside `outer` is tagged with
+    // `outer`, including the steps that were physically authored in `inner`.
+    expect(result.sourceSkills).toEqual(['outer', 'outer', 'outer']);
   });
 
   it('two invocations of the same skill get distinct internal namespaces', async () => {
@@ -279,8 +284,8 @@ type: skill
       tmpDir,
     );
 
-    expect(result[0]).toBe('Read [store as: __skill1_x]');
-    expect(result[1]).toBe('Read [store as: __skill2_x]');
+    expect(result.steps[0]).toBe('Read [store as: __skill1_x]');
+    expect(result.steps[1]).toBe('Read [store as: __skill2_x]');
   });
 
   describe('bare-identifier shorthand', () => {
@@ -304,7 +309,7 @@ type: skill
       // skill body is interpolated, the literal `{{password}}` survives in the
       // expanded step — to be resolved against the caller's parameter scope at
       // runtime.
-      expect(result).toEqual([
+      expect(result.steps).toEqual([
         'Type "{{password}}" into the password field',
       ]);
     });
@@ -330,7 +335,7 @@ type: skill
         tmpDir,
       );
 
-      expect(result).toEqual([
+      expect(result.steps).toEqual([
         'Type "{{username}}" / "{{password}}" with role "admin"',
       ]);
     });
@@ -354,7 +359,7 @@ type: skill
         tmpDir,
       );
 
-      expect(result).toEqual([
+      expect(result.steps).toEqual([
         'Count rows [store as: result_count]',
         'Total: {{result_count}}',
       ]);

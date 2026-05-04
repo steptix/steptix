@@ -23,8 +23,23 @@ interface SkillCall {
 }
 
 /**
+ * Result of skill expansion. `steps` is the flat list of natural-language
+ * step strings the runner sees. `sourceSkills` is a parallel array tagging
+ * each step with the *outermost* skill the test author invoked from the
+ * caller scope — `null` for steps that were authored inline (not via any
+ * skill). The runner threads this through to the report so each step row
+ * can show "from skill X" provenance without changing how skills compose.
+ */
+export interface SkillExpansion {
+  steps: string[];
+  sourceSkills: (string | null)[];
+}
+
+/**
  * Expand all `[skill: ...]` invocations in `steps` recursively, returning a
- * flat list of fully-resolved natural-language step strings.
+ * flat list of fully-resolved natural-language step strings plus a parallel
+ * array attributing each step to the outermost skill it came from (or null
+ * for inline steps).
  *
  * @param steps  Step list from a test (or another skill).
  * @param skillsDir  Directory containing `*.md` skill files.
@@ -32,9 +47,9 @@ interface SkillCall {
 export async function expandSkills(
   steps: string[],
   skillsDir: string,
-): Promise<string[]> {
+): Promise<SkillExpansion> {
   const ctx = { skillsDir, seq: 0 };
-  return expandRecursive(steps, ctx, new Set(), 0);
+  return expandRecursive(steps, ctx, new Set(), 0, null);
 }
 
 interface ExpandContext {
@@ -48,17 +63,23 @@ async function expandRecursive(
   ctx: ExpandContext,
   visited: Set<string>,
   depth: number,
-): Promise<string[]> {
+  /** When non-null, every emitted step is tagged with this skill name —
+   *  the outermost skill the caller invoked. `null` at the top level
+   *  (inline steps from the test file). */
+  sourceSkill: string | null,
+): Promise<SkillExpansion> {
   if (depth > MAX_DEPTH) {
     throw new Error(`Skill expansion exceeded max depth of ${MAX_DEPTH} (possible recursion)`);
   }
 
   const out: string[] = [];
+  const sources: (string | null)[] = [];
 
   for (const step of steps) {
     const call = parseSkillCall(step);
     if (!call) {
       out.push(step);
+      sources.push(sourceSkill);
       continue;
     }
 
@@ -74,17 +95,22 @@ async function expandRecursive(
     const instanceId = ++ctx.seq;
     const expandedBody = applySkillScope(skill, call, instanceId);
 
+    // Outermost-skill attribution: keep the first skill we entered as the
+    // source for every inner step, so report rows point back to a name the
+    // test author actually wrote.
     const recursed = await expandRecursive(
       expandedBody,
       ctx,
       new Set([...visited, call.name]),
       depth + 1,
+      sourceSkill ?? call.name,
     );
 
-    out.push(...recursed);
+    out.push(...recursed.steps);
+    sources.push(...recursed.sourceSkills);
   }
 
-  return out;
+  return { steps: out, sourceSkills: sources };
 }
 
 /**

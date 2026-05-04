@@ -34,17 +34,37 @@ export async function parseTestFile(
   const parsed = parseTestContentRaw(rawContent, absPath);
 
   if (options.skillsDir) {
-    parsed.steps = await expandSkills(parsed.steps, options.skillsDir);
+    const stepsExp = await expandSkills(parsed.steps, options.skillsDir);
+    parsed.steps = stepsExp.steps;
+    parsed.sourceSkills = stepsExp.sourceSkills;
+
+    const beforeExp = await expandSkills(parsed.hooks.before, options.skillsDir);
+    const beforeEachExp = await expandSkills(parsed.hooks.beforeEach, options.skillsDir);
+    const afterEachExp = await expandSkills(parsed.hooks.afterEach, options.skillsDir);
+    const afterExp = await expandSkills(parsed.hooks.after, options.skillsDir);
+
     parsed.hooks = {
-      before: await expandSkills(parsed.hooks.before, options.skillsDir),
-      beforeEach: await expandSkills(parsed.hooks.beforeEach, options.skillsDir),
-      afterEach: await expandSkills(parsed.hooks.afterEach, options.skillsDir),
-      after: await expandSkills(parsed.hooks.after, options.skillsDir),
+      before: beforeExp.steps,
+      beforeEach: beforeEachExp.steps,
+      afterEach: afterEachExp.steps,
+      after: afterExp.steps,
+    };
+    parsed.hookSourceSkills = {
+      before: beforeExp.sourceSkills,
+      beforeEach: beforeEachExp.sourceSkills,
+      afterEach: afterEachExp.sourceSkills,
+      after: afterExp.sourceSkills,
     };
     // Skill bodies may themselves contain `[tool: ...]` lines that surface
-    // only after expansion, so re-derive the parallel toolCalls array against
-    // the expanded steps. skipHooks is also re-extended to match length.
+    // only after expansion, so re-derive the parallel toolCalls arrays
+    // against every expanded step list (test body + each hook scope).
     parsed.toolCalls = parsed.steps.map((s) => parseToolCall(s));
+    parsed.hookToolCalls = {
+      before: parsed.hooks.before.map((s) => parseToolCall(s)),
+      beforeEach: parsed.hooks.beforeEach.map((s) => parseToolCall(s)),
+      afterEach: parsed.hooks.afterEach.map((s) => parseToolCall(s)),
+      after: parsed.hooks.after.map((s) => parseToolCall(s)),
+    };
     while (parsed.skipHooks.length < parsed.steps.length) {
       parsed.skipHooks.push(false);
     }
@@ -83,7 +103,22 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
     steps: sections.steps,
     skipHooks: sections.skipHooks,
     toolCalls: sections.toolCalls,
+    // Pre-skill-expansion: every step is inline (no source skill yet). Will be
+    // re-populated by parseTestFile after expandSkills() runs.
+    sourceSkills: sections.steps.map(() => null),
     hooks: sections.hooks,
+    hookToolCalls: {
+      before: sections.hooks.before.map(() => null),
+      beforeEach: sections.hooks.beforeEach.map(() => null),
+      afterEach: sections.hooks.afterEach.map(() => null),
+      after: sections.hooks.after.map(() => null),
+    },
+    hookSourceSkills: {
+      before: sections.hooks.before.map(() => null),
+      beforeEach: sections.hooks.beforeEach.map(() => null),
+      afterEach: sections.hooks.afterEach.map(() => null),
+      after: sections.hooks.after.map(() => null),
+    },
   };
 }
 

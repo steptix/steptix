@@ -299,10 +299,15 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   const stepNumberLabel = overrides.numberLabel ?? `Step ${step.index}`;
   const displayedInstruction = overrides.displayInstruction ?? step.instruction;
 
+  const sourceSkillBadge = step.sourceSkill
+    ? `<span class="badge badge-skill" title="Step expanded from skill ${escapeHtml(step.sourceSkill)}">${escapeHtml(step.sourceSkill)}</span>`
+    : '';
+
   return `<div class="step${childStepClass}">
   <div class="step-header">
     <span class="step-number">${escapeHtml(stepNumberLabel)}</span>
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
+    ${sourceSkillBadge}
     ${retryBadge}
     <span class="step-duration">${duration}</span>
     <span class="badge ${statusClass}">${statusIcon} ${step.status.toUpperCase()}</span>
@@ -318,6 +323,9 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   </div>
 </div>`;
 }
+
+/** Exported for unit-test use; not part of the report's public API. */
+export { renderStep };
 
 /** Render the tool-invocation block for a `[tool: ...]` step.
  *  Surfaces args, captured outputs, and tool logs alongside the existing

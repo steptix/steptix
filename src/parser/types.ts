@@ -63,6 +63,30 @@ export interface TestConfig {
   cdpTab?: string;
 }
 
+/**
+ * Parallel-to-`hooks` shape: a `(ToolCall | null)[]` per scope, recording
+ * which hook instructions are `[tool: ...]` invocations (dispatched to the
+ * tool executor) versus natural-language steps (dispatched to the AI loop).
+ */
+export interface HookToolCalls {
+  before: (import('../tools/types.js').ToolCall | null)[];
+  beforeEach: (import('../tools/types.js').ToolCall | null)[];
+  afterEach: (import('../tools/types.js').ToolCall | null)[];
+  after: (import('../tools/types.js').ToolCall | null)[];
+}
+
+/**
+ * Parallel-to-`hooks` shape: a `(string | null)[]` per scope, attributing
+ * each hook instruction to the outermost skill it came from (or null when
+ * authored inline). Used by the report renderer to show provenance chips.
+ */
+export interface HookSourceSkills {
+  before: (string | null)[];
+  beforeEach: (string | null)[];
+  afterEach: (string | null)[];
+  after: (string | null)[];
+}
+
 /** A single parsed test file */
 export interface ParsedTest {
   /** Absolute path to the .md file */
@@ -84,8 +108,16 @@ export interface ParsedTest {
    *  rather than a natural-language instruction. The runner dispatches these
    *  to the tool executor instead of the AI loop. */
   toolCalls: (import('../tools/types.js').ToolCall | null)[];
+  /** Parallel to `steps` — when non-null, the step came from inside the
+   *  named (outermost) skill. Surfaced by the report so each step row
+   *  shows which skill it originated from. */
+  sourceSkills: (string | null)[];
   /** Pre/post-step hook instructions (skills already expanded). */
   hooks: TestHooks;
+  /** Parallel to `hooks` — tool-call markers per hook instruction. */
+  hookToolCalls: HookToolCalls;
+  /** Parallel to `hooks` — source-skill attribution per hook instruction. */
+  hookSourceSkills: HookSourceSkills;
 }
 
 /**

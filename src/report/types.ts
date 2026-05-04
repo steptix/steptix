@@ -145,6 +145,10 @@ export interface StepResult {
     outputs: Record<string, string>;
     logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }>;
   };
+  /** Name of the outermost skill this step came from, if any. Surfaced as a
+   *  chip in the step header so the report shows skill provenance even after
+   *  parse-time expansion has flattened the call away. */
+  sourceSkill?: string;
 }
 
 /** AI-generated root-cause analysis for a failed test run */

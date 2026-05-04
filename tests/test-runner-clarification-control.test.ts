@@ -101,7 +101,10 @@ function makeTest(steps: string[]): ParsedTest {
     steps,
     skipHooks: steps.map(() => false),
     toolCalls: steps.map(() => null),
+    sourceSkills: steps.map(() => null),
     hooks: { before: [], beforeEach: [], afterEach: [], after: [] },
+    hookToolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
+    hookSourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
 }
 
