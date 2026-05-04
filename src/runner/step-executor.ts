@@ -649,6 +649,70 @@ async function executeStepAttempt(
         continue;
       }
 
+      // ── openPage action ───────────────────────────────────────────────────
+      // Spawn a brand-new tab/window at a URL the test specifies (vs. waiting
+      // for the application to open one via window.open / target="_blank").
+      // The new page registers automatically via context.on('page') from
+      // browser/manager.ts, then we promote it to active so subsequent
+      // actions in the test target it without an explicit switchPage turn.
+      if (action.action === 'openPage') {
+        let openError: string | undefined;
+        const targetUrl = action.url ?? action.value ?? '';
+        if (!targetUrl) {
+          openError = 'openPage failed: no "url" field specified';
+          logger.warn(openError);
+        } else if (!pageTracker) {
+          openError = 'openPage failed: page tracking is not enabled';
+          logger.warn(openError);
+        } else {
+          try {
+            const newPage = await page.context().newPage();
+            await newPage.goto(targetUrl, {
+              waitUntil: 'domcontentloaded',
+              timeout: 30_000,
+            });
+            // The context.on('page') handler in browser/manager.ts already
+            // registered this page — switching to it makes it active for
+            // the rest of this turn and every subsequent step.
+            const switched = await pageTracker.switchToAsync(newPage.url());
+            if (switched) page = switched;
+            else page = newPage;
+            logger.info(`Opened new page → ${newPage.url()}`);
+          } catch (err) {
+            openError = `openPage failed: ${(err as Error).message}`;
+            logger.warn(openError);
+          }
+        }
+
+        let openShot: string | undefined;
+        let openUrl: string | undefined;
+        if (openError) {
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          openShot = shot?.base64;
+          openUrl = page.url();
+        } else {
+          openUrl = page.url();
+        }
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          ...(openError !== undefined && { error: openError }),
+          ...(openShot !== undefined && { screenshotBase64: openShot }),
+          ...(openUrl !== undefined && { pageUrl: openUrl }),
+          timestamp: new Date().toISOString(),
+        });
+
+        if (openError) {
+          turnFailed = true;
+          turnError = openError;
+          break;
+        }
+        continue;
+      }
+
       // ── switchPage action ──────────────────────────────────────────────────
       if (action.action === 'switchPage') {
         let switchError: string | undefined;

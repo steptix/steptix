@@ -11,6 +11,7 @@ export type ActionType =
   | 'switchFrame'
   | 'switchPage'
   | 'closePage'
+  | 'openPage'
   | 'dismiss'
   | 'assert'
   | 'keyboard'

@@ -30,6 +30,7 @@ function describeSubAction(sa: SubActionResult): string {
     case 'click':    return `click ${a.selector ?? a.description}`;
     case 'type':     return `type "${a.value ?? ''}" → ${a.selector ?? ''}`;
     case 'navigate': return `navigate → ${a.url ?? ''}`;
+    case 'openPage': return `open new page → ${a.url ?? ''}`;
     case 'assert':   return `assert: ${a.condition ?? a.description}`;
     case 'wait':     return `wait ${a.condition ? `"${a.condition}"` : `${a.timeout ?? ''}ms`}`;
     case 'select':   return `select "${a.value ?? ''}" in ${a.selector ?? ''}`;

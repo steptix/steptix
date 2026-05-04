@@ -177,6 +177,11 @@ export async function executeAction(
         logger.debug(`closePage action: target="${eff.page}" — ${eff.description}`);
         break;
 
+      case 'openPage':
+        // Handled at the step executor level — it needs to spawn a new page and promote it as active
+        logger.debug(`openPage action: url="${eff.url}" — ${eff.description}`);
+        break;
+
       case 'dismiss':
         await executeDismiss(root, eff);
         break;
