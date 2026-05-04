@@ -19,37 +19,37 @@ npm install
 
 ```bash
 # Run all tests in the default tests/ directory
-npx ai-ui-auto run
+npx aiui run
 
 # Run a specific test file
-npx ai-ui-auto run tests/login-flow.md
+npx aiui run tests/login-flow.md
 
 # Run a directory of tests
-npx ai-ui-auto run tests/smoke/
+npx aiui run tests/smoke/
 
 # Filter by tags
-npx ai-ui-auto run --tag smoke,login
+npx aiui run --tag smoke,login
 
 # Headless mode
-npx ai-ui-auto run --headless
+npx aiui run --headless
 
 # Use a specific browser
-npx ai-ui-auto run --browser firefox
+npx aiui run --browser firefox
 
 # Load environment variables from .env.staging
-npx ai-ui-auto run --env staging
+npx aiui run --env staging
 ```
 
 ### List tests
 
 ```bash
-npx ai-ui-auto list
+npx aiui list
 ```
 
 ### Initialize a new project
 
 ```bash
-npx ai-ui-auto init
+npx aiui init
 ```
 
 ## Runner UI
@@ -87,16 +87,16 @@ The renderer hot-reloads as you edit React components. Restart is needed for mai
 npm run build:all
 
 # Launch with default tests/ directory
-npx ai-ui-auto ui
+npx aiui ui
 
 # Specify a tests directory
-npx ai-ui-auto ui ./my-tests
+npx aiui ui ./my-tests
 
 # With environment
-npx ai-ui-auto ui --env staging
+npx aiui ui --env staging
 
 # With custom config
-npx ai-ui-auto ui --config ./custom.config.ts
+npx aiui ui --config ./custom.config.ts
 ```
 
 ### UI Features
@@ -172,7 +172,7 @@ Tools live in their own TypeScript subproject so they get the full IDE experienc
 
 ```
 my-test-project/
-├── ai-ui-auto.config.ts          ← framework config
+├── aiui.config.ts          ← framework config
 ├── tests/
 │   └── login-flow.md             ← natural-language tests
 ├── skills/
@@ -241,7 +241,7 @@ That's it. VS Code now autocompletes `context.request.`, `page.locator(...)`, et
 
 **4. Tell the framework where the tools live**
 
-In `ai-ui-auto.config.ts`:
+In `aiui.config.ts`:
 
 ```ts
 export default {
@@ -442,7 +442,7 @@ When you run a test, here's what happens end to end:
 
 ## Configuration
 
-Create `ai-ui-auto.config.ts` in your project root:
+Create `aiui.config.ts` in your project root:
 
 ```typescript
 import { defineConfig } from 'ai-ui-automation';

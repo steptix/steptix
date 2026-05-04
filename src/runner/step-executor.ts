@@ -600,9 +600,11 @@ async function executeStepAttempt(
       if (action.action === 'assert') {
         const myAssertIndex = assertCounter++;
         const condition = action.condition ?? '';
-        const expected = action.expected ?? '';
-        const description = action.description;
+        // Preserve `undefined` for predicate mode — the fingerprint, cache,
+        // and code generator all distinguish "no expected" from "expected: ''".
         const against = action.against ?? 'dom';
+        const expected = against === 'predicate' ? undefined : (action.expected ?? '');
+        const description = action.description;
 
         const assertResult = await evaluateAssertion({
           page,
@@ -989,7 +991,19 @@ async function executeStepAttempt(
       }
 
       // Store captured value from "read" / "count" actions into the live parameter map
-      if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
+      if (result.capturedValues !== undefined && action.as && opts.resolvedParameters) {
+        // List capture (read multiple: true) — JSON-encode so it round-trips
+        // through the string-valued param map. Tools that declare an
+        // array-typed parameter decode this back into a typed array at the
+        // bridge boundary.
+        const json = JSON.stringify(result.capturedValues);
+        opts.resolvedParameters[action.as] = json;
+        logger.info(
+          `Stored ${result.capturedValues.length} captured value${
+            result.capturedValues.length === 1 ? '' : 's'
+          } as "{{${action.as}}}"`,
+        );
+      } else if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
         opts.resolvedParameters[action.as] = result.capturedValue;
         logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
       }
@@ -1209,9 +1223,9 @@ interface EvaluateAssertionParams {
   turnNumber: number;
   subActionIndex: number;
   condition: string;
-  expected: string;
+  expected: string | undefined;
   description: string;
-  against: 'dom' | 'api' | 'both';
+  against: 'dom' | 'api' | 'both' | 'predicate';
   poll: { timeoutMs?: number; intervalMs?: number } | undefined;
   contextContent: string;
   testName: string;
@@ -1260,7 +1274,12 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
   for (let attempt = 1; attempt <= MAX_ASSERTION_CODE_ATTEMPTS; attempt++) {
     // 2. Generate code on cache miss / regenerate on failure
     if (!assertionCode) {
-      const fullDom = p.against === 'api'
+      // Predicate mode: nothing in the DOM or API needs to be fetched —
+      // both sides of the comparison are already in `condition`. Skip
+      // DOM capture, screenshot, and API history entirely. Saves tokens
+      // and removes irrelevant context from the AI's prompt.
+      const skipDomAndScreenshot = p.against === 'api' || p.against === 'predicate';
+      const fullDom = skipDomAndScreenshot
         ? null
         : await captureDomSnapshot(p.page, {
             collapseRepetitiveDom: false,
@@ -1271,7 +1290,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
             useDomAttributeAllowlist: false,
             dropUnstableIds: false,
           });
-      const finalShot = p.sendScreenshots && p.against !== 'api'
+      const finalShot = p.sendScreenshots && !skipDomAndScreenshot
         ? await captureScreenshot(p.page, p.fullPageScreenshots)
         : null;
 
@@ -1356,6 +1375,12 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 
   logger.assertion(evalResult.pass, evalResult.actual, p.description);
 
+  // Predicate-mode failures don't have a literal `expected` to quote — the
+  // explanation references the predicate text itself instead.
+  const failureExplanation = p.against === 'predicate'
+    ? `Predicate "${p.condition}" was false: ${evalResult.actual}`
+    : `Expected "${p.expected ?? ''}", got "${evalResult.actual}"`;
+
   return {
     assertIndex: p.assertIndex,
     turnNumber: p.turnNumber,
@@ -1363,11 +1388,10 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     description: p.description,
     condition: p.condition,
     expected: p.expected,
+    against: p.against,
     actual: evalResult.actual,
     pass: evalResult.pass,
-    explanation: evalResult.pass
-      ? 'Assertion passed'
-      : `Expected "${p.expected}", got "${evalResult.actual}"`,
+    explanation: evalResult.pass ? 'Assertion passed' : failureExplanation,
     fromCache,
     ...(assertionCode !== null && { assertionCode }),
     ...(aiInteraction !== undefined && { aiInteraction }),

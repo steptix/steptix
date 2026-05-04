@@ -12,7 +12,7 @@ import type {
  * Example:
  *
  * ```ts
- * import { defineTool } from 'ai-ui-auto/tools';
+ * import { defineTool } from 'ai-ui-automation/tools';
  *
  * export default defineTool({
  *   name: 'fetch_otp',

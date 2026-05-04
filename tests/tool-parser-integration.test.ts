@@ -60,7 +60,7 @@ describe('parseTestContent — tool-call detection', () => {
   it('throws ToolCallSyntaxError on malformed tool calls (parse-time failure)', () => {
     expect(() =>
       parseTestContent(`# T\n## Steps\n1. [tool: foo bar=baz]\n`),
-    ).toThrow(/expected '"' after '=' for argument 'bar'/);
+    ).toThrow(/expected '"', '\[', a number, or true\/false after '=' for argument 'bar'/);
   });
 });
 

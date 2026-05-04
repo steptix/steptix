@@ -72,8 +72,13 @@ export interface ActionExecutionResult {
   failedSelector?: string;
   /** How many elements matched the selector (0 = not found, >1 = ambiguous) */
   matchCount?: number;
-  /** Value captured by a "read" action */
+  /** Value captured by a "read" or "count" action (single-value path). */
   capturedValue?: string;
+  /** List of values captured by a "read multiple: true" action (one per
+   *  matched element). Mutually exclusive with `capturedValue`. The
+   *  step-executor JSON-encodes this into the parameter map so downstream
+   *  tools can decode it via array-typed parameters. */
+  capturedValues?: string[];
 }
 
 /**
@@ -203,6 +208,10 @@ export async function executeAction(
         break;
 
       case 'read': {
+        if (eff.multiple) {
+          const list = await executeReadMultiple(root, eff);
+          return { success: true, capturedValues: list };
+        }
         const captured = await executeRead(root, eff);
         return { success: true, capturedValue: captured };
       }
@@ -640,6 +649,42 @@ async function executeCount(root: Page | FrameLocator, action: AIAction): Promis
 }
 
 /**
+ * Per-element value extraction shared by `executeRead` and `executeReadMultiple`.
+ * Runs in the BROWSER context (shipped to Playwright via `evaluate` /
+ * `evaluateAll`), so it must be a self-contained function — no closures over
+ * Node-side state, no references to other helpers in this module. The
+ * function source is stringified twice on the way to the page; both call
+ * sites pass it through Playwright's serialization the same way.
+ *
+ * Behaviour:
+ *   - With `attribute`: special-case `href`/`src` so the resolved absolute
+ *     URL wins over the raw attribute string (which may be a relative path).
+ *   - Without `attribute`: prefer the form-input `value` over `textContent`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractValueInPage(el: any, attribute?: string): string {
+  if (attribute) {
+    if (attribute === 'href' || attribute === 'src') {
+      const resolved = el[attribute];
+      if (typeof resolved === 'string' && resolved.length > 0) return resolved;
+    }
+    return typeof el.getAttribute === 'function' ? (el.getAttribute(attribute) ?? '') : '';
+  }
+  if (typeof el.value === 'string') return el.value;
+  return (el.textContent ?? '').trim();
+}
+
+/**
+ * Maximum number of elements `read multiple: true` will capture in one
+ * action. Authors who need more should narrow the selector (chunk by
+ * section/page); a higher cap usually indicates an over-broad selector.
+ * The cap protects the param map from accidentally swallowing an entire
+ * page's worth of elements when a selector is mis-typed (e.g. `a` instead
+ * of `.section-1 a`).
+ */
+const READ_MULTIPLE_MAX = 500;
+
+/**
  * Read the value or text content of an element.
  * Tries the element's `value` attribute first (for inputs), falls back to `textContent`.
  * Uses locator.evaluate() so it works inside both page and FrameLocator contexts.
@@ -650,30 +695,80 @@ async function executeRead(root: Page | FrameLocator, action: AIAction): Promise
   const target = attribute ? `@${attribute}` : 'text';
   logger.subAction(`read ${selector} ${target} → ${action.as ?? '(unnamed)'}`);
 
-  const locator = root.locator(selector).first();
-
-  let value: string;
-  if (attribute) {
-    // For href/src, prefer the resolved absolute URL over the raw attribute string,
-    // which on DOM-string lookup may be a relative path.
-    if (attribute === 'href' || attribute === 'src') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      value = await locator.evaluate((el: any, attr: string) => {
-        const resolved = el[attr];
-        if (typeof resolved === 'string' && resolved.length > 0) return resolved;
-        return typeof el.getAttribute === 'function' ? (el.getAttribute(attr) ?? '') : '';
-      }, attribute);
-    } else {
-      value = (await locator.getAttribute(attribute)) ?? '';
-    }
-  } else {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    value = await locator.evaluate((el: any) => {
-      if (typeof el.value === 'string') return el.value;
-      return (el.textContent ?? '').trim();
-    });
-  }
+  const value = await root
+    .locator(selector)
+    .first()
+    .evaluate(extractValueInPage, attribute);
 
   logger.info(`read captured: "${value}" → variable "${action.as ?? '(unnamed)'}"`);
   return value;
+}
+
+/**
+ * Read the value/text/attribute of EVERY element matching the selector and
+ * return them as an ordered array — index-aligned with DOM order at capture
+ * time. Single round-trip via `evaluateAll`; the per-element extraction is
+ * the same body as `executeRead` (see `extractValueInPage`).
+ *
+ * Returns an empty array when nothing matches; that's a valid (though
+ * possibly surprising) outcome and the consuming tool can decide whether
+ * an empty list is a failure.
+ *
+ * Capped at READ_MULTIPLE_MAX. When the selector matches more, the first
+ * READ_MULTIPLE_MAX values are returned and a warning names the total — so
+ * an over-broad selector is loud rather than silent.
+ */
+async function executeReadMultiple(
+  root: Page | FrameLocator,
+  action: AIAction,
+): Promise<string[]> {
+  const selector = requireSelector(action);
+  const attribute = action.attribute;
+  const target = attribute ? `@${attribute}` : 'text';
+  logger.subAction(`read[multiple] ${selector} ${target} → ${action.as ?? '(unnamed)'}`);
+
+  // Single round-trip: ship the extractor source to the page and run it
+  // across every match. The extractor body is duplicated literally inside
+  // the evaluateAll callback because Playwright cannot serialise references
+  // to closures in Node scope. Keeping this in lockstep with
+  // `extractValueInPage` is enforced by the tests in read-multiple.test.ts.
+  const values: string[] = await root.locator(selector).evaluateAll(
+    (els, args) => {
+      const { attribute, max } = args as { attribute?: string; max: number };
+      const slice = els.slice(0, max);
+      return slice.map((el) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const e = el as any;
+        if (attribute) {
+          if (attribute === 'href' || attribute === 'src') {
+            const resolved = e[attribute];
+            if (typeof resolved === 'string' && resolved.length > 0) return resolved;
+          }
+          return typeof e.getAttribute === 'function'
+            ? (e.getAttribute(attribute) ?? '')
+            : '';
+        }
+        if (typeof e.value === 'string') return e.value;
+        return (e.textContent ?? '').trim();
+      });
+    },
+    { attribute, max: READ_MULTIPLE_MAX },
+  );
+
+  // We capped inside the page. To tell the author whether anything was
+  // truncated, do one cheap follow-up count() — only when the result hit
+  // the cap, so the common case stays at one round trip.
+  if (values.length >= READ_MULTIPLE_MAX) {
+    const total = await root.locator(selector).count().catch(() => values.length);
+    if (total > values.length) {
+      logger.warn(
+        `read[multiple] captured the first ${values.length} of ${total} elements matching "${selector}" — narrow the selector if you need all of them (READ_MULTIPLE_MAX=${READ_MULTIPLE_MAX})`,
+      );
+    }
+  }
+
+  logger.info(
+    `read[multiple] captured: ${values.length} value${values.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
+  );
+  return values;
 }

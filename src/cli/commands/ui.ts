@@ -15,7 +15,7 @@ export function registerUiCommand(program: Command): void {
   program
     .command('ui [directory]')
     .description('Launch the Runner UI. Optionally specify a tests directory.')
-    .option('-c, --config <path>', 'Path to config file', 'ai-ui-auto.config.ts')
+    .option('-c, --config <path>', 'Path to config file', 'aiui.config.ts')
     .option('--env <name>', 'Environment name — loads .env.<name> from project root')
     .action(async (directory: string | undefined, opts: UiOptions) => {
       await uiCommand(directory, opts);
@@ -47,7 +47,7 @@ async function uiCommand(
 
   // Resolve the target tests directory
   const testsDir = path.resolve(directory ?? config.tests.dir);
-  const configPath = path.resolve(opts.config ?? 'ai-ui-auto.config.ts');
+  const configPath = path.resolve(opts.config ?? 'aiui.config.ts');
 
   // Locate the electron binary from the installed electron package
   const require = createRequire(import.meta.url);

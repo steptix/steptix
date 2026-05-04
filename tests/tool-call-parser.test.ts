@@ -96,7 +96,7 @@ describe('parseToolCall — syntax errors', () => {
 
   it('throws when `=` is not followed by `"`', () => {
     expect(() => parseToolCall('[tool: foo bar=baz]')).toThrow(
-      /expected '"' after '=' for argument 'bar'/,
+      /expected '"', '\[', a number, or true\/false after '=' for argument 'bar'/,
     );
   });
 

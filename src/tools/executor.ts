@@ -7,6 +7,7 @@ import type {
   ToolContext,
   ToolDefinition,
   ToolLog,
+  ToolParameter,
   ToolStepApi,
   ToolStepOutcome,
 } from './types.js';
@@ -40,6 +41,13 @@ export async function executeToolStep(
   try {
     registered = options.catalogue.require(call.name);
   } catch (err) {
+    const message = (err as Error).message;
+    // Mirror the catalogue error into the tool-step logs so the HTML report
+    // renders the standard "How to register a tool" callout via
+    // `renderToolHintBlock`. The renderer only sees `toolStep.logs`, not the
+    // parent step's `error` field, so this is the join point that lets a
+    // catalogue-side diagnosis surface in the report UI.
+    logs.push({ level: 'error', message });
     return {
       toolName: call.name,
       args: {},
@@ -47,7 +55,7 @@ export async function executeToolStep(
       durationMs: Date.now() - start,
       logs,
       status: 'failed',
-      error: (err as Error).message,
+      error: message,
     };
   }
   const def = registered.definition;
@@ -110,11 +118,21 @@ export async function executeToolStep(
           `Tool "${call.name}" tried to set undeclared output "${name}". Declared: [${[...declaredOutputs].join(', ') || 'none'}]`,
         );
       }
-      const stringValue = typeof value === 'string' ? value : String(value);
+      // Arrays JSON-encode so the value round-trips through the string-valued
+      // parameter map; downstream tools that declare an array-typed parameter
+      // decode it back into a typed array at the bridge boundary. We let
+      // JSON.stringify preserve original element types (numbers stay numbers,
+      // booleans stay booleans) — the bridge's `coerce` accepts either form,
+      // and authors who `JSON.parse` a captured value via `getVar` get back
+      // the same shape they wrote. Scalars pass through `String(...)` for
+      // backwards-compat with the previous single-value setVar contract.
+      const stored = Array.isArray(value)
+        ? JSON.stringify(value)
+        : typeof value === 'string' ? value : String(value);
       // Apply caller's output alias if any.
       const aliased = call.outputAliases[name] ?? name;
-      options.resolvedParameters[aliased] = stringValue;
-      captured[aliased] = stringValue;
+      options.resolvedParameters[aliased] = stored;
+      captured[aliased] = stored;
     },
     expect(condition, message) {
       if (!condition) {
@@ -204,29 +222,71 @@ function resolveAndCoerceArgs(
   return out;
 }
 
+
 function coerce(
   toolName: string,
   argName: string,
-  type: 'string' | 'number' | 'boolean',
+  type: ToolParameter['type'],
   raw: string,
-): string | number | boolean {
+): string | number | boolean | string[] | number[] | boolean[] {
   if (type === 'string') return raw;
-  if (type === 'number') {
-    const n = Number(raw);
-    if (Number.isNaN(n)) {
-      throw new Error(
-        `Tool "${toolName}" parameter "${argName}" expected a number, got "${raw}"`,
-      );
-    }
-    return n;
+  if (type === 'number') return coerceNumber(toolName, argName, raw);
+  if (type === 'boolean') return coerceBoolean(toolName, argName, raw);
+
+  // Array types: decode the raw string as a JSON array, then coerce each item.
+  // Captures from `read multiple: true` populate the variable with a JSON
+  // string already; an inline literal like `urls=["a","b"]` reaches us as
+  // the same shape; either route ends up here.
+  const items = parseJsonArray(toolName, argName, type, raw);
+  if (type === 'string[]') {
+    return items.map((v) => (typeof v === 'string' ? v : String(v)));
   }
-  // boolean
+  if (type === 'number[]') {
+    return items.map((v, i) => coerceNumber(toolName, `${argName}[${i}]`, String(v)));
+  }
+  // boolean[]
+  return items.map((v, i) => coerceBoolean(toolName, `${argName}[${i}]`, String(v)));
+}
+
+function coerceNumber(toolName: string, argName: string, raw: string): number {
+  const n = Number(raw);
+  if (Number.isNaN(n)) {
+    throw new Error(
+      `Tool "${toolName}" parameter "${argName}" expected a number, got "${raw}"`,
+    );
+  }
+  return n;
+}
+
+function coerceBoolean(toolName: string, argName: string, raw: string): boolean {
   const lower = raw.toLowerCase();
   if (lower === 'true') return true;
   if (lower === 'false') return false;
   throw new Error(
     `Tool "${toolName}" parameter "${argName}" expected a boolean ("true"/"false"), got "${raw}"`,
   );
+}
+
+function parseJsonArray(
+  toolName: string,
+  argName: string,
+  type: ToolParameter['type'],
+  raw: string,
+): unknown[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `Tool "${toolName}" parameter "${argName}" expected a ${type} (JSON array), got "${raw}"`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `Tool "${toolName}" parameter "${argName}" expected a ${type} (JSON array), got "${raw}"`,
+    );
+  }
+  return parsed;
 }
 
 function validateOutputAliases(def: ToolDefinition, call: ToolCall): void {

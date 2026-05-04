@@ -305,6 +305,7 @@ function parseAction(raw: unknown, index: number): AIAction {
   if (typeof obj['path'] === 'string') action.path = obj['path'];
   if (typeof obj['as'] === 'string') action.as = obj['as'];
   if (typeof obj['attribute'] === 'string') action.attribute = obj['attribute'];
+  if (obj['multiple'] === true) action.multiple = true;
   if (typeof obj['frame'] === 'string') action.frame = obj['frame'];
   if (typeof obj['page'] === 'string') action.page = obj['page'];
 
@@ -336,21 +337,43 @@ function parseAction(raw: unknown, index: number): AIAction {
     }
 
     const rawAgainst = obj['against'];
-    if (rawAgainst === 'dom' || rawAgainst === 'api' || rawAgainst === 'both') {
+    if (
+      rawAgainst === 'dom' ||
+      rawAgainst === 'api' ||
+      rawAgainst === 'both' ||
+      rawAgainst === 'predicate'
+    ) {
       action.against = rawAgainst;
     }
 
-    // Required fields for assert: description, condition, expected.
-    // (description is already populated above with a fallback; reject if it
-    // was the synthetic fallback rather than a real value.)
+    // Required fields for assert: description and condition (always);
+    // expected (required for dom/api/both, REJECTED for predicate).
+    // description is already populated above with a fallback; reject if it
+    // was the synthetic fallback rather than a real value.
     if (typeof obj['description'] !== 'string' || !obj['description'].trim()) {
       throw new Error(`Assert action at index ${index} missing required "description" field`);
     }
     if (typeof obj['condition'] !== 'string' || !obj['condition'].trim()) {
       throw new Error(`Assert action at index ${index} missing required "condition" field`);
     }
-    if (typeof obj['expected'] !== 'string' || !obj['expected'].trim()) {
-      throw new Error(`Assert action at index ${index} missing required "expected" field`);
+
+    if (action.against === 'predicate') {
+      // Predicate mode: `expected` is meaningless because both sides of the
+      // comparison are already in `condition`. Strict reject if the AI
+      // sends one anyway — fails loudly when modes get confused, rather
+      // than silently picking a side.
+      if (obj['expected'] !== undefined && obj['expected'] !== null && obj['expected'] !== '') {
+        throw new Error(
+          `Assert action at index ${index} sets "against": "predicate" but also includes "expected" — these are mutually exclusive. Drop "expected" for predicate mode, or remove "against" to use the default DOM mode.`,
+        );
+      }
+    } else {
+      // dom / api / both / undefined (defaults to dom in the runner).
+      if (typeof obj['expected'] !== 'string' || !obj['expected'].trim()) {
+        throw new Error(
+          `Assert action at index ${index} missing required "expected" field (or set "against": "predicate" for self-contained predicates over already-substituted values)`,
+        );
+      }
     }
   }
 

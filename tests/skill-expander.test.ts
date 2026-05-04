@@ -401,7 +401,9 @@ type: skill
     it('throws on an unquoted `key=value` argument', async () => {
       await expect(
         expandSkills(['[skill: foo bar=baz]'], tmpDir),
-      ).rejects.toThrow(/expected '"' after '=' for argument 'bar'/);
+      ).rejects.toThrow(
+        /expected '"', '\[', a number, or true\/false after '=' for argument 'bar'/,
+      );
     });
   });
 });

@@ -154,7 +154,9 @@ describe('parseSkillCall — syntax errors', () => {
       throw new Error('expected throw');
     } catch (e) {
       const err = e as SkillCallSyntaxError;
-      expect(err.reason).toMatch(/expected '"' after '=' for argument 'bar'/);
+      expect(err.reason).toMatch(
+        /expected '"', '\[', a number, or true\/false after '=' for argument 'bar'/,
+      );
       expect(line[err.column]).toBe('b');
     }
   });

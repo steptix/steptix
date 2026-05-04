@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 export function registerInitCommand(program: Command): void {
   program
     .command('init [dir]')
-    .description('Scaffold a new ai-ui-auto project in the target directory (default: current dir)')
+    .description('Scaffold a new aiui project in the target directory (default: current dir)')
     .option('--force', 'Overwrite existing files', false)
     .action(async (dir: string | undefined, opts: { force: boolean }) => {
       await initCommand(dir ?? '.', opts.force);
@@ -20,7 +20,7 @@ export function registerInitCommand(program: Command): void {
 async function initCommand(targetDir: string, force: boolean): Promise<void> {
   const absTarget = path.resolve(targetDir);
 
-  console.log(chalk.bold(`\nInitialising ai-ui-auto project in: ${chalk.cyan(absTarget)}\n`));
+  console.log(chalk.bold(`\nInitialising aiui project in: ${chalk.cyan(absTarget)}\n`));
 
   // Resolve templates directory relative to this module
   // In source: src/cli/commands/ -> ../../.. -> project root -> templates/init
@@ -40,7 +40,7 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
 
   // Copy template files
   const templateFiles: Array<{ src: string; dest: string }> = [
-    { src: 'ai-ui-auto.config.ts', dest: 'ai-ui-auto.config.ts' },
+    { src: 'aiui.config.ts', dest: 'aiui.config.ts' },
     { src: 'tests/example.md', dest: 'tests/example.md' },
     { src: 'context/app.md', dest: 'context/app.md' },
   ];
@@ -74,16 +74,16 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
   console.log(chalk.bold(`\n${'─'.repeat(50)}`));
   console.log(chalk.bold('  Next steps:'));
   console.log('');
-  console.log(`  1. Edit ${chalk.cyan('ai-ui-auto.config.ts')} — set your base URL and AI gateway`);
+  console.log(`  1. Edit ${chalk.cyan('aiui.config.ts')} — set your base URL and AI gateway`);
   console.log(`  2. Edit ${chalk.cyan('tests/example.md')}   — write your first test`);
   console.log(`  3. Edit ${chalk.cyan('context/app.md')}     — describe your application`);
-  console.log(`  4. Run   ${chalk.cyan('ai-ui-auto run')}     — execute the tests`);
+  console.log(`  4. Run   ${chalk.cyan('aiui run')}     — execute the tests`);
   console.log(chalk.bold(`${'─'.repeat(50)}\n`));
 }
 
 async function writeDefaultTemplate(templateName: string, destPath: string): Promise<void> {
   const defaults: Record<string, string> = {
-    'ai-ui-auto.config.ts': `import { defineConfig } from 'ai-ui-automation';
+    'aiui.config.ts': `import { defineConfig } from 'ai-ui-automation';
 
 export default defineConfig({
   ai: {

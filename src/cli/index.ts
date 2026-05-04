@@ -28,7 +28,7 @@ export function createCli(): Command {
   const program = new Command();
 
   program
-    .name('ai-ui-auto')
+    .name('aiui')
     .description('AI-powered UI test automation using natural language Markdown test files')
     .version(version);
 

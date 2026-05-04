@@ -46,8 +46,13 @@ export interface AssertionResult extends AssertionEvaluation {
   description: string;
   /** Natural-language statement of what is being checked */
   condition: string;
-  /** Expected value/state */
-  expected: string;
+  /** Expected value/state. `undefined` for predicate-mode assertions, where
+   *  both sides of the comparison are already in `condition`. */
+  expected: string | undefined;
+  /** Which assertion mode the action used. Drives the report's "Predicate /
+   *  Result" vs "Expected / Actual" row labels. Optional for backwards
+   *  compatibility with reports written before the predicate mode existed. */
+  against?: 'dom' | 'api' | 'both' | 'predicate';
   /** The cached JS code used to evaluate this assertion */
   assertionCode?: string | undefined;
   /** AI interaction that generated the JS code (only when not from cache) */

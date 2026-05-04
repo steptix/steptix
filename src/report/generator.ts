@@ -355,6 +355,8 @@ export function renderToolStep(toolStep: NonNullable<StepResult['toolStep']>): s
           .join('')}</div>
        </div>`;
 
+  const hintHtml = renderToolHintBlock(toolStep);
+
   return `<div class="tool-block">
   <div class="tool-header">
     <span class="tool-title">🔧 Tool</span>
@@ -369,7 +371,49 @@ export function renderToolStep(toolStep: NonNullable<StepResult['toolStep']>): s
     ${outputsHtml}
   </div>
   ${logsHtml}
+  ${hintHtml}
 </div>`;
+}
+
+/**
+ * If the tool-step's logs include a "not found in catalogue" error (the
+ * catalogue's standard message), render a styled "How to register a tool"
+ * callout below the args/outputs/logs. The callout reproduces the
+ * defineTool recipe so an author who's debugging a failed tool call can
+ * fix the missing registration without leaving the report.
+ *
+ * Returns an empty string when no such error is present — non-failure tool
+ * runs and other failure modes (e.g. a tool that ran but threw) are
+ * unaffected.
+ */
+function renderToolHintBlock(toolStep: NonNullable<StepResult['toolStep']>): string {
+  const errorLog = toolStep.logs.find(
+    (l) => l.level === 'error' && l.message.includes('not found in catalogue'),
+  );
+  if (!errorLog) return '';
+  const toolName = escapeHtml(toolStep.name);
+  const recipe = `// tools/${toolStep.name}.ts
+import { defineTool } from 'ai-ui-automation/tools';
+
+export default defineTool({
+  name: '${toolStep.name}',
+  parameters: { /* ... */ },
+  outputs:    { /* ... */ },
+  async run(args, { page, step, log }) { /* ... */ },
+});`;
+  return `<div class="tool-section tool-hint" title="The framework couldn't find this tool. Add a TS file to tests.toolsDir whose default export is a defineTool(...) result.">
+    <div class="tool-section-label">💡 How to register "${toolName}"</div>
+    <div class="tool-hint-body">
+      <p>The framework couldn't find <code>${toolName}</code> in the tool catalogue.
+         Drop a TypeScript file into the directory configured as
+         <code>tests.toolsDir</code> in <code>aiui.config.ts</code>. Its default
+         export must be a <code>defineTool(...)</code> result, like:</p>
+      <pre class="tool-hint-recipe">${escapeHtml(recipe)}</pre>
+      <p class="tool-hint-foot">If the tool already exists, double-check that
+         <code>tests.toolsDir</code> points at the directory containing it —
+         the path the framework scanned is shown in the failure log above.</p>
+    </div>
+  </div>`;
 }
 
 function formatToolValue(v: unknown): string {
@@ -602,18 +646,29 @@ function renderAssertion(assertion: AssertionResult): string {
   </details>`
     : '';
 
+  // Predicate-mode assertions don't have a literal `expected` — both sides
+  // of the comparison live in `condition`. Swap the row labels to
+  // "Predicate" / "Result" to communicate that semantic shape, and skip
+  // the (empty) Expected row entirely.
+  const isPredicate = assertion.against === 'predicate';
+  const conditionLabel = isPredicate ? 'Predicate:' : 'Condition:';
+  const valueLabel = isPredicate ? 'Result:' : 'Actual:';
+  const expectedRow = isPredicate
+    ? ''
+    : `<div class="assertion-row">
+    <span class="assertion-key">Expected:</span>
+    <span>${escapeHtml(assertion.expected ?? '')}</span>
+  </div>`;
+
   return `<div class="assertion-block ${cls}">
   <div class="assertion-title">${icon} ${escapeHtml(assertion.description)} — ${label}</div>
   <div class="assertion-row">
-    <span class="assertion-key">Condition:</span>
+    <span class="assertion-key">${conditionLabel}</span>
     <span>${escapeHtml(assertion.condition)}</span>
   </div>
+  ${expectedRow}
   <div class="assertion-row">
-    <span class="assertion-key">Expected:</span>
-    <span>${escapeHtml(assertion.expected)}</span>
-  </div>
-  <div class="assertion-row">
-    <span class="assertion-key">Actual:</span>
+    <span class="assertion-key">${valueLabel}</span>
     <span>${escapeHtml(assertion.actual)}</span>
   </div>
   <div class="assertion-row">

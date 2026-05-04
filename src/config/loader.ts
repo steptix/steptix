@@ -42,6 +42,12 @@ function resolveConfigPath(configPath?: string): string | null {
 
   // Search for default config filenames
   const candidates = [
+    'aiui.config.ts',
+    'aiui.config.js',
+    'aiui.config.mjs',
+    // Legacy filenames — kept so a project that hasn't migrated still loads
+    // its config without an explicit `--config` flag. New projects scaffolded
+    // by `aiui init` use the canonical `aiui.config.ts` form.
     'ai-ui-auto.config.ts',
     'ai-ui-auto.config.js',
     'ai-ui-auto.config.mjs',

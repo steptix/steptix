@@ -135,7 +135,12 @@ Plan your next action based on the observed result — do not batch multiple act
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
 5. Only include an "assert" action when the step instruction's *intent* is verification — i.e. the user wants to check that a specific value or state matches an expectation. Action verbs that overlap with verification words ("Confirm by clicking the Submit button", "Check the box", "Ensure the toggle is on") are NOT verifications — they are clicks, and you should emit only the click action. Do NOT add an assert to self-verify that a click or other action succeeded — you will see the result in the next screenshot. A failed assert immediately fails the step, so be deliberate${dismissalRule}
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
-8. For "assert" actions, you MUST set: "description" (short report label like "Modal title equals 'Done'"), "condition" (natural-language statement of what is being checked, e.g. "visible modal title text"), and "expected" (the concrete expected value, e.g. "Done"). Optional fields: "poll": { "timeoutMs": 5000, "intervalMs": 250 } when the instruction implies eventual consistency ("eventually shows", "after a moment") and no deterministic wait primitive fits; "against": "dom" | "api" | "both" (default "dom") — set "api" for assertions purely about prior API responses
+8. For "assert" actions, ALWAYS set "description" (short report label) and "condition" (natural-language statement of what is being checked). The "against" field discriminates four shapes — pick the one that matches the resolved instruction text:
+   - against: "dom" (default): the instruction asks you to verify something visible on the page. Set "condition" to what to read (e.g. "visible modal title text") and "expected" to the concrete literal it should equal (e.g. "Done"). Example: { "action": "assert", "against": "dom", "condition": "visible modal title text", "expected": "Done", "description": "Modal title equals Done" }.
+   - against: "api": the instruction is purely about a prior API response. Set "condition" to a path/description into that response and "expected" to the literal value at that path. Example: { "action": "assert", "against": "api", "condition": "step_3.response.body.id", "expected": "DEL-1234", "description": "Created delegate id is DEL-1234" }.
+   - against: "both": the instruction can reference either DOM or prior API responses. Same field requirements as "dom"/"api".
+   - against: "predicate": the instruction is a self-contained predicate — both sides of the comparison are already substituted into the resolved text. Use this whenever NOTHING in the DOM or prior API responses needs to be fetched. Set "condition" to the resolved English predicate verbatim. DO NOT include "expected" — predicate mode rejects it strictly. Triggers: instructions like "Assert that 8 is at least 5", "Assert that 2 equals 2", or 'Assert that ["O-1003","O-1007"] contains "O-1003"' (after parameter substitution leaves only literals on both sides — no DOM, no API). Example: { "action": "assert", "against": "predicate", "condition": "8 is at least 5", "description": "order_count >= 5" }.
+   Optional on any mode: "poll": { "timeoutMs": 5000, "intervalMs": 250 } when the instruction implies eventual consistency ("eventually shows", "after a moment") and no deterministic wait primitive fits.
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 11. For "select" actions, set "selector" to the <select> element itself (NOT an <option>) and "value" to the visible option text (e.g. "Transaction Dispute"). Never click <option> elements directly — always use the "select" action on the parent <select>
@@ -152,6 +157,7 @@ Plan your next action based on the observed result — do not batch multiple act
    - waitType "stable": wait for the page to fully stabilise (network idle and no DOM changes) — no condition needed
    If the screenshot shows the page is loading or transitioning (visible spinner, blank content, partially loaded), return a "wait" action to let it settle before proceeding
 13. For "read" actions, set "selector" to the CSS selector of the element to read and "as" to a snake_case variable name. Use "read" when a step asks you to capture, note, remember, store, or take note of a value from the page (e.g. "capture the residential address", "take note of the balance", "note the email"). If the step specifies a variable name via [store as: name], use that name exactly. Otherwise derive a concise snake_case name from what is being captured (e.g. "residential address" → "residential_address", "account balance" → "account_balance"). Captured values become available as {{variable_name}} in later steps. By default "read" returns the element's value (for inputs) or its textContent. If the step asks for an attribute — most commonly an href, src, or a URL — set "attribute" to the attribute name (e.g. "href"). The displayed text on a link or breadcrumb often differs from the underlying URL, so always use "attribute": "href" when capturing a link URL rather than reading the visible text
+13a. CAPTURING A LIST. When a step asks for "every", "all", "each" matching value (e.g. "capture every link under section 1", "read all the row IDs", "get every product's price"), add "multiple": true to the read action. The framework iterates the selector across every match and stores the values as a JSON-encoded array in the variable. Combine with "attribute" to scrape e.g. every href: { "action": "read", "selector": "section.section-1 a[href]", "attribute": "href", "as": "section1_links", "multiple": true, "description": "Capture every link href under section 1" }. The variable can then be passed to a tool that declares an array-typed parameter — for example "[tool: visit-each urls={{section1_links}}]" — which receives a typed string[] and can loop in code. Without "multiple": true, only the first match is captured (single-string behaviour).
 14. For "count" actions, set "selector" to the CSS selector to count and "as" to a snake_case variable name. Use "count" when a step asks how many elements exist (e.g. "how many accounts", "count the rows"). The result is stored as a string (e.g. "3") and available as {{variable_name}} in later steps
 15. Set "needs_reeval": true if the current step instruction is NOT yet fully satisfied after this action. Set false (or omit) when the step instruction IS satisfied. IMPORTANT: only consider the current step instruction — do NOT continue into actions that belong to subsequent steps. For example, if the step says "Enter username and password", set needs_reeval: true after entering the username (you still need to enter the password), but set needs_reeval: false after entering the password — do NOT proceed to click Login unless the step says to
 16. For elements inside an <iframe>, set "frame" to the CSS selector of the iframe element (shown in the <!-- comment --> after the <iframe> tag). For **nested iframes** (an iframe inside another iframe), chain the selectors with " >> " from outermost to innermost. Example: if the DOM snapshot shows \`<iframe id="outer"> <!-- #outer -->\n  <iframe id="inner"> <!-- #inner -->\n    <button id="btn">\`, then to click #btn set "frame": "#outer >> #inner", "selector": "#btn". Never put an iframe selector inside the "selector" field — iframe traversal belongs entirely in the "frame" field. Omit "frame" for elements in the main page
@@ -317,14 +323,44 @@ export function buildClarificationMessage(
 export function buildAssertionCodePrompt(
   assertDescription: string,
   assertCondition: string,
-  assertExpected: string,
+  assertExpected: string | undefined,
   domSnapshot: string | null,
   screenshotBase64: string | null,
   apiResponseHistory?: string,
-  against: 'dom' | 'api' | 'both' = 'dom',
+  against: 'dom' | 'api' | 'both' | 'predicate' = 'dom',
   testInfoSection?: string,
 ): ChatMessage {
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
+
+  // Predicate mode: nothing to fetch — both sides of the comparison are
+  // already in `condition`. Skip DOM, screenshot, and API context entirely.
+  // The generated JS evaluates the predicate as a self-contained boolean.
+  if (against === 'predicate') {
+    const predicateText = `${testInfoBlock}Write a self-executing JavaScript function that evaluates the following self-contained predicate.
+
+The predicate's both sides are already present in the condition text — there is NOTHING to fetch from the DOM or from prior API responses. The code must NOT call \`document.*\`, MUST NOT reference any API data, and MUST NOT take any external input. Translate the English predicate directly into a boolean expression over the literals in the condition.
+
+## Assertion
+- Description: ${assertDescription}
+- Condition: ${assertCondition}
+
+Requirements for the code:
+- Must be a self-executing function: \`(() => { ... })()\`
+- Must return \`{ pass: boolean, actual: string }\`
+- \`actual\` should describe the comparison performed in a single line, e.g. \`"8 >= 5 → true"\` or \`"['O-1003','O-1007'] contains 'O-1003' → true"\`. This is what the report shows under "Result".
+- For "contains" / "includes" predicates over a JSON-array literal, parse the array (\`JSON.parse\`) and use \`Array.prototype.includes\`.
+- For numeric comparisons, parse the operands as numbers (\`Number(...)\`) before comparing.
+- Do NOT throw — return \`{ pass: false, actual: "<why it failed>" }\` for any unexpected shape.
+
+Respond with ONLY this JSON:
+{
+  "code": "(() => { ... })()"
+}`;
+    // No screenshot for predicate mode — screenshot was never requested
+    // (step-executor skips capture for predicate) and including one would
+    // waste tokens on an irrelevant page.
+    return { role: 'user', content: predicateText };
+  }
 
   const apiSection = (against !== 'dom' && apiResponseHistory)
     ? `\n\n## Prior API Responses (assertions about API data are evaluated against this section)\n${apiResponseHistory}\n`
@@ -347,7 +383,7 @@ ${contextNote}
 ## Assertion
 - Description: ${assertDescription}
 - Condition: ${assertCondition}
-- Expected: ${assertExpected}
+- Expected: ${assertExpected ?? '(not provided)'}
 ${domSection}${apiSection}
 
 Requirements for the code:

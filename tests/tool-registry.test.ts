@@ -174,6 +174,6 @@ describe('ToolCatalogue.require', () => {
   it('throws with available names listed when the tool is unknown', async () => {
     await writeTool('alpha', jsTool('alpha'));
     const catalogue = await loadToolCatalogue(tmpDir);
-    expect(() => catalogue.require('nope')).toThrow(/not found.*alpha/);
+    expect(() => catalogue.require('nope')).toThrow(/not found[\s\S]*alpha/);
   });
 });

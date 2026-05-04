@@ -185,6 +185,16 @@ export function getReportTemplate(): string {
     .tool-log-error { color: var(--fail); }
     .tool-log-line { padding: 1px 0; }
 
+    /* "How to register a tool" callout — shown when a [tool: ...] step
+       fails because the named tool isn't in the catalogue. */
+    .tool-hint { margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: #fffbeb; border: 1px solid #fde68a; }
+    .tool-hint .tool-section-label { color: #92400e; }
+    .tool-hint-body p { margin: 0 0 8px 0; font-size: 0.85rem; line-height: 1.55; color: #78350f; }
+    .tool-hint-body p:last-child { margin-bottom: 0; }
+    .tool-hint-body code { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.8rem; background: #fef3c7; color: #78350f; padding: 1px 6px; border-radius: 3px; }
+    .tool-hint-recipe { margin: 8px 0; padding: 10px 12px; background: #fef3c7; border: 1px solid #fde68a; border-radius: 4px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.78rem; color: #78350f; white-space: pre-wrap; overflow-x: auto; }
+    .tool-hint-foot { font-style: italic; opacity: 0.85; }
+
     /* Diagnosis block */
     .diagnosis-block { margin-bottom: 24px; padding: 18px 20px; border-radius: var(--radius); background: #fffbeb; border: 1px solid #fde68a; box-shadow: var(--shadow); }
     .diagnosis-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }

@@ -4,7 +4,7 @@
   "description": "AI-powered UI test automation using natural language Markdown test files",
   "type": "module",
   "bin": {
-    "ai-ui-auto": "./dist/index.js"
+    "aiui": "./dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,9 +14,9 @@
       "types": "./dist/index.d.ts"
     },
     "./tools": {
-      "types": "./src/tools/index.ts",
-      "import": "./src/tools/index.ts",
-      "default": "./src/tools/index.ts"
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js",
+      "default": "./dist/tools/index.js"
     }
   },
   "scripts": {

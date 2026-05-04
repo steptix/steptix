@@ -94,6 +94,22 @@ export interface AIAction {
    */
   attribute?: string;
   /**
+   * For "read" actions, when true the action collects the captured value from
+   * EVERY element matching `selector` and stores them as a JSON-encoded
+   * string array in the variable named by `as`. When false/omitted, only
+   * the first match is captured (current single-value behaviour).
+   *
+   * Combine with `attribute` to scrape e.g. every `href` under a section:
+   *   { action: "read", selector: "section a[href]", attribute: "href",
+   *     as: "links", multiple: true }
+   *
+   * Tool calls that declare an array-typed parameter (e.g. `urls: string[]`)
+   * decode the JSON string back into a typed array at the bridge boundary,
+   * so authors can pipe the captured list straight into a looping tool:
+   *   `[tool: visit-each urls={{links}}]`
+   */
+  multiple?: boolean;
+  /**
    * CSS selector identifying the <iframe> element in the main page that contains the target element.
    * When set, the action is executed inside that frame rather than the main page.
    * Omit for elements in the main page.
@@ -120,8 +136,13 @@ export interface AIAction {
    * - `'api'`: assertion is purely about prior API responses; DOM is not sent
    *   to the AI when generating code.
    * - `'both'`: both DOM and API context are available.
+   * - `'predicate'`: the assertion is a self-contained predicate over values
+   *   already substituted into the instruction text (via `{{...}}`). Both
+   *   sides of the comparison are present in `condition`; no DOM or API
+   *   context is needed. `expected` is omitted in this mode — the parser
+   *   rejects it strictly to keep modes from drifting.
    */
-  against?: 'dom' | 'api' | 'both';
+  against?: 'dom' | 'api' | 'both' | 'predicate';
 }
 
 /** The structured response from the AI for a test step */

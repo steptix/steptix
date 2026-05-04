@@ -1,5 +1,5 @@
-import { defineConfig } from './src/config/types.js';
-import { DEFAULT_BROWSER_DIMENSIONS } from './src/config/browser-dimensions.js';
+import { defineConfig } from './dist/config/types.js';
+import { DEFAULT_BROWSER_DIMENSIONS } from './dist/config/browser-dimensions.js';
 
 export default defineConfig({
   ai: {
@@ -23,6 +23,7 @@ export default defineConfig({
     dir: './fixtures/tests',
     contextDir: './fixtures/context',
     skillsDir: './fixtures/skills',
+    toolsDir: './fixtures/tools/src',
     pattern: '**/*.md',
   },
   execution: {

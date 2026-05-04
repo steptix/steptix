@@ -24,7 +24,7 @@
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    CLI (Entry Point)                 │
-│  npx ai-ui-auto run tests/ --tag smoke --headless   │
+│  npx aiui run tests/ --tag smoke --headless   │
 └──────────────┬──────────────────────────────────────┘
                │
                ▼
@@ -448,7 +448,7 @@ When a step fails and is retried, the retry is not blind — it includes context
 
 ## 7. Configuration
 
-### `ai-ui-auto.config.ts`
+### `aiui.config.ts`
 
 ```typescript
 import { defineConfig } from 'ai-ui-automation';
@@ -506,37 +506,37 @@ export default defineConfig({
 
 ```bash
 # Run all tests
-npx ai-ui-auto run
+npx aiui run
 
 # Run specific test file
-npx ai-ui-auto run tests/login-flow.md
+npx aiui run tests/login-flow.md
 
 # Run all tests in a directory
-npx ai-ui-auto run tests/
+npx aiui run tests/
 
 # Run tests matching tag
-npx ai-ui-auto run --tag smoke
-npx ai-ui-auto run --tag "smoke,critical"   # AND logic
+npx aiui run --tag smoke
+npx aiui run --tag "smoke,critical"   # AND logic
 
 # Run headless
-npx ai-ui-auto run --headless
+npx aiui run --headless
 
 # Specify config
-npx ai-ui-auto run --config ./custom.config.ts
+npx aiui run --config ./custom.config.ts
 
 # Initialise project structure
-npx ai-ui-auto init
+npx aiui init
 
 # List discovered tests
-npx ai-ui-auto list
-npx ai-ui-auto list --tag smoke
+npx aiui list
+npx aiui list --tag smoke
 ```
 
 ### CLI Flags
 
 | Flag              | Type    | Default                  | Description                        |
 |-------------------|---------|--------------------------|------------------------------------|
-| `--config`        | string  | `ai-ui-auto.config.ts`  | Path to config file                |
+| `--config`        | string  | `aiui.config.ts`  | Path to config file                |
 | `--tag`           | string  | —                        | Filter by tag (comma-separated)    |
 | `--headless`      | boolean | `false`                  | Run browser in headless mode       |
 | `--timeout`       | number  | `60000`                  | Test timeout in ms                 |
@@ -545,13 +545,13 @@ npx ai-ui-auto list --tag smoke
 | `--bail`          | boolean | `false`                  | Stop on first failure              |
 | `--browser`       | string  | `chromium`               | Browser engine                     |
 
-### `ai-ui-auto init`
+### `aiui init`
 
 Scaffolds a new project:
 
 ```
 my-project/
-├── ai-ui-auto.config.ts
+├── aiui.config.ts
 ├── context/
 │   └── app-overview.md
 ├── tests/
@@ -880,7 +880,7 @@ The following actions were tried and failed. Choose a DIFFERENT approach — do 
 
 ```
 1. CLI parses arguments
-2. Load config from ai-ui-auto.config.ts
+2. Load config from aiui.config.ts
 3. Discover test files (filtered by --tag if specified)
 4. Load context files from context/
 5. For each test file:

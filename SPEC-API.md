@@ -87,13 +87,13 @@ API specs are the primary source of endpoint knowledge — request schemas, resp
 
 ```bash
 # Sync all specs referenced in context files (re-download from URLs)
-npx ai-ui-auto specs sync
+npx aiui specs sync
 
 # Sync a specific spec
-npx ai-ui-auto specs sync delegates
+npx aiui specs sync delegates
 
 # List cached specs and their source URLs
-npx ai-ui-auto specs list
+npx aiui specs list
 ```
 
 ### 3.2 Context Files for APIs
@@ -386,7 +386,7 @@ my-project/
 ├── .env.t2
 ├── .env.staging
 ├── .env.production
-├── ai-ui-auto.config.ts
+├── aiui.config.ts
 ├── context/
 ├── specs/
 ├── tests/
@@ -431,13 +431,13 @@ NOTIFICATIONS_API_KEY=prod-notif-key-xxxxx
 
 ```bash
 # Run tests against T1 environment
-npx ai-ui-auto run tests/ --env t1
+npx aiui run tests/ --env t1
 
 # Run against staging
-npx ai-ui-auto run tests/ --env staging
+npx aiui run tests/ --env staging
 
 # Run specific test against production
-npx ai-ui-auto run tests/delegates.md --env production
+npx aiui run tests/delegates.md --env production
 ```
 
 ### 6.3 Environment Resolution
@@ -580,7 +580,7 @@ Full values are available in a debug mode (`--debug-report`) for troubleshooting
 
 ### 9.1 New Config Fields
 
-Added to `ai-ui-auto.config.ts`:
+Added to `aiui.config.ts`:
 
 ```typescript
 export default defineConfig({
@@ -605,9 +605,9 @@ export default defineConfig({
 
 ```bash
 # Spec management
-npx ai-ui-auto specs sync              # Download/update all referenced specs
-npx ai-ui-auto specs sync delegates    # Sync a specific spec (matched by context file name)
-npx ai-ui-auto specs list              # List cached specs with source URLs and last-synced date
+npx aiui specs sync              # Download/update all referenced specs
+npx aiui specs sync delegates    # Sync a specific spec (matched by context file name)
+npx aiui specs list              # List cached specs with source URLs and last-synced date
 ```
 
 ---

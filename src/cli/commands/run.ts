@@ -25,7 +25,7 @@ export function registerRunCommand(program: Command): void {
   program
     .command('run [target]')
     .description('Run test files. Target can be a file path or directory.')
-    .option('-c, --config <path>', 'Path to config file', 'ai-ui-auto.config.ts')
+    .option('-c, --config <path>', 'Path to config file', 'aiui.config.ts')
     .option('-t, --tag <tags>', 'Filter tests by tag (comma-separated, AND logic)')
     .option('--headless', 'Run browser in headless mode', false)
     .option('--timeout <ms>', 'Test timeout in milliseconds', parseInt)

@@ -59,7 +59,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    title: 'ai-ui-auto Runner',
+    title: 'aiui Runner',
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,

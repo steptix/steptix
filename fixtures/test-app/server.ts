@@ -58,6 +58,23 @@ const notifications = [
   { id: 'notif-002', message: 'Transaction completed', recipientId: 'user-001', createdAt: '2026-03-27T09:00:00Z' },
 ];
 
+// Orders fixture — used by the `extract_order_ids` tool demo. Each order has
+// an `ageDays` so the `/api/orders?sinceDays=N` endpoint can return only
+// orders newer than the requested window. Order status varies so a downstream
+// "refund only the failed ones" filter has something to work with.
+const orders = [
+  { id: 'O-1001', status: 'paid',     amount: 4200, ageDays: 1 },
+  { id: 'O-1002', status: 'paid',     amount: 1850, ageDays: 2 },
+  { id: 'O-1003', status: 'failed',   amount: 999,  ageDays: 3 },
+  { id: 'O-1004', status: 'refunded', amount: 250,  ageDays: 5 },
+  { id: 'O-1005', status: 'paid',     amount: 3300, ageDays: 7 },
+  { id: 'O-1006', status: 'paid',     amount: 720,  ageDays: 9 },
+  { id: 'O-1007', status: 'failed',   amount: 1200, ageDays: 12 },
+  { id: 'O-1008', status: 'paid',     amount: 5800, ageDays: 20 },
+  { id: 'O-1009', status: 'paid',     amount: 410,  ageDays: 35 },
+  { id: 'O-1010', status: 'paid',     amount: 90,   ageDays: 60 },
+];
+
 // CSRF token store: maps session-id → token
 const csrfTokens = new Map<string, string>();
 
@@ -1424,6 +1441,27 @@ async function handleRequest(
       return;
     }
     json(res, 200, notifications);
+    return;
+  }
+
+  // ── Orders API ─────────────────────────────────────────────────────────────
+  // GET /api/orders?sinceDays=N&status=foo
+  // Returns every order created within the last N days (default 30), filtered
+  // optionally by status. Used by the `extract_order_ids` demo tool to show
+  // an array output flowing back from a tool into the test variable scope.
+  if (pathname === '/api/orders' && method === 'GET') {
+    const reqUrl = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+    const since = Number(reqUrl.searchParams.get('sinceDays') ?? '30');
+    const statusFilter = reqUrl.searchParams.get('status');
+    if (!Number.isFinite(since) || since < 0) {
+      json(res, 400, { error: 'sinceDays must be a non-negative number' });
+      return;
+    }
+    const filtered = orders
+      .filter((o) => o.ageDays <= since)
+      .filter((o) => (statusFilter ? o.status === statusFilter : true))
+      .map(({ id, status, amount }) => ({ id, status, amount }));
+    json(res, 200, filtered);
     return;
   }
 
