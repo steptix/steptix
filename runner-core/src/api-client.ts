@@ -19,7 +19,8 @@ export interface StreamStepsRequest {
   env?: Record<string, string>;
   /**
    * Active environment name. The server uses it to load `.env.<envName>` and
-   * `data/<envName>.json` from its working directory and apply `${env.X}` /
+   * `fixtures/data/<envName>.json` (or the path in `AIUI_DATA_DIR`) from its
+   * working directory and apply `${env.X}` /
    * `${data.X.Y}` interpolation to each step. Empty/omitted ⇒ no
    * env-data interpolation (steps with `${...}` placeholders will fail).
    */

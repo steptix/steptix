@@ -1,5 +1,5 @@
 /**
- * Tests for `data/<env>.json` loading + dotted-path lookup.
+ * Tests for `fixtures/data/<env>.json` loading + dotted-path lookup.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -17,7 +17,7 @@ describe('loadDataFile', () => {
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-data-'));
-    mkdirSync(path.join(tmpRoot, 'data'), { recursive: true });
+    mkdirSync(path.join(tmpRoot, 'fixtures', 'data'), { recursive: true });
   });
   afterEach(() => {
     rmSync(tmpRoot, { recursive: true, force: true });
@@ -29,7 +29,7 @@ describe('loadDataFile', () => {
 
   it('loads a flat JSON object', async () => {
     writeFileSync(
-      path.join(tmpRoot, 'data', 'uat.json'),
+      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({ baseUrl: 'https://uat.example.com', timeoutMs: 5000 }),
     );
     const data = await loadDataFile('uat', tmpRoot);
@@ -38,7 +38,7 @@ describe('loadDataFile', () => {
 
   it('loads a nested JSON object', async () => {
     writeFileSync(
-      path.join(tmpRoot, 'data', 'uat.json'),
+      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({
         users: { admin: { email: 'a@uat.example.com', password: 'pw' } },
       }),
@@ -53,7 +53,7 @@ describe('loadDataFile', () => {
   it('resolves $VAR string leaves against process.env', async () => {
     process.env['ADMIN_PWD'] = 's3cret';
     writeFileSync(
-      path.join(tmpRoot, 'data', 'uat.json'),
+      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({
         users: { admin: { email: 'a@uat.example.com', password: '$ADMIN_PWD' } },
       }),
@@ -65,7 +65,7 @@ describe('loadDataFile', () => {
   it('keeps the literal $VAR when the env var is not set (with a warning)', async () => {
     delete process.env['MISSING_VAR'];
     writeFileSync(
-      path.join(tmpRoot, 'data', 'uat.json'),
+      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({ password: '$MISSING_VAR' }),
     );
     const data = await loadDataFile('uat', tmpRoot);
@@ -78,18 +78,18 @@ describe('loadDataFile', () => {
   });
 
   it('throws on invalid JSON', async () => {
-    writeFileSync(path.join(tmpRoot, 'data', 'broken.json'), '{ not valid json');
+    writeFileSync(path.join(tmpRoot, 'fixtures', 'data', 'broken.json'), '{ not valid json');
     await expect(loadDataFile('broken', tmpRoot)).rejects.toThrow(/Invalid JSON/);
   });
 
   it('throws when the top-level value is not an object', async () => {
-    writeFileSync(path.join(tmpRoot, 'data', 'arr.json'), JSON.stringify(['a', 'b']));
+    writeFileSync(path.join(tmpRoot, 'fixtures', 'data', 'arr.json'), JSON.stringify(['a', 'b']));
     await expect(loadDataFile('arr', tmpRoot)).rejects.toThrow(/JSON object at the top level/);
   });
 
   it('preserves arrays inside the data tree', async () => {
     writeFileSync(
-      path.join(tmpRoot, 'data', 'uat.json'),
+      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({ regions: ['au', 'nz', 'us'] }),
     );
     const data = await loadDataFile('uat', tmpRoot);

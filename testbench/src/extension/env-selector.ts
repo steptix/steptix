@@ -14,7 +14,7 @@ const UNSET_LABEL = '(none)';
  * - Shows `🌐 env: <name>` (or `🌐 env: (none)`) on the right of the status bar
  *   while a TestBench-eligible Markdown file is the active tab.
  * - Clicking opens a QuickPick listing every env discovered by scanning the
- *   workspace for `data/*.json` and `.env.*` files.
+ *   workspace for `fixtures/data/*.json` and `.env.*` files.
  * - Selection writes `testbench.activeEnv` to workspace settings so it persists
  *   across reloads and is per-workspace (not global).
  *
@@ -79,7 +79,7 @@ export class EnvSelector implements vscode.Disposable {
 
     const envs = await discoverEnvs(folder.uri.fsPath);
     const items: vscode.QuickPickItem[] = [
-      { label: UNSET_LABEL, description: 'Clear env selection — no .env.<name> or data/<name>.json loaded' },
+      { label: UNSET_LABEL, description: 'Clear env selection — no .env.<name> or data file loaded' },
       ...envs.map<vscode.QuickPickItem>((e) => ({
         label: e.name,
         description: e.sources.join(' + '),
@@ -105,18 +105,26 @@ export class EnvSelector implements vscode.Disposable {
 
 interface DiscoveredEnv {
   name: string;
-  /** Which evidence sources this env was discovered from — `.env.foo`, `data/foo.json`. */
+  /** Which evidence sources this env was discovered from — `.env.foo`, `fixtures/data/foo.json`. */
   sources: string[];
 }
 
 /**
+/** Default data directory relative to workspace root (overridable via AIUI_DATA_DIR in .env). */
+const DEFAULT_DATA_DIR = 'fixtures/data';
+
+/**
  * Scan workspace root for `.env.*` files (excluding `.env.example`) and
- * `data/*.json` files. Each filename stem is treated as an env name; the
- * source list helps the user pick when an env is half-defined (just .env, no
- * data file or vice versa).
+ * `<dataDir>/*.json` files (default `fixtures/data`, overridable via
+ * `AIUI_DATA_DIR` in the base `.env`). Each filename stem is treated as an
+ * env name; the source list helps the user pick when an env is half-defined
+ * (just .env, no data file or vice versa).
  */
 export async function discoverEnvs(root: string): Promise<DiscoveredEnv[]> {
   const found = new Map<string, Set<string>>();
+
+  // Read AIUI_DATA_DIR from the base .env file if present.
+  const dataDirRelative = await readDataDirFromEnv(root);
 
   // .env.<name> files at workspace root
   try {
@@ -133,23 +141,39 @@ export async function discoverEnvs(root: string): Promise<DiscoveredEnv[]> {
     /* no workspace root readable — return whatever we have */
   }
 
-  // data/*.json files
-  const dataDir = path.join(root, 'data');
+  // <dataDir>/*.json files
+  const dataDir = path.join(root, dataDirRelative);
   try {
     const entries = await fs.readdir(dataDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       const m = entry.name.match(/^([A-Za-z0-9_-]+)\.json$/);
       if (!m) continue;
-      addSource(found, m[1]!, `data/${m[1]}.json`);
+      addSource(found, m[1]!, `${dataDirRelative}/${m[1]}.json`);
     }
   } catch {
-    /* no data/ dir — fine */
+    /* no data dir — fine */
   }
 
   return Array.from(found.entries())
     .map(([name, sources]) => ({ name, sources: Array.from(sources).sort() }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Read AIUI_DATA_DIR from `<root>/.env` if it exists; fall back to the default. */
+async function readDataDirFromEnv(root: string): Promise<string> {
+  try {
+    const content = await fs.readFile(path.join(root, '.env'), 'utf-8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const m = trimmed.match(/^AIUI_DATA_DIR\s*=\s*(['"]?)(.+?)\1\s*$/);
+      if (m) return m[2]!.trim();
+    }
+  } catch {
+    /* no .env file — use default */
+  }
+  return DEFAULT_DATA_DIR;
 }
 
 function addSource(map: Map<string, Set<string>>, name: string, source: string): void {

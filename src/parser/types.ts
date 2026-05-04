@@ -15,6 +15,14 @@ export interface TestFrontmatter {
   /** "replace" ignores project-level defaultHooks for this test; "merge" (default)
    *  runs defaults before per-test hooks. */
   hooks?: 'merge' | 'replace';
+  /**
+   * Per-test named data-source files. Each entry registers a placeholder
+   * namespace `${<name>.X.Y}` backed by an independent JSON file. Paths are
+   * resolved relative to the test `.md` file's directory (or absolute / `~`).
+   * The reserved names `env` and `data` cannot be used. See
+   * stories/data-sources-namespaces.md.
+   */
+  dataSources?: Record<string, string>;
 }
 
 /**

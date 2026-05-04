@@ -41,7 +41,8 @@ export interface StepRequest {
   env?: Record<string, string>;
   /**
    * Active environment name. When supplied, the server loads `.env.<name>`
-   * and `data/<name>.json` from its CWD, then interpolates `${env.X}` and
+   * and `fixtures/data/<name>.json` (or the path in `AIUI_DATA_DIR`) from its
+   * CWD, then interpolates `${env.X}` and
    * `${data.X.Y}` placeholders in each step before the regular `{{...}}`
    * substitution. Resolution is cached per session — the bundle is loaded
    * the first time it's requested and reused for subsequent step batches in

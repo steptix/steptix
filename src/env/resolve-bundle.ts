@@ -6,21 +6,21 @@ export interface EnvBundle {
   envName: string | null;
   /** The full process.env snapshot after `.env.<name>` was merged. */
   env: Record<string, string>;
-  /** Parsed `data/<name>.json` (may be empty if the file doesn't exist). */
+  /** Parsed `fixtures/data/<name>.json` (may be empty if the file doesn't exist). */
   data: DataObject;
 }
 
 export interface ResolveBundleOptions {
   /** The env name to load. When undefined/empty, no .env or data file is loaded. */
   envName?: string | undefined;
-  /** Project root used to resolve `.env.<name>` and `data/<name>.json`. */
+  /** Project root used to resolve `.env.<name>` and `fixtures/data/<name>.json`. */
   projectRoot?: string;
 }
 
 /**
  * One-shot env+data loader used by every entry point (CLI, programmatic, tests).
  * Loads `.env.<envName>` into process.env via the existing loader, then loads
- * `data/<envName>.json` (resolving `$VAR` leaves), and returns both.
+ * `fixtures/data/<envName>.json` (resolving `$VAR` leaves), and returns both.
  *
  * Why this lives on its own: the CLI used to load just the .env file. The new
  * dropdown / programmatic / CI paths all need the same combined behaviour, so

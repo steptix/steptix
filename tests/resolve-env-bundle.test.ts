@@ -14,7 +14,7 @@ describe('resolveEnvBundle', () => {
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-bundle-'));
-    mkdirSync(path.join(tmpRoot, 'data'), { recursive: true });
+    mkdirSync(path.join(tmpRoot, 'fixtures', 'data'), { recursive: true });
   });
   afterEach(() => {
     rmSync(tmpRoot, { recursive: true, force: true });
@@ -34,7 +34,7 @@ describe('resolveEnvBundle', () => {
 
   it('loads .env.<name> into process.env and snapshots it onto the bundle', async () => {
     writeFileSync(path.join(tmpRoot, '.env.uat'), 'BASE_URL=https://uat.example.com\n');
-    writeFileSync(path.join(tmpRoot, 'data', 'uat.json'), JSON.stringify({ region: 'au' }));
+    writeFileSync(path.join(tmpRoot, 'fixtures', 'data', 'uat.json'), JSON.stringify({ region: 'au' }));
 
     const bundle = await resolveEnvBundle({ envName: 'uat', projectRoot: tmpRoot });
 
@@ -47,7 +47,7 @@ describe('resolveEnvBundle', () => {
   it('resolves $VAR leaves in data file against the just-loaded .env', async () => {
     writeFileSync(path.join(tmpRoot, '.env.uat'), 'ADMIN_PWD=letmein\n');
     writeFileSync(
-      path.join(tmpRoot, 'data', 'uat.json'),
+      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({ admin: { password: '$ADMIN_PWD' } }),
     );
 
@@ -56,7 +56,7 @@ describe('resolveEnvBundle', () => {
     expect((bundle.data['admin'] as { password: string }).password).toBe('letmein');
   });
 
-  it('returns empty data object when data/<env>.json is missing', async () => {
+  it('returns empty data object when fixtures/data/<env>.json is missing', async () => {
     writeFileSync(path.join(tmpRoot, '.env.uat'), 'BASE_URL=https://uat.example.com\n');
 
     const bundle = await resolveEnvBundle({ envName: 'uat', projectRoot: tmpRoot });
@@ -66,7 +66,7 @@ describe('resolveEnvBundle', () => {
   });
 
   it('throws when .env.<name> is missing (matches existing loadEnvFile behaviour)', async () => {
-    writeFileSync(path.join(tmpRoot, 'data', 'uat.json'), JSON.stringify({}));
+    writeFileSync(path.join(tmpRoot, 'fixtures', 'data', 'uat.json'), JSON.stringify({}));
 
     await expect(
       resolveEnvBundle({ envName: 'uat', projectRoot: tmpRoot }),

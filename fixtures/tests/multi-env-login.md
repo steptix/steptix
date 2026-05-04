@@ -17,7 +17,7 @@ aiui run fixtures/tests/multi-env-login.md --env staging
 Each `--env` selects:
 
 - `.env.<name>` — secrets and `BASE_URL`
-- `data/<name>.json` — `users`, `fixtures` (assertion thresholds, etc.)
+- `fixtures/data/<name>.json` — `users`, `fixtures` (assertion thresholds, etc.)
 
 Switch environments without editing the test.
 

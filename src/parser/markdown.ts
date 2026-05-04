@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { marked, type Token, type Tokens } from 'marked';
 import { parseFrontmatter } from './frontmatter.js';
@@ -7,6 +8,7 @@ import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import type { ToolCall } from '../tools/types.js';
 import { interpolateEnvData, type EnvDataContext } from './interpolate-env-data.js';
+import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
 import { logger } from '../utils/logger.js';
 
 /** Prefix marker on a step that opts out of beforeEach / afterEach hooks. */
@@ -83,10 +85,60 @@ export async function parseTestFile(
   }
 
   if (options.envData) {
-    applyEnvDataInterpolation(parsed, { ...options.envData, filePath: absPath });
+    const extraData = await loadFrontmatterDataSources(
+      parsed.frontmatter.dataSources,
+      absPath,
+    );
+    const ctx: EnvDataContext = {
+      ...options.envData,
+      ...(extraData && { extraData }),
+      filePath: absPath,
+    };
+    applyEnvDataInterpolation(parsed, ctx);
   }
 
   return parsed;
+}
+
+/**
+ * Resolve the per-test `dataSources` map declared in frontmatter into a
+ * loaded `Record<name, DataObject>` ready to drop into the interpolation
+ * context. Returns `undefined` when no sources are declared so the caller can
+ * skip the property entirely (keeps the regex narrow when not in use).
+ *
+ * Path resolution rules (mirrored in stories/data-sources-namespaces.md):
+ *  - `~/...` → expanded against the user's home directory.
+ *  - Absolute (`/foo`, `C:\foo`) → used as-is.
+ *  - Relative (`./foo`, `../shared/foo.json`, `tests/foo.json`) → resolved
+ *    relative to the test `.md` file's directory, NOT `process.cwd()` —
+ *    keeps tests portable when the suite moves.
+ */
+async function loadFrontmatterDataSources(
+  sources: Record<string, string> | undefined,
+  testFileAbsPath: string,
+): Promise<Record<string, DataObject> | undefined> {
+  if (!sources || Object.keys(sources).length === 0) return undefined;
+
+  const testDir = path.dirname(testFileAbsPath);
+  const out: Record<string, DataObject> = {};
+  for (const [name, declaredPath] of Object.entries(sources)) {
+    const absPath = resolveDataSourcePath(declaredPath, testDir);
+    out[name] = await loadDataFromPath(absPath);
+  }
+  return out;
+}
+
+/** Expand `~` and resolve relative paths against `testDir`. */
+function resolveDataSourcePath(declaredPath: string, testDir: string): string {
+  const expanded = expandHome(declaredPath);
+  return path.isAbsolute(expanded) ? expanded : path.resolve(testDir, expanded);
+}
+
+function expandHome(p: string): string {
+  if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) {
+    return path.join(os.homedir(), p.slice(1));
+  }
+  return p;
 }
 
 /**

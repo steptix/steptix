@@ -32,6 +32,52 @@ describe('parseTestContent', () => {
     expect(result.frontmatter.dataFile).toBe('./data/users.json');
   });
 
+  it('parses frontmatter dataSources map', () => {
+    const md = `---
+tags: []
+dataSources:
+  vip: ~/shared/vip-users.json
+  local: ./extras.json
+---
+
+# Test
+
+## Steps
+- Login
+`;
+    const result = parseTestContent(md);
+    expect(result.frontmatter.dataSources).toEqual({
+      vip: '~/shared/vip-users.json',
+      local: './extras.json',
+    });
+  });
+
+  it('omits dataSources when not declared (backwards compatible)', () => {
+    const md = `---\ntags: []\n---\n\n# Test\n\n## Steps\n- Login\n`;
+    const result = parseTestContent(md);
+    expect(result.frontmatter.dataSources).toBeUndefined();
+  });
+
+  it('rejects reserved name "env" in dataSources', () => {
+    const md = `---\ntags: []\ndataSources:\n  env: ./x.json\n---\n\n# Test\n\n## Steps\n- A\n`;
+    expect(() => parseTestContent(md)).toThrow(/reserved name "env"/);
+  });
+
+  it('rejects reserved name "data" in dataSources', () => {
+    const md = `---\ntags: []\ndataSources:\n  data: ./x.json\n---\n\n# Test\n\n## Steps\n- A\n`;
+    expect(() => parseTestContent(md)).toThrow(/reserved name "data"/);
+  });
+
+  it('rejects invalid dataSources name (starts with digit)', () => {
+    const md = `---\ntags: []\ndataSources:\n  "1bad": ./x.json\n---\n\n# Test\n\n## Steps\n- A\n`;
+    expect(() => parseTestContent(md)).toThrow(/name "1bad" is invalid/);
+  });
+
+  it('rejects non-string dataSources value', () => {
+    const md = `---\ntags: []\ndataSources:\n  vip: 42\n---\n\n# Test\n\n## Steps\n- A\n`;
+    expect(() => parseTestContent(md)).toThrow(/dataSources\.vip.*non-empty file-path string/);
+  });
+
   it('parses ## Config section key-value pairs', () => {
     const md = `# Test\n\n## Config\n- baseUrl: http://localhost:3000\n- timeout: 30s\n\n## Steps\n- Visit home\n`;
     const result = parseTestContent(md);

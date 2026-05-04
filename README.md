@@ -477,6 +477,73 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
 | `APPEND_RUN_HISTORY_TO_TEST_FILE` | `true`/`false`. Append a "Latest runs" section at the bottom of each test `.md` file after it runs, linking to its HTML report (keeps the most recent 10). Default `false`. |
+| `AIUI_DATA_DIR` | Directory (relative to your project root) holding per-environment JSON test data files. Defaults to `fixtures/data`. |
+
+### Per-environment configuration
+
+Your tests project can live anywhere — it doesn't have to be inside this repo. The framework resolves all paths relative to **the directory you run the CLI from** (`process.cwd()`).
+
+A typical external tests project looks like:
+
+```
+aitests/
+├── .env                    # base config — shared across all envs (e.g. AI_API_KEY, AIUI_DATA_DIR)
+├── .env.local              # env-specific secrets / URLs (BASE_URL, passwords, …)
+├── .env.staging
+├── .env.uat
+├── fixtures/data/          # default data dir (override path with AIUI_DATA_DIR)
+│   ├── local.json          # structured test data for `--env local`
+│   ├── staging.json
+│   └── uat.json
+└── tests/
+    └── my-test.md
+```
+
+Run from that directory:
+
+```bash
+cd ~/projects/aitests
+aiui run tests/my-test.md --env staging
+```
+
+#### Where each setting lives
+
+- **Base `.env`** — loaded first, shared across all envs. Put your AI API key, `AIUI_DATA_DIR`, and any other settings that don't change between environments here.
+- **`.env.<name>`** — loaded on top of the base when you pass `--env <name>` (or pin the test with `env: <name>` in its frontmatter). Holds env-specific secrets and URLs as flat key/value strings. Reference these in tests as `${env.BASE_URL}`.
+- **`<AIUI_DATA_DIR>/<name>.json`** — env-specific structured test data (users, fixtures, thresholds). Reference values in tests as `${data.users.admin.email}`. JSON string leaves of the form `$VAR_NAME` are resolved against `process.env`, so secrets stay in `.env.<name>` and the JSON references them.
+
+Both layers are env-scoped via the same `<name>` suffix. The data folder is optional — tests that don't use `${data.*}` placeholders run fine without it.
+
+#### Why two layers (`.env` + JSON)?
+
+`.env` is flat key/value strings — good for secrets and URLs. JSON is nested/structured — good for users, fixture catalogues, assertion thresholds. Keeping them separate lets you check the JSON into git while keeping secrets out.
+
+#### Per-test data sources (named namespaces)
+
+Sometimes a test wants data from a file outside `<AIUI_DATA_DIR>` — a shared catalogue maintained by another team, or a one-off override that lives next to the test. Declare named **data sources** in the frontmatter:
+
+```markdown
+---
+env: staging
+dataSources:
+  vip:   ~/shared/vip-users.json     # absolute / `~` paths work
+  local: ./vip-checkout.data.json    # relative paths resolve against the .md file's directory
+---
+
+## Steps
+1. Login as "${data.users.admin.email}"          # env default — fixtures/data/staging.json
+2. Switch to VIP "${vip.users.platinum.email}"   # ~/shared/vip-users.json
+3. Place order ${local.fixtures.orderTotal}      # ./vip-checkout.data.json
+```
+
+Each entry registers a placeholder namespace `${<name>.X.Y}`. Each step reads from exactly one source — no merging. The standard `${env.X}` and `${data.X.Y}` namespaces still work alongside.
+
+- **Path resolution:** `~/...` expands to your home directory, absolute paths are used as-is, relative paths resolve against the test `.md` file's directory (so tests stay portable when the suite moves).
+- **`$VAR` in JSON:** Secret resolution runs on every namespace. A leaf like `"$VIP_PWD"` in the VIP catalogue is replaced with `process.env.VIP_PWD` — populated from `.env.<envName>`. Same rule that already applies to the env-default data file.
+- **Reserved names:** `env` and `data` are taken by the built-in namespaces; any other identifier-shaped name is fine.
+- **Errors:** A missing source file is a hard error (you explicitly named it). An unknown path inside a declared source (e.g. `${vip.users.platinum.emial}`) throws at parse time, naming the test file. Unknown namespaces (e.g. `${foo.bar}` when no `foo` source is declared) pass through unchanged for backwards compatibility.
+
+See [stories/data-sources-namespaces.md](./stories/data-sources-namespaces.md) for the full design.
 
 ### Browser sizing
 

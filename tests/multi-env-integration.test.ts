@@ -25,7 +25,7 @@ const originalEnv = { ...process.env };
 
 beforeAll(() => {
   tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-multienv-'));
-  mkdirSync(path.join(tmpRoot, 'data'), { recursive: true });
+  mkdirSync(path.join(tmpRoot, 'fixtures', 'data'), { recursive: true });
 
   // Two env files
   writeFileSync(
@@ -39,14 +39,14 @@ beforeAll(() => {
 
   // Two data files
   writeFileSync(
-    path.join(tmpRoot, 'data', 'uat.json'),
+    path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
     JSON.stringify({
       users: { admin: { email: 'admin@uat.example.com', password: '$ADMIN_PWD' } },
       fixtures: { delegateId: 'DEL-1234', threshold: 5000, currency: 'AUD' },
     }),
   );
   writeFileSync(
-    path.join(tmpRoot, 'data', 'staging.json'),
+    path.join(tmpRoot, 'fixtures', 'data', 'staging.json'),
     JSON.stringify({
       users: { admin: { email: 'admin@stg.example.com', password: '$ADMIN_PWD' } },
       fixtures: { delegateId: 'DEL-9999', threshold: 250, currency: 'AUD' },

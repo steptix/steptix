@@ -14,15 +14,24 @@ export type DataValue =
 export type DataObject = { [key: string]: DataValue };
 
 /**
- * Load `data/<envName>.json` from `projectRoot`, resolving `$VAR` string
- * leaves against `process.env`. Missing file returns an empty object (caller
- * decides whether that's an error — interpolation will throw on first use).
+ * Directory (relative to project root) where per-environment JSON data files
+ * live. Override via `AIUI_DATA_DIR=path/to/dir` in the base `.env` file.
+ */
+const DEFAULT_DATA_DIR = 'fixtures/data';
+
+/**
+ * Load `<dataDir>/<envName>.json` from `projectRoot` (where `dataDir` defaults
+ * to `fixtures/data` but can be overridden by `AIUI_DATA_DIR` in the base
+ * `.env`). Resolves `$VAR` string leaves against `process.env`. Missing file
+ * returns an empty object (caller decides whether that's an error —
+ * interpolation will throw on first use).
  */
 export async function loadDataFile(
   envName: string,
   projectRoot: string = process.cwd(),
 ): Promise<DataObject> {
-  const filePath = path.resolve(projectRoot, 'data', `${envName}.json`);
+  const dataDir = process.env['AIUI_DATA_DIR'] ?? DEFAULT_DATA_DIR;
+  const filePath = path.resolve(projectRoot, dataDir, `${envName}.json`);
 
   let content: string;
   try {
@@ -35,6 +44,41 @@ export async function loadDataFile(
     throw err;
   }
 
+  const resolved = parseAndResolve(content, filePath);
+  const n = countLeaves(resolved);
+  logger.info(`Loaded test data "${envName}" (${n} value${n === 1 ? '' : 's'})`);
+  return resolved;
+}
+
+/**
+ * Load a JSON data file from an absolute path, parse it, validate it's an
+ * object at the top level, and resolve `$VAR` leaves against `process.env`.
+ * Used by per-test `dataSources` namespaces, where the author has explicitly
+ * named a file (so a missing file is a hard error, unlike the env default).
+ */
+export async function loadDataFromPath(absPath: string): Promise<DataObject> {
+  let content: string;
+  try {
+    content = await fs.readFile(absPath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Data source file not found: ${absPath}`);
+    }
+    throw err;
+  }
+
+  const resolved = parseAndResolve(content, absPath);
+  const n = countLeaves(resolved);
+  logger.info(`Loaded data source ${absPath} (${n} value${n === 1 ? '' : 's'})`);
+  return resolved;
+}
+
+/**
+ * Parse a JSON string, validate it's a plain object at the top level, and
+ * walk its leaves resolving `$VAR` references. The shared core of
+ * `loadDataFile` and `loadDataFromPath`.
+ */
+function parseAndResolve(content: string, filePath: string): DataObject {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -46,10 +90,7 @@ export async function loadDataFile(
     throw new Error(`Test data file must be a JSON object at the top level: ${filePath}`);
   }
 
-  const resolved = resolveSecrets(parsed as DataObject) as DataObject;
-  const n = countLeaves(resolved);
-  logger.info(`Loaded test data "${envName}" (${n} value${n === 1 ? '' : 's'})`);
-  return resolved;
+  return resolveSecrets(parsed as DataObject) as DataObject;
 }
 
 /**

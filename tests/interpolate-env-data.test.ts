@@ -145,3 +145,61 @@ describe('interpolateEnvDataDeep', () => {
     expect(interpolateEnvDataDeep(null, ctx())).toBe(null);
   });
 });
+
+describe('interpolateEnvData — extra namespaces (dataSources)', () => {
+  const withExtra = (overrides: Partial<EnvDataContext> = {}): EnvDataContext => ({
+    ...ctx(),
+    extraData: {
+      vip: { users: { platinum: { email: 'vip@example.com', password: 'p' } } },
+      local: { fixtures: { orderTotal: 50000, tier: 'Platinum' } },
+    },
+    ...overrides,
+  });
+
+  it('resolves `${vip.X.Y}` from a registered extra namespace', () => {
+    expect(
+      interpolateEnvData('Login as ${vip.users.platinum.email}', withExtra()),
+    ).toBe('Login as vip@example.com');
+  });
+
+  it('resolves multiple distinct namespaces in one step', () => {
+    expect(
+      interpolateEnvData(
+        '${env.BASE_URL} | ${data.users.admin.email} | ${vip.users.platinum.email} | ${local.fixtures.tier}',
+        withExtra(),
+      ),
+    ).toBe(
+      'https://uat.example.com | a@uat.example.com | vip@example.com | Platinum',
+    );
+  });
+
+  it('throws with namespace name when an extra-namespace path is unknown', () => {
+    expect(() =>
+      interpolateEnvData(
+        'Login as ${vip.users.gold.email}',
+        { ...withExtra(), filePath: 'tests/x.md' },
+      ),
+    ).toThrow(/Unknown data path in 'vip'.*users\.gold\.email.*tests\/x\.md/);
+  });
+
+  it('passes through unknown namespaces literally (backwards compatible)', () => {
+    // `unknown` is not registered — the placeholder must survive untouched
+    // so existing tests that happen to contain `${X.Y}`-shaped strings keep
+    // working.
+    expect(
+      interpolateEnvData('Plain ${unknown.foo} ref', withExtra()),
+    ).toBe('Plain ${unknown.foo} ref');
+  });
+
+  it('passes through unknown namespaces literally when no extras at all', () => {
+    expect(
+      interpolateEnvData('See ${vip.users.x}', ctx()),
+    ).toBe('See ${vip.users.x}');
+  });
+
+  it('still resolves env/data when extras are registered', () => {
+    expect(
+      interpolateEnvData('${data.fixtures.currency} ${env.REGION}', withExtra()),
+    ).toBe('AUD au');
+  });
+});
