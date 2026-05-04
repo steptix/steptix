@@ -1642,7 +1642,25 @@ export async function executeBranchedStep(
     ];
 
     const { text: rawResponse } = await aiClient.complete(messages);
-    const branchedResponse = parseBranchedResponse(rawResponse);
+    let branchedResponse: BranchedAIResponse;
+    try {
+      branchedResponse = parseBranchedResponse(rawResponse);
+    } catch (err) {
+      // The LLM occasionally returns a malformed branched response (e.g. omits
+      // the required `matched` field). Treat as a failed poll and continue —
+      // never let parser errors escape and crash the CLI.
+      logger.warn(
+        `Branch poll ${pollCount}: malformed AI response — ${(err as Error).message}. Retrying.`,
+      );
+      if (Date.now() + pollInterval < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        await waitForPageStability(page, {
+          timeoutMs: Math.min(5000, deadline - Date.now()),
+          quiesceMs: 500,
+        });
+      }
+      continue;
+    }
 
     logger.debug(`Branch poll ${pollCount}: matched="${branchedResponse.matched}" — ${branchedResponse.reasoning}`);
 

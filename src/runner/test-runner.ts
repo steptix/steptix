@@ -230,6 +230,7 @@ export async function runTest(
         browser: session.browser,
         resolvedParameters,
         catalogue: toolCatalogue,
+        ...(baseUrl !== undefined && { baseUrl }),
       });
       const passed = outcome.status === 'passed';
       if (passed) {

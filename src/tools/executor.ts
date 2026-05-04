@@ -18,6 +18,14 @@ export interface ExecuteToolStepOptions {
   browser: Browser;
   resolvedParameters: Record<string, string>;
   catalogue: ToolCatalogue;
+  /**
+   * Test's `## Config` baseUrl. Merged into the interpolation scope so
+   * `{{baseUrl}}` (and the bareword shorthand `[tool: foo baseUrl]`) work
+   * in tool args the same way they implicitly do in AI-driven step text.
+   * Action steps survive a missing scope entry because the LLM infers the
+   * value from the test-info block; deterministic tools have no such fallback.
+   */
+  baseUrl?: string;
 }
 
 /**
@@ -62,7 +70,10 @@ export async function executeToolStep(
 
   let typedArgs: Record<string, unknown>;
   try {
-    typedArgs = resolveAndCoerceArgs(def, call, options.resolvedParameters);
+    const scope: Record<string, string> = options.baseUrl !== undefined
+      ? { baseUrl: options.baseUrl, ...options.resolvedParameters }
+      : options.resolvedParameters;
+    typedArgs = resolveAndCoerceArgs(def, call, scope);
   } catch (err) {
     return {
       toolName: call.name,

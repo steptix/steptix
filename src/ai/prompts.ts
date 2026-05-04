@@ -392,6 +392,7 @@ Requirements for the code:
 - If an element is not found, return \`{ pass: false, actual: "element not found: <selector>" }\` — do NOT throw
 - For numeric comparisons, strip currency symbols and commas before parsing
 - For cross-element assertions, query each element separately and compare
+- Use ONLY native CSS selectors with \`document.querySelector\` / \`document.querySelectorAll\`. Playwright pseudos (\`:has-text(...)\`, \`:text-is(...)\`, \`:visible\`, \`:text(...)\`) are NOT valid CSS and will throw \`SyntaxError\`. To match elements by text, query a broader set then filter in JS — e.g. \`Array.from(document.querySelectorAll('tr')).find(el => el.textContent.includes('Alice'))\`.
 
 Respond with ONLY this JSON:
 {
