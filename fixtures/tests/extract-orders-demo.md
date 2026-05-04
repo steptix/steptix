@@ -35,13 +35,3 @@ array-typed parameter.
 3. [tool: extract_order_ids sinceDays=30 status="failed" baseUrl="${env.BASE_URL}" out.order_ids="failed_ids" out.order_count="failed_count"]
 4. Assert that {{failed_count}} equals 2
 5. Assert that {{failed_ids}} contains "O-1003" and "O-1007"
-
-<!-- latest-runs:start -->
-## Latest runs
-
-- [2026-05-04 12:21:50Z — passed — openrouter/deepseek/deepseek-v4-flash:nitro](file:///C:/Projects/vibe/ai-ui-automation/reports/2026-05-04_12-21-50-tool-returns-an-array-extract-every-recent-order-id.html)
-- [2026-05-04 11:36:52Z — failed](file:///C:/Projects/vibe/ai-ui-automation/reports/2026-05-04_11-36-52-tool-returns-an-array-extract-every-recent-order-id.html)
-- [2026-05-04 11:35:59Z — failed — openrouter/deepseek/deepseek-v4-flash:nitro](file:///C:/Projects/vibe/ai-ui-automation/reports/2026-05-04_11-35-59-tool-returns-an-array-extract-every-recent-order-id.html)
-- [2026-05-04 11:35:56Z — failed — openrouter/deepseek/deepseek-v4-flash:nitro](file:///C:/Projects/vibe/ai-ui-automation/reports/2026-05-04_11-35-56-tool-returns-an-array-extract-every-recent-order-id.html)
-- [2026-05-04 11:23:50Z — failed](file:///C:/Projects/vibe/ai-ui-automation/reports/2026-05-04_11-23-50-tool-returns-an-array-extract-every-recent-order-id.html)
-<!-- latest-runs:end -->
