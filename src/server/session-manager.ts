@@ -613,7 +613,11 @@ export class SessionManager {
       }
     }
     const envDataCtx = session.envBundle
-      ? { env: session.envBundle.env, data: session.envBundle.data }
+      ? {
+          env: session.envBundle.env,
+          data: session.envBundle.data,
+          envName: session.envBundle.envName,
+        }
       : null;
 
     // Determine per-step timeout

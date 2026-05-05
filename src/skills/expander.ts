@@ -2,6 +2,7 @@ import path from 'node:path';
 import { parseSkillFile } from '../parser/markdown.js';
 import { interpolate } from '../parser/parameters.js';
 import type { ParsedSkill } from '../parser/types.js';
+import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import { logger } from '../utils/logger.js';
 import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
 
@@ -47,8 +48,15 @@ export interface SkillExpansion {
 export async function expandSkills(
   steps: string[],
   skillsDir: string,
+  envCtx?: EnvDataContext,
+  callerFilePath?: string,
 ): Promise<SkillExpansion> {
-  const ctx = { skillsDir, seq: 0 };
+  const ctx: ExpandContext = {
+    skillsDir,
+    seq: 0,
+    ...(envCtx && { envCtx }),
+    ...(callerFilePath && { callerFilePath }),
+  };
   return expandRecursive(steps, ctx, new Set(), 0, null);
 }
 
@@ -56,6 +64,13 @@ interface ExpandContext {
   skillsDir: string;
   /** Monotonic counter producing unique prefixes for internal capture names. */
   seq: number;
+  /** When set, threaded into `parseSkillFile` so the skill's own
+   *  `dataSources` resolve via the same env context the caller is using. */
+  envCtx?: EnvDataContext;
+  /** Absolute path of the test (or other top-level file) that invoked this
+   *  expansion. Used to wrap `parseSkillFile` errors with both endpoints —
+   *  the skill where the failure landed and the test that triggered it. */
+  callerFilePath?: string;
 }
 
 async function expandRecursive(
@@ -89,7 +104,17 @@ async function expandRecursive(
       );
     }
 
-    const skill = await loadSkill(ctx.skillsDir, call.name);
+    let skill: ParsedSkill;
+    try {
+      skill = await loadSkill(ctx.skillsDir, call.name, ctx.envCtx);
+    } catch (err) {
+      // Wrap the underlying error so the message names both endpoints —
+      // the skill file where parsing/interpolation failed, AND the calling
+      // test (if known) plus the invocation line. Authors get clickable
+      // pointers to both files instead of having to grep for who called
+      // a failing skill.
+      throw wrapSkillLoadError(err, call, step, ctx);
+    }
     validateCall(skill, call);
 
     const instanceId = ++ctx.seq;
@@ -132,24 +157,63 @@ function parseSkillCall(step: string): SkillCall | null {
 
 const skillCache = new Map<string, ParsedSkill>();
 
-async function loadSkill(skillsDir: string, name: string): Promise<ParsedSkill> {
+async function loadSkill(
+  skillsDir: string,
+  name: string,
+  envCtx?: EnvDataContext,
+): Promise<ParsedSkill> {
   const filePath = path.resolve(skillsDir, `${name}.md`);
-  const cached = skillCache.get(filePath);
+  // Cache key includes the active envName because skill-level dataSources may
+  // resolve to different files per env (e.g. `../data/${envName}.json`). A
+  // shared cache across envs would silently leak stale interpolated output.
+  const cacheKey = `${filePath}::${envCtx?.envName ?? ''}`;
+  const cached = skillCache.get(cacheKey);
   if (cached) return cached;
 
   let skill: ParsedSkill;
   try {
-    skill = await parseSkillFile(filePath);
+    skill = await parseSkillFile(filePath, envCtx);
   } catch (err) {
-    throw new Error(`Skill "${name}" not found at ${filePath}: ${String(err)}`);
+    // Distinguish "skill markdown file is missing" (author typoed the name)
+    // from any other parse-or-interpolation failure (skill exists but its
+    // dataSources/JSON resolution went wrong). Letting the latter bubble up
+    // unwrapped lets the caller's wrapper produce a single coherent message.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Skill "${name}" not found at ${filePath}`);
+    }
+    throw err;
   }
-  skillCache.set(filePath, skill);
+  skillCache.set(cacheKey, skill);
   return skill;
 }
 
-/** Reset the in-memory skill cache. Used by tests; the parser does not call this. */
+/** Reset the in-memory skill cache. Used by tests, and by long-lived hosts
+ *  (e.g. the Electron UI server) at run-start so disk edits to skill files
+ *  in the dev loop don't get masked by a stale parse from an earlier run. */
 export function clearSkillCache(): void {
   skillCache.clear();
+}
+
+/**
+ * Wrap an error from `loadSkill` (which today is just `parseSkillFile`) with
+ * caller-side context. The underlying error already names the skill file
+ * (via `interpolateEnvData`'s `ctx.filePath`); we add the test file path and
+ * the literal `[skill: ...]` line that triggered the call so an author has
+ * both clickable endpoints in the failure message.
+ */
+function wrapSkillLoadError(
+  err: unknown,
+  call: SkillCall,
+  invocationLine: string,
+  ctx: ExpandContext,
+): Error {
+  const original = err instanceof Error ? err.message : String(err);
+  const callerSuffix = ctx.callerFilePath
+    ? `\n  Invoked from ${ctx.callerFilePath}: ${invocationLine}`
+    : `\n  Invoked via: ${invocationLine}`;
+  return new Error(
+    `Skill "${call.name}" failed to load:\n  ${original}${callerSuffix}`,
+  );
 }
 
 function validateCall(skill: ParsedSkill, call: SkillCall): void {

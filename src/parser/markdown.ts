@@ -7,7 +7,11 @@ import type { ParsedSkill, ParsedTest, TestConfig, TestHooks } from './types.js'
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import type { ToolCall } from '../tools/types.js';
-import { interpolateEnvData, type EnvDataContext } from './interpolate-env-data.js';
+import {
+  interpolateDataSourcePath,
+  interpolateEnvData,
+  type EnvDataContext,
+} from './interpolate-env-data.js';
 import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
 import { logger } from '../utils/logger.js';
 
@@ -45,14 +49,19 @@ export async function parseTestFile(
   const parsed = parseTestContentRaw(rawContent, absPath);
 
   if (options.skillsDir) {
-    const stepsExp = await expandSkills(parsed.steps, options.skillsDir);
+    // Thread the run-wide env context (env vars + envName) into skill
+    // expansion so a skill's own `dataSources` (declared in the skill's
+    // frontmatter) can resolve `${envName}` / `${env.X}` in their paths and
+    // load env-appropriate JSON files at parse time.
+    const envCtxForSkills = options.envData;
+    const stepsExp = await expandSkills(parsed.steps, options.skillsDir, envCtxForSkills, absPath);
     parsed.steps = stepsExp.steps;
     parsed.sourceSkills = stepsExp.sourceSkills;
 
-    const beforeExp = await expandSkills(parsed.hooks.before, options.skillsDir);
-    const beforeEachExp = await expandSkills(parsed.hooks.beforeEach, options.skillsDir);
-    const afterEachExp = await expandSkills(parsed.hooks.afterEach, options.skillsDir);
-    const afterExp = await expandSkills(parsed.hooks.after, options.skillsDir);
+    const beforeExp = await expandSkills(parsed.hooks.before, options.skillsDir, envCtxForSkills, absPath);
+    const beforeEachExp = await expandSkills(parsed.hooks.beforeEach, options.skillsDir, envCtxForSkills, absPath);
+    const afterEachExp = await expandSkills(parsed.hooks.afterEach, options.skillsDir, envCtxForSkills, absPath);
+    const afterExp = await expandSkills(parsed.hooks.after, options.skillsDir, envCtxForSkills, absPath);
 
     parsed.hooks = {
       before: beforeExp.steps,
@@ -181,11 +190,81 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
 /**
  * Parse a Markdown skill file. Skills share the same parser as tests but
  * additionally read the `## Outputs` section and use the H1 as the skill name.
+ *
+ * When `envCtx` is supplied, the skill's own `dataSources` (frontmatter) are
+ * resolved here — paths are interpolated via `${env.X}` / `${envName}`,
+ * loaded, and then the skill body / parameters / outputs are interpolated
+ * against the env + skill-private namespaces. The resulting `ParsedSkill`
+ * has skill-private placeholders already resolved, so by the time the
+ * expander inlines it the caller's interpolation pass sees only literals
+ * and `{{paramName}}` placeholders.
  */
-export async function parseSkillFile(filePath: string): Promise<ParsedSkill> {
+export async function parseSkillFile(
+  filePath: string,
+  envCtx?: EnvDataContext,
+): Promise<ParsedSkill> {
   const absPath = path.resolve(filePath);
   const rawContent = await fs.readFile(absPath, 'utf-8');
-  return parseSkillContent(rawContent, absPath);
+  const parsed = parseSkillContent(rawContent, absPath);
+  if (envCtx) {
+    await applySkillEnvDataInterpolation(parsed, absPath, envCtx);
+  } else if (parsed.dataSources && Object.keys(parsed.dataSources).length > 0) {
+    // Skill declares dataSources but no env context was provided — the
+    // skill-private `${<source>.X}` placeholders won't be resolved here, and
+    // they'll fall through to caller-level interpolation which doesn't know
+    // about them. Warn loudly so the footgun surfaces at parse time rather
+    // than as an unresolved literal in a step at runtime.
+    logger.warn(
+      `Skill "${parsed.name}" at ${absPath} declares dataSources but was parsed ` +
+      `without an env context — its \${<source>.X} placeholders will pass through ` +
+      `unresolved. Pass envCtx into parseSkillFile / expandSkills to fix.`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Resolve skill-private `dataSources` paths, load the JSON files, then
+ * interpolate the skill body / parameters / outputs against a context that
+ * includes the env, the active envName, and the skill's own namespaces —
+ * but NOT `data` (the caller's env-default file). Skill-private namespaces
+ * are private to the skill: a colliding name in the calling test resolves
+ * against the test's file in test scope, not the skill's.
+ */
+async function applySkillEnvDataInterpolation(
+  parsed: ParsedSkill,
+  skillAbsPath: string,
+  envCtx: EnvDataContext,
+): Promise<void> {
+  const skillDir = path.dirname(skillAbsPath);
+  const extraData: Record<string, DataObject> = {};
+  if (parsed.dataSources) {
+    for (const [name, declaredPath] of Object.entries(parsed.dataSources)) {
+      const resolvedPathStr = interpolateDataSourcePath(declaredPath, {
+        env: envCtx.env,
+        envName: envCtx.envName ?? null,
+        filePath: skillAbsPath,
+      });
+      const absDataPath = resolveDataSourcePath(resolvedPathStr, skillDir);
+      extraData[name] = await loadDataFromPath(absDataPath);
+    }
+  }
+
+  const skillCtx: EnvDataContext = {
+    env: envCtx.env,
+    // Deliberately omit `data` — skills don't reach into the caller's
+    // env-default data file. `${data.X}` in a skill body passes through
+    // and is resolved later by test-level interpolation if the test owns it.
+    ...(Object.keys(extraData).length > 0 && { extraData }),
+    ...(envCtx.envName !== undefined && { envName: envCtx.envName }),
+    filePath: skillAbsPath,
+  };
+
+  parsed.steps = parsed.steps.map((s) => interpolateEnvData(s, skillCtx));
+  for (const [k, v] of Object.entries(parsed.parameters)) {
+    parsed.parameters[k] = interpolateEnvData(v, skillCtx);
+  }
+  parsed.outputs = parsed.outputs.map((o) => interpolateEnvData(o, skillCtx));
 }
 
 /** Parse test content from a string (steps returned verbatim — no skill expansion) */
@@ -225,7 +304,7 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
 }
 
 function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
-  const { sections, title } = parseSections(rawContent, filePath);
+  const { sections, frontmatter, title } = parseSections(rawContent, filePath);
 
   return {
     filePath,
@@ -233,6 +312,7 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
     parameters: sections.parameters,
     outputs: sections.outputs,
     steps: sections.steps,
+    ...(frontmatter.dataSources && { dataSources: frontmatter.dataSources }),
   };
 }
 

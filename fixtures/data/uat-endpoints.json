@@ -1,0 +1,10 @@
+{
+  "api": {
+    "url": "https://uat.securebank.example",
+    "label": "UAT"
+  },
+  "user": {
+    "email": "uat-admin@securebank.example",
+    "password": "$ADMIN_PWD"
+  }
+}

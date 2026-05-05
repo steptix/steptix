@@ -91,7 +91,7 @@ async function runCommand(
   logger.info(`Discovering tests from ${testFiles.length} file(s)...`);
   const skillsDir = path.resolve(process.cwd(), config.tests.skillsDir);
   const envDataCtx = cliEnvName
-    ? { env: runBundle.env, data: runBundle.data }
+    ? { env: runBundle.env, data: runBundle.data, envName: runBundle.envName }
     : undefined;
   const parsedAll = await Promise.all(
     testFiles.map(async (f) => {
@@ -107,7 +107,11 @@ async function runCommand(
         });
         return parseTestFile(f, {
           skillsDir,
-          envData: { env: perTestBundle.env, data: perTestBundle.data },
+          envData: {
+            env: perTestBundle.env,
+            data: perTestBundle.data,
+            envName: perTestBundle.envName,
+          },
         });
       }
       return initial;

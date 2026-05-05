@@ -149,6 +149,14 @@ export interface ParsedSkill {
   outputs: string[];
   /** Skill body — natural-language steps, may reference {{param}} and other skills */
   steps: string[];
+  /**
+   * Skill-private named data-source files declared in frontmatter. Each
+   * entry registers a placeholder namespace `${<name>.X.Y}` resolved locally
+   * inside this skill's body — invisible to callers. Path strings may
+   * reference `${env.X}` and `${envName}` only. See
+   * stories/skill-data-sources.md.
+   */
+  dataSources?: Record<string, string>;
 }
 
 /** A test instance ready for execution (may be a data-driven row) */

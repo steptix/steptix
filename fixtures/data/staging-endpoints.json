@@ -1,0 +1,10 @@
+{
+  "api": {
+    "url": "https://stg.securebank.example",
+    "label": "Staging"
+  },
+  "user": {
+    "email": "stg-admin@securebank.example",
+    "password": "$ADMIN_PWD"
+  }
+}

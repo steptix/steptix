@@ -1,0 +1,10 @@
+{
+  "api": {
+    "url": "http://localhost:8787",
+    "label": "Local Dev"
+  },
+  "user": {
+    "email": "demo@securebank.com",
+    "password": "password123"
+  }
+}

@@ -17,6 +17,7 @@ import type { BrowserSession } from '../../browser/manager.js';
 
 import { loadConfig } from '../../config/loader.js';
 import { parseTestFile } from '../../parser/markdown.js';
+import { clearSkillCache } from '../../skills/expander.js';
 import { expandTestInstances, parseTimeoutMs } from '../../runner/test-runner.js';
 import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
@@ -273,6 +274,11 @@ export class UIRunnerAdapter {
 
     // 1. Load config
     this.config = await loadConfig();
+
+    // Clear the module-level skill cache at run-start so disk edits to skill
+    // files in the dev loop are picked up — the UI server is long-lived, so
+    // without this an edited skill stays masked by its earlier-cached parse.
+    clearSkillCache();
 
     // 2. Parse the test file (expanding any [skill: ...] references)
     const skillsDir = pathResolve(process.cwd(), this.config.tests.skillsDir);
