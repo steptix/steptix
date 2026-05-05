@@ -7,7 +7,7 @@ import type { ParsedTest, TestConfig, TestInstance } from '../parser/types.js';
 import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
-import { launchBrowser, closeBrowser, type CdpLaunchOptions } from '../browser/manager.js';
+import { launchBrowser, closeBrowser, BrowserTracker, type CdpLaunchOptions } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
@@ -182,7 +182,12 @@ export async function runTest(
     : () => {};
 
   const cdpOptions = parseCdpOptionsFromTestConfig(test.config);
-  const session = await launchBrowser(config.browser, cdpOptions);
+  const initialSession = await launchBrowser(config.browser, cdpOptions);
+  const browserTracker = new BrowserTracker(initialSession);
+  // `session` is a *snapshot* of the current active browser — re-read from
+  // the tracker before/after each step so openBrowser/switchBrowser actions
+  // can transparently shift which browser subsequent steps target.
+  let session = browserTracker.getActive();
 
   // Load the tool catalogue once per test. Node caches dynamic imports so
   // subsequent loads are cheap; failures are surfaced as a fatal startup
@@ -296,6 +301,7 @@ export async function runTest(
             csrfTokens,
             resolvedParameters,
             pageTracker: session.pageTracker,
+            browserTracker,
             dismissalGuidance: hooks.hasAny,
             // No stepCache — hook results are usually page-state-dependent
             // (e.g., "accept cookie banner if visible") and shouldn't be replayed blindly.
@@ -392,6 +398,7 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
+          browserTracker,
           stepCache,
           cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
@@ -427,6 +434,11 @@ export async function runTest(
         // This step is part of a group but not the first — already handled
         continue;
       }
+
+      // Refresh active session — a prior step may have switched browsers
+      // via openBrowser/switchBrowser/closeBrowser. Single-browser tests
+      // see exactly the same `default` session every iteration.
+      session = browserTracker.getActive();
 
       const rawInstruction = test.steps[i] ?? '';
       // Interpolate {{placeholders}} in step text
@@ -484,6 +496,7 @@ export async function runTest(
             csrfTokens,
             resolvedParameters,
             pageTracker: session.pageTracker,
+            browserTracker,
             dismissalGuidance: hooks.hasAny,
           },
           adHocResults,
@@ -570,6 +583,7 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
+          browserTracker,
           stepCache,
           cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
@@ -595,6 +609,7 @@ export async function runTest(
           csrfTokens,
           resolvedParameters,
           pageTracker: session.pageTracker,
+          browserTracker,
           stepCache,
           cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
@@ -679,6 +694,7 @@ export async function runTest(
             csrfTokens,
             resolvedParameters,
             pageTracker: session.pageTracker,
+            browserTracker,
             dismissalGuidance: hooks.hasAny,
           };
           const adHocResults: StepResult[] = [];
@@ -817,7 +833,15 @@ export async function runTest(
 
     return report;
   } finally {
-    await closeBrowser(session);
+    // Close all tracked browsers in reverse creation order. For the
+    // single-browser path (no openBrowser ever called), this is just the
+    // initial session — same teardown as before. CDP sessions are handled
+    // specially by closeBrowser; non-CDP sessions go through tracker.
+    if (initialSession.cdp) {
+      await closeBrowser(initialSession);
+    } else {
+      await browserTracker.closeAll();
+    }
     removeFileBridges();
     setLogLevel(previousLevel);
     if (runLog) {

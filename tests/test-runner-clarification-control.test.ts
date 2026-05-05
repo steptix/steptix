@@ -24,6 +24,24 @@ const closeBrowserMock = vi.fn();
 vi.mock('../src/browser/manager.js', () => ({
   launchBrowser: (...args: unknown[]) => launchBrowserMock(...args),
   closeBrowser: (...args: unknown[]) => closeBrowserMock(...args),
+  // Minimal BrowserTracker stub: tracks the initial session, returns it
+  // as active, and closeAll is a no-op (the test relies on closeBrowserMock
+  // being called for non-CDP teardown — but the multi-browser branch uses
+  // tracker.closeAll, so we delegate). The two paths converge by having
+  // closeAll call closeBrowserMock for the initial session.
+  BrowserTracker: class {
+    private session: unknown;
+    constructor(initial: unknown) { this.session = initial; }
+    getActive() { return this.session; }
+    getActivePage() { return (this.session as { page: unknown }).page; }
+    has() { return false; }
+    add() {}
+    switchTo() { return this.session; }
+    async close() {}
+    async closeAll() { closeBrowserMock(this.session); }
+    list() { return []; }
+    get count() { return 1; }
+  },
 }));
 
 const executeStepMock = vi.fn();

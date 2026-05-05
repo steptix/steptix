@@ -23,7 +23,7 @@ import { parseAIResponse, parseAssertionCode, parseBranchedResponse } from '../a
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
-import type { PageTracker } from '../browser/manager.js';
+import { launchBrowser, type PageTracker, type BrowserTracker, type LaunchOverrides } from '../browser/manager.js';
 import { withRetry } from './retry.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import type { InteractiveReader } from './interactive-repl.js';
@@ -80,6 +80,10 @@ export interface StepExecutorOptions {
   resolvedParameters?: Record<string, string>;
   /** Tracks all open pages (popups, tabs) — enables switchPage actions */
   pageTracker?: PageTracker;
+  /** Tracks all opened browser sessions — enables openBrowser/switchBrowser/
+   *  closeBrowser actions. When undefined, only the single browser passed via
+   *  `page`/`pageTracker` is in play (back-compat with single-browser tests). */
+  browserTracker?: BrowserTracker;
   /** Pre-initialized step cache — always present; action caching gated by cacheEnabled */
   stepCache?: StepCache;
   /** When true, step action responses are read from / written to the step cache */
@@ -115,6 +119,30 @@ class StepFailureError extends Error {
   }
 }
 
+
+/**
+ * Snapshot the current state of the browser tracker into the shape
+ * `formatTestInfo` consumes. Returns undefined when single-browser mode is
+ * in play (no tracker, or only one session) so the prompt's browser block
+ * stays empty for those tests.
+ */
+function buildActiveBrowserInfo(tracker: BrowserTracker | undefined) {
+  if (!tracker || tracker.count <= 1) return undefined;
+  const list = tracker.list();
+  const active = list.find((b) => b.isActive);
+  if (!active) return undefined;
+  const others = list.filter((b) => !b.isActive).map((b) => ({
+    label: b.label,
+    engine: b.engine,
+    ...(b.channel !== undefined && { channel: b.channel }),
+  }));
+  return {
+    label: active.label,
+    engine: active.engine,
+    ...(active.channel !== undefined && { channel: active.channel }),
+    others,
+  };
+}
 
 /** Determine if a step instruction is asking to extract, read, or capture values from the page.
  * When true, a richer "readable" DOM snapshot is sent that preserves visible text content
@@ -339,8 +367,12 @@ async function executeStepAttempt(
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
     completedTurns = currentTurn;
 
-    // 0. Refresh active page from tracker (handles switchPage from prior turn)
-    if (pageTracker) {
+    // 0. Refresh active page from tracker (handles switchPage and
+    //    openBrowser/switchBrowser/closeBrowser from prior turn).
+    if (opts.browserTracker) {
+      try { page = opts.browserTracker.getActivePage(); }
+      catch { /* no active browser — let downstream fail with clear error */ }
+    } else if (pageTracker) {
       page = pageTracker.getActive();
     }
     const tracker = trackerFor(page);
@@ -435,6 +467,7 @@ async function executeStepAttempt(
       stepIndex,
       totalSteps,
       config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+      buildActiveBrowserInfo(opts.browserTracker),
     );
 
     // 5. Build user message (first turn: normal step message; subsequent: continuation prompt)
@@ -727,6 +760,140 @@ async function executeStepAttempt(
         if (openError) {
           turnFailed = true;
           turnError = openError;
+          break;
+        }
+        continue;
+      }
+
+      // ── openBrowser action ────────────────────────────────────────────────
+      // Spawn a new isolated `Browser` instance and register it on the
+      // BrowserTracker. Auto-promotes to active (mirrors openPage's
+      // promote-to-active behaviour) so subsequent steps target it without
+      // an explicit switchBrowser turn.
+      if (action.action === 'openBrowser') {
+        let openErr: string | undefined;
+        if (!opts.browserTracker) {
+          openErr = 'openBrowser failed: browser tracking is not enabled';
+          logger.warn(openErr);
+        } else if (!action.browserLabel) {
+          openErr = 'openBrowser failed: missing required "as" field (label)';
+          logger.warn(openErr);
+        } else if (opts.browserTracker.has(action.browserLabel)) {
+          openErr = `openBrowser failed: label "${action.browserLabel}" is already in use`;
+          logger.warn(openErr);
+        } else {
+          try {
+            const overrides: LaunchOverrides = {};
+            if (action.engine) overrides.engine = action.engine;
+            if (action.channel) overrides.channel = action.channel;
+            if (action.headed !== undefined) overrides.headed = action.headed;
+            const newSession = await launchBrowser(config.browser, undefined, overrides);
+            opts.browserTracker.add(action.browserLabel, newSession);
+            // Active session changed — refresh local `page` so the rest of
+            // this turn targets the new browser's active page.
+            page = opts.browserTracker.getActivePage();
+            logger.info(
+              `Opened browser "${action.browserLabel}" (${newSession.engine ?? '?'}${newSession.channel ? '/' + newSession.channel : ''}) — auto-switched to active`,
+            );
+          } catch (err) {
+            openErr = `openBrowser failed: ${(err as Error).message}`;
+            logger.warn(openErr);
+          }
+        }
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          ...(openErr !== undefined && { error: openErr }),
+          pageUrl: page.url(),
+          timestamp: new Date().toISOString(),
+        });
+
+        if (openErr) {
+          turnFailed = true;
+          turnError = openErr;
+          break;
+        }
+        continue;
+      }
+
+      // ── switchBrowser action ─────────────────────────────────────────────
+      if (action.action === 'switchBrowser') {
+        let switchBrErr: string | undefined;
+        if (!opts.browserTracker) {
+          switchBrErr = 'switchBrowser failed: browser tracking is not enabled';
+        } else if (!action.browserLabel) {
+          switchBrErr = 'switchBrowser failed: missing required "to" field';
+        } else {
+          try {
+            opts.browserTracker.switchTo(action.browserLabel);
+            page = opts.browserTracker.getActivePage();
+            logger.info(`Switched to browser "${action.browserLabel}" (${page.url()})`);
+          } catch (err) {
+            switchBrErr = `switchBrowser failed: ${(err as Error).message}`;
+          }
+        }
+        if (switchBrErr) logger.warn(switchBrErr);
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          ...(switchBrErr !== undefined && { error: switchBrErr }),
+          pageUrl: page.url(),
+          timestamp: new Date().toISOString(),
+        });
+
+        if (switchBrErr) {
+          turnFailed = true;
+          turnError = switchBrErr;
+          break;
+        }
+        continue;
+      }
+
+      // ── closeBrowser action ──────────────────────────────────────────────
+      // Permissive — closes whatever label you point it at, including
+      // `default` and including the last remaining browser. If the close
+      // leaves no active browser, the next step fails naturally with
+      // `getActive()`'s "no active browser session" error.
+      if (action.action === 'closeBrowser') {
+        let closeBrErr: string | undefined;
+        if (!opts.browserTracker) {
+          closeBrErr = 'closeBrowser failed: browser tracking is not enabled';
+        } else if (!action.browserLabel) {
+          closeBrErr = 'closeBrowser failed: missing required "as" field';
+        } else {
+          try {
+            await opts.browserTracker.close(action.browserLabel);
+            // Best-effort: if the active browser is still alive, refresh
+            // `page`. If it's not (we just closed the only browser), keep
+            // the stale page reference — the following step will fail with
+            // a clear error from getActive() on its next refresh.
+            try { page = opts.browserTracker.getActivePage(); } catch { /* no active session */ }
+            logger.info(`Closed browser "${action.browserLabel}"`);
+          } catch (err) {
+            closeBrErr = `closeBrowser failed: ${(err as Error).message}`;
+          }
+        }
+        if (closeBrErr) logger.warn(closeBrErr);
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          ...(closeBrErr !== undefined && { error: closeBrErr }),
+          pageUrl: (() => { try { return page.url(); } catch { return ''; } })(),
+          timestamp: new Date().toISOString(),
+        });
+
+        if (closeBrErr) {
+          turnFailed = true;
+          turnError = closeBrErr;
           break;
         }
         continue;
@@ -1622,6 +1789,7 @@ export async function executeBranchedStep(
       group.conditionalSteps[0]!.index,
       totalSteps,
       config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+      buildActiveBrowserInfo(opts.browserTracker),
     );
     const userMessage = buildBranchedStepMessage(
       outcomes,

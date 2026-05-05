@@ -3,7 +3,9 @@ import { logger } from '../utils/logger.js';
 
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
-  'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'closePage', 'openPage', 'dismiss',
+  'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'closePage', 'openPage',
+  'openBrowser', 'switchBrowser', 'closeBrowser',
+  'dismiss',
   'assert', 'keyboard', 'keypress', 'prompt',
   'api_call', 'extract_csrf', 'extract_value',
   'read', 'count',
@@ -42,6 +44,11 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   'new_tab': 'openPage',
   'newWindow': 'openPage',
   'new_window': 'openPage',
+  'open_browser': 'openBrowser',
+  'newBrowser': 'openBrowser',
+  'new_browser': 'openBrowser',
+  'switch_browser': 'switchBrowser',
+  'close_browser': 'closeBrowser',
   'press': 'keyboard',
   'key': 'keyboard',
   'key_press': 'keypress',
@@ -308,6 +315,44 @@ function parseAction(raw: unknown, index: number): AIAction {
   if (obj['multiple'] === true) action.multiple = true;
   if (typeof obj['frame'] === 'string') action.frame = obj['frame'];
   if (typeof obj['page'] === 'string') action.page = obj['page'];
+
+  // Multi-browser fields. The browser-action subset uses different keys
+  // for the label depending on operation: openBrowser writes `as`,
+  // switchBrowser writes `to` (also accepted as `browserLabel`),
+  // closeBrowser writes `as` (also `browserLabel`). Normalise all into
+  // `browserLabel` for the executor.
+  if (typeof obj['browserLabel'] === 'string') action.browserLabel = obj['browserLabel'];
+  if (action.action === 'switchBrowser' && typeof obj['to'] === 'string' && !action.browserLabel) {
+    action.browserLabel = obj['to'];
+  }
+  if ((action.action === 'openBrowser' || action.action === 'closeBrowser')
+      && typeof obj['as'] === 'string' && !action.browserLabel) {
+    action.browserLabel = obj['as'];
+  }
+  const rawEngine = obj['engine'];
+  if (rawEngine === 'chromium' || rawEngine === 'firefox' || rawEngine === 'webkit') {
+    action.engine = rawEngine;
+  }
+  if (typeof obj['channel'] === 'string') action.channel = obj['channel'];
+  if (typeof obj['headed'] === 'boolean') action.headed = obj['headed'];
+
+  // Required-label check for the three browser actions. Loud failure ≫ soft
+  // fallback — same policy applied to switchBrowser unknown labels at runtime.
+  if (action.action === 'openBrowser' && !action.browserLabel) {
+    throw new Error(
+      `openBrowser action at index ${index} missing required "as" field (the label this new browser is registered under)`,
+    );
+  }
+  if (action.action === 'switchBrowser' && !action.browserLabel) {
+    throw new Error(
+      `switchBrowser action at index ${index} missing required "to" field (the label of the browser to switch to)`,
+    );
+  }
+  if (action.action === 'closeBrowser' && !action.browserLabel) {
+    throw new Error(
+      `closeBrowser action at index ${index} missing required "as" field (the label of the browser to close)`,
+    );
+  }
 
   const modeRaw = obj['apiMode'];
   if (modeRaw === 'browser' || modeRaw === 'standalone') {

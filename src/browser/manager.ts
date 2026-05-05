@@ -14,6 +14,96 @@ function ensureStealth(): void {
   stealthApplied = true;
 }
 
+/**
+ * Pre-flight check that the target channel binary is available before we
+ * call Playwright's launch — gives a clear "Edge not found" error instead
+ * of an opaque "Failed to launch" stack trace from chromium.
+ */
+async function assertChannelAvailable(channel: string): Promise<void> {
+  const known = new Set([
+    'chrome',
+    'chrome-beta',
+    'chrome-dev',
+    'chrome-canary',
+    'msedge',
+    'msedge-beta',
+    'msedge-dev',
+  ]);
+  if (!known.has(channel)) {
+    throw new Error(
+      `Unknown chromium channel "${channel}". Supported: ${[...known].join(', ')}.`,
+    );
+  }
+  // Lazy-load the executable resolver — Playwright doesn't expose channel
+  // path resolution on its public API, so we shell out to a single launch
+  // attempt with a short args probe. Failure mode: process.platform-specific
+  // binary search for the well-known install paths.
+  if (channel === 'chrome') return; // default — no extra check
+  const platform = process.platform;
+  const candidatePaths = channelInstallPaths(channel, platform);
+  if (candidatePaths.length === 0) return; // unknown platform — skip check, let Playwright report
+  const fs = await import('node:fs');
+  const found = candidatePaths.some((p) => {
+    try {
+      return fs.existsSync(p);
+    } catch {
+      return false;
+    }
+  });
+  if (!found) {
+    throw new Error(
+      `Channel "${channel}" requested but no matching browser binary was found in any of the expected install locations:\n` +
+      candidatePaths.map((p) => `  - ${p}`).join('\n') +
+      `\nInstall the browser, or set a different channel.`,
+    );
+  }
+}
+
+function channelInstallPaths(channel: string, platform: NodeJS.Platform): string[] {
+  if (platform === 'win32') {
+    const pf = process.env['ProgramFiles'] ?? 'C:\\Program Files';
+    const pf86 = process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
+    const localApp = process.env['LOCALAPPDATA'] ?? '';
+    switch (channel) {
+      case 'msedge':
+        return [
+          `${pf}\\Microsoft\\Edge\\Application\\msedge.exe`,
+          `${pf86}\\Microsoft\\Edge\\Application\\msedge.exe`,
+        ];
+      case 'msedge-beta':
+        return [`${pf}\\Microsoft\\Edge Beta\\Application\\msedge.exe`];
+      case 'msedge-dev':
+        return [`${pf}\\Microsoft\\Edge Dev\\Application\\msedge.exe`];
+      case 'chrome-beta':
+        return [`${pf}\\Google\\Chrome Beta\\Application\\chrome.exe`];
+      case 'chrome-dev':
+        return [`${pf}\\Google\\Chrome Dev\\Application\\chrome.exe`];
+      case 'chrome-canary':
+        return localApp
+          ? [`${localApp}\\Google\\Chrome SxS\\Application\\chrome.exe`]
+          : [];
+    }
+  } else if (platform === 'darwin') {
+    switch (channel) {
+      case 'msedge': return ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'];
+      case 'msedge-beta': return ['/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta'];
+      case 'msedge-dev': return ['/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev'];
+      case 'chrome-beta': return ['/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta'];
+      case 'chrome-dev': return ['/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev'];
+      case 'chrome-canary': return ['/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'];
+    }
+  } else if (platform === 'linux') {
+    switch (channel) {
+      case 'msedge': return ['/usr/bin/microsoft-edge', '/usr/bin/microsoft-edge-stable'];
+      case 'msedge-beta': return ['/usr/bin/microsoft-edge-beta'];
+      case 'msedge-dev': return ['/usr/bin/microsoft-edge-dev'];
+      case 'chrome-beta': return ['/usr/bin/google-chrome-beta'];
+      case 'chrome-dev': return ['/usr/bin/google-chrome-unstable'];
+    }
+  }
+  return [];
+}
+
 export interface TrackedPage {
   page: Page;
   label: string;
@@ -286,6 +376,163 @@ export interface BrowserSession {
    *  closes only this tab; if `cdpTab` selected an existing tab, this is
    *  false and the tab is left open. */
   cdpTabOpenedByUs?: boolean;
+  /** Engine + channel labels for reporting and prompt grounding. Optional
+   *  for back-compat with code paths that synthesize a `BrowserSession`
+   *  without going through `launchBrowser` (CDP mode, tests, etc). */
+  engine?: 'chromium' | 'firefox' | 'webkit';
+  channel?: string;
+}
+
+/** Validation rules for author-supplied browser labels (the `as` field on
+ *  openBrowser). Returns null when valid, or a human-readable reason when not. */
+function validateBrowserLabel(label: string): string | null {
+  if (!label || typeof label !== 'string') return 'must be a non-empty string';
+  if (label === 'default') return '"default" is reserved for the initial browser';
+  if (!/^[a-z][a-z0-9_-]*$/i.test(label)) {
+    return 'must start with a letter and contain only letters, digits, underscore, or hyphen';
+  }
+  if (label.length > 40) return 'must be 40 characters or fewer';
+  return null;
+}
+
+export interface BrowserInfo {
+  label: string;
+  engine: string;
+  channel: string;
+  activePageUrl: string;
+  isActive: boolean;
+}
+
+/**
+ * Tracks every `Browser` instance opened during a test. Mirrors the
+ * `PageTracker` pattern at the level above: tracker holds N labelled
+ * sessions, exactly one is active at a time, all are closed in reverse
+ * creation order at test end.
+ *
+ * Each tracked entry is a full `BrowserSession` (browser + context + its
+ * own `PageTracker`). Switching between tracked browsers is just a pointer
+ * update; the new session's active page becomes whatever its `pageTracker`
+ * currently points to.
+ */
+export class BrowserTracker {
+  private sessions: Array<{ label: string; session: BrowserSession }> = [];
+  private activeIndex = 0;
+
+  constructor(initialSession: BrowserSession, initialLabel = 'default') {
+    this.sessions.push({ label: initialLabel, session: initialSession });
+  }
+
+  /** Register a freshly-launched browser session under a custom label.
+   *  Throws on validation failure (reserved name, bad characters, collision). */
+  add(label: string, session: BrowserSession): void {
+    const err = validateBrowserLabel(label);
+    if (err) throw new Error(`Invalid browser label "${label}": ${err}`);
+    if (this.sessions.some((s) => s.label === label)) {
+      throw new Error(`Browser label "${label}" is already taken`);
+    }
+    this.sessions.push({ label, session });
+    // Auto-promote to active — matches openPage precedent (saves authors a
+    // separate switchBrowser turn after openBrowser).
+    this.activeIndex = this.sessions.length - 1;
+    logger.info(`Browser added: ${label} (${session.engine ?? '?'}${session.channel ? '/' + session.channel : ''})`);
+  }
+
+  /** Get the currently active browser session. Throws when nothing is
+   *  active — the natural consequence of an author closing the only
+   *  remaining browser. */
+  getActive(): BrowserSession {
+    const entry = this.sessions[this.activeIndex];
+    if (!entry) {
+      throw new Error('no active browser session — closeBrowser left zero browsers tracked');
+    }
+    return entry.session;
+  }
+
+  /** Get the currently active page (active session's active page). */
+  getActivePage(): Page {
+    return this.getActive().pageTracker.getActive();
+  }
+
+  /** Get the currently active browser's label. */
+  getActiveLabel(): string {
+    return this.sessions[this.activeIndex]?.label ?? 'default';
+  }
+
+  has(label: string): boolean {
+    return this.sessions.some((s) => s.label === label);
+  }
+
+  /** Switch to a tracked browser by label. Returns the session, throws on
+   *  unknown label (matches resolved decision: fail loudly). */
+  switchTo(label: string): BrowserSession {
+    const idx = this.sessions.findIndex((s) => s.label === label);
+    if (idx === -1) {
+      const known = this.sessions.map((s) => s.label).join(', ');
+      throw new Error(`No browser registered as "${label}" — known: ${known}`);
+    }
+    this.activeIndex = idx;
+    return this.sessions[idx]!.session;
+  }
+
+  /** Close a tracked browser by label. Permissive — closes whatever you
+   *  point it at, including `default` and including the last remaining one.
+   *  If the active browser was closed, the active pointer falls back to
+   *  whichever session is now at the same index (or the previous one if the
+   *  list is now shorter); a subsequent step with no active browser fails
+   *  naturally with `getActive()`'s error. */
+  async close(label: string): Promise<void> {
+    const idx = this.sessions.findIndex((s) => s.label === label);
+    if (idx === -1) {
+      const known = this.sessions.map((s) => s.label).join(', ');
+      throw new Error(`No browser registered as "${label}" — known: ${known}`);
+    }
+    const { session } = this.sessions[idx]!;
+    try {
+      await session.context.close();
+      await session.browser.close();
+    } catch (err) {
+      logger.debug(`Error closing browser "${label}" — ${(err as Error).message}`);
+    }
+    this.sessions.splice(idx, 1);
+    if (this.activeIndex >= this.sessions.length) {
+      this.activeIndex = Math.max(0, this.sessions.length - 1);
+    } else if (this.activeIndex > idx) {
+      this.activeIndex--;
+    }
+    logger.info(`Browser closed: ${label}`);
+  }
+
+  /** Close all tracked browsers in reverse creation order. Called by the
+   *  test runner's `finally` block at test end. */
+  async closeAll(): Promise<void> {
+    for (let i = this.sessions.length - 1; i >= 0; i--) {
+      const { label, session } = this.sessions[i]!;
+      try {
+        await session.context.close();
+        await session.browser.close();
+      } catch (err) {
+        logger.debug(`Error closing browser "${label}" — ${(err as Error).message}`);
+      }
+    }
+    this.sessions.length = 0;
+  }
+
+  /** Snapshot for reports / prompt context. */
+  list(): BrowserInfo[] {
+    return this.sessions.map((s, i) => ({
+      label: s.label,
+      engine: s.session.engine ?? 'chromium',
+      channel: s.session.channel ?? 'chrome',
+      activePageUrl: (() => {
+        try { return s.session.pageTracker.getActive().url(); } catch { return ''; }
+      })(),
+      isActive: i === this.activeIndex,
+    }));
+  }
+
+  get count(): number {
+    return this.sessions.length;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -453,28 +700,47 @@ export interface CdpLaunchOptions {
   tab?: string | undefined;
 }
 
+/** Per-launch overrides applied on top of `BrowserConfig`. Used by the
+ *  multi-browser feature: each spawned browser can pick its own engine and
+ *  channel without mutating the test's shared config. */
+export interface LaunchOverrides {
+  engine?: 'chromium' | 'firefox' | 'webkit';
+  /** Chromium-only — Playwright channel name (`chrome` (default), `msedge`,
+   *  `chrome-beta`, `chrome-dev`, `msedge-beta`, `msedge-dev`). */
+  channel?: string;
+  headed?: boolean;
+}
+
 /**
  * Launch a Playwright browser and create a new page with the given configuration.
  * When `cdp` is provided, attaches to a running Chrome over CDP instead of
  * launching a fresh browser. Chromium (non-CDP) uses playwright-extra with
  * stealth plugin to avoid bot detection.
+ *
+ * `overrides` lets callers (notably the multi-browser openBrowser action)
+ * pick a different engine/channel/headed mode without mutating the test's
+ * shared `BrowserConfig`.
  */
 export async function launchBrowser(
   config: BrowserConfig,
   cdp?: CdpLaunchOptions,
+  overrides?: LaunchOverrides,
 ): Promise<BrowserSession> {
   if (cdp) {
     return connectOverCdpSession(config, cdp);
   }
 
-  const browserType = config.browser;
+  const browserType = overrides?.engine ?? config.browser;
+  const headed = overrides?.headed ?? config.headed;
+  const channel = overrides?.channel; // undefined = default ('chrome' for chromium)
+  const channelLabel = channel ? `/${channel}` : '';
   logger.info(
-    `Launching ${browserType} browser (${config.headed ? 'headed' : 'headless'})`,
+    `Launching ${browserType}${channelLabel} browser (${headed ? 'headed' : 'headless'})`,
   );
 
-  const { width, height } = config.headed ? config.windowSize : config.viewport;
+  const { width, height } = headed ? config.windowSize : config.viewport;
   const launchOptions = {
-    headless: !config.headed,
+    headless: !headed,
     slowMo: config.slowMo,
     args: [`--window-size=${width},${height}`],
   };
@@ -489,11 +755,16 @@ export async function launchBrowser(
       break;
     case 'chromium':
     default: {
-      // Prefer the installed Google Chrome ("chrome" channel) over bundled
-      // Chromium — bundled Chromium has a fingerprintable codec/component list
-      // that sites like Akamai/Imperva flag as automation.
-      const chromeOpts = { ...launchOptions, channel: 'chrome' };
-      if (config.stealth !== false) {
+      // Default channel = 'chrome' (real Google Chrome — better fingerprint
+      // than bundled Chromium). Override via `overrides.channel` for Edge
+      // (`msedge`), Chrome Beta, etc.
+      const effectiveChannel = channel ?? 'chrome';
+      await assertChannelAvailable(effectiveChannel);
+      const chromeOpts = { ...launchOptions, channel: effectiveChannel };
+      // Stealth's monkey-patches target Chrome internals — apply on the
+      // `chrome` channel only; for `msedge` or other channels, fall back to
+      // the plain chromium driver (matches user intent: "I want real Edge").
+      if (effectiveChannel === 'chrome' && config.stealth !== false) {
         ensureStealth();
         browser = await stealthChromium.launch(chromeOpts) as unknown as Browser;
       } else {
@@ -503,7 +774,7 @@ export async function launchBrowser(
   }
 
   const context = await browser.newContext({
-    viewport: config.headed ? null : config.viewport,
+    viewport: headed ? null : config.viewport,
     // Accept all permissions by default
     permissions: ['clipboard-read', 'clipboard-write'],
     // Do not override userAgent — on the `chrome` channel, the real Chrome UA
@@ -534,7 +805,9 @@ export async function launchBrowser(
 
   logger.debug(`Browser launched: ${browserType} ${browser.version()}`);
 
-  return { browser, context, page, pageTracker };
+  const session: BrowserSession = { browser, context, page, pageTracker, engine: browserType };
+  if (browserType === 'chromium') session.channel = channel ?? 'chrome';
+  return session;
 }
 
 /**
