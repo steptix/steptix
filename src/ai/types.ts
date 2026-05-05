@@ -12,6 +12,9 @@ export type ActionType =
   | 'switchPage'
   | 'closePage'
   | 'openPage'
+  | 'openBrowser'
+  | 'switchBrowser'
+  | 'closeBrowser'
   | 'dismiss'
   | 'assert'
   | 'keyboard'
@@ -120,6 +123,29 @@ export interface AIAction {
    * Can be a label ("main", "page:2"), a URL substring, or a title substring.
    */
   page?: string;
+  /**
+   * For openBrowser/switchBrowser/closeBrowser: the browser session label.
+   * `as` on `openBrowser` registers the new session under this name (used by
+   * subsequent `switchBrowser to=<label>`); `to` on `switchBrowser` selects
+   * the target. Reserved name: `default` is the initial browser.
+   */
+  browserLabel?: string;
+  /**
+   * For openBrowser: which Playwright engine to launch. Defaults to the
+   * test config's engine. Valid: 'chromium' | 'firefox' | 'webkit'.
+   */
+  engine?: 'chromium' | 'firefox' | 'webkit';
+  /**
+   * For openBrowser (chromium engine only): the Playwright channel name.
+   * 'chrome' (default), 'msedge' for Microsoft Edge, 'chrome-beta', etc.
+   * Ignored for firefox/webkit.
+   */
+  channel?: string;
+  /**
+   * For openBrowser: override the test config's headed/headless mode.
+   * Mainly useful for debugging (e.g. open Edge headed while default runs headless).
+   */
+  headed?: boolean;
   /** Human-readable description of what this action does */
   description: string;
   /**

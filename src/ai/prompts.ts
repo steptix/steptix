@@ -40,12 +40,23 @@ function classifyDeviceMode(width: number): string {
  * Format the volatile per-step "Test Information" section that lives in the user
  * message (not the system prompt) so it doesn't break the cacheable system prefix.
  */
+export interface ActiveBrowserInfo {
+  label: string;
+  engine: string;
+  channel?: string;
+  /** Other registered browsers, used to remind the AI which sessions exist
+   *  so it doesn't hallucinate a `switchBrowser to=...` against an
+   *  unregistered label. Empty array means single-browser mode. */
+  others: Array<{ label: string; engine: string; channel?: string }>;
+}
+
 export function formatTestInfo(
   testName: string,
   baseUrl?: string,
   currentStep?: number,
   totalSteps?: number,
   viewport?: ViewportInfo,
+  browser?: ActiveBrowserInfo,
 ): string {
   const stepInfo =
     currentStep !== undefined && totalSteps !== undefined
@@ -57,7 +68,23 @@ export function formatTestInfo(
     const mode = classifyDeviceMode(viewport.width);
     viewportInfo = `- Viewport: ${viewport.width}×${viewport.height}px (${mode} view)`;
   }
-  return [`## Test Information`, `- Test: ${testName}`, baseUrlInfo, stepInfo, viewportInfo]
+  // Multi-browser grounding. Only emitted when more than one browser is
+  // registered, so single-browser tests see no extra noise. The AI uses
+  // this to disambiguate which browser a step targets and to avoid
+  // hallucinating switchBrowser calls against unknown labels.
+  let browserInfo = '';
+  if (browser && browser.others.length > 0) {
+    const fmt = (b: { label: string; engine: string; channel?: string }) =>
+      `${b.label} (${b.engine}${b.channel ? '/' + b.channel : ''})`;
+    const all = [
+      { label: browser.label, engine: browser.engine, ...(browser.channel !== undefined && { channel: browser.channel }) },
+      ...browser.others,
+    ].map(fmt).join(', ');
+    browserInfo =
+      `- Active Browser: ${fmt(browser)}\n` +
+      `- All Browsers: ${all}`;
+  }
+  return [`## Test Information`, `- Test: ${testName}`, baseUrlInfo, stepInfo, viewportInfo, browserInfo]
     .filter((line) => line !== '')
     .join('\n');
 }
@@ -166,6 +193,8 @@ Plan your next action based on the observed result — do not batch multiple act
 18a. To open a brand-new browser tab/window at a URL the test specifies (rather than waiting for the application to spawn one via window.open or a target="_blank" link), use an "openPage" action: { "action": "openPage", "url": "https://docs.example.com", "description": "Open documentation in a new tab" }. The new page is automatically promoted to the active page, so subsequent actions in this step and following steps target it without an explicit switchPage. Use this when a step asks to "open a new tab/window to <URL>", "open <URL> in a new tab", or similar. Always set "needs_reeval": true so the next turn sees the new page's DOM. To return to the original page later, use a "switchPage" action with "main".
 
 18b. NAMING TABS for deterministic switchPage. When a step asks to remember/save/name a tab (e.g. "open <URL> in a new tab and remember it as docs", "open <URL> as the help tab"), include "as": "<snake_case_name>" on the openPage action: { "action": "openPage", "url": "https://docs.example.com", "as": "docs", "description": "Open docs and label as 'docs'" }. Subsequent switchPage actions can then target by exact label: { "action": "switchPage", "page": "docs", "description": "Switch back to docs tab" }. Prefer naming when (a) the test will open multiple tabs with similar titles or URLs, or (b) the test author asked for a specific name. Label rules: lowercase letters/digits/underscore/hyphen, must start with a letter, must NOT be "main" (reserved) or match the auto-generated "page:N" form. Without "as", the tab gets the next auto label (page:2, page:3, ...) and you can switch by URL substring or title substring as before
+
+18c. SECOND BROWSER (Chrome + Edge / multi-actor). When a step says to open another browser, a different browser, an Edge browser, a second user's browser — anything that means a fully-isolated session, not just another tab — emit an "openBrowser" action: { "action": "openBrowser", "as": "<label>", "channel": "msedge", "description": "Open Edge as 'edge'" }. Field rules: "as" is REQUIRED (the label this browser registers under; cannot be "default" — that's reserved for the initial browser). "engine" is optional and defaults to the test's chromium engine; valid values "chromium" | "firefox" | "webkit". "channel" is chromium-only and selects a specific install — "msedge" for Microsoft Edge, "chrome" (default), "chrome-beta", etc. After openBrowser, the new browser is automatically active — do NOT emit a separate switchBrowser. To return to a previously-opened browser, emit { "action": "switchBrowser", "to": "<label>", "description": "..." } — "to" must match a label seen in the "All Browsers" line of the test-info block; unknown labels fail loudly. To release a browser session early, emit { "action": "closeBrowser", "as": "<label>", "description": "..." } — closeBrowser is permissive (closes whatever you point it at, including "default" and the last remaining one); the test runner closes all tracked browsers at test end regardless. Always set "needs_reeval": true after these actions so the next turn sees the new browser's DOM.
 19. For "find" actions, set "value" to the text to search for. Returns up to 50 leaf-like matches with stable selectors (auto-chained nth-of-type when the element has no direct id/data-testid/name/aria-label), plus the total match count so you can tell whether more exist than were shown. Optionally set "selector" to a CSS selector that scopes the search to that element's subtree — use this to cut noise when you already know where the target lives (e.g. { "action": "find", "value": "Smith", "selector": "#orders-table" }). Use find when you need to locate a specific item that is not visible in the snapshot — most commonly an item inside an omitted run (see rule 20a). Always set "needs_reeval": true
 20. For "expand" actions, set "selector" to the CSS selector of the element to expand. The framework will return the full DOM subtree for that element. Use this when you need to see all descendants of a specific element (e.g. inspecting the cells inside one row of a large table). Always set "needs_reeval": true
 20a. Omitted-run markers. The snapshot may contain comments like '<!-- 495 similar <tr> elements omitted (nth-of-type 4..498). Use find "<text>" to locate one, or target directly with tbody > tr:nth-of-type(N). -->'. These mean a long repetitive run (table rows, list items, etc.) was collapsed to head + tail to save space. To act on a specific omitted item: (a) use a "find" action with text you know is inside it and use the returned selector, or (b) if you already know the position, construct an nth-of-type(N) selector from the parent prefix in the marker and use it directly (click / read / expand). Rendered head and tail items use their normal selectors
