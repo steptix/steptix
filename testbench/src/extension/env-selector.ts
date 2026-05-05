@@ -36,7 +36,11 @@ export class EnvSelector implements vscode.Disposable {
     this.disposables.push(
       this.item,
       vscode.commands.registerCommand(COMMAND_ID, () => this.pickEnv()),
-      vscode.window.onDidChangeActiveTextEditor(() => this.refresh()),
+      // Tab-group event (not onDidChangeActiveTextEditor) so we also fire when
+      // the focus moves to a custom-editor tab — `activeTextEditor` is
+      // undefined while a TestBench webview is the active editor, which
+      // would otherwise hide this item exactly when it's most useful.
+      vscode.window.tabGroups.onDidChangeTabGroups(() => this.refresh()),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration(`testbench.${SETTING_KEY}`)) this.refresh();
       }),
@@ -57,10 +61,9 @@ export class EnvSelector implements vscode.Disposable {
   }
 
   private refresh(): void {
-    const editor = vscode.window.activeTextEditor;
-    const isMarkdown = editor?.document.languageId === 'markdown'
-      || editor?.document.fileName.endsWith('.md');
-    if (!editor || !isMarkdown) {
+    const uri = activeTabUri();
+    const isMarkdown = uri?.fsPath.toLowerCase().endsWith('.md') === true;
+    if (!isMarkdown) {
       this.item.hide();
       return;
     }
@@ -101,6 +104,17 @@ export class EnvSelector implements vscode.Disposable {
     );
     this.refresh();
   }
+}
+
+/** URI of the resource shown in the focused tab — works for both plain
+ *  text editors and custom editors (TestBench's webview). Returns
+ *  `undefined` for tab kinds we don't care about (terminal, diff, etc.). */
+function activeTabUri(): vscode.Uri | undefined {
+  const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+  if (!tab) return undefined;
+  if (tab.input instanceof vscode.TabInputText) return tab.input.uri;
+  if (tab.input instanceof vscode.TabInputCustom) return tab.input.uri;
+  return undefined;
 }
 
 interface DiscoveredEnv {
