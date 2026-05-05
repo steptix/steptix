@@ -1,0 +1,12 @@
+{
+  "user": {
+    "email": "demo@securebank.com",
+    "password": "password123"
+  },
+  "march": {
+    "filterMonth": "March 2026",
+    "minBalance": 1000,
+    "expectedSalary": "+$2,800.00",
+    "minTransactions": 3
+  }
+}
