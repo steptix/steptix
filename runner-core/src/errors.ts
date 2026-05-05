@@ -106,7 +106,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   }),
   TB010: (ctx) => ({
     diagnosis: `Cannot reach the ai-ui-automation server at ${ctx.serverUrl} (${ctx.reason})`,
-    fix: "Start the server (run 'npm run server' in the ai-ui-automation repo) and confirm it's listening on the host and port in SERVER_URL. If running on another machine, check the firewall.",
+    fix: "Start the server (run 'npx tsx src/index.ts serve' in the ai-ui-automation repo) and confirm it's listening on the host and port in SERVER_URL. If running on another machine, check the firewall.",
     actions: [{ label: 'Show Run Log', command: 'testbench.showRunLog' }],
   }),
   TB011: (ctx) => ({
