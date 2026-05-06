@@ -1073,10 +1073,10 @@ function TestBenchRunner() {
         >
           {breakpointStop != null ? `▶ Resume (line ${breakpointStop})` : "Resume"}
         </button>
-        <button onClick={handleStop} disabled={!running && breakpointStop == null} style={{ padding: "6px 12px", background: (running || breakpointStop != null) ? "#2a1010" : "transparent", border: "1px solid #5a2020", borderRadius: 5, color: (running || breakpointStop != null) ? "#f87171" : "#5f3940", fontSize: 11, cursor: (running || breakpointStop != null) ? "pointer" : "not-allowed" }}>
+        <button onClick={handleStop} disabled={!running && breakpointStop == null} style={{ padding: "6px 12px", background: (running || breakpointStop != null) ? (isLight ? "#fee2e2" : "#2a1010") : "transparent", border: `1px solid ${isLight ? "#fca5a5" : "#5a2020"}`, borderRadius: 5, color: (running || breakpointStop != null) ? (isLight ? "#b91c1c" : "#f87171") : (isLight ? "#9b6064" : "#5f3940"), fontSize: 11, cursor: (running || breakpointStop != null) ? "pointer" : "not-allowed" }}>
           Stop
         </button>
-        <button onClick={runSelected} disabled={running || !monacoReady} style={{ padding: "6px 16px", background: running ? "#1a2a1a" : "linear-gradient(135deg, #1d4ed8, #2563eb)", border: "none", borderRadius: 5, color: running ? "#4ade80" : "#fff", fontSize: 12, cursor: running || !monacoReady ? "not-allowed" : "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+        <button onClick={runSelected} disabled={running || !monacoReady} style={{ padding: "6px 16px", background: running ? (isLight ? "#dcfce7" : "#1a2a1a") : "linear-gradient(135deg, #1d4ed8, #2563eb)", border: "none", borderRadius: 5, color: running ? (isLight ? "#15803d" : "#4ade80") : "#fff", fontSize: 12, cursor: running || !monacoReady ? "not-allowed" : "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
           {running ? <><span style={{ animation: "pulse 1s infinite" }}>●</span> Running…</> : <><span>▶</span> Run <Kbd>F5</Kbd></>}
         </button>
       </div>
@@ -1176,8 +1176,8 @@ function TestBenchRunner() {
               </div>
             )}
             {runLog.map((entry, index) => (
-              <div key={index} style={{ fontSize: 10, lineHeight: 1.6, padding: "2px 6px", borderRadius: 3, color: entry.type === "fail" ? "#f87171" : entry.type === "pass" ? "#22c55e" : entry.type === "start" ? "#60a5fa" : "#4a6090", animation: "slideIn 0.15s ease-out", background: entry.type === "fail" ? isLight ? "#fee2e2" : "#1a0808" : "transparent", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-                <span style={{ color: colors.logEmpty, marginRight: 6 }}>{entry.ts}</span>
+              <div key={index} style={{ fontSize: 10, lineHeight: 1.6, padding: "2px 6px", borderRadius: 3, color: entry.type === "fail" ? "#f87171" : entry.type === "pass" ? "#22c55e" : entry.type === "start" ? "#60a5fa" : (isLight ? "#475569" : "#94a3b8"), animation: "slideIn 0.15s ease-out", background: entry.type === "fail" ? isLight ? "#fee2e2" : "#1a0808" : "transparent", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                <span style={{ color: colors.muted, marginRight: 6 }}>{entry.ts}</span>
                 {entry.msg}
               </div>
             ))}
