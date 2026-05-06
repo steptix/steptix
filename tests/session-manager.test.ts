@@ -23,11 +23,26 @@ const mockBrowserSession = {
   pageTracker: mockPageTracker,
 };
 
-vi.mock('../src/browser/manager.js', () => ({
-  launchBrowser: vi.fn(async () => ({ ...mockBrowserSession })),
-  closeBrowser: vi.fn(async () => {}),
-  PageTracker: vi.fn(),
-}));
+// Track BrowserTracker instances created by the production code so tests can
+// assert against their methods (e.g. closeAll on closeSession).
+const browserTrackerInstances: Array<{ getActive: ReturnType<typeof vi.fn>; closeAll: ReturnType<typeof vi.fn> }> = [];
+
+vi.mock('../src/browser/manager.js', () => {
+  class BrowserTracker {
+    getActive: ReturnType<typeof vi.fn>;
+    closeAll: ReturnType<typeof vi.fn>;
+    constructor(initialSession: typeof mockBrowserSession) {
+      this.getActive = vi.fn(() => initialSession);
+      this.closeAll = vi.fn(async () => {});
+      browserTrackerInstances.push(this);
+    }
+  }
+  return {
+    launchBrowser: vi.fn(async () => ({ ...mockBrowserSession })),
+    PageTracker: vi.fn(),
+    BrowserTracker,
+  };
+});
 
 vi.mock('../src/runner/step-executor.js', () => ({
   executeStep: vi.fn(async (): Promise<StepResult> => ({
@@ -98,7 +113,6 @@ vi.mock('../src/utils/logger.js', () => ({
 
 import { SessionManager } from '../src/server/session-manager.js';
 import { executeStep } from '../src/runner/step-executor.js';
-import { closeBrowser } from '../src/browser/manager.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -168,6 +182,7 @@ describe('SessionManager', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    browserTrackerInstances.length = 0;
     manager = new SessionManager(testConfig);
   });
 
@@ -640,9 +655,11 @@ describe('SessionManager', () => {
     it('closes browser and removes session', async () => {
       await manager.executeSteps('session-1', { steps: ['Step 1'] });
 
+      const trackerForSession = browserTrackerInstances[browserTrackerInstances.length - 1]!;
+
       await manager.closeSession('session-1');
 
-      expect(closeBrowser).toHaveBeenCalled();
+      expect(trackerForSession.closeAll).toHaveBeenCalled();
       const state = await manager.getSession('session-1');
       expect(state).toBeNull();
       expect(manager.getActiveSessions()).toHaveLength(0);

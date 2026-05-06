@@ -24,11 +24,21 @@ const mockBrowserSession = {
   pageTracker: mockPageTracker,
 };
 
-vi.mock('../src/browser/manager.js', () => ({
-  launchBrowser: vi.fn(async () => ({ ...mockBrowserSession })),
-  closeBrowser: vi.fn(async () => {}),
-  PageTracker: vi.fn(),
-}));
+vi.mock('../src/browser/manager.js', () => {
+  class BrowserTracker {
+    getActive: ReturnType<typeof vi.fn>;
+    closeAll: ReturnType<typeof vi.fn>;
+    constructor(initialSession: typeof mockBrowserSession) {
+      this.getActive = vi.fn(() => initialSession);
+      this.closeAll = vi.fn(async () => {});
+    }
+  }
+  return {
+    launchBrowser: vi.fn(async () => ({ ...mockBrowserSession })),
+    PageTracker: vi.fn(),
+    BrowserTracker,
+  };
+});
 
 vi.mock('../src/runner/step-executor.js', () => ({
   executeStep: vi.fn(async (): Promise<StepResult> => ({
