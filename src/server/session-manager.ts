@@ -3,7 +3,7 @@ import type { Config } from '../config/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
-import { launchBrowser, closeBrowser, type BrowserSession } from '../browser/manager.js';
+import { launchBrowser, BrowserTracker, type BrowserSession } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
@@ -142,7 +142,14 @@ const OUTPUT_PREFIX_PATTERN = /\[output:\s*(\w+)\]/gi;
 
 interface ManagedSession {
   id: string;
+  /** Snapshot of the currently-active browser. Refreshed from `browserTracker`
+   *  after every step so subsequent steps target whatever openBrowser /
+   *  switchBrowser / closeBrowser left as active. */
   browserSession: BrowserSession;
+  /** Owns every browser launched in this session — the initial one plus any
+   *  added by `openBrowser`. Closing the session calls `closeAll()` so no
+   *  named browser leaks. */
+  browserTracker: BrowserTracker;
   status: 'active' | 'executing' | 'closed';
   sessionConfig: { baseUrl?: string; timeout?: string };
   configSet: boolean;
@@ -435,7 +442,10 @@ export class SessionManager {
     if (!session) return;
 
     try {
-      await closeBrowser(session.browserSession);
+      // closeAll covers every browser the tracker owns — the initial one
+      // plus any added by openBrowser. Closing only browserSession would
+      // leak named browsers from multi-browser tests.
+      await session.browserTracker.closeAll();
     } catch {
       // Best effort
     }
@@ -469,6 +479,7 @@ export class SessionManager {
     const aiConfig = applyEnvToAiConfig(this.config.ai, envOverrides);
 
     const browserSession = await launchBrowser(this.config.browser);
+    const browserTracker = new BrowserTracker(browserSession);
     const tokenTracker = new TokenTracker();
     const aiClient = new AiClient(aiConfig, tokenTracker);
     const apiResponseStore = new ApiResponseStore();
@@ -491,6 +502,7 @@ export class SessionManager {
     const session: ManagedSession = {
       id: sessionId,
       browserSession,
+      browserTracker,
       status: 'active',
       sessionConfig: sessionConfig ?? {},
       configSet: sessionConfig !== undefined,
@@ -671,6 +683,7 @@ export class SessionManager {
             csrfTokens: session.csrfTokens,
             resolvedParameters,
             pageTracker: session.browserSession.pageTracker,
+            browserTracker: session.browserTracker,
           });
 
           let branchFailed = false;
@@ -785,6 +798,7 @@ export class SessionManager {
               csrfTokens: session.csrfTokens,
               resolvedParameters,
               pageTracker: session.browserSession.pageTracker,
+              browserTracker: session.browserTracker,
             },
           );
         } catch (err) {
@@ -924,8 +938,18 @@ export class SessionManager {
           break;
         }
 
-        // Check if the browser was closed by the step (e.g. "Close the browser")
-        if (isBrowserClosed(session.browserSession)) {
+        // Refresh active browser from the tracker — openBrowser /
+        // switchBrowser / closeBrowser may have shifted which browser is
+        // active. If the tracker has no browsers left (closeBrowser closed
+        // the only one) or the active one was disconnected by the step
+        // (e.g. "Close the browser"), tear down the session.
+        let trackerEmpty = false;
+        try {
+          session.browserSession = session.browserTracker.getActive();
+        } catch {
+          trackerEmpty = true;
+        }
+        if (trackerEmpty || isBrowserClosed(session.browserSession)) {
           logger.info(`Session "${sessionId}": browser closed by step, removing session`);
           session.status = 'closed';
           this.sessions.delete(sessionId);
