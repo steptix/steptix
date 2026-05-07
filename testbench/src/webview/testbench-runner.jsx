@@ -539,7 +539,11 @@ function TestBenchRunner() {
 
       const editor = monaco.editor.create(editorHostRef.current, {
         value: INITIAL_SCRIPT,
-        language: "plaintext",
+        // Markdown tokenization gives headings, list bullets, quote markers
+        // and code spans distinct colors via the inherited vs/vs-dark theme
+        // rules. Test files are .md and Monaco's bundled markdown grammar
+        // handles them well.
+        language: "markdown",
         theme: isLight ? "testbench-light" : "testbench-dark",
         fontFamily: editorFontFamily,
         fontSize: editorFontSize,
