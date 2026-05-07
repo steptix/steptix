@@ -62,6 +62,37 @@ function detectVscodeTheme() {
   return "dark";
 }
 
+// Read a `--vscode-*` CSS variable injected by VS Code into the webview.
+// Dots in the source name (e.g. "editor.background") map to dashes in the
+// CSS-variable form ("--vscode-editor-background"). Returns `fallback` when
+// the variable is missing (e.g. standalone-dev where the page is opened
+// outside VS Code).
+function readVscodeVar(name, fallback) {
+  const v = getComputedStyle(document.body).getPropertyValue(`--vscode-${name.replace(/\./g, '-')}`).trim();
+  return v || fallback;
+}
+
+// Mirror the user's VS Code editor colors into a Monaco theme color map.
+// Each fallback matches the previous hand-tuned testbench palette so we
+// degrade gracefully when a CSS variable is absent.
+function buildEditorThemeColors(isLight) {
+  return {
+    "editor.background":                  readVscodeVar('editor.background',                  isLight ? '#ffffff' : '#0d1220'),
+    "editor.foreground":                  readVscodeVar('editor.foreground',                  isLight ? '#172033' : '#d7e2f2'),
+    "editorLineNumber.foreground":        readVscodeVar('editorLineNumber.foreground',        isLight ? '#94a3b8' : '#4a5578'),
+    "editorLineNumber.activeForeground":  readVscodeVar('editorLineNumber.activeForeground',  isLight ? '#0f172a' : '#e2e8f0'),
+    "editor.selectionBackground":         readVscodeVar('editor.selectionBackground',         isLight ? '#bfdbfe' : '#1e2c4f'),
+    "editor.inactiveSelectionBackground": readVscodeVar('editor.inactiveSelectionBackground', isLight ? '#dbeafe' : '#162038'),
+    "editorGutter.background":            readVscodeVar('editorGutter.background',            isLight ? '#f8fafc' : '#090d16'),
+  };
+}
+
+function defineEditorThemes(isLight) {
+  const colors = buildEditorThemeColors(isLight);
+  monaco.editor.defineTheme("testbench-dark", { base: "vs-dark", inherit: true, rules: [], colors });
+  monaco.editor.defineTheme("testbench-light", { base: "vs", inherit: true, rules: [], colors });
+}
+
 function TestBenchRunner() {
   const [theme, setTheme] = useState(detectVscodeTheme);
   const [scriptText, setScriptText] = useState(INITIAL_SCRIPT);
@@ -112,21 +143,25 @@ function TestBenchRunner() {
   const outputAtBottomRef = useRef(true);
 
   const isLight = theme === "light";
+  // Each entry maps to a VS Code CSS variable when one is available, falling
+  // back to the previous hand-tuned testbench palette. This keeps the UI
+  // chrome (toolbar, buttons, output panel) in the user's chosen VS Code
+  // color scheme instead of the bespoke navy palette.
   const colors = {
-    page: isLight ? "#f5f7fb" : "#0b0f1a",
-    header: isLight ? "#ffffff" : "#0d1220",
-    panel: isLight ? "#ffffff" : "#0d1220",
-    panelAlt: isLight ? "#f8fafc" : "#090d16",
-    border: isLight ? "#d8e0ed" : "#1a2240",
-    borderStrong: isLight ? "#b9c6d8" : "#2d3a5a",
-    text: isLight ? "#172033" : "#c8d4e8",
-    textStrong: isLight ? "#0f172a" : "#e2e8f0",
-    muted: isLight ? "#64748b" : "#6b7a99",
-    faint: isLight ? "#94a3b8" : "#3a4a6a",
-    selectedLine: isLight ? "#dbeafe" : "#16213a",
-    menu: isLight ? "#ffffff" : "#0f1726",
-    splitter: isLight ? "#e2e8f0" : "#0b0f1a",
-    logEmpty: isLight ? "#94a3b8" : "#2a3450",
+    page:         readVscodeVar('sideBar-background',                  isLight ? "#f5f7fb" : "#0b0f1a"),
+    header:       readVscodeVar('editorGroupHeader-tabsBackground',    isLight ? "#ffffff" : "#0d1220"),
+    panel:        readVscodeVar('editor-background',                   isLight ? "#ffffff" : "#0d1220"),
+    panelAlt:     readVscodeVar('sideBar-background',                  isLight ? "#f8fafc" : "#090d16"),
+    border:       readVscodeVar('panel-border',                        isLight ? "#d8e0ed" : "#1a2240"),
+    borderStrong: readVscodeVar('input-border',                        isLight ? "#b9c6d8" : "#2d3a5a"),
+    text:         readVscodeVar('foreground',                          isLight ? "#172033" : "#c8d4e8"),
+    textStrong:   readVscodeVar('foreground',                          isLight ? "#0f172a" : "#e2e8f0"),
+    muted:        readVscodeVar('descriptionForeground',               isLight ? "#64748b" : "#6b7a99"),
+    faint:        readVscodeVar('disabledForeground',                  isLight ? "#94a3b8" : "#3a4a6a"),
+    selectedLine: readVscodeVar('list-inactiveSelectionBackground',    isLight ? "#dbeafe" : "#16213a"),
+    menu:         readVscodeVar('menu-background',                     isLight ? "#ffffff" : "#0f1726"),
+    splitter:     readVscodeVar('panel-border',                        isLight ? "#e2e8f0" : "#0b0f1a"),
+    logEmpty:     readVscodeVar('disabledForeground',                  isLight ? "#94a3b8" : "#2a3450"),
   };
 
   const steps = useMemo(() => {
@@ -491,42 +526,23 @@ function TestBenchRunner() {
   useEffect(() => {
     if (!editorHostRef.current || editorRef.current) return;
     try {
-      monaco.editor.defineTheme("testbench-dark", {
-        base: "vs-dark",
-        inherit: true,
-        rules: [],
-        colors: {
-          "editor.background": "#0d1220",
-          "editor.foreground": "#d7e2f2",
-          "editorLineNumber.foreground": "#4a5578",
-          "editorLineNumber.activeForeground": "#e2e8f0",
-          "editor.selectionBackground": "#264f78",
-          "editor.inactiveSelectionBackground": "#1e3a5f",
-          "editorGutter.background": "#090d16",
-        },
-      });
-      monaco.editor.defineTheme("testbench-light", {
-        base: "vs",
-        inherit: true,
-        rules: [],
-        colors: {
-          "editor.background": "#ffffff",
-          "editor.foreground": "#172033",
-          "editorLineNumber.foreground": "#94a3b8",
-          "editorLineNumber.activeForeground": "#0f172a",
-          "editor.selectionBackground": "#bfdbfe",
-          "editor.inactiveSelectionBackground": "#dbeafe",
-          "editorGutter.background": "#f8fafc",
-        },
-      });
+      defineEditorThemes(isLight);
+
+      // Pull font from VS Code's CSS variables so Monaco's character-width
+      // measurements line up with what's actually rendered. JetBrains Mono
+      // (loaded via Google Fonts @import) is blocked by the webview CSP, so
+      // it never actually loaded — Monaco was measuring against the declared
+      // font and rendering a fallback, which is what caused the
+      // selection/cursor offsets.
+      const editorFontFamily = readVscodeVar('editor-font-family', "Consolas, 'Courier New', monospace");
+      const editorFontSize = parseFloat(readVscodeVar('editor-font-size', '14')) || 14;
 
       const editor = monaco.editor.create(editorHostRef.current, {
         value: INITIAL_SCRIPT,
         language: "plaintext",
         theme: isLight ? "testbench-light" : "testbench-dark",
-        fontFamily: "JetBrains Mono, Cascadia Code, monospace",
-        fontSize: 14,
-        lineHeight: 22,
+        fontFamily: editorFontFamily,
+        fontSize: editorFontSize,
         glyphMargin: true,
         lineNumbers: "on",
         lineNumbersMinChars: 2,
@@ -648,6 +664,9 @@ function TestBenchRunner() {
 
   useEffect(() => {
     if (!monaco || !editorRef.current) return;
+    // Re-read VS Code CSS variables — they change with the user's theme —
+    // and rebuild the Monaco theme before applying.
+    defineEditorThemes(isLight);
     monaco.editor.setTheme(isLight ? "testbench-light" : "testbench-dark");
   }, [isLight]);
 
@@ -985,7 +1004,11 @@ function TestBenchRunner() {
       "--kbd-bg": isLight ? "#eef2f7" : "#1e2433",
       "--kbd-border": colors.borderStrong,
       "--kbd-text": colors.muted,
-      "--selected-line": colors.selectedLine,
+      // Use VS Code's list-selection color so the active-step highlight is
+       // visually distinct from text selection (which uses
+       // editor.selectionBackground — typically blue and was clashing).
+      // Falls back to the testbench palette in standalone-dev.
+       "--selected-line": `var(--vscode-list-inactiveSelectionBackground, ${colors.selectedLine})`,
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
@@ -1012,10 +1035,10 @@ function TestBenchRunner() {
         .tb-breakpoint-slot::before {
           content: "";
           position: absolute;
-          left: 5px;
-          top: 6px;
-          width: 9px;
-          height: 9px;
+          left: 3px;
+          top: 5px;
+          width: 7px;
+          height: 7px;
           border-radius: 50%;
           border: 1px solid transparent;
         }
@@ -1102,7 +1125,11 @@ function TestBenchRunner() {
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <div style={{ flex: 1, minHeight: 0, overflow: "hidden", background: colors.panel }}>
+          {/* Background tracks VS Code's editorGutter color (falling back to
+              editor.background, then panelAlt for standalone-dev) so the
+              left-padding strip matches whatever the user's VS Code theme
+              renders for the editor gutter. */}
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden", background: `var(--vscode-editorGutter-background, var(--vscode-editor-background, ${colors.panelAlt}))`, paddingLeft: 6 }}>
             <div ref={editorHostRef} style={{ width: "100%", height: "100%" }} />
             {editorLoadError && (
               <div style={{ padding: 16, color: "#f87171", fontSize: 12 }}>
