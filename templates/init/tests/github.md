@@ -8,8 +8,6 @@ tags: [smoke]
 - consoleLogLevel: debug
 - serverFileLogLevel: off
 
-
-
 ## Parameters
 - username: $GITHUB_USERNAME
 - password: $GITHUB_PASSWORD
@@ -24,9 +22,3 @@ tags: [smoke]
 7. [tool: print_all repos]
 8. Click logout
 9. Click "Sign out" button
-
-<!-- latest-runs:start -->
-## Latest runs
-
-- [2026-05-04 07:36:03Z — passed](file:///C:/Projects/vibe/ai-ui-automation/reports/2026-05-04_07-36-03-github-login-test.html)
-<!-- latest-runs:end -->
