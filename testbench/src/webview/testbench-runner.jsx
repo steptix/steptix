@@ -157,6 +157,34 @@ function editorSelectionColors(themeKind) {
       "editorBracketMatch.background": "#00000000",
       "editorBracketMatch.border": "#0F4A85",
       "editorWhitespace.foreground": "#00000000",
+      "editor.findMatchBackground": "#00000000",
+      "editor.findMatchBorder": "#0F4A85",
+      "editor.findMatchHighlightBackground": "#00000000",
+      "editor.findMatchHighlightBorder": "#0F4A85",
+      "editor.findRangeHighlightBackground": "#00000000",
+      "editorWidget.background": "#FFFFFF",
+      "editorWidget.foreground": "#292929",
+      "editorWidget.border": "#0F4A85",
+      "editorWidget.resizeBorder": "#0F4A85",
+      "widget.shadow": "#00000000",
+      "input.background": "#FFFFFF",
+      "input.foreground": "#292929",
+      "input.border": "#0F4A85",
+      "input.placeholderForeground": "#616161",
+      "inputOption.activeBackground": "#0F4A85",
+      "inputOption.activeBorder": "#0F4A85",
+      "inputOption.activeForeground": "#FFFFFF",
+      "inputOption.hoverBackground": "#B8B8B850",
+      "toolbar.hoverBackground": "#B8B8B850",
+      "toolbar.activeBackground": "#A6A6A650",
+      "toolbar.hoverOutline": "#0F4A85",
+      "inputValidation.errorBackground": "#FFFFFF",
+      "inputValidation.errorBorder": "#B5200D",
+      "inputValidation.warningBackground": "#FFFFFF",
+      "inputValidation.warningBorder": "#B89500",
+      "inputValidation.infoBackground": "#FFFFFF",
+      "inputValidation.infoBorder": "#0F4A85",
+      "progressBar.background": "#0F4A85",
     };
   }
   if (themeKind === "hc-dark") {
@@ -180,6 +208,34 @@ function editorSelectionColors(themeKind) {
       "editorBracketMatch.background": "#00000000",
       "editorBracketMatch.border": "#F38518",
       "editorWhitespace.foreground": "#00000000",
+      "editor.findMatchBackground": "#00000000",
+      "editor.findMatchBorder": "#F38518",
+      "editor.findMatchHighlightBackground": "#00000000",
+      "editor.findMatchHighlightBorder": "#F38518",
+      "editor.findRangeHighlightBackground": "#00000000",
+      "editorWidget.background": "#0C141F",
+      "editorWidget.foreground": "#FFFFFF",
+      "editorWidget.border": "#6FC3DF",
+      "editorWidget.resizeBorder": "#6FC3DF",
+      "widget.shadow": "#00000000",
+      "input.background": "#0C141F",
+      "input.foreground": "#FFFFFF",
+      "input.border": "#6FC3DF",
+      "input.placeholderForeground": "#A6A6A6",
+      "inputOption.activeBackground": "#0E639C",
+      "inputOption.activeBorder": "#6FC3DF",
+      "inputOption.activeForeground": "#FFFFFF",
+      "inputOption.hoverBackground": "#5A5D5E50",
+      "toolbar.hoverBackground": "#5A5D5E50",
+      "toolbar.activeBackground": "#63666750",
+      "toolbar.hoverOutline": "#6FC3DF",
+      "inputValidation.errorBackground": "#0C141F",
+      "inputValidation.errorBorder": "#F48771",
+      "inputValidation.warningBackground": "#0C141F",
+      "inputValidation.warningBorder": "#FFCC00",
+      "inputValidation.infoBackground": "#0C141F",
+      "inputValidation.infoBorder": "#6FC3DF",
+      "progressBar.background": "#0E70C0",
     };
   }
   if (themeKind === "light") {
@@ -203,6 +259,34 @@ function editorSelectionColors(themeKind) {
       "editorBracketMatch.background": "#0064001A",
       "editorBracketMatch.border": "#B9B9B9",
       "editorWhitespace.foreground": "#00000000",
+      "editor.findMatchBackground": "#A8AC94",
+      "editor.findMatchBorder": "#00000000",
+      "editor.findMatchHighlightBackground": "#EA5C0055",
+      "editor.findMatchHighlightBorder": "#00000000",
+      "editor.findRangeHighlightBackground": "#B4B4B433",
+      "editorWidget.background": "#F3F3F3",
+      "editorWidget.foreground": "#616161",
+      "editorWidget.border": "#C8C8C8",
+      "editorWidget.resizeBorder": "#C8C8C8",
+      "widget.shadow": "#A8A8A899",
+      "input.background": "#FFFFFF",
+      "input.foreground": "#616161",
+      "input.border": "#CECECE",
+      "input.placeholderForeground": "#767676",
+      "inputOption.activeBackground": "#0E639C40",
+      "inputOption.activeBorder": "#007ACC",
+      "inputOption.activeForeground": "#000000",
+      "inputOption.hoverBackground": "#B8B8B850",
+      "toolbar.hoverBackground": "#B8B8B850",
+      "toolbar.activeBackground": "#A6A6A650",
+      "toolbar.hoverOutline": "#007ACC",
+      "inputValidation.errorBackground": "#F2DEDE",
+      "inputValidation.errorBorder": "#BE1100",
+      "inputValidation.warningBackground": "#F6F5D2",
+      "inputValidation.warningBorder": "#B89500",
+      "inputValidation.infoBackground": "#D6ECF2",
+      "inputValidation.infoBorder": "#007ACC",
+      "progressBar.background": "#0E70C0",
     };
   }
   return {
@@ -225,6 +309,34 @@ function editorSelectionColors(themeKind) {
     "editorBracketMatch.background": "#0064001A",
     "editorBracketMatch.border": "#888888",
     "editorWhitespace.foreground": "#00000000",
+    "editor.findMatchBackground": "#515C6A",
+    "editor.findMatchBorder": "#00000000",
+    "editor.findMatchHighlightBackground": "#EA5C0055",
+    "editor.findMatchHighlightBorder": "#00000000",
+    "editor.findRangeHighlightBackground": "#3A3D4166",
+    "editorWidget.background": "#252526",
+    "editorWidget.foreground": "#CCCCCC",
+    "editorWidget.border": "#454545",
+    "editorWidget.resizeBorder": "#454545",
+    "widget.shadow": "#0000005C",
+    "input.background": "#3C3C3C",
+    "input.foreground": "#CCCCCC",
+    "input.border": "#3C3C3C",
+    "input.placeholderForeground": "#A6A6A6",
+    "inputOption.activeBackground": "#0E639C",
+    "inputOption.activeBorder": "#007ACC",
+    "inputOption.activeForeground": "#FFFFFF",
+    "inputOption.hoverBackground": "#5A5D5E50",
+    "toolbar.hoverBackground": "#5A5D5E50",
+    "toolbar.activeBackground": "#63666750",
+    "toolbar.hoverOutline": "#007ACC",
+    "inputValidation.errorBackground": "#5A1D1D",
+    "inputValidation.errorBorder": "#BE1100",
+    "inputValidation.warningBackground": "#352A05",
+    "inputValidation.warningBorder": "#B89500",
+    "inputValidation.infoBackground": "#063B49",
+    "inputValidation.infoBorder": "#007ACC",
+    "progressBar.background": "#0E70C0",
   };
 }
 
@@ -501,8 +613,30 @@ function TestBenchRunner() {
   const openGutterMenu = (event, lineNumber) => {
     event.preventDefault();
     setSelectedId(lineNumber);
-    setContextMenu({ x: event.clientX, y: event.clientY, lineNumber });
+    setContextMenu({ kind: "gutter", x: event.clientX, y: event.clientY, lineNumber });
   };
+
+  const openEditorMenu = (event) => {
+    event.preventDefault();
+    setContextMenu({ kind: "editor", x: event.clientX, y: event.clientY });
+  };
+
+  const triggerEditorAction = (actionId) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    setContextMenu(null);
+    // queueMicrotask so the menu unmounts and focus returns to the editor
+    // before Monaco's clipboard action fires — paste in particular needs
+    // the editor focused for execCommand to land in the right surface.
+    queueMicrotask(() => {
+      editor.focus();
+      editor.trigger("contextmenu", actionId, null);
+    });
+  };
+
+  const handleCut = () => triggerEditorAction("editor.action.clipboardCutAction");
+  const handleCopy = () => triggerEditorAction("editor.action.clipboardCopyAction");
+  const handlePaste = () => triggerEditorAction("editor.action.clipboardPasteAction");
 
   const handleBreakpointMenuClick = () => {
     if (!contextMenu) return;
@@ -825,13 +959,14 @@ function TestBenchRunner() {
         hideCursorInOverviewRuler: true,
         scrollBeyondLastLine: false,
         automaticLayout: true,
-        // Re-enable Monaco's built-in context menu so right-click in the text
-        // area gives Cut / Copy / Paste / Command Palette / Go to Definition.
-        // Our `onContextMenu` listener still claims gutter right-clicks
-        // (line numbers + glyph margin) for the breakpoint menu by calling
-        // preventDefault and returning early; everywhere else falls through
-        // to Monaco's default.
-        contextmenu: true,
+        // Disable Monaco's built-in context menu — it pulls the user's full
+        // VS Code menu palette (menu.background, widget.shadow, etc.) and on
+        // some themes those are painted red, giving the menu a red glow.
+        // We render our own menu in the webview instead (Cut / Copy / Paste
+        // for the text area, breakpoint actions for the gutter) so it
+        // matches the rest of the testbench UI and skips that styling
+        // entirely.
+        contextmenu: false,
         // Initial wordWrap; host overrides it via { type: 'init' } / 'settingsChanged'.
         wordWrap: "on",
         // Disable Monaco's built-in bracket-match highlight — both the legacy
@@ -958,14 +1093,21 @@ function TestBenchRunner() {
           monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS,
           monaco.editor.MouseTargetType.GUTTER_LINE_DECORATIONS,
         ]);
-        if (!gutterTargets.has(event.target.type)) return;
 
-        const lineNumber = event.target.position?.lineNumber || event.target.range?.startLineNumber;
-        if (!lineNumber) return;
-        event.event.preventDefault();
-        openGutterMenu(event.event.browserEvent, lineNumber);
+        if (gutterTargets.has(event.target.type)) {
+          const lineNumber = event.target.position?.lineNumber || event.target.range?.startLineNumber;
+          if (!lineNumber) return;
+          event.event.preventDefault();
+          openGutterMenu(event.event.browserEvent, lineNumber);
+        } else {
+          // Text-area right-click → our Cut/Copy/Paste menu.
+          event.event.preventDefault();
+          openEditorMenu(event.event.browserEvent);
+        }
 
-        // Restore the selections Monaco collapsed when the right-click hit.
+        // Restore the selections Monaco collapsed when the right-click hit
+        // — applies to both gutter and text-area menus so Cut/Copy operate
+        // on the user's original selection rather than a collapsed cursor.
         const preserved = getSelectionsToRestore(preservedSelectionsRef.current);
         preservedSelectionsRef.current = null;
         if (preserved) {
@@ -1402,6 +1544,10 @@ function TestBenchRunner() {
           background-color: var(--tb-editor-line-highlight-background) !important;
           border-color: var(--tb-editor-line-highlight-border) !important;
         }
+        .tb-context-menu-item:hover:not(:disabled) {
+          background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)) !important;
+          color: var(--vscode-menu-selectionForeground, inherit) !important;
+        }
         .monaco-editor .tb-bracket-match {
           background-color: var(--tb-editor-bracket-match-background) !important;
           box-shadow: 0 0 0 1px var(--tb-editor-bracket-match-border) inset;
@@ -1622,23 +1768,42 @@ function TestBenchRunner() {
         </div>
 
         {contextMenu && (() => {
-          const items = getGutterContextMenuItems({
-            lineNumber: contextMenu.lineNumber,
-            hasBreakpoint: breakpoints.has(contextMenu.lineNumber),
-            running,
-            selectedLineCount: selectedLines.size,
-          });
-          const handlers = {
-            "toggle-breakpoint": handleBreakpointMenuClick,
-            "run-step": handleRunStepMenuClick,
-            "clear-statuses": handleClearStatusesMenuClick,
-            "clear-breakpoints": handleClearBreakpointsMenuClick,
-          };
+          const editorSelection = editorRef.current?.getSelection?.();
+          const hasTextSelection = editorSelection
+            ? !(
+                editorSelection.startLineNumber === editorSelection.endLineNumber &&
+                editorSelection.startColumn === editorSelection.endColumn
+              )
+            : false;
+
+          const items = contextMenu.kind === "editor"
+            ? [
+                { id: "cut", label: "Cut", shortcut: "Ctrl+X", disabled: !hasTextSelection },
+                { id: "copy", label: "Copy", shortcut: "Ctrl+C", disabled: !hasTextSelection },
+                { id: "paste", label: "Paste", shortcut: "Ctrl+V", disabled: false },
+              ]
+            : getGutterContextMenuItems({
+                lineNumber: contextMenu.lineNumber,
+                hasBreakpoint: breakpoints.has(contextMenu.lineNumber),
+                running,
+                selectedLineCount: selectedLines.size,
+              });
+          const handlers = contextMenu.kind === "editor"
+            ? { cut: handleCut, copy: handleCopy, paste: handlePaste }
+            : {
+                "toggle-breakpoint": handleBreakpointMenuClick,
+                "run-step": handleRunStepMenuClick,
+                "clear-statuses": handleClearStatusesMenuClick,
+                "clear-breakpoints": handleClearBreakpointsMenuClick,
+              };
           return (
-            <div onClick={(event) => event.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, zIndex: 20, minWidth: 150, padding: 4, background: colors.menu, border: `1px solid ${colors.borderStrong}`, borderRadius: 6, boxShadow: "0 12px 30px #0008" }}>
+            <div onClick={(event) => event.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, zIndex: 20, width: "max-content", padding: 4, background: colors.menu, border: `1px solid ${colors.borderStrong}`, borderRadius: 6, boxShadow: "0 12px 30px #0008", fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)" }}>
               {items.map((item) => (
-                <button key={item.id} onClick={handlers[item.id]} disabled={item.disabled} style={{ width: "100%", padding: "7px 10px", border: "none", borderRadius: 4, background: "transparent", color: item.disabled ? colors.faint : colors.text, textAlign: "left", fontSize: 12, cursor: item.disabled ? "not-allowed" : "pointer", fontFamily: "JetBrains Mono, monospace" }}>
-                  {item.label}
+                <button key={item.id} onClick={handlers[item.id]} disabled={item.disabled} className="tb-context-menu-item" style={{ width: "100%", padding: "4px 10px", border: "none", borderRadius: 4, background: "transparent", color: item.disabled ? colors.faint : colors.text, textAlign: "left", fontSize: "inherit", fontFamily: "inherit", fontWeight: "var(--vscode-font-weight, normal)", cursor: item.disabled ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24, whiteSpace: "nowrap" }}>
+                  <span>{item.label}</span>
+                  {item.shortcut && (
+                    <span style={{ color: item.disabled ? colors.faint : colors.muted, fontSize: "0.85em", opacity: item.disabled ? 0.5 : 0.85 }}>{item.shortcut}</span>
+                  )}
                 </button>
               ))}
             </div>
