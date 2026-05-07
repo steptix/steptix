@@ -105,6 +105,11 @@ function TestBenchRunner() {
   // Remembers the breakpoint trim line for the in-flight run, so the `done`
   // handler can decide whether to land the yellow arrow on it.
   const pausedAtRef = useRef(null);
+  // Output-log auto-scroll: pin to bottom by default, but pause when the
+  // user scrolls up so they can read past entries without the view jumping.
+  // Resumes once the user scrolls back within 20px of the bottom.
+  const outputLogRef = useRef(null);
+  const outputAtBottomRef = useRef(true);
 
   const isLight = theme === "light";
   const colors = {
@@ -659,6 +664,16 @@ function TestBenchRunner() {
     selectedLinesRef.current = selectedLines;
   }, [selectedLines]);
 
+  // Pin output log to the bottom whenever new entries arrive — but only if
+  // the user hasn't scrolled up. Programmatic scrollTop=scrollHeight lands
+  // exactly at the bottom, so the next onScroll keeps atBottom true.
+  useEffect(() => {
+    if (!outputAtBottomRef.current) return;
+    const el = outputLogRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [runLog]);
+
   // Track text the host most recently sent us so we don't echo it back as
   // an `edit` (which would create a feedback loop).
   const hostShadowText = useRef(null);
@@ -1050,18 +1065,18 @@ function TestBenchRunner() {
           onClick={handleRenumber}
           disabled={running || selectedLines.size < 2}
           title="Rewrite the leading '1.' / '2.' prefixes on the selected lines so they're sequential. Continues from the last numbered line above the selection."
-          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running || selectedLines.size < 2 ? "not-allowed" : "pointer" }}
+          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running || selectedLines.size < 2 ? "default" : "pointer", opacity: running || selectedLines.size < 2 ? 0.5 : 1 }}
         >
           Renumber
         </button>
-        <button onClick={handleReset} disabled={running} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: "pointer" }}>
+        <button onClick={handleReset} disabled={running} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running ? "default" : "pointer", opacity: running ? 0.5 : 1 }}>
           Reset
         </button>
         <button
           onClick={handleCloseSession}
           disabled={running}
           title="Close the server-side session for this file. Next run starts a fresh browser with the current Config."
-          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running ? "not-allowed" : "pointer" }}
+          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running ? "default" : "pointer", opacity: running ? 0.5 : 1 }}
         >
           Close Session
         </button>
@@ -1069,14 +1084,14 @@ function TestBenchRunner() {
           onClick={handleResume}
           disabled={running || breakpointStop == null}
           title={breakpointStop != null ? `Resume from breakpoint on line ${breakpointStop}` : "Resume — only available when paused at a breakpoint"}
-          style={{ padding: "6px 12px", background: breakpointStop != null ? (isLight ? "#fef3c7" : "#3a2a05") : "transparent", border: `1px solid ${breakpointStop != null ? "#fbbf24" : colors.borderStrong}`, borderRadius: 5, color: breakpointStop != null ? (isLight ? "#92400e" : "#fbbf24") : colors.muted, fontSize: 11, cursor: !running && breakpointStop != null ? "pointer" : "not-allowed", fontWeight: breakpointStop != null ? 600 : 400 }}
+          style={{ padding: "6px 12px", background: breakpointStop != null ? (isLight ? "#fef3c7" : "#3a2a05") : "transparent", border: `1px solid ${breakpointStop != null ? "#fbbf24" : colors.borderStrong}`, borderRadius: 5, color: breakpointStop != null ? (isLight ? "#92400e" : "#fbbf24") : colors.muted, fontSize: 11, cursor: !running && breakpointStop != null ? "pointer" : "default", opacity: running || breakpointStop == null ? 0.5 : 1, fontWeight: breakpointStop != null ? 600 : 400 }}
         >
           {breakpointStop != null ? `▶ Resume (line ${breakpointStop})` : "Resume"}
         </button>
-        <button onClick={handleStop} disabled={!running && breakpointStop == null} style={{ padding: "6px 12px", background: (running || breakpointStop != null) ? (isLight ? "#fee2e2" : "#2a1010") : "transparent", border: `1px solid ${isLight ? "#fca5a5" : "#5a2020"}`, borderRadius: 5, color: (running || breakpointStop != null) ? (isLight ? "#b91c1c" : "#f87171") : (isLight ? "#9b6064" : "#5f3940"), fontSize: 11, cursor: (running || breakpointStop != null) ? "pointer" : "not-allowed" }}>
+        <button onClick={handleStop} disabled={!running && breakpointStop == null} style={{ padding: "6px 12px", background: (running || breakpointStop != null) ? (isLight ? "#fee2e2" : "#2a1010") : "transparent", border: `1px solid ${isLight ? "#fca5a5" : "#5a2020"}`, borderRadius: 5, color: (running || breakpointStop != null) ? (isLight ? "#b91c1c" : "#f87171") : (isLight ? "#9b6064" : "#5f3940"), fontSize: 11, cursor: (running || breakpointStop != null) ? "pointer" : "default", opacity: !running && breakpointStop == null ? 0.5 : 1 }}>
           Stop
         </button>
-        <button onClick={runSelected} disabled={running || !monacoReady} style={{ padding: "6px 16px", background: running ? (isLight ? "#dcfce7" : "#1a2a1a") : "linear-gradient(135deg, #1d4ed8, #2563eb)", border: "none", borderRadius: 5, color: running ? (isLight ? "#15803d" : "#4ade80") : "#fff", fontSize: 12, cursor: running || !monacoReady ? "not-allowed" : "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+        <button onClick={runSelected} disabled={running || !monacoReady} style={{ padding: "6px 16px", background: running ? (isLight ? "#dcfce7" : "#1a2a1a") : "linear-gradient(135deg, #1d4ed8, #2563eb)", border: "none", borderRadius: 5, color: running ? (isLight ? "#15803d" : "#4ade80") : "#fff", fontSize: 12, cursor: running || !monacoReady ? "default" : "pointer", opacity: running || !monacoReady ? 0.5 : 1, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
           {running ? <><span style={{ animation: "pulse 1s infinite" }}>●</span> Running…</> : <><span>▶</span> Run <Kbd>F5</Kbd></>}
         </button>
       </div>
@@ -1169,7 +1184,15 @@ function TestBenchRunner() {
           <div style={{ padding: "10px 14px", borderBottom: `1px solid ${colors.border}`, fontSize: 10, color: colors.faint, letterSpacing: 2, fontWeight: 700 }}>
             OUTPUT LOG
           </div>
-          <div style={{ flex: 1, overflowY: "auto", padding: 10, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div
+            ref={outputLogRef}
+            onScroll={() => {
+              const el = outputLogRef.current;
+              if (!el) return;
+              outputAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 20;
+            }}
+            style={{ flex: 1, overflowY: "auto", padding: 10, display: "flex", flexDirection: "column", gap: 2 }}
+          >
             {runLog.length === 0 && (
               <div style={{ fontSize: 11, color: colors.logEmpty, padding: 4, textAlign: "center", marginTop: 20 }}>
                 No output yet.<br />Press Run to start.
