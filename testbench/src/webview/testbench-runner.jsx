@@ -989,6 +989,10 @@ function TestBenchRunner() {
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
+        /* VS Code injects 20px padding on the webview <body> by default,
+           which creates a visible gap to the left of Monaco's glyph margin
+           (and on the other three sides). Reset it. */
+        body { padding: 0 !important; }
         * { box-sizing: border-box; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: ${colors.page}; }
