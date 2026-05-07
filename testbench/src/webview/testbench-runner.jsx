@@ -153,6 +153,9 @@ function editorSelectionColors(themeKind) {
       "scrollbarSlider.background": "#64646466",
       "scrollbarSlider.hoverBackground": "#646464B3",
       "scrollbarSlider.activeBackground": "#00000099",
+      "scrollbar.shadow": "#00000000",
+      "editorBracketMatch.background": "#00000000",
+      "editorBracketMatch.border": "#0F4A85",
       "editorWhitespace.foreground": "#00000000",
     };
   }
@@ -173,6 +176,9 @@ function editorSelectionColors(themeKind) {
       "scrollbarSlider.background": "#79797966",
       "scrollbarSlider.hoverBackground": "#646464B3",
       "scrollbarSlider.activeBackground": "#BFBFBF66",
+      "scrollbar.shadow": "#00000000",
+      "editorBracketMatch.background": "#00000000",
+      "editorBracketMatch.border": "#F38518",
       "editorWhitespace.foreground": "#00000000",
     };
   }
@@ -193,6 +199,9 @@ function editorSelectionColors(themeKind) {
       "scrollbarSlider.background": "#64646466",
       "scrollbarSlider.hoverBackground": "#646464B3",
       "scrollbarSlider.activeBackground": "#00000099",
+      "scrollbar.shadow": "#DDDDDD",
+      "editorBracketMatch.background": "#0064001A",
+      "editorBracketMatch.border": "#B9B9B9",
       "editorWhitespace.foreground": "#00000000",
     };
   }
@@ -212,6 +221,9 @@ function editorSelectionColors(themeKind) {
     "scrollbarSlider.background": "#79797966",
     "scrollbarSlider.hoverBackground": "#646464B3",
     "scrollbarSlider.activeBackground": "#BFBFBF66",
+    "scrollbar.shadow": "#000000",
+    "editorBracketMatch.background": "#0064001A",
+    "editorBracketMatch.border": "#888888",
     "editorWhitespace.foreground": "#00000000",
   };
 }
@@ -235,7 +247,76 @@ function cssSelectionColors(themeKind) {
     scrollbarSliderHover: colors["scrollbarSlider.hoverBackground"],
     scrollbarSliderActive: colors["scrollbarSlider.activeBackground"],
     whitespace: colors["editorWhitespace.foreground"],
+    bracketMatchBackground: colors["editorBracketMatch.background"],
+    bracketMatchBorder: colors["editorBracketMatch.border"],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Hand-rolled bracket-match highlighter.
+//
+// Monaco's built-in matcher (both legacy and the new bracket-pair-tree one)
+// calls `ignoreBracketsInToken(StandardTokenType.String)` and skips brackets
+// inside `string.*` tokens. Our editor is set to language "markdown", and
+// Monaco's bundled markdown tokenizer marks `[…]` as `string.link` and `{…}`
+// as `string.target` — so the built-in matcher never lights up for `[`/`]` or
+// `{`/`}`. (`(`/`)` works because parens stay as the default `Other` token.)
+//
+// We bypass that by walking the document text directly and decorating both
+// halves of the pair with the `tb-bracket-match` className, which we style
+// via the same `editorBracketMatch.background/border` colors we set on the
+// Monaco theme. Monaco's own matcher is disabled (`matchBrackets: 'never'`)
+// to avoid duplicate highlighting on `()`.
+// ---------------------------------------------------------------------------
+
+const BRACKET_PAIRS_OPEN_TO_CLOSE = { "(": ")", "[": "]", "{": "}" };
+const BRACKET_PAIRS_CLOSE_TO_OPEN = { ")": "(", "]": "[", "}": "{" };
+
+function walkForwardForMatch(text, startIndex, openCh, closeCh) {
+  let depth = 1;
+  for (let i = startIndex; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === openCh) depth++;
+    else if (ch === closeCh) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
+function walkBackwardForMatch(text, startIndex, openCh, closeCh) {
+  let depth = 1;
+  for (let i = startIndex; i >= 0; i--) {
+    const ch = text[i];
+    if (ch === closeCh) depth++;
+    else if (ch === openCh) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
+function findMatchingBracketOffsets(text, cursorOffset) {
+  // Mirror VS Code's behavior: prefer the bracket immediately to the LEFT
+  // of the cursor; only check the right if the left isn't a bracket.
+  for (const probeOffset of [cursorOffset - 1, cursorOffset]) {
+    if (probeOffset < 0 || probeOffset >= text.length) continue;
+    const ch = text[probeOffset];
+    const close = BRACKET_PAIRS_OPEN_TO_CLOSE[ch];
+    if (close) {
+      const matchIdx = walkForwardForMatch(text, probeOffset + 1, ch, close);
+      if (matchIdx != null) return { open: probeOffset, close: matchIdx };
+      continue;
+    }
+    const open = BRACKET_PAIRS_CLOSE_TO_OPEN[ch];
+    if (open) {
+      const matchIdx = walkBackwardForMatch(text, probeOffset - 1, open, ch);
+      if (matchIdx != null) return { open: matchIdx, close: probeOffset };
+    }
+  }
+  return null;
 }
 
 function applyHostEditorSettings(editor, msg) {
@@ -291,6 +372,7 @@ function TestBenchRunner() {
   const editorHostRef = useRef(null);
   const editorRef = useRef(null);
   const decorationsRef = useRef(null);
+  const bracketMatchDecorationsRef = useRef(null);
   const runningRef = useRef(false);
   const pausedRef = useRef(false);
   const stopRef = useRef(false);
@@ -537,10 +619,25 @@ function TestBenchRunner() {
     const editor = editorRef.current;
     if (!editor) return;
 
-    const selections = editor.getSelections() || [];
-    const hasSelection = selections.some((selection) => !selection.isEmpty()) || selections.length > 1;
+    // Step selection is React state, not a Monaco text selection — clicking a
+    // line collapses the editor's cursor (so the UI looks like VS Code) and
+    // updates `selectedLinesRef` instead. Read from there so F5 runs the
+    // highlighted lines. Fall through to a real text selection only if the
+    // user has actively dragged/Shift-arrowed across multiple lines.
+    const trackedLines = [...selectedLinesRef.current].sort((a, b) => a - b);
+    if (trackedLines.length > 0) {
+      const selectedSteps = trackedLines
+        .map((id) => steps.find((step) => step.id === id))
+        .filter(Boolean);
+      const label = selectedSteps.length > 1 ? "selected lines" : `step ${selectedSteps[0]?.id}`;
+      executeSteps(selectedSteps, true, label);
+      return;
+    }
 
-    if (hasSelection) {
+    const selections = editor.getSelections() || [];
+    const hasTextSelection =
+      selections.some((selection) => !selection.isEmpty()) || selections.length > 1;
+    if (hasTextSelection) {
       const lineIds = [...getLinesFromSelections(selections)].sort((a, b) => a - b);
       const selectedSteps = lineIds.map((id) => steps.find((step) => step.id === id)).filter(Boolean);
       executeSteps(selectedSteps, true, "selected lines");
@@ -724,12 +821,63 @@ function TestBenchRunner() {
         contextmenu: false,
         // Initial wordWrap; host overrides it via { type: 'init' } / 'settingsChanged'.
         wordWrap: "on",
+        // Disable Monaco's built-in bracket-match highlight — both the legacy
+        // and the new bracket-pair-tree algorithm skip brackets inside string
+        // tokens (`StandardTokenType.String`), and Monaco's bundled markdown
+        // tokenizer marks `[…]` as `string.link` and `{…}` as `string.target`.
+        // We run our own matcher (see findMatchingBracketOffsets above) and
+        // paint the box via decorations, so we don't depend on tokens.
+        matchBrackets: "never",
       });
 
       editorRef.current = editor;
       decorationsRef.current = editor.createDecorationsCollection();
+      bracketMatchDecorationsRef.current = editor.createDecorationsCollection();
+
+      const refreshBracketMatch = () => {
+        const collection = bracketMatchDecorationsRef.current;
+        if (!collection) return;
+        const model = editor.getModel();
+        const position = editor.getPosition();
+        if (!model || !position) {
+          collection.set([]);
+          return;
+        }
+        const cursorOffset = model.getOffsetAt(position);
+        const text = model.getValue();
+        const match = findMatchingBracketOffsets(text, cursorOffset);
+        if (!match) {
+          collection.set([]);
+          return;
+        }
+        const openPos = model.getPositionAt(match.open);
+        const closePos = model.getPositionAt(match.close);
+        collection.set([
+          {
+            range: new monaco.Range(
+              openPos.lineNumber,
+              openPos.column,
+              openPos.lineNumber,
+              openPos.column + 1,
+            ),
+            options: { className: "tb-bracket-match", stickiness: 1 },
+          },
+          {
+            range: new monaco.Range(
+              closePos.lineNumber,
+              closePos.column,
+              closePos.lineNumber,
+              closePos.column + 1,
+            ),
+            options: { className: "tb-bracket-match", stickiness: 1 },
+          },
+        ]);
+      };
+
+      editor.onDidChangeCursorPosition(refreshBracketMatch);
 
       editor.onDidChangeModelContent((event) => {
+        refreshBracketMatch();
         const value = editor.getValue();
         const lineCount = editor.getModel().getLineCount();
         const changes = event.changes;
@@ -1199,6 +1347,8 @@ function TestBenchRunner() {
       "--tb-scrollbar-slider-hover-background": selectionColors.scrollbarSliderHover,
       "--tb-scrollbar-slider-active-background": selectionColors.scrollbarSliderActive,
       "--tb-editor-whitespace-foreground": selectionColors.whitespace,
+      "--tb-editor-bracket-match-background": selectionColors.bracketMatchBackground,
+      "--tb-editor-bracket-match-border": selectionColors.bracketMatchBorder,
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
@@ -1238,6 +1388,11 @@ function TestBenchRunner() {
         .monaco-editor .margin-view-overlays .current-line {
           background-color: var(--tb-editor-line-highlight-background) !important;
           border-color: var(--tb-editor-line-highlight-border) !important;
+        }
+        .monaco-editor .tb-bracket-match {
+          background-color: var(--tb-editor-bracket-match-background) !important;
+          box-shadow: 0 0 0 1px var(--tb-editor-bracket-match-border) inset;
+          box-sizing: border-box;
         }
         .monaco-editor .focused .selectionHighlight {
           background-color: var(--tb-editor-selection-highlight-background) !important;
