@@ -58,8 +58,20 @@ const Kbd = ({ children }) => (
 
 function detectVscodeTheme() {
   const cls = document.body.classList;
-  if (cls.contains("vscode-light") || cls.contains("vscode-high-contrast-light")) return "light";
+  if (cls.contains("vscode-high-contrast-light")) return "hc-light";
+  if (cls.contains("vscode-high-contrast")) return "hc-dark";
+  if (cls.contains("vscode-light")) return "light";
   return "dark";
+}
+
+function monacoThemeName(themeKind) {
+  return `testbench-${themeKind}`;
+}
+
+function monacoThemeBase(themeKind) {
+  if (themeKind === "hc-light") return "hc-light";
+  if (themeKind === "hc-dark") return "hc-black";
+  return themeKind === "light" ? "vs" : "vs-dark";
 }
 
 // Read a `--vscode-*` CSS variable injected by VS Code into the webview.
@@ -72,40 +84,180 @@ function readVscodeVar(name, fallback) {
   return v || fallback;
 }
 
-// Mirror the user's VS Code editor colors into a Monaco theme color map.
-// Each fallback matches the previous hand-tuned testbench palette so we
-// degrade gracefully when a CSS variable is absent.
-function buildEditorThemeColors(isLight) {
+// Pull EVERY --vscode-* CSS variable VS Code injects into the webview and
+// remap it back into Monaco's `section.property` color-key form. Monaco
+// silently ignores unknown keys, so passing the full set is harmless and
+// means new theme contributions auto-flow through without us having to
+// enumerate them by hand.
+//
+// VS Code's naming convention: each color id has exactly one dot separating
+// `<section>.<property>`, both camelCase. The CSS variable form replaces
+// that dot with a dash, so `editorBracketMatch.background` becomes
+// `--vscode-editorBracketMatch-background`. We reverse the conversion by
+// splitting on the LAST dash after the `--vscode-` prefix.
+function buildVscodeMappedThemeColors() {
+  const cs = getComputedStyle(document.body);
+  const PREFIX = '--vscode-';
+  const out = {};
+  for (let i = 0; i < cs.length; i++) {
+    const name = cs.item(i);
+    if (!name.startsWith(PREFIX)) continue;
+    const value = cs.getPropertyValue(name).trim();
+    if (!value) continue;
+    const stripped = name.slice(PREFIX.length);
+    const lastDash = stripped.lastIndexOf('-');
+    if (lastDash <= 0) continue; // skip non-section.property entries (e.g. --vscode-foreground)
+    const key = stripped.slice(0, lastDash) + '.' + stripped.slice(lastDash + 1);
+    out[key] = value;
+  }
+  return out;
+}
+
+// Final color map handed to Monaco. It is built from the color variables VS
+// Code injects into the webview, so selection, bracket matching, cursor,
+// find/range highlights and guides inherit the active VS Code theme directly.
+function buildEditorThemeColors() {
   return {
-    "editor.background":                  readVscodeVar('editor.background',                  isLight ? '#ffffff' : '#0d1220'),
-    "editor.foreground":                  readVscodeVar('editor.foreground',                  isLight ? '#172033' : '#d7e2f2'),
-    "editorLineNumber.foreground":        readVscodeVar('editorLineNumber.foreground',        isLight ? '#94a3b8' : '#4a5578'),
-    "editorLineNumber.activeForeground":  readVscodeVar('editorLineNumber.activeForeground',  isLight ? '#0f172a' : '#e2e8f0'),
-    // Fallback values match VS Code Default Light+/Dark+ exactly so we
-    // degrade gracefully when the CSS variable lookup returns empty.
-    "editor.selectionBackground":         readVscodeVar('editor.selectionBackground',         isLight ? '#ADD6FF' : '#264F78'),
-    "editor.inactiveSelectionBackground": readVscodeVar('editor.inactiveSelectionBackground', isLight ? '#E5EBF1' : '#3A3D41'),
-    "editorGutter.background":            readVscodeVar('editorGutter.background',            isLight ? '#f8fafc' : '#090d16'),
-    // Hardcoded non-red values for word/occurrence highlights and the
-    // drag-and-drop drop target. We don't read these from CSS variables
-    // because the user's theme paints them an aggressive red that drowns
-    // out the editor. Values mirror VS Code Default Dark+/Light+ palettes
-    // — subtle blue/gray with alpha so they layer cleanly over selection.
-    "editor.selectionHighlightBackground": isLight ? '#ADD6FF80' : '#ADD6FF26',
-    "editor.wordHighlightBackground":      isLight ? '#5757574D' : '#575757B8',
-    "editor.wordHighlightStrongBackground":isLight ? '#0E639C40' : '#004972B8',
-    "editor.dropBackground":               isLight ? '#5757574D' : '#53595D80',
+    ...buildVscodeMappedThemeColors(),
+    ...editorSelectionColors(detectVscodeTheme()),
   };
 }
 
-function defineEditorThemes(isLight) {
-  const colors = buildEditorThemeColors(isLight);
-  monaco.editor.defineTheme("testbench-dark", { base: "vs-dark", inherit: true, rules: [], colors });
-  monaco.editor.defineTheme("testbench-light", { base: "vs", inherit: true, rules: [], colors });
+function defineEditorTheme(themeKind) {
+  monaco.editor.defineTheme(monacoThemeName(themeKind), {
+    base: monacoThemeBase(themeKind),
+    inherit: true,
+    rules: [],
+    colors: {
+      ...buildVscodeMappedThemeColors(),
+      ...editorSelectionColors(themeKind),
+    },
+  });
+}
+
+function editorSelectionColors(themeKind) {
+  if (themeKind === "hc-light") {
+    return {
+      "editor.selectionBackground": "#0F4A85",
+      "editor.inactiveSelectionBackground": "#C8DEF4",
+      "editor.lineHighlightBackground": "#0000000A",
+      "editor.lineHighlightBorder": "#0F4A85",
+      "editor.selectionHighlightBackground": "#ADD6FF66",
+      "editor.selectionHighlightBorder": "#00000000",
+      "editor.wordHighlightBackground": "#5757574D",
+      "editor.wordHighlightBorder": "#00000000",
+      "editor.wordHighlightStrongBackground": "#0E639C40",
+      "editor.wordHighlightStrongBorder": "#00000000",
+      "editor.wordHighlightTextBackground": "#5757574D",
+      "editor.wordHighlightTextBorder": "#00000000",
+      "scrollbarSlider.background": "#64646466",
+      "scrollbarSlider.hoverBackground": "#646464B3",
+      "scrollbarSlider.activeBackground": "#00000099",
+      "editorWhitespace.foreground": "#00000000",
+    };
+  }
+  if (themeKind === "hc-dark") {
+    return {
+      "editor.selectionBackground": "#264F78",
+      "editor.inactiveSelectionBackground": "#3A3D41",
+      "editor.lineHighlightBackground": "#2A2D2E",
+      "editor.lineHighlightBorder": "#F38518",
+      "editor.selectionHighlightBackground": "#ADD6FF26",
+      "editor.selectionHighlightBorder": "#00000000",
+      "editor.wordHighlightBackground": "#575757B8",
+      "editor.wordHighlightBorder": "#00000000",
+      "editor.wordHighlightStrongBackground": "#004972B8",
+      "editor.wordHighlightStrongBorder": "#00000000",
+      "editor.wordHighlightTextBackground": "#575757B8",
+      "editor.wordHighlightTextBorder": "#00000000",
+      "scrollbarSlider.background": "#79797966",
+      "scrollbarSlider.hoverBackground": "#646464B3",
+      "scrollbarSlider.activeBackground": "#BFBFBF66",
+      "editorWhitespace.foreground": "#00000000",
+    };
+  }
+  if (themeKind === "light") {
+    return {
+      "editor.selectionBackground": "#ADD6FF",
+      "editor.inactiveSelectionBackground": "#C8DEF4",
+      "editor.lineHighlightBackground": "#0000000A",
+      "editor.lineHighlightBorder": "#00000000",
+      "editor.selectionHighlightBackground": "#ADD6FF80",
+      "editor.selectionHighlightBorder": "#00000000",
+      "editor.wordHighlightBackground": "#5757574D",
+      "editor.wordHighlightBorder": "#00000000",
+      "editor.wordHighlightStrongBackground": "#0E639C40",
+      "editor.wordHighlightStrongBorder": "#00000000",
+      "editor.wordHighlightTextBackground": "#5757574D",
+      "editor.wordHighlightTextBorder": "#00000000",
+      "scrollbarSlider.background": "#64646466",
+      "scrollbarSlider.hoverBackground": "#646464B3",
+      "scrollbarSlider.activeBackground": "#00000099",
+      "editorWhitespace.foreground": "#00000000",
+    };
+  }
+  return {
+    "editor.selectionBackground": "#264F78",
+    "editor.inactiveSelectionBackground": "#3A3D41",
+    "editor.lineHighlightBackground": "#2A2D2E",
+    "editor.lineHighlightBorder": "#00000000",
+    "editor.selectionHighlightBackground": "#ADD6FF26",
+    "editor.selectionHighlightBorder": "#00000000",
+    "editor.wordHighlightBackground": "#575757B8",
+    "editor.wordHighlightBorder": "#00000000",
+    "editor.wordHighlightStrongBackground": "#004972B8",
+    "editor.wordHighlightStrongBorder": "#00000000",
+    "editor.wordHighlightTextBackground": "#575757B8",
+    "editor.wordHighlightTextBorder": "#00000000",
+    "scrollbarSlider.background": "#79797966",
+    "scrollbarSlider.hoverBackground": "#646464B3",
+    "scrollbarSlider.activeBackground": "#BFBFBF66",
+    "editorWhitespace.foreground": "#00000000",
+  };
+}
+
+function cssSelectionColors(themeKind) {
+  const colors = editorSelectionColors(themeKind);
+  return {
+    active: colors["editor.selectionBackground"],
+    inactive: colors["editor.inactiveSelectionBackground"],
+    lineHighlight: colors["editor.lineHighlightBackground"],
+    lineHighlightBorder: colors["editor.lineHighlightBorder"],
+    selectionHighlight: colors["editor.selectionHighlightBackground"],
+    selectionHighlightBorder: colors["editor.selectionHighlightBorder"],
+    wordHighlight: colors["editor.wordHighlightBackground"],
+    wordHighlightBorder: colors["editor.wordHighlightBorder"],
+    wordHighlightStrong: colors["editor.wordHighlightStrongBackground"],
+    wordHighlightStrongBorder: colors["editor.wordHighlightStrongBorder"],
+    wordHighlightText: colors["editor.wordHighlightTextBackground"],
+    wordHighlightTextBorder: colors["editor.wordHighlightTextBorder"],
+    scrollbarSlider: colors["scrollbarSlider.background"],
+    scrollbarSliderHover: colors["scrollbarSlider.hoverBackground"],
+    scrollbarSliderActive: colors["scrollbarSlider.activeBackground"],
+    whitespace: colors["editorWhitespace.foreground"],
+  };
+}
+
+function applyHostEditorSettings(editor, msg) {
+  if (!editor || !msg) return;
+
+  const editorOptions = { ...(msg.editorOptions || {}) };
+  if (typeof msg.wordWrap === "boolean") {
+    editorOptions.wordWrap = msg.wordWrap ? "on" : "off";
+  }
+  if (Object.keys(editorOptions).length > 0) {
+    editor.updateOptions(editorOptions);
+  }
+
+  const model = editor.getModel?.();
+  if (model && msg.modelOptions && Object.keys(msg.modelOptions).length > 0) {
+    model.updateOptions(msg.modelOptions);
+  }
 }
 
 function TestBenchRunner() {
   const [theme, setTheme] = useState(detectVscodeTheme);
+  const [themeVersion, setThemeVersion] = useState(0);
   const [scriptText, setScriptText] = useState(INITIAL_SCRIPT);
   const [statuses, setStatuses] = useState({});
   const [errors, setErrors] = useState({});
@@ -144,6 +296,7 @@ function TestBenchRunner() {
   const stopRef = useRef(false);
   const selectedLinesRef = useRef(new Set([1]));
   const preservedSelectionsRef = useRef(null);
+  const suppressSelectionSyncRef = useRef(false);
   // Remembers the breakpoint trim line for the in-flight run, so the `done`
   // handler can decide whether to land the yellow arrow on it.
   const pausedAtRef = useRef(null);
@@ -153,7 +306,8 @@ function TestBenchRunner() {
   const outputLogRef = useRef(null);
   const outputAtBottomRef = useRef(true);
 
-  const isLight = theme === "light";
+  const isLight = theme === "light" || theme === "hc-light";
+  const selectionColors = cssSelectionColors(theme);
   // Each entry maps to a VS Code CSS variable when one is available, falling
   // back to the previous hand-tuned testbench palette. This keeps the UI
   // chrome (toolbar, buttons, output panel) in the user's chosen VS Code
@@ -176,7 +330,7 @@ function TestBenchRunner() {
     // list.inactiveSelectionBackground as red/salmon, which then blends
     // visibly under Monaco's blue text-selection making the selected
     // region look pink instead of blue.
-    selectedLine: isLight ? "#E5EBF1" : "#37373D",
+    selectedLine: isLight ? "rgba(229, 235, 241, 0.58)" : "rgba(55, 55, 61, 0.68)",
     menu:         readVscodeVar('menu-background',                     isLight ? "#ffffff" : "#0f1726"),
     splitter:     readVscodeVar('panel-border',                        isLight ? "#e2e8f0" : "#0b0f1a"),
     logEmpty:     readVscodeVar('disabledForeground',                  isLight ? "#94a3b8" : "#2a3450"),
@@ -196,6 +350,7 @@ function TestBenchRunner() {
   const syncSelectionFromEditor = useCallback(() => {
     const editor = editorRef.current;
     if (!editor) return;
+    if (suppressSelectionSyncRef.current) return;
 
     const selections = editor.getSelections() || [];
     const cursorLine = editor.getPosition()?.lineNumber ?? 1;
@@ -221,31 +376,23 @@ function TestBenchRunner() {
     const model = editor?.getModel();
     if (!editor || !monaco || !model) return;
 
-    const buildLineSelection = (line) =>
-      new monaco.Selection(line, 1, line, model.getLineMaxColumn(line));
+    const nextSet = additive
+      ? toggleLineInSet(selectedLinesRef.current, lineNumber)
+      : new Set([lineNumber]);
 
-    if (!additive) {
-      const selection = buildLineSelection(lineNumber);
-      editor.setSelection(selection);
-      queueMicrotask(() => editor.setSelection(selection));
-      editor.focus();
+    // TestBench step selection is command state, not text selection. Keep the
+    // Monaco selection collapsed so the editor looks like VS Code unless the
+    // user has made an actual text selection.
+    const collapsed = new monaco.Selection(lineNumber, 1, lineNumber, 1);
+    suppressSelectionSyncRef.current = true;
+    editor.setSelection(collapsed);
+    queueMicrotask(() => {
+      editor.setSelection(collapsed);
+      suppressSelectionSyncRef.current = false;
       setSelectedId(lineNumber);
-      setSelectedLines(new Set([lineNumber]));
-      return;
-    }
-
-    // Drive the toggle from React state (via ref) rather than
-    // editor.getSelections(). Monaco's default mousedown handler may run
-    // before this listener and insert its own selection — most importantly
-    // for the LAST line, where that selection is single-line and would
-    // confuse a getSelections-based toggle into removing the line.
-    const nextSet = toggleLineInSet(selectedLinesRef.current, lineNumber);
-    const nextSelections = [...nextSet]
-      .sort((a, b) => a - b)
-      .map(buildLineSelection);
-
-    editor.setSelections(nextSelections);
-    queueMicrotask(() => editor.setSelections(nextSelections));
+      setSelectedLines(nextSet);
+      selectedLinesRef.current = nextSet;
+    });
     editor.focus();
     setSelectedId(lineNumber);
     setSelectedLines(nextSet);
@@ -544,7 +691,7 @@ function TestBenchRunner() {
   useEffect(() => {
     if (!editorHostRef.current || editorRef.current) return;
     try {
-      defineEditorThemes(isLight);
+      defineEditorTheme(theme);
 
       // Pull font from VS Code's CSS variables so Monaco's character-width
       // measurements line up with what's actually rendered. JetBrains Mono
@@ -562,7 +709,7 @@ function TestBenchRunner() {
         // rules. Test files are .md and Monaco's bundled markdown grammar
         // handles them well.
         language: "markdown",
-        theme: isLight ? "testbench-light" : "testbench-dark",
+        theme: monacoThemeName(theme),
         fontFamily: editorFontFamily,
         fontSize: editorFontSize,
         glyphMargin: true,
@@ -574,16 +721,6 @@ function TestBenchRunner() {
         hideCursorInOverviewRuler: true,
         scrollBeyondLastLine: false,
         automaticLayout: true,
-        // "gutter" keeps the active-line indicator in the line-number column
-        // but drops the full-line body band — the band picks up
-        // editor.lineHighlightBackground from the user's theme, which can
-        // flash visibly while dragging a multi-line selection.
-        renderLineHighlight: "gutter",
-        // Highlight other instances of the selected text + the word at
-        // the cursor. Colors come from our theme, not the user's VS Code
-        // theme, so they stay subtle (some user themes paint these red).
-        selectionHighlight: true,
-        occurrencesHighlight: "singleFile",
         contextmenu: false,
         // Initial wordWrap; host overrides it via { type: 'init' } / 'settingsChanged'.
         wordWrap: "on",
@@ -697,16 +834,26 @@ function TestBenchRunner() {
     if (!monaco || !editorRef.current) return;
     // Re-read VS Code CSS variables — they change with the user's theme —
     // and rebuild the Monaco theme before applying.
-    defineEditorThemes(isLight);
-    monaco.editor.setTheme(isLight ? "testbench-light" : "testbench-dark");
-  }, [isLight]);
+    defineEditorTheme(theme);
+    monaco.editor.setTheme(monacoThemeName(theme));
+  }, [theme, themeVersion]);
 
   // VS Code toggles `vscode-light` / `vscode-dark` / `vscode-high-contrast`
-  // classes on <body> when the user changes their color theme. Observe and
-  // mirror so the webview follows the IDE without a manual toggle.
+  // classes on <body> when the theme family changes. Theme switches within the
+  // same family can leave the class alone but still replace CSS variables, so
+  // observe the style/theme-id attributes too and force a theme rebuild.
   useEffect(() => {
-    const observer = new MutationObserver(() => setTheme(detectVscodeTheme()));
-    observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    const refreshTheme = () => {
+      setTheme(detectVscodeTheme());
+      setThemeVersion((version) => version + 1);
+    };
+    const observer = new MutationObserver(refreshTheme);
+    const options = {
+      attributes: true,
+      attributeFilter: ["class", "style", "data-vscode-theme-id", "data-vscode-theme-kind"],
+    };
+    observer.observe(document.body, options);
+    observer.observe(document.documentElement, options);
     return () => observer.disconnect();
   }, []);
 
@@ -748,6 +895,7 @@ function TestBenchRunner() {
             if (model && model.getValue() !== msg.text) {
               model.setValue(msg.text);
             }
+            applyHostEditorSettings(editorRef.current, msg);
           }
           break;
 
@@ -826,9 +974,7 @@ function TestBenchRunner() {
         }
 
         case "settingsChanged":
-          if (editorRef.current && typeof msg.wordWrap === "boolean") {
-            editorRef.current.updateOptions({ wordWrap: msg.wordWrap ? "on" : "off" });
-          }
+          applyHostEditorSettings(editorRef.current, msg);
           break;
 
         case "prompt":
@@ -940,6 +1086,7 @@ function TestBenchRunner() {
             isWholeLine: true,
             className: "tb-selected-line",
             lineNumberClassName: "tb-selected-line-number",
+            marginClassName: "tb-selected-line-margin",
           },
         });
       }
@@ -1035,12 +1182,23 @@ function TestBenchRunner() {
       "--kbd-bg": isLight ? "#eef2f7" : "#1e2433",
       "--kbd-border": colors.borderStrong,
       "--kbd-text": colors.muted,
-      // Active-step line highlight. Hardcoded via colors.selectedLine
-       // (not pulled from --vscode-list-inactiveSelectionBackground) so
-       // it stays a subtle gray even when the user's theme paints list
-       // selection backgrounds in a color that would clash with the
-       // editor's blue text-selection.
-       "--selected-line": colors.selectedLine,
+      "--selected-line": colors.selectedLine,
+      "--tb-editor-selection-background": selectionColors.active,
+      "--tb-editor-inactive-selection-background": selectionColors.inactive,
+      "--tb-editor-line-highlight-background": selectionColors.lineHighlight,
+      "--tb-editor-line-highlight-border": selectionColors.lineHighlightBorder,
+      "--tb-editor-selection-highlight-background": selectionColors.selectionHighlight,
+      "--tb-editor-selection-highlight-border": selectionColors.selectionHighlightBorder,
+      "--tb-editor-word-highlight-background": selectionColors.wordHighlight,
+      "--tb-editor-word-highlight-border": selectionColors.wordHighlightBorder,
+      "--tb-editor-word-highlight-strong-background": selectionColors.wordHighlightStrong,
+      "--tb-editor-word-highlight-strong-border": selectionColors.wordHighlightStrongBorder,
+      "--tb-editor-word-highlight-text-background": selectionColors.wordHighlightText,
+      "--tb-editor-word-highlight-text-border": selectionColors.wordHighlightTextBorder,
+      "--tb-scrollbar-slider-background": selectionColors.scrollbarSlider,
+      "--tb-scrollbar-slider-hover-background": selectionColors.scrollbarSliderHover,
+      "--tb-scrollbar-slider-active-background": selectionColors.scrollbarSliderActive,
+      "--tb-editor-whitespace-foreground": selectionColors.whitespace,
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
@@ -1054,11 +1212,60 @@ function TestBenchRunner() {
         ::-webkit-scrollbar-thumb { background: ${colors.borderStrong}; border-radius: 3px; }
         @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
         @keyframes slideIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
-        .tb-selected-line { background: var(--selected-line) !important; }
+        .tb-selected-line {
+          background: var(--selected-line) !important;
+        }
+        .tb-selected-line-margin {
+          background: var(--selected-line) !important;
+        }
         .tb-selected-line-number {
           background: var(--selected-line);
           color: ${colors.textStrong} !important;
           font-weight: 700;
+        }
+        .monaco-editor .focused .selected-text {
+          background-color: var(--tb-editor-selection-background) !important;
+        }
+        .monaco-editor .selected-text {
+          background-color: var(--tb-editor-inactive-selection-background) !important;
+        }
+        .monaco-editor .mtkw,
+        .monaco-editor .mtkz,
+        .monaco-editor .mwh {
+          color: var(--tb-editor-whitespace-foreground) !important;
+        }
+        .monaco-editor .view-overlays .current-line,
+        .monaco-editor .margin-view-overlays .current-line {
+          background-color: var(--tb-editor-line-highlight-background) !important;
+          border-color: var(--tb-editor-line-highlight-border) !important;
+        }
+        .monaco-editor .focused .selectionHighlight {
+          background-color: var(--tb-editor-selection-highlight-background) !important;
+          border-color: var(--tb-editor-selection-highlight-border) !important;
+        }
+        .monaco-editor .wordHighlight {
+          background-color: var(--tb-editor-word-highlight-background) !important;
+          border-color: var(--tb-editor-word-highlight-border) !important;
+        }
+        .monaco-editor .wordHighlightStrong {
+          background-color: var(--tb-editor-word-highlight-strong-background) !important;
+          border-color: var(--tb-editor-word-highlight-strong-border) !important;
+        }
+        .monaco-editor .wordHighlightText {
+          background-color: var(--tb-editor-word-highlight-text-background) !important;
+          border-color: var(--tb-editor-word-highlight-text-border) !important;
+        }
+        .monaco-scrollable-element > .scrollbar {
+          background: transparent !important;
+        }
+        .monaco-scrollable-element > .scrollbar > .slider {
+          background: var(--tb-scrollbar-slider-background) !important;
+        }
+        .monaco-scrollable-element > .scrollbar > .slider:hover {
+          background: var(--tb-scrollbar-slider-hover-background) !important;
+        }
+        .monaco-scrollable-element > .scrollbar > .slider.active {
+          background: var(--tb-scrollbar-slider-active-background) !important;
         }
         .tb-breakpoint-slot {
           cursor: pointer;

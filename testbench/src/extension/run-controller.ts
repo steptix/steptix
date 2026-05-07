@@ -17,6 +17,8 @@ import {
   resolveSection,
   type ClassifiedStep,
   type ErrorPayload,
+  type HostEditorOptions,
+  type HostModelOptions,
   type HostToWebviewMsg,
   type RunEvent,
 } from 'ai-ui-automation-runner-core';
@@ -129,11 +131,17 @@ export class RunController {
   }
 
   /** Send the `init` message to the webview after it reports ready. */
-  sendInit(wordWrap: boolean): void {
+  sendInit(
+    wordWrap: boolean,
+    editorOptions?: HostEditorOptions,
+    modelOptions?: HostModelOptions,
+  ): void {
     this.post({
       type: 'init',
       text: this.ctx.document.getText(),
       wordWrap,
+      editorOptions,
+      modelOptions,
       filePath: this.ctx.document.uri.fsPath,
     });
   }

@@ -71,10 +71,58 @@ export type RunEvent =
 // Host → webview
 // ---------------------------------------------------------------------------
 
+export interface HostEditorOptions {
+  wordWrap?: 'off' | 'on' | 'wordWrapColumn' | 'bounded';
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: string;
+  fontLigatures?: boolean | string;
+  lineHeight?: number;
+  letterSpacing?: number;
+  cursorBlinking?: 'blink' | 'smooth' | 'phase' | 'expand' | 'solid';
+  cursorSmoothCaretAnimation?: 'off' | 'explicit' | 'on';
+  cursorStyle?: 'line' | 'block' | 'underline' | 'line-thin' | 'block-outline' | 'underline-thin';
+  cursorWidth?: number;
+  matchBrackets?: 'never' | 'near' | 'always';
+  renderWhitespace?: 'none' | 'boundary' | 'selection' | 'trailing' | 'all';
+  renderControlCharacters?: boolean;
+  renderLineHighlight?: 'none' | 'gutter' | 'line' | 'all';
+  renderLineHighlightOnlyWhenFocus?: boolean;
+  selectionHighlight?: boolean;
+  occurrencesHighlight?: 'off' | 'singleFile' | 'multiFile';
+  bracketPairColorization?: {
+    enabled?: boolean;
+    independentColorPoolPerBracketType?: boolean;
+  };
+  guides?: {
+    bracketPairs?: boolean | 'active';
+    bracketPairsHorizontal?: boolean | 'active';
+    highlightActiveBracketPair?: boolean;
+    indentation?: boolean;
+    highlightActiveIndentation?: boolean | 'always';
+  };
+  tabSize?: number;
+  insertSpaces?: boolean;
+  detectIndentation?: boolean;
+  trimAutoWhitespace?: boolean;
+}
+
+export interface HostModelOptions {
+  tabSize?: number;
+  insertSpaces?: boolean;
+  trimAutoWhitespace?: boolean;
+  bracketColorizationOptions?: {
+    enabled: boolean;
+    independentColorPoolPerBracketType: boolean;
+  };
+}
+
 export interface HostInitMsg {
   type: 'init';
   text: string;
   wordWrap: boolean;
+  editorOptions?: HostEditorOptions;
+  modelOptions?: HostModelOptions;
   /** Resolved absolute path of the test file, for display only. */
   filePath: string;
 }
@@ -97,6 +145,8 @@ export interface HostRunErrorMsg {
 export interface HostSettingsChangedMsg {
   type: 'settingsChanged';
   wordWrap: boolean;
+  editorOptions?: HostEditorOptions;
+  modelOptions?: HostModelOptions;
 }
 
 /**

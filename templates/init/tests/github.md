@@ -20,11 +20,10 @@ tags: [smoke]
 3. Enter the username {{username}}
 4. Enter the password {{password}}
 5. Click the Sign in button
-6. [interactive]
 6. Get a list of the names of the top repositories on the left panel [as: repos]
 7. [tool: print_all repos]
-7. Click logout
-8. Click "Sign out" button
+8. Click logout
+9. Click "Sign out" button
 
 <!-- latest-runs:start -->
 ## Latest runs

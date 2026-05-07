@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import {
   isWebviewMsg,
+  type HostEditorOptions,
+  type HostModelOptions,
   type WebviewToHostMsg,
 } from 'ai-ui-automation-runner-core';
 import { buildWebviewHtml } from './webview-html.js';
@@ -126,13 +128,21 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
       });
     });
 
-    // Forward setting changes (just wordWrap for now).
+    // Forward editor setting changes so the Monaco surface tracks VS Code's
+    // markdown editor behavior for selection, bracket matching, guides, cursor,
+    // whitespace rendering, fonts, and indentation.
     const settingsSub = vscode.workspace.onDidChangeConfiguration((e) => {
-      if (!e.affectsConfiguration('testbench.editor.wordWrap')) return;
-      const wordWrap = vscode.workspace
-        .getConfiguration('testbench')
-        .get<boolean>('editor.wordWrap', true);
-      void panel.webview.postMessage({ type: 'settingsChanged', wordWrap });
+      const scope = configurationScope(document);
+      if (
+        !e.affectsConfiguration('testbench.editor.wordWrap', document.uri) &&
+        !e.affectsConfiguration('editor', scope)
+      ) {
+        return;
+      }
+      void panel.webview.postMessage({
+        type: 'settingsChanged',
+        ...editorSettingsPayload(document),
+      });
     });
 
     panel.onDidDispose(() => {
@@ -155,13 +165,11 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
   ): Promise<void> {
     switch (msg.type) {
       case 'ready': {
-        const wordWrap = vscode.workspace
-          .getConfiguration('testbench')
-          .get<boolean>('editor.wordWrap', true);
+        const settings = editorSettingsPayload(document);
         getOutputChannel().appendLine(
-          `[webview ready] sending init: ${document.getText().length} chars, wordWrap=${wordWrap}`,
+          `[webview ready] sending init: ${document.getText().length} chars, wordWrap=${settings.wordWrap}`,
         );
-        controller.sendInit(wordWrap);
+        controller.sendInit(settings.wordWrap, settings.editorOptions, settings.modelOptions);
         break;
       }
       case 'run':
@@ -199,6 +207,131 @@ export class TestBenchEditorProvider implements vscode.CustomTextEditorProvider 
       }
     }
   }
+}
+
+interface EditorSettingsPayload {
+  wordWrap: boolean;
+  editorOptions: HostEditorOptions;
+  modelOptions: HostModelOptions;
+}
+
+function configurationScope(document: vscode.TextDocument): vscode.ConfigurationScope {
+  return { uri: document.uri, languageId: document.languageId || 'markdown' };
+}
+
+function editorSettingsPayload(document: vscode.TextDocument): EditorSettingsPayload {
+  const scope = configurationScope(document);
+  const editor = vscode.workspace.getConfiguration('editor', scope);
+  const testbench = vscode.workspace.getConfiguration('testbench', document.uri);
+  const wordWrap = testbench.get<boolean>('editor.wordWrap', true);
+
+  const bracketPairColorization = pruneObject({
+    enabled: asBoolean(editor.get('bracketPairColorization.enabled')),
+    independentColorPoolPerBracketType: asBoolean(
+      editor.get('bracketPairColorization.independentColorPoolPerBracketType'),
+    ),
+  });
+
+  const editorOptions: HostEditorOptions = pruneObject({
+    wordWrap: wordWrap ? 'on' as const : 'off' as const,
+    fontFamily: asString(editor.get('fontFamily')),
+    fontSize: asNumber(editor.get('fontSize')),
+    fontWeight: asString(editor.get('fontWeight')),
+    fontLigatures: asBooleanOrString(editor.get('fontLigatures')),
+    lineHeight: asNumber(editor.get('lineHeight')),
+    letterSpacing: asNumber(editor.get('letterSpacing')),
+    cursorBlinking: asEnum(editor.get('cursorBlinking'), ['blink', 'smooth', 'phase', 'expand', 'solid']),
+    cursorSmoothCaretAnimation: asEnum(editor.get('cursorSmoothCaretAnimation'), ['off', 'explicit', 'on']),
+    cursorStyle: asEnum(editor.get('cursorStyle'), [
+      'line',
+      'block',
+      'underline',
+      'line-thin',
+      'block-outline',
+      'underline-thin',
+    ]),
+    cursorWidth: asNumber(editor.get('cursorWidth')),
+    matchBrackets: asEnum(editor.get('matchBrackets'), ['never', 'near', 'always']),
+    renderWhitespace: asEnum(editor.get('renderWhitespace'), ['none', 'boundary', 'selection', 'trailing', 'all']),
+    renderControlCharacters: asBoolean(editor.get('renderControlCharacters')),
+    renderLineHighlight: asEnum(editor.get('renderLineHighlight'), ['none', 'gutter', 'line', 'all']),
+    renderLineHighlightOnlyWhenFocus: asBoolean(editor.get('renderLineHighlightOnlyWhenFocus')),
+    selectionHighlight: asBoolean(editor.get('selectionHighlight')),
+    occurrencesHighlight: normalizeOccurrencesHighlight(editor.get('occurrencesHighlight')),
+    bracketPairColorization,
+    guides: pruneObject({
+      bracketPairs: asBooleanOrActive(editor.get('guides.bracketPairs')),
+      bracketPairsHorizontal: asBooleanOrActive(editor.get('guides.bracketPairsHorizontal')),
+      highlightActiveBracketPair: asBoolean(editor.get('guides.highlightActiveBracketPair')),
+      indentation: asBoolean(editor.get('guides.indentation')),
+      highlightActiveIndentation: asBooleanOrAlways(editor.get('guides.highlightActiveIndentation')),
+    }),
+    tabSize: asNumber(editor.get('tabSize')),
+    insertSpaces: asBoolean(editor.get('insertSpaces')),
+    detectIndentation: asBoolean(editor.get('detectIndentation')),
+    trimAutoWhitespace: asBoolean(editor.get('trimAutoWhitespace')),
+  });
+
+  const bracketColorizationOptions =
+    typeof bracketPairColorization.enabled === 'boolean' &&
+    typeof bracketPairColorization.independentColorPoolPerBracketType === 'boolean'
+      ? {
+          enabled: bracketPairColorization.enabled,
+          independentColorPoolPerBracketType: bracketPairColorization.independentColorPoolPerBracketType,
+        }
+      : undefined;
+
+  const modelOptions: HostModelOptions = pruneObject({
+    tabSize: asNumber(editor.get('tabSize')),
+    insertSpaces: asBoolean(editor.get('insertSpaces')),
+    trimAutoWhitespace: asBoolean(editor.get('trimAutoWhitespace')),
+    bracketColorizationOptions,
+  });
+
+  return { wordWrap, editorOptions, modelOptions };
+}
+
+function pruneObject<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => {
+      if (entry == null) return false;
+      if (typeof entry === 'object' && !Array.isArray(entry) && Object.keys(entry).length === 0) return false;
+      return true;
+    }),
+  ) as T;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function asBooleanOrString(value: unknown): boolean | string | undefined {
+  return typeof value === 'boolean' || typeof value === 'string' ? value : undefined;
+}
+
+function asEnum<const T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : undefined;
+}
+
+function asBooleanOrActive(value: unknown): boolean | 'active' | undefined {
+  return typeof value === 'boolean' || value === 'active' ? value : undefined;
+}
+
+function asBooleanOrAlways(value: unknown): boolean | 'always' | undefined {
+  return typeof value === 'boolean' || value === 'always' ? value : undefined;
+}
+
+function normalizeOccurrencesHighlight(value: unknown): 'off' | 'singleFile' | 'multiFile' | undefined {
+  if (typeof value === 'boolean') return value ? 'singleFile' : 'off';
+  return asEnum(value, ['off', 'singleFile', 'multiFile']);
 }
 
 function buildNoWorkspaceHtml(): string {

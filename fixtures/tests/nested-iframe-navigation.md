@@ -18,4 +18,4 @@ timeout: 120s
 7. Inside the recommendations iframe (nested inside the advisor iframe), verify there are 3 recommendation cards: one tagged "Rebalance", one tagged "Buy", and one tagged "Hold"
 8. Inside the recommendations iframe, click "View Details" on the "Rebalance: Reduce Equities" card and verify the details show a target equity allocation of "47%"
 9. Inside the recommendations iframe, click the "Apply" button on the rebalance card and verify a confirmation message "Rebalance order submitted" appears
-10. Inside the recommendations iframe, click "View Details" on the "Buy: Vanguard Total Bond ETF (BND)" card and verify the suggested amount is "$7,142.50" and the yield is "4.2% annual"
+10. Inside the recommendations iframe, click "View Details" on the "Buy: Vanguard Total Bond ETF (BND)" card and verify the suggested amount is "$7,142.50" and the yield is "4.2%" annual
