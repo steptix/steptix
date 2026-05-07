@@ -81,9 +81,20 @@ function buildEditorThemeColors(isLight) {
     "editor.foreground":                  readVscodeVar('editor.foreground',                  isLight ? '#172033' : '#d7e2f2'),
     "editorLineNumber.foreground":        readVscodeVar('editorLineNumber.foreground',        isLight ? '#94a3b8' : '#4a5578'),
     "editorLineNumber.activeForeground":  readVscodeVar('editorLineNumber.activeForeground',  isLight ? '#0f172a' : '#e2e8f0'),
-    "editor.selectionBackground":         readVscodeVar('editor.selectionBackground',         isLight ? '#bfdbfe' : '#1e2c4f'),
-    "editor.inactiveSelectionBackground": readVscodeVar('editor.inactiveSelectionBackground', isLight ? '#dbeafe' : '#162038'),
+    // Fallback values match VS Code Default Light+/Dark+ exactly so we
+    // degrade gracefully when the CSS variable lookup returns empty.
+    "editor.selectionBackground":         readVscodeVar('editor.selectionBackground',         isLight ? '#ADD6FF' : '#264F78'),
+    "editor.inactiveSelectionBackground": readVscodeVar('editor.inactiveSelectionBackground', isLight ? '#E5EBF1' : '#3A3D41'),
     "editorGutter.background":            readVscodeVar('editorGutter.background',            isLight ? '#f8fafc' : '#090d16'),
+    // Hardcoded non-red values for word/occurrence highlights and the
+    // drag-and-drop drop target. We don't read these from CSS variables
+    // because the user's theme paints them an aggressive red that drowns
+    // out the editor. Values mirror VS Code Default Dark+/Light+ palettes
+    // — subtle blue/gray with alpha so they layer cleanly over selection.
+    "editor.selectionHighlightBackground": isLight ? '#ADD6FF80' : '#ADD6FF26',
+    "editor.wordHighlightBackground":      isLight ? '#5757574D' : '#575757B8',
+    "editor.wordHighlightStrongBackground":isLight ? '#0E639C40' : '#004972B8',
+    "editor.dropBackground":               isLight ? '#5757574D' : '#53595D80',
   };
 }
 
@@ -149,7 +160,10 @@ function TestBenchRunner() {
   // color scheme instead of the bespoke navy palette.
   const colors = {
     page:         readVscodeVar('sideBar-background',                  isLight ? "#f5f7fb" : "#0b0f1a"),
-    header:       readVscodeVar('editorGroupHeader-tabsBackground',    isLight ? "#ffffff" : "#0d1220"),
+    // Toolbar shares the editor's background so the chrome reads as one
+    // continuous surface — no visible seam where the toolbar ends and the
+    // editor begins.
+    header:       readVscodeVar('editor-background',                   isLight ? "#ffffff" : "#0d1220"),
     panel:        readVscodeVar('editor-background',                   isLight ? "#ffffff" : "#0d1220"),
     panelAlt:     readVscodeVar('sideBar-background',                  isLight ? "#f8fafc" : "#090d16"),
     border:       readVscodeVar('panel-border',                        isLight ? "#d8e0ed" : "#1a2240"),
@@ -158,7 +172,11 @@ function TestBenchRunner() {
     textStrong:   readVscodeVar('foreground',                          isLight ? "#0f172a" : "#e2e8f0"),
     muted:        readVscodeVar('descriptionForeground',               isLight ? "#64748b" : "#6b7a99"),
     faint:        readVscodeVar('disabledForeground',                  isLight ? "#94a3b8" : "#3a4a6a"),
-    selectedLine: readVscodeVar('list-inactiveSelectionBackground',    isLight ? "#dbeafe" : "#16213a"),
+    // Hardcoded subtle gray (not from CSS var) — some user themes paint
+    // list.inactiveSelectionBackground as red/salmon, which then blends
+    // visibly under Monaco's blue text-selection making the selected
+    // region look pink instead of blue.
+    selectedLine: isLight ? "#E5EBF1" : "#37373D",
     menu:         readVscodeVar('menu-background',                     isLight ? "#ffffff" : "#0f1726"),
     splitter:     readVscodeVar('panel-border',                        isLight ? "#e2e8f0" : "#0b0f1a"),
     logEmpty:     readVscodeVar('disabledForeground',                  isLight ? "#94a3b8" : "#2a3450"),
@@ -556,7 +574,16 @@ function TestBenchRunner() {
         hideCursorInOverviewRuler: true,
         scrollBeyondLastLine: false,
         automaticLayout: true,
-        renderLineHighlight: "all",
+        // "gutter" keeps the active-line indicator in the line-number column
+        // but drops the full-line body band — the band picks up
+        // editor.lineHighlightBackground from the user's theme, which can
+        // flash visibly while dragging a multi-line selection.
+        renderLineHighlight: "gutter",
+        // Highlight other instances of the selected text + the word at
+        // the cursor. Colors come from our theme, not the user's VS Code
+        // theme, so they stay subtle (some user themes paint these red).
+        selectionHighlight: true,
+        occurrencesHighlight: "singleFile",
         contextmenu: false,
         // Initial wordWrap; host overrides it via { type: 'init' } / 'settingsChanged'.
         wordWrap: "on",
@@ -1008,11 +1035,12 @@ function TestBenchRunner() {
       "--kbd-bg": isLight ? "#eef2f7" : "#1e2433",
       "--kbd-border": colors.borderStrong,
       "--kbd-text": colors.muted,
-      // Use VS Code's list-selection color so the active-step highlight is
-       // visually distinct from text selection (which uses
-       // editor.selectionBackground — typically blue and was clashing).
-      // Falls back to the testbench palette in standalone-dev.
-       "--selected-line": `var(--vscode-list-inactiveSelectionBackground, ${colors.selectedLine})`,
+      // Active-step line highlight. Hardcoded via colors.selectedLine
+       // (not pulled from --vscode-list-inactiveSelectionBackground) so
+       // it stays a subtle gray even when the user's theme paints list
+       // selection backgrounds in a color that would clash with the
+       // editor's blue text-selection.
+       "--selected-line": colors.selectedLine,
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
@@ -1040,9 +1068,15 @@ function TestBenchRunner() {
           content: "";
           position: absolute;
           left: 3px;
-          top: 5px;
-          width: 7px;
-          height: 7px;
+          /* Center vertically against the inherited line-box rather than
+             pinning to a hardcoded top offset — adapts automatically when
+             the user changes their editor font size. */
+          top: 50%;
+          transform: translateY(-50%);
+          /* Size scales with the editor font (em = font-size). 0.5em ≈ 7px
+             at 14px, 9px at 18px, etc. */
+          width: 0.5em;
+          height: 0.5em;
           border-radius: 50%;
           border: 1px solid transparent;
         }
@@ -1062,16 +1096,19 @@ function TestBenchRunner() {
         .tb-status-icon::before {
           position: absolute;
           left: 4px;
-          top: 3px;
-          width: 14px;
-          height: 14px;
-          border-radius: 4px;
+          /* Vertical centering + em sizing so the status badge tracks
+             whatever editor font size the user has configured. */
+          top: 50%;
+          transform: translateY(-50%);
+          width: 1em;
+          height: 1em;
+          border-radius: 0.3em;
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 10px;
+          font-size: 0.7em;
           font-weight: 700;
-          font-family: JetBrains Mono, monospace;
+          font-family: var(--vscode-editor-font-family);
         }
         .tb-status-running::before { content: "●"; color: ${isLight ? "#15803d" : "#4ade80"}; background: ${isLight ? "#dcfce7" : "#1a2a1a"}; box-shadow: 0 0 10px ${isLight ? "#86efac88" : "#4ade8055"}; animation: pulse 1s ease-in-out infinite; }
         .tb-status-pass::before { content: "✓"; color: ${isLight ? "#15803d" : "#22c55e"}; background: ${isLight ? "#dcfce7" : "#0f2318"}; }
@@ -1079,6 +1116,58 @@ function TestBenchRunner() {
         .tb-status-skip::before { content: "—"; color: ${isLight ? "#475569" : "#6b7280"}; background: ${isLight ? "#e2e8f0" : "#1e2433"}; }
         .tb-breakpoint-stopped { cursor: grab; }
         .tb-breakpoint-stopped::before { content: "▶"; color: ${isLight ? "#b45309" : "#fbbf24"}; background: ${isLight ? "#fef3c7" : "#2a2210"}; box-shadow: 0 0 8px ${isLight ? "#fcd34d88" : "#fbbf2455"}; pointer-events: none; }
+
+        /* Toolbar buttons styled to match VS Code's button conventions:
+           solid color (no gradient/border), tight padding, 2px corners,
+           --vscode-button-* for colors so they track the user's theme. */
+        .tb-btn {
+          padding: 4px 11px;
+          border: none;
+          border-radius: 2px;
+          background: var(--vscode-button-secondaryBackground);
+          color: var(--vscode-button-secondaryForeground);
+          font-size: 12px;
+          font-family: var(--vscode-font-family);
+          line-height: 1.4;
+          cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          transition: background-color 100ms ease;
+        }
+        .tb-btn:hover:not(:disabled) {
+          background: var(--vscode-button-secondaryHoverBackground);
+        }
+        .tb-btn:disabled {
+          cursor: default;
+          opacity: 0.5;
+        }
+        .tb-btn--primary {
+          background: var(--vscode-button-background);
+          color: var(--vscode-button-foreground);
+        }
+        .tb-btn--primary:hover:not(:disabled) {
+          background: var(--vscode-button-hoverBackground);
+        }
+        .tb-btn--running {
+          background: ${isLight ? "#dcfce7" : "#1a2a1a"};
+          color: ${isLight ? "#15803d" : "#4ade80"};
+        }
+        .tb-btn--danger {
+          background: ${isLight ? "#fee2e2" : "#2a1010"};
+          color: ${isLight ? "#b91c1c" : "#f87171"};
+        }
+        .tb-btn--danger:hover:not(:disabled) {
+          background: ${isLight ? "#fecaca" : "#3a1818"};
+        }
+        .tb-btn--warning {
+          background: ${isLight ? "#fef3c7" : "#3a2a05"};
+          color: ${isLight ? "#92400e" : "#fbbf24"};
+          font-weight: 600;
+        }
+        .tb-btn--warning:hover:not(:disabled) {
+          background: ${isLight ? "#fde68a" : "#4a3a15"};
+        }
       `}</style>
 
       <div style={{ padding: "8px 12px", borderBottom: `1px solid ${colors.border}`, display: "flex", alignItems: "center", gap: 8, background: colors.header }}>
@@ -1096,18 +1185,18 @@ function TestBenchRunner() {
           onClick={handleRenumber}
           disabled={running || selectedLines.size < 2}
           title="Rewrite the leading '1.' / '2.' prefixes on the selected lines so they're sequential. Continues from the last numbered line above the selection."
-          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running || selectedLines.size < 2 ? "default" : "pointer", opacity: running || selectedLines.size < 2 ? 0.5 : 1 }}
+          className="tb-btn"
         >
           Renumber
         </button>
-        <button onClick={handleReset} disabled={running} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running ? "default" : "pointer", opacity: running ? 0.5 : 1 }}>
+        <button onClick={handleReset} disabled={running} className="tb-btn">
           Reset
         </button>
         <button
           onClick={handleCloseSession}
           disabled={running}
           title="Close the server-side session for this file. Next run starts a fresh browser with the current Config."
-          style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${colors.borderStrong}`, borderRadius: 5, color: colors.muted, fontSize: 11, cursor: running ? "default" : "pointer", opacity: running ? 0.5 : 1 }}
+          className="tb-btn"
         >
           Close Session
         </button>
@@ -1115,14 +1204,22 @@ function TestBenchRunner() {
           onClick={handleResume}
           disabled={running || breakpointStop == null}
           title={breakpointStop != null ? `Resume from breakpoint on line ${breakpointStop}` : "Resume — only available when paused at a breakpoint"}
-          style={{ padding: "6px 12px", background: breakpointStop != null ? (isLight ? "#fef3c7" : "#3a2a05") : "transparent", border: `1px solid ${breakpointStop != null ? "#fbbf24" : colors.borderStrong}`, borderRadius: 5, color: breakpointStop != null ? (isLight ? "#92400e" : "#fbbf24") : colors.muted, fontSize: 11, cursor: !running && breakpointStop != null ? "pointer" : "default", opacity: running || breakpointStop == null ? 0.5 : 1, fontWeight: breakpointStop != null ? 600 : 400 }}
+          className={`tb-btn${breakpointStop != null ? " tb-btn--warning" : ""}`}
         >
           {breakpointStop != null ? `▶ Resume (line ${breakpointStop})` : "Resume"}
         </button>
-        <button onClick={handleStop} disabled={!running && breakpointStop == null} style={{ padding: "6px 12px", background: (running || breakpointStop != null) ? (isLight ? "#fee2e2" : "#2a1010") : "transparent", border: `1px solid ${isLight ? "#fca5a5" : "#5a2020"}`, borderRadius: 5, color: (running || breakpointStop != null) ? (isLight ? "#b91c1c" : "#f87171") : (isLight ? "#9b6064" : "#5f3940"), fontSize: 11, cursor: (running || breakpointStop != null) ? "pointer" : "default", opacity: !running && breakpointStop == null ? 0.5 : 1 }}>
+        <button
+          onClick={handleStop}
+          disabled={!running && breakpointStop == null}
+          className={`tb-btn${(running || breakpointStop != null) ? " tb-btn--danger" : ""}`}
+        >
           Stop
         </button>
-        <button onClick={runSelected} disabled={running || !monacoReady} style={{ padding: "6px 16px", background: running ? (isLight ? "#dcfce7" : "#1a2a1a") : "linear-gradient(135deg, #1d4ed8, #2563eb)", border: "none", borderRadius: 5, color: running ? (isLight ? "#15803d" : "#4ade80") : "#fff", fontSize: 12, cursor: running || !monacoReady ? "default" : "pointer", opacity: running || !monacoReady ? 0.5 : 1, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+        <button
+          onClick={runSelected}
+          disabled={running || !monacoReady}
+          className={`tb-btn ${running ? "tb-btn--running" : "tb-btn--primary"}`}
+        >
           {running ? <><span style={{ animation: "pulse 1s infinite" }}>●</span> Running…</> : <><span>▶</span> Run <Kbd>F5</Kbd></>}
         </button>
       </div>
