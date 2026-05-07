@@ -368,6 +368,11 @@ function TestBenchRunner() {
   // as-is when no .env data is available).
   const [runtimeVariables, setRuntimeVariables] = useState({});
   const [variablesCollapsed, setVariablesCollapsed] = useState(false);
+  // Count of step lines the most recent run targeted — used as the
+  // denominator in the toolbar's "X/Y steps" indicator. Without this we'd
+  // fall back to `steps.length`, which is total document lines (steps is
+  // built from a raw newline split), not the F5-runnable step count.
+  const [runTargetCount, setRunTargetCount] = useState(0);
 
   const editorHostRef = useRef(null);
   const editorRef = useRef(null);
@@ -591,6 +596,7 @@ function TestBenchRunner() {
     pausedAtRef.current = pausedAt;
 
     const lineIds = runnable.map((step) => step.id);
+    setRunTargetCount(lineIds.length);
 
     // Clear any stale errors on targeted lines. Don't pre-mark them as
     // RUNNING — only the line the server is actively executing should
@@ -658,6 +664,7 @@ function TestBenchRunner() {
     selectedLinesRef.current = new Set();
     setRunLog([]);
     setRuntimeVariables({});
+    setRunTargetCount(0);
     stopRef.current = true;
     finishRun();
     const editor = editorRef.current;
@@ -818,7 +825,13 @@ function TestBenchRunner() {
         hideCursorInOverviewRuler: true,
         scrollBeyondLastLine: false,
         automaticLayout: true,
-        contextmenu: false,
+        // Re-enable Monaco's built-in context menu so right-click in the text
+        // area gives Cut / Copy / Paste / Command Palette / Go to Definition.
+        // Our `onContextMenu` listener still claims gutter right-clicks
+        // (line numbers + glyph margin) for the breakpoint menu by calling
+        // preventDefault and returning early; everywhere else falls through
+        // to Monaco's default.
+        contextmenu: true,
         // Initial wordWrap; host overrides it via { type: 'init' } / 'settingsChanged'.
         wordWrap: "on",
         // Disable Monaco's built-in bracket-match highlight — both the legacy
@@ -1539,7 +1552,7 @@ function TestBenchRunner() {
           <div style={{ display: "flex", gap: 12, fontSize: 11, marginRight: 8 }}>
             <span style={{ color: "#22c55e" }}>✓ {passCount} passed</span>
             {failCount > 0 && <span style={{ color: "#f87171" }}>✗ {failCount} failed</span>}
-            <span style={{ color: colors.faint }}>{runCount}/{steps.length} steps</span>
+            <span style={{ color: colors.faint }}>{runCount}/{runTargetCount} steps</span>
           </div>
         )}
 
