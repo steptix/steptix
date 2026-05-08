@@ -2,7 +2,7 @@
   "name": "testbench",
   "displayName": "TestBench",
   "publisher": "pkent",
-  "version": "0.1.53",
+  "version": "0.2.7",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code",
   "private": true,
   "engines": {
@@ -17,18 +17,31 @@
     "onStartupFinished"
   ],
   "contributes": {
-    "customEditors": [
+    "breakpoints": [
       {
-        "viewType": "testbench.editor",
-        "displayName": "TestBench",
-        "selector": [
-          {
-            "filenamePattern": "*.md"
-          }
-        ],
-        "priority": "default"
+        "language": "markdown"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "testbench",
+          "title": "TestBench",
+          "icon": "$(beaker)"
+        }
+      ]
+    },
+    "views": {
+      "testbench": [
+        {
+          "id": "testbench.runner",
+          "name": "Test Runner",
+          "type": "webview",
+          "icon": "$(beaker)",
+          "contextualTitle": "TestBench"
+        }
+      ]
+    },
     "configuration": {
       "title": "TestBench",
       "properties": {
@@ -36,16 +49,6 @@
           "type": "string",
           "default": "",
           "description": "Absolute or workspace-relative path used when walk-up finds no .env next to (or above) the test file."
-        },
-        "testbench.editor.wordWrap": {
-          "type": "boolean",
-          "default": true,
-          "description": "Wrap long lines in the TestBench editor."
-        },
-        "testbench.openMarkdownAsTest": {
-          "type": "boolean",
-          "default": true,
-          "description": "Open Markdown files containing a '## Steps' heading in the TestBench editor by default. Disable to keep all .md files in the plain editor."
         },
         "testbench.consoleLogLevel": {
           "type": "string",
@@ -69,15 +72,23 @@
     "commands": [
       {
         "command": "testbench.runSelected",
-        "title": "TestBench: Run Selected Step(s)"
+        "title": "TestBench: Run Selected Step(s)",
+        "icon": "$(play)"
       },
       {
         "command": "testbench.runAll",
-        "title": "TestBench: Run All Steps"
+        "title": "TestBench: Run All Steps",
+        "icon": "$(run-all)"
       },
       {
         "command": "testbench.stop",
-        "title": "TestBench: Stop Run"
+        "title": "TestBench: Stop Run",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "testbench.pause",
+        "title": "TestBench: Pause Run",
+        "icon": "$(debug-pause)"
       },
       {
         "command": "testbench.restartSession",
@@ -86,11 +97,25 @@
       },
       {
         "command": "testbench.toggleBreakpoint",
-        "title": "TestBench: Toggle Breakpoint"
+        "title": "TestBench: Toggle Breakpoint",
+        "icon": "$(debug-breakpoint)"
       },
       {
-        "command": "testbench.reopenAsText",
-        "title": "TestBench: Reopen as Plain Markdown"
+        "command": "testbench.runStepHere",
+        "title": "TestBench: Run This Step"
+      },
+      {
+        "command": "testbench.resume",
+        "title": "TestBench: Resume from Breakpoint",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "testbench.clearBreakpoints",
+        "title": "TestBench: Clear All Breakpoints"
+      },
+      {
+        "command": "testbench.clearStatuses",
+        "title": "TestBench: Clear Run Statuses"
       },
       {
         "command": "testbench.revealEnvFile",
@@ -108,18 +133,98 @@
       {
         "command": "testbench.selectEnv",
         "title": "TestBench: Select Environment"
+      },
+      {
+        "command": "testbench.focusRunner",
+        "title": "TestBench: Focus Runner Panel"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "testbench.runSelected",
+          "when": "testbench.activeFile && !testbench.running && !testbench.paused",
+          "group": "navigation@1"
+        },
+        {
+          "command": "testbench.pause",
+          "when": "testbench.activeFile && testbench.running",
+          "group": "navigation@1"
+        },
+        {
+          "command": "testbench.resume",
+          "when": "testbench.activeFile && testbench.paused && !testbench.running",
+          "group": "navigation@1"
+        },
+        {
+          "command": "testbench.stop",
+          "when": "testbench.activeFile && (testbench.running || testbench.paused)",
+          "group": "navigation@2"
+        },
+        {
+          "command": "testbench.restartSession",
+          "when": "testbench.activeFile",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/lineNumber/context": [
+        {
+          "command": "testbench.toggleBreakpoint",
+          "when": "testbench.activeFile",
+          "group": "1_breakpoint@1"
+        },
+        {
+          "command": "testbench.runStepHere",
+          "when": "testbench.activeFile",
+          "group": "2_run@1"
+        },
+        {
+          "command": "testbench.clearBreakpoints",
+          "when": "testbench.activeFile",
+          "group": "3_clear@1"
+        },
+        {
+          "command": "testbench.clearStatuses",
+          "when": "testbench.activeFile",
+          "group": "3_clear@2"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "testbench.runSelected",
         "key": "f5",
-        "when": "resourceExtname == .md && activeCustomEditorId == testbench.editor"
+        "when": "editorTextFocus && testbench.activeFile && !testbench.running && !testbench.paused"
+      },
+      {
+        "command": "testbench.pause",
+        "key": "f5",
+        "when": "editorTextFocus && testbench.activeFile && testbench.running"
+      },
+      {
+        "command": "testbench.resume",
+        "key": "f5",
+        "when": "editorTextFocus && testbench.activeFile && testbench.paused && !testbench.running"
+      },
+      {
+        "command": "testbench.stop",
+        "key": "shift+f5",
+        "when": "editorTextFocus && testbench.activeFile && (testbench.running || testbench.paused)"
       },
       {
         "command": "-workbench.action.debug.start",
         "key": "f5",
-        "when": "resourceExtname == .md && activeCustomEditorId == testbench.editor"
+        "when": "editorTextFocus && testbench.activeFile"
+      },
+      {
+        "command": "-workbench.action.debug.stop",
+        "key": "shift+f5",
+        "when": "editorTextFocus && testbench.activeFile"
+      },
+      {
+        "command": "testbench.toggleBreakpoint",
+        "key": "f9",
+        "when": "editorTextFocus && testbench.activeFile"
       }
     ]
   },
@@ -138,7 +243,6 @@
   },
   "dependencies": {
     "ai-ui-automation-runner-core": "file:../runner-core",
-    "monaco-editor": "^0.49.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

@@ -12,3 +12,4 @@ package-lock.json
 **/*.map
 **/*.ts
 !dist/**
+!icons/**

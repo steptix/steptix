@@ -70,9 +70,18 @@ export class ApiClientError extends Error {
  * True when the error represents a user-initiated abort (e.g. Stop button)
  * rather than a network failure. Callers use this to suppress the noisy
  * "connection lost" error toast on intentional cancellation.
+ *
+ * Cross-bundle safe: when runner-core is bundled into a consumer (e.g.
+ * esbuild bundles it into the testbench extension), `instanceof` against
+ * an ApiClientError thrown by a different copy of this module returns
+ * false. Fall back to duck-typing by name + kind so test fakes and any
+ * non-bundled callers also signal aborts correctly.
  */
 export function isUserAbort(err: unknown): boolean {
-  return err instanceof ApiClientError && err.kind === 'aborted';
+  if (!err || typeof err !== 'object') return false;
+  if (err instanceof ApiClientError && err.kind === 'aborted') return true;
+  const e = err as { name?: unknown; kind?: unknown };
+  return e.name === 'ApiClientError' && e.kind === 'aborted';
 }
 
 export interface ApiClientOptions {

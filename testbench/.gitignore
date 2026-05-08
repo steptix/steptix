@@ -2,3 +2,8 @@ server.*.log
 node_modules/
 dist/
 .claude/
+.vscode-test/
+tests/integration/test-report.json
+tests/integration/fixtures/github.md
+integration-out.log
+*.vsix

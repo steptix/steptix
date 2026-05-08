@@ -25,9 +25,13 @@ async function main() {
     // as a Node binary and the script is what wires up extension testing.
     const cliJs = path.join(installRoot, 'resources', 'app', 'out', 'cli.js');
 
+    // Pass the fixtures dir as a folder arg so VS Code opens it as the
+    // workspace. Without it, RunController.runLines() can't resolve
+    // workspaceFolderFor(uri) and silently no-ops.
     const args = [
       cliJs,
       '--wait',
+      workspacePath,
       '--extensionDevelopmentPath=' + extensionDevelopmentPath,
       '--extensionTestsPath=' + extensionTestsPath,
       '--user-data-dir=' + userDataDir,
@@ -38,15 +42,35 @@ async function main() {
     console.log('Launching:', codeExe);
     console.log('  args:', args.join(' '));
 
+    const reportPath = path.resolve(__dirname, 'test-report.json');
+    try { require('node:fs').rmSync(reportPath, { force: true }); } catch { /* ignore */ }
+
     const result = cp.spawnSync(codeExe, args, {
       stdio: 'inherit',
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',
         TESTBENCH_FIXTURES_DIR: workspacePath,
+        TESTBENCH_TEST_REPORT: reportPath,
         ELECTRON_ENABLE_LOGGING: '1',
       },
     });
+
+    // Print whatever the JSON reporter captured. ELECTRON_RUN_AS_NODE +
+    // Mocha's spec reporter don't surface to stdout reliably on Windows;
+    // the report file is the source of truth.
+    try {
+      const report = JSON.parse(require('node:fs').readFileSync(reportPath, 'utf8'));
+      console.log('\n--- Test report ---');
+      for (const r of report.results) {
+        const tag = r.state === 'pass' ? '✓' : r.state === 'fail' ? '✗' : 'o';
+        console.log(`  ${tag} ${r.suite} > ${r.title}`);
+        if (r.state === 'fail' && r.err) console.log(r.err);
+      }
+      console.log(`\n${report.results.length} tests, ${report.failures} failures`);
+    } catch (err) {
+      console.error('No test report written (Mocha may not have run):', err.message);
+    }
 
     if (result.status !== 0) {
       console.error('integration tests failed with exit code', result.status);

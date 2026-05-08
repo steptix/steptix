@@ -17,20 +17,31 @@ import {
   resolveSection,
   type ClassifiedStep,
   type ErrorPayload,
-  type HostEditorOptions,
-  type HostModelOptions,
   type HostToWebviewMsg,
   type RunEvent,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 
-/** A run-context is one document opened in one editor. */
-export interface RunContext {
-  document: vscode.TextDocument;
-  webview: vscode.Webview;
-  workspaceFolder: vscode.WorkspaceFolder;
+/**
+ * Subset of the ApiClient surface we depend on. Defining it lets tests
+ * inject a fake that scripts the event stream without spinning up the
+ * real Sessions API server. The default factory still hands back a real
+ * `new ApiClient(...)` for production use.
+ */
+export interface ApiClientLike {
+  streamSteps(
+    sessionId: string,
+    request: unknown,
+    signal: AbortSignal,
+  ): AsyncIterable<RunEvent>;
+  closeSession(sessionId: string): Promise<void>;
 }
+
+export type ApiClientFactory = (config: { serverUrl: string; apiKey: string }) => ApiClientLike;
+
+/** Default factory — the real one. */
+export const defaultApiClientFactory: ApiClientFactory = (config) => new ApiClient(config);
 
 /** Outcome reported back to callers — used by tests + commands. */
 export interface RunOutcome {
@@ -39,26 +50,31 @@ export interface RunOutcome {
 }
 
 /**
- * One controller per open editor. Owns the abort controller for the active
- * run; refuses to start a second run while one is in flight.
+ * One controller per .md test document. Owns the abort controller for the
+ * active run; refuses to start a second run while one is in flight.
  *
- * All error paths funnel through `reportError(...)` so the user-facing
- * payload is built from a single source of truth.
+ * The extension keeps a Map<URI, RunController> in run-controller-registry,
+ * lazily creating controllers as files are opened. Each controller posts
+ * run events to a `post` callback (which routes to the sidebar webview).
  */
 export class RunController {
   private active: AbortController | null = null;
-  /** Last resolved .env path — exposed for the "Reveal .env" command. */
   private lastResolvedEnvPath: string | null = null;
-  /**
-   * True once a run has succeeded for this controller's session. Subsequent
-   * F5s skip the `config` field in the request body, since the server only
-   * accepts config on the first request. Reset by `closeSession`.
-   */
   private configSentForSession = false;
-  /** Resolver for the currently open prompt, if any. */
   private pendingPrompt: { resolve: (text: string | null) => void } | null = null;
+  /** Set by pause() so the abort handler knows to mark a resume point
+   *  rather than treating the abort as a full Stop. */
+  private pauseRequested = false;
+  /** Line of the most recent step:start event in the current run. Used as
+   *  the resume point when the user pauses mid-step. */
+  private lastStepStartLine: number | null = null;
 
-  constructor(private readonly ctx: RunContext) {}
+  constructor(
+    public readonly document: vscode.TextDocument,
+    public readonly workspaceFolder: vscode.WorkspaceFolder,
+    private readonly post: (msg: HostToWebviewMsg) => void,
+    private readonly clientFactory: ApiClientFactory = defaultApiClientFactory,
+  ) {}
 
   get isRunning(): boolean {
     return this.active !== null;
@@ -69,19 +85,31 @@ export class RunController {
   }
 
   stop(): void {
-    // Cancel any open prompt first so the run-loop unblocks immediately.
+    this.pauseRequested = false;
     this.cancelPrompt();
     this.active?.abort();
   }
 
-  /** Called by the editor-provider when the webview submits text. */
+  /**
+   * Halt the run mid-flight without abandoning it. Aborts the current
+   * stream (same mechanism as stop) but flips a flag so the abort handler
+   * publishes a `breakpointStop` at the line that was executing, leaving
+   * the runner in `paused` state. The user can then Resume to pick up
+   * from there. No-op if no run is in flight.
+   */
+  pause(): void {
+    if (!this.active) return;
+    this.pauseRequested = true;
+    this.cancelPrompt();
+    this.active.abort();
+  }
+
   resolvePrompt(text: string): void {
     const p = this.pendingPrompt;
     this.pendingPrompt = null;
     if (p) p.resolve(text);
   }
 
-  /** Called by the editor-provider when the user clicks Cancel. */
   cancelPrompt(): void {
     const p = this.pendingPrompt;
     this.pendingPrompt = null;
@@ -89,23 +117,19 @@ export class RunController {
   }
 
   /**
-   * Tell the server to drop this session and close its browser. Safe to call
-   * even when no run is in flight. Returns once the DELETE has been issued
-   * (best-effort — the server may already be gone).
+   * Tell the server to drop this session and close its browser.
    */
   async closeSession(): Promise<void> {
     const out = getOutputChannel();
     const ts = () => new Date().toISOString().slice(11, 23);
 
-    // Resolve env just to get SERVER_URL + SERVER_API_KEY. Anything missing
-    // is silently ignored — we want close to be cheap and forgiving.
     const settings = vscode.workspace.getConfiguration('testbench');
     const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
-    const filePath = this.ctx.document.uri.fsPath;
+    const filePath = this.document.uri.fsPath;
 
     const envResolution = await resolveEnvFile({
       testFile: filePath,
-      workspaceRoot: this.ctx.workspaceFolder.uri.fsPath,
+      workspaceRoot: this.workspaceFolder.uri.fsPath,
       fallbackPath: fallbackSetting,
     });
     if (!envResolution.hit) return;
@@ -123,47 +147,34 @@ export class RunController {
     out.appendLine(`[${ts()}] closing server session for ${filePath}`);
     this.active?.abort();
 
-    const client = new ApiClient({ serverUrl, apiKey });
+    const client = this.clientFactory({ serverUrl, apiKey });
     await client.closeSession(filePath);
-    // Reset so the next F5 sends config to recreate the session.
     this.configSentForSession = false;
     out.appendLine(`[${ts()}] session closed`);
   }
 
-  /** Send the `init` message to the webview after it reports ready. */
-  sendInit(
-    wordWrap: boolean,
-    editorOptions?: HostEditorOptions,
-    modelOptions?: HostModelOptions,
-  ): void {
-    this.post({
-      type: 'init',
-      text: this.ctx.document.getText(),
-      wordWrap,
-      editorOptions,
-      modelOptions,
-      filePath: this.ctx.document.uri.fsPath,
-    });
-  }
-
-  async runLines(lines: number[]): Promise<RunOutcome> {
+  async runLines(
+    lines: number[],
+    options: { breakpoints?: Set<number>; skipBreakpointAtStart?: boolean } = {},
+  ): Promise<RunOutcome> {
     if (this.isRunning) {
       return { ok: false };
     }
+    const breakpoints = options.breakpoints ?? new Set<number>();
+    const skipFirstBreakpoint = options.skipBreakpointAtStart === true;
 
     const out = getOutputChannel();
     const log = (line: string) => out.appendLine(`[${timestamp()}] ${line}`);
 
-    const filePath = this.ctx.document.uri.fsPath;
+    const filePath = this.document.uri.fsPath;
     log(`run requested for ${filePath}: lines=[${lines.join(',')}]`);
 
-    // 1. Resolve .env (walk-up + fallback)
     const settings = vscode.workspace.getConfiguration('testbench');
     const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
 
     const envResolution = await resolveEnvFile({
       testFile: filePath,
-      workspaceRoot: this.ctx.workspaceFolder.uri.fsPath,
+      workspaceRoot: this.workspaceFolder.uri.fsPath,
       fallbackPath: fallbackSetting,
     });
 
@@ -180,7 +191,6 @@ export class RunController {
     log(`.env resolved (${envResolution.source}): ${envResolution.path}`);
     this.lastResolvedEnvPath = envResolution.path;
 
-    // 2. Parse .env
     let env: Record<string, string>;
     try {
       env = await readEnvFile(envResolution.path);
@@ -197,7 +207,6 @@ export class RunController {
       throw err;
     }
 
-    // 3. Validate required keys + URL
     if (!env['SERVER_URL'] || env['SERVER_URL'].trim() === '') {
       const payload = reportError('TB002', { envPath: envResolution.path });
       return this.fail(payload, log);
@@ -215,21 +224,39 @@ export class RunController {
     }
     const apiKey = env['SERVER_API_KEY'].trim();
 
-    // 4. Classify the requested lines into normal steps / [input:] / [interactive].
-    // Expand the user's raw selection to actual step lines first — clicking
-    // on a heading or blank line should run the steps below it rather than
-    // failing with TB021.
-    const text = this.ctx.document.getText();
+    const text = this.document.getText();
     const effectiveLines = resolveRunLines(text, lines);
-    const classified = classifySelectedSteps(text, effectiveLines);
-    if (classified.length === 0) {
+    const allClassified = classifySelectedSteps(text, effectiveLines);
+    if (allClassified.length === 0) {
       const payload = reportError('TB021', {});
       return this.fail(payload, log);
     }
 
-    // Parse Config / Parameters from the test file. $VAR references in
-    // values are resolved against the loaded .env so secrets stay out of
-    // the file under source control.
+    // Trim the run at the first breakpoint we encounter (skipping the very
+    // first item when resuming). The pause line is reported back via the
+    // `breakpointStop` message so the gutter shows the yellow ▶ arrow.
+    const { runnable: classified, pausedAt } = trimAtBreakpoint(
+      allClassified,
+      breakpoints,
+      skipFirstBreakpoint,
+    );
+
+    // Communicate the new pause state up front. Setting null clears any
+    // stale pause from a previous run; setting a line shows the arrow.
+    this.post({ type: 'breakpointStop', line: pausedAt });
+
+    if (pausedAt !== null) {
+      log(`⏸ Will pause before breakpoint on line ${pausedAt} — Resume to continue`);
+    }
+
+    if (classified.length === 0) {
+      // Hit a breakpoint on the first selected step — nothing to send to
+      // the server. The arrow + pause indicator are already up; treat this
+      // as a successful "paused at start" outcome.
+      this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+      return { ok: true };
+    }
+
     const rawConfig = parseConfig(text);
     const rawParameters = parseParameters(text);
     const resolvedParameters = resolveSection(rawParameters, env);
@@ -239,14 +266,8 @@ export class RunController {
     const timeout = rawConfig['timeout'];
     if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
 
-    // Resolve per-run logging overrides. Precedence: test frontmatter ('## Config')
-    // wins, then VS Code settings, then server default (omitted ⇒ no override).
     const logging = resolveLoggingOverride(rawConfig, settings);
 
-    // Surface resolved parameter values to the Variables panel. The webview
-    // never sees .env, so without this message it can only display the raw
-    // `$VAR` placeholders. Secret-named entries get masked at render time
-    // by maskIfSecretInline.
     if (Object.keys(resolvedParameters).length > 0) {
       this.post({ type: 'parametersResolved', values: { ...resolvedParameters } });
     }
@@ -260,12 +281,12 @@ export class RunController {
     );
 
     const sessionId = filePath;
-    const client = new ApiClient({ serverUrl, apiKey });
+    const client = this.clientFactory({ serverUrl, apiKey });
     const ac = new AbortController();
     this.active = ac;
+    this.pauseRequested = false;
+    this.lastStepStartLine = null;
 
-    // Mutable parameters bag — `[input:]` answers get folded in here as the
-    // run progresses, so subsequent steps can reference them.
     const params: Record<string, string> = { ...resolvedParameters };
     let anyFailed = false;
 
@@ -276,8 +297,6 @@ export class RunController {
         const item = classified[i]!;
 
         if (item.kind === 'step') {
-          // Take the largest contiguous block of normal steps starting at i
-          // and send it as a single streamSteps request.
           const block: ClassifiedStep[] = [];
           while (i < classified.length && classified[i]!.kind === 'step') {
             block.push(classified[i]!);
@@ -337,22 +356,28 @@ export class RunController {
         }
       }
 
-      // Mark config as sent so the next F5 reuses the existing session.
       this.configSentForSession = true;
 
-      // Final `done` for the webview's "running" state. Status reflects
-      // whether anything failed.
       const status: 'passed' | 'failed' | 'aborted' =
         ac.signal.aborted ? 'aborted' : anyFailed ? 'failed' : 'passed';
       this.post({ type: 'runEvent', event: { type: 'done', status } });
       log(`run ${status}`);
       return { ok: !anyFailed };
     } catch (err) {
-      // User-initiated Stop is the expected outcome of clicking Stop, not an
-      // error. Suppress the noisy TB014 toast and just close the run cleanly.
       if (isUserAbort(err)) {
-        this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
-        log('run aborted by user');
+        // Pause vs Stop: the user-abort path is the same (AbortController),
+        // so the controller's pauseRequested flag tells us which intent.
+        // On pause we publish breakpointStop so the UI shows the yellow ▶
+        // and offers Resume; on stop we just mark the run aborted.
+        if (this.pauseRequested && this.lastStepStartLine != null) {
+          const resumeLine = this.lastStepStartLine;
+          this.post({ type: 'breakpointStop', line: resumeLine });
+          this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+          log(`run paused at line ${resumeLine} — Resume to continue`);
+        } else {
+          this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+          log('run aborted by user');
+        }
         return { ok: true };
       }
       const payload = mapApiErrorToPayload(err, { serverUrl, envPath: envResolution.path });
@@ -360,20 +385,15 @@ export class RunController {
       return this.fail(payload, log);
     } finally {
       this.active = null;
-      // Belt-and-braces — if a prompt was somehow still open, drop it.
+      this.pauseRequested = false;
       this.cancelPrompt();
       this.post({ type: 'promptDone' });
     }
   }
 
-  // -------------------------------------------------------------------------
-  // State-machine helpers
-  // -------------------------------------------------------------------------
-
-  /** Run a contiguous block of normal steps. Returns false if we should stop. */
   private async runStepBlock(args: {
     block: ClassifiedStep[];
-    client: ApiClient;
+    client: ApiClientLike;
     sessionId: string;
     env: Record<string, string>;
     params: Record<string, string>;
@@ -387,54 +407,40 @@ export class RunController {
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
 
-    try {
-      const activeEnv = EnvSelector.activeEnv();
-      const events = client.streamSteps(
-        sessionId,
-        {
-          steps: stepInstructions,
-          sourceLines: stepLines,
-          env,
-          ...(activeEnv && { envName: activeEnv }),
-          ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
-            config: sessionConfig,
-          }),
-          ...(Object.keys(params).length > 0 && { parameters: params }),
-          ...(logging && { logging }),
-        },
-        signal,
-      );
+    const activeEnv = EnvSelector.activeEnv();
+    const events = client.streamSteps(
+      sessionId,
+      {
+        steps: stepInstructions,
+        sourceLines: stepLines,
+        env,
+        ...(activeEnv && { envName: activeEnv }),
+        ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
+          config: sessionConfig,
+        }),
+        ...(Object.keys(params).length > 0 && { parameters: params }),
+        ...(logging && { logging }),
+      },
+      signal,
+    );
 
-      let sawFail = false;
-      for await (const event of events) {
-        // First event proves the server has accepted the request and
-        // bound the session config. Set the flag NOW (not after the loop)
-        // so that a Stop / abort / network drop mid-stream still leaves
-        // the next F5 in a state where it skips `config` — otherwise the
-        // server rejects with "Config can only be provided on the first
-        // request".
-        this.configSentForSession = true;
-        log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
-        if (event.type === 'step:fail') sawFail = true;
-        // Suppress the per-block 'done' — the outer loop emits one final
-        // 'done' for the whole run.
-        if (event.type === 'done') continue;
-        this.post({ type: 'runEvent', event });
-      }
-      return !sawFail;
-    } catch (err) {
-      throw err;
+    let sawFail = false;
+    for await (const event of events) {
+      this.configSentForSession = true;
+      log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
+      // Track the step that's currently executing — used as the resume
+      // point if the user pauses mid-step.
+      if (event.type === 'step:start') this.lastStepStartLine = event.line;
+      if (event.type === 'step:fail') sawFail = true;
+      if (event.type === 'done') continue;
+      this.post({ type: 'runEvent', event });
     }
+    return !sawFail;
   }
 
-  /**
-   * Run the interactive REPL: keep the composer open, treat each user
-   * submission as a single ad-hoc step (or REPL command). Returns true if
-   * the user advanced cleanly (/continue), false to abort the whole run (/exit).
-   */
   private async runInteractive(args: {
     hint: string;
-    client: ApiClient;
+    client: ApiClientLike;
     sessionId: string;
     env: Record<string, string>;
     params: Record<string, string>;
@@ -445,7 +451,6 @@ export class RunController {
   }): Promise<boolean> {
     const { hint, client, sessionId, env, params, sessionConfig, logging, signal, log } = args;
 
-    // Open the composer once. Subsequent loops re-await without re-posting.
     const firstAnswer = await this.requestPrompt({ mode: 'interactive', message: hint });
     let answer: string | null = firstAnswer;
 
@@ -453,7 +458,7 @@ export class RunController {
       if (signal.aborted) return false;
 
       const action = interpretReplCommand(answer, () =>
-        listStepInstructions(this.ctx.document.getText()),
+        listStepInstructions(this.document.getText()),
       );
 
       if (action.kind === 'exit-section') return true;
@@ -462,9 +467,6 @@ export class RunController {
       if (action.kind === 'output') {
         this.postOutput(action.msg, action.level);
       } else if (action.kind === 'resume') {
-        // /resume is not yet wired into the testbench's run-controller — the
-        // server-driven flow doesn't currently support arbitrary jumps. Surface
-        // the limitation and stay in the REPL.
         this.postOutput(
           '/resume is not yet supported in the testbench — use /continue or /exit, or run from the CLI for resume support.',
           'warn',
@@ -494,9 +496,6 @@ export class RunController {
             signal,
           );
           for await (const event of events) {
-            // Same rationale as runStepBlock — set on first event so an
-            // abort mid-step leaves the flag in the right state for the
-            // next request.
             this.configSentForSession = true;
             if (event.type === 'done') continue;
             this.post({ type: 'runEvent', event });
@@ -508,30 +507,39 @@ export class RunController {
           );
         }
       }
-      // action.kind === 'noop' — fall through and re-prompt.
 
-      // Re-arm the prompt for the next submission.
       answer = await this.requestPrompt({ mode: 'interactive', message: hint });
     }
-    // Cancel — abort the whole run.
     return false;
   }
 
-  /**
-   * Show the composer in the webview and resolve once the user submits or
-   * cancels. Returns null if canceled (or if a prior prompt is still open,
-   * which shouldn't happen in normal flow).
-   */
   private requestPrompt(opts: {
     mode: 'input' | 'interactive';
     message: string;
     varName?: string;
   }): Promise<string | null> {
+    // Cancel any prior pending prompt so a stale resolver doesn't fire when
+    // the new prompt resolves.
     if (this.pendingPrompt) {
-      // Defensive — a previous prompt was never resolved. Drop it.
       this.pendingPrompt.resolve(null);
       this.pendingPrompt = null;
     }
+
+    if (opts.mode === 'input') {
+      // One-shot input → use VS Code's native InputBox. Native styling, no
+      // webview round-trip, free Esc-to-cancel + Enter-to-submit.
+      return new Promise<string | null>((resolve) => {
+        void vscode.window
+          .showInputBox({
+            prompt: opts.message || `Enter value for {{${opts.varName ?? 'input'}}}`,
+            placeHolder: opts.varName ? `{{${opts.varName}}}` : undefined,
+            ignoreFocusOut: true,
+          })
+          .then((value) => resolve(value === undefined ? null : value));
+      });
+    }
+
+    // Interactive REPL — multi-turn composer in the sidebar webview.
     return new Promise<string | null>((resolve) => {
       this.pendingPrompt = { resolve };
       this.post({
@@ -547,18 +555,8 @@ export class RunController {
     this.post({ type: 'runEvent', event: { type: 'output', msg, kind } });
   }
 
-  /** Run every step in the document. */
   async runAll(): Promise<RunOutcome> {
-    // Empty `lines` triggers extractStepsForRun's "everything" branch.
     return this.runLines([]);
-  }
-
-  // -------------------------------------------------------------------------
-  // Internals
-  // -------------------------------------------------------------------------
-
-  private post(msg: HostToWebviewMsg): void {
-    void this.ctx.webview.postMessage(msg);
   }
 
   private fail(payload: ErrorPayload, log: (line: string) => void): RunOutcome {
@@ -566,6 +564,30 @@ export class RunController {
     this.post({ type: 'runError', payload });
     return { ok: false, error: payload };
   }
+}
+
+/**
+ * Walk the classified items in order; if any step's source line is in the
+ * breakpoint set, return everything *before* that step (so the breakpoint
+ * line itself doesn't run) and the line we paused at. `skipFirst=true`
+ * lets a Resume run past the breakpoint that triggered the pause.
+ */
+function trimAtBreakpoint(
+  items: ClassifiedStep[],
+  breakpoints: Set<number>,
+  skipFirst: boolean,
+): { runnable: ClassifiedStep[]; pausedAt: number | null } {
+  if (breakpoints.size === 0) return { runnable: items, pausedAt: null };
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    // Only proper step lines carry breakpoints; [input:] / [interactive]
+    // markers don't appear under ## Steps as numbered list items.
+    if (item.kind !== 'step') continue;
+    if (!breakpoints.has(item.line)) continue;
+    if (skipFirst && i === 0) continue;
+    return { runnable: items.slice(0, i), pausedAt: item.line };
+  }
+  return { runnable: items, pausedAt: null };
 }
 
 function listStepInstructions(text: string): string {
@@ -593,9 +615,6 @@ function mapApiErrorToPayload(
       case 'stream-dropped':
         return reportError('TB014', { serverUrl: ctx.serverUrl, reason: err.message });
       case 'aborted':
-        // Defense-in-depth — runLines's catch already intercepts user
-        // aborts via isUserAbort() and emits done(aborted) without an
-        // error toast. This branch is unreachable in normal flow.
         return reportError('TB014', { serverUrl: ctx.serverUrl, reason: 'aborted' });
       case 'connect-failed':
       default:
@@ -611,7 +630,6 @@ function timestamp(): string {
   return d.toISOString().slice(11, 23);
 }
 
-/** Resolve a `$VAR` reference against env, or return the literal value. */
 function resolveValue(value: string, env: Record<string, string>): string {
   if (!value.startsWith('$')) return value;
   const name = value.slice(1);
@@ -629,18 +647,6 @@ interface LoggingOverride {
   serverFileLogLevel?: LogFileMode;
 }
 
-/**
- * Decide what `logging` field to put on the streamSteps body.
- *
- * Precedence (highest first):
- *   1. Test file's `## Config` block — `consoleLogLevel:` / `serverFileLogLevel:`.
- *   2. VS Code workspace settings — `testbench.consoleLogLevel` /
- *      `testbench.serverFileLogLevel`.
- *   3. Server-side default (returned as undefined ⇒ no override sent).
- *
- * Empty strings are treated as "not set" so a workspace setting of `""` falls
- * through to the server default exactly like an absent setting.
- */
 function resolveLoggingOverride(
   rawConfig: Record<string, string>,
   settings: vscode.WorkspaceConfiguration,

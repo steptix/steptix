@@ -68,68 +68,39 @@ export type RunEvent =
   | DoneEvent;
 
 // ---------------------------------------------------------------------------
+// Per-document state snapshot (sent host → webview)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirror of the active TextEditor's TestBench state: file text, breakpoints,
+ * statuses, paused-at marker. The webview renders against this; the host is
+ * the source of truth.
+ */
+export interface FileStateSnapshot {
+  uri: string | null;
+  filePath: string | null;
+  isTestFile: boolean;
+  text: string;
+  breakpoints: number[];
+  statuses: Array<[number, 'running' | 'pass' | 'fail' | 'skip']>;
+  errors: Array<[number, ErrorPayload]>;
+  breakpointStop: number | null;
+  selectedLines: number[];
+  cursorLine: number;
+}
+
+// ---------------------------------------------------------------------------
 // Host → webview
 // ---------------------------------------------------------------------------
 
-export interface HostEditorOptions {
-  wordWrap?: 'off' | 'on' | 'wordWrapColumn' | 'bounded';
-  fontFamily?: string;
-  fontSize?: number;
-  fontWeight?: string;
-  fontLigatures?: boolean | string;
-  lineHeight?: number;
-  letterSpacing?: number;
-  cursorBlinking?: 'blink' | 'smooth' | 'phase' | 'expand' | 'solid';
-  cursorSmoothCaretAnimation?: 'off' | 'explicit' | 'on';
-  cursorStyle?: 'line' | 'block' | 'underline' | 'line-thin' | 'block-outline' | 'underline-thin';
-  cursorWidth?: number;
-  matchBrackets?: 'never' | 'near' | 'always';
-  renderWhitespace?: 'none' | 'boundary' | 'selection' | 'trailing' | 'all';
-  renderControlCharacters?: boolean;
-  renderLineHighlight?: 'none' | 'gutter' | 'line' | 'all';
-  renderLineHighlightOnlyWhenFocus?: boolean;
-  selectionHighlight?: boolean;
-  occurrencesHighlight?: 'off' | 'singleFile' | 'multiFile';
-  bracketPairColorization?: {
-    enabled?: boolean;
-    independentColorPoolPerBracketType?: boolean;
-  };
-  guides?: {
-    bracketPairs?: boolean | 'active';
-    bracketPairsHorizontal?: boolean | 'active';
-    highlightActiveBracketPair?: boolean;
-    indentation?: boolean;
-    highlightActiveIndentation?: boolean | 'always';
-  };
-  tabSize?: number;
-  insertSpaces?: boolean;
-  detectIndentation?: boolean;
-  trimAutoWhitespace?: boolean;
-}
-
-export interface HostModelOptions {
-  tabSize?: number;
-  insertSpaces?: boolean;
-  trimAutoWhitespace?: boolean;
-  bracketColorizationOptions?: {
-    enabled: boolean;
-    independentColorPoolPerBracketType: boolean;
-  };
-}
-
-export interface HostInitMsg {
-  type: 'init';
-  text: string;
-  wordWrap: boolean;
-  editorOptions?: HostEditorOptions;
-  modelOptions?: HostModelOptions;
-  /** Resolved absolute path of the test file, for display only. */
-  filePath: string;
-}
-
-export interface HostDocumentChangedMsg {
-  type: 'documentChanged';
-  text: string;
+/**
+ * Whenever the active TextEditor changes, or the breakpoint/status/cursor
+ * state on the active file changes, the host posts a fresh snapshot. The
+ * webview re-renders against it.
+ */
+export interface HostActiveFileMsg {
+  type: 'activeFile';
+  snapshot: FileStateSnapshot;
 }
 
 export interface HostRunEventMsg {
@@ -142,17 +113,10 @@ export interface HostRunErrorMsg {
   payload: ErrorPayload;
 }
 
-export interface HostSettingsChangedMsg {
-  type: 'settingsChanged';
-  wordWrap: boolean;
-  editorOptions?: HostEditorOptions;
-  modelOptions?: HostModelOptions;
-}
-
 /**
  * Ask the user to type something. `mode: 'input'` is one-shot (filling a
- * `[input: var]` slot). `mode: 'interactive'` keeps the composer open
- * across submissions until the host posts `promptDone`.
+ * `[input: var]` slot) and is now handled host-side via showInputBox. The
+ * webview only sees `mode: 'interactive'` for the multi-turn REPL composer.
  */
 export interface HostPromptMsg {
   type: 'prompt';
@@ -179,15 +143,31 @@ export interface HostParametersResolvedMsg {
   values: Record<string, string>;
 }
 
+/** True while a run is in flight; lets the webview enable/disable buttons. */
+export interface HostRunningMsg {
+  type: 'running';
+  running: boolean;
+}
+
+/**
+ * Mark the line where a run paused at a breakpoint. `null` clears the
+ * pause indicator. The webview/decorations show a yellow ▶ glyph on the
+ * paused line.
+ */
+export interface HostBreakpointStopMsg {
+  type: 'breakpointStop';
+  line: number | null;
+}
+
 export type HostToWebviewMsg =
-  | HostInitMsg
-  | HostDocumentChangedMsg
+  | HostActiveFileMsg
   | HostRunEventMsg
   | HostRunErrorMsg
-  | HostSettingsChangedMsg
   | HostPromptMsg
   | HostPromptDoneMsg
-  | HostParametersResolvedMsg;
+  | HostParametersResolvedMsg
+  | HostRunningMsg
+  | HostBreakpointStopMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -199,7 +179,10 @@ export interface WebviewReadyMsg {
 
 export interface WebviewRunMsg {
   type: 'run';
-  /** 1-based line numbers to run. Empty array runs nothing. */
+  /**
+   * 1-based line numbers to run. Empty array runs everything from the
+   * cursor onwards (the host expands as needed).
+   */
   lines: number[];
 }
 
@@ -209,11 +192,6 @@ export interface WebviewRunAllMsg {
 
 export interface WebviewStopMsg {
   type: 'stop';
-}
-
-export interface WebviewEditMsg {
-  type: 'edit';
-  text: string;
 }
 
 export interface WebviewRestartSessionMsg {
@@ -231,15 +209,40 @@ export interface WebviewPromptCancelMsg {
   type: 'promptCancel';
 }
 
+/** User clicked a line in the sidebar's step list — focus the active editor. */
+export interface WebviewRevealLineMsg {
+  type: 'revealLine';
+  line: number;
+}
+
+/** User clicked the breakpoint dot in the sidebar — toggle on the active file. */
+export interface WebviewToggleBreakpointMsg {
+  type: 'toggleBreakpoint';
+  line: number;
+}
+
+/** User clicked Resume — re-run from the breakpoint pause line. */
+export interface WebviewResumeMsg {
+  type: 'resume';
+}
+
+/** User clicked Pause — abort current stream, mark resume point. */
+export interface WebviewPauseMsg {
+  type: 'pause';
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
   | WebviewRunAllMsg
   | WebviewStopMsg
-  | WebviewEditMsg
   | WebviewRestartSessionMsg
   | WebviewPromptResponseMsg
-  | WebviewPromptCancelMsg;
+  | WebviewPromptCancelMsg
+  | WebviewRevealLineMsg
+  | WebviewToggleBreakpointMsg
+  | WebviewResumeMsg
+  | WebviewPauseMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -249,14 +252,14 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
   if (!value || typeof value !== 'object') return false;
   const t = (value as { type?: unknown }).type;
   return (
-    t === 'init' ||
-    t === 'documentChanged' ||
+    t === 'activeFile' ||
     t === 'runEvent' ||
     t === 'runError' ||
-    t === 'settingsChanged' ||
     t === 'prompt' ||
     t === 'promptDone' ||
-    t === 'parametersResolved'
+    t === 'parametersResolved' ||
+    t === 'running' ||
+    t === 'breakpointStop'
   );
 }
 
@@ -268,10 +271,13 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'run' ||
     t === 'runAll' ||
     t === 'stop' ||
-    t === 'edit' ||
     t === 'restartSession' ||
     t === 'promptResponse' ||
-    t === 'promptCancel'
+    t === 'promptCancel' ||
+    t === 'revealLine' ||
+    t === 'toggleBreakpoint' ||
+    t === 'resume' ||
+    t === 'pause'
   );
 }
 

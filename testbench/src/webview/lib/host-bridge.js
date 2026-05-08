@@ -55,8 +55,11 @@ export const hostBridge = {
   postRun(lines) { post({ type: 'run', lines }); },
   postRunAll() { post({ type: 'runAll' }); },
   postStop() { post({ type: 'stop' }); },
-  postEdit(text) { post({ type: 'edit', text }); },
   postRestartSession() { post({ type: 'restartSession' }); },
   postPromptResponse(text) { post({ type: 'promptResponse', text }); },
   postPromptCancel() { post({ type: 'promptCancel' }); },
+  postRevealLine(line) { post({ type: 'revealLine', line }); },
+  postToggleBreakpoint(line) { post({ type: 'toggleBreakpoint', line }); },
+  postResume() { post({ type: 'resume' }); },
+  postPause() { post({ type: 'pause' }); },
 };
