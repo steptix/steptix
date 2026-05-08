@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
-import type {
-  HostToWebviewMsg,
-  WebviewToHostMsg,
+import {
+  extractSteps,
+  type HostToWebviewMsg,
+  type WebviewToHostMsg,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
 import { DecorationManager } from './decorations.js';
@@ -22,6 +23,15 @@ const FIRST_ACTIVATION_KEY = 'testbench.shownActivationToast';
 class RunControllerRegistry implements vscode.Disposable {
   private readonly controllers = new Map<string, RunController>();
   private clientFactory: ApiClientFactory = defaultApiClientFactory;
+  /** Mirror of the last value pushed to the `testbench.running` context
+   *  key. VS Code doesn't expose context keys for read, so this is the
+   *  only handle the integration suite has on toolbar visibility. */
+  private lastRunningContextValue = false;
+
+  /** Test-only readback of the `testbench.running` context key. */
+  get runningContextValue(): boolean {
+    return this.lastRunningContextValue;
+  }
 
   constructor(
     private readonly view: TestBenchRunnerView,
@@ -101,6 +111,11 @@ class RunControllerRegistry implements vscode.Disposable {
       return;
     }
     if (msg.type === 'runError') {
+      this.lastRunError = {
+        code: msg.payload.code,
+        diagnosis: msg.payload.diagnosis,
+        ...(msg.payload.fix !== undefined && { fix: msg.payload.fix }),
+      };
       this.refreshRunningContext();
       return;
     }
@@ -109,21 +124,46 @@ class RunControllerRegistry implements vscode.Disposable {
     }
   }
 
-  /** Refresh the `testbench.running` context key from current state. */
+  /** Refresh the `testbench.running` context key from current state. Used
+   *  on event-driven boundaries (e.g. `done` arrived and `this.active` is
+   *  still set inside the controller's try-block) where anyRunning() is
+   *  the authoritative answer. */
   refreshRunningContext(): void {
-    void vscode.commands.executeCommand(
-      'setContext',
-      'testbench.running',
-      this.anyRunning(),
-    );
+    this.setRunningContext(this.anyRunning());
   }
 
-  /** Tell the webview a run started/stopped. Call at the kickoff/finish edges
-   *  so the toolbar buttons enable instantly without waiting on step events. */
+  /**
+   * Tell the webview a run started/stopped, and pin the
+   * `testbench.running` context key to the same value.
+   *
+   * IMPORTANT: this trusts the caller's intent — it does NOT poll
+   * `anyRunning()`. Polling fails on the leading edge: the command
+   * handler calls `notifyRunning(true)` synchronously, *before*
+   * `controller.runLines()` sets `controller.active`. If we polled,
+   * we'd read the stale "no active run" state and set the context key
+   * to false, which hides Pause/Stop in the editor title bar until the
+   * first run event drives a refresh — exactly the "Pause disappeared
+   * after Resume" symptom.
+   *
+   * For `running=false` we still trust the caller. Each command handler
+   * pairs `notifyRunning(true)` with a `.finally(notifyRunning(false))`,
+   * so the second call always corresponds to that run's exit.
+   */
   notifyRunning(running: boolean): void {
+    this.notifyRunningHistory.push(running);
     this.view.post({ type: 'running', running });
-    this.refreshRunningContext();
+    this.setRunningContext(running);
   }
+
+  private setRunningContext(value: boolean): void {
+    this.lastRunningContextValue = value;
+    void vscode.commands.executeCommand('setContext', 'testbench.running', value);
+  }
+
+  /** Test-only: every value passed through notifyRunning, in order. */
+  readonly notifyRunningHistory: boolean[] = [];
+  /** Test-only: most recent runError payload posted by any controller. */
+  lastRunError: { code: string; diagnosis: string; fix?: string } | null = null;
 
   dispose(): void {
     for (const c of this.controllers.values()) c.stop();
@@ -139,6 +179,16 @@ export interface TestBenchTestHooks {
   tracker: ActiveFileTracker;
   setApiClientFactory: (factory: ApiClientFactory) => void;
   isRunning: () => boolean;
+  /** Last value mirrored to the `testbench.running` context key. The
+   *  editor title bar's Pause/Stop visibility hinges on this — VS Code
+   *  doesn't let us read context keys, so the registry tracks them. */
+  runningContextValue: () => boolean;
+  /** Diagnostic: does registry.active() resolve to a controller right now? */
+  activeControllerResolves: () => boolean;
+  /** Diagnostic: every value notifyRunning has seen in this session. */
+  notifyRunningHistory: () => boolean[];
+  /** Diagnostic: last runError payload, or null if none. */
+  lastRunError: () => { code: string; diagnosis: string; fix?: string } | null;
   /** Best-effort: wait until tracker.snapshot() satisfies the predicate. */
   waitFor: (predicate: () => boolean, timeoutMs?: number) => Promise<void>;
 }
@@ -190,6 +240,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       tracker,
       setApiClientFactory: (factory) => registry.setApiClientFactory(factory),
       isRunning: () => registry.anyRunning(),
+      runningContextValue: () => registry.runningContextValue,
+      activeControllerResolves: () => registry.active() !== undefined,
+      notifyRunningHistory: () => [...registry.notifyRunningHistory],
+      lastRunError: () => registry.lastRunError,
       waitFor: async (predicate, timeoutMs = 5000) => {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
@@ -262,8 +316,16 @@ async function handleWebviewMessage(
       // new one if it hits another breakpoint.
       tracker.setBreakpointStop(controller.document.uri, null);
       registry.notifyRunning(true);
+      // Resume continues from startLine through the rest of the document
+      // (or until the next breakpoint). Passing `[startLine]` alone would
+      // collapse through resolveRunLines to a single-step run — useful if
+      // we wanted "step over" semantics, but Resume's contract is to
+      // *continue execution*, matching how F5 works in a debugger.
+      const resumeLines = extractSteps(controller.document.getText())
+        .map((s) => s.line)
+        .filter((line) => line >= startLine);
       void controller
-        .runLines([startLine], {
+        .runLines(resumeLines, {
           breakpoints: tracker.breakpoints(controller.document.uri),
           // First step is the pause line itself; let it through.
           skipBreakpointAtStart: true,

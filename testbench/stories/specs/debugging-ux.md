@@ -66,16 +66,21 @@ slot for Stop. The user always sees one obvious next action.
 | Shift+F5 | — | Stop | Stop |
 | F9 | Toggle breakpoint at cursor line | Toggle | Toggle |
 
-## 5. Pause semantics
+## 5. Pause / Resume semantics
 
 - Aborts the in-flight HTTP stream (the runner sends contiguous steps as
   one `streamSteps` request; we cancel it).
 - The runner tracks the most recent `step:start` event's source line.
   When the user pauses, that line becomes the resume point — the step
   that was *executing* when Pause fired.
-- Resume re-runs from the resume point. The first step on resume bypasses
-  the "is there a breakpoint here?" check (otherwise a breakpoint on the
-  resume line would trap us in a loop).
+- Resume re-opens the stream and executes **every step from the resume
+  point through the end of the document** (or until the next breakpoint).
+  Single-step semantics ("re-run only the paused step, then stop") is
+  *not* what Resume does — that would surprise anyone used to F5 in a
+  debugger, where Continue runs forward until the next interruption.
+- The first step on resume bypasses the "is there a breakpoint here?"
+  check (otherwise a breakpoint on the resume line would trap us in a
+  loop).
 - Subsequent breakpoints during the resumed run trigger normally.
 
 ## 6. Stop semantics
@@ -93,6 +98,22 @@ slot for Stop. The user always sees one obvious next action.
 - **Sidebar step list**: ✓ pass / ✗ fail / … running / ▶ paused per step.
 - **Output log**: appends events live; entries persist across runs unless
   the user hits "Clear".
+
+### Pause-indicator timing
+
+The yellow ▶ marks the line where execution is *currently halted*. It must
+not appear before the run actually reaches that line. Concretely:
+
+- On Run with a downstream breakpoint, any stale ▶ from a previous run is
+  cleared immediately, but the new ▶ on the breakpoint line only appears
+  *after* every preceding step has finished successfully.
+- On manual Pause mid-step, the ▶ appears once the in-flight stream has
+  unwound.
+- If a step before the breakpoint fails or the user hits Stop before
+  reaching it, the ▶ never appears — the user did not arrive at the pause
+  point, and showing the arrow would be misleading.
+- Edge case — breakpoint on the first step of the selected run: nothing
+  ran before it, so the ▶ appears immediately on that line.
 
 ## 8. Edge cases
 

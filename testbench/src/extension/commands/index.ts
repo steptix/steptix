@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { extractSteps } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { RunController } from '../run-controller.js';
@@ -76,9 +77,16 @@ export function registerCommands(
       }
       tracker.setBreakpointStop(controller.document.uri, null);
       const breakpoints = tracker.breakpoints(controller.document.uri);
+      // Resume continues from startLine through the end of the document.
+      // Passing `[startLine]` alone would collapse through resolveRunLines
+      // to a single-step run — useful for "step over" but not what Resume
+      // means in a debugger.
+      const resumeLines = extractSteps(editor.document.getText())
+        .map((s) => s.line)
+        .filter((line) => line >= startLine);
       registry.notifyRunning(true);
       await controller
-        .runLines([startLine], { breakpoints, skipBreakpointAtStart: true })
+        .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true })
         .finally(() => registry.notifyRunning(false));
     }),
 

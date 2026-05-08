@@ -160,6 +160,14 @@ export class RunController {
     if (this.isRunning) {
       return { ok: false };
     }
+
+    // Clear any stale pause indicator IMMEDIATELY — synchronously, before
+    // we do any async env-file work. If we waited until after env resolution
+    // (~50-200ms on Windows), the user would see the yellow ▶ from the
+    // previous pause linger at that line while the new run boots, which
+    // reads as "the arrow jumped straight to the breakpoint."
+    this.post({ type: 'breakpointStop', line: null });
+
     const breakpoints = options.breakpoints ?? new Set<number>();
     const skipFirstBreakpoint = options.skipBreakpointAtStart === true;
 
@@ -241,18 +249,21 @@ export class RunController {
       skipFirstBreakpoint,
     );
 
-    // Communicate the new pause state up front. Setting null clears any
-    // stale pause from a previous run; setting a line shows the arrow.
-    this.post({ type: 'breakpointStop', line: pausedAt });
-
+    // Stale pause was already cleared at the top of runLines. The *new*
+    // pause indicator (if any) is posted only when execution actually
+    // reaches the pause point — putting the yellow ▶ on the breakpoint
+    // line before the steps before it have run reads as "we're already
+    // there" instead of "we will pause here."
     if (pausedAt !== null) {
       log(`⏸ Will pause before breakpoint on line ${pausedAt} — Resume to continue`);
     }
 
     if (classified.length === 0) {
       // Hit a breakpoint on the first selected step — nothing to send to
-      // the server. The arrow + pause indicator are already up; treat this
-      // as a successful "paused at start" outcome.
+      // the server. We *are* immediately at the pause point, so post the
+      // indicator now and treat it as a successful "paused at start"
+      // outcome.
+      if (pausedAt !== null) this.post({ type: 'breakpointStop', line: pausedAt });
       this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
       return { ok: true };
     }
@@ -360,6 +371,13 @@ export class RunController {
 
       const status: 'passed' | 'failed' | 'aborted' =
         ac.signal.aborted ? 'aborted' : anyFailed ? 'failed' : 'passed';
+      // Now that all preceding steps actually finished, surface the pause
+      // indicator so the yellow ▶ shows up on the paused line. Skip on
+      // failure/abort — the user didn't reach the pause point, so the
+      // arrow would be misleading.
+      if (status === 'passed' && pausedAt !== null) {
+        this.post({ type: 'breakpointStop', line: pausedAt });
+      }
       this.post({ type: 'runEvent', event: { type: 'done', status } });
       log(`run ${status}`);
       return { ok: !anyFailed };

@@ -4,6 +4,8 @@ dist/
 .claude/
 .vscode-test/
 tests/integration/test-report.json
+tests/integration/live-test-report.json
+tests/integration/live-test-output.log
 tests/integration/fixtures/github.md
 integration-out.log
 *.vsix

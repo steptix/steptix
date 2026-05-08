@@ -2,7 +2,7 @@
   "name": "testbench",
   "displayName": "TestBench",
   "publisher": "pkent",
-  "version": "0.2.8",
+  "version": "0.2.12",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code",
   "private": true,
   "engines": {
@@ -239,7 +239,8 @@
     "dev": "npm run build && code --extensionDevelopmentPath=.",
     "package": "vsce package --no-dependencies",
     "test": "node --test tests/*.test.js",
-    "test:integration": "npm run build && node tests/integration/runTest.cjs"
+    "test:integration": "npm run build && node tests/integration/runTest.cjs",
+    "test:live": "npm run build && node tests/integration/runLiveTest.cjs"
   },
   "dependencies": {
     "ai-ui-automation-runner-core": "file:../runner-core",

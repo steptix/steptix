@@ -16,6 +16,10 @@ class FakeApiClient {
     this.activeStream = null;
     this.closeSessionCalls = 0;
     this.streamCallCount = 0;
+    /** Each entry is the request body passed to streamSteps(). Tests can
+     *  read `requests[n].sourceLines` to verify which steps a particular
+     *  call covered (e.g. that Resume sent multiple steps, not one). */
+    this.requests = [];
   }
 
   /**
@@ -23,7 +27,7 @@ class FakeApiClient {
    * tests push() onto the active stream, or throws an aborted-kind
    * ApiClientError when the caller aborts.
    */
-  async *streamSteps(_sessionId, _request, signal) {
+  async *streamSteps(_sessionId, request, signal) {
     /** @type {Stream} */
     const stream = {
       queue: [],
@@ -33,6 +37,7 @@ class FakeApiClient {
     };
     this.activeStream = stream;
     this.streamCallCount += 1;
+    this.requests.push(request);
 
     const onAbort = () => {
       stream.aborted = true;
