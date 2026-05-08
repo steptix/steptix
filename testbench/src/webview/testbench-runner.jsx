@@ -37,6 +37,7 @@ const STATUS = {
   PASS: "pass",
   FAIL: "fail",
   SKIP: "skip",
+  STOPPED: "stopped",
 };
 
 function statusFromTuple(tuples) {
@@ -410,6 +411,7 @@ function TestBenchRunner() {
               status === STATUS.PASS ? "tb-step--pass" : "",
               status === STATUS.FAIL ? "tb-step--fail" : "",
               status === STATUS.RUNNING ? "tb-step--running" : "",
+              status === STATUS.STOPPED ? "tb-step--stopped" : "",
             ].filter(Boolean).join(" ");
             return (
               <React.Fragment key={lineNumber}>
@@ -430,7 +432,7 @@ function TestBenchRunner() {
                     onMouseLeave={(e) => { if (!hasBreakpoint) e.currentTarget.style.opacity = 0.25; }}
                   >●</span>
                   <span style={{ width: 14, textAlign: "center" }}>
-                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : ""}
+                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
                   </span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>

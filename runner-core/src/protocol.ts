@@ -82,7 +82,7 @@ export interface FileStateSnapshot {
   isTestFile: boolean;
   text: string;
   breakpoints: number[];
-  statuses: Array<[number, 'running' | 'pass' | 'fail' | 'skip']>;
+  statuses: Array<[number, 'running' | 'pass' | 'fail' | 'skip' | 'stopped']>;
   errors: Array<[number, ErrorPayload]>;
   breakpointStop: number | null;
   selectedLines: number[];

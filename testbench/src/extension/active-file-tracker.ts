@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { isTestFile } from 'ai-ui-automation-runner-core';
 import type { ErrorPayload } from 'ai-ui-automation-runner-core';
 
+export type LineStatus = 'running' | 'pass' | 'fail' | 'skip' | 'stopped';
+
 /**
  * Per-document RUN state. Breakpoints are NOT stored here — they live in
  * `vscode.debug.breakpoints` (the canonical store, which gives us free
@@ -9,7 +11,7 @@ import type { ErrorPayload } from 'ai-ui-automation-runner-core';
  * only holds state that's transient to the current run.
  */
 export interface FileState {
-  statuses: Map<number, 'running' | 'pass' | 'fail' | 'skip'>;
+  statuses: Map<number, LineStatus>;
   errors: Map<number, ErrorPayload>;
   /** Line where a breakpoint paused the run (for the yellow ▶ arrow). */
   breakpointStop: number | null;
@@ -22,7 +24,7 @@ export interface FileStateSnapshot {
   isTestFile: boolean;
   text: string;
   breakpoints: number[];
-  statuses: Array<[number, 'running' | 'pass' | 'fail' | 'skip']>;
+  statuses: Array<[number, LineStatus]>;
   errors: Array<[number, ErrorPayload]>;
   breakpointStop: number | null;
   selectedLines: number[];
@@ -174,10 +176,21 @@ export class ActiveFileTracker {
     this.emit();
   }
 
-  setStatus(uri: vscode.Uri, line: number, status: 'running' | 'pass' | 'fail' | 'skip'): void {
+  setStatus(uri: vscode.Uri, line: number, status: LineStatus): void {
     const state = this.state(uri);
     state.statuses.set(line, status);
     this.emit();
+  }
+
+  markRunningStopped(uri: vscode.Uri): void {
+    const state = this.state(uri);
+    let changed = false;
+    for (const [line, status] of state.statuses) {
+      if (status !== 'running') continue;
+      state.statuses.set(line, 'stopped');
+      changed = true;
+    }
+    if (changed) this.emit();
   }
 
   setError(uri: vscode.Uri, line: number, error: ErrorPayload): void {

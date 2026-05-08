@@ -61,6 +61,7 @@ export function registerCommands(
       const editor = tracker.activeEditor;
       if (editor && tracker.isActiveTestFile) {
         tracker.setBreakpointStop(editor.document.uri, null);
+        tracker.markRunningStopped(editor.document.uri);
       }
       registry.notifyRunning(false);
     }),

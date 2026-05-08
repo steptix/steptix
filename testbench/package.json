@@ -2,7 +2,7 @@
   "name": "testbench",
   "displayName": "TestBench",
   "publisher": "pkent",
-  "version": "0.2.19",
+  "version": "0.2.26",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code",
   "private": true,
   "engines": {

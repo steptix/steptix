@@ -23,6 +23,14 @@ export function extractStepLineIds(text: string): number[] {
   return out;
 }
 
+export function findStepsHeadingLine(text: string): number | null {
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (STEPS_HEADING_RE.test(lines[i] || '')) return i + 1;
+  }
+  return null;
+}
+
 function findStepsSpan(lines: string[]): { start: number; end: number } | null {
   let headingIndex = -1;
   let headingDepth = 0;
