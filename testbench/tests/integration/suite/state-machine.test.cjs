@@ -225,6 +225,24 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.tracker.snapshot().breakpointStop, 10);
   });
 
+  it('running → paused (early pause): Pause before any step:start still marks a resume point', async () => {
+    // This guards the bug where pausing immediately after Run — before
+    // the server emits the first step:start event — would leave the
+    // controller without a resume point. Without the classified[0]
+    // fallback, paused state never gets set and the Resume button
+    // doesn't render.
+    void vscode.commands.executeCommand('testbench.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // No step:start pushed — pause immediately.
+    await vscode.commands.executeCommand('testbench.pause');
+
+    await waitFor('breakpointStop falls back to first selected step', () => {
+      return hooks.tracker.snapshot().breakpointStop === 9;
+    });
+    await waitFor('isRunning becomes false', () => !hooks.isRunning());
+  });
+
   it('paused → idle (stop): Stop while paused clears the pause indicator', async () => {
     // Trigger a pause via breakpoint.
     const uri = vscode.window.activeTextEditor.document.uri;

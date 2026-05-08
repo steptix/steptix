@@ -369,15 +369,24 @@ export class RunController {
         // so the controller's pauseRequested flag tells us which intent.
         // On pause we publish breakpointStop so the UI shows the yellow ▶
         // and offers Resume; on stop we just mark the run aborted.
-        if (this.pauseRequested && this.lastStepStartLine != null) {
-          const resumeLine = this.lastStepStartLine;
-          this.post({ type: 'breakpointStop', line: resumeLine });
-          this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
-          log(`run paused at line ${resumeLine} — Resume to continue`);
-        } else {
-          this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
-          log('run aborted by user');
+        if (this.pauseRequested) {
+          // Resume point: the line that was executing when pause fired.
+          // Fall back to the first step in the run if no step:start has
+          // arrived yet (e.g. the user hit Pause immediately after Run,
+          // before the server emitted the first event). Without this
+          // fallback, paused state is never set and the Resume button
+          // doesn't render.
+          const firstStepLine = classified.find((c) => c.kind === 'step')?.line ?? null;
+          const resumeLine = this.lastStepStartLine ?? firstStepLine;
+          if (resumeLine != null) {
+            this.post({ type: 'breakpointStop', line: resumeLine });
+            this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+            log(`run paused at line ${resumeLine} — Resume to continue`);
+            return { ok: true };
+          }
         }
+        this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+        log('run aborted by user');
         return { ok: true };
       }
       const payload = mapApiErrorToPayload(err, { serverUrl, envPath: envResolution.path });
