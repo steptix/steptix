@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ActiveFileTracker, FileStateSnapshot } from './active-file-tracker.js';
+import { extractStepLineIds } from './step-lines.js';
 
 /**
  * Paints TestBench decorations on the active TextEditor: breakpoint dot,
@@ -18,6 +19,7 @@ export class DecorationManager implements vscode.Disposable {
   private readonly statusFail: vscode.TextEditorDecorationType;
   private readonly statusRunning: vscode.TextEditorDecorationType;
   private readonly statusSkip: vscode.TextEditorDecorationType;
+  private readonly statusPlaceholder: vscode.TextEditorDecorationType;
   private readonly errorLine: vscode.TextEditorDecorationType;
 
   constructor(
@@ -27,26 +29,40 @@ export class DecorationManager implements vscode.Disposable {
     const icon = (name: string): vscode.Uri =>
       vscode.Uri.joinPath(context.extensionUri, 'icons', name);
 
-    this.breakpointStopped = vscode.window.createTextEditorDecorationType({
-      gutterIconPath: icon('breakpoint-stopped.svg'),
-      gutterIconSize: 'contain',
+    // Reserve a status cell before every step line, even before a run has
+    // started. Visible statuses and the invisible placeholder use the same
+    // text attachment metrics, so the numbered Markdown list stays aligned.
+    const statusGlyph = (
+      contentText: string,
+      color: vscode.ThemeColor | string,
+    ): vscode.DecorationRenderOptions => ({
+      before: {
+        contentText,
+        color,
+        width: '1.2em',
+        margin: '0 0.35em 0 0',
+        fontWeight: '700',
+      },
     });
-    this.statusPass = vscode.window.createTextEditorDecorationType({
-      gutterIconPath: icon('status-pass.svg'),
-      gutterIconSize: 'contain',
-    });
-    this.statusFail = vscode.window.createTextEditorDecorationType({
-      gutterIconPath: icon('status-fail.svg'),
-      gutterIconSize: 'contain',
-    });
-    this.statusRunning = vscode.window.createTextEditorDecorationType({
-      gutterIconPath: icon('status-running.svg'),
-      gutterIconSize: 'contain',
-    });
-    this.statusSkip = vscode.window.createTextEditorDecorationType({
-      gutterIconPath: icon('status-skip.svg'),
-      gutterIconSize: 'contain',
-    });
+    this.statusPass = vscode.window.createTextEditorDecorationType(
+      statusGlyph('✓', '#22C55E'),
+    );
+    this.statusFail = vscode.window.createTextEditorDecorationType(
+      statusGlyph('×', '#F87171'),
+    );
+    this.statusRunning = vscode.window.createTextEditorDecorationType(
+      statusGlyph('●', '#60A5FA'),
+    );
+    this.statusSkip = vscode.window.createTextEditorDecorationType(
+      statusGlyph('–', '#94A3B8'),
+    );
+    this.statusPlaceholder = vscode.window.createTextEditorDecorationType(
+      statusGlyph('✓', 'rgba(0, 0, 0, 0)'),
+    );
+    this.breakpointStopped = vscode.window.createTextEditorDecorationType(
+      statusGlyph('▶', '#FACC15'),
+    );
+
     this.errorLine = vscode.window.createTextEditorDecorationType({
       isWholeLine: true,
       backgroundColor: new vscode.ThemeColor('inputValidation.errorBackground'),
@@ -67,6 +83,7 @@ export class DecorationManager implements vscode.Disposable {
     this.statusFail.dispose();
     this.statusRunning.dispose();
     this.statusSkip.dispose();
+    this.statusPlaceholder.dispose();
     this.errorLine.dispose();
   }
 
@@ -95,6 +112,7 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.statusFail, []);
     editor.setDecorations(this.statusRunning, []);
     editor.setDecorations(this.statusSkip, []);
+    editor.setDecorations(this.statusPlaceholder, []);
     editor.setDecorations(this.errorLine, []);
   }
 
@@ -106,8 +124,8 @@ export class DecorationManager implements vscode.Disposable {
     };
 
     // Breakpoint dots are painted by VS Code's debug system (we contribute
-    // `breakpoints` for markdown). We only own the yellow ▶ arrow that
-    // marks the line where a run paused at a breakpoint.
+    // `breakpoints` for markdown). The yellow pause arrow lives in the
+    // reserved inline status cell before the numbered step, not in the gutter.
     const stopped: vscode.Range[] = [];
     if (snap.breakpointStop != null) {
       stopped.push(range(snap.breakpointStop));
@@ -119,8 +137,11 @@ export class DecorationManager implements vscode.Disposable {
     const failRanges: vscode.Range[] = [];
     const runningRanges: vscode.Range[] = [];
     const skipRanges: vscode.Range[] = [];
+    const linesWithStatus = new Set<number>();
     for (const [line, status] of snap.statuses) {
+      if (line === snap.breakpointStop) continue;
       const r = range(line);
+      linesWithStatus.add(line);
       switch (status) {
         case 'pass': passRanges.push(r); break;
         case 'fail': failRanges.push(r); break;
@@ -129,6 +150,10 @@ export class DecorationManager implements vscode.Disposable {
       }
     }
 
+    const placeholderRanges = extractStepLineIds(snap.text)
+      .filter((line) => line !== snap.breakpointStop && !linesWithStatus.has(line))
+      .map((line) => range(line));
+
     const errorRanges = snap.errors.map(([line]) => range(line));
 
     editor.setDecorations(this.breakpointStopped, stopped);
@@ -136,6 +161,7 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.statusFail, failRanges);
     editor.setDecorations(this.statusRunning, runningRanges);
     editor.setDecorations(this.statusSkip, skipRanges);
+    editor.setDecorations(this.statusPlaceholder, placeholderRanges);
     editor.setDecorations(this.errorLine, errorRanges);
   }
 
