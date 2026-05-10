@@ -71,8 +71,11 @@ class FakeApiClient {
     }
   }
 
-  async closeSession(_sessionId) {
+  async closeSession(sessionId) {
     this.closeSessionCalls += 1;
+    if (this.closeSessionImpl) {
+      await this.closeSessionImpl(sessionId);
+    }
   }
 
   // -------------------- Test-driving API --------------------

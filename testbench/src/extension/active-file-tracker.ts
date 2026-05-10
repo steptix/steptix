@@ -262,10 +262,21 @@ function isTestbenchDocument(doc: vscode.TextDocument): boolean {
   return isTestFile(doc.getText());
 }
 
-/** 1-based line numbers covered by every selection in the editor. */
+/**
+ * 1-based line numbers covered by every *range* selection in the editor.
+ * Cursor-only "selections" (no highlighted range) are ignored — they
+ * represent "I'm parked here", not "run this." Treating a cursor as a
+ * single-line selection caused empty-trim bugs when the cursor sat on a
+ * step that also had a breakpoint (e.g. after a reload mid-pause): the
+ * trimmed run was empty, the pause indicator went up immediately, and the
+ * user thought their test had silently jumped to the breakpoint without
+ * running the preceding steps. With this rule, cursor-only → [] → run
+ * everything; explicit highlight → run those lines.
+ */
 function selectionLines(editor: vscode.TextEditor): number[] {
   const set = new Set<number>();
   for (const sel of editor.selections) {
+    if (sel.isEmpty) continue;
     const start = sel.start.line;
     const end = sel.end.line;
     for (let i = start; i <= end; i++) set.add(i + 1);

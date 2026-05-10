@@ -27,6 +27,10 @@ export function registerCommands(
     const controller = registry.active();
     const editor = tracker.activeEditor;
     if (!controller || !editor) return notifyNoActive();
+    // selectionLines returns [] for cursor-only "selections" (no
+    // highlighted range), which runLines interprets as "run every step in
+    // the document" — the same behavior as Run All. See selectionLines'
+    // doc comment for why.
     const lines = selectionLines(editor);
     const breakpoints = tracker.breakpoints(controller.document.uri);
     registry.notifyRunning(true);
@@ -178,10 +182,16 @@ export function registerCommands(
   ];
 }
 
-/** 1-based line numbers covered by every selection in the editor. */
+/**
+ * 1-based line numbers covered by every *range* selection in the editor.
+ * Cursor-only "selections" (no highlighted range) are ignored: a cursor
+ * just means "I'm parked here," not "run this." See the same helper in
+ * active-file-tracker.ts for the full rationale.
+ */
 function selectionLines(editor: vscode.TextEditor): number[] {
   const set = new Set<number>();
   for (const sel of editor.selections) {
+    if (sel.isEmpty) continue;
     const start = sel.start.line;
     const end = sel.end.line;
     for (let i = start; i <= end; i++) set.add(i + 1);

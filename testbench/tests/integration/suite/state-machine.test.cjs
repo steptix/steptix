@@ -62,9 +62,12 @@ describe('TestBench debug state machine', function () {
     fake = new FakeApiClient();
     hooks.setApiClientFactory(() => fake);
 
-    // Open the fixture and select the first step line. Selecting tells
-    // testbench.runSelected which line to run — we always pick line 9
-    // ("1. Navigate to https://example.com" in the fixture).
+    // Open the fixture and highlight line 9 with a real range selection.
+    // testbench.runSelected treats cursor-only "selections" as a request to
+    // run the whole test (the bug fix this suite documents), so tests that
+    // want to scope a run to a single step must use a range. Line 9 is
+    // "2. Click the 'Get started' button" in the fixture; selecting columns
+    // 0..5 keeps the highlight inside the line.
     const uri = fixtureUri('test-with-steps.md');
     await vscode.commands.executeCommand('vscode.open', uri);
     await waitFor('fixture editor active', () => {
@@ -74,7 +77,7 @@ describe('TestBench debug state machine', function () {
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(
       new vscode.Position(8, 0), // 0-based: line 9 is index 8
-      new vscode.Position(8, 0),
+      new vscode.Position(8, 5),
     );
 
     // Wait a beat for the activeFile context key to flip true after the
@@ -120,7 +123,7 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.tracker.snapshot().breakpointStop, null);
   });
 
-  it('running → idle (stop): testbench.stop aborts immediately, no pause marker', async () => {
+  it('running → idle (stop): testbench.stop aborts immediately, no pause marker, in-flight step marked stopped', async () => {
     void vscode.commands.executeCommand('testbench.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
@@ -137,6 +140,85 @@ describe('TestBench debug state machine', function () {
       snap.breakpointStop,
       null,
       'Stop must clear pause indicator (per spec §6)',
+    );
+    // The in-flight `running` step gets reclassified to `stopped` so the user
+    // sees a grey square (not a permanent blue dot or stale running spinner).
+    // markRunningStopped is wired into both stop handlers — this test covers
+    // the testbench.stop command path.
+    const statuses = Object.fromEntries(snap.statuses);
+    assert.equal(
+      statuses[9],
+      'stopped',
+      'Stop must flip in-flight running steps to stopped status',
+    );
+  });
+
+  it('running → idle (webview stop): webview-driven stop also marks in-flight step stopped', async () => {
+    // Guards the two-handler regression class: testbench.stop and the
+    // webview-message `{ type: 'stop' }` handler are separate code paths.
+    // Both must call tracker.markRunningStopped — if a future contributor
+    // wires it into only one handler, the user will see inconsistent UX
+    // depending on whether they clicked the title-bar Stop or the webview
+    // toolbar Stop. (See feedback memory: VS Code commands & message types
+    // are often registered in two places; fix both.)
+    void vscode.commands.executeCommand('testbench.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('status running', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+
+    await hooks.dispatchWebviewMessage({ type: 'stop' });
+
+    await waitFor('idle after webview stop', () => !hooks.isRunning());
+    const snap = hooks.tracker.snapshot();
+    assert.equal(snap.breakpointStop, null, 'webview stop must clear pause indicator');
+    const statuses = Object.fromEntries(snap.statuses);
+    assert.equal(
+      statuses[9],
+      'stopped',
+      'webview stop must flip running step to stopped (parity with testbench.stop)',
+    );
+  });
+
+  it('stop while paused (with already-passed step): stop preserves pass status, does not flip to stopped', async () => {
+    // markRunningStopped must ONLY flip rows that are currently `running` —
+    // not pass/fail/skip. If a step finished successfully before pause and
+    // the user then hit Stop, that pass should stay a pass, not become a
+    // stopped square.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(8, 0),
+      new vscode.Position(9, 0),
+    );
+
+    void vscode.commands.executeCommand('testbench.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at 10 after step 9 passes', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Step 9 should be `pass` at this point — no `running` rows to flip.
+    const beforeStop = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(beforeStop[9], 'pass', 'precondition: step 9 should be pass');
+
+    await vscode.commands.executeCommand('testbench.stop');
+    await waitFor('breakpointStop cleared', () => hooks.tracker.snapshot().breakpointStop === null);
+    const afterStop = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(
+      afterStop[9],
+      'pass',
+      'Stop must NOT downgrade a passed step to stopped — only running rows flip',
     );
   });
 
@@ -276,12 +358,17 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.isRunning(), false);
   });
 
-  it('breakpoint on first selected step: pauses immediately, no stream opens', async () => {
+  it('breakpoint on first selected step (explicit range): pauses immediately, no stream opens', async () => {
     // Audit gap: existing trim-pause test puts the breakpoint on the *second*
     // selected step, so the trimmed run still has one item and the stream
     // opens. The empty-trim branch (`classified.length === 0` in
     // run-controller.runLines) is its own code path — pause indicator goes up
     // and `done(aborted)` fires without ever creating a fake stream.
+    //
+    // The empty-trim branch is reached when the user explicitly highlights
+    // a single step that also has a breakpoint on it. Cursor-only on a
+    // breakpoint line now expands to runAll (see the cursor-parked test
+    // above), so this scenario requires a real range selection.
     const uri = vscode.window.activeTextEditor.document.uri;
     vscode.debug.addBreakpoints([
       new vscode.SourceBreakpoint(
@@ -289,6 +376,15 @@ describe('TestBench debug state machine', function () {
         true,
       ),
     ]);
+
+    // Explicit range selection covering line 9 only — start at column 0,
+    // end at column 5 (still on line 9). hasRange becomes true so
+    // runSelected uses the highlighted line, not the runAll fallback.
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(8, 0),
+      new vscode.Position(8, 5),
+    );
 
     void vscode.commands.executeCommand('testbench.runSelected');
 
@@ -498,5 +594,284 @@ describe('TestBench debug state machine', function () {
     fake.push({ type: 'step:pass', line: 9 });
     fake.end();
     await waitFor('idle after resume completes', () => !hooks.isRunning());
+  });
+
+  it('Run with cursor parked on a breakpoint line: runs every preceding step from the top instead of silently pausing without executing anything', async () => {
+    // User-reported bug: with a breakpoint on step 3, run the test, hit the
+    // breakpoint, reload the VS Code window, hit Run again. After reload
+    // VS Code restores the cursor to where it was last (the breakpoint
+    // line), so F5 / Play (both bound to testbench.runSelected) runs with
+    // selectionLines === [breakpoint line]. trimAtBreakpoint then returns
+    // runnable=[] with pausedAt=breakpoint line, the empty-trim branch
+    // posts breakpointStop and calls it done — yellow ▶ lands on step 3
+    // immediately, steps 1 and 2 never execute.
+    //
+    // Cursor-only "selection" isn't really a selection. The user's intent
+    // is "run the test", not "run only this one step that happens to have
+    // a breakpoint." Run-from-cursor for a single step is what
+    // testbench.runStepHere is for (gutter right-click); runSelected with
+    // a cursor should expand to runAll semantics.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    // Breakpoint on step 3 (line 10).
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)),
+        true,
+      ),
+    ]);
+    // Park the cursor on the breakpoint line (no range selection) — what
+    // VS Code restores after a reload mid-pause.
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(9, 0),
+      new vscode.Position(9, 0),
+    );
+
+    void vscode.commands.executeCommand('testbench.runSelected');
+
+    // The fix: a stream actually opens for the preceding steps (lines 8
+    // and 9). Without it, the empty-trim branch fires and no stream ever
+    // exists.
+    await waitFor('stream opens for preceding steps', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 8 });
+    await waitFor('step 1 actually runs', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[8] === 'running';
+    });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+
+    // Only after steps 1 and 2 actually executed should the breakpoint
+    // pause indicator appear on step 3.
+    await waitFor('arrow lands on step 3 after preceding steps complete', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+    await waitFor('idle after run pauses on step 3', () => !hooks.isRunning());
+
+    const finalStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(finalStatuses[8], 'pass', 'step 1 must show as passed');
+    assert.equal(finalStatuses[9], 'pass', 'step 2 must show as passed');
+  });
+
+  it('First run after activation closes any stale server session before opening the stream', async () => {
+    // Bug: after a VS Code reload mid-pause, the server still holds the
+    // previous session keyed on this file's path. The new run sends only
+    // the steps before the breakpoint (e.g. [step1, step2]) — the server,
+    // confused by its leftover paused-at-step-3 state, short-circuits with
+    // an instant `done` event and no step:start events. The runner reads
+    // status=passed and posts the breakpointStop on the breakpoint line.
+    // From the user's perspective: yellow ▶ jumps to step 3, no preceding
+    // pass ticks ever appeared, and the test "didn't run anything."
+    //
+    // The fix: every controller's first runLines call closes the session
+    // before doing anything else. Each VS Code reload creates fresh
+    // controllers (registry is reset on activate), so this gives the
+    // server a clean slate exactly when needed. Subsequent runs reuse the
+    // session — closing every time would defeat the perf win of session
+    // reuse and would cost a real browser relaunch on each run.
+    assert.equal(fake.closeSessionCalls, 0, 'precondition: nothing closed yet');
+
+    void vscode.commands.executeCommand('testbench.runSelected');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+
+    assert.equal(
+      fake.closeSessionCalls,
+      1,
+      'closeSession must be called exactly once before the first stream opens',
+    );
+
+    fake.end();
+    await waitFor('idle after first run', () => !hooks.isRunning());
+
+    // Subsequent runs in the same activation must NOT close — session
+    // reuse is intentional once the controller has confirmed a clean
+    // start.
+    void vscode.commands.executeCommand('testbench.runSelected');
+    await waitFor('second stream active', () => fake.hasActiveStream);
+    assert.equal(
+      fake.closeSessionCalls,
+      1,
+      'closeSession must NOT fire for runs after the first one',
+    );
+
+    fake.end();
+    await waitFor('idle after second run', () => !hooks.isRunning());
+  });
+
+  it('First-run close failure must not block the run', async () => {
+    // Defensive: if the server is down or the .env is missing or the
+    // session never existed (404), closeSession can throw — but the
+    // user's intent is to RUN, so a cleanup failure must not propagate.
+    // The try/catch around closeSession swallows; the run that follows
+    // surfaces the real error itself if the underlying problem persists.
+    fake.closeSessionImpl = async () => {
+      throw new Error('simulated closeSession failure');
+    };
+
+    void vscode.commands.executeCommand('testbench.runSelected');
+    await waitFor('stream still opens despite close failure', () => fake.hasActiveStream);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('Run with cursor parked on a breakpoint line (webview path): same fix applies to the webview Run button', async () => {
+    // The fix lives in selectionLines (active-file-tracker.ts), so the
+    // tracker's snapshot.selectedLines also reports [] for cursor-only.
+    // The webview's handleRun posts `{ type: 'run', lines: selectedLines }`
+    // — with [] the extension's case 'run' handler runs all, same as the
+    // command path. Without this rule the webview Run button would still
+    // hit the empty-trim branch even after the runSelected fix.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(9, 0),
+      new vscode.Position(9, 0),
+    );
+    // Wait for the tracker to flush the new selection through onChange so
+    // snapshot.selectedLines is up to date.
+    await waitFor('snapshot reflects cursor-only selection as []', () => {
+      return hooks.tracker.snapshot().selectedLines.length === 0;
+    });
+
+    // Simulate exactly what the webview does in handleRun: read
+    // selectedLines from the snapshot and post a `run` message.
+    const lines = hooks.tracker.snapshot().selectedLines;
+    void hooks.dispatchWebviewMessage({ type: 'run', lines });
+
+    await waitFor('stream opens for preceding steps via webview Run', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+
+    await waitFor('arrow lands on step 3 after preceding steps complete', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+    await waitFor('idle after webview Run pauses on step 3', () => !hooks.isRunning());
+
+    const finalStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(finalStatuses[8], 'pass', 'step 1 must show as passed');
+    assert.equal(finalStatuses[9], 'pass', 'step 2 must show as passed');
+  });
+
+  it('Stop is a hard reset (not a hidden pause): next Run re-executes every step from the beginning, hits the surviving breakpoint freshly', async () => {
+    // User scenario: set a breakpoint on step 3, run the test, hit the
+    // breakpoint, hit Stop, then run again.
+    //
+    // The contract being verified is that Stop is a HARD RESET of run state,
+    // not a paused-state masquerading as Stop. After Stop the next Run is a
+    // genuine from-scratch execution: every step re-runs, no continuation,
+    // no resumption from where the previous run paused. The yellow ▶ that
+    // ends up on step 3 at the end is a *fresh* breakpoint hit, not a
+    // leftover from before.
+    //
+    // Promises being verified:
+    //   1. After Stop, the yellow arrow disappears (breakpointStop === null).
+    //   2. The breakpoint itself survives Stop — Stop resets RUN state, not
+    //      DEBUG state.
+    //   3. The new run starts with no stale arrow.
+    //   4. The new run does NOT light up the arrow on step 3 prematurely —
+    //      it must wait for steps 1 and 2 to actually finish (proving they
+    //      genuinely re-executed, not skipped on the assumption "we already
+    //      passed those last time").
+    //   5. Once steps 1 and 2 pass freshly, the breakpoint trips again and
+    //      the arrow lands on step 3.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    // Breakpoint on step 3 (line 10 in the fixture).
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)),
+        true,
+      ),
+    ]);
+
+    // ---------- First run: hit the breakpoint ----------
+    // testbench.runAll runs every step in the document — equivalent to the
+    // user clicking "Run All" with no selection narrowing.
+    void vscode.commands.executeCommand('testbench.runAll');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+
+    // Steps 1 and 2 (lines 8, 9) execute, then the run pauses before step 3.
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+
+    await waitFor('first run pauses on step 3 (line 10)', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+    await waitFor('idle after first run hits breakpoint', () => !hooks.isRunning());
+
+    // ---------- Stop ----------
+    await vscode.commands.executeCommand('testbench.stop');
+    await waitFor('arrow cleared after stop', () => {
+      return hooks.tracker.snapshot().breakpointStop === null;
+    });
+    // Breakpoint must survive Stop — only pause indicator is cleared.
+    assert.ok(
+      vscode.debug.breakpoints.some(
+        (bp) =>
+          bp instanceof vscode.SourceBreakpoint &&
+          bp.location.uri.toString() === uri.toString() &&
+          bp.location.range.start.line === 9,
+      ),
+      'Stop must NOT remove the user\'s breakpoint',
+    );
+
+    // ---------- Second run from the beginning ----------
+    void vscode.commands.executeCommand('testbench.runAll');
+    await waitFor('second stream active', () => fake.hasActiveStream);
+
+    // While the run is in flight before steps 1 and 2 complete, the arrow
+    // must NOT have jumped straight back to step 3. The clear-stale post at
+    // the top of runLines guarantees no leftover from the first run, and
+    // breakpointStop for the new pause is only published after status===passed.
+    assert.equal(
+      hooks.tracker.snapshot().breakpointStop,
+      null,
+      'Arrow must not appear on the breakpoint line before preceding steps run',
+    );
+
+    fake.push({ type: 'step:start', line: 8 });
+    await waitFor('running on line 8 in second run', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[8] === 'running';
+    });
+    assert.equal(
+      hooks.tracker.snapshot().breakpointStop,
+      null,
+      'Arrow still must not appear while step 1 is executing',
+    );
+
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+
+    // Pushing step:start + step:pass for lines 8 and 9 in this run is the
+    // load-bearing assertion that the run started fresh — those events only
+    // arrive if step 1 and step 2 actually re-executed. If Stop secretly
+    // preserved progress and the next Run had behaved like Resume, the
+    // server would have skipped them and we'd have timed out.
+    //
+    // Now the breakpoint trips again on step 3 — fresh hit, same line as
+    // the first run because the breakpoint is unchanged.
+    await waitFor('arrow lands on step 3 after fresh run hits the breakpoint', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+    await waitFor('idle after second run hits the breakpoint', () => !hooks.isRunning());
   });
 });

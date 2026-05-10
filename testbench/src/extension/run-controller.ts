@@ -68,6 +68,16 @@ export class RunController {
   /** Line of the most recent step:start event in the current run. Used as
    *  the resume point when the user pauses mid-step. */
   private lastStepStartLine: number | null = null;
+  /** False until the first runLines call clears any stale server session
+   *  for this file. VS Code reloads create a fresh controller but the
+   *  server still has the previous session keyed on the file path — left
+   *  unattended, the server can short-circuit the new run with an instant
+   *  `done` and no step events, which the runner misreads as "all steps
+   *  passed" and pins the pause indicator on the breakpoint line without
+   *  any preceding step having actually run. Closing on first use gives a
+   *  clean slate; subsequent runs in the same activation reuse the
+   *  session as intended. */
+  private staleSessionCleared = false;
 
   constructor(
     public readonly document: vscode.TextDocument,
@@ -167,6 +177,20 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
+
+    // First run on this controller? Close any session the server may still
+    // be holding from a previous VS Code session — see staleSessionCleared
+    // doc comment for full reasoning. Best-effort: a missing .env, a
+    // server outage, or no existing session all just no-op here, and the
+    // run that follows surfaces the real error if there is one.
+    if (!this.staleSessionCleared) {
+      this.staleSessionCleared = true;
+      try {
+        await this.closeSession();
+      } catch {
+        // Swallow — cleanup must not block the run.
+      }
+    }
 
     const breakpoints = options.breakpoints ?? new Set<number>();
     const skipFirstBreakpoint = options.skipBreakpointAtStart === true;

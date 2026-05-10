@@ -189,6 +189,10 @@ export interface TestBenchTestHooks {
   notifyRunningHistory: () => boolean[];
   /** Diagnostic: last runError payload, or null if none. */
   lastRunError: () => { code: string; diagnosis: string; fix?: string } | null;
+  /** Drive the webview→host message path directly so tests can verify it
+   *  mirrors the registered command behavior (markRunningStopped, etc).
+   *  Guards the two-handler regression class. */
+  dispatchWebviewMessage: (msg: WebviewToHostMsg) => Promise<void>;
   /** Best-effort: wait until tracker.snapshot() satisfies the predicate. */
   waitFor: (predicate: () => boolean, timeoutMs?: number) => Promise<void>;
 }
@@ -244,6 +248,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       activeControllerResolves: () => registry.active() !== undefined,
       notifyRunningHistory: () => [...registry.notifyRunningHistory],
       lastRunError: () => registry.lastRunError,
+      dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker),
       waitFor: async (predicate, timeoutMs = 5000) => {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
