@@ -12,6 +12,13 @@
   box-sizing: border-box;
 }
 
+/* The `hidden` attribute must win over class rules like `.image-overlay`/
+   `.settings-overlay` that set `display: flex`. Without this, those overlays
+   (and their broken-image placeholders) render on top of the panel. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
