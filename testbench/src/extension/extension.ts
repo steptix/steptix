@@ -424,6 +424,12 @@ async function handleWebviewMessage(
       tracker.toggleBreakpoint(editor.document.uri, msg.line);
       return;
     }
+    case 'clearStatus': {
+      const editor = tracker.activeEditor;
+      if (!editor || !tracker.isActiveTestFile) return;
+      tracker.clearStatus(editor.document.uri, msg.line);
+      return;
+    }
     case 'focusTestResults': {
       // Triggered by the batch-run banner's "Open Test Results" link.
       void vscode.commands.executeCommand('workbench.panel.testResults.focus');

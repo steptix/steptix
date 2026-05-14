@@ -63,4 +63,5 @@ export const hostBridge = {
   postResume() { post({ type: 'resume' }); },
   postPause() { post({ type: 'pause' }); },
   postFocusTestResults() { post({ type: 'focusTestResults' }); },
+  postClearStatus(line) { post({ type: 'clearStatus', line }); },
 };

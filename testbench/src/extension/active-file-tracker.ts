@@ -176,6 +176,16 @@ export class ActiveFileTracker {
     this.emit();
   }
 
+  /** Single-line variant used by the webview's per-step "Clear status here"
+   *  menu item. Leaves other lines' statuses and the breakpoint-stop marker
+   *  untouched. */
+  clearStatus(uri: vscode.Uri, line: number): void {
+    const state = this.state(uri);
+    const had = state.statuses.delete(line);
+    const hadErr = state.errors.delete(line);
+    if (had || hadErr) this.emit();
+  }
+
   setStatus(uri: vscode.Uri, line: number, status: LineStatus): void {
     const state = this.state(uri);
     state.statuses.set(line, status);

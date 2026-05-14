@@ -254,6 +254,16 @@ export interface WebviewFocusTestResultsMsg {
   type: 'focusTestResults';
 }
 
+/**
+ * User picked "Clear status here" on a step's context menu. Drops the
+ * pass/fail status and any error attached to that single line — the
+ * file-wide `testbench.clearStatuses` command remains for clearing all.
+ */
+export interface WebviewClearStatusMsg {
+  type: 'clearStatus';
+  line: number;
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -266,7 +276,8 @@ export type WebviewToHostMsg =
   | WebviewToggleBreakpointMsg
   | WebviewResumeMsg
   | WebviewPauseMsg
-  | WebviewFocusTestResultsMsg;
+  | WebviewFocusTestResultsMsg
+  | WebviewClearStatusMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -303,7 +314,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'toggleBreakpoint' ||
     t === 'resume' ||
     t === 'pause' ||
-    t === 'focusTestResults'
+    t === 'focusTestResults' ||
+    t === 'clearStatus'
   );
 }
 
