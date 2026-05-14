@@ -15,6 +15,7 @@ import { EnvSelector } from './env-selector.js';
 import { workspaceFolderFor } from './workspace.js';
 import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
+import { InvocationDefinitionProvider } from './definition-provider.js';
 
 const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
 
@@ -283,6 +284,12 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     }),
     new EnvSelector(),
     openInEditor,
+    // F12 / Ctrl+Click / Peek on `[skill: ...]` and `[tool: ...]` step
+    // invocations — jumps to the skill `.md` or tool `.ts` file.
+    vscode.languages.registerDefinitionProvider(
+      { language: 'markdown', scheme: 'file' },
+      new InvocationDefinitionProvider(),
+    ),
     ...registerCommands(registry, tracker),
   );
 
