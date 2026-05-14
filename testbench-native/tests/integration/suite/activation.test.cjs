@@ -3,8 +3,8 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.testbench';
-const SIDEBAR_VIEW_ID = 'testbench.runner';
+const EXT_ID = 'pkent.testbench-native';
+const SIDEBAR_VIEW_ID = 'testbench-native.runner';
 
 const FIXTURES_DIR =
   process.env.TESTBENCH_FIXTURES_DIR ||
@@ -72,20 +72,20 @@ describe('TestBench extension — structural smoke', function () {
   it('every contributed command is registered', async () => {
     const commands = await vscode.commands.getCommands(true);
     const expected = [
-      'testbench.runSelected',
-      'testbench.runAll',
-      'testbench.stop',
-      'testbench.pause',
-      'testbench.resume',
-      'testbench.toggleBreakpoint',
-      'testbench.runStepHere',
-      'testbench.clearBreakpoints',
-      'testbench.clearStatuses',
-      'testbench.revealEnvFile',
-      'testbench.showRunLog',
-      'testbench.dismissError',
-      'testbench.selectEnv',
-      'testbench.focusRunner',
+      'testbench-native.runSelected',
+      'testbench-native.runAll',
+      'testbench-native.stop',
+      'testbench-native.pause',
+      'testbench-native.resume',
+      'testbench-native.toggleBreakpoint',
+      'testbench-native.runStepHere',
+      'testbench-native.clearBreakpoints',
+      'testbench-native.clearStatuses',
+      'testbench-native.revealEnvFile',
+      'testbench-native.showRunLog',
+      'testbench-native.dismissError',
+      'testbench-native.selectEnv',
+      'testbench-native.focusRunner',
     ];
     const missing = expected.filter((c) => !commands.includes(c));
     assert.deepEqual(missing, [], `missing commands: ${missing.join(', ')}`);
@@ -128,7 +128,7 @@ describe('TestBench extension — structural smoke', function () {
     );
 
     // Toggle on.
-    await vscode.commands.executeCommand('testbench.toggleBreakpoint');
+    await vscode.commands.executeCommand('testbench-native.toggleBreakpoint');
     await waitFor('breakpoint added', () => {
       return vscode.debug.breakpoints.some(
         (bp) =>
@@ -139,7 +139,7 @@ describe('TestBench extension — structural smoke', function () {
     });
 
     // Toggle off.
-    await vscode.commands.executeCommand('testbench.toggleBreakpoint');
+    await vscode.commands.executeCommand('testbench-native.toggleBreakpoint');
     await waitFor('breakpoint removed', () => {
       return !vscode.debug.breakpoints.some(
         (bp) =>
@@ -159,9 +159,9 @@ describe('TestBench extension — structural smoke', function () {
     });
 
     // None of these should throw when there's no in-flight run.
-    await vscode.commands.executeCommand('testbench.stop');
-    await vscode.commands.executeCommand('testbench.pause');
-    await vscode.commands.executeCommand('testbench.resume');
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await vscode.commands.executeCommand('testbench-native.resume');
   });
 
   it('breakpoints panel reflects markdown breakpoints we add', async () => {

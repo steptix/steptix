@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import { getOutputChannel } from './output-channel.js';
 
 const SETTING_KEY = 'activeEnv';
-const COMMAND_ID = 'testbench.selectEnv';
+const COMMAND_ID = 'testbench-native.selectEnv';
 const STATUS_BAR_PRIORITY = 100;
 const UNSET_LABEL = '(none)';
 
@@ -15,7 +15,7 @@ const UNSET_LABEL = '(none)';
  *   while a TestBench-eligible Markdown file is the active tab.
  * - Clicking opens a QuickPick listing every env discovered by scanning the
  *   workspace for `fixtures/data/*.json` and `.env.*` files.
- * - Selection writes `testbench.activeEnv` to workspace settings so it persists
+ * - Selection writes `testbench-native.activeEnv` to workspace settings so it persists
  *   across reloads and is per-workspace (not global).
  *
  * Reading the setting elsewhere (e.g. run-controller, future Flick app) gives
@@ -42,7 +42,7 @@ export class EnvSelector implements vscode.Disposable {
       // would otherwise hide this item exactly when it's most useful.
       vscode.window.tabGroups.onDidChangeTabGroups(() => this.refresh()),
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration(`testbench.${SETTING_KEY}`)) this.refresh();
+        if (e.affectsConfiguration(`testbench-native.${SETTING_KEY}`)) this.refresh();
       }),
     );
 
@@ -55,7 +55,7 @@ export class EnvSelector implements vscode.Disposable {
 
   /** Read the active env from settings — null when unset. */
   static activeEnv(): string | null {
-    const cfg = vscode.workspace.getConfiguration('testbench');
+    const cfg = vscode.workspace.getConfiguration('testbench-native');
     const v = cfg.get<string>(SETTING_KEY)?.trim();
     return v ? v : null;
   }
@@ -96,7 +96,7 @@ export class EnvSelector implements vscode.Disposable {
     });
     if (!pick) return;
 
-    const cfg = vscode.workspace.getConfiguration('testbench');
+    const cfg = vscode.workspace.getConfiguration('testbench-native');
     const newValue = pick.label === UNSET_LABEL ? '' : pick.label;
     await cfg.update(SETTING_KEY, newValue, vscode.ConfigurationTarget.Workspace);
     getOutputChannel().appendLine(

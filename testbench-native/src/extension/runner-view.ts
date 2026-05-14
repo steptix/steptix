@@ -24,12 +24,12 @@ interface Attachment {
 /**
  * Sidebar webview view that hosts the TestBench UI (toolbar, output log,
  * variables, error panel). Also acts as a broadcaster: detached editor
- * panels created via `testbench.openInEditor` register themselves here so
+ * panels created via `testbench-native.openInEditor` register themselves here so
  * they receive the same run events, batch banners, and activeFile
  * snapshots as the sidebar.
  */
 export class TestBenchRunnerView implements vscode.WebviewViewProvider {
-  public static readonly viewId = 'testbench.runner';
+  public static readonly viewId = 'testbench-native.runner';
 
   private readonly attachments: Attachment[] = [];
   private messageHandler:

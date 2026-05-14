@@ -145,7 +145,7 @@ export class RunController {
     const out = getOutputChannel();
     const ts = () => new Date().toISOString().slice(11, 23);
 
-    const settings = vscode.workspace.getConfiguration('testbench');
+    const settings = vscode.workspace.getConfiguration('testbench-native');
     const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
     const filePath = this.document.uri.fsPath;
 
@@ -239,7 +239,7 @@ export class RunController {
     const filePath = this.document.uri.fsPath;
     log(`run requested for ${filePath}: lines=[${lines.join(',')}]`);
 
-    const settings = vscode.workspace.getConfiguration('testbench');
+    const settings = vscode.workspace.getConfiguration('testbench-native');
     const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
 
     const envResolution = await resolveEnvFile({

@@ -6,7 +6,7 @@
  *
  * Each test follows the same shape:
  *   1. Open the fixture .md, wait for it to be the active editor.
- *   2. Trigger a command (testbench.runSelected / pause / stop / resume).
+ *   2. Trigger a command (testbench-native.runSelected / pause / stop / resume).
  *   3. Push synthesized events onto the fake stream.
  *   4. Assert tracker state + isRunning() across the transition.
  *
@@ -17,7 +17,7 @@ const path = require('node:path');
 const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
 
-const EXT_ID = 'pkent.testbench';
+const EXT_ID = 'pkent.testbench-native';
 const FIXTURES_DIR =
   process.env.TESTBENCH_FIXTURES_DIR ||
   path.resolve(__dirname, '..', 'fixtures');
@@ -63,7 +63,7 @@ describe('TestBench debug state machine', function () {
     hooks.setApiClientFactory(() => fake);
 
     // Open the fixture and highlight line 9 with a real range selection.
-    // testbench.runSelected treats cursor-only "selections" as a request to
+    // testbench-native.runSelected treats cursor-only "selections" as a request to
     // run the whole test (the bug fix this suite documents), so tests that
     // want to scope a run to a single step must use a range. Line 9 is
     // "2. Click the 'Get started' button" in the fixture; selecting columns
@@ -91,7 +91,7 @@ describe('TestBench debug state machine', function () {
   it('idle → running: runSelected starts a run and reports running', async () => {
     assert.equal(hooks.isRunning(), false, 'should start idle');
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
 
     await waitFor('isRunning becomes true', () => hooks.isRunning());
     await waitFor('fake stream is active', () => fake.hasActiveStream);
@@ -103,7 +103,7 @@ describe('TestBench debug state machine', function () {
   });
 
   it('running → idle (success): step events drive statuses, done flips running off', async () => {
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     fake.push({ type: 'step:start', line: 9 });
@@ -123,8 +123,8 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.tracker.snapshot().breakpointStop, null);
   });
 
-  it('running → idle (stop): testbench.stop aborts immediately, no pause marker, in-flight step marked stopped', async () => {
-    void vscode.commands.executeCommand('testbench.runSelected');
+  it('running → idle (stop): testbench-native.stop aborts immediately, no pause marker, in-flight step marked stopped', async () => {
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     await waitFor('status running', () => {
@@ -132,7 +132,7 @@ describe('TestBench debug state machine', function () {
       return statuses[9] === 'running';
     });
 
-    await vscode.commands.executeCommand('testbench.stop');
+    await vscode.commands.executeCommand('testbench-native.stop');
 
     await waitFor('idle after stop', () => !hooks.isRunning());
     const snap = hooks.tracker.snapshot();
@@ -144,7 +144,7 @@ describe('TestBench debug state machine', function () {
     // The in-flight `running` step gets reclassified to `stopped` so the user
     // sees a grey square (not a permanent blue dot or stale running spinner).
     // markRunningStopped is wired into both stop handlers — this test covers
-    // the testbench.stop command path.
+    // the testbench-native.stop command path.
     const statuses = Object.fromEntries(snap.statuses);
     assert.equal(
       statuses[9],
@@ -154,14 +154,14 @@ describe('TestBench debug state machine', function () {
   });
 
   it('running → idle (webview stop): webview-driven stop also marks in-flight step stopped', async () => {
-    // Guards the two-handler regression class: testbench.stop and the
+    // Guards the two-handler regression class: testbench-native.stop and the
     // webview-message `{ type: 'stop' }` handler are separate code paths.
     // Both must call tracker.markRunningStopped — if a future contributor
     // wires it into only one handler, the user will see inconsistent UX
     // depending on whether they clicked the title-bar Stop or the webview
     // toolbar Stop. (See feedback memory: VS Code commands & message types
     // are often registered in two places; fix both.)
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     await waitFor('status running', () => {
@@ -178,7 +178,7 @@ describe('TestBench debug state machine', function () {
     assert.equal(
       statuses[9],
       'stopped',
-      'webview stop must flip running step to stopped (parity with testbench.stop)',
+      'webview stop must flip running step to stopped (parity with testbench-native.stop)',
     );
   });
 
@@ -200,7 +200,7 @@ describe('TestBench debug state machine', function () {
       new vscode.Position(9, 0),
     );
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     fake.push({ type: 'step:pass', line: 9 });
@@ -212,7 +212,7 @@ describe('TestBench debug state machine', function () {
     const beforeStop = Object.fromEntries(hooks.tracker.snapshot().statuses);
     assert.equal(beforeStop[9], 'pass', 'precondition: step 9 should be pass');
 
-    await vscode.commands.executeCommand('testbench.stop');
+    await vscode.commands.executeCommand('testbench-native.stop');
     await waitFor('breakpointStop cleared', () => hooks.tracker.snapshot().breakpointStop === null);
     const afterStop = Object.fromEntries(hooks.tracker.snapshot().statuses);
     assert.equal(
@@ -222,8 +222,8 @@ describe('TestBench debug state machine', function () {
     );
   });
 
-  it('running → paused (user pause): testbench.pause marks resume point', async () => {
-    void vscode.commands.executeCommand('testbench.runSelected');
+  it('running → paused (user pause): testbench-native.pause marks resume point', async () => {
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     await waitFor('status running on line 9', () => {
@@ -231,7 +231,7 @@ describe('TestBench debug state machine', function () {
       return statuses[9] === 'running';
     });
 
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
 
     await waitFor('breakpointStop is set to executing line', () => {
       return hooks.tracker.snapshot().breakpointStop === 9;
@@ -239,16 +239,16 @@ describe('TestBench debug state machine', function () {
     await waitFor('isRunning becomes false', () => !hooks.isRunning());
   });
 
-  it('paused → running (resume): testbench.resume re-opens the stream from paused line', async () => {
+  it('paused → running (resume): testbench-native.resume re-opens the stream from paused line', async () => {
     // Drive into paused state.
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     await waitFor('running on line 9', () => {
       const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
       return statuses[9] === 'running';
     });
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
     await waitFor('paused at 9', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle while paused', () => !hooks.isRunning());
 
@@ -256,7 +256,7 @@ describe('TestBench debug state machine', function () {
     // Fire-and-forget: the command body awaits runLines() which awaits the
     // stream, so awaiting the command here would deadlock since this test
     // is the one feeding the stream events.
-    void vscode.commands.executeCommand('testbench.resume');
+    void vscode.commands.executeCommand('testbench-native.resume');
     await waitFor('isRunning back to true', () => hooks.isRunning());
     await waitFor('new fake stream', () => fake.hasActiveStream);
     assert.equal(
@@ -287,7 +287,7 @@ describe('TestBench debug state machine', function () {
       new vscode.Position(9, 0),
     );
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     // Spec promise: the yellow ▶ should NOT appear before the preceding
@@ -328,11 +328,11 @@ describe('TestBench debug state machine', function () {
     // controller without a resume point. Without the classified[0]
     // fallback, paused state never gets set and the Resume button
     // doesn't render.
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     // No step:start pushed — pause immediately.
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
 
     await waitFor('breakpointStop falls back to first selected step', () => {
       return hooks.tracker.snapshot().breakpointStop === 9;
@@ -349,11 +349,11 @@ describe('TestBench debug state machine', function () {
         true,
       ),
     ]);
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('paused at 9', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle while paused', () => !hooks.isRunning());
 
-    await vscode.commands.executeCommand('testbench.stop');
+    await vscode.commands.executeCommand('testbench-native.stop');
     await waitFor('breakpointStop cleared', () => hooks.tracker.snapshot().breakpointStop === null);
     assert.equal(hooks.isRunning(), false);
   });
@@ -386,7 +386,7 @@ describe('TestBench debug state machine', function () {
       new vscode.Position(8, 5),
     );
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
 
     await waitFor('paused at line 9', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle (no stream needed)', () => !hooks.isRunning());
@@ -402,15 +402,15 @@ describe('TestBench debug state machine', function () {
     // so the resume line is the real lastStepStartLine. With early-pause the
     // breakpointStop is sourced from classified[0]?.line — same dispatcher
     // path, but verifying it round-trips through resume too.
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     // Pause before any step:start — fallback path sets breakpointStop = 9.
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
     await waitFor('paused at 9 via fallback', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle while paused', () => !hooks.isRunning());
 
-    void vscode.commands.executeCommand('testbench.resume');
+    void vscode.commands.executeCommand('testbench-native.resume');
     await waitFor('isRunning back to true', () => hooks.isRunning());
     await waitFor('new fake stream', () => fake.hasActiveStream);
     assert.equal(
@@ -433,7 +433,7 @@ describe('TestBench debug state machine', function () {
     // continuing forward. The user's spec promise is "Resume continues
     // from the pause point" (analogous to F5 in a debugger), which means
     // resume must carry steps from startLine through end-of-document.
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     fake.push({ type: 'step:start', line: 9 });
@@ -441,13 +441,13 @@ describe('TestBench debug state machine', function () {
       const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
       return statuses[9] === 'running';
     });
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
     await waitFor('paused at 9', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle while paused', () => !hooks.isRunning());
 
     const requestsBeforeResume = fake.requests.length;
 
-    void vscode.commands.executeCommand('testbench.resume');
+    void vscode.commands.executeCommand('testbench-native.resume');
     await waitFor('new fake stream after resume', () => fake.hasActiveStream);
 
     // The fixture (test-with-steps.md) has steps on lines 8, 9, 10
@@ -474,21 +474,21 @@ describe('TestBench debug state machine', function () {
     //
     // The contract: by the time the stream opens, the stale arrow MUST be
     // gone. The new run owns the indicator from then on.
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('first stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     await waitFor('running on 9', () => {
       const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
       return statuses[9] === 'running';
     });
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
     await waitFor('paused at 9', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle while paused', () => !hooks.isRunning());
     assert.equal(hooks.tracker.snapshot().breakpointStop, 9, 'precondition: arrow at line 9');
 
     // Click Run again (NOT Resume — Run starts fresh and should drop the
     // stale arrow before any visible delay).
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
 
     // By the time the new stream opens, the stale breakpointStop must be
     // cleared. If the clear were still buried after env resolution, we'd
@@ -504,23 +504,23 @@ describe('TestBench debug state machine', function () {
     await waitFor('idle after second run', () => !hooks.isRunning());
   });
 
-  it('Resume flips testbench.running to true synchronously, before any new step events arrive', async () => {
+  it('Resume flips testbench-native.running to true synchronously, before any new step events arrive', async () => {
     // Bug guard: the editor title-bar Pause/Stop icons are gated on the
-    // `testbench.running` context key. The original implementation polled
+    // `testbench-native.running` context key. The original implementation polled
     // anyRunning() inside notifyRunning(true) — but that hook fires
     // synchronously BEFORE controller.runLines() sets controller.active,
     // so the poll read false and the context key got pinned at false until
     // a run event drove a refresh. To the user this looked like "Pause
     // disappeared the moment I clicked Resume" until the first step:start
     // arrived seconds later.
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     await waitFor('running on 9', () => {
       const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
       return statuses[9] === 'running';
     });
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
     await waitFor('paused at 9', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle while paused', () => !hooks.isRunning());
     assert.equal(
@@ -533,7 +533,7 @@ describe('TestBench debug state machine', function () {
     // is about state in the gap between the resume command firing and the
     // first run event arriving. Use `await` here because resume is async
     // and we want it to drain notifyRunning(true) before we poll.
-    void vscode.commands.executeCommand('testbench.resume');
+    void vscode.commands.executeCommand('testbench-native.resume');
 
     // Two microtask ticks is enough — extension.ts case 'resume' calls
     // notifyRunning(true) synchronously before the first await.
@@ -543,7 +543,7 @@ describe('TestBench debug state machine', function () {
     assert.equal(
       hooks.runningContextValue(),
       true,
-      'Resume must flip testbench.running=true synchronously, not after the first stream event',
+      'Resume must flip testbench-native.running=true synchronously, not after the first stream event',
     );
 
     // Sanity: the context key stays true even if no events arrive for a
@@ -577,12 +577,12 @@ describe('TestBench debug state machine', function () {
       ),
     ]);
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('paused at line 9 via trim', () => hooks.tracker.snapshot().breakpointStop === 9);
     await waitFor('idle while paused', () => !hooks.isRunning());
 
     // Resume — must skip the breakpoint on line 9 and actually open a stream.
-    void vscode.commands.executeCommand('testbench.resume');
+    void vscode.commands.executeCommand('testbench-native.resume');
     await waitFor('stream opens after resume past breakpoint', () => fake.hasActiveStream);
     assert.equal(
       hooks.tracker.snapshot().breakpointStop,
@@ -600,7 +600,7 @@ describe('TestBench debug state machine', function () {
     // User-reported bug: with a breakpoint on step 3, run the test, hit the
     // breakpoint, reload the VS Code window, hit Run again. After reload
     // VS Code restores the cursor to where it was last (the breakpoint
-    // line), so F5 / Play (both bound to testbench.runSelected) runs with
+    // line), so F5 / Play (both bound to testbench-native.runSelected) runs with
     // selectionLines === [breakpoint line]. trimAtBreakpoint then returns
     // runnable=[] with pausedAt=breakpoint line, the empty-trim branch
     // posts breakpointStop and calls it done — yellow ▶ lands on step 3
@@ -609,7 +609,7 @@ describe('TestBench debug state machine', function () {
     // Cursor-only "selection" isn't really a selection. The user's intent
     // is "run the test", not "run only this one step that happens to have
     // a breakpoint." Run-from-cursor for a single step is what
-    // testbench.runStepHere is for (gutter right-click); runSelected with
+    // testbench-native.runStepHere is for (gutter right-click); runSelected with
     // a cursor should expand to runAll semantics.
     const uri = vscode.window.activeTextEditor.document.uri;
     // Breakpoint on step 3 (line 10).
@@ -627,7 +627,7 @@ describe('TestBench debug state machine', function () {
       new vscode.Position(9, 0),
     );
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
 
     // The fix: a stream actually opens for the preceding steps (lines 8
     // and 9). Without it, the empty-trim branch fires and no stream ever
@@ -674,7 +674,7 @@ describe('TestBench debug state machine', function () {
     // reuse and would cost a real browser relaunch on each run.
     assert.equal(fake.closeSessionCalls, 0, 'precondition: nothing closed yet');
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('first stream active', () => fake.hasActiveStream);
 
     assert.equal(
@@ -689,7 +689,7 @@ describe('TestBench debug state machine', function () {
     // Subsequent runs in the same activation must NOT close — session
     // reuse is intentional once the controller has confirmed a clean
     // start.
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('second stream active', () => fake.hasActiveStream);
     assert.equal(
       fake.closeSessionCalls,
@@ -711,7 +711,7 @@ describe('TestBench debug state machine', function () {
       throw new Error('simulated closeSession failure');
     };
 
-    void vscode.commands.executeCommand('testbench.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream still opens despite close failure', () => fake.hasActiveStream);
 
     fake.end();
@@ -798,9 +798,9 @@ describe('TestBench debug state machine', function () {
     ]);
 
     // ---------- First run: hit the breakpoint ----------
-    // testbench.runAll runs every step in the document — equivalent to the
+    // testbench-native.runAll runs every step in the document — equivalent to the
     // user clicking "Run All" with no selection narrowing.
-    void vscode.commands.executeCommand('testbench.runAll');
+    void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('first stream active', () => fake.hasActiveStream);
 
     // Steps 1 and 2 (lines 8, 9) execute, then the run pauses before step 3.
@@ -816,7 +816,7 @@ describe('TestBench debug state machine', function () {
     await waitFor('idle after first run hits breakpoint', () => !hooks.isRunning());
 
     // ---------- Stop ----------
-    await vscode.commands.executeCommand('testbench.stop');
+    await vscode.commands.executeCommand('testbench-native.stop');
     await waitFor('arrow cleared after stop', () => {
       return hooks.tracker.snapshot().breakpointStop === null;
     });
@@ -832,7 +832,7 @@ describe('TestBench debug state machine', function () {
     );
 
     // ---------- Second run from the beginning ----------
-    void vscode.commands.executeCommand('testbench.runAll');
+    void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('second stream active', () => fake.hasActiveStream);
 
     // While the run is in flight before steps 1 and 2 complete, the arrow

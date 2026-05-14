@@ -20,7 +20,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.testbench';
+const EXT_ID = 'pkent.testbench-native';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -88,7 +88,7 @@ describe('TestBench live pause/resume against real server', function () {
       vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
     }
 
-    // Wait for the testbench.activeFile context key to flip true.
+    // Wait for the testbench-native.activeFile context key to flip true.
     await waitFor(
       'testbench detects test file',
       () => hooks.tracker.snapshot().isTestFile === true,
@@ -108,8 +108,8 @@ describe('TestBench live pause/resume against real server', function () {
       breakpointStop: hooks.tracker.snapshot().breakpointStop,
     }));
     console.log('[live] runningContext before run:', hooks.runningContextValue());
-    console.log('[live] Starting run via testbench.runSelected');
-    void vscode.commands.executeCommand('testbench.runSelected');
+    console.log('[live] Starting run via testbench-native.runSelected');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
 
     // Poll briefly for the running flag, surfacing diagnostics at each interval
     // so we can tell whether runLines started but failed, vs. never started.
@@ -168,7 +168,7 @@ describe('TestBench live pause/resume against real server', function () {
     await sleep(2_000);
 
     console.log('[live] Pausing #1');
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
 
     await waitFor(
       'breakpointStop set after pause #1',
@@ -181,7 +181,7 @@ describe('TestBench live pause/resume against real server', function () {
 
     // ---- Resume → run continues ----------------------------------------
     console.log('[live] Resuming');
-    void vscode.commands.executeCommand('testbench.resume');
+    void vscode.commands.executeCommand('testbench-native.resume');
 
     await waitFor('isRunning back to true after resume', () => hooks.isRunning(), 15_000);
     await waitFor(
@@ -217,7 +217,7 @@ describe('TestBench live pause/resume against real server', function () {
     await sleep(2_000);
 
     console.log('[live] Pausing #2');
-    await vscode.commands.executeCommand('testbench.pause');
+    await vscode.commands.executeCommand('testbench-native.pause');
 
     await waitFor(
       'breakpointStop set after pause #2',
@@ -236,14 +236,14 @@ describe('TestBench live pause/resume against real server', function () {
     );
 
     // Stop cleanly so we don't leak a browser session.
-    console.log('[live] Cleaning up — testbench.stop');
-    await vscode.commands.executeCommand('testbench.stop');
+    console.log('[live] Cleaning up — testbench-native.stop');
+    await vscode.commands.executeCommand('testbench-native.stop');
     await waitFor(
       'breakpointStop cleared after stop',
       () => hooks.tracker.snapshot().breakpointStop == null,
       10_000,
     );
     // Tell the server to release the browser.
-    await vscode.commands.executeCommand('testbench.restartSession');
+    await vscode.commands.executeCommand('testbench-native.restartSession');
   });
 });

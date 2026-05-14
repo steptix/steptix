@@ -16,7 +16,7 @@ import { workspaceFolderFor } from './workspace.js';
 import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
 
-const FIRST_ACTIVATION_KEY = 'testbench.shownActivationToast';
+const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
 
 /**
  * Registry mapping document URI → RunController. Lazy: a controller is
@@ -25,12 +25,12 @@ const FIRST_ACTIVATION_KEY = 'testbench.shownActivationToast';
 class RunControllerRegistry implements vscode.Disposable {
   private readonly controllers = new Map<string, RunController>();
   private clientFactory: ApiClientFactory = defaultApiClientFactory;
-  /** Mirror of the last value pushed to the `testbench.running` context
+  /** Mirror of the last value pushed to the `testbench-native.running` context
    *  key. VS Code doesn't expose context keys for read, so this is the
    *  only handle the integration suite has on toolbar visibility. */
   private lastRunningContextValue = false;
 
-  /** Test-only readback of the `testbench.running` context key. */
+  /** Test-only readback of the `testbench-native.running` context key. */
   get runningContextValue(): boolean {
     return this.lastRunningContextValue;
   }
@@ -84,7 +84,7 @@ class RunControllerRegistry implements vscode.Disposable {
    * Build the `post` callback for a controller. Each event flows to:
    *  1. the sidebar webview (UI updates)
    *  2. the ActiveFileTracker (status icons + error decorations on the editor)
-   *  3. the `testbench.running` context key (for menu visibility)
+   *  3. the `testbench-native.running` context key (for menu visibility)
    */
   private makePostCallback(uri: vscode.Uri): (msg: HostToWebviewMsg) => void {
     return (msg: HostToWebviewMsg) => {
@@ -126,7 +126,7 @@ class RunControllerRegistry implements vscode.Disposable {
     }
   }
 
-  /** Refresh the `testbench.running` context key from current state. Used
+  /** Refresh the `testbench-native.running` context key from current state. Used
    *  on event-driven boundaries (e.g. `done` arrived and `this.active` is
    *  still set inside the controller's try-block) where anyRunning() is
    *  the authoritative answer. */
@@ -136,7 +136,7 @@ class RunControllerRegistry implements vscode.Disposable {
 
   /**
    * Tell the webview a run started/stopped, and pin the
-   * `testbench.running` context key to the same value.
+   * `testbench-native.running` context key to the same value.
    *
    * IMPORTANT: this trusts the caller's intent — it does NOT poll
    * `anyRunning()`. Polling fails on the leading edge: the command
@@ -159,7 +159,7 @@ class RunControllerRegistry implements vscode.Disposable {
 
   private setRunningContext(value: boolean): void {
     this.lastRunningContextValue = value;
-    void vscode.commands.executeCommand('setContext', 'testbench.running', value);
+    void vscode.commands.executeCommand('setContext', 'testbench-native.running', value);
   }
 
   /** Test-only: every value passed through notifyRunning, in order. */
@@ -181,7 +181,7 @@ export interface TestBenchTestHooks {
   tracker: ActiveFileTracker;
   setApiClientFactory: (factory: ApiClientFactory) => void;
   isRunning: () => boolean;
-  /** Last value mirrored to the `testbench.running` context key. The
+  /** Last value mirrored to the `testbench-native.running` context key. The
    *  editor title bar's Pause/Stop visibility hinges on this — VS Code
    *  doesn't let us read context keys, so the registry tracks them. */
   runningContextValue: () => boolean;
@@ -256,7 +256,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   // the sidebar so the panel keeps its React state when stashed in a
   // background tab. We don't dedupe: each invocation opens a new panel
   // so power users can keep multiple visible at once.
-  const openInEditor = vscode.commands.registerCommand('testbench.openInEditor', async () => {
+  const openInEditor = vscode.commands.registerCommand('testbench-native.openInEditor', async () => {
     const panel = vscode.window.createWebviewPanel(
       TestBenchRunnerView.viewId,
       'TestBench Runner',
@@ -296,7 +296,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         'Show Run Log',
       )
       .then((choice) => {
-        if (choice === 'Show Run Log') void vscode.commands.executeCommand('testbench.showRunLog');
+        if (choice === 'Show Run Log') void vscode.commands.executeCommand('testbench-native.showRunLog');
       });
   }
 

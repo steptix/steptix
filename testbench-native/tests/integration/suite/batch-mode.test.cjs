@@ -14,7 +14,7 @@ const path = require('node:path');
 const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
 
-const EXT_ID = 'pkent.testbench';
+const EXT_ID = 'pkent.testbench-native';
 const FIXTURES_DIR =
   process.env.TESTBENCH_FIXTURES_DIR ||
   path.resolve(__dirname, '..', 'fixtures');

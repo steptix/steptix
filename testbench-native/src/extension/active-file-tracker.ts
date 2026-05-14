@@ -36,7 +36,7 @@ type Listener = (snapshot: FileStateSnapshot) => void;
 /**
  * Tracks which TextEditor is the "current TestBench file" and maintains
  * per-document state (breakpoints, run statuses, pause point). Drives the
- * `testbench.activeFile` context key so menu/keybinding `when` clauses
+ * `testbench-native.activeFile` context key so menu/keybinding `when` clauses
  * activate only on test markdown.
  *
  * The sidebar webview reads its content from this tracker — switching tabs
@@ -232,7 +232,7 @@ export class ActiveFileTracker {
   setBreakpointStop(uri: vscode.Uri, line: number | null): void {
     const state = this.state(uri);
     state.breakpointStop = line;
-    void vscode.commands.executeCommand('setContext', 'testbench.paused', line != null);
+    void vscode.commands.executeCommand('setContext', 'testbench-native.paused', line != null);
     this.emit();
   }
 
@@ -278,7 +278,7 @@ export class ActiveFileTracker {
   private updateContextKey(): void {
     void vscode.commands.executeCommand(
       'setContext',
-      'testbench.activeFile',
+      'testbench-native.activeFile',
       this.isActiveTestFile,
     );
   }

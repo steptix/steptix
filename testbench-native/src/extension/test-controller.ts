@@ -59,7 +59,7 @@ export class TestBenchTestController implements vscode.Disposable {
     private readonly registry: TestControllerRegistry,
     private readonly banner: BatchBannerSink,
   ) {
-    this.controller = vscode.tests.createTestController('testbench', 'TestBench');
+    this.controller = vscode.tests.createTestController('testbench-native', 'TestBench (Native)');
     this.controller.refreshHandler = () => discovery.refresh();
     this.controller.resolveHandler = async (item) => {
       // VS Code calls this with `undefined` to populate the root of the
@@ -85,7 +85,7 @@ export class TestBenchTestController implements vscode.Disposable {
     this.profile.configureHandler = () => {
       // Re-use the single-file env picker so there's one source of truth
       // for "active env" across single-file and batch runs.
-      void vscode.commands.executeCommand('testbench.selectEnv');
+      void vscode.commands.executeCommand('testbench-native.selectEnv');
     };
 
     // Seed from anything discovery already knows about, then subscribe.

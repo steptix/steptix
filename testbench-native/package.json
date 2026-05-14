@@ -1,9 +1,9 @@
 {
-  "name": "testbench",
-  "displayName": "TestBench",
+  "name": "testbench-native",
+  "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.4.1",
-  "description": "Edit and run ai-ui-automation natural-language tests inside VS Code",
+  "version": "0.5.0",
+  "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
     "vscode": "^1.85.0"
@@ -25,49 +25,49 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "testbench",
-          "title": "TestBench",
+          "id": "testbench-native",
+          "title": "TestBench (Native)",
           "icon": "./icons/testbench.svg"
         }
       ]
     },
     "views": {
-      "testbench": [
+      "testbench-native": [
         {
-          "id": "testbench.runner",
+          "id": "testbench-native.runner",
           "name": "Test Runner",
           "type": "webview",
           "icon": "./icons/testbench.svg",
-          "contextualTitle": "TestBench"
+          "contextualTitle": "TestBench (Native)"
         }
       ]
     },
     "configuration": {
-      "title": "TestBench",
+      "title": "TestBench (Native)",
       "properties": {
-        "testbench.defaultEnvFile": {
+        "testbench-native.defaultEnvFile": {
           "type": "string",
           "default": "",
           "description": "Absolute or workspace-relative path used when walk-up finds no .env next to (or above) the test file."
         },
-        "testbench.consoleLogLevel": {
+        "testbench-native.consoleLogLevel": {
           "type": "string",
           "enum": ["", "silent", "error", "warn", "info", "debug"],
           "default": "",
           "description": "Console + output-panel log threshold for test runs. Leave blank to use the server's configured default. A test's '## Config: consoleLogLevel' setting overrides this."
         },
-        "testbench.serverFileLogLevel": {
+        "testbench-native.serverFileLogLevel": {
           "type": "string",
           "enum": ["", "off", "compact", "full"],
           "default": "",
           "description": "Per-run log file written by the server under reports/logs/. 'off' disables; 'compact' = log lines only; 'full' = log lines + AI request/response trace. Leave blank to use the server's configured default. A test's '## Config: serverFileLogLevel' setting overrides this."
         },
-        "testbench.activeEnv": {
+        "testbench-native.activeEnv": {
           "type": "string",
           "default": "",
           "description": "Active environment name. Selects '.env.<name>' (secrets/URLs) and 'data/<name>.json' (structured test data) for the next run. Leave blank for no env selection. Pick via the '🌐 env: ...' status-bar item or 'TestBench: Select Environment' command."
         },
-        "testbench.testsGlob": {
+        "testbench-native.testsGlob": {
           "type": "string",
           "default": "**/*.md",
           "description": "Glob pattern of files to consider as candidate tests in the Test Explorer. Files still must contain '## Steps' and not be marked 'type: skill' or 'disabled: true' in frontmatter. Narrow this (e.g. 'tests/**/*.md') for faster discovery on large repos."
@@ -76,75 +76,75 @@
     },
     "commands": [
       {
-        "command": "testbench.runSelected",
+        "command": "testbench-native.runSelected",
         "title": "TestBench: Run Selected Step(s)",
         "icon": "$(play)"
       },
       {
-        "command": "testbench.runAll",
+        "command": "testbench-native.runAll",
         "title": "TestBench: Run All Steps",
         "icon": "$(run-all)"
       },
       {
-        "command": "testbench.stop",
+        "command": "testbench-native.stop",
         "title": "TestBench: Stop Run",
         "icon": "$(debug-stop)"
       },
       {
-        "command": "testbench.pause",
+        "command": "testbench-native.pause",
         "title": "TestBench: Pause Run",
         "icon": "$(debug-pause)"
       },
       {
-        "command": "testbench.restartSession",
+        "command": "testbench-native.restartSession",
         "title": "TestBench: Close Session",
         "icon": "$(refresh)"
       },
       {
-        "command": "testbench.toggleBreakpoint",
+        "command": "testbench-native.toggleBreakpoint",
         "title": "TestBench: Toggle Breakpoint",
         "icon": "$(debug-breakpoint)"
       },
       {
-        "command": "testbench.runStepHere",
+        "command": "testbench-native.runStepHere",
         "title": "TestBench: Run This Step"
       },
       {
-        "command": "testbench.resume",
+        "command": "testbench-native.resume",
         "title": "TestBench: Resume from Breakpoint",
         "icon": "$(debug-continue)"
       },
       {
-        "command": "testbench.clearBreakpoints",
+        "command": "testbench-native.clearBreakpoints",
         "title": "TestBench: Clear All Breakpoints"
       },
       {
-        "command": "testbench.clearStatuses",
+        "command": "testbench-native.clearStatuses",
         "title": "TestBench: Clear Run Statuses"
       },
       {
-        "command": "testbench.revealEnvFile",
+        "command": "testbench-native.revealEnvFile",
         "title": "TestBench: Reveal Resolved .env"
       },
       {
-        "command": "testbench.showRunLog",
+        "command": "testbench-native.showRunLog",
         "title": "TestBench: Show Run Log",
         "icon": "$(output)"
       },
       {
-        "command": "testbench.dismissError",
+        "command": "testbench-native.dismissError",
         "title": "TestBench: Dismiss Error"
       },
       {
-        "command": "testbench.selectEnv",
+        "command": "testbench-native.selectEnv",
         "title": "TestBench: Select Environment"
       },
       {
-        "command": "testbench.focusRunner",
+        "command": "testbench-native.focusRunner",
         "title": "TestBench: Focus Runner Panel"
       },
       {
-        "command": "testbench.openInEditor",
+        "command": "testbench-native.openInEditor",
         "title": "TestBench: Open Runner in Editor",
         "icon": "$(link-external)"
       }
@@ -152,96 +152,96 @@
     "menus": {
       "view/title": [
         {
-          "command": "testbench.openInEditor",
-          "when": "view == testbench.runner",
+          "command": "testbench-native.openInEditor",
+          "when": "view == testbench-native.runner",
           "group": "navigation@1"
         }
       ],
       "editor/title": [
         {
-          "command": "testbench.runSelected",
-          "when": "testbench.activeFile && !testbench.running && !testbench.paused",
+          "command": "testbench-native.runSelected",
+          "when": "testbench-native.activeFile && !testbench-native.running && !testbench-native.paused",
           "group": "navigation@1"
         },
         {
-          "command": "testbench.pause",
-          "when": "testbench.activeFile && testbench.running",
+          "command": "testbench-native.pause",
+          "when": "testbench-native.activeFile && testbench-native.running",
           "group": "navigation@1"
         },
         {
-          "command": "testbench.resume",
-          "when": "testbench.activeFile && testbench.paused && !testbench.running",
+          "command": "testbench-native.resume",
+          "when": "testbench-native.activeFile && testbench-native.paused && !testbench-native.running",
           "group": "navigation@1"
         },
         {
-          "command": "testbench.stop",
-          "when": "testbench.activeFile && (testbench.running || testbench.paused)",
+          "command": "testbench-native.stop",
+          "when": "testbench-native.activeFile && (testbench-native.running || testbench-native.paused)",
           "group": "navigation@2"
         },
         {
-          "command": "testbench.restartSession",
-          "when": "testbench.activeFile",
+          "command": "testbench-native.restartSession",
+          "when": "testbench-native.activeFile",
           "group": "navigation@3"
         }
       ],
       "editor/lineNumber/context": [
         {
-          "command": "testbench.toggleBreakpoint",
-          "when": "testbench.activeFile",
+          "command": "testbench-native.toggleBreakpoint",
+          "when": "testbench-native.activeFile",
           "group": "1_breakpoint@1"
         },
         {
-          "command": "testbench.runStepHere",
-          "when": "testbench.activeFile",
+          "command": "testbench-native.runStepHere",
+          "when": "testbench-native.activeFile",
           "group": "2_run@1"
         },
         {
-          "command": "testbench.clearBreakpoints",
-          "when": "testbench.activeFile",
+          "command": "testbench-native.clearBreakpoints",
+          "when": "testbench-native.activeFile",
           "group": "3_clear@1"
         },
         {
-          "command": "testbench.clearStatuses",
-          "when": "testbench.activeFile",
+          "command": "testbench-native.clearStatuses",
+          "when": "testbench-native.activeFile",
           "group": "3_clear@2"
         }
       ]
     },
     "keybindings": [
       {
-        "command": "testbench.runSelected",
+        "command": "testbench-native.runSelected",
         "key": "f5",
-        "when": "editorTextFocus && testbench.activeFile && !testbench.running && !testbench.paused"
+        "when": "editorTextFocus && testbench-native.activeFile && !testbench-native.running && !testbench-native.paused"
       },
       {
-        "command": "testbench.pause",
+        "command": "testbench-native.pause",
         "key": "f5",
-        "when": "editorTextFocus && testbench.activeFile && testbench.running"
+        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.running"
       },
       {
-        "command": "testbench.resume",
+        "command": "testbench-native.resume",
         "key": "f5",
-        "when": "editorTextFocus && testbench.activeFile && testbench.paused && !testbench.running"
+        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.paused && !testbench-native.running"
       },
       {
-        "command": "testbench.stop",
+        "command": "testbench-native.stop",
         "key": "shift+f5",
-        "when": "editorTextFocus && testbench.activeFile && (testbench.running || testbench.paused)"
+        "when": "editorTextFocus && testbench-native.activeFile && (testbench-native.running || testbench-native.paused)"
       },
       {
         "command": "-workbench.action.debug.start",
         "key": "f5",
-        "when": "editorTextFocus && testbench.activeFile"
+        "when": "editorTextFocus && testbench-native.activeFile"
       },
       {
         "command": "-workbench.action.debug.stop",
         "key": "shift+f5",
-        "when": "editorTextFocus && testbench.activeFile"
+        "when": "editorTextFocus && testbench-native.activeFile"
       },
       {
-        "command": "testbench.toggleBreakpoint",
+        "command": "testbench-native.toggleBreakpoint",
         "key": "f9",
-        "when": "editorTextFocus && testbench.activeFile"
+        "when": "editorTextFocus && testbench-native.activeFile"
       }
     ]
   },

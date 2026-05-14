@@ -16,7 +16,7 @@ interface Registry {
  * to push into context.subscriptions.
  *
  * All commands work against the *active TextEditor*. The
- * `testbench.activeFile` context key (set by ActiveFileTracker) gates menu
+ * `testbench-native.activeFile` context key (set by ActiveFileTracker) gates menu
  * visibility so users can't invoke them on non-test markdown.
  */
 export function registerCommands(
@@ -38,9 +38,9 @@ export function registerCommands(
   };
 
   return [
-    vscode.commands.registerCommand('testbench.runSelected', runSelected),
+    vscode.commands.registerCommand('testbench-native.runSelected', runSelected),
 
-    vscode.commands.registerCommand('testbench.runAll', async () => {
+    vscode.commands.registerCommand('testbench-native.runAll', async () => {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
       const breakpoints = tracker.breakpoints(controller.document.uri);
@@ -50,7 +50,7 @@ export function registerCommands(
         .finally(() => registry.notifyRunning(false));
     }),
 
-    vscode.commands.registerCommand('testbench.pause', () => {
+    vscode.commands.registerCommand('testbench-native.pause', () => {
       const controller = registry.active();
       if (!controller || !controller.isRunning) {
         vscode.window.setStatusBarMessage('TestBench: nothing to pause', 1500);
@@ -59,7 +59,7 @@ export function registerCommands(
       controller.pause();
     }),
 
-    vscode.commands.registerCommand('testbench.stop', () => {
+    vscode.commands.registerCommand('testbench-native.stop', () => {
       const controller = registry.active();
       controller?.stop();
       const editor = tracker.activeEditor;
@@ -70,7 +70,7 @@ export function registerCommands(
       registry.notifyRunning(false);
     }),
 
-    vscode.commands.registerCommand('testbench.resume', async () => {
+    vscode.commands.registerCommand('testbench-native.resume', async () => {
       const controller = registry.active();
       const editor = tracker.activeEditor;
       if (!controller || !editor) return notifyNoActive();
@@ -95,7 +95,7 @@ export function registerCommands(
         .finally(() => registry.notifyRunning(false));
     }),
 
-    vscode.commands.registerCommand('testbench.restartSession', async () => {
+    vscode.commands.registerCommand('testbench-native.restartSession', async () => {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
       await controller.closeSession();
@@ -105,7 +105,7 @@ export function registerCommands(
       );
     }),
 
-    vscode.commands.registerCommand('testbench.toggleBreakpoint', (target?: { lineNumber?: number }) => {
+    vscode.commands.registerCommand('testbench-native.toggleBreakpoint', (target?: { lineNumber?: number }) => {
       const editor = tracker.activeEditor;
       if (!editor || !tracker.isActiveTestFile) return notifyNoActive();
 
@@ -127,7 +127,7 @@ export function registerCommands(
       tracker.toggleBreakpoint(editor.document.uri, line);
     }),
 
-    vscode.commands.registerCommand('testbench.runStepHere', (target?: { lineNumber?: number }) => {
+    vscode.commands.registerCommand('testbench-native.runStepHere', (target?: { lineNumber?: number }) => {
       const editor = tracker.activeEditor;
       const controller = registry.active();
       if (!editor || !controller) return notifyNoActive();
@@ -142,19 +142,19 @@ export function registerCommands(
         .finally(() => registry.notifyRunning(false));
     }),
 
-    vscode.commands.registerCommand('testbench.clearBreakpoints', () => {
+    vscode.commands.registerCommand('testbench-native.clearBreakpoints', () => {
       const editor = tracker.activeEditor;
       if (!editor) return notifyNoActive();
       tracker.clearBreakpoints(editor.document.uri);
     }),
 
-    vscode.commands.registerCommand('testbench.clearStatuses', () => {
+    vscode.commands.registerCommand('testbench-native.clearStatuses', () => {
       const editor = tracker.activeEditor;
       if (!editor) return notifyNoActive();
       tracker.clearStatuses(editor.document.uri);
     }),
 
-    vscode.commands.registerCommand('testbench.revealEnvFile', async () => {
+    vscode.commands.registerCommand('testbench-native.revealEnvFile', async () => {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
       const path = controller.lastEnvPath;
@@ -168,16 +168,16 @@ export function registerCommands(
       await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(path));
     }),
 
-    vscode.commands.registerCommand('testbench.showRunLog', () => {
+    vscode.commands.registerCommand('testbench-native.showRunLog', () => {
       getOutputChannel().show(true);
     }),
 
-    vscode.commands.registerCommand('testbench.dismissError', () => {
+    vscode.commands.registerCommand('testbench-native.dismissError', () => {
       // No-op host side — the webview owns the banner state.
     }),
 
-    vscode.commands.registerCommand('testbench.focusRunner', async () => {
-      await vscode.commands.executeCommand('testbench.runner.focus');
+    vscode.commands.registerCommand('testbench-native.focusRunner', async () => {
+      await vscode.commands.executeCommand('testbench-native.runner.focus');
     }),
   ];
 }

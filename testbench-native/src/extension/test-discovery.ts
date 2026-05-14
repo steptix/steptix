@@ -31,7 +31,7 @@ export type DiscoveryEvent =
  * Scans the workspace for TestBench tests and maintains a live cache.
  *
  * A file is a test when:
- *  1. Its path matches `testbench.testsGlob`.
+ *  1. Its path matches `testbench-native.testsGlob`.
  *  2. It contains a `## Steps` heading.
  *  3. Frontmatter does NOT declare `type: skill`.
  *  4. Frontmatter does NOT declare `disabled: true`.
@@ -67,7 +67,7 @@ export class TestDiscovery implements vscode.Disposable {
 
     this.disposables.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration(`testbench.${SETTING_KEY}`)) {
+        if (e.affectsConfiguration(`testbench-native.${SETTING_KEY}`)) {
           const next = readGlob();
           if (next !== this.currentGlob) {
             this.currentGlob = next;
@@ -257,7 +257,7 @@ export class TestDiscovery implements vscode.Disposable {
 }
 
 function readGlob(): string {
-  const cfg = vscode.workspace.getConfiguration('testbench');
+  const cfg = vscode.workspace.getConfiguration('testbench-native');
   const v = cfg.get<string>(SETTING_KEY)?.trim();
   return v && v.length > 0 ? v : DEFAULT_GLOB;
 }
