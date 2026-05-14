@@ -249,6 +249,29 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   // Wire webview → host messages.
   view.setMessageHandler((msg) => handleWebviewMessage(msg, registry, tracker));
 
+  // "Detach to editor" command. Spawns a webview panel in the editor area
+  // wired to the same broadcaster as the sidebar — once the panel is a
+  // tab, VS Code's "Move Editor Into New Window" lets the user pop it
+  // out into a floating window. The retainContextWhenHidden flag matches
+  // the sidebar so the panel keeps its React state when stashed in a
+  // background tab. We don't dedupe: each invocation opens a new panel
+  // so power users can keep multiple visible at once.
+  const openInEditor = vscode.commands.registerCommand('testbench.openInEditor', async () => {
+    const panel = vscode.window.createWebviewPanel(
+      TestBenchRunnerView.viewId,
+      'TestBench Runner',
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [
+          vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview'),
+        ],
+      },
+    );
+    await view.attachPanel(panel);
+  });
+
   context.subscriptions.push(
     tracker,
     decorations,
@@ -259,6 +282,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     new EnvSelector(),
+    openInEditor,
     ...registerCommands(registry, tracker),
   );
 

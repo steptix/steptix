@@ -7,24 +7,34 @@ import {
 import { buildWebviewHtml } from './webview-html.js';
 import { getOutputChannel } from './output-channel.js';
 import type { ActiveFileTracker, FileStateSnapshot } from './active-file-tracker.js';
-import type { RunController } from './run-controller.js';
+
+/**
+ * One attached webview surface — the sidebar view or a detached panel.
+ * Each surface tracks its own `ready` state because the React bundle in
+ * each panel boots independently and posts its own `ready` message; if we
+ * flushed pending state on a shared flag, the second panel would never
+ * see the initial snapshot.
+ */
+interface Attachment {
+  webview: vscode.Webview;
+  ready: boolean;
+  pendingSnapshot: FileStateSnapshot | null;
+}
 
 /**
  * Sidebar webview view that hosts the TestBench UI (toolbar, output log,
- * variables, error panel). Replaces the previous webview-panel custom editor
- * — there is no Monaco inside; the user edits the .md in VS Code's native
- * editor and this panel just drives runs and renders results.
+ * variables, error panel). Also acts as a broadcaster: detached editor
+ * panels created via `testbench.openInEditor` register themselves here so
+ * they receive the same run events, batch banners, and activeFile
+ * snapshots as the sidebar.
  */
 export class TestBenchRunnerView implements vscode.WebviewViewProvider {
   public static readonly viewId = 'testbench.runner';
 
-  private view: vscode.WebviewView | undefined;
+  private readonly attachments: Attachment[] = [];
   private messageHandler:
     | ((msg: WebviewToHostMsg) => void | Promise<void>)
     | null = null;
-  /** Pending snapshots posted before the webview was ready. */
-  private pendingSnapshot: FileStateSnapshot | null = null;
-  private webviewReady = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -37,33 +47,66 @@ export class TestBenchRunnerView implements vscode.WebviewViewProvider {
     this.messageHandler = handler;
   }
 
-  /** Forward a host→webview message. Safe to call before the view exists. */
+  /** Forward a host→webview message to every attached surface. Posts to a
+   *  not-yet-ready webview are still safe — VS Code queues them. */
   post(msg: HostToWebviewMsg): void {
-    void this.view?.webview.postMessage(msg);
+    for (const a of this.attachments) {
+      void a.webview.postMessage(msg);
+    }
   }
 
+  /** Forward an activeFile snapshot. If a surface hasn't posted `ready`
+   *  yet, hold the snapshot for flushing when it does — otherwise the
+   *  initial state arrives before the React bundle subscribes and the
+   *  panel renders empty. */
   postActiveFile(snap: FileStateSnapshot): void {
-    if (!this.webviewReady) {
-      this.pendingSnapshot = snap;
-      return;
+    for (const a of this.attachments) {
+      if (!a.ready) {
+        a.pendingSnapshot = snap;
+      } else {
+        void a.webview.postMessage({ type: 'activeFile', snapshot: snap });
+      }
     }
-    this.post({ type: 'activeFile', snapshot: snap });
+  }
+
+  /** Number of attached surfaces — used by the openInEditor command to
+   *  decide whether to spawn another panel or just focus an existing one. */
+  attachmentCount(): number {
+    return this.attachments.length;
   }
 
   async resolveWebviewView(view: vscode.WebviewView): Promise<void> {
-    this.view = view;
+    await this.attach(view.webview, view.onDidDispose.bind(view));
+  }
 
-    view.webview.options = {
+  /**
+   * Attach a detached editor-area panel to the broadcaster. The panel's
+   * webview is wired up exactly like the sidebar view — same HTML, same
+   * message routing, same activeFile state — so run events, banners,
+   * and snapshots flow to both surfaces with no further branching.
+   */
+  async attachPanel(panel: vscode.WebviewPanel): Promise<void> {
+    await this.attach(panel.webview, panel.onDidDispose.bind(panel));
+  }
+
+  private async attach(
+    webview: vscode.Webview,
+    onDispose: (cb: () => void) => vscode.Disposable,
+  ): Promise<void> {
+    webview.options = {
       enableScripts: true,
       localResourceRoots: [
         vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview'),
       ],
     };
 
-    // Attach the message listener before setting `webview.html`. The webview
-    // posts `ready` immediately on script load; if we set HTML first the
-    // message gets dropped because our listener isn't registered yet.
-    view.webview.onDidReceiveMessage((raw: unknown) => {
+    const attachment: Attachment = { webview, ready: false, pendingSnapshot: null };
+    this.attachments.push(attachment);
+
+    // Attach the message listener BEFORE setting html. The webview posts
+    // `ready` immediately on script load; if we set html first the message
+    // gets dropped because our listener isn't registered yet.
+    webview.onDidReceiveMessage((raw: unknown) => {
       if (raw && typeof raw === 'object' && (raw as { type?: string }).type === 'webviewError') {
         const r = raw as { label?: string; detail?: string };
         getOutputChannel().appendLine(`[webview ${r.label}] ${r.detail}`);
@@ -73,25 +116,29 @@ export class TestBenchRunnerView implements vscode.WebviewViewProvider {
         getOutputChannel().appendLine(`ignored unknown webview message: ${JSON.stringify(raw)}`);
         return;
       }
-      // Intercept `ready` here so we can flush any pending state snapshot
-      // before whoever owns messageHandler runs the rest of the wiring.
       if (raw.type === 'ready') {
-        this.webviewReady = true;
-        if (this.pendingSnapshot) {
-          this.post({ type: 'activeFile', snapshot: this.pendingSnapshot });
-          this.pendingSnapshot = null;
+        attachment.ready = true;
+        if (attachment.pendingSnapshot) {
+          void attachment.webview.postMessage({
+            type: 'activeFile',
+            snapshot: attachment.pendingSnapshot,
+          });
+          attachment.pendingSnapshot = null;
         } else {
-          this.post({ type: 'activeFile', snapshot: this.tracker.snapshot() });
+          void attachment.webview.postMessage({
+            type: 'activeFile',
+            snapshot: this.tracker.snapshot(),
+          });
         }
       }
       void this.messageHandler?.(raw);
     });
 
-    view.webview.html = await buildWebviewHtml(this.context, view.webview);
+    webview.html = await buildWebviewHtml(this.context, webview);
 
-    view.onDidDispose(() => {
-      this.view = undefined;
-      this.webviewReady = false;
+    onDispose(() => {
+      const idx = this.attachments.indexOf(attachment);
+      if (idx >= 0) this.attachments.splice(idx, 1);
     });
   }
 }

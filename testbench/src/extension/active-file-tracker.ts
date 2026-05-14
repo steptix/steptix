@@ -51,6 +51,18 @@ export class ActiveFileTracker {
   constructor() {
     this.subs.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
+        // `undefined` means no text editor has focus — typically a webview
+        // panel (the detached TestBench runner, the Test Results panel, a
+        // Settings UI, etc.) just got focus. We don't want that to wipe the
+        // sidebar back to "Open a Markdown file…", so we keep the previous
+        // editor as long as its document is still open. The onDidClose
+        // handler below clears it cleanly when the document actually goes
+        // away.
+        if (editor === undefined) {
+          if (this.currentEditor && !this.currentEditor.document.isClosed) {
+            return;
+          }
+        }
         this.currentEditor = editor;
         this.updateContextKey();
         this.emit();
@@ -70,6 +82,14 @@ export class ActiveFileTracker {
         // vscode.debug.breakpoints and persist independently — VS Code
         // restores them on next session.
         this.states.delete(doc.uri.toString());
+        // If the closed doc was our sticky reference, release it so the
+        // sidebar correctly falls back to "no test file" instead of
+        // reporting on a disposed document.
+        if (this.currentEditor?.document === doc) {
+          this.currentEditor = undefined;
+          this.updateContextKey();
+          this.emit();
+        }
       }),
       // Mirror VS Code's debug breakpoint store into our snapshot. Adding /
       // removing a SourceBreakpoint via gutter-click, F9, or our right-click

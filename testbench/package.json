@@ -2,7 +2,7 @@
   "name": "testbench",
   "displayName": "TestBench",
   "publisher": "pkent",
-  "version": "0.3.9",
+  "version": "0.4.1",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code",
   "private": true,
   "engines": {
@@ -142,9 +142,21 @@
       {
         "command": "testbench.focusRunner",
         "title": "TestBench: Focus Runner Panel"
+      },
+      {
+        "command": "testbench.openInEditor",
+        "title": "TestBench: Open Runner in Editor",
+        "icon": "$(link-external)"
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "testbench.openInEditor",
+          "when": "view == testbench.runner",
+          "group": "navigation@1"
+        }
+      ],
       "editor/title": [
         {
           "command": "testbench.runSelected",
