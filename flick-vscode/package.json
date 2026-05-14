@@ -2,7 +2,7 @@
   "name": "flick-vscode",
   "displayName": "Flick",
   "publisher": "pkent",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "description": "Send natural-language UI steps to the ai-ui-automation Sessions API from a chat panel inside VS Code.",
   "private": true,
   "repository": {
@@ -17,25 +17,46 @@
     "Other",
     "Testing"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished",
+    "onWebviewPanel:flick.panel"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
           "id": "flick",
           "title": "Flick",
-          "icon": "./icons/flick.svg"
+          "icon": "./icons/flick.svg",
+          "when": "flick.doesNotSupportSecondarySidebar"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "flickSecondary",
+          "title": "Flick",
+          "icon": "./icons/flick.svg",
+          "when": "!flick.doesNotSupportSecondarySidebar"
         }
       ]
     },
     "views": {
       "flick": [
         {
-          "id": "flick.chat",
-          "name": "Sessions",
           "type": "webview",
-          "icon": "./icons/flick.svg",
-          "contextualTitle": "Flick"
+          "id": "flick.sidebar",
+          "name": "Flick",
+          "contextualTitle": "Flick",
+          "when": "flick.doesNotSupportSecondarySidebar"
+        }
+      ],
+      "flickSecondary": [
+        {
+          "type": "webview",
+          "id": "flick.sidebarSecondary",
+          "name": "Flick",
+          "contextualTitle": "Flick",
+          "when": "!flick.doesNotSupportSecondarySidebar"
         }
       ]
     },
@@ -66,13 +87,18 @@
     },
     "commands": [
       {
+        "command": "flick.open",
+        "title": "Flick: Open in Editor",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "flick.openSidebar",
+        "title": "Flick: Open in Side Bar"
+      },
+      {
         "command": "flick.newSession",
         "title": "Flick: New Session",
         "icon": "$(add)"
-      },
-      {
-        "command": "flick.focus",
-        "title": "Flick: Focus Sessions Panel"
       },
       {
         "command": "flick.openSettings",
@@ -84,13 +110,18 @@
       "view/title": [
         {
           "command": "flick.newSession",
-          "when": "view == flick.chat",
+          "when": "view == flick.sidebar || view == flick.sidebarSecondary",
           "group": "navigation@1"
         },
         {
-          "command": "flick.openSettings",
-          "when": "view == flick.chat",
+          "command": "flick.open",
+          "when": "view == flick.sidebar || view == flick.sidebarSecondary",
           "group": "navigation@2"
+        },
+        {
+          "command": "flick.openSettings",
+          "when": "view == flick.sidebar || view == flick.sidebarSecondary",
+          "group": "navigation@3"
         }
       ]
     }

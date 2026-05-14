@@ -7,8 +7,15 @@ no code is shared with the Tauri `flick/` project.
 
 ## What it does
 
-- A **Flick** view in the activity bar with a tab per session (each tab = one
-  server-side browser session, keyed by a generated GUID).
+- Shows on two surfaces, either or both open at once, kept in sync:
+  - **Docked sidebar view** — run **Flick: Open in Side Bar**. Lives in the
+    secondary side bar (right) on VS Code >= 1.95, and falls back to the
+    activity bar on older versions.
+  - **Editor tab** — run **Flick: Open in Editor**. Because it is an editor
+    tab, you can drag it into its own editor group or use **Move into New
+    Window** to float Flick in a separate window.
+- A tab per session inside the UI (each session tab = one server-side browser
+  session, keyed by a generated GUID).
 - Type steps (plain lines, `1.` numbered, or `- ` dashed — prefixes stripped),
   press **Enter** to submit (**Shift+Enter** for a newline).
 - Each batch shows a **user message card** then a **result card** with
@@ -41,7 +48,9 @@ extension, so:
 
 - **Window behaviour** — initial size/position, bottom-right anchoring, upward
   expansion animation, always-on-top, and the dynamic window title are dropped.
-  VS Code owns the panel; Flick lives as a sidebar webview view.
+  VS Code owns window management; Flick is shown as a docked sidebar view
+  and/or an editor-tab webview panel, the latter movable into its own editor
+  group or floated into a separate window.
 - **Theming** — the spec's light-only palette is replaced with VS Code theme
   variables so the panel matches the editor in any theme. Pass/fail/error keep
   semantic green/red/orange.
@@ -72,7 +81,7 @@ npm run dev            # build + launch an Extension Development Host
 ```powershell
 npm run package        # produces flick-vscode-<version>.vsix
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
-    --install-extension flick-vscode-0.1.0.vsix --force
+    --install-extension flick-vscode-0.3.0.vsix --force
 ```
 
 Reload the VS Code window afterwards.
@@ -82,9 +91,10 @@ Reload the VS Code window afterwards.
 ```
 src/
   shared/         protocol.ts (message types), parse-steps.ts  — shared by both sides
-  extension/      extension.ts   activation + wiring
-                  controller.ts  all host state, message handlers, polling
-                  panel.ts       WebviewViewProvider shell
+  extension/      extension.ts   activation + wiring (dual-surface registration)
+                  controller.ts  all host state, message handlers, polling;
+                                 broadcasts to every attached webview
+                  panel.ts       FlickPanel (editor tab) + FlickSidebarProvider
                   api-client.ts  Sessions API HTTP client
                   store.ts       sessions / history / screenshot persistence
                   settings.ts    VS Code config <-> FlickSettings

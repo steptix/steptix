@@ -45,6 +45,13 @@ type Listener = (snapshot: FileStateSnapshot) => void;
 export class ActiveFileTracker {
   private readonly states = new Map<string, FileState>();
   private currentEditor: vscode.TextEditor | undefined;
+  // True when the *active tab* is a text editor (not a webview panel). The
+  // sticky `currentEditor` keeps the sidebar populated while a webview is
+  // focused, but the `activeFile` context key — which gates the editor/title
+  // run buttons — must follow the real active tab so the buttons don't leak
+  // onto webview panels (our detached runner, the Settings UI, other
+  // extensions' panels, …).
+  private activeTabIsTextEditor = false;
   private readonly listeners = new Set<Listener>();
   private readonly subs: vscode.Disposable[] = [];
 
@@ -57,11 +64,16 @@ export class ActiveFileTracker {
         // sidebar back to "Open a Markdown file…", so we keep the previous
         // editor as long as its document is still open. The onDidClose
         // handler below clears it cleanly when the document actually goes
-        // away.
+        // away. The context key, however, must drop — the active tab is a
+        // webview, and the editor/title buttons must not appear on it.
         if (editor === undefined) {
+          this.activeTabIsTextEditor = false;
           if (this.currentEditor && !this.currentEditor.document.isClosed) {
+            this.updateContextKey();
             return;
           }
+        } else {
+          this.activeTabIsTextEditor = true;
         }
         this.currentEditor = editor;
         this.updateContextKey();
@@ -99,6 +111,7 @@ export class ActiveFileTracker {
     );
     // Initial sync — the active editor may already exist when we activate.
     this.currentEditor = vscode.window.activeTextEditor;
+    this.activeTabIsTextEditor = this.currentEditor !== undefined;
     this.updateContextKey();
   }
 
@@ -276,10 +289,14 @@ export class ActiveFileTracker {
   }
 
   private updateContextKey(): void {
+    // Only true when the active *tab* is a TestBench test-file text editor.
+    // While a webview panel is focused `activeTabIsTextEditor` is false, so
+    // the run buttons stay off it even though `currentEditor` is still set
+    // (sticky) to keep the sidebar populated.
     void vscode.commands.executeCommand(
       'setContext',
       'testbench-native.activeFile',
-      this.isActiveTestFile,
+      this.activeTabIsTextEditor && this.isActiveTestFile,
     );
   }
 }
