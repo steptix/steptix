@@ -17,6 +17,8 @@ flick/node_modules/
 flick/dist/
 flick/src-tauri/target/
 
-# TestBench (VS Code extension)
-testbench/.vscode-test/
-testbench/*.vsix
+# TestBench (VS Code extensions — Monaco webview + native editor variants)
+testbench-monaco/.vscode-test/
+testbench-monaco/*.vsix
+testbench-native/.vscode-test/
+testbench-native/*.vsix
