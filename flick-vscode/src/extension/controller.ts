@@ -1,7 +1,11 @@
-// FlickController owns all extension-host state and the bridge to the webview:
-// the session list, per-session history, connectivity polling, and the handlers
-// for every WebviewToHost message. The WebviewViewProvider (panel.ts) is a thin
-// shell that forwards lifecycle events here.
+// FlickController owns all extension-host state and the bridge to the webview
+// surfaces: the session list, per-session history, connectivity polling, and
+// the handlers for every WebviewToHost message.
+//
+// Flick can be shown on more than one surface at once — the editor-tab panel
+// (FlickPanel) and the sidebar view (FlickSidebarProvider), both in panel.ts.
+// Each attached webview is tracked independently; host state is broadcast to
+// every webview that has finished booting, so the surfaces stay in sync.
 
 import * as crypto from 'node:crypto';
 import * as vscode from 'vscode';
@@ -22,6 +26,15 @@ import type {
 const IDLE_PING_MS = 15_000;
 const BUSY_PING_MS = 4_000;
 
+interface Attachment {
+  readonly webview: vscode.Webview;
+  readonly listener: vscode.Disposable;
+  /** A webview only receives broadcasts once it has booted and sent `ready`. */
+  ready: boolean;
+  /** Set when "open settings" was requested before this webview was ready. */
+  showSettingsOnReady: boolean;
+}
+
 export class FlickController {
   private readonly api: SessionsApiClient;
   private sessions: SessionMeta[] = [];
@@ -29,8 +42,7 @@ export class FlickController {
   private readonly busy = new Set<string>();
   private connection: ConnectionStatus = 'unknown';
 
-  private webview: vscode.Webview | null = null;
-  private webviewListener: vscode.Disposable | undefined;
+  private readonly attachments = new Map<vscode.Webview, Attachment>();
   private pingTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
 
@@ -50,23 +62,29 @@ export class FlickController {
   dispose(): void {
     this.disposed = true;
     if (this.pingTimer) clearTimeout(this.pingTimer);
-    this.webviewListener?.dispose();
+    for (const att of this.attachments.values()) att.listener.dispose();
+    this.attachments.clear();
   }
 
   // --- webview lifecycle ---------------------------------------------------
 
   attachWebview(webview: vscode.Webview): void {
-    this.webview = webview;
-    this.webviewListener?.dispose();
-    this.webviewListener = webview.onDidReceiveMessage((msg: WebviewToHost) => {
-      void this.handleMessage(msg);
+    const listener = webview.onDidReceiveMessage((msg: WebviewToHost) => {
+      void this.handleMessage(msg, webview);
+    });
+    this.attachments.set(webview, {
+      webview,
+      listener,
+      ready: false,
+      showSettingsOnReady: false,
     });
   }
 
-  detachWebview(): void {
-    this.webviewListener?.dispose();
-    this.webviewListener = undefined;
-    this.webview = null;
+  detachWebview(webview: vscode.Webview): void {
+    const att = this.attachments.get(webview);
+    if (!att) return;
+    att.listener.dispose();
+    this.attachments.delete(webview);
   }
 
   /** Called when the VS Code `flick.*` configuration changes. */
@@ -83,18 +101,26 @@ export class FlickController {
     await this.createSession();
   }
 
-  async openSettingsInUi(): Promise<void> {
-    await vscode.commands.executeCommand('flick.chat.focus');
-    this.post({ type: 'settings', settings: readSettings() });
-    this.post({ type: 'showSettings' });
+  openSettingsInUi(): void {
+    // Deliver to every webview that is ready now; webviews still booting get
+    // it flushed when their `ready` message arrives.
+    for (const att of this.attachments.values()) {
+      if (att.ready) this.postShowSettings(att.webview);
+      else att.showSettingsOnReady = true;
+    }
+  }
+
+  private postShowSettings(webview: vscode.Webview): void {
+    this.postTo(webview, { type: 'settings', settings: readSettings() });
+    this.postTo(webview, { type: 'showSettings' });
   }
 
   // --- message handling ----------------------------------------------------
 
-  private async handleMessage(msg: WebviewToHost): Promise<void> {
+  private async handleMessage(msg: WebviewToHost, webview: vscode.Webview): Promise<void> {
     switch (msg.type) {
       case 'ready':
-        await this.sendInit();
+        await this.handleReady(webview);
         break;
       case 'newSession':
         await this.createSession();
@@ -109,7 +135,7 @@ export class FlickController {
         await this.deleteSession(msg.sessionId);
         break;
       case 'requestHistory':
-        await this.sendHistory(msg.sessionId);
+        await this.sendHistory(msg.sessionId, webview);
         break;
       case 'submitSteps':
         await this.submitSteps(msg.sessionId, msg.rawText);
@@ -124,8 +150,19 @@ export class FlickController {
     }
   }
 
-  private async sendInit(): Promise<void> {
-    this.post({
+  private async handleReady(webview: vscode.Webview): Promise<void> {
+    const att = this.attachments.get(webview);
+    if (!att) return;
+    await this.sendInit(webview);
+    att.ready = true;
+    if (att.showSettingsOnReady) {
+      att.showSettingsOnReady = false;
+      this.postShowSettings(webview);
+    }
+  }
+
+  private async sendInit(webview: vscode.Webview): Promise<void> {
+    this.postTo(webview, {
       type: 'init',
       sessions: this.sessions,
       activeSessionId: this.activeSessionId,
@@ -133,7 +170,7 @@ export class FlickController {
       connection: this.connection,
     });
     if (this.activeSessionId) {
-      await this.sendHistory(this.activeSessionId);
+      await this.sendHistory(this.activeSessionId, webview);
       void this.checkStale(this.activeSessionId);
     }
   }
@@ -251,7 +288,7 @@ export class FlickController {
     history.push(pendingEntry);
 
     await this.store.saveHistory(sessionId, history);
-    this.post({ type: 'historyAppend', sessionId, entry: this.webviewize(userEntry) });
+    this.post({ type: 'historyAppend', sessionId, entry: userEntry });
     this.post({ type: 'historyAppend', sessionId, entry: pendingEntry });
 
     this.busy.add(sessionId);
@@ -315,7 +352,7 @@ export class FlickController {
     }
 
     // Replace the pending placeholder with the result entry, both on disk and
-    // in the webview.
+    // in every attached webview.
     const finalHistory = await this.store.loadHistory(sessionId);
     const idx = finalHistory.findIndex((e) => e.id === pendingId);
     if (idx >= 0) finalHistory[idx] = resultEntry;
@@ -323,29 +360,24 @@ export class FlickController {
     await this.store.saveHistory(sessionId, finalHistory);
     await this.persistSessions();
 
-    this.post({
-      type: 'historyReplace',
-      sessionId,
-      entryId: pendingId,
-      entry: this.webviewize(resultEntry),
-    });
+    this.post({ type: 'historyReplace', sessionId, entryId: pendingId, entry: resultEntry });
   }
 
   // --- history -------------------------------------------------------------
 
-  private async sendHistory(sessionId: string): Promise<void> {
+  /** Send a session's history. Targets one webview when `target` is given
+   *  (the `ready`/`requestHistory` reply path), otherwise broadcasts. */
+  private async sendHistory(sessionId: string, target?: vscode.Webview): Promise<void> {
     const entries = await this.store.loadHistory(sessionId);
-    this.post({
-      type: 'history',
-      sessionId,
-      entries: entries.map((e) => this.webviewize(e)),
-    });
+    const msg: HostToWebview = { type: 'history', sessionId, entries };
+    if (target) this.postTo(target, msg);
+    else this.post(msg);
   }
 
-  /** Rewrites on-disk screenshot file paths into webview-resolvable URIs. */
-  private webviewize(entry: HistoryEntry): HistoryEntry {
-    if (entry.kind !== 'result' || !this.webview) return entry;
-    const webview = this.webview;
+  /** Rewrites on-disk screenshot file paths into URIs the given webview can
+   *  load. Webview URIs are per-webview, so this runs once per target. */
+  private webviewize(entry: HistoryEntry, webview: vscode.Webview): HistoryEntry {
+    if (entry.kind !== 'result') return entry;
     return {
       ...entry,
       batch: {
@@ -419,7 +451,28 @@ export class FlickController {
     await this.store.saveSessions(this.sessions);
   }
 
+  /** Broadcast to every webview that has finished booting. */
   private post(msg: HostToWebview): void {
-    this.webview?.postMessage(msg);
+    for (const att of this.attachments.values()) {
+      if (att.ready) void att.webview.postMessage(this.localizeForWebview(msg, att.webview));
+    }
+  }
+
+  /** Send to one webview regardless of its `ready` flag — used for the `init`
+   *  burst that answers a webview's own `ready` message. */
+  private postTo(webview: vscode.Webview, msg: HostToWebview): void {
+    void webview.postMessage(this.localizeForWebview(msg, webview));
+  }
+
+  /** Rewrites on-disk screenshot paths in entry-bearing messages into URIs the
+   *  target webview can load; other message types pass through unchanged. */
+  private localizeForWebview(msg: HostToWebview, webview: vscode.Webview): HostToWebview {
+    if (msg.type === 'history') {
+      return { ...msg, entries: msg.entries.map((e) => this.webviewize(e, webview)) };
+    }
+    if (msg.type === 'historyAppend' || msg.type === 'historyReplace') {
+      return { ...msg, entry: this.webviewize(msg.entry, webview) };
+    }
+    return msg;
   }
 }
