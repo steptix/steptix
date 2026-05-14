@@ -13,6 +13,8 @@ import { registerCommands } from './commands/index.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { workspaceFolderFor } from './workspace.js';
+import { TestDiscovery } from './test-discovery.js';
+import { TestBenchTestController } from './test-controller.js';
 
 const FIRST_ACTIVATION_KEY = 'testbench.shownActivationToast';
 
@@ -193,6 +195,29 @@ export interface TestBenchTestHooks {
    *  mirrors the registered command behavior (markRunningStopped, etc).
    *  Guards the two-handler regression class. */
   dispatchWebviewMessage: (msg: WebviewToHostMsg) => Promise<void>;
+  /** Test runner discovery cache — eligible tests in the workspace. */
+  discoveredTests: () => Array<{ uri: string; title: string | null; tags: string[] }>;
+  /** Wait for the initial discovery scan to complete. */
+  discoveryReady: () => Promise<void>;
+  /** Force a full re-scan of the workspace; useful for tests that write
+   *  fixture files synchronously and can't wait on the watcher. */
+  discoveryRefresh: () => Promise<void>;
+  /** Result counts of the most recent batch run, or null if none yet. */
+  lastBatchRun: () => { passed: number; failed: number; skipped: number } | null;
+  /** Test-only: run a batch identified by file URIs. Returns the counts
+   *  once the TestRun has ended. */
+  runBatchByUris: (uris: vscode.Uri[]) => Promise<{ passed: number; failed: number; skipped: number }>;
+  /** Test-only readback of every TestItem.id currently in
+   *  `vscode.TestController.items`. Source of truth for what the Test
+   *  Explorer would render. */
+  controllerItemIds: () => string[];
+  /** Test-only: invoke the TestController's `resolveHandler` with
+   *  `undefined` (root-resolve), the same call VS Code makes to populate
+   *  the test tree's top level on first render. */
+  triggerInitialResolve: () => Promise<void>;
+  /** Test-only readback of a single TestItem's rendered metadata
+   *  (label / description / tag ids). */
+  testItemMetadata: (uri: vscode.Uri) => { label: string; description: string; tags: string[] } | undefined;
   /** Best-effort: wait until tracker.snapshot() satisfies the predicate. */
   waitFor: (predicate: () => boolean, timeoutMs?: number) => Promise<void>;
 }
@@ -210,6 +235,16 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   const decorations = new DecorationManager(context, tracker);
   const view = new TestBenchRunnerView(context, tracker);
   const registry = new RunControllerRegistry(view, tracker);
+  const discovery = new TestDiscovery();
+  const testController = new TestBenchTestController(discovery, registry, {
+    // Forward batch progress to the sidebar webview banner. `null` clears
+    // the banner; non-null { running, total } shows it. The test
+    // controller never directly references the webview view — this sink
+    // is the only coupling.
+    set: (state) => {
+      view.post({ type: 'batchBanner', state });
+    },
+  });
 
   // Wire webview → host messages.
   view.setMessageHandler((msg) => handleWebviewMessage(msg, registry, tracker));
@@ -218,6 +253,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     tracker,
     decorations,
     registry,
+    discovery,
+    testController,
     vscode.window.registerWebviewViewProvider(TestBenchRunnerView.viewId, view, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
@@ -249,6 +286,19 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       notifyRunningHistory: () => [...registry.notifyRunningHistory],
       lastRunError: () => registry.lastRunError,
       dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker),
+      discoveredTests: () =>
+        discovery.eligibleTests().map((t) => ({
+          uri: t.uri.toString(),
+          title: t.title,
+          tags: t.frontmatter.tags ?? [],
+        })),
+      discoveryReady: () => discovery.ready(),
+      discoveryRefresh: () => discovery.refresh(),
+      lastBatchRun: () => testController.lastRun,
+      runBatchByUris: (uris) => testController.runByUris(uris),
+      controllerItemIds: () => testController.controllerItemIds(),
+      triggerInitialResolve: () => testController.triggerInitialResolve(),
+      testItemMetadata: (uri) => testController.itemMetadata(uri),
       waitFor: async (predicate, timeoutMs = 5000) => {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
@@ -372,6 +422,11 @@ async function handleWebviewMessage(
       const editor = tracker.activeEditor;
       if (!editor || !tracker.isActiveTestFile) return;
       tracker.toggleBreakpoint(editor.document.uri, msg.line);
+      return;
+    }
+    case 'focusTestResults': {
+      // Triggered by the batch-run banner's "Open Test Results" link.
+      void vscode.commands.executeCommand('workbench.panel.testResults.focus');
       return;
     }
   }

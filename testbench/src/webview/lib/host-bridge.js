@@ -62,4 +62,5 @@ export const hostBridge = {
   postToggleBreakpoint(line) { post({ type: 'toggleBreakpoint', line }); },
   postResume() { post({ type: 'resume' }); },
   postPause() { post({ type: 'pause' }); },
+  postFocusTestResults() { post({ type: 'focusTestResults' }); },
 };

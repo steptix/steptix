@@ -78,6 +78,10 @@ export class RunController {
    *  clean slate; subsequent runs in the same activation reuse the
    *  session as intended. */
   private staleSessionCleared = false;
+  /** Per-run event listener, set by runLines via options.onEvent and
+   *  cleared in finally. Batch runners hook this to drive TestRun results
+   *  without having to subscribe to the host→webview message channel. */
+  private currentEventListener: ((event: RunEvent) => void) | null = null;
 
   constructor(
     public readonly document: vscode.TextDocument,
@@ -98,6 +102,14 @@ export class RunController {
     this.pauseRequested = false;
     this.cancelPrompt();
     this.active?.abort();
+  }
+
+  /** Post a run event to the webview AND notify any registered per-run
+   *  event listener. Used by every code path that emits step:start /
+   *  step:pass / step:fail / output / capture / done. */
+  private emitRunEvent(event: RunEvent): void {
+    this.post({ type: 'runEvent', event });
+    this.currentEventListener?.(event);
   }
 
   /**
@@ -165,7 +177,25 @@ export class RunController {
 
   async runLines(
     lines: number[],
-    options: { breakpoints?: Set<number>; skipBreakpointAtStart?: boolean } = {},
+    options: {
+      breakpoints?: Set<number>;
+      skipBreakpointAtStart?: boolean;
+      /** Batch / Test Explorer mode. Interactive `[input: ...]` and
+       *  `[interactive]` steps cannot prompt the user in a batch, so we
+       *  short-circuit them as step:fail events. */
+      batchMode?: boolean;
+      /** Force a fresh session before this run. Batch mode uses this for
+       *  per-test isolation; single-file flow leaves it false so sessions
+       *  are reused within a TestBench session. */
+      forceFreshSession?: boolean;
+      /** Env name to send to the server (selects `data/<name>.json` etc).
+       *  When omitted, falls back to `EnvSelector.activeEnv()`. */
+      envOverride?: string | null;
+      /** Hook for batch runners to observe every RunEvent emitted during
+       *  this call (step:start, step:pass, step:fail, output, capture,
+       *  done). Receives events in flight order. */
+      onEvent?: (event: RunEvent) => void;
+    } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
       return { ok: false };
@@ -183,7 +213,11 @@ export class RunController {
     // doc comment for full reasoning. Best-effort: a missing .env, a
     // server outage, or no existing session all just no-op here, and the
     // run that follows surfaces the real error if there is one.
-    if (!this.staleSessionCleared) {
+    //
+    // Batch mode opts into forceFreshSession to give every test a clean
+    // slate; that path bypasses the first-run-only gate.
+    const forceFresh = options.forceFreshSession === true;
+    if (forceFresh || !this.staleSessionCleared) {
       this.staleSessionCleared = true;
       try {
         await this.closeSession();
@@ -191,6 +225,10 @@ export class RunController {
         // Swallow — cleanup must not block the run.
       }
     }
+
+    // Hook the per-run event listener (batch runner uses this to drive
+    // TestRun pass/fail). Cleared in finally so it never leaks across runs.
+    this.currentEventListener = options.onEvent ?? null;
 
     const breakpoints = options.breakpoints ?? new Set<number>();
     const skipFirstBreakpoint = options.skipBreakpointAtStart === true;
@@ -288,7 +326,7 @@ export class RunController {
       // indicator now and treat it as a successful "paused at start"
       // outcome.
       if (pausedAt !== null) this.post({ type: 'breakpointStop', line: pausedAt });
-      this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+      this.emitRunEvent({ type: 'done', status: 'aborted' });
       return { ok: true };
     }
 
@@ -322,8 +360,14 @@ export class RunController {
     this.pauseRequested = false;
     this.lastStepStartLine = null;
 
+    // Resolve which env name to send to the server. Explicit override (batch
+    // mode passes one per test) wins over the workspace-level EnvSelector.
+    const effectiveEnvName =
+      options.envOverride !== undefined ? options.envOverride : EnvSelector.activeEnv();
+
     const params: Record<string, string> = { ...resolvedParameters };
     let anyFailed = false;
+    const batchMode = options.batchMode === true;
 
     try {
       let i = 0;
@@ -342,6 +386,7 @@ export class RunController {
             client,
             sessionId,
             env,
+            envName: effectiveEnvName,
             params,
             sessionConfig,
             logging,
@@ -356,6 +401,19 @@ export class RunController {
         }
 
         if (item.kind === 'input') {
+          if (batchMode) {
+            // Batch mode can't show prompts. Auto-fail the test with a clear
+            // pointer to the offending line so the user knows to run it from
+            // the editor (F5) instead.
+            log(`[batch] input on line ${item.line} → auto-fail (interactive steps not supported in batch)`);
+            this.emitRunEvent({
+              type: 'step:fail',
+              line: item.line,
+              error: `Step on line ${item.line} requires interactive input ([input: ${item.varName}]) — interactive and [input: ...] steps cannot run in batch mode. Run this test from its editor (F5) to provide a value.`,
+            });
+            anyFailed = true;
+            break;
+          }
           log(`prompt input on line ${item.line} → {{${item.varName}}}`);
           const answer = await this.requestPrompt({
             mode: 'input',
@@ -373,12 +431,23 @@ export class RunController {
         }
 
         if (item.kind === 'interactive') {
+          if (batchMode) {
+            log(`[batch] interactive on line ${item.line} → auto-fail`);
+            this.emitRunEvent({
+              type: 'step:fail',
+              line: item.line,
+              error: `Step on line ${item.line} is [interactive] — interactive steps cannot run in batch mode. Run this test from its editor (F5) instead.`,
+            });
+            anyFailed = true;
+            break;
+          }
           log(`interactive on line ${item.line}: ${item.hint}`);
           const exitedCleanly = await this.runInteractive({
             hint: item.hint,
             client,
             sessionId,
             env,
+            envName: effectiveEnvName,
             params,
             sessionConfig,
             logging,
@@ -402,7 +471,7 @@ export class RunController {
       if (status === 'passed' && pausedAt !== null) {
         this.post({ type: 'breakpointStop', line: pausedAt });
       }
-      this.post({ type: 'runEvent', event: { type: 'done', status } });
+      this.emitRunEvent({ type: 'done', status });
       log(`run ${status}`);
       return { ok: !anyFailed };
     } catch (err) {
@@ -422,23 +491,24 @@ export class RunController {
           const resumeLine = this.lastStepStartLine ?? firstStepLine;
           if (resumeLine != null) {
             this.post({ type: 'breakpointStop', line: resumeLine });
-            this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+            this.emitRunEvent({ type: 'done', status: 'aborted' });
             log(`run paused at line ${resumeLine} — Resume to continue`);
             return { ok: true };
           }
         }
-        this.post({ type: 'runEvent', event: { type: 'done', status: 'aborted' } });
+        this.emitRunEvent({ type: 'done', status: 'aborted' });
         log('run aborted by user');
         return { ok: true };
       }
       const payload = mapApiErrorToPayload(err, { serverUrl, envPath: envResolution.path });
-      this.post({ type: 'runEvent', event: { type: 'done', status: 'error' } });
+      this.emitRunEvent({ type: 'done', status: 'error' });
       return this.fail(payload, log);
     } finally {
       this.active = null;
       this.pauseRequested = false;
       this.cancelPrompt();
       this.post({ type: 'promptDone' });
+      this.currentEventListener = null;
     }
   }
 
@@ -447,25 +517,26 @@ export class RunController {
     client: ApiClientLike;
     sessionId: string;
     env: Record<string, string>;
+    /** Resolved env name to send to the server. `null` means none active. */
+    envName: string | null;
     params: Record<string, string>;
     sessionConfig: { baseUrl?: string; timeout?: string };
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, params, sessionConfig, logging, signal, log } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
 
-    const activeEnv = EnvSelector.activeEnv();
     const events = client.streamSteps(
       sessionId,
       {
         steps: stepInstructions,
         sourceLines: stepLines,
         env,
-        ...(activeEnv && { envName: activeEnv }),
+        ...(envName && { envName }),
         ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
           config: sessionConfig,
         }),
@@ -484,7 +555,7 @@ export class RunController {
       if (event.type === 'step:start') this.lastStepStartLine = event.line;
       if (event.type === 'step:fail') sawFail = true;
       if (event.type === 'done') continue;
-      this.post({ type: 'runEvent', event });
+      this.emitRunEvent(event);
     }
     return !sawFail;
   }
@@ -494,13 +565,14 @@ export class RunController {
     client: ApiClientLike;
     sessionId: string;
     env: Record<string, string>;
+    envName: string | null;
     params: Record<string, string>;
     sessionConfig: { baseUrl?: string; timeout?: string };
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<boolean> {
-    const { hint, client, sessionId, env, params, sessionConfig, logging, signal, log } = args;
+    const { hint, client, sessionId, env, envName, params, sessionConfig, logging, signal, log } = args;
 
     const firstAnswer = await this.requestPrompt({ mode: 'interactive', message: hint });
     let answer: string | null = firstAnswer;
@@ -531,14 +603,13 @@ export class RunController {
         log(`interactive step: ${action.text}`);
         this.postOutput(`> ${action.text}`, 'info');
         try {
-          const activeEnv = EnvSelector.activeEnv();
           const events = client.streamSteps(
             sessionId,
             {
               steps: [action.text],
               sourceLines: [0],
               env,
-              ...(activeEnv && { envName: activeEnv }),
+              ...(envName && { envName }),
               ...(!this.configSentForSession &&
                 Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),
               ...(Object.keys(params).length > 0 && { parameters: params }),
@@ -549,7 +620,7 @@ export class RunController {
           for await (const event of events) {
             this.configSentForSession = true;
             if (event.type === 'done') continue;
-            this.post({ type: 'runEvent', event });
+            this.emitRunEvent(event);
           }
         } catch (err) {
           this.postOutput(
@@ -603,7 +674,7 @@ export class RunController {
   }
 
   private postOutput(msg: string, kind: 'info' | 'warn' | 'error'): void {
-    this.post({ type: 'runEvent', event: { type: 'output', msg, kind } });
+    this.emitRunEvent({ type: 'output', msg, kind });
   }
 
   async runAll(): Promise<RunOutcome> {

@@ -25,6 +25,7 @@ const HOST_MSG_TYPES = new Set([
   "parametersResolved",
   "running",
   "breakpointStop",
+  "batchBanner",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -67,6 +68,43 @@ function ErrorPanel({ error, onDismiss }) {
   );
 }
 
+/**
+ * Banner shown at the top of the webview while a Test Explorer batch run
+ * is in flight. Tells the user where the real action is (Test Results
+ * panel) so they don't try to drive the run from the TestBench sidebar.
+ * Renders nothing when `state` is null.
+ */
+function BatchBanner({ state }) {
+  if (!state) return null;
+  const openResults = () => hostBridge.postFocusTestResults();
+  return (
+    <div
+      style={{
+        padding: "8px 12px",
+        background: "var(--vscode-statusBarItem-prominentBackground, #4d4d4d)",
+        color: "var(--vscode-statusBarItem-prominentForeground, #fff)",
+        fontSize: "12px",
+        borderBottom: "1px solid var(--vscode-panel-border, #444)",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+      }}
+    >
+      <span>🧪</span>
+      <span style={{ flex: 1 }}>
+        Batch run: {state.running}/{state.total} tests
+      </span>
+      <a
+        href="#"
+        onClick={(e) => { e.preventDefault(); openResults(); }}
+        style={{ color: "inherit", textDecoration: "underline" }}
+      >
+        Open Test Results
+      </a>
+    </div>
+  );
+}
+
 function TestBenchRunner() {
   const [snapshot, setSnapshot] = useState(null);
   const [running, setRunning] = useState(false);
@@ -77,6 +115,13 @@ function TestBenchRunner() {
   const [variablesCollapsed, setVariablesCollapsed] = useState(false);
   const [logCollapsed, setLogCollapsed] = useState(false);
   const [hostError, setHostError] = useState(null);
+  /**
+   * Batch-run banner state. Non-null while a Test Explorer batch is in
+   * flight; carries the progress (running / total). Cleared when the batch
+   * ends — final results live in VS Code's Test Results panel, so the
+   * banner doesn't need to linger.
+   */
+  const [batchBanner, setBatchBanner] = useState(null);
 
   const outputLogRef = useRef(null);
   const outputAtBottomRef = useRef(true);
@@ -112,6 +157,9 @@ function TestBenchRunner() {
           break;
         case "parametersResolved":
           setRuntimeVariables((prev) => ({ ...prev, ...msg.values }));
+          break;
+        case "batchBanner":
+          setBatchBanner(msg.state);
           break;
         default:
           break;
@@ -236,10 +284,13 @@ function TestBenchRunner() {
 
   if (!isTestFile) {
     return (
-      <div style={{ padding: 16, fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)", color: "var(--vscode-foreground)" }}>
-        <div style={{ marginBottom: 12, fontWeight: 600 }}>TestBench</div>
-        <div style={{ opacity: 0.8, lineHeight: 1.5 }}>
-          Open a Markdown file with a <code>## Steps</code> heading to start a TestBench run.
+      <div style={{ fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)", color: "var(--vscode-foreground)" }}>
+        <BatchBanner state={batchBanner} />
+        <div style={{ padding: 16 }}>
+          <div style={{ marginBottom: 12, fontWeight: 600 }}>TestBench</div>
+          <div style={{ opacity: 0.8, lineHeight: 1.5 }}>
+            Open a Markdown file with a <code>## Steps</code> heading to start a TestBench run.
+          </div>
         </div>
       </div>
     );
@@ -247,6 +298,7 @@ function TestBenchRunner() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)", color: "var(--vscode-foreground)", background: "var(--vscode-sideBar-background)" }}>
+      <BatchBanner state={batchBanner} />
       <style>{`
         body { padding: 0 !important; margin: 0; }
         .tb-btn {

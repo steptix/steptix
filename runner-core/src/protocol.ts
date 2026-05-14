@@ -159,6 +159,18 @@ export interface HostBreakpointStopMsg {
   line: number | null;
 }
 
+/**
+ * Surface multi-test batch run progress in the sidebar webview. The webview
+ * renders a banner at the top while `state` is non-null and clears it on
+ * `null`. The Test Explorer's progress UI is still the primary surface;
+ * this banner exists so users staring at the TestBench sidebar know a
+ * batch is in flight and don't try to drive runs from this panel.
+ */
+export interface HostBatchBannerMsg {
+  type: 'batchBanner';
+  state: { running: number; total: number } | null;
+}
+
 export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
@@ -167,7 +179,8 @@ export type HostToWebviewMsg =
   | HostPromptDoneMsg
   | HostParametersResolvedMsg
   | HostRunningMsg
-  | HostBreakpointStopMsg;
+  | HostBreakpointStopMsg
+  | HostBatchBannerMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -231,6 +244,16 @@ export interface WebviewPauseMsg {
   type: 'pause';
 }
 
+/**
+ * User clicked the batch-banner's "Open Test Results" link. Host
+ * forwards to the built-in `workbench.panel.testResults.focus` command.
+ * A dedicated message rather than arbitrary command execution keeps the
+ * webview → host surface narrow.
+ */
+export interface WebviewFocusTestResultsMsg {
+  type: 'focusTestResults';
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -242,7 +265,8 @@ export type WebviewToHostMsg =
   | WebviewRevealLineMsg
   | WebviewToggleBreakpointMsg
   | WebviewResumeMsg
-  | WebviewPauseMsg;
+  | WebviewPauseMsg
+  | WebviewFocusTestResultsMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -259,7 +283,8 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'promptDone' ||
     t === 'parametersResolved' ||
     t === 'running' ||
-    t === 'breakpointStop'
+    t === 'breakpointStop' ||
+    t === 'batchBanner'
   );
 }
 
@@ -277,7 +302,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'revealLine' ||
     t === 'toggleBreakpoint' ||
     t === 'resume' ||
-    t === 'pause'
+    t === 'pause' ||
+    t === 'focusTestResults'
   );
 }
 

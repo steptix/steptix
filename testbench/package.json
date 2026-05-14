@@ -2,7 +2,7 @@
   "name": "testbench",
   "displayName": "TestBench",
   "publisher": "pkent",
-  "version": "0.2.30",
+  "version": "0.3.5",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code",
   "private": true,
   "engines": {
@@ -27,7 +27,7 @@
         {
           "id": "testbench",
           "title": "TestBench",
-          "icon": "$(beaker)"
+          "icon": "./icons/testbench.svg"
         }
       ]
     },
@@ -37,7 +37,7 @@
           "id": "testbench.runner",
           "name": "Test Runner",
           "type": "webview",
-          "icon": "$(beaker)",
+          "icon": "./icons/testbench.svg",
           "contextualTitle": "TestBench"
         }
       ]
@@ -66,6 +66,11 @@
           "type": "string",
           "default": "",
           "description": "Active environment name. Selects '.env.<name>' (secrets/URLs) and 'data/<name>.json' (structured test data) for the next run. Leave blank for no env selection. Pick via the '🌐 env: ...' status-bar item or 'TestBench: Select Environment' command."
+        },
+        "testbench.testsGlob": {
+          "type": "string",
+          "default": "**/*.md",
+          "description": "Glob pattern of files to consider as candidate tests in the Test Explorer. Files still must contain '## Steps' and not be marked 'type: skill' or 'disabled: true' in frontmatter. Narrow this (e.g. 'tests/**/*.md') for faster discovery on large repos."
         }
       }
     },

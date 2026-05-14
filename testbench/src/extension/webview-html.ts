@@ -60,14 +60,19 @@ export async function buildWebviewHtml(
   // CRITICAL: `acquireVsCodeApi()` may only be called once per webview. We
   // call it here and stash the handle on `window.__tbVsCodeApi` so the React
   // bundle can re-use it instead of attempting another (throwing) call.
+  // Boot-time diagnostic shell. Stays hidden once React mounts content into
+  // #root — without this, the loading message sits on top of the React UI
+  // (min-height 100vh pushes the app off-screen) and users mistake the
+  // working-but-hidden app for a load failure.
   const diagnosticHtml = `
-<div id="testbench-loading" style="font-family: -apple-system, Segoe UI, sans-serif; padding: 24px; color: #ddd; background: #1e1e1e; min-height: 100vh; box-sizing: border-box;">
-  <h2 style="color: #4ec9b0;">TestBench webview loaded</h2>
-  <p>Waiting for the React app to mount&hellip;</p>
+<div id="testbench-loading" style="font-family: -apple-system, Segoe UI, sans-serif; padding: 24px; color: #ddd; background: #1e1e1e; box-sizing: border-box;">
+  <h2 style="color: #4ec9b0; margin: 0 0 8px;">TestBench webview loaded</h2>
+  <p style="margin: 0;">Waiting for the React app to mount&hellip;</p>
   <pre id="testbench-errors" style="color: #f48771; white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; margin-top: 16px;"></pre>
 </div>
 <script>
   (function() {
+    const loading = document.getElementById('testbench-loading');
     const errBox = document.getElementById('testbench-errors');
     const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
     if (vscode) window.__tbVsCodeApi = vscode;
@@ -83,6 +88,21 @@ export async function buildWebviewHtml(
       record('unhandledrejection', String((e.reason && (e.reason.message || e.reason)) || e));
     });
     record('boot', 'inline diagnostic script ran');
+
+    // Hide the loading shell once React mounts content into #root. Watch
+    // for the first child being added — that's the React tree taking over.
+    // If a runtime error stops React from mounting (errBox has lines), the
+    // shell stays visible so the diagnostics remain on-screen.
+    const root = document.getElementById('root');
+    if (root && window.MutationObserver) {
+      const observer = new MutationObserver(function() {
+        if (root.childNodes.length > 0 && loading && (!errBox || errBox.textContent.trim().split('\\n').filter(Boolean).length <= 1)) {
+          loading.style.display = 'none';
+          observer.disconnect();
+        }
+      });
+      observer.observe(root, { childList: true });
+    }
   })();
 </script>`;
   html = html.replace(/<div id="root"><\/div>/i, `${diagnosticHtml}\n<div id="root"></div>`);

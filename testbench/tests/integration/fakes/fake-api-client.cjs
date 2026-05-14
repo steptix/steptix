@@ -20,6 +20,10 @@ class FakeApiClient {
      *  read `requests[n].sourceLines` to verify which steps a particular
      *  call covered (e.g. that Resume sent multiple steps, not one). */
     this.requests = [];
+    /** Pre-scripted per-stream event flows. Each entry is an async function
+     *  that receives this fake and is invoked exactly when streamSteps is
+     *  called for that stream index. Avoids polling races. */
+    this.streamScripts = [];
   }
 
   /**
@@ -36,8 +40,17 @@ class FakeApiClient {
       aborted: false,
     };
     this.activeStream = stream;
+    const idx = this.streamCallCount;
     this.streamCallCount += 1;
     this.requests.push(request);
+
+    // Fire any pre-scripted event flow for this stream index. Fire-and-
+    // forget — the script pushes events and (usually) calls fake.end()
+    // asynchronously, while this generator yields events to the consumer.
+    const script = this.streamScripts[idx];
+    if (script) {
+      Promise.resolve().then(() => script(this)).catch(() => undefined);
+    }
 
     const onAbort = () => {
       stream.aborted = true;
