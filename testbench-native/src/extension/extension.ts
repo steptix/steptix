@@ -128,7 +128,7 @@ class RunControllerRegistry implements vscode.Disposable {
         case 'step:start': {
           const target = this.targetUriFor(uri, ev.frame);
           this.tracker.setStatus(target, ev.line, 'running');
-          if (ev.frame) this.maybeRevealFrame(ev.frame, ev.line);
+          if (ev.frame) this.maybeRevealFrame(uri, ev.frame, ev.line);
           break;
         }
         case 'step:pass': {
@@ -180,10 +180,10 @@ class RunControllerRegistry implements vscode.Disposable {
           break;
         case 'done':
           this.refreshRunningContext();
-          // Allow the same skill files to be auto-revealed again on the
-          // next run (otherwise a second run never re-opens them after the
-          // user closed the tabs from the first).
-          this.revealedFrameUris.clear();
+          // The per-controller revealedFrameUris is cleared by
+          // resetFrameState() at the START of the next run, so we don't
+          // need to wipe anything here — the auto-reveal gate stays
+          // honored until then.
           break;
       }
       return;
@@ -221,12 +221,20 @@ class RunControllerRegistry implements vscode.Disposable {
    * executing — the test file's line shows `running` aggregate but the
    * actual stepping is invisible. The reveal is best-effort and uses
    * `preserveFocus: true` so it never steals keyboard focus.
+   *
+   * The first-time-per-run gate lives on the controller (not on the
+   * registry) so two controllers running back-to-back can both reveal
+   * the same skill — the previous controller's reveal set doesn't bleed
+   * into the next run.
    */
-  private revealedFrameUris = new Set<string>();
-  private maybeRevealFrame(frame: import('ai-ui-automation-runner-core').FrameInfo, line: number): void {
+  private maybeRevealFrame(
+    controllerUri: vscode.Uri,
+    frame: import('ai-ui-automation-runner-core').FrameInfo,
+    line: number,
+  ): void {
     if (frame.kind !== 'skill') return;
-    if (this.revealedFrameUris.has(frame.uri)) return;
-    this.revealedFrameUris.add(frame.uri);
+    const controller = this.controllers.get(controllerUri.toString());
+    if (!controller?.shouldRevealFrameUri(frame.uri)) return;
     const target = vscode.Uri.file(frame.uri);
     const revealLine = Math.max(0, line - 1);
     void vscode.window.showTextDocument(target, {
@@ -507,14 +515,19 @@ async function handleWebviewMessage(
     case 'stop': {
       const controller = registry.active();
       controller?.stop();
+      // Phase 2.1: parity with testbench-native.stop — frame state cleared
+      // and ALL `running` statuses (test file + any descended skill file)
+      // flipped to `stopped`. Without this a Stop while inside a skill
+      // leaves skill-body lines spinning.
+      controller?.resetFrameState();
       // Also clear any breakpoint pause so the user fully exits the run.
       // Without this, hitting Stop while paused at a breakpoint would leave
       // the yellow ▶ marker stuck and the Resume button still active.
       const editor = tracker.activeEditor;
       if (editor && tracker.isActiveTestFile) {
         tracker.setBreakpointStop(editor.document.uri, null);
-        tracker.markRunningStopped(editor.document.uri);
       }
+      tracker.markAllRunningStopped();
       registry.notifyRunning(false);
       return;
     }

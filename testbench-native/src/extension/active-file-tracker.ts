@@ -236,6 +236,26 @@ export class ActiveFileTracker {
     if (changed) this.emit();
   }
 
+  /**
+   * Flip every `running` status across every tracked URI to `stopped`.
+   * Used on Stop: a run that descended into a skill leaves `running`
+   * statuses on both the test file's `[skill: ...]` aggregate line AND
+   * on the skill file's own body lines. The single-URI `markRunningStopped`
+   * only catches one of those, so a Stop while inside a skill would
+   * leave skill-file lines spinning indefinitely.
+   */
+  markAllRunningStopped(): void {
+    let changed = false;
+    for (const state of this.states.values()) {
+      for (const [line, status] of state.statuses) {
+        if (status !== 'running') continue;
+        state.statuses.set(line, 'stopped');
+        changed = true;
+      }
+    }
+    if (changed) this.emit();
+  }
+
   setError(uri: vscode.Uri, line: number, error: ErrorPayload): void {
     const state = this.state(uri);
     state.errors.set(line, error);

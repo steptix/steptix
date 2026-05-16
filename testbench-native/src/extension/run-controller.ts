@@ -96,11 +96,27 @@ export class RunController {
    *  file the descent ultimately started from. Inherited from parent on
    *  nested pushes. Drives the aggregate test-file status on `[skill: ...]`
    *  lines so the user sees pass/fail on those lines even though the actual
-   *  step events for the descent land on the skill file's lines. */
+   *  step events for the descent land on the skill file's lines.
+   *
+   *  Persists across the frame's `frame:pop` until end-of-run — a late
+   *  `step:fail` event (out-of-order, or from a server that emits pop
+   *  before all its descendants' events have drained) still needs to
+   *  resolve the root so the failure paints on the test file. Cleared
+   *  by `resetFrameState`. */
   private frameRoot = new Map<string, { testUri: vscode.Uri; testLine: number }>();
+  /** Parent id for every frame we've seen this run, persistent across the
+   *  frame's own `frame:pop`. Used by `markFrameFailed` to walk ancestry
+   *  reliably even after the frame has been popped off the live stack. */
+  private frameParents = new Map<string, string | null>();
   /** Frame ids whose descent has had a step:fail somewhere underneath.
    *  Propagated to the test-file [skill:] line on `frame:pop`. */
   private failedFrames = new Set<string>();
+  /** URIs auto-revealed this run, so we don't keep re-revealing the same
+   *  skill file each time its first step starts. Per-controller (not
+   *  per-registry) so two test files running in sequence both reveal
+   *  shared skills independently. Cleared by `resetFrameState` at the
+   *  start of each run. */
+  private readonly revealedFrameUris = new Set<string>();
   private readonly frameStackEmitter = new vscode.EventEmitter<void>();
   /** Fires whenever `frameStack` changes. The Call Stack view subscribes. */
   readonly onFrameStackChange = this.frameStackEmitter.event;
@@ -141,13 +157,17 @@ export class RunController {
   handleFramePush(frame: FrameInfo): void {
     this._frameStack.push(frame);
     // Root attribution: top-level skills (parentId is the test root, i.e.
-    // empty/null) anchor themselves on the test file. Nested skills
-    // inherit the same root so a deep failure still marks the outermost
-    // `[skill:]` line in the test.
+    // null) anchor themselves on the test file. Nested skills inherit the
+    // same root so a deep failure still marks the outermost `[skill:]`
+    // line in the test.
     const root = frame.parentId
       ? this.frameRoot.get(frame.parentId)
       : { testUri: this.document.uri, testLine: frame.line };
     if (root) this.frameRoot.set(frame.id, root);
+    // Remember ancestry for `markFrameFailed` to walk after the frame has
+    // been popped (the live stack alone isn't enough when step:fail and
+    // frame:pop arrive close together).
+    this.frameParents.set(frame.id, frame.parentId);
     this.frameStackEmitter.fire();
   }
 
@@ -161,22 +181,25 @@ export class RunController {
       // streams keeps the UI from showing a phantom frame after stop/abort.
       this._frameStack.length = idx;
     }
-    this.frameRoot.delete(frameId);
-    this.failedFrames.delete(frameId);
+    // Deliberately keep frameRoot / frameParents populated until run end:
+    // a late step:fail (after pop) needs ancestry to propagate the failure
+    // to the test file's [skill:] line. resetFrameState clears them.
     this.frameStackEmitter.fire();
     return { failed, root };
   }
 
   /** Mark a frame as having had a failed descendant step. Walks the parent
-   *  chain so the root frame (the one anchored on the test file's
-   *  `[skill:]` line) inherits the failure even if the immediate step that
-   *  failed lives several levels deep. */
+   *  chain via the persistent `frameParents` map so the root frame (the one
+   *  anchored on the test file's `[skill:]` line) inherits the failure even
+   *  if the immediate step that failed lives several levels deep AND even
+   *  if the frame has already been popped off the live stack. */
   markFrameFailed(frameId: string): { testUri: vscode.Uri; testLine: number } | null {
     let cur: string | null = frameId;
-    while (cur) {
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
       this.failedFrames.add(cur);
-      const frame = this._frameStack.find((f) => f.id === cur);
-      cur = frame?.parentId ?? null;
+      cur = this.frameParents.get(cur) ?? null;
     }
     return this.frameRoot.get(frameId) ?? null;
   }
@@ -186,8 +209,20 @@ export class RunController {
   resetFrameState(): void {
     this._frameStack = [];
     this.frameRoot.clear();
+    this.frameParents.clear();
     this.failedFrames.clear();
+    this.revealedFrameUris.clear();
     this.frameStackEmitter.fire();
+  }
+
+  /** Atomic test-and-mark: returns true the first time a URI is seen this
+   *  run, false on subsequent calls. Caller uses the return value to gate
+   *  the auto-reveal side-effect so the same skill file isn't re-opened
+   *  on every `step:start` inside it. */
+  shouldRevealFrameUri(uri: string): boolean {
+    if (this.revealedFrameUris.has(uri)) return false;
+    this.revealedFrameUris.add(uri);
+    return true;
   }
 
   stop(): void {

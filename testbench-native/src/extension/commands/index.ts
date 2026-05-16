@@ -62,11 +62,16 @@ export function registerCommands(
     vscode.commands.registerCommand('testbench-native.stop', () => {
       const controller = registry.active();
       controller?.stop();
+      // Phase 2.1: stop must flip running statuses on BOTH the test file
+      // and any skill file the run descended into — otherwise skill-body
+      // lines stay spinning after Stop. Frame state on the controller is
+      // wiped too so a subsequent run doesn't inherit stale frames.
+      controller?.resetFrameState();
       const editor = tracker.activeEditor;
       if (editor && tracker.isActiveTestFile) {
         tracker.setBreakpointStop(editor.document.uri, null);
-        tracker.markRunningStopped(editor.document.uri);
       }
+      tracker.markAllRunningStopped();
       registry.notifyRunning(false);
     }),
 

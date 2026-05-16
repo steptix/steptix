@@ -199,6 +199,82 @@ describe('TestBench frame events (Phase 2)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('step:fail that arrives AFTER frame:pop still propagates fail to the [skill:] line', async () => {
+    // Phase 2.1.a regression guard: markFrameFailed walks ancestry via
+    // the persistent frameParents map, not the live stack. If the walk
+    // depended on the live stack, a fail event reordered after the pop
+    // (rare but possible across SSE flush boundaries) would silently
+    // drop the fail mark on the test file.
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      line: 9,
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    // Frame is already off the live stack. Now the late fail arrives.
+    fake.push({ type: 'step:fail', line: 3, error: 'late', frame });
+
+    await waitFor('test-file line 9 fail (propagated post-pop)', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'fail';
+    });
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('Stop during a skill flips running statuses on BOTH the test file and the skill file', async () => {
+    // Phase 2.1.d regression guard: markAllRunningStopped walks every
+    // tracked URI, not just the active editor's. Pre-fix, the skill
+    // file's running step would stay spinning after Stop.
+    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 9,
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 5, frame });
+    await waitFor('skill-file line 5 running', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      const statuses = snap ? Object.fromEntries(snap.statuses) : {};
+      return statuses[5] === 'running';
+    });
+    await waitFor('test-file line 9 running (aggregate)', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+
+    await vscode.commands.executeCommand('testbench-native.stop');
+
+    await waitFor('idle after stop', () => !hooks.isRunning());
+    // Both files must show stopped on what was running.
+    const testStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(testStatuses[9], 'stopped', 'test-file aggregate must flip to stopped');
+    const skillSnap = hooks.tracker.snapshotFor(skillUri);
+    const skillStatuses = skillSnap ? Object.fromEntries(skillSnap.statuses) : {};
+    assert.equal(skillStatuses[5], 'stopped', 'skill-body line must flip to stopped');
+    // Frame state on the controller should be wiped so the next run
+    // starts clean (and the Call Stack view is empty).
+    assert.deepEqual(hooks.runningFrameStack(), [], 'frame stack cleared on stop');
+  });
+
   it('step:fail inside a frame propagates fail to the test-file [skill:] line', async () => {
     const frame = {
       id: 'f1',

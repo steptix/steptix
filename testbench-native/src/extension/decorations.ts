@@ -198,8 +198,14 @@ export class DecorationManager implements vscode.Disposable {
     const passed = snap.statuses.filter(
       ([line, status]) => status === 'pass' && stepLineSet.has(line),
     ).length;
+    // The "N/M passed" summary belongs on the user's actual test file —
+    // not on skill `.md`s we surfaced during a descent. A skill running
+    // halfway through its own body would otherwise show a misleading
+    // "0/4 passed" while it's still executing, and a skill the user
+    // never wrote a test for shouldn't carry a passed-count signal at
+    // all. Phase 2.1 cleanup.
     const summaryRanges: vscode.DecorationOptions[] =
-      headingLine && stepLines.length > 0
+      snap.isTestFile && headingLine && stepLines.length > 0
         ? [{
             range: rangeAtLineEnd(headingLine),
             renderOptions: {
