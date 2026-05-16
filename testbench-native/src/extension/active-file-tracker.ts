@@ -249,6 +249,68 @@ export class ActiveFileTracker {
     this.emit();
   }
 
+  /**
+   * Snapshot for an arbitrary URI. Returns null when no state exists for
+   * the URI — the caller can treat that as "no decorations needed."
+   * Distinct from `snapshot()` which returns the active-editor snapshot
+   * for the sidebar webview; this variant lets the DecorationManager
+   * paint every visible editor against its own per-URI state, which is
+   * what Phase 2 needs when a run descends into a skill `.md` that lives
+   * in a different file from the test.
+   */
+  snapshotFor(uri: vscode.Uri): FileStateSnapshot | null {
+    const key = uri.toString();
+    const state = this.states.get(key);
+    if (!state) return null;
+    if (
+      state.statuses.size === 0 &&
+      state.errors.size === 0 &&
+      state.breakpointStop === null
+    ) {
+      return null;
+    }
+    // Editor may not currently be open — fall back to an empty doc text;
+    // decorations only need the URI + line numbers, not the document body.
+    const editor = this.findEditorFor(uri);
+    const document = editor?.document;
+    const text = document?.getText() ?? '';
+    return {
+      uri: key,
+      filePath: uri.fsPath,
+      isTestFile: document ? isTestbenchDocument(document) : false,
+      text,
+      breakpoints: [...this.breakpoints(uri)].sort((a, b) => a - b),
+      statuses: [...state.statuses.entries()],
+      errors: [...state.errors.entries()],
+      breakpointStop: state.breakpointStop,
+      selectedLines: [],
+      cursorLine: 1,
+    };
+  }
+
+  /** URIs that currently carry any run state — drives DecorationManager's
+   *  multi-editor refresh. */
+  urisWithState(): vscode.Uri[] {
+    const out: vscode.Uri[] = [];
+    for (const [key, state] of this.states) {
+      if (
+        state.statuses.size > 0 ||
+        state.errors.size > 0 ||
+        state.breakpointStop !== null
+      ) {
+        out.push(vscode.Uri.parse(key));
+      }
+    }
+    return out;
+  }
+
+  private findEditorFor(uri: vscode.Uri): vscode.TextEditor | undefined {
+    const target = uri.toString();
+    return vscode.window.visibleTextEditors.find(
+      (e) => e.document.uri.toString() === target,
+    );
+  }
+
   /** Snapshot for the sidebar webview. */
   snapshot(): FileStateSnapshot {
     const editor = this.currentEditor;

@@ -16,6 +16,7 @@ import { workspaceFolderFor } from './workspace.js';
 import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
 import { InvocationDefinitionProvider } from './definition-provider.js';
+import { CallStackTreeProvider } from './call-stack-view.js';
 
 const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
 
@@ -30,6 +31,16 @@ class RunControllerRegistry implements vscode.Disposable {
    *  key. VS Code doesn't expose context keys for read, so this is the
    *  only handle the integration suite has on toolbar visibility. */
   private lastRunningContextValue = false;
+
+  /** Fires whenever any controller's frame stack changes. The Call Stack
+   *  view re-renders against this — driving its tree off a single registry
+   *  event keeps the view decoupled from individual controllers (which
+   *  come and go as documents open). */
+  private readonly anyFrameStackEmitter = new vscode.EventEmitter<void>();
+  readonly onAnyFrameStackChange = this.anyFrameStackEmitter.event;
+  /** Per-controller subscription handle so we don't leak listeners when a
+   *  controller is removed. */
+  private readonly frameSubs = new Map<string, vscode.Disposable>();
 
   /** Test-only readback of the `testbench-native.running` context key. */
   get runningContextValue(): boolean {
@@ -63,7 +74,23 @@ class RunControllerRegistry implements vscode.Disposable {
     const post = this.makePostCallback(document.uri);
     const controller = new RunController(document, folder, post, this.clientFactory);
     this.controllers.set(key, controller);
+    // Re-fire the controller's frame-stack changes through the registry
+    // so a single view subscriber catches every controller's transitions.
+    this.frameSubs.set(
+      key,
+      controller.onFrameStackChange(() => this.anyFrameStackEmitter.fire()),
+    );
     return controller;
+  }
+
+  /** The currently-running controller, if any. The Call Stack view reads
+   *  the active frame stack from this. Only one run can be in flight at
+   *  a time today; if that ever changes the view will need to disambiguate. */
+  runningController(): RunController | undefined {
+    for (const c of this.controllers.values()) {
+      if (c.isRunning) return c;
+    }
+    return undefined;
   }
 
   /** The controller for the currently-active TestBench file, if any. */
@@ -98,17 +125,65 @@ class RunControllerRegistry implements vscode.Disposable {
     if (msg.type === 'runEvent') {
       const ev = msg.event;
       switch (ev.type) {
-        case 'step:start':
-          this.tracker.setStatus(uri, ev.line, 'running');
+        case 'step:start': {
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setStatus(target, ev.line, 'running');
+          if (ev.frame) this.maybeRevealFrame(ev.frame, ev.line);
           break;
-        case 'step:pass':
-          this.tracker.setStatus(uri, ev.line, 'pass');
+        }
+        case 'step:pass': {
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setStatus(target, ev.line, 'pass');
           break;
-        case 'step:fail':
-          this.tracker.setStatus(uri, ev.line, 'fail');
+        }
+        case 'step:fail': {
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setStatus(target, ev.line, 'fail');
+          // Propagate the failure to the originating test-file `[skill:]` line
+          // so the user sees the red icon on the line they actually authored,
+          // not just on the skill's body line they may not even have open.
+          if (ev.frame) {
+            const controller = this.controllers.get(uri.toString());
+            const root = controller?.markFrameFailed(ev.frame.id) ?? null;
+            if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail');
+          }
+          break;
+        }
+        case 'frame:push': {
+          const controller = this.controllers.get(uri.toString());
+          controller?.handleFramePush(ev.frame);
+          // Aggregate test-file status: a top-level skill (parentId === null)
+          // is the one anchored on the test's `[skill:]` line. Mark it
+          // `running` so the user sees activity on that line even though
+          // the step events for the descent will land on the skill file.
+          if (ev.frame.parentId === null && ev.frame.line > 0) {
+            this.tracker.setStatus(uri, ev.frame.line, 'running');
+          }
+          break;
+        }
+        case 'frame:pop': {
+          const controller = this.controllers.get(uri.toString());
+          const result = controller?.handleFramePop(ev.frameId);
+          if (result?.root) {
+            // Only overwrite the aggregate status with `pass` when the
+            // descent had no failures — failures already painted `fail`
+            // synchronously in the step:fail branch and we don't want to
+            // step on them here.
+            if (!result.failed) {
+              this.tracker.setStatus(result.root.testUri, result.root.testLine, 'pass');
+            }
+          }
+          break;
+        }
+        case 'frame:scope':
+          // Reserved for Phase 4 (Variables panel). No-op in Phase 2.
           break;
         case 'done':
           this.refreshRunningContext();
+          // Allow the same skill files to be auto-revealed again on the
+          // next run (otherwise a second run never re-opens them after the
+          // user closed the tabs from the first).
+          this.revealedFrameUris.clear();
           break;
       }
       return;
@@ -125,6 +200,41 @@ class RunControllerRegistry implements vscode.Disposable {
     if (msg.type === 'breakpointStop') {
       this.tracker.setBreakpointStop(uri, msg.line);
     }
+  }
+
+  /**
+   * Resolve the URI a step event's status should be written against. When
+   * the server supplies a `frame`, the step lives in that frame's source
+   * file (a skill `.md` for skill-body steps; the test file for inline
+   * steps). Otherwise the legacy assumption holds — everything lives in
+   * the controller's own document.
+   */
+  private targetUriFor(testUri: vscode.Uri, frame: import('ai-ui-automation-runner-core').FrameInfo | undefined): vscode.Uri {
+    if (!frame) return testUri;
+    return vscode.Uri.file(frame.uri);
+  }
+
+  /**
+   * On the first `step:start` inside a non-test frame, open the frame's
+   * file in a non-preview tab next to the user's current editor. Without
+   * this the user runs a test and "nothing happens" while the descent is
+   * executing — the test file's line shows `running` aggregate but the
+   * actual stepping is invisible. The reveal is best-effort and uses
+   * `preserveFocus: true` so it never steals keyboard focus.
+   */
+  private revealedFrameUris = new Set<string>();
+  private maybeRevealFrame(frame: import('ai-ui-automation-runner-core').FrameInfo, line: number): void {
+    if (frame.kind !== 'skill') return;
+    if (this.revealedFrameUris.has(frame.uri)) return;
+    this.revealedFrameUris.add(frame.uri);
+    const target = vscode.Uri.file(frame.uri);
+    const revealLine = Math.max(0, line - 1);
+    void vscode.window.showTextDocument(target, {
+      preserveFocus: true,
+      preview: false,
+      viewColumn: vscode.ViewColumn.Beside,
+      selection: new vscode.Range(revealLine, 0, revealLine, 0),
+    });
   }
 
   /** Refresh the `testbench-native.running` context key from current state. Used
@@ -171,6 +281,9 @@ class RunControllerRegistry implements vscode.Disposable {
   dispose(): void {
     for (const c of this.controllers.values()) c.stop();
     this.controllers.clear();
+    for (const sub of this.frameSubs.values()) sub.dispose();
+    this.frameSubs.clear();
+    this.anyFrameStackEmitter.dispose();
   }
 }
 
@@ -250,6 +363,15 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   // Wire webview → host messages.
   view.setMessageHandler((msg) => handleWebviewMessage(msg, registry, tracker));
 
+  // Call Stack view — read-only tree showing the running controller's
+  // frame stack. Bridged to the registry's union event so a single tree
+  // provider sees every controller's transitions.
+  const callStackProvider = new CallStackTreeProvider({
+    currentStack: () => registry.runningController()?.frameStack ?? [],
+    currentTestUri: () => registry.runningController()?.document.uri ?? null,
+    onChange: registry.onAnyFrameStackChange,
+  });
+
   // "Detach to editor" command. Spawns a webview panel in the editor area
   // wired to the same broadcaster as the sidebar — once the panel is a
   // tab, VS Code's "Move Editor Into New Window" lets the user pop it
@@ -282,6 +404,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     vscode.window.registerWebviewViewProvider(TestBenchRunnerView.viewId, view, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
+    vscode.window.registerTreeDataProvider('testbench-native.callStack', callStackProvider),
+    callStackProvider,
     new EnvSelector(),
     openInEditor,
     // F12 / Ctrl+Click / Peek on `[skill: ...]` and `[tool: ...]` step

@@ -99,22 +99,38 @@ export class DecorationManager implements vscode.Disposable {
     this.errorLine.dispose();
   }
 
-  /** Re-apply decorations to whichever editor matches the snapshot's URI. */
+  /**
+   * Walk every visible editor and decorate it against its own per-URI run
+   * state — not just the editor whose URI matches the active-editor
+   * snapshot. This is how Phase 2's "arrow follows frames across files"
+   * works: when a run descends into a `[skill: ...]`, statuses land on
+   * the skill `.md`'s URI in the tracker, and any open editor showing
+   * that file gets the decorations even though the active test file has
+   * its own (running) status on the `[skill:]` line.
+   *
+   * The active-file snapshot is still used as the fallback for the
+   * currently-focused editor so legacy behaviour (no skills involved) is
+   * unchanged: an editor with no run state but matching `snap.uri` still
+   * paints the step-placeholder reservation marks.
+   */
   private refresh(snap: FileStateSnapshot): void {
-    if (!snap.uri) {
-      // No active test file — clear from every visible editor.
-      for (const editor of vscode.window.visibleTextEditors) {
-        this.clear(editor);
-      }
-      return;
-    }
-
     for (const editor of vscode.window.visibleTextEditors) {
-      if (editor.document.uri.toString() !== snap.uri) {
-        this.clear(editor);
+      const uri = editor.document.uri.toString();
+      // Prefer the controller's own snapshot for the active editor (it
+      // includes breakpoints + text the per-URI store doesn't carry).
+      if (snap.uri && uri === snap.uri) {
+        this.apply(editor, snap);
         continue;
       }
-      this.apply(editor, snap);
+      // Other visible editors get decorations only when they have state
+      // (e.g. skill `.md` opened during a run). Editors with no state
+      // get cleared so stale icons from a previous run don't linger.
+      const perUri = this.tracker.snapshotFor(editor.document.uri);
+      if (perUri) {
+        this.apply(editor, perUri);
+      } else {
+        this.clear(editor);
+      }
     }
   }
 

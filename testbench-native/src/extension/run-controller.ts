@@ -17,6 +17,7 @@ import {
   resolveSection,
   type ClassifiedStep,
   type ErrorPayload,
+  type FrameInfo,
   type HostToWebviewMsg,
   type RunEvent,
 } from 'ai-ui-automation-runner-core';
@@ -84,6 +85,26 @@ export class RunController {
    *  without having to subscribe to the host→webview message channel. */
   private currentEventListener: ((event: RunEvent) => void) | null = null;
 
+  /**
+   * Stack of frames currently active, most recent on top. Maintained from
+   * `frame:push` / `frame:pop` events on the SSE stream when the server
+   * supports the step-into protocol. Empty when execution is in the test
+   * (top-level) frame. Read by the Call Stack view; written only here.
+   */
+  private _frameStack: FrameInfo[] = [];
+  /** Root attribution for each pushed frame — the (uri, line) in the test
+   *  file the descent ultimately started from. Inherited from parent on
+   *  nested pushes. Drives the aggregate test-file status on `[skill: ...]`
+   *  lines so the user sees pass/fail on those lines even though the actual
+   *  step events for the descent land on the skill file's lines. */
+  private frameRoot = new Map<string, { testUri: vscode.Uri; testLine: number }>();
+  /** Frame ids whose descent has had a step:fail somewhere underneath.
+   *  Propagated to the test-file [skill:] line on `frame:pop`. */
+  private failedFrames = new Set<string>();
+  private readonly frameStackEmitter = new vscode.EventEmitter<void>();
+  /** Fires whenever `frameStack` changes. The Call Stack view subscribes. */
+  readonly onFrameStackChange = this.frameStackEmitter.event;
+
   constructor(
     public readonly document: vscode.TextDocument,
     public readonly workspaceFolder: vscode.WorkspaceFolder,
@@ -97,6 +118,76 @@ export class RunController {
 
   get lastEnvPath(): string | null {
     return this.lastResolvedEnvPath;
+  }
+
+  /** Read-only view of the active frame stack. Empty when execution is in
+   *  the test (top-level) frame. The top of the stack is the deepest frame. */
+  get frameStack(): readonly FrameInfo[] {
+    return this._frameStack;
+  }
+
+  /**
+   * Consume a frame event from the SSE stream. Pushes/pops the frame stack,
+   * tracks root attribution for the aggregate test-file [skill:] status,
+   * and fires `onFrameStackChange`. Called by the extension's per-run
+   * router (`applyToTracker`) so the controller stays the source of truth
+   * for frame state, even though the router does the side-effect work
+   * (decorations, editor reveal).
+   *
+   * Returns `{ failed }` on a `frame:pop` so the caller can update the
+   * test-file aggregate status — `true` if any descendant step failed
+   * during this frame's lifetime, `false` for a clean exit.
+   */
+  handleFramePush(frame: FrameInfo): void {
+    this._frameStack.push(frame);
+    // Root attribution: top-level skills (parentId is the test root, i.e.
+    // empty/null) anchor themselves on the test file. Nested skills
+    // inherit the same root so a deep failure still marks the outermost
+    // `[skill:]` line in the test.
+    const root = frame.parentId
+      ? this.frameRoot.get(frame.parentId)
+      : { testUri: this.document.uri, testLine: frame.line };
+    if (root) this.frameRoot.set(frame.id, root);
+    this.frameStackEmitter.fire();
+  }
+
+  handleFramePop(frameId: string): { failed: boolean; root: { testUri: vscode.Uri; testLine: number } | null } {
+    const idx = this._frameStack.findIndex((f) => f.id === frameId);
+    const failed = this.failedFrames.has(frameId);
+    const root = this.frameRoot.get(frameId) ?? null;
+    if (idx >= 0) {
+      // Pop this frame and anything pushed above it. Nested-skill servers
+      // emit pops in the right order, but defending against truncated
+      // streams keeps the UI from showing a phantom frame after stop/abort.
+      this._frameStack.length = idx;
+    }
+    this.frameRoot.delete(frameId);
+    this.failedFrames.delete(frameId);
+    this.frameStackEmitter.fire();
+    return { failed, root };
+  }
+
+  /** Mark a frame as having had a failed descendant step. Walks the parent
+   *  chain so the root frame (the one anchored on the test file's
+   *  `[skill:]` line) inherits the failure even if the immediate step that
+   *  failed lives several levels deep. */
+  markFrameFailed(frameId: string): { testUri: vscode.Uri; testLine: number } | null {
+    let cur: string | null = frameId;
+    while (cur) {
+      this.failedFrames.add(cur);
+      const frame = this._frameStack.find((f) => f.id === cur);
+      cur = frame?.parentId ?? null;
+    }
+    return this.frameRoot.get(frameId) ?? null;
+  }
+
+  /** Reset the frame stack — called on run start so a fresh run never
+   *  inherits leftover frames from an aborted or completed previous run. */
+  resetFrameState(): void {
+    this._frameStack = [];
+    this.frameRoot.clear();
+    this.failedFrames.clear();
+    this.frameStackEmitter.fire();
   }
 
   stop(): void {
@@ -208,6 +299,11 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
+
+    // Wipe any frame state from a previous run so the Call Stack view starts
+    // empty. Pause/resume mid-skill is a Phase 3 concern; in Phase 2 the
+    // stack is always empty at the entry to a run.
+    this.resetFrameState();
 
     // First run on this controller? Close any session the server may still
     // be holding from a previous VS Code session — see staleSessionCleared
