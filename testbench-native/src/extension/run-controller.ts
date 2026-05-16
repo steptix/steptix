@@ -238,12 +238,19 @@ export class RunController {
   /**
    * Send a step-control command to the server, advancing a step-paused
    * run. No-op when nothing is running, when the active client doesn't
-   * support runControl (legacy / test fakes), or when the request fails
-   * — the server will surface a 409 if the run isn't actually paused,
-   * which means a stray F11/F10 keypress between events is benign.
+   * support runControl (legacy / test fakes), or when the request fails.
    *
    * The matching SSE stream is still open and will continue emitting
    * events once the server picks up the new mode.
+   *
+   * Phase 3.1.c — error reporting is split:
+   *   - `not-found` (HTTP 409 in disguise) means there's no paused run
+   *     to deliver to. Common race when the user mashes F11 between
+   *     events. Silent — the next event from the stream will tell the
+   *     user where they actually are.
+   *   - everything else (connect-failed, server-error) gets a status-
+   *     bar diagnostic so the user knows the server side actually
+   *     failed, not just a UX race.
    */
   async sendRunControl(mode: StepMode): Promise<void> {
     const client = this.currentClient;
@@ -253,9 +260,16 @@ export class RunController {
     try {
       await client.runControl(sessionId, mode);
     } catch (err) {
-      // Surface a status-bar diagnostic but don't tear the run down — the
-      // server is still authoritative; the next event from the stream
-      // will tell us where we actually are.
+      const isNotFound =
+        err !== null &&
+        typeof err === 'object' &&
+        'kind' in err &&
+        (err as { kind?: string }).kind === 'not-found';
+      if (isNotFound) {
+        // Benign race: no paused run on the server side. Don't bother the
+        // user — they'll see the next event in a moment.
+        return;
+      }
       const reason = err instanceof Error ? err.message : String(err);
       vscode.window.setStatusBarMessage(
         `TestBench: run-control failed (${reason})`,

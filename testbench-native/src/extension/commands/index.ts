@@ -9,6 +9,14 @@ interface Registry {
   active(): RunController | undefined;
   refreshRunningContext(): void;
   notifyRunning(running: boolean): void;
+  /** Phase 3.1 — drop step-paused yellow ▶ markers across every URI
+   *  they live on (test file AND any skill file the run descended into). */
+  clearAllStepPausedMarkers(): void;
+  /** Phase 3.1.b — distinguish step-paused (server blocked on
+   *  pendingRunControl) from running-but-not-step-paused (server is
+   *  mid-step). dispatchStep uses this to give a clean diagnostic
+   *  instead of a 409. */
+  isStepPaused(controllerUri: vscode.Uri): boolean;
 }
 
 /**
@@ -72,15 +80,11 @@ export function registerCommands(
         tracker.setBreakpointStop(editor.document.uri, null);
       }
       tracker.markAllRunningStopped();
-      // Phase 3: a step-paused yellow ▶ may live on a different URI (the
-      // skill file). Drop the context key here; the registry will clear
-      // any lingering setBreakpointStop on its done handler when the
-      // SSE stream unwinds.
-      void vscode.commands.executeCommand(
-        'setContext',
-        'testbench-native.stepPaused',
-        false,
-      );
+      // Phase 3.1.a: a step-paused yellow ▶ may live on a SKILL file the
+      // run descended into — `setBreakpointStop` above only cleared the
+      // test-file marker. Walk every recorded step-paused entry and
+      // clear it where it actually was painted.
+      registry.clearAllStepPausedMarkers();
       registry.notifyRunning(false);
     }),
 
@@ -271,11 +275,7 @@ function notifyNoActive(): void {
  */
 async function dispatchStep(
   mode: StepMode,
-  registry: {
-    active(): RunController | undefined;
-    refreshRunningContext(): void;
-    notifyRunning(running: boolean): void;
-  },
+  registry: Registry,
   tracker: ActiveFileTracker,
 ): Promise<void> {
   const controller = registry.active();
@@ -283,7 +283,29 @@ async function dispatchStep(
   if (!controller || !editor) return notifyNoActive();
 
   // (1) Already step-paused — fast path: just deliver the next mode.
+  // Phase 3.1.b: only POST when there's an actual paused step. A run
+  // that's running-but-not-step-paused would otherwise generate a 409
+  // and an ugly status-bar warning.
   if (controller.isRunning) {
+    if (!registry.isStepPaused(controller.document.uri)) {
+      vscode.window.setStatusBarMessage(
+        'TestBench: run is in flight, not paused — press F5 to pause first',
+        2500,
+      );
+      return;
+    }
+    // Phase 3.1.d: Step Out at depth 0 (test frame) is functionally
+    // identical to Continue — the server's `'out'` decision never pauses
+    // when there's no shallower frame to return to. Send `'continue'`
+    // for cleaner intent and tell the user why.
+    if (mode === 'out' && controller.frameStack.length === 0) {
+      vscode.window.setStatusBarMessage(
+        'TestBench: Step Out at the test frame = Continue',
+        2000,
+      );
+      await controller.sendRunControl('continue');
+      return;
+    }
     await controller.sendRunControl(mode);
     return;
   }

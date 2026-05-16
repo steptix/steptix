@@ -106,12 +106,25 @@ describe('TestBench step-mode commands (Phase 3)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('stepOver / stepOut from step-paused POST the matching mode', async () => {
+  it('stepOver / stepOut from step-paused inside a skill POST the matching mode', async () => {
+    // Push a frame first so the controller's frameStack has depth > 0;
+    // otherwise Phase 3.1.d intercepts Step Out at the root frame and
+    // sends 'continue' instead. This test verifies the inside-a-skill
+    // case where 'out' is meaningful.
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      line: 9,
+      skillName: 'fake_skill',
+    };
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    fake.push({ type: 'step:awaiting', line: 9 });
-    await waitFor('paused', () => hooks.tracker.snapshot().breakpointStop === 9);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:awaiting', line: 3, frame });
+    await waitFor('paused', () => hooks.runningFrameStack().length === 1);
 
     await vscode.commands.executeCommand('testbench-native.stepOver');
     await vscode.commands.executeCommand('testbench-native.stepOut');
@@ -165,6 +178,97 @@ describe('TestBench step-mode commands (Phase 3)', function () {
     assert.equal(fake.requests.length, 1);
     assert.equal(fake.requests[0].stepMode, 'into',
       'idle stepInto must send stepMode=into so the server starts paused');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('Stop while step-paused inside a skill clears the yellow ▶ on the skill file too', async () => {
+    // Phase 3.1.a regression guard: pre-fix, Stop only cleared
+    // breakpointStop on the active editor (the test file). A step:awaiting
+    // marker painted on a skill file would survive Stop and linger as
+    // a stale yellow ▶ until the next run launched. With
+    // clearAllStepPausedMarkers wired into both Stop paths, the marker
+    // gets dropped wherever step:awaiting placed it.
+    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 9,
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Drive the stream into a step-paused state on the skill file.
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:awaiting', line: 3, frame });
+    await waitFor('skill-file breakpointStop set on line 3', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      return snap?.breakpointStop === 3;
+    });
+
+    await vscode.commands.executeCommand('testbench-native.stop');
+
+    await waitFor('idle after stop', () => !hooks.isRunning());
+    // The yellow ▶ must be gone from the skill file too — not just the
+    // test file's active-editor URI.
+    const skillSnap = hooks.tracker.snapshotFor(skillUri);
+    // After the marker is cleared the per-URI snapshot may return null
+    // (no state left) — either way, breakpointStop must not be 3.
+    if (skillSnap) {
+      assert.notEqual(skillSnap.breakpointStop, 3,
+        'Stop must clear step-paused breakpointStop on the skill file');
+    }
+  });
+
+  it('Step Out at the test (root) frame sends Continue, not Step Out', async () => {
+    // Phase 3.1.d regression guard: at depth 0 the server's `out`
+    // decision never pauses (no shallower frame to return to). The
+    // extension now intercepts and sends 'continue' with a status-bar
+    // hint instead, so the user gets a clearer mental model.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Step-paused at depth 0 (no frame in event).
+    fake.push({ type: 'step:awaiting', line: 9 });
+    await waitFor('paused', () => hooks.tracker.snapshot().breakpointStop === 9);
+
+    await vscode.commands.executeCommand('testbench-native.stepOut');
+
+    const lastMode = fake.runControlCalls.at(-1)?.mode;
+    assert.equal(lastMode, 'continue',
+      'Step Out at the test frame must be sent as Continue');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('stepInto via command palette while running-but-not-step-paused does not POST a 409', async () => {
+    // Phase 3.1.b regression guard: dispatchStep checks isStepPaused
+    // before POSTing. Without this guard, F11 via command palette
+    // during a normal (non-stepping) run would generate a 409 and an
+    // ugly run-control-failed status bar.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // The run is in flight but NO step:awaiting has fired.
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('running', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+
+    const callsBefore = fake.runControlCalls.length;
+    await vscode.commands.executeCommand('testbench-native.stepInto');
+    // No new runControl POST should have been issued — dispatchStep
+    // detected running-but-not-step-paused and bailed.
+    assert.equal(fake.runControlCalls.length, callsBefore,
+      'stepInto must not POST runControl when not step-paused');
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());

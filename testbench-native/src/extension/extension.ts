@@ -101,6 +101,31 @@ class RunControllerRegistry implements vscode.Disposable {
     return undefined;
   }
 
+  /** Phase 3.1.b — true when this controller has an outstanding
+   *  step:awaiting (the SSE stream is open and the server is blocked on
+   *  pendingRunControl). Used by dispatchStep to distinguish step-paused
+   *  from running-but-mid-step, which need different diagnostics. */
+  isStepPaused(controllerUri: vscode.Uri): boolean {
+    return this.stepPausedAt.has(controllerUri.toString());
+  }
+
+  /** Phase 3.1.a — clear every step-paused yellow ▶ marker across all
+   *  tracked controllers. Called on Stop so a step:awaiting on a skill
+   *  file's URI doesn't linger after the user has cancelled the run.
+   *  (The active-editor-only setBreakpointStop(null) in the Stop
+   *  handlers misses skill-file markers.) */
+  clearAllStepPausedMarkers(): void {
+    for (const [, entry] of this.stepPausedAt) {
+      this.tracker.setBreakpointStop(entry.uri, null);
+    }
+    this.stepPausedAt.clear();
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.stepPaused',
+      false,
+    );
+  }
+
   /** The controller for the currently-active TestBench file, if any. */
   active(): RunController | undefined {
     const editor = this.tracker.activeEditor;
@@ -583,12 +608,10 @@ async function handleWebviewMessage(
         tracker.setBreakpointStop(editor.document.uri, null);
       }
       tracker.markAllRunningStopped();
-      // Phase 3: parity with command-path stop on step-paused state.
-      void vscode.commands.executeCommand(
-        'setContext',
-        'testbench-native.stepPaused',
-        false,
-      );
+      // Phase 3.1.a: clear step-paused markers on whatever URIs they were
+      // painted on — the active-editor-only clear above misses any marker
+      // step:awaiting placed on a skill file the run descended into.
+      registry.clearAllStepPausedMarkers();
       registry.notifyRunning(false);
       return;
     }

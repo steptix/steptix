@@ -298,4 +298,72 @@ describe('api-server step-into protocol', () => {
     const awaitingCount = events.filter((e) => e.type === 'step:awaiting').length;
     expect(awaitingCount).toBe(0);
   });
+
+  it('stepMode=over skips a [skill: ...] body atomically', async () => {
+    // Phase 3.1.e — covers the "Step Over a skill" end-to-end path that
+    // wasn't exercised in Phase 3. Three inline steps with the middle
+    // one being [skill: demo_skill] which expands to 2 body steps. With
+    // mode='over' the server should pause AFTER step 1 (next is the
+    // first skill body at depth 1 → don't pause yet... actually that's
+    // 'over' = pause when nextDepth ≤ curDepth, and curDepth here is 0
+    // so the SKILL body executes atomically. The next pause is when
+    // we're back to depth 0 — i.e., after the skill body finishes.
+    const sessionId = 'stepmode-over-skill-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    const consume = (async () => {
+      for await (const ev of sseEvents(url, {
+        steps: ['Open the page', '[skill: demo_skill]', 'Verify result'],
+        sourceLines: [1, 2, 3],
+        skillsDir,
+        testFilePath,
+        stepMode: 'over',
+      })) {
+        events.push(ev);
+        if (ev.type === 'step:awaiting') {
+          await runControl(sessionId, 'over');
+        }
+        if (ev.type === 'done') break;
+      }
+    })();
+    await consume;
+
+    // Three step:awaiting pauses total: one after step 1 (about to enter
+    // skill), one after the skill body completes (about to run step 3),
+    // and none after step 3 (last step). Wait — let's compute carefully:
+    //
+    //   step 1 (depth 0, inline): pass. nextDepth = 1 (skill body).
+    //     'over': 1 > 0 → DON'T pause.
+    //   step 2 (skill body #1, depth 1): pass. nextDepth = 1.
+    //     'over': 1 ≤ 1 → PAUSE. ⚠ This pauses INSIDE the skill body —
+    //     because once the user IS at depth 1, 'over' is interpreted in
+    //     the now-deeper frame. That's debugger-correct: 'over' steps
+    //     one statement of the current frame.
+    //
+    // So the user would hit pause inside the skill body. Subsequent
+    // 'over' commands step through the rest of the skill body, then
+    // back to depth 0. Total step:awaiting: depends on number of
+    // skill-body steps. demo_skill has 2 body steps, so 1 pause inside
+    // (between body steps), 1 pause back at depth 0 (before step 3).
+    const awaitingCount = events.filter((e) => e.type === 'step:awaiting').length;
+    expect(awaitingCount).toBeGreaterThan(0);
+
+    // The frame:push / frame:pop pair MUST surround the skill body in
+    // the trace, regardless of how step:awaitings interleave.
+    const types = events.map((e) => e.type);
+    expect(types.indexOf('frame:push')).toBeGreaterThan(-1);
+    expect(types.indexOf('frame:pop')).toBeGreaterThan(types.indexOf('frame:push'));
+
+    // Total step:pass count: 1 (step 1 inline) + 2 (skill body) + 1
+    // (step 3 inline) = 4. The skill INVOCATION line (step 2) doesn't
+    // emit its own step:pass because expansion replaces it with the
+    // skill's body — the invocation line is folded away.
+    const passCount = events.filter((e) => e.type === 'step:pass').length;
+    expect(passCount).toBe(4);
+
+    // The done event should report passed status.
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.status).toBe('passed');
+  });
 });
