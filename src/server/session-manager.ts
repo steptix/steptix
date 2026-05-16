@@ -10,6 +10,7 @@ import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
+import { expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { ApiResponseStore } from '../api/response-store.js';
@@ -61,6 +62,21 @@ export interface StepRequest {
    */
   sourceLines?: number[];
   /**
+   * Absolute path to the project's skills directory. When supplied, the
+   * server runs `expandSkills` over `steps`, flattens `[skill: ...]`
+   * invocations, and emits `frame:push` / `frame:pop` events around each
+   * expanded skill body so step-into-aware clients can render a multi-file
+   * call stack. Omit to keep the legacy behaviour (raw steps fed straight
+   * to the runner — fine when no `[skill: ...]` lines are present).
+   */
+  skillsDir?: string;
+  /**
+   * Absolute path of the test file the steps were authored in. Used as the
+   * origin `uri` on `frame` payloads attached to step events emitted from
+   * inline (non-skill) lines. Optional.
+   */
+  testFilePath?: string;
+  /**
    * Per-request logging override. Lets a testbench user flip verbosity on a
    * single run (e.g. `consoleLogLevel: 'debug'` + `serverFileLogLevel: 'full'`
    * for a hung run) without restarting the server. Each field falls back to
@@ -75,17 +91,37 @@ export interface StepRequest {
 }
 
 /**
+ * Origin frame for step events. Mirrors `FrameInfo` in `runner-core`'s
+ * `protocol.ts`. Kept in sync by hand — protocol is owned by runner-core
+ * but the server emits these in step-into-aware runs.
+ */
+export interface FrameInfo {
+  id: string;
+  parentId: string | null;
+  kind: 'test' | 'skill';
+  uri: string;
+  line: number;
+  skillName?: string;
+}
+
+/**
  * Run-time event the session manager emits per step. The streaming HTTP
  * endpoint converts these to SSE frames; the non-streaming endpoint ignores
  * them.
+ *
+ * The `frame:*` variants are emitted only when the client asks for skill
+ * expansion (via `StepRequest.skillsDir`). Legacy clients can ignore them.
  */
 export type RunEvent =
-  | { type: 'step:start'; line: number }
-  | { type: 'step:pass'; line: number; output?: string; screenshot?: string }
-  | { type: 'step:fail'; line: number; error: string; screenshot?: string }
+  | { type: 'step:start'; line: number; frame?: FrameInfo }
+  | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo }
+  | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string }
-  | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' };
+  | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' }
+  | { type: 'frame:push'; frame: FrameInfo }
+  | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
+  | { type: 'frame:scope'; frameId: string; scope: Record<string, string> };
 
 export type RunEventListener = (event: RunEvent) => void;
 
@@ -535,16 +571,31 @@ export class SessionManager {
     /** Full StepResult records accumulated across this request — used to
      *  generate the per-run HTML report at the end. */
     const fullStepResults: StepResult[] = [];
-    const stepsTotal = request.steps.length;
+    // stepsTotal mirrors the post-expansion step count once skill expansion
+    // runs (further down). Declared `let` because of that. Status displays
+    // and `step N/total` log lines reflect what the runner actually executes,
+    // not the pre-expansion length.
+    let stepsTotal = request.steps.length;
     let stepsCompleted = 0;
     let overallStatus: 'passed' | 'failed' | 'error' | 'aborted' = 'passed';
     let errorInfo: { step: number; message: string } | null = null;
 
+    // Step-execution view of the inbound request. When skill expansion runs
+    // (further down, once envDataCtx is resolved) these get rebound to the
+    // flattened arrays; the loop only ever reads from them. Declared up
+    // here so the `sourceLineFor` closure binds to the live values.
+    let effectiveSteps: string[] = request.steps;
+    let effectiveSourceLines: number[] | undefined = request.sourceLines;
+    let expansionOrigins: ExpandedStepOrigin[] | null = null;
+    let expansionFrames: Record<string, FrameInfo> | null = null;
+
     // Map a 1-based step index to the source-document line. When the client
     // doesn't supply sourceLines we echo the step index — some clients (e.g.
-    // headless runners) don't track source positions.
+    // headless runners) don't track source positions. After skill expansion,
+    // `effectiveSourceLines` carries per-expanded-step lines (skill-body
+    // entries point at their skill `.md`, not the test file).
     const sourceLineFor = (stepIndex0: number): number => {
-      const explicit = request.sourceLines?.[stepIndex0];
+      const explicit = effectiveSourceLines?.[stepIndex0];
       return typeof explicit === 'number' ? explicit : stepIndex0 + 1;
     };
 
@@ -636,17 +687,132 @@ export class SessionManager {
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
       ?? this.config.execution.timeout;
 
+    // Skill expansion — when the caller supplies `skillsDir`, flatten
+    // `[skill: ...]` lines into their bodies before execution and remember
+    // the per-step origin so step-into-aware clients see `frame:push` /
+    // `frame:pop` events around each skill body. Without `skillsDir` the
+    // existing flow is preserved verbatim (raw steps shipped to the runner).
+    if (request.skillsDir) {
+      try {
+        const expansion = await expandSkills(
+          request.steps,
+          request.skillsDir,
+          envDataCtx ?? undefined,
+          request.testFilePath,
+        );
+        effectiveSteps = expansion.steps;
+        stepsTotal = effectiveSteps.length;
+        expansionOrigins = expansion.origins;
+        // Translate ExpandedFrame (parser shape) into FrameInfo (wire shape):
+        // the parser uses `invocationLine | null`, the wire carries a non-null
+        // line. We pin the test-frame line to 0 when absent; consumers treat
+        // it as "frame has no parent line".
+        expansionFrames = {};
+        for (const [id, f] of Object.entries(expansion.frames)) {
+          expansionFrames[id] = {
+            id: f.id,
+            parentId: f.parentId,
+            kind: f.kind,
+            uri: f.uri,
+            line: f.invocationLine ?? 0,
+            ...(f.skillName !== undefined && { skillName: f.skillName }),
+          };
+        }
+        // Re-derive sourceLines: skill-body steps point at the skill file's
+        // own line; inline steps keep their original test-file line. Without
+        // this, a status emitted for a skill-body step would land on the
+        // wrong line in the test editor.
+        effectiveSourceLines = expansion.origins.map((o) => {
+          if (o.skillLine !== undefined) return o.skillLine;
+          return request.sourceLines?.[o.inputIndex] ?? o.inputIndex + 1;
+        });
+      } catch (err) {
+        // Skill expansion failures (cycles, missing files, bad args) abort
+        // the run before the browser does any work. Mirror the existing
+        // executeStep error path so the SSE stream emits a clean `done`.
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(`Session "${sessionId}": skill expansion failed: ${message}`);
+        emit({ type: 'output', msg: `Skill expansion failed: ${message}`, kind: 'error' });
+        emit({ type: 'done', status: 'error' });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          error: { step: 0, message },
+          pageTitle: '',
+        };
+      }
+    }
+
     // Detect conditional step groups for multi-outcome branching — interpolate
     // env/data substitutions first so grouping looks at the final step text
     // (otherwise `${data.foo}` placeholders could change which steps look
     // alike for grouping purposes).
     const interpolatedSteps = envDataCtx
-      ? request.steps.map((s) => interpolateEnvData(s, envDataCtx))
-      : request.steps;
+      ? effectiveSteps.map((s) => interpolateEnvData(s, envDataCtx))
+      : effectiveSteps;
     const stepGroups = identifyStepGroups(interpolatedSteps);
 
+    // ─── Frame stack ────────────────────────────────────────────────────────
+    //
+    // For step-into-aware clients: maintain a stack of currently-pushed
+    // skill frames, emit `frame:push` / `frame:pop` events to transition
+    // the stack to the frame each step belongs to, and return the FrameInfo
+    // payload to attach to `step:start` / `step:pass` / `step:fail`.
+    //
+    // `activeFrames` is the stack of frame ids (without the implicit test
+    // root). `desiredFrameChain(frameId)` walks parentId links via
+    // `expansionFrames` to produce the chain from outermost to the given
+    // frame (empty when the step lives in the test frame).
+    const activeFrames: string[] = [];
+    const desiredFrameChain = (frameId: string): string[] => {
+      if (!expansionFrames || frameId === '') return [];
+      const chain: string[] = [];
+      let cur: string | null = frameId;
+      while (cur && cur !== '') {
+        chain.unshift(cur);
+        cur = expansionFrames[cur]?.parentId ?? null;
+      }
+      return chain;
+    };
+    const transitionToFrame = (frameId: string): void => {
+      if (!expansionFrames) return;
+      const desired = desiredFrameChain(frameId);
+      // Pop until activeFrames matches a prefix of desired.
+      while (activeFrames.length > 0) {
+        const idx = activeFrames.length - 1;
+        if (idx < desired.length && activeFrames[idx] === desired[idx]) break;
+        const popped = activeFrames.pop()!;
+        emit({ type: 'frame:pop', frameId: popped, outputs: {} });
+      }
+      // Push the remainder.
+      while (activeFrames.length < desired.length) {
+        const nextId = desired[activeFrames.length]!;
+        const f = expansionFrames[nextId];
+        if (!f) break;
+        activeFrames.push(nextId);
+        emit({ type: 'frame:push', frame: f });
+      }
+    };
+    const frameInfoFor = (i: number): FrameInfo | undefined => {
+      if (!expansionOrigins || !expansionFrames) return undefined;
+      const origin = expansionOrigins[i];
+      if (!origin) return undefined;
+      if (origin.frameId === '') {
+        // Test (top-level inline) frame. Synthesise a FrameInfo so clients
+        // get a uri attribution even without an explicit push event.
+        return request.testFilePath
+          ? { id: '', parentId: null, kind: 'test', uri: request.testFilePath, line: 0 }
+          : undefined;
+      }
+      return expansionFrames[origin.frameId];
+    };
+
     try {
-      for (let i = 0; i < request.steps.length; i++) {
+      for (let i = 0; i < effectiveSteps.length; i++) {
         // Check abort BEFORE starting each step. We don't try to interrupt
         // a step mid-flight (Playwright actions / AI calls aren't reliably
         // cancelable today) — between-step granularity is the contract.
@@ -655,7 +821,7 @@ export class SessionManager {
           logger.info(`Session "${sessionId}": run aborted by client at step ${i + 1}/${stepsTotal}`);
           break;
         }
-        const originalStep = request.steps[i]!;
+        const originalStep = effectiveSteps[i]!;
 
         // Apply env-data interpolation first (parse-time semantics: fixed for
         // the whole session), then runtime `{{...}}` parameter substitution.
@@ -695,7 +861,7 @@ export class SessionManager {
               result.status === 'skipped' ? 'passed' : result.status;
 
             results.push({
-              step: request.steps[result.index] ?? result.instruction,
+              step: effectiveSteps[result.index] ?? result.instruction,
               status: resultStatus,
               actions: result.turns.flatMap((t) => t.subActions).map((sa) => sa.action),
               screenshot: screenshotValue,
@@ -740,10 +906,20 @@ export class SessionManager {
           continue;
         }
 
+        // Transition the frame stack to this step's frame before emitting
+        // anything tagged with `line` — clients use the most recent
+        // frame:push to scope the line to a file. `frameForStep` is spread
+        // into each step event below so step-into-aware clients can attach
+        // origin metadata without legacy clients seeing a new mandatory field.
+        const stepFrameId = expansionOrigins?.[i]?.frameId ?? '';
+        transitionToFrame(stepFrameId);
+        const frameForStep = frameInfoFor(i);
+        const frameSpread: { frame?: FrameInfo } = frameForStep ? { frame: frameForStep } : {};
+
         // Check for skippable steps ([input:] and [interactive])
         if (isSkippableStep(interpolated)) {
           logger.info(`Session "${sessionId}": skipping step ${i + 1} (input/interactive not supported in API mode)`);
-          emit({ type: 'step:start', line: sourceLineFor(i) });
+          emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
           results.push({
             step: originalStep,
             status: 'passed',
@@ -752,7 +928,7 @@ export class SessionManager {
             reasoning: 'Skipped: [input] and [interactive] steps are not supported in API mode',
             outputs: {},
           });
-          emit({ type: 'step:pass', line: sourceLineFor(i), output: 'skipped' });
+          emit({ type: 'step:pass', line: sourceLineFor(i), output: 'skipped', ...frameSpread });
           stepsCompleted++;
           session.totalStepsExecuted++;
           continue;
@@ -775,7 +951,7 @@ export class SessionManager {
           stepInstruction,
         );
 
-        emit({ type: 'step:start', line: sourceLineFor(i) });
+        emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
 
         // Execute the step
         let stepResult: StepResult;
@@ -843,6 +1019,7 @@ export class SessionManager {
             line: sourceLineFor(i),
             error: message,
             ...(errorScreenshot && { screenshot: errorScreenshot }),
+            ...frameSpread,
           });
 
           overallStatus = 'error';
@@ -918,6 +1095,7 @@ export class SessionManager {
             line: sourceLineFor(i),
             ...(stepResult.aiExplanation && { output: stepResult.aiExplanation }),
             ...(screenshotValue && { screenshot: screenshotValue }),
+            ...frameSpread,
           });
         } else {
           // Step failed
@@ -934,6 +1112,7 @@ export class SessionManager {
             line: sourceLineFor(i),
             error: stepResult.error ?? 'Step failed',
             ...(screenshotValue && { screenshot: screenshotValue }),
+            ...frameSpread,
           });
           break;
         }
@@ -1021,6 +1200,12 @@ export class SessionManager {
         logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);
       }
     }
+
+    // Unwind any frames still on the stack — happens on early exit (fail,
+    // error, abort) and on a clean finish where the last executed step was
+    // inside a skill body. Clients need the matching pops to keep their
+    // call-stack model consistent.
+    transitionToFrame('');
 
     emit({ type: 'done', status: overallStatus });
 

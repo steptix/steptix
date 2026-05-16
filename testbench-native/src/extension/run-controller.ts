@@ -22,6 +22,7 @@ import {
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
+import { resolveProjectDirs } from './aiui-config.js';
 
 /**
  * Subset of the ApiClient surface we depend on. Defining it lets tests
@@ -530,6 +531,15 @@ export class RunController {
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
 
+    // Resolve the project's skills directory so the server can expand
+    // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around
+    // their bodies. Without a resolved skillsDir the server falls back to
+    // the legacy raw-step path — fine for tests that never reference a
+    // skill, but skill invocations would hit the AI as literal strings.
+    const projectDirs = resolveProjectDirs(this.document.uri);
+    const skillsDir = projectDirs?.skillsDir ?? null;
+    const testFilePath = this.document.uri.fsPath;
+
     const events = client.streamSteps(
       sessionId,
       {
@@ -542,6 +552,8 @@ export class RunController {
         }),
         ...(Object.keys(params).length > 0 && { parameters: params }),
         ...(logging && { logging }),
+        ...(skillsDir && { skillsDir }),
+        testFilePath,
       },
       signal,
     );

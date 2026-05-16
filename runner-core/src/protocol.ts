@@ -15,10 +15,34 @@ import type { ErrorPayload } from './errors.js';
 export type RunStatus = 'passed' | 'failed' | 'error' | 'aborted';
 export type StepStatus = 'passed' | 'failed' | 'error';
 
+/**
+ * Origin frame for a step event. Present from servers that support the
+ * step-into protocol (added in Phase 1 of the step-into work). Absent on
+ * legacy servers — clients must tolerate missing `frame`.
+ *
+ * A frame is one execution scope: the top-level test, or a `[skill: ...]`
+ * invocation. Frames nest when skills call skills. `id` is unique per run
+ * and stable for the lifetime of the frame; `parentId` is null for the
+ * test frame and the parent's id otherwise.
+ */
+export interface FrameInfo {
+  id: string;
+  parentId: string | null;
+  kind: 'test' | 'skill';
+  /** Absolute path (file:// URI form) of the file this frame's steps live in. */
+  uri: string;
+  /** 1-based line of the step in that file. */
+  line: number;
+  /** Set when `kind === 'skill'` — the skill name as authored. */
+  skillName?: string;
+}
+
 export interface StepStartEvent {
   type: 'step:start';
   /** 1-based source line of the step in the original document. */
   line: number;
+  /** Origin frame the step belongs to. Optional for backward compat. */
+  frame?: FrameInfo;
 }
 
 export interface StepPassEvent {
@@ -28,6 +52,7 @@ export interface StepPassEvent {
   output?: string;
   /** data:image/png;base64 URI, may be empty. */
   screenshot?: string;
+  frame?: FrameInfo;
 }
 
 export interface StepFailEvent {
@@ -35,6 +60,38 @@ export interface StepFailEvent {
   line: number;
   error: string;
   screenshot?: string;
+  frame?: FrameInfo;
+}
+
+/**
+ * Emitted when execution enters a new frame — i.e. just before the first
+ * step of a `[skill: ...]` invocation runs. Pairs 1:1 with a `frame:pop`.
+ */
+export interface FramePushEvent {
+  type: 'frame:push';
+  frame: FrameInfo;
+}
+
+/**
+ * Emitted when a frame finishes (its last step passed, or execution fell
+ * off the end of the skill body). `outputs` carries the values the skill
+ * exposed back to the caller — aliased into the caller's variable scope.
+ */
+export interface FramePopEvent {
+  type: 'frame:pop';
+  frameId: string;
+  outputs: Record<string, string>;
+}
+
+/**
+ * Snapshot of the variable scope visible inside a frame at a step boundary.
+ * Used by the Variables panel (Phase 4) — Phase 1 servers may emit these
+ * sparsely or not at all; clients must treat the type as informational.
+ */
+export interface FrameScopeEvent {
+  type: 'frame:scope';
+  frameId: string;
+  scope: Record<string, string>;
 }
 
 export interface OutputEvent {
@@ -65,7 +122,10 @@ export type RunEvent =
   | StepFailEvent
   | OutputEvent
   | CaptureEvent
-  | DoneEvent;
+  | DoneEvent
+  | FramePushEvent
+  | FramePopEvent
+  | FrameScopeEvent;
 
 // ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)
@@ -328,6 +388,9 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'step:fail' ||
     t === 'output' ||
     t === 'capture' ||
-    t === 'done'
+    t === 'done' ||
+    t === 'frame:push' ||
+    t === 'frame:pop' ||
+    t === 'frame:scope'
   );
 }

@@ -30,6 +30,28 @@ export interface StreamStepsRequest {
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */
   sourceLines?: number[];
   /**
+   * Absolute path of the file each step in `steps` was authored in. Parallel
+   * to `steps`; defaults to the test file when omitted per-step. Used by the
+   * server to attribute frame origins when a request is sent already-expanded
+   * (rare today; reserved for client-side expansion paths).
+   */
+  sourceUris?: string[];
+  /**
+   * Absolute path to the project's skills directory (`skillsDir` in
+   * `aiui.config.*`). When supplied, the server runs `expandSkills` over the
+   * incoming `steps`, dispatches the flattened result, and emits
+   * `frame:push` / `frame:pop` events around each skill body. Omit to use
+   * the legacy behaviour (raw steps shipped straight to the runner — fine
+   * for tests with no `[skill: ...]` lines).
+   */
+  skillsDir?: string;
+  /**
+   * Absolute path of the test file the steps were authored in. Used as the
+   * URI for the top-level (test) frame when the server emits frame events.
+   * Optional; servers without frame support ignore it.
+   */
+  testFilePath?: string;
+  /**
    * Per-request logging override. Each field falls back to the server's
    * configured default when omitted. Override scope is this request only —
    * the server restores its default after the run completes.
