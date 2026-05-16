@@ -1,0 +1,233 @@
+/**
+ * Phase 2 — frame stack model + status routing by `frame.uri`.
+ *
+ * Drives the extension end-to-end inside a real VS Code extension host
+ * with a FakeApiClient scripted to emit `frame:push` / `frame:pop` events
+ * around a synthesized skill body. Asserts:
+ *
+ *  1. The RunController's frame stack reflects pushes/pops in order.
+ *  2. step:* events with `frame` payload land on `frame.uri` in the
+ *     tracker, not on the test file.
+ *  3. A top-level frame:push paints `running` on the test file's
+ *     `[skill: ...]` line; frame:pop paints `pass` on a clean exit.
+ *  4. A step:fail inside a frame propagates `fail` to the test file's
+ *     `[skill:]` line via markFrameFailed.
+ *
+ * The fake skill `.md` doesn't have to exist on disk for the tracker
+ * assertions — the extension reads `frame.uri` as an opaque string and
+ * stores per-URI state under it. The auto-reveal path's
+ * `showTextDocument` is best-effort and its error is swallowed via
+ * `void`, so a missing file path doesn't fail the test (it just produces
+ * an error in the VS Code dev console we tolerate).
+ */
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const vscode = require('vscode');
+const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
+
+const EXT_ID = 'pkent.testbench-native';
+const FIXTURES_DIR =
+  process.env.TESTBENCH_FIXTURES_DIR ||
+  path.resolve(__dirname, '..', 'fixtures');
+const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(label, predicate, timeoutMs = 5_000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      if (await predicate()) return;
+    } catch {
+      // ignore — predicate transient errors are part of the wait
+    }
+    await sleep(50);
+  }
+  throw new Error(`timeout waiting for: ${label}`);
+}
+
+describe('TestBench frame events (Phase 2)', function () {
+  this.timeout(20_000);
+
+  /** @type {FakeApiClient} */
+  let fake;
+  /** @type {import('../../../dist/extension/extension').TestBenchTestHooks} */
+  let hooks;
+
+  before(async () => {
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    assert.ok(ext, `${EXT_ID} not loaded`);
+    if (!ext.isActive) await ext.activate();
+    hooks = ext.exports?.__testHooks;
+    assert.ok(hooks, '__testHooks not exposed — did activate() forget to return them?');
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    if (vscode.debug.breakpoints.length > 0) {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+    }
+    fake = new FakeApiClient();
+    hooks.setApiClientFactory(() => fake);
+
+    const uri = fixtureUri('test-with-steps.md');
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture editor active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    // Highlight line 9 so runSelected scopes itself to that step (matches
+    // the pattern used by state-machine.test.cjs — cursor-only selections
+    // run the whole file).
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(8, 0),
+      new vscode.Position(8, 5),
+    );
+    await waitFor('active file detected as test file', () => {
+      const snap = hooks.tracker.snapshot();
+      return snap.isTestFile === true;
+    });
+  });
+
+  it('frame:push grows the controller stack; frame:pop shrinks it', async () => {
+    const skillUri = vscode.Uri.file(path.resolve(FIXTURES_DIR, 'fake-skill.md'));
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    assert.deepEqual(hooks.runningFrameStack(), [], 'stack starts empty');
+
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillUri.fsPath,
+      line: 9,
+      skillName: 'fake_skill',
+    };
+    fake.push({ type: 'frame:push', frame });
+    await waitFor('frame stack has one frame', () => hooks.runningFrameStack().length === 1);
+    const stack = hooks.runningFrameStack();
+    assert.equal(stack[0].id, 'f1');
+    assert.equal(stack[0].skillName, 'fake_skill');
+
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    await waitFor('frame stack empty after pop', () => hooks.runningFrameStack().length === 0);
+
+    fake.end();
+    await waitFor('idle after stream ends', () => !hooks.isRunning());
+  });
+
+  it('step events with frame.uri route statuses to that URI', async () => {
+    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 9,
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 5, frame });
+    await waitFor('skill-file status running on line 5', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      if (!snap) return false;
+      const statuses = Object.fromEntries(snap.statuses);
+      return statuses[5] === 'running';
+    });
+
+    fake.push({ type: 'step:pass', line: 5, frame });
+    await waitFor('skill-file status pass on line 5', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      if (!snap) return false;
+      const statuses = Object.fromEntries(snap.statuses);
+      return statuses[5] === 'pass';
+    });
+
+    // The test file's own snapshot should NOT have a status on line 5 —
+    // that's the skill file's line, not the test's. Phase 2's whole point.
+    const testSnap = hooks.tracker.snapshot();
+    const testStatuses = Object.fromEntries(testSnap.statuses);
+    assert.equal(testStatuses[5], undefined, 'test file must not inherit skill-body statuses');
+
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    fake.end();
+    await waitFor('idle after stream ends', () => !hooks.isRunning());
+  });
+
+  it('top-level frame:push marks test-file [skill:] line running; pop marks pass', async () => {
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      line: 9, // the [skill: ...] invocation line in the test file
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    await waitFor('test-file line 9 running (aggregate)', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+
+    // A successful step inside the skill should NOT change the test file's
+    // aggregate to pass — that only happens at frame:pop.
+    fake.push({ type: 'step:start', line: 3, frame });
+    fake.push({ type: 'step:pass', line: 3, frame });
+    await sleep(30); // give the host time to process the events
+    let statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(statuses[9], 'running', 'aggregate stays running until frame:pop');
+
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    await waitFor('test-file line 9 pass (aggregate after pop)', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'pass';
+    });
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('step:fail inside a frame propagates fail to the test-file [skill:] line', async () => {
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      line: 9,
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 3, frame });
+    fake.push({ type: 'step:fail', line: 3, error: 'boom', frame });
+
+    await waitFor('test-file line 9 fail (propagated)', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'fail';
+    });
+
+    // frame:pop after a failed descent must NOT overwrite the fail with pass.
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    await sleep(30);
+    const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(statuses[9], 'fail', 'frame:pop must not clobber a propagated fail');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+});

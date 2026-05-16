@@ -288,22 +288,6 @@ export class ActiveFileTracker {
     };
   }
 
-  /** URIs that currently carry any run state — drives DecorationManager's
-   *  multi-editor refresh. */
-  urisWithState(): vscode.Uri[] {
-    const out: vscode.Uri[] = [];
-    for (const [key, state] of this.states) {
-      if (
-        state.statuses.size > 0 ||
-        state.errors.size > 0 ||
-        state.breakpointStop !== null
-      ) {
-        out.push(vscode.Uri.parse(key));
-      }
-    }
-    return out;
-  }
-
   private findEditorFor(uri: vscode.Uri): vscode.TextEditor | undefined {
     const target = uri.toString();
     return vscode.window.visibleTextEditors.find(

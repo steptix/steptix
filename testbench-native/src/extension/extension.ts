@@ -334,6 +334,11 @@ export interface TestBenchTestHooks {
   testItemMetadata: (uri: vscode.Uri) => { label: string; description: string; tags: string[] } | undefined;
   /** Best-effort: wait until tracker.snapshot() satisfies the predicate. */
   waitFor: (predicate: () => boolean, timeoutMs?: number) => Promise<void>;
+  /** Frame stack of the currently-running controller, outermost first.
+   *  Empty when no run is in flight or when the run is in the test (root)
+   *  frame. Used by Phase 2 tests to assert that frame events drive the
+   *  call-stack model. */
+  runningFrameStack: () => Array<import('ai-ui-automation-runner-core').FrameInfo>;
 }
 
 export interface TestBenchExports {
@@ -461,6 +466,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
           await new Promise((r) => setTimeout(r, 50));
         }
         throw new Error('waitFor: predicate did not become true within ' + timeoutMs + 'ms');
+      },
+      runningFrameStack: () => {
+        const controller = registry.runningController();
+        return controller ? [...controller.frameStack] : [];
       },
     },
   };
