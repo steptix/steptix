@@ -116,6 +116,40 @@ export interface DoneEvent {
   status: RunStatus;
 }
 
+/**
+ * Step-mode controls available on requests and resume commands. The runner
+ * uses these to decide whether to pause between steps, and at what depth:
+ *
+ *  - `continue` — run to the next breakpoint or end-of-batch. No
+ *    between-step pauses.
+ *  - `into` — pause unconditionally after each emitted step. Stepping
+ *    "into" a `[skill: ...]` happens naturally: the next step the server
+ *    pauses on is the first step of the skill body.
+ *  - `over` — pause when the next step is at or shallower than the
+ *    just-executed step's frame depth. Skips the entire body of any
+ *    deeper skill invocation as a single atomic step.
+ *  - `out` — pause when the next step is strictly shallower than the
+ *    just-executed step's frame depth. Runs to the end of the current
+ *    frame. No-op at the test (root) frame.
+ */
+export type StepMode = 'continue' | 'into' | 'over' | 'out';
+
+/**
+ * Emitted by step-mode-aware servers when they reach a pause point
+ * between steps. `line` and `frame` point at the next step that will
+ * execute when the client sends the next run-control command. Acts as
+ * the "yellow ▶" signal for the step-into UI; mirrors how
+ * `breakpointStop` signals the pause at a breakpoint hit.
+ *
+ * Servers that don't support stepMode never emit this; legacy clients
+ * that don't read it stay on the existing breakpoint-only pause story.
+ */
+export interface StepAwaitingEvent {
+  type: 'step:awaiting';
+  line: number;
+  frame?: FrameInfo;
+}
+
 export type RunEvent =
   | StepStartEvent
   | StepPassEvent
@@ -125,7 +159,8 @@ export type RunEvent =
   | DoneEvent
   | FramePushEvent
   | FramePopEvent
-  | FrameScopeEvent;
+  | FrameScopeEvent
+  | StepAwaitingEvent;
 
 // ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)
@@ -391,6 +426,7 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'done' ||
     t === 'frame:push' ||
     t === 'frame:pop' ||
-    t === 'frame:scope'
+    t === 'frame:scope' ||
+    t === 'step:awaiting'
   );
 }

@@ -41,6 +41,14 @@ class RunControllerRegistry implements vscode.Disposable {
   /** Per-controller subscription handle so we don't leak listeners when a
    *  controller is removed. */
   private readonly frameSubs = new Map<string, vscode.Disposable>();
+  /** Per-controller record of where a step:awaiting yellow ▶ is currently
+   *  painted. Set on step:awaiting, cleared on the next step:start (or on
+   *  done). Lets us drop the marker even when it lives on a different URI
+   *  from the controller's own document (skill files). */
+  private readonly stepPausedAt = new Map<
+    string,
+    { uri: vscode.Uri; line: number }
+  >();
 
   /** Test-only readback of the `testbench-native.running` context key. */
   get runningContextValue(): boolean {
@@ -126,8 +134,30 @@ class RunControllerRegistry implements vscode.Disposable {
       const ev = msg.event;
       switch (ev.type) {
         case 'step:start': {
+          // A step:start means we've advanced past whatever step:awaiting
+          // we were paused on. Clear that marker (and its context key) so
+          // the yellow ▶ doesn't linger while the new step is running.
+          this.clearStepPaused(uri);
           const target = this.targetUriFor(uri, ev.frame);
           this.tracker.setStatus(target, ev.line, 'running');
+          if (ev.frame) this.maybeRevealFrame(uri, ev.frame, ev.line);
+          break;
+        }
+        case 'step:awaiting': {
+          // The server has paused between steps and is waiting on a
+          // run-control. Paint the yellow ▶ on the next step's
+          // line+frame so the user sees where execution will resume.
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setBreakpointStop(target, ev.line);
+          this.stepPausedAt.set(uri.toString(), { uri: target, line: ev.line });
+          void vscode.commands.executeCommand(
+            'setContext',
+            'testbench-native.stepPaused',
+            true,
+          );
+          // Reveal the frame's file the same way a step:start would, so
+          // the user can SEE the line about to execute (e.g. inside a
+          // skill body) without having to open it manually.
           if (ev.frame) this.maybeRevealFrame(uri, ev.frame, ev.line);
           break;
         }
@@ -184,6 +214,11 @@ class RunControllerRegistry implements vscode.Disposable {
           // resetFrameState() at the START of the next run, so we don't
           // need to wipe anything here — the auto-reveal gate stays
           // honored until then.
+          //
+          // Phase 3: any step-paused marker dies with the run. The
+          // yellow ▶ would otherwise be left behind if the user clicks
+          // Stop while step-paused.
+          this.clearStepPaused(uri);
           break;
       }
       return;
@@ -212,6 +247,26 @@ class RunControllerRegistry implements vscode.Disposable {
   private targetUriFor(testUri: vscode.Uri, frame: import('ai-ui-automation-runner-core').FrameInfo | undefined): vscode.Uri {
     if (!frame) return testUri;
     return vscode.Uri.file(frame.uri);
+  }
+
+  /**
+   * Drop the step-paused yellow ▶ for this controller (if any). Called
+   * when execution advances past a step:awaiting (next step:start) and
+   * when the run completes (done). The breakpointStop marker on the
+   * tracker is the same field the breakpoint-pause UI uses, so we wipe
+   * just the URI we set it on — leaving any unrelated breakpoint pause
+   * on other URIs alone.
+   */
+  private clearStepPaused(controllerUri: vscode.Uri): void {
+    const entry = this.stepPausedAt.get(controllerUri.toString());
+    if (!entry) return;
+    this.stepPausedAt.delete(controllerUri.toString());
+    this.tracker.setBreakpointStop(entry.uri, null);
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.stepPaused',
+      false,
+    );
   }
 
   /**
@@ -528,6 +583,12 @@ async function handleWebviewMessage(
         tracker.setBreakpointStop(editor.document.uri, null);
       }
       tracker.markAllRunningStopped();
+      // Phase 3: parity with command-path stop on step-paused state.
+      void vscode.commands.executeCommand(
+        'setContext',
+        'testbench-native.stepPaused',
+        false,
+      );
       registry.notifyRunning(false);
       return;
     }

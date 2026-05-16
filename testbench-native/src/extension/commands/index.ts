@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { extractSteps } from 'ai-ui-automation-runner-core';
+import { extractSteps, type StepMode } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { RunController } from '../run-controller.js';
@@ -72,7 +72,48 @@ export function registerCommands(
         tracker.setBreakpointStop(editor.document.uri, null);
       }
       tracker.markAllRunningStopped();
+      // Phase 3: a step-paused yellow ▶ may live on a different URI (the
+      // skill file). Drop the context key here; the registry will clear
+      // any lingering setBreakpointStop on its done handler when the
+      // SSE stream unwinds.
+      void vscode.commands.executeCommand(
+        'setContext',
+        'testbench-native.stepPaused',
+        false,
+      );
       registry.notifyRunning(false);
+    }),
+
+    // ── Phase 3 step controls ────────────────────────────────────────
+    //
+    // The three step commands share dispatch logic:
+    //  - If a step:awaiting run is in flight (stepPaused), POST a
+    //    run-control to advance.
+    //  - If a breakpoint pause is set (the run isn't in flight; the
+    //    extension trimmed at a breakpoint), launch a fresh run from
+    //    that line with the requested stepMode — Step Into starts a
+    //    stepping session.
+    //  - Step Into from a fully idle state launches a new run with
+    //    stepMode='into' starting at the cursor/selection. Step Over /
+    //    Step Out from idle are surface-only no-ops with a status
+    //    message — they only have meaning once you're inside a run.
+    vscode.commands.registerCommand('testbench-native.stepInto', () =>
+      dispatchStep('into', registry, tracker),
+    ),
+    vscode.commands.registerCommand('testbench-native.stepOver', () =>
+      dispatchStep('over', registry, tracker),
+    ),
+    vscode.commands.registerCommand('testbench-native.stepOut', () =>
+      dispatchStep('out', registry, tracker),
+    ),
+    // F5 from a step-paused state sends `continue` to drain the rest of
+    // the run (or hit the next breakpoint). Distinct from
+    // testbench-native.resume which restarts a stream after a
+    // breakpoint-trim pause.
+    vscode.commands.registerCommand('testbench-native.continueRun', async () => {
+      const controller = registry.active();
+      if (!controller) return notifyNoActive();
+      await controller.sendRunControl('continue');
     }),
 
     vscode.commands.registerCommand('testbench-native.resume', async () => {
@@ -209,4 +250,77 @@ function notifyNoActive(): void {
     'TestBench: open a Markdown file with a "## Steps" heading first',
     2500,
   );
+}
+
+/**
+ * Phase 3 step-control dispatch. Routes Step Into / Over / Out to one of
+ * three behaviours depending on current state:
+ *
+ *  1. Run is step-paused (`step:awaiting` already received) → POST the
+ *     new mode to the server's run-control endpoint. The SSE stream
+ *     continues emitting events from the server's resumed step loop.
+ *  2. Run is breakpoint-paused (the extension trimmed its step list at
+ *     a breakpoint) → launch a fresh run from the pause line with the
+ *     requested stepMode. Step Into starts a stepping session; Step
+ *     Over / Out from a breakpoint pause behave the same way (they're
+ *     all "advance one step from here under stepMode X").
+ *  3. Otherwise (idle) → Step Into starts a fresh run from cursor/
+ *     selection with stepMode='into'. Step Over / Out from idle are
+ *     surface-only no-ops: there's no "current frame" to step over
+ *     or out of yet.
+ */
+async function dispatchStep(
+  mode: StepMode,
+  registry: {
+    active(): RunController | undefined;
+    refreshRunningContext(): void;
+    notifyRunning(running: boolean): void;
+  },
+  tracker: ActiveFileTracker,
+): Promise<void> {
+  const controller = registry.active();
+  const editor = tracker.activeEditor;
+  if (!controller || !editor) return notifyNoActive();
+
+  // (1) Already step-paused — fast path: just deliver the next mode.
+  if (controller.isRunning) {
+    await controller.sendRunControl(mode);
+    return;
+  }
+
+  // (2) Breakpoint-paused: relaunch from that line with the chosen mode.
+  const state = tracker.state(controller.document.uri);
+  const startLine = state.breakpointStop;
+  if (startLine != null) {
+    tracker.setBreakpointStop(controller.document.uri, null);
+    const breakpoints = tracker.breakpoints(controller.document.uri);
+    const resumeLines = extractSteps(editor.document.getText())
+      .map((s) => s.line)
+      .filter((line) => line >= startLine);
+    registry.notifyRunning(true);
+    await controller
+      .runLines(resumeLines, {
+        breakpoints,
+        skipBreakpointAtStart: true,
+        stepMode: mode,
+      })
+      .finally(() => registry.notifyRunning(false));
+    return;
+  }
+
+  // (3) Idle: only Step Into has meaning; Step Over / Out need a frame
+  // to operate against and the user hasn't started one yet.
+  if (mode !== 'into') {
+    vscode.window.setStatusBarMessage(
+      'TestBench: start a run (F5 or F11) before using Step Over / Step Out',
+      2500,
+    );
+    return;
+  }
+  const lines = selectionLines(editor);
+  const breakpoints = tracker.breakpoints(controller.document.uri);
+  registry.notifyRunning(true);
+  await controller
+    .runLines(lines, { breakpoints, stepMode: 'into' })
+    .finally(() => registry.notifyRunning(false));
 }

@@ -20,6 +20,7 @@ import {
   type FrameInfo,
   type HostToWebviewMsg,
   type RunEvent,
+  type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
@@ -38,6 +39,10 @@ export interface ApiClientLike {
     signal: AbortSignal,
   ): AsyncIterable<RunEvent>;
   closeSession(sessionId: string): Promise<void>;
+  /** Optional in tests that predate Phase 3 — when absent, run-control
+   *  commands are no-ops. The real ApiClient implements this against
+   *  `POST /sessions/:id/run-control`. */
+  runControl?(sessionId: string, mode: StepMode): Promise<void>;
 }
 
 export type ApiClientFactory = (config: { serverUrl: string; apiKey: string }) => ApiClientLike;
@@ -117,6 +122,11 @@ export class RunController {
    *  shared skills independently. Cleared by `resetFrameState` at the
    *  start of each run. */
   private readonly revealedFrameUris = new Set<string>();
+  /** Captured at the start of each run so step-control commands
+   *  (sendRunControl) can target the right session via POST. Cleared in
+   *  the `runLines` finally block. */
+  private currentClient: ApiClientLike | null = null;
+  private currentSessionId: string | null = null;
   private readonly frameStackEmitter = new vscode.EventEmitter<void>();
   /** Fires whenever `frameStack` changes. The Call Stack view subscribes. */
   readonly onFrameStackChange = this.frameStackEmitter.event;
@@ -225,6 +235,35 @@ export class RunController {
     return true;
   }
 
+  /**
+   * Send a step-control command to the server, advancing a step-paused
+   * run. No-op when nothing is running, when the active client doesn't
+   * support runControl (legacy / test fakes), or when the request fails
+   * — the server will surface a 409 if the run isn't actually paused,
+   * which means a stray F11/F10 keypress between events is benign.
+   *
+   * The matching SSE stream is still open and will continue emitting
+   * events once the server picks up the new mode.
+   */
+  async sendRunControl(mode: StepMode): Promise<void> {
+    const client = this.currentClient;
+    const sessionId = this.currentSessionId;
+    if (!client || !sessionId) return;
+    if (typeof client.runControl !== 'function') return;
+    try {
+      await client.runControl(sessionId, mode);
+    } catch (err) {
+      // Surface a status-bar diagnostic but don't tear the run down — the
+      // server is still authoritative; the next event from the stream
+      // will tell us where we actually are.
+      const reason = err instanceof Error ? err.message : String(err);
+      vscode.window.setStatusBarMessage(
+        `TestBench: run-control failed (${reason})`,
+        2500,
+      );
+    }
+  }
+
   stop(): void {
     this.pauseRequested = false;
     this.cancelPrompt();
@@ -322,6 +361,11 @@ export class RunController {
        *  this call (step:start, step:pass, step:fail, output, capture,
        *  done). Receives events in flight order. */
       onEvent?: (event: RunEvent) => void;
+      /** Initial step-mode for the run. `into` / `over` / `out` start
+       *  the run paused between steps so the user can drive Step Into /
+       *  Over / Out from a freshly-launched stepping session. `continue`
+       *  (default) runs to the next breakpoint or end-of-batch. */
+      stepMode?: StepMode;
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -491,6 +535,10 @@ export class RunController {
     this.active = ac;
     this.pauseRequested = false;
     this.lastStepStartLine = null;
+    // Capture so step-control commands (Phase 3) can target the same
+    // session via the same client without rebuilding either.
+    this.currentClient = client;
+    this.currentSessionId = sessionId;
 
     // Resolve which env name to send to the server. Explicit override (batch
     // mode passes one per test) wins over the workspace-level EnvSelector.
@@ -524,6 +572,7 @@ export class RunController {
             logging,
             signal: ac.signal,
             log,
+            ...(options.stepMode && { stepMode: options.stepMode }),
           });
           if (!ok) {
             anyFailed = true;
@@ -641,6 +690,8 @@ export class RunController {
       this.cancelPrompt();
       this.post({ type: 'promptDone' });
       this.currentEventListener = null;
+      this.currentClient = null;
+      this.currentSessionId = null;
     }
   }
 
@@ -656,8 +707,12 @@ export class RunController {
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
+    /** Initial stepMode to send with the request body — when set, the
+     *  server pauses between steps and the run is driven by `run-control`
+     *  POSTs from the extension. */
+    stepMode?: StepMode;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, stepMode } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -685,6 +740,7 @@ export class RunController {
         ...(logging && { logging }),
         ...(skillsDir && { skillsDir }),
         testFilePath,
+        ...(stepMode && { stepMode }),
       },
       signal,
     );

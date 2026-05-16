@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -158,6 +158,26 @@
         "command": "testbench-native.openInEditor",
         "title": "TestBench: Open Runner in Editor",
         "icon": "$(link-external)"
+      },
+      {
+        "command": "testbench-native.stepInto",
+        "title": "TestBench: Step Into",
+        "icon": "$(debug-step-into)"
+      },
+      {
+        "command": "testbench-native.stepOver",
+        "title": "TestBench: Step Over",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "testbench-native.stepOut",
+        "title": "TestBench: Step Out",
+        "icon": "$(debug-step-out)"
+      },
+      {
+        "command": "testbench-native.continueRun",
+        "title": "TestBench: Continue Run",
+        "icon": "$(debug-continue)"
       }
     ],
     "menus": {
@@ -253,6 +273,31 @@
         "command": "testbench-native.toggleBreakpoint",
         "key": "f9",
         "when": "editorTextFocus && testbench-native.activeFile"
+      },
+      {
+        "command": "testbench-native.continueRun",
+        "key": "f5",
+        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.stepPaused"
+      },
+      {
+        "command": "testbench-native.stepInto",
+        "key": "f11",
+        "when": "editorTextFocus && testbench-native.activeFile && !testbench-native.running"
+      },
+      {
+        "command": "testbench-native.stepInto",
+        "key": "f11",
+        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.stepPaused"
+      },
+      {
+        "command": "testbench-native.stepOver",
+        "key": "f10",
+        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.stepPaused"
+      },
+      {
+        "command": "testbench-native.stepOut",
+        "key": "shift+f11",
+        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.stepPaused"
       }
     ]
   },

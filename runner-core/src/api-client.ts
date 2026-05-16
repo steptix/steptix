@@ -6,7 +6,7 @@
  */
 
 import { SseParser, type SseFrame } from './sse-parser.js';
-import type { RunEvent } from './protocol.js';
+import type { RunEvent, StepMode } from './protocol.js';
 
 export type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
 export type LogFileMode = 'off' | 'compact' | 'full';
@@ -51,6 +51,14 @@ export interface StreamStepsRequest {
    * Optional; servers without frame support ignore it.
    */
   testFilePath?: string;
+  /**
+   * Initial step-mode for the run. `continue` (default) runs to completion
+   * or the next breakpoint; `into` / `over` / `out` start the run paused
+   * between steps so the client can drive step-by-step execution via the
+   * `runControl` endpoint. Servers that don't support stepMode ignore the
+   * field — the run executes as a normal `continue`.
+   */
+  stepMode?: StepMode;
   /**
    * Per-request logging override. Each field falls back to the server's
    * configured default when omitted. Override scope is this request only —
@@ -218,6 +226,51 @@ export class ApiClient {
       });
     } catch {
       // Best effort — ignore.
+    }
+  }
+
+  /**
+   * Send a step-control command to a session that is paused awaiting next-
+   * step direction. Used to drive Step Into / Over / Out / Continue from
+   * the UI. The server resolves the pending Promise in its step loop and
+   * the SSE stream from `streamSteps` continues emitting events.
+   *
+   * Throws an `ApiClientError` of kind `not-found` if the session has no
+   * paused run, or `server-error` for any other failure. Callers in the
+   * extension translate those into a status-bar message — there's no
+   * fatal-state recovery beyond surfacing the diagnostic.
+   */
+  async runControl(sessionId: string, mode: StepMode): Promise<void> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/run-control`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+        },
+        body: JSON.stringify({ mode }),
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new ApiClientError('connect-failed', reason);
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    // 409 (no paused run) is reported as 'not-found' so the extension's
+    // existing error mapping flags it as a transient state mismatch — not
+    // a connectivity failure.
+    if (response.status === 404 || response.status === 409) {
+      throw new ApiClientError('not-found', 'No paused run', { status: response.status });
+    }
+    if (response.status >= 400) {
+      const body = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('server-error', `HTTP ${response.status}`, {
+        status: response.status,
+        ...(body !== undefined && { bodyExcerpt: body }),
+      });
     }
   }
 }

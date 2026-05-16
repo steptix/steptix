@@ -90,6 +90,23 @@ export function createApiServer(config: Config): {
       if (body.sourceLines !== undefined && Array.isArray(body.sourceLines)) {
         request.sourceLines = body.sourceLines as number[];
       }
+      // Step-into protocol fields. `skillsDir` triggers server-side skill
+      // expansion + frame:push/pop emission; `testFilePath` anchors frame
+      // events on the test file; `stepMode` opts the run into the
+      // pause-between-steps state machine. All optional — legacy clients
+      // omit them and the run executes as before.
+      if (typeof body.skillsDir === 'string') {
+        request.skillsDir = body.skillsDir;
+      }
+      if (typeof body.testFilePath === 'string') {
+        request.testFilePath = body.testFilePath;
+      }
+      if (typeof body.stepMode === 'string') {
+        const validModes = new Set(['continue', 'into', 'over', 'out']);
+        if (validModes.has(body.stepMode)) {
+          request.stepMode = body.stepMode as 'continue' | 'into' | 'over' | 'out';
+        }
+      }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);
@@ -183,6 +200,35 @@ export function createApiServer(config: Config): {
 
       next(err);
     }
+  });
+
+  // POST /sessions/:id/run-control — Phase 3 step-into protocol.
+  //
+  // Delivers a step-mode command (continue / into / over / out) to a run
+  // currently paused inside the step loop's `pendingRunControl` await.
+  // 200 on delivery, 409 when there's no paused run to consume it.
+  // The matching SSE stream continues to emit events; the client doesn't
+  // need a separate response body beyond {ok:true}.
+  app.post('/sessions/:id/run-control', (req: Request, res: Response) => {
+    const sessionId = String(req.params.id);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const mode = body.mode;
+    const validModes = new Set(['continue', 'into', 'over', 'out']);
+    if (typeof mode !== 'string' || !validModes.has(mode)) {
+      res.status(400).json({
+        error: 'mode must be one of: continue, into, over, out',
+      });
+      return;
+    }
+    const delivered = sessionManager.submitRunControl(
+      sessionId,
+      mode as 'continue' | 'into' | 'over' | 'out',
+    );
+    if (!delivered) {
+      res.status(409).json({ error: 'No paused run for this session' });
+      return;
+    }
+    res.status(200).json({ ok: true });
   });
 
   // GET /sessions/:id

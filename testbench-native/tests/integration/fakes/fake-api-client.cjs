@@ -24,6 +24,10 @@ class FakeApiClient {
      *  that receives this fake and is invoked exactly when streamSteps is
      *  called for that stream index. Avoids polling races. */
     this.streamScripts = [];
+    /** Phase 3 — each call to runControl is appended here as
+     *  { sessionId, mode }. Tests assert against this to check the
+     *  extension dispatches Step Into / Over / Out with the right modes. */
+    this.runControlCalls = [];
   }
 
   /**
@@ -88,6 +92,20 @@ class FakeApiClient {
     this.closeSessionCalls += 1;
     if (this.closeSessionImpl) {
       await this.closeSessionImpl(sessionId);
+    }
+  }
+
+  /**
+   * Phase 3 — server delivers step-control via POST /sessions/:id/run-control.
+   * The fake records each call so tests can assert the extension's
+   * stepInto/stepOver/stepOut commands fire it with the right mode.
+   * Default implementation is a no-op; tests can replace it with one
+   * that drives the next event push.
+   */
+  async runControl(sessionId, mode) {
+    this.runControlCalls.push({ sessionId, mode });
+    if (this.runControlImpl) {
+      await this.runControlImpl(sessionId, mode);
     }
   }
 

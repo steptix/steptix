@@ -77,6 +77,15 @@ export interface StepRequest {
    */
   testFilePath?: string;
   /**
+   * Initial step-mode for this batch. `continue` (default) runs until the
+   * next breakpoint or end. `into` / `over` / `out` start the run paused
+   * between steps and emit `step:awaiting` events so the client can drive
+   * step-by-step execution via `POST /sessions/:id/run-control`.
+   *
+   * Reset to `continue` between sessions.
+   */
+  stepMode?: 'continue' | 'into' | 'over' | 'out';
+  /**
    * Per-request logging override. Lets a testbench user flip verbosity on a
    * single run (e.g. `consoleLogLevel: 'debug'` + `serverFileLogLevel: 'full'`
    * for a hung run) without restarting the server. Each field falls back to
@@ -121,7 +130,8 @@ export type RunEvent =
   | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' }
   | { type: 'frame:push'; frame: FrameInfo }
   | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
-  | { type: 'frame:scope'; frameId: string; scope: Record<string, string> };
+  | { type: 'frame:scope'; frameId: string; scope: Record<string, string> }
+  | { type: 'step:awaiting'; line: number; frame?: FrameInfo };
 
 export type RunEventListener = (event: RunEvent) => void;
 
@@ -200,6 +210,14 @@ interface ManagedSession {
   queueTail: Promise<void>;
   /** Cached env+data bundle once `envName` is supplied; reused across step batches. */
   envBundle?: EnvBundle;
+  /**
+   * When the step loop pauses awaiting next-step direction (stepMode !==
+   * 'continue'), this holds the resolver for the Promise the loop is
+   * blocked on. The HTTP run-control endpoint resolves it; the loop then
+   * picks up with the supplied mode. Cleared as soon as it resolves so
+   * a stale handle can't outlive a single pause point.
+   */
+  pendingRunControl: { resolve: (mode: 'continue' | 'into' | 'over' | 'out') => void } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +320,22 @@ export class SessionManager {
 
   constructor(config: Config) {
     this.config = config;
+  }
+
+  /**
+   * Resolve a pending run-control wait for `sessionId` with the supplied
+   * mode. Called by the HTTP `POST /sessions/:id/run-control` handler.
+   * Returns `true` if a paused run actually picked the mode up, `false`
+   * if there was no paused run to deliver to (so the handler can return a
+   * 409 / "no pause" diagnostic).
+   */
+  submitRunControl(sessionId: string, mode: 'continue' | 'into' | 'over' | 'out'): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session?.pendingRunControl) return false;
+    const { resolve } = session.pendingRunControl;
+    session.pendingRunControl = null;
+    resolve(mode);
+    return true;
   }
 
   /**
@@ -551,6 +585,7 @@ export class SessionManager {
       csrfTokens: {},
       contextContent: context.combined,
       queueTail: Promise.resolve(),
+      pendingRunControl: null,
     };
 
     this.sessions.set(sessionId, session);
@@ -810,6 +845,33 @@ export class SessionManager {
       }
       return expansionFrames[origin.frameId];
     };
+
+    /**
+     * Walk the frame's ancestry to get the step's depth. Test (root)
+     * frame is depth 0; each nested skill is +1. Used by stepMode pause
+     * decisions: 'over' pauses when next depth ≤ current depth; 'out'
+     * pauses when next depth < current depth.
+     */
+    const depthOf = (i: number): number => {
+      if (!expansionOrigins || !expansionFrames) return 0;
+      const origin = expansionOrigins[i];
+      if (!origin || origin.frameId === '') return 0;
+      let depth = 0;
+      let cur: string | null = origin.frameId;
+      const seen = new Set<string>();
+      while (cur && cur !== '' && !seen.has(cur)) {
+        seen.add(cur);
+        depth++;
+        cur = expansionFrames[cur]?.parentId ?? null;
+      }
+      return depth;
+    };
+
+    // Initial step mode from the request. Defaults to 'continue' (legacy
+    // behaviour). The HTTP run-control endpoint can flip this mid-run by
+    // resolving the per-session pendingRunControl Promise the step loop
+    // awaits when paused.
+    let currentMode: 'continue' | 'into' | 'over' | 'out' = request.stepMode ?? 'continue';
 
     try {
       for (let i = 0; i < effectiveSteps.length; i++) {
@@ -1097,6 +1159,58 @@ export class SessionManager {
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
           });
+
+          // ── Step-mode pause decision ────────────────────────────────
+          //
+          // When the client started this batch with `stepMode !== 'continue'`,
+          // we pause after each step depending on the depth relationship
+          // between the just-executed step and the next one. The yellow ▶
+          // moves to the next step's frame/line on the client; the loop
+          // blocks on `pendingRunControl` until the client sends a new
+          // mode via the `run-control` endpoint.
+          if (currentMode !== 'continue' && i < effectiveSteps.length - 1) {
+            const nextI = i + 1;
+            const curDepth = depthOf(i);
+            const nextDepth = depthOf(nextI);
+            const shouldPause =
+              currentMode === 'into' ||
+              (currentMode === 'over' && nextDepth <= curDepth) ||
+              (currentMode === 'out' && nextDepth < curDepth);
+            if (shouldPause) {
+              // Pre-transition the frame stack to the next step's frame so
+              // step:awaiting carries the right frame payload (the call
+              // stack view + yellow ▶ both need the destination, not the
+              // origin).
+              const nextFrameId = expansionOrigins?.[nextI]?.frameId ?? '';
+              transitionToFrame(nextFrameId);
+              const nextFrame = frameInfoFor(nextI);
+              const nextLine = sourceLineFor(nextI);
+              emit({
+                type: 'step:awaiting',
+                line: nextLine,
+                ...(nextFrame && { frame: nextFrame }),
+              });
+              // Block until the client sends the next mode (or the run
+              // gets aborted). On abort we resolve with 'continue' to
+              // unblock cleanly — the abort check at the top of the next
+              // iteration catches the actual abort.
+              const newMode = await new Promise<'continue' | 'into' | 'over' | 'out'>((resolve) => {
+                session.pendingRunControl = { resolve };
+                if (signal?.aborted) {
+                  session.pendingRunControl = null;
+                  resolve('continue');
+                  return;
+                }
+                signal?.addEventListener('abort', () => {
+                  if (session.pendingRunControl?.resolve === resolve) {
+                    session.pendingRunControl = null;
+                    resolve('continue');
+                  }
+                }, { once: true });
+              });
+              currentMode = newMode;
+            }
+          }
         } else {
           // Step failed
           overallStatus = 'failed';
