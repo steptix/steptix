@@ -11,6 +11,9 @@ import { interpolate } from '../parser/parameters.js';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
 import { expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
+import { parseToolCall } from '../tools/tool-call-parser.js';
+import { executeToolStep } from '../tools/executor.js';
+import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { ApiResponseStore } from '../api/response-store.js';
@@ -76,6 +79,15 @@ export interface StepRequest {
    * inline (non-skill) lines. Optional.
    */
   testFilePath?: string;
+  /**
+   * Absolute path to the project's tools directory. When supplied, the
+   * server loads the `ToolCatalogue` once per session and dispatches every
+   * `[tool: ...]` step through `executeToolStep` (the same code path the
+   * CLI runner uses). Without `toolsDir` the legacy behaviour applies —
+   * `[tool: ...]` lines reach the LLM as raw text, which it doesn't know
+   * how to execute.
+   */
+  toolsDir?: string;
   /**
    * Initial step-mode for this batch. `continue` (default) runs until the
    * next breakpoint or end. `into` / `over` / `out` start the run paused
@@ -210,6 +222,14 @@ interface ManagedSession {
   queueTail: Promise<void>;
   /** Cached env+data bundle once `envName` is supplied; reused across step batches. */
   envBundle?: EnvBundle;
+  /**
+   * Cached tool catalogue once `toolsDir` is supplied. Loaded lazily on the
+   * first batch that supplies one; subsequent batches reuse the catalogue
+   * (re-scanning the directory per batch would slow every step run for no
+   * gain — the file watcher / `loadToolCatalogue` re-run on session restart
+   * is the explicit reload story).
+   */
+  toolCatalogue?: ToolCatalogue;
   /**
    * When the step loop pauses awaiting next-step direction (stepMode !==
    * 'continue'), this holds the resolver for the Promise the loop is
@@ -722,6 +742,34 @@ export class SessionManager {
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
       ?? this.config.execution.timeout;
 
+    // Tool catalogue — when the caller supplies `toolsDir`, load it once and
+    // cache on the session. The step loop later dispatches `[tool: ...]`
+    // lines through `executeToolStep` so deterministic tool code runs on the
+    // server (parallel to how the CLI runner dispatches them). Without
+    // `toolsDir` `[tool: ...]` lines reach the AI as plain text — same as
+    // pre-Phase-5 behaviour.
+    if (request.toolsDir && !session.toolCatalogue) {
+      try {
+        session.toolCatalogue = await loadToolCatalogue(request.toolsDir);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(`Session "${sessionId}": failed to load tool catalogue "${request.toolsDir}": ${message}`);
+        emit({ type: 'output', msg: `Tool catalogue load failed: ${message}`, kind: 'error' });
+        emit({ type: 'done', status: 'error' });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          error: { step: 0, message },
+          pageTitle: '',
+        };
+      }
+    }
+    const toolCatalogue = session.toolCatalogue;
+
     // Skill expansion — when the caller supplies `skillsDir`, flatten
     // `[skill: ...]` lines into their bodies before execution and remember
     // the per-step origin so step-into-aware clients see `frame:push` /
@@ -1015,30 +1063,88 @@ export class SessionManager {
 
         emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
 
-        // Execute the step
+        // Tool-step branch — when the step is a `[tool: ...]` invocation
+        // AND we have a loaded catalogue, dispatch through `executeToolStep`
+        // (the same code path the CLI runner uses) and shape the outcome
+        // into a `StepResult` so the rest of the loop is unchanged. Without
+        // a catalogue, fall through to `executeStep` and let the AI loop
+        // see the raw `[tool: ...]` text (legacy behaviour).
+        const toolCall = toolCatalogue ? parseToolCall(originalStep) : null;
         let stepResult: StepResult;
         try {
-          stepResult = await executeStep(
-            i + 1,
-            stepsTotal,
-            stepInstruction,
-            {
+          if (toolCall && toolCatalogue) {
+            const startedAt = Date.now();
+            const outcome = await executeToolStep(toolCall, {
               page: session.browserSession.pageTracker.getActive(),
-              config: this.config,
-              aiClient: session.aiClient,
-              contextContent: session.contextContent,
-              testName: `session:${sessionId}`,
+              context: session.browserSession.context,
+              browser: session.browserSession.browser,
+              resolvedParameters,
+              catalogue: toolCatalogue,
               ...(session.sessionConfig.baseUrl !== undefined && {
                 baseUrl: session.sessionConfig.baseUrl,
               }),
-              conversationHistory: [...session.conversationHistory],
-              apiResponseStore: session.apiResponseStore,
-              csrfTokens: session.csrfTokens,
-              resolvedParameters,
-              pageTracker: session.browserSession.pageTracker,
-              browserTracker: session.browserTracker,
-            },
-          );
+            });
+            const passed = outcome.status === 'passed';
+            stepResult = {
+              index: i + 1,
+              instruction: originalStep,
+              status: passed ? 'passed' : 'failed',
+              turns: [],
+              durationMs: Date.now() - startedAt,
+              retried: false,
+              ...(outcome.error !== undefined && { error: outcome.error }),
+              aiExplanation: passed
+                ? `Tool "${outcome.toolName}" produced outputs: ${
+                    Object.keys(outcome.outputs).length
+                      ? Object.entries(outcome.outputs)
+                          .map(([k, v]) => `${k}="${v}"`)
+                          .join(', ')
+                      : '(none)'
+                  }`
+                : `Tool "${outcome.toolName}" failed`,
+              toolStep: {
+                name: outcome.toolName,
+                args: outcome.args,
+                outputs: outcome.outputs,
+                logs: outcome.logs,
+              },
+            };
+            // The tool's `setVar` writes to resolvedParameters via the alias.
+            // Surface each captured value via a `capture` event so the
+            // Variables panel reflects it without waiting for an explicit
+            // `[output: ...]` prefix.
+            for (const [aliasName, aliasValue] of Object.entries(outcome.outputs)) {
+              session.outputs[aliasName] = aliasValue;
+              emit({
+                type: 'capture',
+                line: sourceLineFor(i),
+                name: aliasName,
+                value: aliasValue,
+              });
+            }
+          } else {
+            stepResult = await executeStep(
+              i + 1,
+              stepsTotal,
+              stepInstruction,
+              {
+                page: session.browserSession.pageTracker.getActive(),
+                config: this.config,
+                aiClient: session.aiClient,
+                contextContent: session.contextContent,
+                testName: `session:${sessionId}`,
+                ...(session.sessionConfig.baseUrl !== undefined && {
+                  baseUrl: session.sessionConfig.baseUrl,
+                }),
+                conversationHistory: [...session.conversationHistory],
+                apiResponseStore: session.apiResponseStore,
+                csrfTokens: session.csrfTokens,
+                resolvedParameters,
+                pageTracker: session.browserSession.pageTracker,
+                browserTracker: session.browserTracker,
+              },
+            );
+          }
         } catch (err) {
           // Unexpected error during step execution
           const message = err instanceof Error ? err.message : String(err);

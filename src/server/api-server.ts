@@ -101,6 +101,9 @@ export function createApiServer(config: Config): {
       if (typeof body.testFilePath === 'string') {
         request.testFilePath = body.testFilePath;
       }
+      if (typeof body.toolsDir === 'string') {
+        request.toolsDir = body.toolsDir;
+      }
       if (typeof body.stepMode === 'string') {
         const validModes = new Set(['continue', 'into', 'over', 'out']);
         if (validModes.has(body.stepMode)) {

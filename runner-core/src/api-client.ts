@@ -52,6 +52,13 @@ export interface StreamStepsRequest {
    */
   testFilePath?: string;
   /**
+   * Absolute path to the project's tools directory (`toolsDir` in
+   * `aiui.config.*`). When supplied, the server loads the tool catalogue
+   * once per session and dispatches `[tool: ...]` steps through
+   * `executeToolStep` — without it, tool lines reach the AI as plain text.
+   */
+  toolsDir?: string;
+  /**
    * Initial step-mode for the run. `continue` (default) runs to completion
    * or the next breakpoint; `into` / `over` / `out` start the run paused
    * between steps so the client can drive step-by-step execution via the

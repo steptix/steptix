@@ -779,6 +779,7 @@ export class RunController {
     // skill, but skill invocations would hit the AI as literal strings.
     const projectDirs = resolveProjectDirs(this.document.uri);
     const skillsDir = projectDirs?.skillsDir ?? null;
+    const toolsDir = projectDirs?.toolsDir ?? null;
     const testFilePath = this.document.uri.fsPath;
 
     const events = client.streamSteps(
@@ -794,6 +795,7 @@ export class RunController {
         ...(Object.keys(params).length > 0 && { parameters: params }),
         ...(logging && { logging }),
         ...(skillsDir && { skillsDir }),
+        ...(toolsDir && { toolsDir }),
         testFilePath,
         ...(stepMode && { stepMode }),
       },
