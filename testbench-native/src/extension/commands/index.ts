@@ -162,6 +162,11 @@ export function registerCommands(
     // Back-compat alias: `testbench-native.resume` delegates to
     // continueRun. Existing tests and user-configured keybindings
     // keep working unchanged.
+    //
+    // NOTE: renaming or removing `testbench-native.continueRun`
+    // silently breaks this alias with a runtime "command not found"
+    // (the registration happens at activation; there's no compile-
+    // time link between the two command IDs).
     vscode.commands.registerCommand('testbench-native.resume', () =>
       vscode.commands.executeCommand('testbench-native.continueRun'),
     ),
@@ -313,6 +318,13 @@ function isAtToolLine(registry: Registry, controller: RunController): boolean {
  *     selection with stepMode='into'. Step Over / Out from idle are
  *     surface-only no-ops: there's no "current frame" to step over
  *     or out of yet.
+ *
+ * Toolbar-vs-keybinding asymmetry (Option D follow-up): the F11
+ * keybinding deliberately fires from IDLE too (case 3 above), but the
+ * StepInto toolbar button is hidden in IDLE — a StepInto glyph there
+ * would imply "advance into the next call" when nothing is running,
+ * which is misleading. The keybind preserves the power-user shortcut
+ * "F11 starts a stepping run from cursor."
  */
 async function dispatchStep(
   mode: StepMode,

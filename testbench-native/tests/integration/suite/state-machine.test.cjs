@@ -239,6 +239,20 @@ describe('TestBench debug state machine', function () {
     await waitFor('isRunning becomes false', () => !hooks.isRunning());
   });
 
+  it('continueRun from idle is a safe no-op (no stream opened, no exception)', async () => {
+    // Phase 5 follow-up: when there's no run to continue (idle state),
+    // the unified continueRun falls through to a status-bar message
+    // rather than crashing or opening a stream. Easy to break if a
+    // future change drops one of the guard conditions.
+    assert.equal(hooks.isRunning(), false, 'precondition: must be idle');
+    await vscode.commands.executeCommand('testbench-native.continueRun');
+    // Give any spurious async work a chance to surface.
+    await sleep(100);
+    assert.equal(hooks.isRunning(), false, 'continueRun from idle must not start a run');
+    assert.equal(fake.hasActiveStream, false, 'continueRun from idle must not open a stream');
+    assert.equal(fake.runControlCalls.length, 0, 'continueRun from idle must not POST run-control');
+  });
+
   it('paused → running (continueRun handles breakpoint state too): the unified Continue command re-opens the stream', async () => {
     // Phase 5 follow-up: testbench-native.continueRun was originally a
     // step-paused-only command (POST run-control). It's now unified so
