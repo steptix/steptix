@@ -126,6 +126,61 @@ describe('TestBench Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('skill input parameters arrive in the Variables view at a breakpoint pause', async () => {
+    // Phase 5 follow-up — end-to-end proof for the
+    // skill-inputs-in-frame-scope fix. Mimics what the server does
+    // when a `[skill: parameterized_skill query="OpenAI GPT-5"]`
+    // call is paused on the skill's first step via a breakpoint:
+    //
+    //   1. frame:push for the skill frame
+    //   2. frame:scope carrying { query: 'OpenAI GPT-5', ... }
+    //   3. step:awaiting (the pause)
+    //
+    // After that, the Variables view's rendered items must contain
+    // `query` mapped to "OpenAI GPT-5". This proves the WHOLE stack
+    // (runController.handleFrameScope → scopesByFrame map →
+    // currentScope → VariablesTreeProvider.getChildren → rendered
+    // TreeItem) carries the input through. Without this test, the
+    // wire-level vitest could pass and the user could still see an
+    // empty view because the extension dropped or filtered the data.
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      line: 7,
+      skillName: 'parameterized_skill',
+    };
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'OpenAI GPT-5' },
+    });
+    fake.push({ type: 'step:awaiting', line: 7, frame });
+
+    await waitFor('skill scope active', () => {
+      const scope = hooks.runningScope();
+      return scope.query === 'OpenAI GPT-5';
+    });
+
+    // The actual user-visible assertion: the Variables view's
+    // rendered items show `query = "OpenAI GPT-5"`.
+    const items = hooks.variablesViewItems();
+    const byName = Object.fromEntries(items.map((i) => [i.name, i.description]));
+    assert.equal(
+      byName.query,
+      'OpenAI GPT-5',
+      `expected query to render with caller-supplied value; got items: ${JSON.stringify(items)}`,
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('secret-named entries are masked in the rendered view', async () => {
     // Phase 4.1.c — the integration tests at the runningScope layer
     // (above) verify the controller's state, but not that the VIEW
