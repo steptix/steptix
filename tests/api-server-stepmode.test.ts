@@ -416,4 +416,117 @@ describe('api-server step-into protocol', () => {
     const done = events.find((e) => e.type === 'done');
     expect(done?.status).toBe('passed');
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Server-side breakpoints (skill-file breakpoint support).
+  //
+  // Pre-fix: a breakpoint set inside a skill `.md` was completely
+  // ignored — the extension's client-side `trimAtBreakpoint` only
+  // looked at the TEST file's breakpoints, and skill expansion is
+  // server-side so the skill body steps weren't in the pre-expansion
+  // step list. The fix moves breakpoint checking to the server for
+  // non-test-file URIs.
+  // ─────────────────────────────────────────────────────────────────
+
+  it('breakpointsByUri pauses execution before the matching skill-body step', async () => {
+    const sessionId = 'skill-bp-pause-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+    const skillPath = path.join(skillsDir, 'demo_skill.md');
+
+    const consume = (async () => {
+      for await (const ev of sseEvents(url, {
+        steps: ['[skill: demo_skill]'],
+        sourceLines: [1],
+        skillsDir,
+        testFilePath,
+        // demo_skill.md has "1. First skill step" on line 7. Setting a
+        // breakpoint there should pause BEFORE that step runs.
+        breakpointsByUri: { [skillPath]: [7] },
+      })) {
+        events.push(ev);
+        if (ev.type === 'step:awaiting') {
+          // Continue past the pause; let the rest of the run complete.
+          await runControl(sessionId, 'continue');
+        }
+        if (ev.type === 'done') break;
+      }
+    })();
+    await consume;
+
+    // The pause MUST come before the first skill body step:pass.
+    const awaitingIdx = events.findIndex((e) => e.type === 'step:awaiting');
+    const firstSkillPassIdx = events.findIndex(
+      (e) => e.type === 'step:pass' && e.frame?.skillName === 'demo_skill',
+    );
+    expect(awaitingIdx).toBeGreaterThan(-1);
+    expect(firstSkillPassIdx).toBeGreaterThan(awaitingIdx);
+
+    // The step:awaiting payload should point at the skill file's line.
+    expect(events[awaitingIdx]).toMatchObject({
+      type: 'step:awaiting',
+      line: 7,
+    });
+    expect(events[awaitingIdx].frame?.skillName).toBe('demo_skill');
+
+    // Done as passed — both skill body steps ran after the resume.
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.status).toBe('passed');
+  });
+
+  it('breakpointsByUri does NOT loop — once consumed, the same step does not re-pause', async () => {
+    // Regression: without consumedBreakpoints tracking, the server
+    // would re-pause on the SAME step every time Continue arrived.
+    const sessionId = 'skill-bp-noloop-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+    const skillPath = path.join(skillsDir, 'demo_skill.md');
+
+    let awaitingCount = 0;
+    const consume = (async () => {
+      for await (const ev of sseEvents(url, {
+        steps: ['[skill: demo_skill]'],
+        sourceLines: [1],
+        skillsDir,
+        testFilePath,
+        breakpointsByUri: { [skillPath]: [7] },
+      })) {
+        events.push(ev);
+        if (ev.type === 'step:awaiting') {
+          awaitingCount++;
+          if (awaitingCount > 5) throw new Error('runaway loop — server kept pausing');
+          await runControl(sessionId, 'continue');
+        }
+        if (ev.type === 'done') break;
+      }
+    })();
+    await consume;
+
+    expect(awaitingCount).toBe(1);
+  });
+
+  it('breakpointsByUri entries keyed at testFilePath are ignored (client trims those)', async () => {
+    // The fix's contract: the server skips testFilePath entries from
+    // the map because the client's client-side trimAtBreakpoint
+    // already prevents the server from reaching those lines. If the
+    // server ALSO honored them, we'd double-trigger on resume.
+    const sessionId = 'skill-bp-testfile-skipped-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    for await (const ev of sseEvents(url, {
+      steps: ['Open the page', 'Verify result'],
+      sourceLines: [1, 2],
+      testFilePath,
+      // Try to trigger a server-side pause on line 1 of the TEST file.
+      // The server must ignore this (testFilePath entries are filtered).
+      breakpointsByUri: { [testFilePath]: [1] },
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    const awaiting = events.filter((e) => e.type === 'step:awaiting');
+    expect(awaiting).toHaveLength(0);
+  });
 });

@@ -15,6 +15,21 @@ export interface StreamStepsRequest {
   steps: string[];
   /** Per-line break indices (1-based step indices into `steps`). */
   breakpoints?: number[];
+  /**
+   * Per-URI breakpoint sets keyed by absolute file path. Used by the server
+   * to pause execution before any step whose origin (test file OR an
+   * expanded skill body line) matches a breakpoint. The pause surfaces as
+   * a `step:awaiting` event so the client treats it like a step-paused
+   * state — same yellow ▶ + Continue / StepOver / StepInto / StepOut
+   * machinery as the stepMode flow.
+   *
+   * Test-file breakpoints are still trimmed CLIENT-side (legacy
+   * back-compat path); the server skips them in this map to avoid
+   * double-triggering. Skill-file breakpoints aren't visible to the
+   * client's `trimAtBreakpoint` (skill expansion is server-side) and
+   * are the primary motivation for this field.
+   */
+  breakpointsByUri?: Record<string, number[]>;
   /** Per-request env (e.g. AI_API_KEY). Server applies these to the session, not its own process.env. */
   env?: Record<string, string>;
   /**

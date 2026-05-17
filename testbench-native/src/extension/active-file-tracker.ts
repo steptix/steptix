@@ -167,6 +167,34 @@ export class ActiveFileTracker {
     return out;
   }
 
+  /**
+   * Every enabled SourceBreakpoint across markdown files, grouped by
+   * absolute file path. Used at run-start to ship the full per-URI map
+   * to the server so it can pause before any step (test file OR
+   * expanded skill body line) that matches a breakpoint.
+   *
+   * Filters to `.md` files only — VS Code's breakpoint store is global
+   * across all languages, but we only care about TestBench files.
+   */
+  allMarkdownBreakpoints(): Record<string, number[]> {
+    const out: Record<string, Set<number>> = {};
+    for (const bp of vscode.debug.breakpoints) {
+      if (!(bp instanceof vscode.SourceBreakpoint)) continue;
+      if (!bp.enabled) continue;
+      const uri = bp.location.uri;
+      if (uri.scheme !== 'file') continue;
+      if (!uri.fsPath.toLowerCase().endsWith('.md')) continue;
+      const key = uri.fsPath;
+      if (!out[key]) out[key] = new Set();
+      out[key].add(bp.location.range.start.line + 1);
+    }
+    const result: Record<string, number[]> = {};
+    for (const [key, set] of Object.entries(out)) {
+      result[key] = [...set].sort((a, b) => a - b);
+    }
+    return result;
+  }
+
   toggleBreakpoint(uri: vscode.Uri, line: number): void {
     // Find an existing SourceBreakpoint on this line; remove if present,
     // otherwise add a new one. Goes through vscode.debug so VS Code's

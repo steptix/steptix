@@ -59,6 +59,20 @@ export interface StepRequest {
    */
   breakpoints?: number[];
   /**
+   * Per-URI breakpoint sets keyed by absolute file path. The step loop
+   * checks each step's origin frame (test file OR a skill body line) and
+   * pauses via `step:awaiting` before executing a matching step. The
+   * client treats the pause as a step-paused state (same yellow ▶ /
+   * Continue / StepOver / etc. machinery as the stepMode flow).
+   *
+   * Entries keyed under `testFilePath` are skipped on the server side —
+   * the client already trims at those breakpoints before sending the
+   * request. Skill-file breakpoints (the actual motivation for this
+   * field) reach the server because the client's pre-expansion trim
+   * can't see them.
+   */
+  breakpointsByUri?: Record<string, number[]>;
+  /**
    * 1-based source-document line for each entry in `steps`. When present,
    * step events carry the original line so the client can render gutter
    * status against the document. Defaults to step index when omitted.
@@ -987,6 +1001,23 @@ export class SessionManager {
       session.pauseAtNextTool = true;
     }
 
+    // Per-URI breakpoint sets for the server-side pause check. Skill-
+    // file (and any non-test-file) breakpoints land here; the test file's
+    // own breakpoints are skipped because the client already trims at
+    // them before sending the request (legacy `trimAtBreakpoint` path).
+    const breakpointSetsByUri = new Map<string, Set<number>>();
+    if (request.breakpointsByUri) {
+      for (const [uri, lines] of Object.entries(request.breakpointsByUri)) {
+        if (uri === request.testFilePath) continue;
+        if (lines.length === 0) continue;
+        breakpointSetsByUri.set(uri, new Set(lines));
+      }
+    }
+    // Step indexes that have already had their breakpoint pause consumed
+    // in this batch. Without this, the loop would re-pause forever on
+    // the same step after a Continue.
+    const consumedBreakpoints = new Set<number>();
+
     try {
       for (let i = 0; i < effectiveSteps.length; i++) {
         // Check abort BEFORE starting each step. We don't try to interrupt
@@ -1091,6 +1122,56 @@ export class SessionManager {
         transitionToFrame(stepFrameId);
         const frameForStep = frameInfoFor(i);
         const frameSpread: { frame?: FrameInfo } = frameForStep ? { frame: frameForStep } : {};
+
+        // ── Server-side breakpoint check ────────────────────────────
+        //
+        // If the next step's origin (URI + source line) matches a
+        // breakpoint AND we haven't already paused for this exact step
+        // index, emit `step:awaiting` and park on `pendingRunControl`
+        // — same machinery the stepMode flow uses. The client treats
+        // the pause as step-paused state; F5 / F11 / F10 / Shift+F11
+        // all just work.
+        //
+        // Skill-file breakpoints are the primary reason this exists.
+        // Test-file breakpoints are filtered out at map-build time
+        // because the client already trims at them client-side via
+        // `trimAtBreakpoint` before the request is sent.
+        if (
+          breakpointSetsByUri.size > 0 &&
+          !consumedBreakpoints.has(i) &&
+          frameForStep?.uri &&
+          !signal?.aborted
+        ) {
+          const stepUriBps = breakpointSetsByUri.get(frameForStep.uri);
+          const stepLine = sourceLineFor(i);
+          if (stepUriBps?.has(stepLine)) {
+            consumedBreakpoints.add(i);
+            emit({
+              type: 'step:awaiting',
+              line: stepLine,
+              ...frameSpread,
+            });
+            const newMode = await new Promise<'continue' | 'into' | 'over' | 'out'>((resolve) => {
+              session.pendingRunControl = { resolve };
+              if (signal?.aborted) {
+                session.pendingRunControl = null;
+                resolve('continue');
+                return;
+              }
+              signal?.addEventListener(
+                'abort',
+                () => {
+                  if (session.pendingRunControl?.resolve === resolve) {
+                    session.pendingRunControl = null;
+                    resolve('continue');
+                  }
+                },
+                { once: true },
+              );
+            });
+            currentMode = newMode;
+          }
+        }
 
         // Check for skippable steps ([input:] and [interactive])
         if (isSkippableStep(interpolated)) {

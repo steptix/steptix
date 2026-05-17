@@ -136,6 +136,40 @@ describe('TestBench step-mode commands (Phase 3)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('skill-file breakpoints are sent to the server via breakpointsByUri', async () => {
+    // Bug fix follow-up: breakpoints in a skill .md were ignored
+    // because the extension only sent test-file breakpoints. Now the
+    // extension ships the full per-URI map; the server checks it
+    // before each step and pauses for non-test-file matches.
+    //
+    // This test verifies the EXTENSION SIDE — that
+    // `vscode.debug.breakpoints` set on a non-test markdown file
+    // reach the request body as `breakpointsByUri`. The server-side
+    // pause behaviour is covered in tests/api-server-stepmode.test.ts.
+    const skillUri = fixtureUri('fake-skill.md');
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(skillUri, new vscode.Position(8, 0)),
+        true,
+      ),
+    ]);
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+
+    const req = fake.requests[0];
+    assert.ok(req, 'no request captured');
+    assert.ok(req.breakpointsByUri, 'breakpointsByUri must be present on the request');
+    const skillPath = skillUri.fsPath;
+    assert.deepEqual(
+      req.breakpointsByUri[skillPath],
+      [9],
+      'skill-file breakpoint at editor line 8 (1-based line 9) must appear under its file path',
+    );
+  });
+
   it('continueRun POSTs runControl with mode=continue', async () => {
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);

@@ -157,6 +157,13 @@ export class RunController {
     public readonly workspaceFolder: vscode.WorkspaceFolder,
     private readonly post: (msg: HostToWebviewMsg) => void,
     private readonly clientFactory: ApiClientFactory = defaultApiClientFactory,
+    /**
+     * Optional provider for the full per-URI breakpoint map shipped to
+     * the server on every steps request (Phase 5 follow-up — skill-file
+     * breakpoint support). The registry passes a closure over its
+     * tracker; tests pass a fixed map or omit entirely.
+     */
+    private readonly breakpointsByUriProvider?: () => Record<string, number[]>,
   ) {}
 
   get isRunning(): boolean {
@@ -878,6 +885,10 @@ export class RunController {
         testFilePath,
         ...(stepMode && { stepMode }),
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
+        ...(this.breakpointsByUriProvider && (() => {
+          const map = this.breakpointsByUriProvider!();
+          return Object.keys(map).length > 0 ? { breakpointsByUri: map } : {};
+        })()),
       },
       signal,
     );

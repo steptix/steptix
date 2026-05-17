@@ -86,7 +86,17 @@ class RunControllerRegistry implements vscode.Disposable {
     if (!folder) return undefined;
 
     const post = this.makePostCallback(document.uri);
-    const controller = new RunController(document, folder, post, this.clientFactory);
+    const controller = new RunController(
+      document,
+      folder,
+      post,
+      this.clientFactory,
+      // Re-evaluated on every request so a breakpoint added mid-session
+      // (between batches) reaches the server next time. Filters to .md
+      // files; the server skips entries matching testFilePath since the
+      // client trims those before sending.
+      () => this.tracker.allMarkdownBreakpoints(),
+    );
     this.controllers.set(key, controller);
     // Re-fire the controller's frame-stack changes through the registry
     // so a single view subscriber catches every controller's transitions.

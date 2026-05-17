@@ -87,6 +87,21 @@ export function createApiServer(config: Config): {
       if (body.breakpoints !== undefined && Array.isArray(body.breakpoints)) {
         request.breakpoints = body.breakpoints as number[];
       }
+      if (
+        body.breakpointsByUri !== undefined &&
+        body.breakpointsByUri !== null &&
+        typeof body.breakpointsByUri === 'object' &&
+        !Array.isArray(body.breakpointsByUri)
+      ) {
+        // Defensive copy + shape check — each value must be number[].
+        const map: Record<string, number[]> = {};
+        for (const [uri, lines] of Object.entries(body.breakpointsByUri)) {
+          if (Array.isArray(lines) && lines.every((n) => typeof n === 'number')) {
+            map[uri] = lines as number[];
+          }
+        }
+        if (Object.keys(map).length > 0) request.breakpointsByUri = map;
+      }
       if (body.sourceLines !== undefined && Array.isArray(body.sourceLines)) {
         request.sourceLines = body.sourceLines as number[];
       }
