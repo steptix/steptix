@@ -919,4 +919,72 @@ describe('TestBench debug state machine', function () {
     });
     await waitFor('idle after second run hits the breakpoint', () => !hooks.isRunning());
   });
+
+  it('resume from breakpoint preserves pass marks from the first batch', async () => {
+    // Regression: continueRun called runLines() which unconditionally called
+    // clearStatusesForUris() — the same wipe a fresh re-run performs. After
+    // pausing at a breakpoint and hitting Continue, every step that had passed
+    // in the first batch was blanked out, making it look like those steps
+    // never ran.
+    //
+    // The contract: statuses from the first batch (steps that ran before the
+    // breakpoint) must survive the Continue and remain visible while the
+    // second batch executes. Only a deliberate Stop → Run is a hard reset.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    // Breakpoint on step 3 (line 10). Steps 1 (line 8) and 2 (line 9) run
+    // in the first batch; step 3 runs after the user hits Continue.
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+
+    // ---------- First batch: steps 1 and 2 pass, breakpoint pauses before 3 ----------
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+
+    await waitFor('paused at line 10 after first batch', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    const afterFirstBatch = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(afterFirstBatch[8], 'pass', 'precondition: step 1 passed in first batch');
+    assert.equal(afterFirstBatch[9], 'pass', 'precondition: step 2 passed in first batch');
+
+    // ---------- Continue: second batch runs step 3 ----------
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('second stream active after Continue', () => fake.hasActiveStream);
+
+    // First-batch pass marks must NOT be wiped at the moment the stream opens.
+    const duringResume = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(
+      duringResume[8],
+      'pass',
+      'step 1 pass must survive the Continue — not blanked by clearStatusesForUris',
+    );
+    assert.equal(
+      duringResume[9],
+      'pass',
+      'step 2 pass must survive the Continue — not blanked by clearStatusesForUris',
+    );
+
+    fake.push({ type: 'step:start', line: 10 });
+    fake.push({ type: 'step:pass', line: 10 });
+    fake.end();
+
+    await waitFor('idle after second batch', () => !hooks.isRunning());
+
+    const afterResume = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(afterResume[8], 'pass', 'step 1 still pass after resume completes');
+    assert.equal(afterResume[9], 'pass', 'step 2 still pass after resume completes');
+    assert.equal(afterResume[10], 'pass', 'step 3 (the resumed step) also passed');
+  });
 });

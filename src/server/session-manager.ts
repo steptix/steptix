@@ -1535,6 +1535,18 @@ export class SessionManager {
             scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
           });
 
+          // Persist variables captured via [store as: X] to session scope.
+          // The outputVars loop above only handles [output: X] prefix steps;
+          // [store as: X] writes directly to resolvedParameters via the step
+          // executor and would be lost when a breakpoint splits the run into
+          // separate batch requests (the next batch seeds resolvedParameters
+          // from session.outputs, which never got the value).
+          for (const [key, value] of Object.entries(resolvedParameters)) {
+            if (!key.startsWith('__skill')) {
+              session.outputs[key] = value;
+            }
+          }
+
           // ── Step-mode pause decision ────────────────────────────────
           //
           // When the client started this batch with `stepMode !== 'continue'`,

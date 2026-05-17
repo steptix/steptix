@@ -510,6 +510,12 @@ export class RunController {
        *  run isn't in flight yet — we have to seed the flag in the
        *  initial steps request). */
       pauseAtNextTool?: boolean;
+      /** True when this call is a continuation of a breakpoint-paused run
+       *  (i.e. Continue / Resume). Skips the status-clear that a fresh run
+       *  performs so that pass marks from the first batch are preserved. The
+       *  skill-file URIs revealed in the first batch are carried forward so
+       *  the NEXT fresh re-run still cleans them up correctly. */
+      isContinuation?: boolean;
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -536,12 +542,19 @@ export class RunController {
     // stack is always empty at the entry to a run.
     this.resetFrameState();
 
-    // Clear test-file statuses AND every skill file the previous run
-    // descended into. The new run will repaint as it goes; anything
-    // that doesn't run this time stays blank, which matches user intent
-    // ("re-run = fresh slate") and prevents stale ✓s from making a
-    // short-circuited run look like it continued.
-    if (this.clearStatusesForUris) {
+    if (options.isContinuation) {
+      // Carry the first-batch skill-file URIs forward into the new run's
+      // tracking set. This preserves their pass marks (we don't clear them)
+      // AND ensures the NEXT fresh re-run still knows to clean them up.
+      for (const uri of previousTouchedSkillUris) {
+        this.revealedFrameUris.add(uri);
+      }
+    } else if (this.clearStatusesForUris) {
+      // Clear test-file statuses AND every skill file the previous run
+      // descended into. The new run will repaint as it goes; anything
+      // that doesn't run this time stays blank, which matches user intent
+      // ("re-run = fresh slate") and prevents stale ✓s from making a
+      // short-circuited run look like it continued.
       const uris: vscode.Uri[] = [this.document.uri];
       for (const fsPath of previousTouchedSkillUris) {
         uris.push(vscode.Uri.file(fsPath));

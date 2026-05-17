@@ -988,6 +988,67 @@ describe('api-server step-into protocol', () => {
     }
   });
 
+  it('[store as: X] captures survive a batch boundary — {{X}} resolves in the next request', async () => {
+    // Regression: [store as: X] writes directly to resolvedParameters
+    // via the step executor but the session manager only synced
+    // [output: X] prefix variables to session.outputs. When a test-file
+    // breakpoint split the run into two HTTP batch requests, the second
+    // batch seeded resolvedParameters from session.outputs (which never
+    // received the captured value), so {{X}} stayed literal and Playwright
+    // threw "Cannot navigate to invalid URL".
+    const { executeStep } = await import('../src/runner/step-executor.js');
+    const exec = vi.mocked(executeStep);
+    const defaultImpl = exec.getMockImplementation();
+
+    let secondBatchInstruction: string | undefined;
+
+    // First batch: simulate [store as: target_url] writing to the
+    // opts.resolvedParameters reference the session-manager passes in.
+    exec.mockImplementationOnce(async (_idx, _total, _instr, opts: any) => {
+      if (opts?.resolvedParameters) {
+        opts.resolvedParameters['target_url'] = 'https://example.com';
+      }
+      return {
+        index: 1, instruction: 'capture step', status: 'passed',
+        turns: [], durationMs: 5, retried: false, aiExplanation: 'ok',
+      };
+    });
+
+    // Second batch: record the interpolated instruction to verify resolution.
+    exec.mockImplementationOnce(async (_idx, _total, instr: string) => {
+      secondBatchInstruction = instr;
+      return {
+        index: 1, instruction: instr, status: 'passed',
+        turns: [], durationMs: 5, retried: false, aiExplanation: 'ok',
+      };
+    });
+
+    const sessionId = 'store-as-survives-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+
+    // Batch 1: step that captures target_url (mock writes it to resolvedParameters).
+    for await (const ev of sseEvents(url, {
+      steps: ['Capture the URL [store as: target_url]'],
+      sourceLines: [1],
+    })) {
+      if (ev.type === 'done') break;
+    }
+
+    // Batch 2: step that uses {{target_url}} — simulates resume after breakpoint.
+    for await (const ev of sseEvents(url, {
+      steps: ['Navigate to {{target_url}}'],
+      sourceLines: [1],
+    })) {
+      if (ev.type === 'done') break;
+    }
+
+    // {{target_url}} must have been interpolated before reaching executeStep.
+    expect(secondBatchInstruction).toBe('Navigate to https://example.com');
+
+    exec.mockReset();
+    if (defaultImpl) exec.mockImplementation(defaultImpl);
+  });
+
   it('breakpointsByUri entries keyed at testFilePath are ignored (client trims those)', async () => {
     // The fix's contract: the server skips testFilePath entries from
     // the map because the client's client-side trimAtBreakpoint

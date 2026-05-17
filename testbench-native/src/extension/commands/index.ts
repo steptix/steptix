@@ -159,7 +159,7 @@ export function registerCommands(
           .filter((line) => line >= startLine);
         registry.notifyRunning(true);
         await controller
-          .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true })
+          .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true, isContinuation: true })
           .finally(() => registry.notifyRunning(false));
         return;
       }
