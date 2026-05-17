@@ -17,6 +17,7 @@ export default defineConfig({
     dir: './tests',
     contextDir: './context',
   },
+  skillsDir: './skills',
   reports: {
     outputDir: './reports',
   },
