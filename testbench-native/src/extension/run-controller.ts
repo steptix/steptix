@@ -42,7 +42,14 @@ export interface ApiClientLike {
   /** Optional in tests that predate Phase 3 — when absent, run-control
    *  commands are no-ops. The real ApiClient implements this against
    *  `POST /sessions/:id/run-control`. */
-  runControl?(sessionId: string, mode: StepMode): Promise<void>;
+  runControl?(
+    sessionId: string,
+    mode: StepMode,
+    opts?: { pauseAtNextTool?: boolean },
+  ): Promise<void>;
+  /** Optional Phase-5 ack used by tool step-into. Tests that don't
+   *  exercise the tool-debugger flow omit it. */
+  ackToolDebugger?(sessionId: string): Promise<void>;
 }
 
 export type ApiClientFactory = (config: { serverUrl: string; apiKey: string }) => ApiClientLike;
@@ -127,6 +134,10 @@ export class RunController {
    *  the `runLines` finally block. */
   private currentClient: ApiClientLike | null = null;
   private currentSessionId: string | null = null;
+  /** Captured along with currentClient so the tool step-into feature can
+   *  test whether the server is reachable as a Node debugger target.
+   *  Cleared in the same finally block. */
+  private currentServerUrl: string | null = null;
 
   /** Latest variable scope emitted by `frame:scope` per frame id. The
    *  test (root) frame uses key '' to match the server-side convention.
@@ -293,13 +304,16 @@ export class RunController {
    *     bar diagnostic so the user knows the server side actually
    *     failed, not just a UX race.
    */
-  async sendRunControl(mode: StepMode): Promise<void> {
+  async sendRunControl(
+    mode: StepMode,
+    opts?: { pauseAtNextTool?: boolean },
+  ): Promise<void> {
     const client = this.currentClient;
     const sessionId = this.currentSessionId;
     if (!client || !sessionId) return;
     if (typeof client.runControl !== 'function') return;
     try {
-      await client.runControl(sessionId, mode);
+      await client.runControl(sessionId, mode, opts);
     } catch (err) {
       const isNotFound =
         err !== null &&
@@ -314,6 +328,57 @@ export class RunController {
       const reason = err instanceof Error ? err.message : String(err);
       vscode.window.setStatusBarMessage(
         `TestBench: run-control failed (${reason})`,
+        2500,
+      );
+    }
+  }
+
+  /**
+   * True when the active run's server URL resolves to localhost
+   * (127.0.0.1 / ::1 / localhost). Tool step-into requires this — the
+   * VS Code Node debugger attaches to a local inspector socket, and we
+   * can't reach a remote `--inspect` port. The extension uses this to
+   * surface a clean "feature unavailable" error instead of attempting
+   * the attach and failing opaquely.
+   */
+  isLocalServer(): boolean {
+    if (!this.currentServerUrl) return false;
+    try {
+      const host = new URL(this.currentServerUrl).hostname.toLowerCase();
+      return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Acknowledge a `tool:awaiting-debugger` pause point — the extension
+   * calls this after `vscode.debug.startDebugging` has actually attached
+   * VS Code's Node debugger to the server process. The server then
+   * proceeds past its cooperative `debugger;` statement, which the
+   * inspector traps so the user lands inside the tool's TypeScript.
+   *
+   * 409 / not-found means we missed the parking window (e.g. the run
+   * was aborted between event and ack). Silent — the SSE stream will
+   * carry the actual state on the next event.
+   */
+  async ackToolDebugger(): Promise<void> {
+    const client = this.currentClient;
+    const sessionId = this.currentSessionId;
+    if (!client || !sessionId) return;
+    if (typeof client.ackToolDebugger !== 'function') return;
+    try {
+      await client.ackToolDebugger(sessionId);
+    } catch (err) {
+      const isNotFound =
+        err !== null &&
+        typeof err === 'object' &&
+        'kind' in err &&
+        (err as { kind?: string }).kind === 'not-found';
+      if (isNotFound) return;
+      const reason = err instanceof Error ? err.message : String(err);
+      vscode.window.setStatusBarMessage(
+        `TestBench: tool-debugger ack failed (${reason})`,
         2500,
       );
     }
@@ -421,6 +486,13 @@ export class RunController {
        *  Over / Out from a freshly-launched stepping session. `continue`
        *  (default) runs to the next breakpoint or end-of-batch. */
       stepMode?: StepMode;
+      /** Phase 5 — start the run with the one-shot pauseAtNextTool flag
+       *  set. The server emits `tool:awaiting-debugger` before the next
+       *  `[tool: ...]` step and parks for the debugger-attach ack. Used
+       *  when F11 is hit on a tool line from a breakpoint pause (the
+       *  run isn't in flight yet — we have to seed the flag in the
+       *  initial steps request). */
+      pauseAtNextTool?: boolean;
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -594,6 +666,7 @@ export class RunController {
     // session via the same client without rebuilding either.
     this.currentClient = client;
     this.currentSessionId = sessionId;
+    this.currentServerUrl = serverUrl;
 
     // Resolve which env name to send to the server. Explicit override (batch
     // mode passes one per test) wins over the workspace-level EnvSelector.
@@ -628,6 +701,7 @@ export class RunController {
             signal: ac.signal,
             log,
             ...(options.stepMode && { stepMode: options.stepMode }),
+            ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
           });
           if (!ok) {
             anyFailed = true;
@@ -747,6 +821,7 @@ export class RunController {
       this.currentEventListener = null;
       this.currentClient = null;
       this.currentSessionId = null;
+      this.currentServerUrl = null;
     }
   }
 
@@ -766,8 +841,12 @@ export class RunController {
      *  server pauses between steps and the run is driven by `run-control`
      *  POSTs from the extension. */
     stepMode?: StepMode;
+    /** Phase 5 — when true, the request body carries `pauseAtNextTool: true`.
+     *  The server emits `tool:awaiting-debugger` before the next
+     *  `[tool: ...]` step and parks for a debugger-attach ack. */
+    pauseAtNextTool?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, stepMode } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, stepMode, pauseAtNextTool } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -798,6 +877,7 @@ export class RunController {
         ...(toolsDir && { toolsDir }),
         testFilePath,
         ...(stepMode && { stepMode }),
+        ...(pauseAtNextTool && { pauseAtNextTool: true }),
       },
       signal,
     );

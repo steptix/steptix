@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -91,6 +91,16 @@
           "type": "string",
           "default": "**/*.md",
           "description": "Glob pattern of files to consider as candidate tests in the Test Explorer. Files still must contain '## Steps' and not be marked 'type: skill' or 'disabled: true' in frontmatter. Narrow this (e.g. 'tests/**/*.md') for faster discovery on large repos."
+        },
+        "testbench-native.inspectorPort": {
+          "type": "number",
+          "default": 9229,
+          "description": "Node inspector port the extension attaches to when Step Into descends into a [tool: ...] line. Match the port the API server was launched with (e.g. 'node --inspect=9229 dist/server.js'). Only used when the run targets a local server."
+        },
+        "testbench-native.inspectorHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host of the Node inspector socket the extension attaches to for tool step-into. Defaults to 127.0.0.1; only used when the run targets a local server."
         }
       }
     },

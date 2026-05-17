@@ -17,6 +17,9 @@ interface Registry {
    *  mid-step). dispatchStep uses this to give a clean diagnostic
    *  instead of a 409. */
   isStepPaused(controllerUri: vscode.Uri): boolean;
+  /** Phase 5 — where the step-paused yellow ▶ is parked, so dispatch
+   *  can detect F11-on-a-tool-line and request the tool-debugger pause. */
+  stepPausedEntry(controllerUri: vscode.Uri): { uri: vscode.Uri; line: number } | null;
 }
 
 /**
@@ -257,6 +260,26 @@ function notifyNoActive(): void {
 }
 
 /**
+ * True when the controller's step-paused yellow ▶ is parked on a
+ * `[tool: ...]` invocation. Reads the document at the paused line.
+ * Returns false on any miss (no pause, document not open, no match) —
+ * the caller falls back to normal stepInto behaviour, which is correct
+ * for skill lines and inline AI steps.
+ */
+function isAtToolLine(registry: Registry, controller: RunController): boolean {
+  const entry = registry.stepPausedEntry(controller.document.uri);
+  if (!entry) return false;
+  const doc = vscode.workspace.textDocuments.find(
+    (d) => d.uri.toString() === entry.uri.toString(),
+  );
+  if (!doc) return false;
+  const lineIdx = entry.line - 1;
+  if (lineIdx < 0 || lineIdx >= doc.lineCount) return false;
+  const text = doc.lineAt(lineIdx).text;
+  return /\[tool:\s*[A-Za-z0-9_-]+/.test(text);
+}
+
+/**
  * Phase 3 step-control dispatch. Routes Step Into / Over / Out to one of
  * three behaviours depending on current state:
  *
@@ -306,6 +329,14 @@ async function dispatchStep(
       await controller.sendRunControl('continue');
       return;
     }
+    // Phase 5 — Step Into on a `[tool: ...]` line asks the server to
+    // pause at the tool dispatcher so VS Code's Node debugger can
+    // attach. Detected by reading the line text at the parked
+    // step-pause position; falls back to normal `into` otherwise.
+    if (mode === 'into' && isAtToolLine(registry, controller)) {
+      await controller.sendRunControl('into', { pauseAtNextTool: true });
+      return;
+    }
     await controller.sendRunControl(mode);
     return;
   }
@@ -319,12 +350,19 @@ async function dispatchStep(
     const resumeLines = extractSteps(editor.document.getText())
       .map((s) => s.line)
       .filter((line) => line >= startLine);
+    // Phase 5 — if the breakpoint sat on a `[tool: ...]` line and the
+    // command is Step Into, seed the run with `pauseAtNextTool: true`
+    // so the server emits `tool:awaiting-debugger` before that step.
+    const lineText = editor.document.lineAt(Math.max(0, startLine - 1)).text;
+    const isToolLine = /\[tool:\s*[A-Za-z0-9_-]+/.test(lineText);
+    const pauseAtNextTool = mode === 'into' && isToolLine;
     registry.notifyRunning(true);
     await controller
       .runLines(resumeLines, {
         breakpoints,
         skipBreakpointAtStart: true,
         stepMode: mode,
+        ...(pauseAtNextTool && { pauseAtNextTool: true }),
       })
       .finally(() => registry.notifyRunning(false));
     return;

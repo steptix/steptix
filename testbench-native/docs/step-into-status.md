@@ -4,8 +4,10 @@ Status tracker for the step-into work. The full design lives in
 [step-into-design.md](step-into-design.md); this file is the "where
 are we?" snapshot.
 
-**Last updated:** 2026-05-17 — Phases 1–4.1 done; Phase 5 (tool
-step-into via Node inspector) pending.
+**Last updated:** 2026-05-17 — Phases 1–4.1 done. Phase 5 split into
+**5.A** (server-side tool dispatch — the gap discovered before the
+debugger work could begin) and **5.B** (tool step-into proper) — both
+landed.
 
 ## Where the work lives
 
@@ -16,17 +18,19 @@ All commits sit on a linear stack of feature branches off `main`.
 main (356547f, unchanged)
 └─ feat/step-into-phase1-frames        → 56a9a40
    └─ feat/step-into-phase2-callstack  → 36e6d96   (Phase 2 + follow-up)
-      └─ feat/step-into-phase2.1-cleanup       → bfcb53e
-         └─ feat/step-into-phase3-stepmode     → 3484d86
-            └─ feat/step-into-phase3.1-cleanup → 5b97d7b
-               └─ feat/step-into-phase4-variables → c8f84f7
-                  └─ feat/step-into-phase4.1-cleanup → 7d2edd0
-                     └─ docs/step-into-status            ← this file
+      └─ feat/step-into-phase2.1-cleanup        → bfcb53e
+         └─ feat/step-into-phase3-stepmode      → 3484d86
+            └─ feat/step-into-phase3.1-cleanup  → 5b97d7b
+               └─ feat/step-into-phase4-variables   → c8f84f7
+                  └─ feat/step-into-phase4.1-cleanup  → 7d2edd0
+                     └─ docs/step-into-status          → ce8f596
+                        └─ feat/step-into-phase5-tool-debugger ← this file
+                           (5.A → 9f8703f, 5.B → HEAD)
 ```
 
-The chain is cherry-pick-clean. To land it, fast-forward `main` to
-`7d2edd0` (or whatever the latest tip is) — or open one PR per phase
-if you'd rather review them incrementally.
+The chain is cherry-pick-clean. To land it, fast-forward `main` to the
+latest tip — or open one PR per phase if you'd rather review them
+incrementally.
 
 ## Phase tracker
 
@@ -39,7 +43,8 @@ if you'd rather review them incrementally.
 | **3.1** — step-pause polish | `5b97d7b` | Stop clears step-paused marker on its actual URI (not just the active editor). `sendRunControl` swallows `not-found` (409) silently. `dispatchStep` detects running-but-not-step-paused. Step Out at root frame redirects to Continue. End-to-end Step-Over-a-skill test. |
 | **4** — Variables panel | `c8f84f7` | Server emits `frame:scope` after every `step:pass` / `step:fail`. `RunController.scopesByFrame` map + `currentScope()` accessor. New `VariablesTreeProvider` (flat scope, alphabetical, `maskIfSecret` for secret-named entries) registered alongside Call Stack. |
 | **4.1** — Variables polish | `7d2edd0` | View title flips between "Variables (test)" / "Variables (skill: name)" via `createTreeView`. Test-frame view hides `__skill\d+_` skill-internal names (which the expander never garbage-collects after a skill exits). Render-path secret-mask test. STORIES doc: [variables-panel-scope-semantics.md](variables-panel-scope-semantics.md). |
-| **5** — tool step-into | _pending_ | Attach VS Code's Node debugger to the running server process so the user can step into a `[tool: ...]` line's TypeScript source. |
+| **5.A** — server-side tool dispatch | `9f8703f` | `toolsDir` request field; `session-manager.executeStepsInternal` parses `[tool: ...]` lines via `parseToolCall` and dispatches through `executeToolStep` with the session's live `page` / `context` / `browser`. Tool outputs surface as `capture` SSE events. **Discovered + fixed a latent gap**: tools previously didn't work via the extension at all — `[tool: ...]` reached the AI as plain text because the server's step loop had no tool-call recognition. Same shape as Phase 1's skill gap. New test file `tests/api-server-tools.test.ts`. |
+| **5.B** — tool step-into | HEAD | Wire-level pieces: `tool:awaiting-debugger` event + `pauseAtNextTool` flag (on initial request body AND `run-control` body) + `POST /sessions/:id/tool-debugger-ack` endpoint. Server emits the event before the next `[tool: ...]` step and parks on a per-session debugger-ack Promise; resumes on ack and hits a cooperative `debugger;` statement which Node's V8 inspector traps. Extension: F11 on a tool line detects the invocation and sends `pauseAtNextTool: true`; the `tool:awaiting-debugger` handler calls `vscode.debug.startDebugging` with a `pwa-node` attach config (settings: `testbench-native.inspectorPort` / `inspectorHost`); fails gracefully with ack-and-exit when the server isn't local or the inspector isn't reachable. |
 
 ## What works end-to-end right now
 
@@ -60,11 +65,14 @@ if you'd rather review them incrementally.
 - F5 from step-paused → drains the rest of the run.
 - Variables view updates after each step; secret-named entries are
   masked.
+- `[tool: ...]` invocations dispatch through real TypeScript code on
+  the server (was a no-op via the extension before 5.A).
+- F11 on a `[tool: ...]` line emits `tool:awaiting-debugger`; VS Code's
+  Node debugger attaches (when the server was launched with
+  `--inspect=9229`) and the user lands inside the tool's `.ts` source.
 
 ## What doesn't work yet
 
-- **Tool step-into.** F11 on a `[tool: ...]` line still treats it as
-  an atomic step. Phase 5 is the bridge to VS Code's Node debugger.
 - **Skill-file breakpoints.** A breakpoint set inside a skill `.md`
   is read by the tracker but not honored — the extension's
   client-side `trimAtBreakpoint` only looks at the test file's
@@ -77,9 +85,9 @@ if you'd rather review them incrementally.
 
 | | Value |
 | --- | --- |
-| testbench-native version | `0.5.10` (bumps per CLAUDE.md rule) |
-| main `vitest` | 810 / 810 |
-| testbench-native integration | 60 / 60 |
+| testbench-native version | `0.5.12` (bumps per CLAUDE.md rule) |
+| main `vitest` | 817 / 817 |
+| testbench-native integration | 62 / 62 |
 | runner-core `node:test` | 129 / 131 (2 pre-existing stale tests in `protocol.test.js`, unrelated to this work — they check renamed legacy message types `init` / `documentChanged` / `edit` that no longer exist) |
 
 ## Latent bugs surfaced + fixed along the way
@@ -111,6 +119,18 @@ Worth knowing about because they shape what tests exist now:
    survived Stop. Fixed in Phase 3.1 via a new
    `clearAllStepPausedMarkers()` registry method.
 
+4. **Tools didn't work via the extension at all.** Mirror of bug #1.
+   `[tool: ...]` lines in a session-manager request reached the AI
+   as plain text — there was no tool-call recognition in the server's
+   step loop. The CLI's `test-runner.ts` did dispatch tools (via
+   `executeToolStep`) but the server-flow path didn't. The design doc
+   for Phase 5 had assumed the server already executed tools; the gap
+   was caught when tracing the would-be `debugger;` pause point.
+   Fixed in Phase 5.A by wiring `parseToolCall` + `executeToolStep`
+   into `executeStepsInternal`, gated on a new `toolsDir` request
+   field (parallel to `skillsDir`). Covered by
+   `tests/api-server-tools.test.ts`.
+
 Process takeaway baked into the test suite: any new field on
 `StreamStepsRequest` needs at least one test that goes through the
 actual HTTP route, not just the type definition or the underlying
@@ -138,32 +158,80 @@ function.
   - **Variables view: copy-value affordance** — no "copy" right-
     click. Tooltip shows length only.
 
-## Phase 5 preview — tool step-into
+## Phase 5 — tool step-into (shipped)
 
 Tools are TypeScript code (`src/tools/*.ts`), not markdown — there's
-no body to step through line-by-line. The only honest way to "step
-into" a `[tool: ...]` line is to attach VS Code's Node.js debugger to
-the running server process and pause inside the tool's `.ts` source.
+no body to step through line-by-line. The honest way to "step into" a
+`[tool: ...]` line is to attach VS Code's Node.js debugger to the
+running server process and pause inside the tool's `.ts` source.
 
-Plan from the design doc:
+How it works end-to-end:
 
-1. User launches the server with `node --inspect=9229 ...` (we surface
-   a clear error if not — for remote `SERVER_URL` we document that
-   tool step-into is local-only).
-2. F11 on a paused `[tool: ...]` line sends `stepMode.pauseAtNextTool`
-   on the next run-control.
-3. Server hits a `debugger;` at the tool dispatcher's call site
-   ([src/tools/executor.ts](../../src/tools/executor.ts) line 164) and emits a new
-   `tool:awaiting-debugger` event.
-4. Extension calls `vscode.debug.startDebugging` with a Node attach
-   config pointed at the inspector port.
-5. The user gets VS Code's standard debugger UI inside the tool's
-   `.ts`. When the Node session resumes past the tool's body, the
-   testbench run continues.
+1. User launches the server with `node --inspect=9229 dist/server.js`
+   (or matches `testbench-native.inspectorPort` to whatever port they
+   chose).
+2. F11 on a paused `[tool: ...]` line. The extension detects the tool
+   invocation via line-text regex and POSTs `run-control` with
+   `pauseAtNextTool: true` (or seeds the same flag on the initial
+   request body when the pause came from a breakpoint instead of
+   `step:awaiting`).
+3. Server reaches the next `[tool: ...]` step, emits
+   `tool:awaiting-debugger { toolName, toolFilePath, line, frame? }`
+   and parks on `pendingDebuggerAck`.
+4. Extension's event handler verifies the run targets `127.0.0.1`,
+   calls `vscode.debug.startDebugging` with a `pwa-node` attach
+   config (`{ address, port, sourceMaps: true }`), then POSTs
+   `/sessions/:id/tool-debugger-ack`.
+5. Server resumes, hits the cooperative `debugger;` statement, and
+   the V8 inspector traps execution. The user gets VS Code's standard
+   debugger UI inside the tool's `.ts`.
 
-New surface area: server's `inspector` integration, a new VS Code
-setting for the inspector port (default 9229), a "tool is awaiting
-debugger" UI state in the extension.
+When the local-server check fails or the attach hangs/fails, the
+extension takes an "ack-and-exit" branch: the run still proceeds (the
+tool just executes without a debugger attached) and a status-bar note
+tells the user what went wrong.
+
+Files added:
+  - `runner-core/src/protocol.ts` — `ToolAwaitingDebuggerEvent` +
+    `RunEvent` union extension.
+  - `runner-core/src/api-client.ts` — `pauseAtNextTool` on
+    `StreamStepsRequest`, `runControl(..., { pauseAtNextTool })`,
+    new `ackToolDebugger()` method.
+  - `src/server/session-manager.ts` — `pauseAtNextTool` request
+    field, `pendingDebuggerAck` per-session resolver, dispatcher
+    pause point in the tool branch.
+  - `src/server/api-server.ts` — `pauseAtNextTool` on run-control body,
+    new `POST /sessions/:id/tool-debugger-ack` endpoint.
+  - `testbench-native/src/extension/run-controller.ts` —
+    `isLocalServer()`, `ackToolDebugger()`, plumbing
+    `pauseAtNextTool` into the run-control + initial request body.
+  - `testbench-native/src/extension/commands/index.ts` —
+    `isAtToolLine()` helper; F11-on-tool-line dispatch in both the
+    step-paused and breakpoint-paused branches.
+  - `testbench-native/src/extension/extension.ts` —
+    `handleToolAwaitingDebugger()` (local-server check + attach +
+    ack), `stepPausedEntry()` registry exposure for the dispatcher.
+  - `testbench-native/package.json` —
+    `testbench-native.inspectorPort` (default 9229) and
+    `inspectorHost` (default 127.0.0.1) settings.
+  - `tests/api-server-tools.test.ts` — server-side end-to-end of
+    tool dispatch + `pauseAtNextTool` + ack flow (7 cases).
+  - `testbench-native/tests/integration/suite/tool-debugger.test.cjs`
+    — extension dispatch on F11-on-tool-line (2 cases; the full
+    debugger-attach path can't be exercised in the test harness so
+    that one is covered server-side only).
+
+What's still rough:
+  - The "tool is awaiting debugger" UI is a status-bar string, not a
+    dedicated overlay panel.
+  - Source-map fidelity for tools depends on the user's `tsc` config;
+    if `inlineSources` isn't set the debugger pauses on the compiled
+    JS instead of the `.ts`. Documented in the design doc, not
+    enforced by the extension.
+  - The cooperative `debugger;` is a hard pause in the runtime; if
+    the user doesn't have an inspector listening, nothing surfaces
+    (it's a no-op). The local-server check + clear status-bar message
+    are the user's only signal.
 
 ## Files to read if picking this up cold
 

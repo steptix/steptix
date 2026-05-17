@@ -110,6 +110,9 @@ export function createApiServer(config: Config): {
           request.stepMode = body.stepMode as 'continue' | 'into' | 'over' | 'out';
         }
       }
+      if (body.pauseAtNextTool === true) {
+        request.pauseAtNextTool = true;
+      }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);
@@ -223,12 +226,38 @@ export function createApiServer(config: Config): {
       });
       return;
     }
+    // Tool step-into trigger (Phase 5). Set BEFORE delivering the
+    // step-mode so the loop sees the flag the moment it resumes.
+    if (body.pauseAtNextTool === true) {
+      sessionManager.setPauseAtNextTool(sessionId, true);
+    }
     const delivered = sessionManager.submitRunControl(
       sessionId,
       mode as 'continue' | 'into' | 'over' | 'out',
     );
     if (!delivered) {
       res.status(409).json({ error: 'No paused run for this session' });
+      return;
+    }
+    res.status(200).json({ ok: true });
+  });
+
+  // POST /sessions/:id/tool-debugger-ack — Phase 5 tool step-into.
+  //
+  // Clients call this AFTER they have successfully attached VS Code's
+  // Node debugger to the server process in response to a
+  // `tool:awaiting-debugger` event. The session manager resolves the
+  // per-session debugger-ack Promise the step loop is awaiting; the
+  // loop then proceeds to the cooperative `debugger;` statement which
+  // the inspector traps.
+  //
+  // 409 when no run is currently parked on an ack — same shape as the
+  // run-control endpoint's "no paused run" diagnostic.
+  app.post('/sessions/:id/tool-debugger-ack', (req: Request, res: Response) => {
+    const sessionId = String(req.params.id);
+    const delivered = sessionManager.submitDebuggerAck(sessionId);
+    if (!delivered) {
+      res.status(409).json({ error: 'No run awaiting debugger for this session' });
       return;
     }
     res.status(200).json({ ok: true });

@@ -243,6 +243,143 @@ describe('api-server tool dispatch', () => {
     expect(captures).toHaveLength(0); // no setVar fired
   });
 
+  it('pauseAtNextTool emits tool:awaiting-debugger and parks until ack arrives', async () => {
+    // Phase 5.B — when the request body sets `pauseAtNextTool: true`,
+    // the server emits `tool:awaiting-debugger` before the next
+    // `[tool: ...]` step and waits for `POST /sessions/:id/tool-debugger-ack`.
+    // Without the ack the run hangs at the pause point; once the ack
+    // arrives, execution proceeds and the tool runs normally.
+    const sessionId = 'tool-debug-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+    let sawAwaiting = false;
+
+    const consume = (async () => {
+      for await (const ev of sseEvents(url, {
+        steps: ['[tool: echo value="paused"]'],
+        sourceLines: [1],
+        toolsDir,
+        pauseAtNextTool: true,
+      })) {
+        events.push(ev);
+        if (ev.type === 'tool:awaiting-debugger') {
+          sawAwaiting = true;
+          // Acknowledge — server proceeds past `debugger;`.
+          const ackRes = await fetch(
+            `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/tool-debugger-ack`,
+            { method: 'POST', headers: { 'x-api-key': API_KEY } },
+          );
+          expect(ackRes.status).toBe(200);
+        }
+        if (ev.type === 'done') break;
+      }
+    })();
+
+    await consume;
+
+    expect(sawAwaiting).toBe(true);
+    const awaiting = events.find((e) => e.type === 'tool:awaiting-debugger');
+    expect(awaiting.toolName).toBe('echo');
+    expect(awaiting.toolFilePath).toMatch(/echo\.ts$/);
+    expect(awaiting.line).toBe(1);
+
+    // The tool still ran after the ack — capture event present.
+    const captures = events.filter((e) => e.type === 'capture');
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({ name: 'echoed', value: 'paused' });
+  });
+
+  it('pauseAtNextTool is a one-shot — second tool runs normally', async () => {
+    // The flag self-clears after the first trigger so subsequent tools
+    // in the same batch don't double-pause. Run two tool steps with
+    // `pauseAtNextTool: true` on the initial body; exactly one
+    // `tool:awaiting-debugger` event should fire.
+    const sessionId = 'tool-debug-oneshot-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    const consume = (async () => {
+      for await (const ev of sseEvents(url, {
+        steps: ['[tool: echo value="first"]', '[tool: echo value="second"]'],
+        sourceLines: [1, 2],
+        toolsDir,
+        pauseAtNextTool: true,
+      })) {
+        events.push(ev);
+        if (ev.type === 'tool:awaiting-debugger') {
+          await fetch(
+            `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/tool-debugger-ack`,
+            { method: 'POST', headers: { 'x-api-key': API_KEY } },
+          );
+        }
+        if (ev.type === 'done') break;
+      }
+    })();
+
+    await consume;
+
+    const awaitingCount = events.filter((e) => e.type === 'tool:awaiting-debugger').length;
+    expect(awaitingCount).toBe(1);
+    const captures = events.filter((e) => e.type === 'capture');
+    expect(captures).toHaveLength(2);
+  });
+
+  it('tool-debugger-ack returns 409 when no run awaits an ack', async () => {
+    const res = await fetch(
+      `${baseUrl}/sessions/no-such-session/tool-debugger-ack`,
+      { method: 'POST', headers: { 'x-api-key': API_KEY } },
+    );
+    expect(res.status).toBe(409);
+  });
+
+  it('run-control with pauseAtNextTool sets the flag for the next tool', async () => {
+    // The run is already in flight, paused between steps via stepMode:'into'.
+    // The next-run-control body sets pauseAtNextTool:true. The next tool
+    // emits tool:awaiting-debugger.
+    const sessionId = 'tool-debug-midrun-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    const consume = (async () => {
+      let stepCount = 0;
+      for await (const ev of sseEvents(url, {
+        steps: ['Open the page', '[tool: echo value="midrun"]'],
+        sourceLines: [1, 2],
+        toolsDir,
+        stepMode: 'into',
+      })) {
+        events.push(ev);
+        if (ev.type === 'step:awaiting') {
+          stepCount++;
+          // On the second pause (the one before the tool step), set the
+          // pauseAtNextTool flag along with the resume mode.
+          if (stepCount === 1) {
+            await fetch(
+              `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/run-control`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+                body: JSON.stringify({ mode: 'continue', pauseAtNextTool: true }),
+              },
+            );
+          }
+        }
+        if (ev.type === 'tool:awaiting-debugger') {
+          await fetch(
+            `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/tool-debugger-ack`,
+            { method: 'POST', headers: { 'x-api-key': API_KEY } },
+          );
+        }
+        if (ev.type === 'done') break;
+      }
+    })();
+
+    await consume;
+
+    const awaitingCount = events.filter((e) => e.type === 'tool:awaiting-debugger').length;
+    expect(awaitingCount).toBe(1);
+  });
+
   it('catalogue is cached on the session — second batch reuses it', async () => {
     // Two batches against the same session; the second omits `toolsDir`
     // entirely yet the tool still dispatches. Confirms `session.toolCatalogue`

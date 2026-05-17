@@ -150,6 +150,34 @@ export interface StepAwaitingEvent {
   frame?: FrameInfo;
 }
 
+/**
+ * Emitted right before the server hits its `debugger;` pause at the tool
+ * dispatcher's call site (Phase 5 — tool step-into). The client takes this
+ * as its cue to attach VS Code's Node debugger to the server process and
+ * then POST `/sessions/:id/tool-debugger-ack` so the server proceeds.
+ *
+ * Only fires when the client opted into tool step-into via
+ * `pauseAtNextTool` on the next-run-control. Servers that don't support
+ * tool step-into never emit this; clients that don't read it stay on the
+ * existing pause-between-steps story.
+ */
+export interface ToolAwaitingDebuggerEvent {
+  type: 'tool:awaiting-debugger';
+  /** The tool name as authored on the `[tool: ...]` line. */
+  toolName: string;
+  /** Absolute path to the tool's source file (`.ts` from the catalogue's
+   *  `RegisteredTool.filePath`). The extension uses this to scope the
+   *  Node debugger's source-map handling and to surface "we're stepping
+   *  into <file>" in the UI overlay. */
+  toolFilePath?: string;
+  /** 1-based source line of the `[tool: ...]` invocation in the test/skill
+   *  file. The yellow ▶ stays parked on this line while VS Code's Node
+   *  debugger drives the user inside the tool body. */
+  line: number;
+  /** Origin frame the tool call belongs to. */
+  frame?: FrameInfo;
+}
+
 export type RunEvent =
   | StepStartEvent
   | StepPassEvent
@@ -160,7 +188,8 @@ export type RunEvent =
   | FramePushEvent
   | FramePopEvent
   | FrameScopeEvent
-  | StepAwaitingEvent;
+  | StepAwaitingEvent
+  | ToolAwaitingDebuggerEvent;
 
 // ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)
@@ -427,6 +456,7 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'frame:push' ||
     t === 'frame:pop' ||
     t === 'frame:scope' ||
-    t === 'step:awaiting'
+    t === 'step:awaiting' ||
+    t === 'tool:awaiting-debugger'
   );
 }

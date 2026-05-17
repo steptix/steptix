@@ -247,7 +247,11 @@ export class ApiClient {
    * extension translate those into a status-bar message — there's no
    * fatal-state recovery beyond surfacing the diagnostic.
    */
-  async runControl(sessionId: string, mode: StepMode): Promise<void> {
+  async runControl(
+    sessionId: string,
+    mode: StepMode,
+    opts?: { pauseAtNextTool?: boolean },
+  ): Promise<void> {
     const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/run-control`;
     let response: Response;
     try {
@@ -257,7 +261,10 @@ export class ApiClient {
           'Content-Type': 'application/json',
           'x-api-key': this.apiKey,
         },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({
+          mode,
+          ...(opts?.pauseAtNextTool && { pauseAtNextTool: true }),
+        }),
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -271,6 +278,41 @@ export class ApiClient {
     // a connectivity failure.
     if (response.status === 404 || response.status === 409) {
       throw new ApiClientError('not-found', 'No paused run', { status: response.status });
+    }
+    if (response.status >= 400) {
+      const body = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('server-error', `HTTP ${response.status}`, {
+        status: response.status,
+        ...(body !== undefined && { bodyExcerpt: body }),
+      });
+    }
+  }
+
+  /**
+   * Acknowledge that VS Code's Node debugger is attached and the server
+   * may now hit its `debugger;` pause at the tool dispatcher. Resolves
+   * the per-session debugger-attach Promise the step loop is awaiting.
+   *
+   * 409 when no run is currently awaiting an ack — handled by the
+   * caller via the standard `not-found` mapping.
+   */
+  async ackToolDebugger(sessionId: string): Promise<void> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/tool-debugger-ack`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'x-api-key': this.apiKey },
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new ApiClientError('connect-failed', reason);
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    if (response.status === 404 || response.status === 409) {
+      throw new ApiClientError('not-found', 'No run awaiting debugger', { status: response.status });
     }
     if (response.status >= 400) {
       const body = await safeReadBodyExcerpt(response);

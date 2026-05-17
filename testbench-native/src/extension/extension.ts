@@ -119,6 +119,14 @@ class RunControllerRegistry implements vscode.Disposable {
     return this.stepPausedAt.has(controllerUri.toString());
   }
 
+  /** Where a step:awaiting yellow ▶ is currently parked for this
+   *  controller — `null` if no pause is in flight. Used by Phase 5
+   *  dispatch to decide whether F11 should request a tool-debugger
+   *  pause (when the parked line is a `[tool: ...]` invocation). */
+  stepPausedEntry(controllerUri: vscode.Uri): { uri: vscode.Uri; line: number } | null {
+    return this.stepPausedAt.get(controllerUri.toString()) ?? null;
+  }
+
   /** Phase 3.1.a — clear every step-paused yellow ▶ marker across all
    *  tracked controllers. Called on Stop so a step:awaiting on a skill
    *  file's URI doesn't linger after the user has cancelled the run.
@@ -248,6 +256,18 @@ class RunControllerRegistry implements vscode.Disposable {
           controller?.handleFrameScope(ev.frameId, ev.scope);
           break;
         }
+        case 'tool:awaiting-debugger': {
+          // Phase 5 — tool step-into. The server is parked at its
+          // cooperative `debugger;` waiting for us to attach VS Code's
+          // Node debugger. Hand off to the in-extension flow that
+          // resolves the inspector port from settings, calls
+          // `vscode.debug.startDebugging` with a Node attach config, and
+          // — once attached — POSTs the ack so the server can proceed.
+          const controller = this.controllers.get(uri.toString());
+          if (!controller) break;
+          void this.handleToolAwaitingDebugger(controller, ev);
+          break;
+        }
         case 'done':
           this.refreshRunningContext();
           // The per-controller revealedFrameUris is cleared by
@@ -338,6 +358,92 @@ class RunControllerRegistry implements vscode.Disposable {
       viewColumn: vscode.ViewColumn.Beside,
       selection: new vscode.Range(revealLine, 0, revealLine, 0),
     });
+  }
+
+  /**
+   * Phase 5 — handle a `tool:awaiting-debugger` event. The server is
+   * blocked at its cooperative pause point waiting for VS Code's Node
+   * debugger to attach. Steps:
+   *
+   *  1. Local-server check: tool step-into requires a Node inspector
+   *     reachable from this machine. Fail with a status-bar diagnostic
+   *     when the run is against a remote `SERVER_URL`.
+   *  2. Resolve the inspector port + host from settings (defaults
+   *     9229 / 127.0.0.1). If an attach is already in flight from a
+   *     previous tool in the same session we just reuse it.
+   *  3. `vscode.debug.startDebugging` with a Node attach config. When
+   *     the user already has a Node debug session attached (e.g. they
+   *     launched the server from VS Code's Run panel) startDebugging is
+   *     a no-op and we proceed.
+   *  4. Ack the server, which then hits `debugger;` and the inspector
+   *     traps execution inside the tool's `.ts` source.
+   *
+   * Errors at any step fall back to a "send the ack anyway" path so the
+   * run isn't left hanging — the user still ends up inside the tool
+   * (just without a debugger to drive it).
+   */
+  private async handleToolAwaitingDebugger(
+    controller: RunController,
+    ev: {
+      type: 'tool:awaiting-debugger';
+      toolName: string;
+      toolFilePath?: string;
+      line: number;
+    },
+  ): Promise<void> {
+    const ackAndExit = async (note?: string): Promise<void> => {
+      if (note) vscode.window.setStatusBarMessage(`TestBench: ${note}`, 3500);
+      await controller.ackToolDebugger();
+    };
+
+    if (!controller.isLocalServer()) {
+      await ackAndExit(
+        `Tool step-into requires a local server (SERVER_URL must be 127.0.0.1) — running "${ev.toolName}" without a debugger attached`,
+      );
+      return;
+    }
+
+    const cfg = vscode.workspace.getConfiguration('testbench-native');
+    const port = cfg.get<number>('inspectorPort', 9229);
+    const host = cfg.get<string>('inspectorHost', '127.0.0.1');
+
+    // If a Node debug session is already alive (the user attached
+    // manually, or a previous tool in this run attached), reuse it.
+    const alreadyAttached = vscode.debug.activeDebugSession?.type === 'node' ||
+      vscode.debug.activeDebugSession?.type === 'pwa-node';
+
+    if (!alreadyAttached) {
+      try {
+        const folder = controller.workspaceFolder;
+        const started = await vscode.debug.startDebugging(folder, {
+          type: 'pwa-node',
+          request: 'attach',
+          name: 'TestBench: tool step-into',
+          address: host,
+          port,
+          skipFiles: ['<node_internals>/**'],
+          sourceMaps: true,
+        });
+        if (!started) {
+          await ackAndExit(
+            `Couldn't attach Node debugger on ${host}:${port}. Launch the server with --inspect=${port} to enable tool step-into.`,
+          );
+          return;
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        await ackAndExit(`Debugger attach failed (${reason})`);
+        return;
+      }
+    }
+
+    if (ev.toolFilePath) {
+      vscode.window.setStatusBarMessage(
+        `TestBench: stepping into tool "${ev.toolName}" — use the Debug toolbar`,
+        4000,
+      );
+    }
+    await controller.ackToolDebugger();
   }
 
   /** Refresh the `testbench-native.running` context key from current state. Used
@@ -458,6 +564,9 @@ export interface TestBenchTestHooks {
    *  the `runningScope` layer alone wouldn't catch a render-side
    *  regression that bypassed maskIfSecret). */
   variablesViewItems: () => Array<{ name: string; description: string }>;
+  /** Test-only: is the running controller's run currently parked on a
+   *  step:awaiting (Phase 3 step-paused state)? */
+  isStepPaused: () => boolean;
 }
 
 export interface TestBenchExports {
@@ -634,6 +743,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       runningFrameStack: () => {
         const controller = registry.runningController();
         return controller ? [...controller.frameStack] : [];
+      },
+      isStepPaused: () => {
+        const controller = registry.runningController();
+        return controller ? registry.isStepPaused(controller.document.uri) : false;
       },
       runningScope: () => {
         const controller = registry.runningController();

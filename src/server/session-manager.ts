@@ -89,6 +89,15 @@ export interface StepRequest {
    */
   toolsDir?: string;
   /**
+   * One-shot pause-at-next-tool flag (Phase 5 — tool step-into). When
+   * true on the initial request body OR delivered via the run-control
+   * endpoint, the server emits `tool:awaiting-debugger` before the next
+   * `[tool: ...]` step and waits for the client to attach its debugger
+   * via the `tool-debugger-ack` endpoint. Consumed on first trigger;
+   * subsequent tools run normally until the flag is set again.
+   */
+  pauseAtNextTool?: boolean;
+  /**
    * Initial step-mode for this batch. `continue` (default) runs until the
    * next breakpoint or end. `into` / `over` / `out` start the run paused
    * between steps and emit `step:awaiting` events so the client can drive
@@ -143,7 +152,8 @@ export type RunEvent =
   | { type: 'frame:push'; frame: FrameInfo }
   | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
   | { type: 'frame:scope'; frameId: string; scope: Record<string, string> }
-  | { type: 'step:awaiting'; line: number; frame?: FrameInfo };
+  | { type: 'step:awaiting'; line: number; frame?: FrameInfo }
+  | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo };
 
 export type RunEventListener = (event: RunEvent) => void;
 
@@ -238,6 +248,23 @@ interface ManagedSession {
    * a stale handle can't outlive a single pause point.
    */
   pendingRunControl: { resolve: (mode: 'continue' | 'into' | 'over' | 'out') => void } | null;
+  /**
+   * Set while the step loop is paused at the tool-dispatcher's
+   * `debugger;` ack point (Phase 5). The HTTP `tool-debugger-ack`
+   * endpoint resolves the Promise the loop is awaiting; the loop then
+   * proceeds into the `debugger;` statement which Node's V8 inspector
+   * traps. Cleared as soon as resolved.
+   */
+  pendingDebuggerAck: { resolve: () => void } | null;
+  /**
+   * One-shot trigger: when true at the moment the step loop reaches a
+   * `[tool: ...]` step, the server emits `tool:awaiting-debugger` and
+   * parks on `pendingDebuggerAck` instead of running the tool. The flag
+   * is consumed on first trigger so the user gets exactly one tool
+   * step-into per F11 press. Set via the HTTP run-control body and via
+   * `pauseAtNextTool` on the initial steps request.
+   */
+  pauseAtNextTool: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +382,36 @@ export class SessionManager {
     const { resolve } = session.pendingRunControl;
     session.pendingRunControl = null;
     resolve(mode);
+    return true;
+  }
+
+  /**
+   * Pass-through to a session's mutable `pauseAtNextTool` flag. The HTTP
+   * `run-control` endpoint sets this on the same body that delivers a
+   * step-mode command — the next `[tool: ...]` step the loop reaches
+   * then emits `tool:awaiting-debugger` and parks on
+   * `pendingDebuggerAck` until the client attaches its debugger.
+   *
+   * Returns `true` when the session existed and the flag was set.
+   */
+  setPauseAtNextTool(sessionId: string, value: boolean): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    session.pauseAtNextTool = value;
+    return true;
+  }
+
+  /**
+   * Resolve the per-session debugger-ack wait. Returns `true` if a run
+   * was actually parked on the ack (so the HTTP handler can 200), `false`
+   * if no run is awaiting (handler returns 409).
+   */
+  submitDebuggerAck(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session?.pendingDebuggerAck) return false;
+    const { resolve } = session.pendingDebuggerAck;
+    session.pendingDebuggerAck = null;
+    resolve();
     return true;
   }
 
@@ -606,6 +663,8 @@ export class SessionManager {
       contextContent: context.combined,
       queueTail: Promise.resolve(),
       pendingRunControl: null,
+      pendingDebuggerAck: null,
+      pauseAtNextTool: false,
     };
 
     this.sessions.set(sessionId, session);
@@ -921,6 +980,13 @@ export class SessionManager {
     // awaits when paused.
     let currentMode: 'continue' | 'into' | 'over' | 'out' = request.stepMode ?? 'continue';
 
+    // Seed the one-shot tool-debugger pause flag from the initial request.
+    // The HTTP run-control endpoint can flip it back on mid-run; the step
+    // loop consumes it on the first `[tool: ...]` it reaches.
+    if (request.pauseAtNextTool) {
+      session.pauseAtNextTool = true;
+    }
+
     try {
       for (let i = 0; i < effectiveSteps.length; i++) {
         // Check abort BEFORE starting each step. We don't try to interrupt
@@ -1073,6 +1139,55 @@ export class SessionManager {
         let stepResult: StepResult;
         try {
           if (toolCall && toolCatalogue) {
+            // Tool step-into — Phase 5. When the session's one-shot
+            // pause-at-next-tool flag is set, surface a
+            // `tool:awaiting-debugger` event and wait for the client to
+            // attach VS Code's Node debugger before hitting the
+            // cooperative `debugger;` statement inside `executeToolStep`.
+            // The flag is consumed here so each F11 yields exactly one
+            // pause.
+            if (session.pauseAtNextTool && !signal?.aborted) {
+              session.pauseAtNextTool = false;
+              const registered = toolCatalogue.get(toolCall.name);
+              emit({
+                type: 'tool:awaiting-debugger',
+                toolName: toolCall.name,
+                ...(registered?.filePath && { toolFilePath: registered.filePath }),
+                line: sourceLineFor(i),
+                ...frameSpread,
+              });
+              // Park on the ack. If the run is aborted while we're
+              // parked, resolve immediately so the next-iteration abort
+              // check picks it up.
+              await new Promise<void>((resolve) => {
+                session.pendingDebuggerAck = { resolve };
+                if (signal?.aborted) {
+                  session.pendingDebuggerAck = null;
+                  resolve();
+                  return;
+                }
+                signal?.addEventListener(
+                  'abort',
+                  () => {
+                    if (session.pendingDebuggerAck?.resolve === resolve) {
+                      session.pendingDebuggerAck = null;
+                      resolve();
+                    }
+                  },
+                  { once: true },
+                );
+              });
+              // The Node debugger is attached now. Hit the cooperative
+              // pause point so the user lands inside the tool's source
+              // when their session resumes. The `debugger;` is a no-op
+              // when no inspector is attached, which is the failure
+              // mode the design's "without `--inspect`" path warns
+              // about — we surface that mismatch at the extension layer
+              // before getting here. See step-into-design.md §Tool
+              // step-into.
+              // eslint-disable-next-line no-debugger
+              debugger;
+            }
             const startedAt = Date.now();
             const outcome = await executeToolStep(toolCall, {
               page: session.browserSession.pageTracker.getActive(),
