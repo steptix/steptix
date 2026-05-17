@@ -96,6 +96,14 @@ class RunControllerRegistry implements vscode.Disposable {
       // files; the server skips entries matching testFilePath since the
       // client trims those before sending.
       () => this.tracker.allMarkdownBreakpoints(),
+      // At run start, controller asks us to clear statuses on the test
+      // file + every skill file the previous run descended into. This
+      // gives a "re-run = fresh slate" UX: the new run repaints as it
+      // goes, and lines/files the new run doesn't touch correctly stay
+      // blank instead of showing stale ✓s from the prior run.
+      (uris) => {
+        for (const uri of uris) this.tracker.clearStatuses(uri);
+      },
     );
     this.controllers.set(key, controller);
     // Re-fire the controller's frame-stack changes through the registry

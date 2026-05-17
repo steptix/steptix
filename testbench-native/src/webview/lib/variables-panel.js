@@ -26,6 +26,12 @@ const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
 const STEP_LINE_RE = /^\s*\d+\.\s+\S/;
 const INPUT_PATTERN = /\[input:\s*(\w+)\]/i;
 const OUTPUT_PATTERN = /\[output:\s*(\w+)\]/i;
+// `[skill: name ... out.foo="caller_alias"]` exposes `caller_alias` into
+// the caller's scope. Authors reference it later via `{{caller_alias}}`
+// but never declare it under `## Parameters` — without surfacing it from
+// the invocation line, the Variables panel would silently omit a value
+// that's both captured (via `capture` events) and used downstream.
+const SKILL_OUT_ALIAS_RE = /\bout\.\w+\s*=\s*"([^"]+)"/g;
 
 export function collectVariables(text, parameterValues, runtimeValues) {
   const params = parameterValues || {};
@@ -71,6 +77,24 @@ export function collectVariables(text, parameterValues, runtimeValues) {
         value: runtime[outputMatch[1]],
       });
       seen.add(outputMatch[1]);
+    }
+    // `[skill: foo out.x="alias"]` — surface every caller alias.
+    // Same semantic as a step-level [output:] from the caller's
+    // perspective: the skill captures `x` and exposes it back as
+    // `alias` in the caller's scope.
+    SKILL_OUT_ALIAS_RE.lastIndex = 0;
+    let aliasMatch;
+    while ((aliasMatch = SKILL_OUT_ALIAS_RE.exec(raw)) !== null) {
+      const aliasName = aliasMatch[1];
+      if (!seen.has(aliasName)) {
+        out.push({
+          name: aliasName,
+          source: "output",
+          line: i + 1,
+          value: runtime[aliasName],
+        });
+        seen.add(aliasName);
+      }
     }
   }
 

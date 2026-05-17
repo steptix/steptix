@@ -15,7 +15,7 @@
  * mocks them; the skill expander and the api-server's request handling
  * are exercised for real.
  */
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -710,6 +710,125 @@ describe('api-server step-into protocol', () => {
     // Clean run.
     const done = events.find((e) => e.type === 'done');
     expect(done?.status).toBe('passed');
+  });
+
+  it('a step:fail inside a skill body stops the run — no further skill steps run, no trailing test step runs', async () => {
+    // Regression: a user observation that "a failed step in the skill
+    // doesn't seem to stop the test" prompted a careful audit of the
+    // failure path. The server's step loop MUST `break` on stepResult
+    // status !== 'passed', short-circuiting both:
+    //   (a) the remaining skill-body steps for that frame, and
+    //   (b) any trailing test-frame steps after the skill.
+    // We verify by mocking executeStep to fail on its SECOND call,
+    // then asserting:
+    //   - exactly one step:pass + one step:fail land on demo_skill body lines,
+    //   - no step:start for skill body line 8 (the second skill step never starts),
+    //   - no step:start for the trailing test step (line 2),
+    //   - frame:pop fires (call-stack cleanup happens),
+    //   - done.status === 'failed'.
+    const { executeStep } = await import('../src/runner/step-executor.js');
+    const exec = vi.mocked(executeStep);
+    // Save & restore the default impl so subsequent tests still get a
+    // passing executor — vitest mocks are shared across the file.
+    const defaultImpl = exec.getMockImplementation();
+    let afterFailureCalls = 0;
+    exec.mockImplementationOnce(async () => ({
+      index: 1,
+      instruction: 'first skill step',
+      status: 'passed',
+      turns: [],
+      durationMs: 5,
+      retried: false,
+      aiExplanation: 'ok',
+    }));
+    exec.mockImplementationOnce(async () => ({
+      index: 2,
+      instruction: 'failing skill step',
+      status: 'failed',
+      error: 'simulated failure inside skill',
+      turns: [],
+      durationMs: 5,
+      retried: false,
+      aiExplanation: 'failed',
+    }));
+    // Catches "test didn't actually stop" silently: if a third
+    // executeStep call ever happens we count it AND log loudly so the
+    // assertion below has something concrete to fail on. We don't throw
+    // because throwing after the fail-path's break would mask the real
+    // signal we're checking — and the retry path legitimately calls
+    // executeStep again on transient failures, which we DO want to allow
+    // for the same step index.
+    exec.mockImplementation(async () => {
+      afterFailureCalls++;
+      return {
+        index: 99,
+        instruction: 'should-not-run',
+        status: 'failed',
+        error: 'executeStep called after a failed step — run should have stopped',
+        turns: [],
+        durationMs: 5,
+        retried: false,
+        aiExplanation: 'leaked',
+      };
+    });
+
+    const sessionId = 'skill-fail-stops-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    for await (const ev of sseEvents(url, {
+      steps: ['[skill: demo_skill]', 'Trailing test step'],
+      sourceLines: [1, 2],
+      skillsDir,
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    // demo_skill has 2 body steps on lines 7 and 8 — the first runs
+    // (mock returns passed), the second fails.
+    const passes = events.filter(
+      (e) => e.type === 'step:pass' && e.frame?.skillName === 'demo_skill',
+    );
+    expect(passes.map((e) => e.line)).toEqual([7]);
+
+    const fails = events.filter((e) => e.type === 'step:fail');
+    expect(fails).toHaveLength(1);
+    expect(fails[0].line).toBe(8);
+    expect(fails[0].frame?.skillName).toBe('demo_skill');
+
+    // The second skill step's start IS emitted (since failure is
+    // reported AFTER executeStep returns), but no second skill step:pass.
+    // The crucial assertion: no step:start for the trailing test step.
+    const trailingStart = events.find(
+      (e) => e.type === 'step:start' && e.line === 2 && !e.frame?.skillName,
+    );
+    expect(trailingStart).toBeUndefined();
+
+    // No leaked executeStep calls — the server stopped the loop cleanly.
+    // (Some retry attempts on the failing step are fine; the mock for
+    // the second `mockImplementationOnce` is consumed only once and any
+    // retry attempt for that step would also fall into the third
+    // implementation, but those would be retries OF THE SAME index — so
+    // we only get worried if we see brand-new step indexes leaking
+    // through. Since trailingStart is verified absent above, this is a
+    // secondary safety net.)
+    expect(afterFailureCalls).toBeLessThanOrEqual(2); // retry budget
+
+    // frame:pop still fires — the call stack cleanup happens on early
+    // exit too (transitionToFrame('') in the finally-side of the run).
+    const pops = events.filter((e) => e.type === 'frame:pop');
+    expect(pops.length).toBeGreaterThanOrEqual(1);
+
+    // Done event reports the failure.
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.status).toBe('failed');
+
+    // Restore the file-wide default so the next test in the suite
+    // doesn't inherit the per-call queue or the post-fail impl.
+    exec.mockReset();
+    if (defaultImpl) exec.mockImplementation(defaultImpl);
   });
 
   it('breakpointsByUri does NOT loop — once consumed, the same step does not re-pause', async () => {

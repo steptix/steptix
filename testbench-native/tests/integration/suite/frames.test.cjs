@@ -307,6 +307,78 @@ describe('TestBench frame events (Phase 2)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('re-run after a successful run clears stale statuses on test file AND skill files', async () => {
+    // User-reported regression: "if a step fails in the skill, it
+    // doesn't seem to stop the test." Root cause turned out to be
+    // stale statuses — a successful prior run left ✓ on every line,
+    // and the failing re-run only repainted the lines it actually
+    // touched. The trailing test step still showed ✓ from the prior
+    // run, so the user reasonably interpreted that as "the test
+    // continued past the skill failure."
+    //
+    // Fix: at run start, clear statuses on the test file and every
+    // skill file the previous run descended into. This regression test
+    // simulates the exact scenario: prime statuses on both files, kick
+    // off a new run, and assert both files are blank again before any
+    // new events arrive.
+    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 9,
+      skillName: 'fake_skill',
+    };
+
+    // ── Successful prior run: paint pass on test + skill lines ──
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 5, frame });
+    fake.push({ type: 'step:pass', line: 5, frame });
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    await waitFor(
+      'test line 9 pass after first run',
+      () => Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'pass',
+    );
+    await waitFor(
+      'skill line 5 pass after first run',
+      () => {
+        const snap = hooks.tracker.snapshotFor(skillUri);
+        const statuses = snap ? Object.fromEntries(snap.statuses) : {};
+        return statuses[5] === 'pass';
+      },
+    );
+    fake.end();
+    await waitFor('idle after first run', () => !hooks.isRunning());
+
+    // ── Re-run: at run start, BOTH files' statuses must clear ──
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('second stream active', () => fake.hasActiveStream);
+
+    // The clear happens synchronously inside runLines BEFORE any
+    // events flow back. So by the time the stream is active, the
+    // statuses must already be gone.
+    const testStatusesAfterClear = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(
+      testStatusesAfterClear[9],
+      undefined,
+      'test-file [skill:] line must be cleared at run start',
+    );
+    const skillSnap = hooks.tracker.snapshotFor(skillUri);
+    const skillStatusesAfterClear = skillSnap ? Object.fromEntries(skillSnap.statuses) : {};
+    assert.equal(
+      skillStatusesAfterClear[5],
+      undefined,
+      'skill-file body line must be cleared at run start',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('breakpoint pause inside a skill: after Continue, frame:pop still paints [skill:] line pass', async () => {
     // Regression for the user-reported bug: skill-demo.md has step 1
     // as `[skill: duckduckgo_search ...]`; a breakpoint sits inside

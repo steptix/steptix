@@ -164,6 +164,16 @@ export class RunController {
      * tracker; tests pass a fixed map or omit entirely.
      */
     private readonly breakpointsByUriProvider?: () => Record<string, number[]>,
+    /**
+     * Optional sink for clearing tracker statuses on a list of URIs at
+     * the start of every run. Without this, statuses from a prior run
+     * persist on lines that the new run never reaches — most visible
+     * when a skill failure short-circuits the test: the trailing test
+     * step's old `pass` tick stays painted even though it didn't
+     * execute, which reads as "the test continued past the failure."
+     * The registry passes a closure over its tracker; tests can omit.
+     */
+    private readonly clearStatusesForUris?: (uris: vscode.Uri[]) => void,
   ) {}
 
   get isRunning(): boolean {
@@ -513,10 +523,31 @@ export class RunController {
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
 
+    // Snapshot the previous run's skill-file URIs BEFORE resetFrameState
+    // wipes them — we want to clear those files' statuses too. Without
+    // this, a re-run after a successful run leaves the old skill-body
+    // ✓/✗ marks on the skill file, masking which steps actually ran
+    // this time (and making a failure-short-circuit scenario look like
+    // "test continued past the failure").
+    const previousTouchedSkillUris = [...this.revealedFrameUris];
+
     // Wipe any frame state from a previous run so the Call Stack view starts
     // empty. Pause/resume mid-skill is a Phase 3 concern; in Phase 2 the
     // stack is always empty at the entry to a run.
     this.resetFrameState();
+
+    // Clear test-file statuses AND every skill file the previous run
+    // descended into. The new run will repaint as it goes; anything
+    // that doesn't run this time stays blank, which matches user intent
+    // ("re-run = fresh slate") and prevents stale ✓s from making a
+    // short-circuited run look like it continued.
+    if (this.clearStatusesForUris) {
+      const uris: vscode.Uri[] = [this.document.uri];
+      for (const fsPath of previousTouchedSkillUris) {
+        uris.push(vscode.Uri.file(fsPath));
+      }
+      this.clearStatusesForUris(uris);
+    }
 
     // First run on this controller? Close any session the server may still
     // be holding from a previous VS Code session — see staleSessionCleared
