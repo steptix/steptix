@@ -44,6 +44,22 @@ export interface ExpandedFrame {
   uri: string;
   invocationLine: number | null;
   skillName?: string;
+  /**
+   * Resolved input parameter values for this skill invocation, keyed
+   * by the parameter name as declared in the skill's `## Parameters`.
+   * Captured at expansion time from the caller's `call.args`. The
+   * server includes these in the `frame:scope` payload emitted on
+   * `frame:push` so the Variables view can show "what was passed in"
+   * when execution pauses at a breakpoint inside the skill — even
+   * before the first step has run. Absent for the test (root) frame.
+   *
+   * The expander already INTERPOLATES these values directly into the
+   * skill body's step text at expansion time (so the runner never
+   * sees `{{query}}`), which is why they don't otherwise show up in
+   * `resolvedParameters` for the run. This snapshot is the only way
+   * a debugger pause inside the skill can surface them.
+   */
+  inputs?: Record<string, string>;
 }
 
 /**
@@ -224,6 +240,13 @@ async function expandRecursive(
       uri: skill.filePath,
       invocationLine: stepLines?.[i] ?? null,
       skillName: call.name,
+      // Snapshot the caller-supplied parameter values so a debugger
+      // pause at the skill's first step (or any step before the
+      // skill captures something into the scope) can show what was
+      // passed in. The values are also interpolated directly into
+      // the skill body's step text (see `applySkillScope`), but
+      // that interpolation isn't reversible from the runtime side.
+      inputs: { ...call.args },
     };
 
     // Outermost-skill attribution: keep the first skill we entered as the

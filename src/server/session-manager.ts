@@ -716,6 +716,10 @@ export class SessionManager {
     let effectiveSourceLines: number[] | undefined = request.sourceLines;
     let expansionOrigins: ExpandedStepOrigin[] | null = null;
     let expansionFrames: Record<string, FrameInfo> | null = null;
+    // Per-skill-frame snapshot of the caller-supplied parameter values
+    // recorded by the expander. Merged into `frame:scope` on entry so
+    // a debugger pause inside the skill shows what was passed in.
+    const frameInputs: Record<string, Record<string, string>> = {};
 
     // Map a 1-based step index to the source-document line. When the client
     // doesn't supply sourceLines we echo the step index — some clients (e.g.
@@ -873,6 +877,14 @@ export class SessionManager {
             line: f.invocationLine ?? 0,
             ...(f.skillName !== undefined && { skillName: f.skillName }),
           };
+          // Parallel input map kept server-side only (not part of the
+          // wire FrameInfo). Merged into the `frame:scope` payload on
+          // `frame:push` so a debugger pause inside the skill can see
+          // the caller-supplied parameter values, which would
+          // otherwise be invisible because the expander inlines them
+          // directly into the step text rather than into the
+          // resolvedParameters map.
+          if (f.inputs) frameInputs[id] = { ...f.inputs };
         }
         // Re-derive sourceLines: skill-body steps point at the skill file's
         // own line; inline steps keep their original test-file line. Without
@@ -952,6 +964,11 @@ export class SessionManager {
       // caller passed in. Without this scope-on-entry emit, the
       // Variables view stays empty until a step inside the frame
       // passes/fails, which is too late for a debugger pause point.
+      //
+      // Merge order matters: `frameInputs[f.id]` (the caller's
+      // resolved arg values) overlays `resolvedParameters` so the
+      // skill's declared param names take precedence over any same-
+      // named entries that may already exist in the test scope.
       while (activeFrames.length < desired.length) {
         const nextId = desired[activeFrames.length]!;
         const f = expansionFrames[nextId];
@@ -961,7 +978,7 @@ export class SessionManager {
         emit({
           type: 'frame:scope',
           frameId: f.id,
-          scope: { ...resolvedParameters },
+          scope: { ...resolvedParameters, ...(frameInputs[f.id] ?? {}) },
         });
       }
     };
@@ -1500,10 +1517,17 @@ export class SessionManager {
           // (reverse-rename resolution + skill-private vars only) is
           // tracked as Phase 4.B follow-up; the user gets visibility
           // into the actual runtime state in the meantime.
+          //
+          // Frame inputs (recorded at expansion time from the caller's
+          // `[skill: foo X=...]` args) overlay resolvedParameters so
+          // declared parameters stay visible across the frame's
+          // lifetime — without this, they'd vanish after step 1 because
+          // the expander inlines them into step text rather than into
+          // the live scope map.
           emit({
             type: 'frame:scope',
             frameId: stepFrameId,
-            scope: { ...resolvedParameters },
+            scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
           });
 
           // ── Step-mode pause decision ────────────────────────────────
@@ -1577,10 +1601,11 @@ export class SessionManager {
           // Phase 4 — surface the scope at failure time too. The user
           // wants to see "what were the variables when this step blew
           // up." Same flat shape as the pass-path emission above.
+          // Same frameInputs overlay rationale (see above).
           emit({
             type: 'frame:scope',
             frameId: stepFrameId,
-            scope: { ...resolvedParameters },
+            scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
           });
           break;
         }

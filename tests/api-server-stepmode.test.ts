@@ -148,6 +148,26 @@ type: skill
 2. Second skill step
 `,
   );
+  // A second skill that declares a parameter — needed for the
+  // scope-shows-inputs regression test. The expander INLINES the
+  // value into the step text at expansion time, so without the
+  // frameInputs side-channel the value would never appear in the
+  // runtime scope.
+  await fs.writeFile(
+    path.join(skillsDir, 'parameterized_skill.md'),
+    `---
+type: skill
+---
+# parameterized_skill
+
+## Parameters
+- query: the search term
+
+## Steps
+1. First step using {{query}}
+2. Second step also using {{query}}
+`,
+  );
   testFilePath = path.join(skillsDir, 'fake-test.md');
 });
 
@@ -472,6 +492,52 @@ describe('api-server step-into protocol', () => {
     // And it must follow IMMEDIATELY after push (no other events
     // between — the entry-time snapshot is the contract).
     expect(skillScopeIdx).toBe(pushIdx + 1);
+  });
+
+  it('skill input parameters are visible in the frame:scope on entry (and stay visible across steps)', async () => {
+    // The bug this fixes: the expander INLINES the caller's parameter
+    // values directly into the skill body's step text at expansion
+    // time. They never reach `resolvedParameters`, so a debugger pause
+    // inside the skill saw an empty Variables view — "the param
+    // doesn't look like it's being passed in." Fix: the expander
+    // records `call.args` on the `ExpandedFrame.inputs` field; the
+    // server merges that into the `frame:scope` payload on entry AND
+    // on every subsequent step:pass / step:fail emit inside the
+    // frame, so the param stays visible for the whole frame lifetime.
+    const sessionId = 'skill-inputs-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    for await (const ev of sseEvents(url, {
+      steps: ['[skill: parameterized_skill query="OpenAI GPT-5"]'],
+      sourceLines: [1],
+      skillsDir,
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    // The frame:scope event emitted right after the skill's
+    // frame:push MUST contain query="OpenAI GPT-5".
+    const pushIdx = events.findIndex((e) => e.type === 'frame:push');
+    expect(pushIdx).toBeGreaterThan(-1);
+    const pushedFrameId = events[pushIdx].frame.id;
+    const entryScope = events[pushIdx + 1];
+    expect(entryScope?.type).toBe('frame:scope');
+    expect(entryScope?.frameId).toBe(pushedFrameId);
+    expect(entryScope?.scope?.query).toBe('OpenAI GPT-5');
+
+    // And query must STILL be present in every later frame:scope
+    // event for this frame (i.e. after each step:pass), so the
+    // Variables view doesn't wipe the param between steps.
+    const skillScopes = events.filter(
+      (e) => e.type === 'frame:scope' && e.frameId === pushedFrameId,
+    );
+    expect(skillScopes.length).toBeGreaterThanOrEqual(2);
+    for (const s of skillScopes) {
+      expect(s.scope.query).toBe('OpenAI GPT-5');
+    }
   });
 
   it('breakpointsByUri pauses execution before the matching skill-body step', async () => {
