@@ -318,7 +318,9 @@ describe('api-server step-into protocol', () => {
     const scopes = events.filter((e) => e.type === 'frame:scope');
     const passes = events.filter((e) => e.type === 'step:pass');
     expect(passes.length).toBe(2);
-    expect(scopes.length).toBe(2);
+    // 3 frame:scope events: 1 initial (at run start, so a paused-at-step-1
+    // breakpoint can see scope), then 1 after each step:pass.
+    expect(scopes.length).toBe(3);
     for (const ev of scopes) {
       expect(ev.frameId).toBe('');
       expect(typeof ev.scope).toBe('object');
@@ -427,6 +429,50 @@ describe('api-server step-into protocol', () => {
   // step list. The fix moves breakpoint checking to the server for
   // non-test-file URIs.
   // ─────────────────────────────────────────────────────────────────
+
+  it('frame:scope fires immediately after frame:push (scope visible at skill entry)', async () => {
+    // Bug fix: when paused at a breakpoint on the FIRST step of a
+    // skill, the Variables view was empty because frame:scope only
+    // fired after step:pass/fail. Now frame:scope is emitted right
+    // after frame:push so the entry-time scope (including the input
+    // parameters the expander injected) is observable from the
+    // moment the descent begins.
+    const sessionId = 'scope-on-push-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    for await (const ev of sseEvents(url, {
+      steps: ['[skill: demo_skill]'],
+      sourceLines: [1],
+      skillsDir,
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    // Find the first frame:push and the first frame:scope that follows
+    // it carrying that frame's id. The scope event MUST come BEFORE
+    // any step:pass inside the skill body — that's the contract.
+    const pushIdx = events.findIndex((e) => e.type === 'frame:push');
+    expect(pushIdx).toBeGreaterThan(-1);
+    const pushedFrameId = events[pushIdx].frame.id;
+
+    const firstSkillPassIdx = events.findIndex(
+      (e, i) => i > pushIdx && e.type === 'step:pass',
+    );
+    const skillScopeIdx = events.findIndex(
+      (e, i) =>
+        i > pushIdx &&
+        e.type === 'frame:scope' &&
+        e.frameId === pushedFrameId,
+    );
+    expect(skillScopeIdx).toBeGreaterThan(-1);
+    expect(skillScopeIdx).toBeLessThan(firstSkillPassIdx);
+    // And it must follow IMMEDIATELY after push (no other events
+    // between — the entry-time snapshot is the contract).
+    expect(skillScopeIdx).toBe(pushIdx + 1);
+  });
 
   it('breakpointsByUri pauses execution before the matching skill-body step', async () => {
     const sessionId = 'skill-bp-pause-' + Date.now();

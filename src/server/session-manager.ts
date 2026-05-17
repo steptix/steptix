@@ -944,13 +944,25 @@ export class SessionManager {
         const popped = activeFrames.pop()!;
         emit({ type: 'frame:pop', frameId: popped, outputs: {} });
       }
-      // Push the remainder.
+      // Push the remainder. Each push is paired with a `frame:scope`
+      // snapshot so a client that pauses BEFORE the first step in the
+      // new frame (e.g. via a skill-file breakpoint) can still see
+      // the variables the expander has placed into resolvedParameters
+      // for that frame — most importantly, the input parameters the
+      // caller passed in. Without this scope-on-entry emit, the
+      // Variables view stays empty until a step inside the frame
+      // passes/fails, which is too late for a debugger pause point.
       while (activeFrames.length < desired.length) {
         const nextId = desired[activeFrames.length]!;
         const f = expansionFrames[nextId];
         if (!f) break;
         activeFrames.push(nextId);
         emit({ type: 'frame:push', frame: f });
+        emit({
+          type: 'frame:scope',
+          frameId: f.id,
+          scope: { ...resolvedParameters },
+        });
       }
     };
     const frameInfoFor = (i: number): FrameInfo | undefined => {
@@ -1013,6 +1025,19 @@ export class SessionManager {
         breakpointSetsByUri.set(uri, new Set(lines));
       }
     }
+    // Initial scope for the test (root) frame. Same rationale as the
+    // scope-on-frame-push emit in `transitionToFrame`: a client that
+    // pauses BEFORE the first step (e.g. via a breakpoint trim on
+    // step 1, or stepMode='into' with run-control before the first
+    // execution) needs to see the test's resolved parameters from
+    // the start. Without this, the Variables view stays empty until
+    // step 1 passes, which is too late for the debugger UX.
+    emit({
+      type: 'frame:scope',
+      frameId: '',
+      scope: { ...resolvedParameters },
+    });
+
     // Step indexes that have already had their breakpoint pause consumed
     // in this batch. Without this, the loop would re-pause forever on
     // the same step after a Continue.
