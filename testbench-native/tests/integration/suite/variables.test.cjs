@@ -269,6 +269,123 @@ describe('TestBench Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('skill input parameter remains visible across Step Over commands at every breakpoint', async () => {
+    // Variant of the previous test that exercises the ACTUAL Step
+    // Over command at each pause boundary — not just synthetic event
+    // pushes that mimic what Continue would produce. Catches a
+    // regression where the variable IS preserved across Continue
+    // boundaries but NOT across stepOver, or vice versa, or where the
+    // stepOver command itself fails to dispatch the right mode.
+    //
+    // At each step:awaiting: assert query is visible, then call
+    // testbench-native.stepOver, then verify the fake recorded a
+    // runControl('over') AND query is STILL visible after the next
+    // frame:scope arrives.
+
+    const skillUri = fixtureUri('fake-skill.md');
+    const skillPath = skillUri.fsPath;
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 8,
+      skillName: 'fake_skill',
+    };
+
+    await vscode.commands.executeCommand('testbench-native.runner.focus');
+    await waitFor(
+      'webview mounted',
+      () => hooks.webviewStateUpdateCount() > 0,
+      8_000,
+    );
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    await vscode.commands.executeCommand('vscode.open', skillUri);
+    await waitFor(
+      'skill is active',
+      () => hooks.tracker.snapshot().filePath === skillPath,
+    );
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'OpenAI GPT-5' },
+    });
+
+    const waitForQuery = (expected, label) =>
+      waitFor(
+        `webview runtimeVariables.query === "${expected}" (${label})`,
+        () => hooks.webviewRuntimeVariables().query === expected,
+        4_000,
+      );
+
+    // Pause 1 — assert visible, then Step Over
+    fake.push({ type: 'step:awaiting', line: 8, frame });
+    await waitForQuery('OpenAI GPT-5', 'pause #1 before stepOver');
+    await waitFor(
+      'stepPaused context set',
+      () => hooks.isStepPaused(),
+      4_000,
+    );
+
+    const overBefore = fake.runControlCalls.filter((c) => c.mode === 'over').length;
+    await vscode.commands.executeCommand('testbench-native.stepOver');
+    await waitFor(
+      'stepOver dispatched runControl(over)',
+      () => fake.runControlCalls.filter((c) => c.mode === 'over').length === overBefore + 1,
+      4_000,
+    );
+
+    // Server runs step 1 in response to 'over', then re-pauses before step 2.
+    // Mirror the exact events the server emits in that sequence.
+    fake.push({ type: 'step:start', line: 8, frame });
+    fake.push({ type: 'step:pass', line: 8, frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'OpenAI GPT-5' },
+    });
+    fake.push({ type: 'step:awaiting', line: 9, frame });
+
+    // Pause 2 — STILL visible after one Step Over.
+    await waitForQuery('OpenAI GPT-5', 'pause #2 after first stepOver');
+
+    // Another Step Over.
+    const overBefore2 = fake.runControlCalls.filter((c) => c.mode === 'over').length;
+    await vscode.commands.executeCommand('testbench-native.stepOver');
+    await waitFor(
+      'stepOver #2 dispatched',
+      () => fake.runControlCalls.filter((c) => c.mode === 'over').length === overBefore2 + 1,
+      4_000,
+    );
+
+    fake.push({ type: 'step:start', line: 9, frame });
+    fake.push({ type: 'step:pass', line: 9, frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'OpenAI GPT-5' },
+    });
+    fake.push({ type: 'step:awaiting', line: 10, frame });
+
+    // Pause 3 — STILL visible after two Step Overs.
+    await waitForQuery('OpenAI GPT-5', 'pause #3 after two stepOvers');
+
+    // Final sanity — description text never bled through at any pause.
+    assert.notEqual(
+      hooks.webviewRuntimeVariables().query,
+      'the search term to enter',
+      'webview must never show the description fallback once frame:scope provided the real value',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('skill input parameters arrive in the Variables view at a breakpoint pause', async () => {
     // Phase 5 follow-up — end-to-end proof for the
     // skill-inputs-in-frame-scope fix. Mimics what the server does

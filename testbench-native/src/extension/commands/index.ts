@@ -7,6 +7,10 @@ import { getOutputChannel } from '../output-channel.js';
 
 interface Registry {
   active(): RunController | undefined;
+  /** The currently-running controller, if any. Prefer this over
+   *  `active()` for step commands when a run is in flight — see
+   *  `dispatchStep` for the routing rule. */
+  runningController(): RunController | undefined;
   refreshRunningContext(): void;
   notifyRunning(running: boolean): void;
   /** Phase 3.1 — drop step-paused yellow ▶ markers across every URI
@@ -125,7 +129,11 @@ export function registerCommands(
     // alias for any user keybindings + existing integration tests
     // that call it by name.
     vscode.commands.registerCommand('testbench-native.continueRun', async () => {
-      const controller = registry.active();
+      // Same routing rule as `dispatchStep`: prefer the running
+      // controller so Continue from a side-by-side skill file
+      // advances the outer run instead of trying to relaunch the
+      // skill file as a new test.
+      const controller = registry.runningController() ?? registry.active();
       const editor = tracker.activeEditor;
       if (!controller || !editor) return notifyNoActive();
 
@@ -331,7 +339,16 @@ async function dispatchStep(
   registry: Registry,
   tracker: ActiveFileTracker,
 ): Promise<void> {
-  const controller = registry.active();
+  // Prefer the running controller over the active-editor controller
+  // when a run is in flight. Without this, if the user has clicked
+  // onto a side-by-side skill file (auto-revealed when the run paused
+  // inside the skill), `registry.active()` returns the SKILL file's
+  // controller — which has never run — so Step Over / Step Into try
+  // to launch a NEW run on the skill file instead of advancing the
+  // already-running outer test. When no run is in flight, fall back
+  // to the active-editor controller so the "from idle" path (F11
+  // starts a fresh stepping run) keeps working.
+  const controller = registry.runningController() ?? registry.active();
   const editor = tracker.activeEditor;
   if (!controller || !editor) return notifyNoActive();
 
