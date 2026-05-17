@@ -450,6 +450,14 @@ export interface TestBenchTestHooks {
    *  assert that frame:scope events flow from server → controller →
    *  Variables view. */
   runningScope: () => Record<string, string>;
+  /** Render the Variables view's children as { name, description }
+   *  pairs. The `description` is what the view actually shows — for
+   *  secret-named variables it's the masked form via runner-core's
+   *  `maskIfSecret`. Used by Phase 4.1 tests to assert the view's
+   *  render path actually applies masking (the integration tests at
+   *  the `runningScope` layer alone wouldn't catch a render-side
+   *  regression that bypassed maskIfSecret). */
+  variablesViewItems: () => Array<{ name: string; description: string }>;
 }
 
 export interface TestBenchExports {
@@ -496,6 +504,20 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   // current-scope renderer; per-frame click-to-select is Phase 4.B.
   const variablesProvider = new VariablesTreeProvider({
     currentScope: () => registry.runningController()?.currentScope() ?? {},
+    // The "current frame" the view is rendering is the controller's top
+    // frame, or the test (root) frame when no skill is active. Used by
+    // the view to (a) update its title to "Variables (skill: name)" /
+    // "Variables (test)" and (b) decide whether to hide
+    // skill-internal `__skillN_x` names from the rendered list.
+    currentFrame: () => {
+      const controller = registry.runningController();
+      if (!controller) return null;
+      const top = controller.frameStack[controller.frameStack.length - 1];
+      if (!top) return { id: '' };
+      return top.skillName !== undefined
+        ? { id: top.id, skillName: top.skillName }
+        : { id: top.id };
+    },
   });
   const variablesScopeSub = registry.onAnyScopeChange(() =>
     variablesProvider.refresh(),
@@ -503,6 +525,14 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   const variablesFrameSub = registry.onAnyFrameStackChange(() =>
     variablesProvider.refresh(),
   );
+  // Use createTreeView (not registerTreeDataProvider) so we can drive
+  // the title/description from the active frame. The provider keeps a
+  // handle so refresh() can update it.
+  const variablesView = vscode.window.createTreeView(
+    'testbench-native.variables',
+    { treeDataProvider: variablesProvider },
+  );
+  variablesProvider.attachView(variablesView);
 
   // "Detach to editor" command. Spawns a webview panel in the editor area
   // wired to the same broadcaster as the sidebar — once the panel is a
@@ -538,7 +568,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     }),
     vscode.window.registerTreeDataProvider('testbench-native.callStack', callStackProvider),
     callStackProvider,
-    vscode.window.registerTreeDataProvider('testbench-native.variables', variablesProvider),
+    // Variables view registered via createTreeView (above) so the view
+    // handle can drive title/description per active frame. The
+    // TreeView itself is disposable so it goes into subscriptions too.
+    variablesView,
     variablesProvider,
     variablesScopeSub,
     variablesFrameSub,
@@ -605,6 +638,19 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       runningScope: () => {
         const controller = registry.runningController();
         return controller ? { ...controller.currentScope() } : {};
+      },
+      variablesViewItems: () => {
+        const nodes = variablesProvider.getChildren();
+        return nodes.map((node) => {
+          const item = variablesProvider.getTreeItem(node);
+          // TreeItem.label is the string we supply; description is the
+          // string the view renders after it (the value, masked when
+          // secret-named).
+          return {
+            name: typeof item.label === 'string' ? item.label : node.name,
+            description: typeof item.description === 'string' ? item.description : '',
+          };
+        });
       },
     },
   };

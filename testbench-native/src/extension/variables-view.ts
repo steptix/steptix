@@ -20,7 +20,22 @@ import { maskIfSecret } from 'ai-ui-automation-runner-core';
 export interface ScopeSource {
   /** Current scope to render, or empty when no run is in flight. */
   currentScope(): Record<string, string>;
+  /**
+   * Identity of the frame whose scope is being rendered. Lets the view
+   * distinguish the test (root) frame — where skill-internal `__skillN_x`
+   * names are noise from previous descents and should be hidden — from
+   * a skill frame where those names are the actual locals.
+   *
+   * `null` when no run is in flight. The empty string is the test
+   * (root) frame; any other value is a skill frame's id, with
+   * `skillName` carrying a human-readable label for the view title.
+   */
+  currentFrame(): { id: string; skillName?: string } | null;
 }
+
+/** Matches the expander's per-instance internal-variable rename scheme.
+ *  See src/skills/expander.ts `applySkillScope` → `internalRenames`. */
+const SKILL_INTERNAL_PREFIX = /^__skill\d+_/;
 
 interface VariableNode {
   name: string;
@@ -30,8 +45,23 @@ interface VariableNode {
 export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNode> {
   private readonly emitter = new vscode.EventEmitter<VariableNode | undefined | null | void>();
   readonly onDidChangeTreeData = this.emitter.event;
+  /**
+   * View handle from `createTreeView` so the title/description can be
+   * updated as the active frame changes. Optional — supplied via
+   * `attachView` after construction, since the constructor needs to
+   * exist before VS Code can create the TreeView around it.
+   */
+  private view: vscode.TreeView<VariableNode> | null = null;
 
   constructor(private readonly source: ScopeSource) {}
+
+  /** Wire up a TreeView handle so frame transitions can update the
+   *  view title ("Variables (skill: name)"). Optional — without it, the
+   *  static `package.json` "Variables" title stays. */
+  attachView(view: vscode.TreeView<VariableNode>): void {
+    this.view = view;
+    this.updateTitle();
+  }
 
   dispose(): void {
     this.emitter.dispose();
@@ -42,6 +72,7 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
    *  a re-render, so the caller multiplexes them through this. */
   refresh(): void {
     this.emitter.fire();
+    this.updateTitle();
   }
 
   getTreeItem(node: VariableNode): vscode.TreeItem {
@@ -60,11 +91,40 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
   getChildren(node?: VariableNode): VariableNode[] {
     if (node) return [];
     const scope = this.source.currentScope();
-    // Sort alphabetically so updates don't reorder the visible list
-    // when a single variable changes. Skill-internal names
-    // (`__skillN_x`) bubble to the top because of the underscore — not
-    // ideal, but acceptable until Phase 4.B filters them per frame.
-    const names = Object.keys(scope).sort();
+    const frame = this.source.currentFrame();
+    // Phase 4.1.b: when rendering the test (root) frame's scope, hide
+    // skill-internal names (`__skillN_x`). They survive in
+    // `resolvedParameters` after a skill exits — the expander never
+    // garbage-collects them — and would otherwise clutter the test view
+    // with names the user never wrote. Inside a skill frame the same
+    // names ARE the user's locals (just rewritten for namespacing) so
+    // they're shown there. Phase 4.B will replace this with a real
+    // per-frame filter that reverse-resolves the renames.
+    const isTestFrame = !frame || frame.id === '';
+    const names = Object.keys(scope)
+      .filter((name) => !isTestFrame || !SKILL_INTERNAL_PREFIX.test(name))
+      .sort();
     return names.map((name) => ({ name, rawValue: scope[name] ?? '' }));
+  }
+
+  /** Drive the TreeView's title from the active frame: "Variables (test)"
+   *  at the root, "Variables (skill: name)" inside a skill. Gives the
+   *  user an anchor for which scope they're inspecting — without it,
+   *  switching between test and skill frames was a silent re-render. */
+  private updateTitle(): void {
+    if (!this.view) return;
+    const frame = this.source.currentFrame();
+    if (!frame) {
+      this.view.title = 'Variables';
+      this.view.description = '';
+      return;
+    }
+    if (frame.id === '') {
+      this.view.title = 'Variables';
+      this.view.description = 'test';
+      return;
+    }
+    this.view.title = 'Variables';
+    this.view.description = frame.skillName ? `skill: ${frame.skillName}` : 'frame';
   }
 }

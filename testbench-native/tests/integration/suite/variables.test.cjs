@@ -126,6 +126,117 @@ describe('TestBench Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('secret-named entries are masked in the rendered view', async () => {
+    // Phase 4.1.c — the integration tests at the runningScope layer
+    // (above) verify the controller's state, but not that the VIEW
+    // actually applies maskIfSecret. A future refactor that bypassed
+    // maskIfSecret in the render path would slip through silently.
+    // This test exercises the rendered TreeItem descriptions directly.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: {
+        username: 'alice',
+        token: 'sk-supersecret-12345',
+        api_key: 'pk-pretendkey',
+      },
+    });
+    await waitFor('scope arrived', () => hooks.runningScope().username === 'alice');
+
+    const items = hooks.variablesViewItems();
+    const byName = Object.fromEntries(items.map((i) => [i.name, i.description]));
+    assert.equal(byName.username, 'alice', 'non-secret values render unmasked');
+    assert.notEqual(byName.token, 'sk-supersecret-12345',
+      'secret-named values must NOT render with their raw value');
+    assert.notEqual(byName.api_key, 'pk-pretendkey',
+      'secret-named values must NOT render with their raw value');
+    // The runner-core maskIfSecret helper renders some replacement
+    // form for masked values; the exact format is its concern, but it
+    // must not be the raw value.
+    assert.ok(byName.token && byName.token.length > 0, 'masked entries still show *something*');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('test-frame view hides __skillN_ entries from previous skill descents', async () => {
+    // Phase 4.1.b — after a skill exits, its internal vars survive in
+    // resolvedParameters (the expander never garbage-collects them).
+    // The view filters them out when rendering the test (root) frame
+    // so the user doesn't see noise like `__skill1_query` lingering
+    // after the skill returned.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: {
+        username: 'alice',
+        target_url: 'https://example.com',
+        __skill1_query: 'OpenAI GPT-5',
+        __skill1_first_result_url: 'https://example.com',
+      },
+    });
+    await waitFor('scope arrived', () =>
+      hooks.runningScope().username === 'alice',
+    );
+
+    const items = hooks.variablesViewItems();
+    const names = items.map((i) => i.name);
+    assert.ok(names.includes('username'), 'caller vars must be visible');
+    assert.ok(names.includes('target_url'), 'caller vars must be visible');
+    assert.ok(
+      !names.includes('__skill1_query'),
+      '__skillN_ entries must NOT appear in the test-frame view',
+    );
+    assert.ok(
+      !names.includes('__skill1_first_result_url'),
+      '__skillN_ entries must NOT appear in the test-frame view',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('skill-frame view shows __skillN_ entries (they are the skill local)', async () => {
+    // Counter-test to 4.1.b — when execution is inside a skill, the
+    // namespaced names ARE the user's locals (rewritten for isolation)
+    // so the view must NOT filter them.
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      line: 9,
+      skillName: 'fake_skill',
+    };
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: {
+        __skill1_query: 'OpenAI GPT-5',
+        username: 'alice',
+      },
+    });
+    await waitFor('skill scope', () => hooks.runningScope().__skill1_query === 'OpenAI GPT-5');
+
+    const items = hooks.variablesViewItems();
+    const names = items.map((i) => i.name);
+    assert.ok(names.includes('__skill1_query'),
+      '__skillN_ entries must be visible when inside a skill frame');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('a fresh run wipes scope state from the previous run', async () => {
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream 1 active', () => fake.hasActiveStream);
