@@ -204,6 +204,14 @@ function TestBenchRunner() {
   const outputLogRef = useRef(null);
   const outputAtBottomRef = useRef(true);
 
+  // Diagnostic — push the current runtimeVariables map to the host on
+  // every change so test hooks can observe the webview-side state
+  // without round-tripping a request. Test-only consumer; production
+  // code reads the same state from the controller's per-frame map.
+  useEffect(() => {
+    hostBridge.postWebviewState(runtimeVariables);
+  }, [runtimeVariables]);
+
   // Subscribe to host messages on mount.
   useEffect(() => {
     const unsubscribe = hostBridge.subscribe((msg) => {

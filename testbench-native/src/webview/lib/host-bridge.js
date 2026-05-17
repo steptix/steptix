@@ -64,4 +64,7 @@ export const hostBridge = {
   postPause() { post({ type: 'pause' }); },
   postFocusTestResults() { post({ type: 'focusTestResults' }); },
   postClearStatus(line) { post({ type: 'clearStatus', line }); },
+  postWebviewState(runtimeVariables) {
+    post({ type: 'webviewState', runtimeVariables });
+  },
 };

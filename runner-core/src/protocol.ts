@@ -388,6 +388,20 @@ export interface WebviewClearStatusMsg {
   line: number;
 }
 
+/**
+ * Diagnostic readback from the webview to the host. The webview posts
+ * this whenever its internal `runtimeVariables` map changes (i.e. when
+ * a `frame:scope` / `capture` / `parametersResolved` event updates it).
+ * Used only by the test hooks — production code reads the same state
+ * from the controller's per-frame scope map. Posted unconditionally so
+ * a test harness doesn't have to drive the webview's request/response
+ * cycle.
+ */
+export interface WebviewStateMsg {
+  type: 'webviewState';
+  runtimeVariables: Record<string, string>;
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -401,7 +415,8 @@ export type WebviewToHostMsg =
   | WebviewResumeMsg
   | WebviewPauseMsg
   | WebviewFocusTestResultsMsg
-  | WebviewClearStatusMsg;
+  | WebviewClearStatusMsg
+  | WebviewStateMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -439,7 +454,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'resume' ||
     t === 'pause' ||
     t === 'focusTestResults' ||
-    t === 'clearStatus'
+    t === 'clearStatus' ||
+    t === 'webviewState'
   );
 }
 

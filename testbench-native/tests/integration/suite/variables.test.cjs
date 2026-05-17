@@ -126,6 +126,149 @@ describe('TestBench Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('skill input parameter remains visible in the WEBVIEW Variables across MULTIPLE breakpoints inside the skill', async () => {
+    // Regression test for the bug the previous (TreeView-only) test
+    // missed: the Test Runner sidebar webview has its OWN Variables
+    // section that renders from the active editor's parsed
+    // `## Parameters` declarations overlaid with a `runtimeVariables`
+    // map. Before the fix, that map ignored `frame:scope` events, so
+    // when the active editor was the skill `.md` (where
+    // `## Parameters` uses `- name: description` syntax) the webview
+    // fell back to the description text — making it look like the
+    // caller's value wasn't being passed in.
+    //
+    // The test:
+    //   - opens fake-skill.md as the active editor (mirroring the
+    //     auto-revealed state when a run pauses inside the skill)
+    //   - starts a run on test-with-steps.md (controller's document)
+    //   - pushes 3 step:awaiting cycles, each preceded by a
+    //     `frame:scope` event carrying { query: "OpenAI GPT-5" }
+    //   - at EVERY pause, asserts the WEBVIEW's runtimeVariables
+    //     map shows `query = "OpenAI GPT-5"` — not the
+    //     "the search term to enter" description text the skill's
+    //     `## Parameters` section literally declares.
+    //
+    // This proves the fix at the data-flow layer the user actually
+    // sees: webview → React state → frame:scope handler → rendered
+    // Variables panel.
+
+    const skillUri = fixtureUri('fake-skill.md');
+    const skillPath = skillUri.fsPath;
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 8,
+      skillName: 'fake_skill',
+    };
+
+    // Confirm the precondition: the skill file declares `query`
+    // with description-as-value. If a future edit to the fixture
+    // changes this, the test stops proving what it claims to prove.
+    const fs = require('node:fs');
+    const skillText = fs.readFileSync(skillPath, 'utf-8');
+    assert.match(
+      skillText,
+      /- query:\s*the search term to enter/,
+      'fixture must declare `- query: the search term to enter` so the description-text fallback is the failure mode',
+    );
+
+    // Force the Test Runner sidebar to open so the webview is mounted
+    // and our `webviewState` round-trip works. Without this the
+    // webview isn't attached at all and posts never flow.
+    await vscode.commands.executeCommand('testbench-native.runner.focus');
+    await waitFor(
+      'webview mounted and posting state (count > 0)',
+      () => hooks.webviewStateUpdateCount() > 0,
+      8_000,
+    );
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Auto-reveal: switch active editor to the skill file so the
+    // webview snapshot reflects it. The bug only fires when the
+    // active file is the skill (because that's what the webview
+    // parses for declared parameters).
+    await vscode.commands.executeCommand('vscode.open', skillUri);
+    await waitFor(
+      'skill is active in webview',
+      () => hooks.tracker.snapshot().filePath === skillPath,
+    );
+
+    // Push the frame:push + initial entry scope (mirrors what the
+    // post-fix server emits in real life).
+    fake.push({ type: 'frame:push', frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'OpenAI GPT-5' },
+    });
+
+    // Helper — wait until the webview has received the latest scope
+    // event AND posted its updated runtimeVariables back. Polls
+    // the test hook (postWebviewState fires asynchronously after a
+    // React render, so we need to wait for the round trip).
+    const waitForWebviewQuery = async (expected, label) => {
+      await waitFor(
+        `webview runtimeVariables.query === "${expected}" (${label})`,
+        () => hooks.webviewRuntimeVariables().query === expected,
+        4_000,
+      );
+    };
+
+    // ── Breakpoint 1: pause before step 1 of the skill body ──
+    fake.push({ type: 'step:awaiting', line: 8, frame });
+    await waitForWebviewQuery('OpenAI GPT-5', 'pause #1 — before skill step 1');
+
+    // User "Continues" → server proceeds. Mirror what the server
+    // emits: step:start, step:pass, frame:scope (still carrying
+    // query thanks to the frameInputs overlay in commit 3344a69),
+    // then the next pause.
+    fake.push({ type: 'step:start', line: 8, frame });
+    fake.push({ type: 'step:pass', line: 8, frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      // Server's post-step scope: resolvedParameters overlaid with
+      // frameInputs[f1]. After step 1 the only addition might be
+      // a captured output, but we mimic the "param survived" case
+      // explicitly — that's the whole point of the per-step
+      // overlay fix in 3344a69.
+      scope: { query: 'OpenAI GPT-5' },
+    });
+
+    // ── Breakpoint 2: pause before step 2 ──
+    fake.push({ type: 'step:awaiting', line: 9, frame });
+    await waitForWebviewQuery('OpenAI GPT-5', 'pause #2 — before skill step 2');
+
+    fake.push({ type: 'step:start', line: 9, frame });
+    fake.push({ type: 'step:pass', line: 9, frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'OpenAI GPT-5' },
+    });
+
+    // ── Breakpoint 3: pause before step 3 ──
+    fake.push({ type: 'step:awaiting', line: 10, frame });
+    await waitForWebviewQuery('OpenAI GPT-5', 'pause #3 — before skill step 3');
+
+    // Sanity: NOT the description text at any point. If a future
+    // regression dropped frame:scope handling in the webview, this
+    // would be `"the search term to enter"`.
+    const finalState = hooks.webviewRuntimeVariables();
+    assert.notEqual(
+      finalState.query,
+      'the search term to enter',
+      'webview must never show the description text once frame:scope has overridden it',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('skill input parameters arrive in the Variables view at a breakpoint pause', async () => {
     // Phase 5 follow-up — end-to-end proof for the
     // skill-inputs-in-frame-scope fix. Mimics what the server does

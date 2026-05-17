@@ -137,6 +137,31 @@ class RunControllerRegistry implements vscode.Disposable {
     return this.stepPausedAt.get(controllerUri.toString()) ?? null;
   }
 
+  /** Last-known webview-side runtimeVariables map, posted by the
+   *  webview on every change via `webviewState` messages. Test hook
+   *  reads this to verify the webview's Variables panel actually
+   *  sees the data flowing through `frame:scope` (which is rendered
+   *  by `collectVariables` in the React component — invisible to
+   *  the host except via this readback channel). */
+  private lastWebviewRuntimeVariables: Record<string, string> = {};
+  private webviewStateUpdateCount = 0;
+
+  recordWebviewRuntimeVariables(runtimeVariables: Record<string, string>): void {
+    this.lastWebviewRuntimeVariables = { ...runtimeVariables };
+    this.webviewStateUpdateCount += 1;
+  }
+
+  getWebviewRuntimeVariables(): Record<string, string> {
+    return { ...this.lastWebviewRuntimeVariables };
+  }
+
+  /** Count of `webviewState` messages received from the webview since
+   *  activation. Used by tests to confirm the webview is actually
+   *  mounted and posting state, not just returning the default {}. */
+  getWebviewStateUpdateCount(): number {
+    return this.webviewStateUpdateCount;
+  }
+
   /** Phase 3.1.a — clear every step-paused yellow ▶ marker across all
    *  tracked controllers. Called on Stop so a step:awaiting on a skill
    *  file's URI doesn't linger after the user has cancelled the run.
@@ -579,6 +604,16 @@ export interface TestBenchTestHooks {
   /** Test-only: is the running controller's run currently parked on a
    *  step:awaiting (Phase 3 step-paused state)? */
   isStepPaused: () => boolean;
+  /** Last-known runtimeVariables map from inside the Test Runner
+   *  webview, posted on every state change via the `webviewState`
+   *  message. Lets tests verify the webview-rendered Variables
+   *  section actually reflects `frame:scope` events — independent of
+   *  the separate Variables TreeView's `variablesViewItems()` hook. */
+  webviewRuntimeVariables: () => Record<string, string>;
+  /** Diagnostic counter — how many `webviewState` messages the host
+   *  has received since activation. Zero means the webview never
+   *  mounted (e.g. sidebar never opened); positive means it's posting. */
+  webviewStateUpdateCount: () => number;
 }
 
 export interface TestBenchExports {
@@ -760,6 +795,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         const controller = registry.runningController();
         return controller ? registry.isStepPaused(controller.document.uri) : false;
       },
+      webviewRuntimeVariables: () => registry.getWebviewRuntimeVariables(),
+      webviewStateUpdateCount: () => registry.getWebviewStateUpdateCount(),
       runningScope: () => {
         const controller = registry.runningController();
         return controller ? { ...controller.currentScope() } : {};
@@ -912,6 +949,15 @@ async function handleWebviewMessage(
     case 'focusTestResults': {
       // Triggered by the batch-run banner's "Open Test Results" link.
       void vscode.commands.executeCommand('workbench.panel.testResults.focus');
+      return;
+    }
+    case 'webviewState': {
+      // Test-hook channel: the webview posts its current
+      // `runtimeVariables` map on every state change. We cache it
+      // on the registry so integration tests can read the
+      // webview-visible variable state without round-tripping a
+      // query. Production code path is unchanged.
+      registry.recordWebviewRuntimeVariables(msg.runtimeVariables);
       return;
     }
   }
