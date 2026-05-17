@@ -113,40 +113,58 @@ export function registerCommands(
     vscode.commands.registerCommand('testbench-native.stepOut', () =>
       dispatchStep('out', registry, tracker),
     ),
-    // F5 from a step-paused state sends `continue` to drain the rest of
-    // the run (or hit the next breakpoint). Distinct from
-    // testbench-native.resume which restarts a stream after a
-    // breakpoint-trim pause.
+    // Unified Continue (matches VS Code's standard debugger
+    // convention — one Continue regardless of how you got paused):
+    //   - Step-paused (mid stepping run, server blocked on
+    //     pendingRunControl): POST run-control with mode='continue'.
+    //     Drains the rest of the run or hits the next breakpoint.
+    //   - Breakpoint-paused (run trimmed at a breakpoint, no SSE
+    //     stream open): re-open the stream from the pause line and
+    //     run through to the end of the document or the next break.
+    // The `testbench-native.resume` command stays as a back-compat
+    // alias for any user keybindings + existing integration tests
+    // that call it by name.
     vscode.commands.registerCommand('testbench-native.continueRun', async () => {
-      const controller = registry.active();
-      if (!controller) return notifyNoActive();
-      await controller.sendRunControl('continue');
-    }),
-
-    vscode.commands.registerCommand('testbench-native.resume', async () => {
       const controller = registry.active();
       const editor = tracker.activeEditor;
       if (!controller || !editor) return notifyNoActive();
-      const state = tracker.state(controller.document.uri);
-      const startLine = state.breakpointStop;
-      if (startLine == null) {
-        vscode.window.setStatusBarMessage('TestBench: no run paused at a breakpoint', 2000);
+
+      // Step-paused branch — fast path: deliver the next mode via
+      // run-control. The controller's `isRunning` is still true in
+      // this state (SSE stream is open, just blocked on a Promise).
+      if (controller.isRunning && registry.isStepPaused(controller.document.uri)) {
+        await controller.sendRunControl('continue');
         return;
       }
-      tracker.setBreakpointStop(controller.document.uri, null);
-      const breakpoints = tracker.breakpoints(controller.document.uri);
-      // Resume continues from startLine through the end of the document.
-      // Passing `[startLine]` alone would collapse through resolveRunLines
-      // to a single-step run — useful for "step over" but not what Resume
-      // means in a debugger.
-      const resumeLines = extractSteps(editor.document.getText())
-        .map((s) => s.line)
-        .filter((line) => line >= startLine);
-      registry.notifyRunning(true);
-      await controller
-        .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true })
-        .finally(() => registry.notifyRunning(false));
+
+      // Breakpoint-paused branch — re-open the stream.
+      const state = tracker.state(controller.document.uri);
+      const startLine = state.breakpointStop;
+      if (startLine != null && !controller.isRunning) {
+        tracker.setBreakpointStop(controller.document.uri, null);
+        const breakpoints = tracker.breakpoints(controller.document.uri);
+        // Continue runs from startLine to end-of-document. Passing
+        // `[startLine]` alone would collapse through resolveRunLines
+        // to a one-step run — useful for Step Over but not Continue.
+        const resumeLines = extractSteps(editor.document.getText())
+          .map((s) => s.line)
+          .filter((line) => line >= startLine);
+        registry.notifyRunning(true);
+        await controller
+          .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true })
+          .finally(() => registry.notifyRunning(false));
+        return;
+      }
+
+      vscode.window.setStatusBarMessage('TestBench: nothing to continue', 2000);
     }),
+
+    // Back-compat alias: `testbench-native.resume` delegates to
+    // continueRun. Existing tests and user-configured keybindings
+    // keep working unchanged.
+    vscode.commands.registerCommand('testbench-native.resume', () =>
+      vscode.commands.executeCommand('testbench-native.continueRun'),
+    ),
 
     vscode.commands.registerCommand('testbench-native.restartSession', async () => {
       const controller = registry.active();

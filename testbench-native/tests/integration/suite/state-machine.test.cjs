@@ -239,6 +239,37 @@ describe('TestBench debug state machine', function () {
     await waitFor('isRunning becomes false', () => !hooks.isRunning());
   });
 
+  it('paused → running (continueRun handles breakpoint state too): the unified Continue command re-opens the stream', async () => {
+    // Phase 5 follow-up: testbench-native.continueRun was originally a
+    // step-paused-only command (POST run-control). It's now unified so
+    // it ALSO handles breakpoint-pause (the old resume path). The
+    // existing `testbench-native.resume` test below still passes via
+    // the back-compat alias; THIS test asserts that calling continueRun
+    // directly from a breakpoint-pause state also re-opens the stream.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('running on line 9', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('paused at 9', () => hooks.tracker.snapshot().breakpointStop === 9);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('isRunning back to true', () => hooks.isRunning());
+    await waitFor('new fake stream', () => fake.hasActiveStream);
+    assert.equal(
+      hooks.tracker.snapshot().breakpointStop,
+      null,
+      'continueRun from breakpoint-pause must clear the pause indicator',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('paused → running (resume): testbench-native.resume re-opens the stream from paused line', async () => {
     // Drive into paused state.
     void vscode.commands.executeCommand('testbench-native.runSelected');

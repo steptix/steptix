@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -215,23 +215,38 @@
         },
         {
           "command": "testbench-native.pause",
-          "when": "testbench-native.activeFile && testbench-native.running",
+          "when": "testbench-native.activeFile && testbench-native.running && !testbench-native.stepPaused",
           "group": "navigation@1"
         },
         {
-          "command": "testbench-native.resume",
-          "when": "testbench-native.activeFile && testbench-native.paused && !testbench-native.running",
+          "command": "testbench-native.continueRun",
+          "when": "testbench-native.activeFile && (testbench-native.stepPaused || (testbench-native.paused && !testbench-native.running))",
           "group": "navigation@1"
+        },
+        {
+          "command": "testbench-native.stepOver",
+          "when": "testbench-native.activeFile && (testbench-native.stepPaused || (testbench-native.paused && !testbench-native.running))",
+          "group": "navigation@2"
+        },
+        {
+          "command": "testbench-native.stepInto",
+          "when": "testbench-native.activeFile && (testbench-native.stepPaused || (testbench-native.paused && !testbench-native.running))",
+          "group": "navigation@3"
+        },
+        {
+          "command": "testbench-native.stepOut",
+          "when": "testbench-native.activeFile && testbench-native.stepPaused",
+          "group": "navigation@4"
         },
         {
           "command": "testbench-native.stop",
           "when": "testbench-native.activeFile && (testbench-native.running || testbench-native.paused)",
-          "group": "navigation@2"
+          "group": "navigation@5"
         },
         {
           "command": "testbench-native.restartSession",
           "when": "testbench-native.activeFile",
-          "group": "navigation@3"
+          "group": "navigation@6"
         }
       ],
       "editor/lineNumber/context": [
@@ -266,12 +281,12 @@
       {
         "command": "testbench-native.pause",
         "key": "f5",
-        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.running"
+        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.running && !testbench-native.stepPaused"
       },
       {
-        "command": "testbench-native.resume",
+        "command": "testbench-native.continueRun",
         "key": "f5",
-        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.paused && !testbench-native.running"
+        "when": "editorTextFocus && testbench-native.activeFile && (testbench-native.stepPaused || (testbench-native.paused && !testbench-native.running))"
       },
       {
         "command": "testbench-native.stop",
@@ -294,24 +309,14 @@
         "when": "editorTextFocus && testbench-native.activeFile"
       },
       {
-        "command": "testbench-native.continueRun",
-        "key": "f5",
-        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.stepPaused"
-      },
-      {
         "command": "testbench-native.stepInto",
         "key": "f11",
-        "when": "editorTextFocus && testbench-native.activeFile && !testbench-native.running"
-      },
-      {
-        "command": "testbench-native.stepInto",
-        "key": "f11",
-        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.stepPaused"
+        "when": "editorTextFocus && testbench-native.activeFile && (!testbench-native.running || testbench-native.stepPaused)"
       },
       {
         "command": "testbench-native.stepOver",
         "key": "f10",
-        "when": "editorTextFocus && testbench-native.activeFile && testbench-native.stepPaused"
+        "when": "editorTextFocus && testbench-native.activeFile && (testbench-native.stepPaused || (testbench-native.paused && !testbench-native.running))"
       },
       {
         "command": "testbench-native.stepOut",
