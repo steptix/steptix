@@ -407,10 +407,12 @@ class RunControllerRegistry implements vscode.Disposable {
     const port = cfg.get<number>('inspectorPort', 9229);
     const host = cfg.get<string>('inspectorHost', '127.0.0.1');
 
-    // If a Node debug session is already alive (the user attached
-    // manually, or a previous tool in this run attached), reuse it.
-    const alreadyAttached = vscode.debug.activeDebugSession?.type === 'node' ||
-      vscode.debug.activeDebugSession?.type === 'pwa-node';
+    // If our pwa-node session is already attached (a previous tool
+    // in this run brought it up), reuse it. Filter to `pwa-node`
+    // only — a Chrome devtools (`chrome` / `pwa-chrome`) session is
+    // not the inspector we want and treating it as "attached" would
+    // skip the real attach call.
+    const alreadyAttached = vscode.debug.activeDebugSession?.type === 'pwa-node';
 
     if (!alreadyAttached) {
       try {

@@ -1142,10 +1142,14 @@ export class SessionManager {
             // Tool step-into — Phase 5. When the session's one-shot
             // pause-at-next-tool flag is set, surface a
             // `tool:awaiting-debugger` event and wait for the client to
-            // attach VS Code's Node debugger before hitting the
-            // cooperative `debugger;` statement inside `executeToolStep`.
+            // attach VS Code's Node debugger. The cooperative
+            // `debugger;` lives inside `executeToolStep` immediately
+            // before `def.run(...)` so stepping past it lands the user
+            // in the tool body rather than in argument-coercion
+            // boilerplate (see step-into-design.md §Tool step-into).
             // The flag is consumed here so each F11 yields exactly one
             // pause.
+            let pauseBeforeRun = false;
             if (session.pauseAtNextTool && !signal?.aborted) {
               session.pauseAtNextTool = false;
               const registered = toolCatalogue.get(toolCall.name);
@@ -1158,11 +1162,14 @@ export class SessionManager {
               });
               // Park on the ack. If the run is aborted while we're
               // parked, resolve immediately so the next-iteration abort
-              // check picks it up.
+              // check picks it up — and skip the cooperative pause
+              // because there's no debugger attached on this path.
+              let abortedDuringWait = false;
               await new Promise<void>((resolve) => {
                 session.pendingDebuggerAck = { resolve };
                 if (signal?.aborted) {
                   session.pendingDebuggerAck = null;
+                  abortedDuringWait = true;
                   resolve();
                   return;
                 }
@@ -1171,22 +1178,18 @@ export class SessionManager {
                   () => {
                     if (session.pendingDebuggerAck?.resolve === resolve) {
                       session.pendingDebuggerAck = null;
+                      abortedDuringWait = true;
                       resolve();
                     }
                   },
                   { once: true },
                 );
               });
-              // The Node debugger is attached now. Hit the cooperative
-              // pause point so the user lands inside the tool's source
-              // when their session resumes. The `debugger;` is a no-op
-              // when no inspector is attached, which is the failure
-              // mode the design's "without `--inspect`" path warns
-              // about — we surface that mismatch at the extension layer
-              // before getting here. See step-into-design.md §Tool
-              // step-into.
-              // eslint-disable-next-line no-debugger
-              debugger;
+              // Only arm the cooperative pause when the ack actually
+              // arrived (vs. abort). Otherwise we'd hit `debugger;`
+              // with no attached inspector even though the user
+              // cancelled.
+              pauseBeforeRun = !abortedDuringWait;
             }
             const startedAt = Date.now();
             const outcome = await executeToolStep(toolCall, {
@@ -1198,6 +1201,7 @@ export class SessionManager {
               ...(session.sessionConfig.baseUrl !== undefined && {
                 baseUrl: session.sessionConfig.baseUrl,
               }),
+              ...(pauseBeforeRun && { pauseBeforeRun: true }),
             });
             const passed = outcome.status === 'passed';
             stepResult = {

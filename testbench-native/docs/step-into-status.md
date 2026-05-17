@@ -85,8 +85,8 @@ incrementally.
 
 | | Value |
 | --- | --- |
-| testbench-native version | `0.5.12` (bumps per CLAUDE.md rule) |
-| main `vitest` | 817 / 817 |
+| testbench-native version | `0.5.13` (bumps per CLAUDE.md rule) |
+| main `vitest` | 819 / 819 |
 | testbench-native integration | 62 / 62 |
 | runner-core `node:test` | 129 / 131 (2 pre-existing stale tests in `protocol.test.js`, unrelated to this work — they check renamed legacy message types `init` / `documentChanged` / `edit` that no longer exist) |
 

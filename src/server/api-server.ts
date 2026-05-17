@@ -226,11 +226,11 @@ export function createApiServer(config: Config): {
       });
       return;
     }
-    // Tool step-into trigger (Phase 5). Set BEFORE delivering the
-    // step-mode so the loop sees the flag the moment it resumes.
-    if (body.pauseAtNextTool === true) {
-      sessionManager.setPauseAtNextTool(sessionId, true);
-    }
+    // Set the tool step-into flag BEFORE delivering the run-control,
+    // so the resumed loop sees it on the same tick — but only if we
+    // know the run is actually parked. Otherwise a 409 would leave
+    // the flag stuck on the session, ambushing the NEXT batch's first
+    // tool step with a hang.
     const delivered = sessionManager.submitRunControl(
       sessionId,
       mode as 'continue' | 'into' | 'over' | 'out',
@@ -238,6 +238,9 @@ export function createApiServer(config: Config): {
     if (!delivered) {
       res.status(409).json({ error: 'No paused run for this session' });
       return;
+    }
+    if (body.pauseAtNextTool === true) {
+      sessionManager.setPauseAtNextTool(sessionId, true);
     }
     res.status(200).json({ ok: true });
   });

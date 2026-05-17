@@ -161,6 +161,7 @@ afterAll(async () => {
 async function* sseEvents(
   url: string,
   body: unknown,
+  signal?: AbortSignal,
 ): AsyncGenerator<{ type: string; [k: string]: any }> {
   const res = await fetch(url, {
     method: 'POST',
@@ -170,6 +171,7 @@ async function* sseEvents(
       Accept: 'text/event-stream',
     },
     body: JSON.stringify(body),
+    ...(signal && { signal }),
   });
   if (!res.body) throw new Error('no response body');
   const reader = res.body.getReader();
@@ -330,6 +332,104 @@ describe('api-server tool dispatch', () => {
       { method: 'POST', headers: { 'x-api-key': API_KEY } },
     );
     expect(res.status).toBe(409);
+  });
+
+  it('run-control 409 does NOT leave pauseAtNextTool stuck for the next batch', async () => {
+    // Regression: previously the api-server set pauseAtNextTool on the
+    // session BEFORE delivering the run-control. When run-control
+    // returned 409 (no paused run), the flag stayed armed and the next
+    // batch's first `[tool: ...]` step would unexpectedly hang. The
+    // fix reorders to set-after-deliver. Verify by:
+    //   1. POST a run-control with pauseAtNextTool against a fresh
+    //      session that has no paused run — expect 409.
+    //   2. Run a batch with a tool step (still using toolsDir but with
+    //      NO pauseAtNextTool flag) — assert no `tool:awaiting-debugger`
+    //      event fires and the tool runs to completion.
+    const sessionId = 'no-leak-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+
+    // Phase 1: speculative run-control on a fresh session. Should 409.
+    const stuckRes = await fetch(
+      `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/run-control`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+        body: JSON.stringify({ mode: 'continue', pauseAtNextTool: true }),
+      },
+    );
+    expect(stuckRes.status).toBe(409);
+
+    // Phase 2: real run with a tool step. If the flag had leaked, the
+    // server would emit `tool:awaiting-debugger` and hang waiting for
+    // an ack — the test would time out.
+    const events: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: ['[tool: echo value="should-not-pause"]'],
+      sourceLines: [1],
+      toolsDir,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+    const awaiting = events.filter((e) => e.type === 'tool:awaiting-debugger');
+    expect(awaiting).toHaveLength(0);
+    const captures = events.filter((e) => e.type === 'capture');
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({ name: 'echoed', value: 'should-not-pause' });
+  });
+
+  it('abort while parked awaiting debugger ack unwinds cleanly without hitting debugger;', async () => {
+    // When the user clicks Stop while the loop is parked on
+    // pendingDebuggerAck, two things must happen:
+    //   - The await resolves (so the loop can hit its abort check
+    //     at the top of the next iteration).
+    //   - executeToolStep is NOT called with pauseBeforeRun:true —
+    //     otherwise we'd hit `debugger;` with no debugger attached
+    //     (the user just cancelled).
+    // Driving the abort here means cancelling the SSE fetch which
+    // closes the underlying request. The server's res.on('close')
+    // aborts the AbortController. The run reports 'aborted' on done.
+    const sessionId = 'abort-park-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const ac = new AbortController();
+    const events: any[] = [];
+    let aborted = false;
+
+    const consume = (async () => {
+      try {
+        for await (const ev of sseEvents(url, {
+          steps: ['[tool: echo value="aborted"]'],
+          sourceLines: [1],
+          toolsDir,
+          pauseAtNextTool: true,
+        }, ac.signal)) {
+          events.push(ev);
+          if (ev.type === 'tool:awaiting-debugger') {
+            // Don't send the ack — abort instead.
+            ac.abort();
+          }
+          if (ev.type === 'done') break;
+        }
+      } catch (err: any) {
+        // Aborting the fetch throws — that's the intended path.
+        if (err?.name === 'AbortError' || err?.code === 20) {
+          aborted = true;
+        } else {
+          throw err;
+        }
+      }
+    })();
+
+    await consume;
+
+    // We saw the awaiting event before aborting.
+    expect(events.some((e) => e.type === 'tool:awaiting-debugger')).toBe(true);
+    // And NO capture event fired — the tool body never ran. (If it
+    // had, `debugger;` would still be a no-op because no inspector
+    // is attached; but the contract is "don't reach `debugger;` when
+    // we know the ack didn't come from a real attach.")
+    expect(events.filter((e) => e.type === 'capture')).toHaveLength(0);
+    expect(aborted).toBe(true);
   });
 
   it('run-control with pauseAtNextTool sets the flag for the next tool', async () => {
