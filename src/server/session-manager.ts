@@ -1160,6 +1160,21 @@ export class SessionManager {
             ...frameSpread,
           });
 
+          // ── Frame scope snapshot (Phase 4) ──────────────────────────
+          //
+          // After every successful step, emit the current scope so the
+          // Variables panel can keep up. Phase 4 ships a flat scope —
+          // the full `resolvedParameters`, including any namespaced
+          // skill-internal `__skillN_x` entries. Per-frame filtering
+          // (reverse-rename resolution + skill-private vars only) is
+          // tracked as Phase 4.B follow-up; the user gets visibility
+          // into the actual runtime state in the meantime.
+          emit({
+            type: 'frame:scope',
+            frameId: stepFrameId,
+            scope: { ...resolvedParameters },
+          });
+
           // ── Step-mode pause decision ────────────────────────────────
           //
           // When the client started this batch with `stepMode !== 'continue'`,
@@ -1227,6 +1242,14 @@ export class SessionManager {
             error: stepResult.error ?? 'Step failed',
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
+          });
+          // Phase 4 — surface the scope at failure time too. The user
+          // wants to see "what were the variables when this step blew
+          // up." Same flat shape as the pass-path emission above.
+          emit({
+            type: 'frame:scope',
+            frameId: stepFrameId,
+            scope: { ...resolvedParameters },
           });
           break;
         }

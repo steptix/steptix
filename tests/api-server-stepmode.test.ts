@@ -299,6 +299,56 @@ describe('api-server step-into protocol', () => {
     expect(awaitingCount).toBe(0);
   });
 
+  it('emits frame:scope after every step:pass carrying resolvedParameters', async () => {
+    // Phase 4.6 — the server snapshots the variable scope after every
+    // step so the Variables view stays current. With no [output: ...]
+    // captures and no parameters in the request, the scope is empty,
+    // but the event itself MUST fire — its presence is what drives the
+    // panel's per-step refresh.
+    const sessionId = 'frame-scope-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: ['Step one', 'Step two'],
+      sourceLines: [1, 2],
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+    const scopes = events.filter((e) => e.type === 'frame:scope');
+    const passes = events.filter((e) => e.type === 'step:pass');
+    expect(passes.length).toBe(2);
+    expect(scopes.length).toBe(2);
+    for (const ev of scopes) {
+      expect(ev.frameId).toBe('');
+      expect(typeof ev.scope).toBe('object');
+    }
+  });
+
+  it('frame:scope carries request parameters back to the client', async () => {
+    // Variables view's first use case: parameters declared in the
+    // request body show up as initial scope entries. Sanity check that
+    // the round-trip works.
+    const sessionId = 'frame-scope-params-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: ['Step one'],
+      sourceLines: [1],
+      parameters: { username: 'alice', token: 'sk-supersecret' },
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+    const scope = events.find((e) => e.type === 'frame:scope')?.scope;
+    expect(scope).toBeDefined();
+    expect(scope.username).toBe('alice');
+    // Note: server emits the raw value; secret masking happens client-
+    // side via runner-core's maskIfSecret. So `token` is present here
+    // unmasked.
+    expect(scope.token).toBe('sk-supersecret');
+  });
+
   it('stepMode=over skips a [skill: ...] body atomically', async () => {
     // Phase 3.1.e — covers the "Step Over a skill" end-to-end path that
     // wasn't exercised in Phase 3. Three inline steps with the middle

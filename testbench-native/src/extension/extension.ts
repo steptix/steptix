@@ -17,6 +17,7 @@ import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
 import { InvocationDefinitionProvider } from './definition-provider.js';
 import { CallStackTreeProvider } from './call-stack-view.js';
+import { VariablesTreeProvider } from './variables-view.js';
 
 const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
 
@@ -38,9 +39,14 @@ class RunControllerRegistry implements vscode.Disposable {
    *  come and go as documents open). */
   private readonly anyFrameStackEmitter = new vscode.EventEmitter<void>();
   readonly onAnyFrameStackChange = this.anyFrameStackEmitter.event;
+  /** Fires whenever any controller's scope-per-frame map updates. Same
+   *  bridging pattern as `onAnyFrameStackChange`. */
+  private readonly anyScopeEmitter = new vscode.EventEmitter<void>();
+  readonly onAnyScopeChange = this.anyScopeEmitter.event;
   /** Per-controller subscription handle so we don't leak listeners when a
    *  controller is removed. */
   private readonly frameSubs = new Map<string, vscode.Disposable>();
+  private readonly scopeSubs = new Map<string, vscode.Disposable>();
   /** Per-controller record of where a step:awaiting yellow ▶ is currently
    *  painted. Set on step:awaiting, cleared on the next step:start (or on
    *  done). Lets us drop the marker even when it lives on a different URI
@@ -87,6 +93,10 @@ class RunControllerRegistry implements vscode.Disposable {
     this.frameSubs.set(
       key,
       controller.onFrameStackChange(() => this.anyFrameStackEmitter.fire()),
+    );
+    this.scopeSubs.set(
+      key,
+      controller.onScopeChange(() => this.anyScopeEmitter.fire()),
     );
     return controller;
   }
@@ -230,9 +240,14 @@ class RunControllerRegistry implements vscode.Disposable {
           }
           break;
         }
-        case 'frame:scope':
-          // Reserved for Phase 4 (Variables panel). No-op in Phase 2.
+        case 'frame:scope': {
+          // Phase 4 — pipe the scope payload into the controller's
+          // per-frame map. The Variables view subscribes via the
+          // registry's onAnyScopeChange bridge.
+          const controller = this.controllers.get(uri.toString());
+          controller?.handleFrameScope(ev.frameId, ev.scope);
           break;
+        }
         case 'done':
           this.refreshRunningContext();
           // The per-controller revealedFrameUris is cleared by
@@ -371,7 +386,10 @@ class RunControllerRegistry implements vscode.Disposable {
     this.controllers.clear();
     for (const sub of this.frameSubs.values()) sub.dispose();
     this.frameSubs.clear();
+    for (const sub of this.scopeSubs.values()) sub.dispose();
+    this.scopeSubs.clear();
     this.anyFrameStackEmitter.dispose();
+    this.anyScopeEmitter.dispose();
   }
 }
 
@@ -427,6 +445,11 @@ export interface TestBenchTestHooks {
    *  frame. Used by Phase 2 tests to assert that frame events drive the
    *  call-stack model. */
   runningFrameStack: () => Array<import('ai-ui-automation-runner-core').FrameInfo>;
+  /** Scope of the currently-running controller's top frame (or the test
+   *  frame if no skill frames are active). Used by Phase 4 tests to
+   *  assert that frame:scope events flow from server → controller →
+   *  Variables view. */
+  runningScope: () => Record<string, string>;
 }
 
 export interface TestBenchExports {
@@ -465,6 +488,22 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     onChange: registry.onAnyFrameStackChange,
   });
 
+  // Phase 4 Variables view — flat scope of the currently-running
+  // controller's top frame. Both the frame-stack and scope emitters
+  // need to feed the view: scope events when the server pushes a new
+  // scope, frame-stack events to flip which frame's scope is
+  // "current" when the user steps in/out. Phase 4 ships a single
+  // current-scope renderer; per-frame click-to-select is Phase 4.B.
+  const variablesProvider = new VariablesTreeProvider({
+    currentScope: () => registry.runningController()?.currentScope() ?? {},
+  });
+  const variablesScopeSub = registry.onAnyScopeChange(() =>
+    variablesProvider.refresh(),
+  );
+  const variablesFrameSub = registry.onAnyFrameStackChange(() =>
+    variablesProvider.refresh(),
+  );
+
   // "Detach to editor" command. Spawns a webview panel in the editor area
   // wired to the same broadcaster as the sidebar — once the panel is a
   // tab, VS Code's "Move Editor Into New Window" lets the user pop it
@@ -499,6 +538,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     }),
     vscode.window.registerTreeDataProvider('testbench-native.callStack', callStackProvider),
     callStackProvider,
+    vscode.window.registerTreeDataProvider('testbench-native.variables', variablesProvider),
+    variablesProvider,
+    variablesScopeSub,
+    variablesFrameSub,
     new EnvSelector(),
     openInEditor,
     // F12 / Ctrl+Click / Peek on `[skill: ...]` and `[tool: ...]` step
@@ -558,6 +601,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       runningFrameStack: () => {
         const controller = registry.runningController();
         return controller ? [...controller.frameStack] : [];
+      },
+      runningScope: () => {
+        const controller = registry.runningController();
+        return controller ? { ...controller.currentScope() } : {};
       },
     },
   };

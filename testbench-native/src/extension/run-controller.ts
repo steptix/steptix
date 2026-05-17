@@ -127,6 +127,16 @@ export class RunController {
    *  the `runLines` finally block. */
   private currentClient: ApiClientLike | null = null;
   private currentSessionId: string | null = null;
+
+  /** Latest variable scope emitted by `frame:scope` per frame id. The
+   *  test (root) frame uses key '' to match the server-side convention.
+   *  Cleared by `resetFrameState` at the start of each run. */
+  private readonly scopesByFrame = new Map<string, Record<string, string>>();
+  private readonly scopeEmitter = new vscode.EventEmitter<void>();
+  /** Fires whenever any frame's scope is updated. The Variables view
+   *  subscribes — bridged through the registry so a single subscriber
+   *  catches every controller's transitions. */
+  readonly onScopeChange = this.scopeEmitter.event;
   private readonly frameStackEmitter = new vscode.EventEmitter<void>();
   /** Fires whenever `frameStack` changes. The Call Stack view subscribes. */
   readonly onFrameStackChange = this.frameStackEmitter.event;
@@ -222,7 +232,38 @@ export class RunController {
     this.frameParents.clear();
     this.failedFrames.clear();
     this.revealedFrameUris.clear();
+    this.scopesByFrame.clear();
     this.frameStackEmitter.fire();
+    this.scopeEmitter.fire();
+  }
+
+  /**
+   * Record a `frame:scope` event for one frame. Called by the extension
+   * router (`applyToTracker`) so the controller owns the per-frame scope
+   * map and the Variables view has a single source of truth. Fires
+   * `onScopeChange` so subscribers re-render.
+   */
+  handleFrameScope(frameId: string, scope: Record<string, string>): void {
+    // Copy the payload — the SSE deserialiser shares the object across
+    // listeners and mutating downstream would surprise others.
+    this.scopesByFrame.set(frameId, { ...scope });
+    this.scopeEmitter.fire();
+  }
+
+  /** Latest scope for a frame, or undefined if none has been emitted
+   *  this run. The Variables view reads this when the user selects a
+   *  frame in the Call Stack (future Phase 4.B); today we render the
+   *  top frame's scope as the "current" view. */
+  scopeFor(frameId: string): Record<string, string> | undefined {
+    return this.scopesByFrame.get(frameId);
+  }
+
+  /** The scope of the currently-active (top) frame, or the test frame's
+   *  scope if execution is at the root. Used by the Variables view's
+   *  "show the running scope" default. */
+  currentScope(): Record<string, string> {
+    const topId = this._frameStack[this._frameStack.length - 1]?.id ?? '';
+    return this.scopesByFrame.get(topId) ?? this.scopesByFrame.get('') ?? {};
   }
 
   /** Atomic test-and-mark: returns true the first time a URI is seen this
