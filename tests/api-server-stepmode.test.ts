@@ -314,6 +314,16 @@ describe('api-server step-into protocol', () => {
       expect(ev.frame).toBeDefined();
       expect(ev.frame.skillName).toBe('demo_skill');
     }
+
+    // Top-level skill frame MUST carry its invocation line on the
+    // wire — the client uses `frame.line` to paint pass/running on
+    // the test file's `[skill: ...]` step row. A regression that
+    // dropped the sourceLines thread-through left `line: 0`, which
+    // silently no-ops the client paint (it checks `line > 0`), so
+    // the row stayed blank even on a successful run.
+    const push = events[pushIdx];
+    expect(push.frame.parentId).toBeNull();
+    expect(push.frame.line).toBe(2); // sourceLines[1] = 2 (the [skill:] line)
   });
 
   it('stepMode=into pauses after every step and emits step:awaiting', async () => {
@@ -640,6 +650,64 @@ describe('api-server step-into protocol', () => {
     expect(events[awaitingIdx].frame?.skillName).toBe('demo_skill');
 
     // Done as passed — both skill body steps ran after the resume.
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.status).toBe('passed');
+  });
+
+  it('skill breakpoint + trailing test step: frame:pop fires BEFORE the trailing step (so the [skill:] line can paint pass)', async () => {
+    // User-reported regression: skill-demo.md has
+    //   1. [skill: duckduckgo_search ...]
+    //   2. Navigate to {{target_url}}
+    // and a breakpoint sits inside the skill body. After Continue
+    // and a clean run completion, the test file's step 1 (the
+    // [skill:] line) should show the green ✓. Internally that means
+    // the server MUST emit frame:pop between the last skill-body
+    // step:pass and the trailing test step:start — the extension's
+    // frame:pop handler is what paints `pass` on the [skill:] line.
+    const sessionId = 'skill-bp-trailing-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+    const skillPath = path.join(skillsDir, 'demo_skill.md');
+
+    const consume = (async () => {
+      for await (const ev of sseEvents(url, {
+        steps: ['[skill: demo_skill]', 'Trailing test step'],
+        sourceLines: [1, 2],
+        skillsDir,
+        testFilePath,
+        // Breakpoint on skill body line 7 (demo_skill's first step).
+        breakpointsByUri: { [skillPath]: [7] },
+      })) {
+        events.push(ev);
+        if (ev.type === 'step:awaiting') {
+          await runControl(sessionId, 'continue');
+        }
+        if (ev.type === 'done') break;
+      }
+    })();
+    await consume;
+
+    // Locate critical anchors:
+    //   - last skill-body step:pass (highest index where frame.skillName === demo_skill)
+    //   - frame:pop for the skill
+    //   - step:start for the trailing test step (line 2, no frame OR test-root frame)
+    const lastSkillPassIdx = (() => {
+      let idx = -1;
+      events.forEach((e, i) => {
+        if (e.type === 'step:pass' && e.frame?.skillName === 'demo_skill') idx = i;
+      });
+      return idx;
+    })();
+    const framePopIdx = events.findIndex((e) => e.type === 'frame:pop');
+    const trailingStartIdx = events.findIndex(
+      (e) => e.type === 'step:start' && e.line === 2,
+    );
+
+    expect(lastSkillPassIdx).toBeGreaterThan(-1);
+    expect(framePopIdx).toBeGreaterThan(lastSkillPassIdx);
+    expect(trailingStartIdx).toBeGreaterThan(framePopIdx);
+
+    // Clean run.
     const done = events.find((e) => e.type === 'done');
     expect(done?.status).toBe('passed');
   });

@@ -111,6 +111,14 @@ export async function expandSkills(
   skillsDir: string,
   envCtx?: EnvDataContext,
   callerFilePath?: string,
+  /** Per-step line numbers parallel to `steps`, pulled from the test
+   *  file's parsed steps. Threads into the top-level recursion as
+   *  `stepLines` so a `[skill: ...]` invocation in the test file gets
+   *  its `invocationLine` recorded (which becomes `frame.line` on the
+   *  wire — clients use it to paint pass/fail on the test's
+   *  `[skill: ...]` row). Optional: legacy callers and tests that don't
+   *  care about line attribution can omit it. */
+  sourceLines?: number[],
 ): Promise<SkillExpansion> {
   const frames: Record<string, ExpandedFrame> = {};
   const ctx: ExpandContext = {
@@ -128,7 +136,7 @@ export async function expandSkills(
     null,
     '',
     null,
-    null,
+    sourceLines ?? null,
   );
   return { ...result, frames };
 }

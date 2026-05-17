@@ -859,6 +859,11 @@ export class SessionManager {
           request.skillsDir,
           envDataCtx ?? undefined,
           request.testFilePath,
+          // Thread sourceLines so top-level [skill: ...] invocations
+          // get a non-zero `frame.line` — the client uses it to paint
+          // running/pass on the test file's `[skill: ...]` step row.
+          // Without this, the row stays blank.
+          request.sourceLines,
         );
         effectiveSteps = expansion.steps;
         stepsTotal = effectiveSteps.length;

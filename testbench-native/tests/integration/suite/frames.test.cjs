@@ -306,4 +306,87 @@ describe('TestBench frame events (Phase 2)', function () {
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
   });
+
+  it('breakpoint pause inside a skill: after Continue, frame:pop still paints [skill:] line pass', async () => {
+    // Regression for the user-reported bug: skill-demo.md has step 1
+    // as `[skill: duckduckgo_search ...]`; a breakpoint sits inside
+    // the skill body. After Continue and clean completion, the test
+    // file's step 1 (the [skill:] line) should show the green ✓.
+    //
+    // Mimics the full server event sequence:
+    //   1. frame:push (skill, parentId=null, invocationLine=9)
+    //   2. frame:scope on entry (caller's inputs)
+    //   3. step:awaiting at skill line 5 (breakpoint pause)
+    //   4. user Continue → fake.runControl receives 'continue'
+    //   5. step:start + step:pass for the rest of the skill body
+    //   6. frame:pop (clean exit)
+    //   7. step:start + step:pass for the test's next line (10)
+    // After (6), the test file's line 9 must flip from running → pass.
+    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 9, // [skill: ...] invocation line in the test file
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'OpenAI GPT-5' },
+    });
+    fake.push({ type: 'step:awaiting', line: 5, frame });
+
+    await waitFor('test-file line 9 running (aggregate)', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+
+    // User clicks Continue. The unified continueRun command POSTs
+    // runControl('continue') because the controller is step-paused.
+    const before = fake.runControlCalls.filter((c) => c.mode === 'continue').length;
+    await vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor(
+      'continueRun dispatched runControl(continue)',
+      () => fake.runControlCalls.filter((c) => c.mode === 'continue').length === before + 1,
+      4_000,
+    );
+
+    // Server resumes and finishes the skill body cleanly.
+    fake.push({ type: 'step:start', line: 5, frame });
+    fake.push({ type: 'step:pass', line: 5, frame });
+    fake.push({ type: 'step:start', line: 6, frame });
+    fake.push({ type: 'step:pass', line: 6, frame });
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+
+    // The whole point of this test: after frame:pop on a clean exit,
+    // the test file's [skill:] line aggregate becomes pass.
+    await waitFor(
+      'test-file line 9 pass (aggregate after pop, post-breakpoint)',
+      () => {
+        const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+        return statuses[9] === 'pass';
+      },
+      4_000,
+    );
+
+    // Caller's next step runs and passes too — confirms the run
+    // didn't bail out before reaching the test's remaining steps.
+    fake.push({ type: 'step:start', line: 10 });
+    fake.push({ type: 'step:pass', line: 10 });
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+
+    // Final assert: line 9's status survived to end-of-run.
+    const final = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(final[9], 'pass', '[skill:] line must keep pass after run completes');
+    assert.equal(final[10], 'pass', 'caller next step must also be pass');
+  });
 });
