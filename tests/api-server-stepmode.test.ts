@@ -168,6 +168,64 @@ type: skill
 2. Second step also using {{query}}
 `,
   );
+  // Nested-skill fixtures for the call-stack / output-flow tests.
+  // outer takes `outer_arg`, declares output `outer_result`. Its body
+  // calls inner and captures inner's `inner_result`, then stores its
+  // own value into outer_result.
+  await fs.writeFile(
+    path.join(skillsDir, 'outer_skill.md'),
+    `---
+type: skill
+---
+# outer_skill
+
+## Parameters
+- outer_arg: caller-supplied outer value
+
+## Outputs
+- outer_result: the value outer exposes back to its caller
+
+## Steps
+1. [skill: inner_skill inner_arg="INNER_PASSED" out.inner_result="captured_from_inner"]
+2. [output: outer_result] Determine outer's final value
+`,
+  );
+  await fs.writeFile(
+    path.join(skillsDir, 'inner_skill.md'),
+    `---
+type: skill
+---
+# inner_skill
+
+## Parameters
+- inner_arg: caller-supplied inner value
+
+## Outputs
+- inner_result: the value inner exposes back to its caller
+
+## Steps
+1. First inner step using {{inner_arg}}
+2. [output: inner_result] Inner produces a value
+`,
+  );
+  // A skill called twice in the same test — used for the per-instance
+  // input-isolation regression test. Same skill file; different
+  // caller args on each invocation.
+  await fs.writeFile(
+    path.join(skillsDir, 'reentrant_skill.md'),
+    `---
+type: skill
+---
+# reentrant_skill
+
+## Parameters
+- token: caller-supplied token
+
+## Steps
+1. Use {{token}} in step one
+2. Use {{token}} in step two
+`,
+  );
   testFilePath = path.join(skillsDir, 'fake-test.md');
 });
 
@@ -615,6 +673,132 @@ describe('api-server step-into protocol', () => {
     await consume;
 
     expect(awaitingCount).toBe(1);
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Multi-frame scope coverage — call stack chain + per-frame
+  // isolation + same-skill-twice independence. The previous tests
+  // covered single-skill scope; these protect the nested and
+  // repeated-invocation cases that are easy to break with subtle
+  // changes to the expander's frame-input recording.
+  // ─────────────────────────────────────────────────────────────────
+
+  it('nested skills: each frame:scope carries its OWN caller-supplied inputs (no cross-contamination)', async () => {
+    // Test → outer_skill (outer_arg="OUTER") → inner_skill
+    //                                          (inner_arg="INNER_PASSED")
+    //
+    // Three scope contracts to verify simultaneously:
+    //   1. Outer's entry frame:scope contains outer_arg, NOT inner_arg
+    //      (the inner skill hasn't been entered yet).
+    //   2. Inner's entry frame:scope contains inner_arg, NOT outer_arg
+    //      (outer's params are inlined into outer's step text, not
+    //       stored as variables — the frame chain isolates them).
+    //   3. The call-stack chain is test → outer → inner at maximum
+    //      depth (two frame:push events with the right parentId
+    //      relationship).
+    //
+    // Catches: frame input collection that accidentally inherits
+    // ancestor frame's inputs; or that drops inputs on nested calls;
+    // or that emits scope events in the wrong order around push/pop.
+    const sessionId = 'nested-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    for await (const ev of sseEvents(url, {
+      steps: ['[skill: outer_skill outer_arg="OUTER" out.outer_result="from_outer"]'],
+      sourceLines: [1],
+      skillsDir,
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    // Locate the two frame:push events in order.
+    const pushes = events.filter((e) => e.type === 'frame:push');
+    expect(pushes).toHaveLength(2);
+    expect(pushes[0].frame.skillName).toBe('outer_skill');
+    expect(pushes[1].frame.skillName).toBe('inner_skill');
+    expect(pushes[1].frame.parentId).toBe(pushes[0].frame.id);
+
+    // The frame:scope event paired with each push lives at index
+    // pushIdx + 1 (the contract documented in
+    // session-manager.ts: "every push is paired with a frame:scope
+    // snapshot"). Verify per-frame isolation:
+    const outerPushIdx = events.indexOf(pushes[0]);
+    const outerScope = events[outerPushIdx + 1];
+    expect(outerScope?.type).toBe('frame:scope');
+    expect(outerScope?.frameId).toBe(pushes[0].frame.id);
+    expect(outerScope?.scope?.outer_arg).toBe('OUTER');
+    expect(outerScope?.scope?.inner_arg).toBeUndefined();
+
+    const innerPushIdx = events.indexOf(pushes[1]);
+    const innerScope = events[innerPushIdx + 1];
+    expect(innerScope?.type).toBe('frame:scope');
+    expect(innerScope?.frameId).toBe(pushes[1].frame.id);
+    expect(innerScope?.scope?.inner_arg).toBe('INNER_PASSED');
+    expect(innerScope?.scope?.outer_arg).toBeUndefined();
+
+    // Pop sequence must mirror push sequence (LIFO).
+    const pops = events.filter((e) => e.type === 'frame:pop');
+    expect(pops).toHaveLength(2);
+    expect(pops[0].frameId).toBe(pushes[1].frame.id);
+    expect(pops[1].frameId).toBe(pushes[0].frame.id);
+  });
+
+  it('same skill called twice: each invocation has its OWN inputs visible (no leak from prior call)', async () => {
+    // Test step 1: [skill: reentrant_skill token="FIRST"]
+    // Test step 2: [skill: reentrant_skill token="SECOND"]
+    //
+    // Each invocation gets a NEW frame id (the expander's
+    // instanceId increments), and frameInputs is keyed by frame id.
+    // So instance #1's scope shows token="FIRST", instance #2's
+    // shows token="SECOND". Catches: a regression where the
+    // expander shared a single inputs map across invocations of
+    // the same skill, or where frameInputs was keyed by skill name
+    // instead of frame id.
+    const sessionId = 'reentrant-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    for await (const ev of sseEvents(url, {
+      steps: [
+        '[skill: reentrant_skill token="FIRST"]',
+        '[skill: reentrant_skill token="SECOND"]',
+      ],
+      sourceLines: [1, 2],
+      skillsDir,
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    // Two distinct frame ids — same skill, different invocations.
+    const pushes = events.filter((e) => e.type === 'frame:push');
+    expect(pushes).toHaveLength(2);
+    expect(pushes[0].frame.skillName).toBe('reentrant_skill');
+    expect(pushes[1].frame.skillName).toBe('reentrant_skill');
+    expect(pushes[0].frame.id).not.toBe(pushes[1].frame.id);
+
+    // First instance's entry scope.
+    const firstScope = events[events.indexOf(pushes[0]) + 1];
+    expect(firstScope?.scope?.token).toBe('FIRST');
+
+    // Second instance's entry scope MUST show its own token,
+    // not leak the first's.
+    const secondScope = events[events.indexOf(pushes[1]) + 1];
+    expect(secondScope?.scope?.token).toBe('SECOND');
+    // And the second invocation's frame:scope events emitted
+    // AFTER the first instance's frame:pop must not retain "FIRST"
+    // — frameInputs lookup is per frame id, not per skill name.
+    const secondInstanceScopes = events.filter(
+      (e) => e.type === 'frame:scope' && e.frameId === pushes[1].frame.id,
+    );
+    expect(secondInstanceScopes.length).toBeGreaterThanOrEqual(1);
+    for (const s of secondInstanceScopes) {
+      expect(s.scope.token).toBe('SECOND');
+    }
   });
 
   it('breakpointsByUri entries keyed at testFilePath are ignored (client trims those)', async () => {
