@@ -10,6 +10,10 @@ import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
+import { clearSkillCache, expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
+import { parseToolCall } from '../tools/tool-call-parser.js';
+import { executeToolStep } from '../tools/executor.js';
+import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { ApiResponseStore } from '../api/response-store.js';
@@ -55,11 +59,67 @@ export interface StepRequest {
    */
   breakpoints?: number[];
   /**
+   * Per-URI breakpoint sets keyed by absolute file path. The step loop
+   * checks each step's origin frame (test file OR a skill body line) and
+   * pauses via `step:awaiting` before executing a matching step. The
+   * client treats the pause as a step-paused state (same yellow ▶ /
+   * Continue / StepOver / etc. machinery as the stepMode flow).
+   *
+   * Entries keyed under `testFilePath` are skipped on the server side —
+   * the client already trims at those breakpoints before sending the
+   * request. Skill-file breakpoints (the actual motivation for this
+   * field) reach the server because the client's pre-expansion trim
+   * can't see them.
+   */
+  breakpointsByUri?: Record<string, number[]>;
+  /**
    * 1-based source-document line for each entry in `steps`. When present,
    * step events carry the original line so the client can render gutter
    * status against the document. Defaults to step index when omitted.
    */
   sourceLines?: number[];
+  /**
+   * Absolute path to the project's skills directory. When supplied, the
+   * server runs `expandSkills` over `steps`, flattens `[skill: ...]`
+   * invocations, and emits `frame:push` / `frame:pop` events around each
+   * expanded skill body so step-into-aware clients can render a multi-file
+   * call stack. Omit to keep the legacy behaviour (raw steps fed straight
+   * to the runner — fine when no `[skill: ...]` lines are present).
+   */
+  skillsDir?: string;
+  /**
+   * Absolute path of the test file the steps were authored in. Used as the
+   * origin `uri` on `frame` payloads attached to step events emitted from
+   * inline (non-skill) lines. Optional.
+   */
+  testFilePath?: string;
+  /**
+   * Absolute path to the project's tools directory. When supplied, the
+   * server loads the `ToolCatalogue` once per session and dispatches every
+   * `[tool: ...]` step through `executeToolStep` (the same code path the
+   * CLI runner uses). Without `toolsDir` the legacy behaviour applies —
+   * `[tool: ...]` lines reach the LLM as raw text, which it doesn't know
+   * how to execute.
+   */
+  toolsDir?: string;
+  /**
+   * One-shot pause-at-next-tool flag (Phase 5 — tool step-into). When
+   * true on the initial request body OR delivered via the run-control
+   * endpoint, the server emits `tool:awaiting-debugger` before the next
+   * `[tool: ...]` step and waits for the client to attach its debugger
+   * via the `tool-debugger-ack` endpoint. Consumed on first trigger;
+   * subsequent tools run normally until the flag is set again.
+   */
+  pauseAtNextTool?: boolean;
+  /**
+   * Initial step-mode for this batch. `continue` (default) runs until the
+   * next breakpoint or end. `into` / `over` / `out` start the run paused
+   * between steps and emit `step:awaiting` events so the client can drive
+   * step-by-step execution via `POST /sessions/:id/run-control`.
+   *
+   * Reset to `continue` between sessions.
+   */
+  stepMode?: 'continue' | 'into' | 'over' | 'out';
   /**
    * Per-request logging override. Lets a testbench user flip verbosity on a
    * single run (e.g. `consoleLogLevel: 'debug'` + `serverFileLogLevel: 'full'`
@@ -75,17 +135,39 @@ export interface StepRequest {
 }
 
 /**
+ * Origin frame for step events. Mirrors `FrameInfo` in `runner-core`'s
+ * `protocol.ts`. Kept in sync by hand — protocol is owned by runner-core
+ * but the server emits these in step-into-aware runs.
+ */
+export interface FrameInfo {
+  id: string;
+  parentId: string | null;
+  kind: 'test' | 'skill';
+  uri: string;
+  line: number;
+  skillName?: string;
+}
+
+/**
  * Run-time event the session manager emits per step. The streaming HTTP
  * endpoint converts these to SSE frames; the non-streaming endpoint ignores
  * them.
+ *
+ * The `frame:*` variants are emitted only when the client asks for skill
+ * expansion (via `StepRequest.skillsDir`). Legacy clients can ignore them.
  */
 export type RunEvent =
-  | { type: 'step:start'; line: number }
-  | { type: 'step:pass'; line: number; output?: string; screenshot?: string }
-  | { type: 'step:fail'; line: number; error: string; screenshot?: string }
+  | { type: 'step:start'; line: number; frame?: FrameInfo }
+  | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo }
+  | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string }
-  | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' };
+  | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' }
+  | { type: 'frame:push'; frame: FrameInfo }
+  | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
+  | { type: 'frame:scope'; frameId: string; scope: Record<string, string> }
+  | { type: 'step:awaiting'; line: number; frame?: FrameInfo }
+  | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo };
 
 export type RunEventListener = (event: RunEvent) => void;
 
@@ -164,6 +246,39 @@ interface ManagedSession {
   queueTail: Promise<void>;
   /** Cached env+data bundle once `envName` is supplied; reused across step batches. */
   envBundle?: EnvBundle;
+  /**
+   * Cached tool catalogue once `toolsDir` is supplied. Loaded lazily on the
+   * first batch that supplies one; subsequent batches reuse the catalogue
+   * (re-scanning the directory per batch would slow every step run for no
+   * gain — the file watcher / `loadToolCatalogue` re-run on session restart
+   * is the explicit reload story).
+   */
+  toolCatalogue?: ToolCatalogue;
+  /**
+   * When the step loop pauses awaiting next-step direction (stepMode !==
+   * 'continue'), this holds the resolver for the Promise the loop is
+   * blocked on. The HTTP run-control endpoint resolves it; the loop then
+   * picks up with the supplied mode. Cleared as soon as it resolves so
+   * a stale handle can't outlive a single pause point.
+   */
+  pendingRunControl: { resolve: (mode: 'continue' | 'into' | 'over' | 'out') => void } | null;
+  /**
+   * Set while the step loop is paused at the tool-dispatcher's
+   * `debugger;` ack point (Phase 5). The HTTP `tool-debugger-ack`
+   * endpoint resolves the Promise the loop is awaiting; the loop then
+   * proceeds into the `debugger;` statement which Node's V8 inspector
+   * traps. Cleared as soon as resolved.
+   */
+  pendingDebuggerAck: { resolve: () => void } | null;
+  /**
+   * One-shot trigger: when true at the moment the step loop reaches a
+   * `[tool: ...]` step, the server emits `tool:awaiting-debugger` and
+   * parks on `pendingDebuggerAck` instead of running the tool. The flag
+   * is consumed on first trigger so the user gets exactly one tool
+   * step-into per F11 press. Set via the HTTP run-control body and via
+   * `pauseAtNextTool` on the initial steps request.
+   */
+  pauseAtNextTool: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +384,52 @@ export class SessionManager {
   }
 
   /**
+   * Resolve a pending run-control wait for `sessionId` with the supplied
+   * mode. Called by the HTTP `POST /sessions/:id/run-control` handler.
+   * Returns `true` if a paused run actually picked the mode up, `false`
+   * if there was no paused run to deliver to (so the handler can return a
+   * 409 / "no pause" diagnostic).
+   */
+  submitRunControl(sessionId: string, mode: 'continue' | 'into' | 'over' | 'out'): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session?.pendingRunControl) return false;
+    const { resolve } = session.pendingRunControl;
+    session.pendingRunControl = null;
+    resolve(mode);
+    return true;
+  }
+
+  /**
+   * Pass-through to a session's mutable `pauseAtNextTool` flag. The HTTP
+   * `run-control` endpoint sets this on the same body that delivers a
+   * step-mode command — the next `[tool: ...]` step the loop reaches
+   * then emits `tool:awaiting-debugger` and parks on
+   * `pendingDebuggerAck` until the client attaches its debugger.
+   *
+   * Returns `true` when the session existed and the flag was set.
+   */
+  setPauseAtNextTool(sessionId: string, value: boolean): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    session.pauseAtNextTool = value;
+    return true;
+  }
+
+  /**
+   * Resolve the per-session debugger-ack wait. Returns `true` if a run
+   * was actually parked on the ack (so the HTTP handler can 200), `false`
+   * if no run is awaiting (handler returns 409).
+   */
+  submitDebuggerAck(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session?.pendingDebuggerAck) return false;
+    const { resolve } = session.pendingDebuggerAck;
+    session.pendingDebuggerAck = null;
+    resolve();
+    return true;
+  }
+
+  /**
    * Execute a batch of steps within a named session.
    * Creates the session on first use. Queues requests if the session is busy.
    *
@@ -282,6 +443,14 @@ export class SessionManager {
     onEvent?: RunEventListener,
     signal?: AbortSignal,
   ): Promise<StepResponse> {
+    // Clear the module-level skill cache at the start of every request so
+    // disk edits to skill files between batches are picked up. The API
+    // server is long-lived; without this an edit during a paused run stays
+    // masked by the earlier-cached parse. Within a single request the cache
+    // is repopulated by expandSkills and still amortises across nested
+    // invocations of the same skill.
+    clearSkillCache();
+
     let session = this.sessions.get(sessionId);
 
     // If session exists but is closed, remove it so a fresh one is created
@@ -515,6 +684,9 @@ export class SessionManager {
       csrfTokens: {},
       contextContent: context.combined,
       queueTail: Promise.resolve(),
+      pendingRunControl: null,
+      pendingDebuggerAck: null,
+      pauseAtNextTool: false,
     };
 
     this.sessions.set(sessionId, session);
@@ -535,16 +707,35 @@ export class SessionManager {
     /** Full StepResult records accumulated across this request — used to
      *  generate the per-run HTML report at the end. */
     const fullStepResults: StepResult[] = [];
-    const stepsTotal = request.steps.length;
+    // stepsTotal mirrors the post-expansion step count once skill expansion
+    // runs (further down). Declared `let` because of that. Status displays
+    // and `step N/total` log lines reflect what the runner actually executes,
+    // not the pre-expansion length.
+    let stepsTotal = request.steps.length;
     let stepsCompleted = 0;
     let overallStatus: 'passed' | 'failed' | 'error' | 'aborted' = 'passed';
     let errorInfo: { step: number; message: string } | null = null;
 
+    // Step-execution view of the inbound request. When skill expansion runs
+    // (further down, once envDataCtx is resolved) these get rebound to the
+    // flattened arrays; the loop only ever reads from them. Declared up
+    // here so the `sourceLineFor` closure binds to the live values.
+    let effectiveSteps: string[] = request.steps;
+    let effectiveSourceLines: number[] | undefined = request.sourceLines;
+    let expansionOrigins: ExpandedStepOrigin[] | null = null;
+    let expansionFrames: Record<string, FrameInfo> | null = null;
+    // Per-skill-frame snapshot of the caller-supplied parameter values
+    // recorded by the expander. Merged into `frame:scope` on entry so
+    // a debugger pause inside the skill shows what was passed in.
+    const frameInputs: Record<string, Record<string, string>> = {};
+
     // Map a 1-based step index to the source-document line. When the client
     // doesn't supply sourceLines we echo the step index — some clients (e.g.
-    // headless runners) don't track source positions.
+    // headless runners) don't track source positions. After skill expansion,
+    // `effectiveSourceLines` carries per-expanded-step lines (skill-body
+    // entries point at their skill `.md`, not the test file).
     const sourceLineFor = (stepIndex0: number): number => {
-      const explicit = request.sourceLines?.[stepIndex0];
+      const explicit = effectiveSourceLines?.[stepIndex0];
       return typeof explicit === 'number' ? explicit : stepIndex0 + 1;
     };
 
@@ -636,17 +827,254 @@ export class SessionManager {
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
       ?? this.config.execution.timeout;
 
+    // Tool catalogue — when the caller supplies `toolsDir`, load it once and
+    // cache on the session. The step loop later dispatches `[tool: ...]`
+    // lines through `executeToolStep` so deterministic tool code runs on the
+    // server (parallel to how the CLI runner dispatches them). Without
+    // `toolsDir` `[tool: ...]` lines reach the AI as plain text — same as
+    // pre-Phase-5 behaviour.
+    if (request.toolsDir && !session.toolCatalogue) {
+      try {
+        session.toolCatalogue = await loadToolCatalogue(request.toolsDir);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(`Session "${sessionId}": failed to load tool catalogue "${request.toolsDir}": ${message}`);
+        emit({ type: 'output', msg: `Tool catalogue load failed: ${message}`, kind: 'error' });
+        emit({ type: 'done', status: 'error' });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          error: { step: 0, message },
+          pageTitle: '',
+        };
+      }
+    }
+    const toolCatalogue = session.toolCatalogue;
+
+    // Skill expansion — when the caller supplies `skillsDir`, flatten
+    // `[skill: ...]` lines into their bodies before execution and remember
+    // the per-step origin so step-into-aware clients see `frame:push` /
+    // `frame:pop` events around each skill body. Without `skillsDir` the
+    // existing flow is preserved verbatim (raw steps shipped to the runner).
+    if (request.skillsDir) {
+      try {
+        const expansion = await expandSkills(
+          request.steps,
+          request.skillsDir,
+          envDataCtx ?? undefined,
+          request.testFilePath,
+          // Thread sourceLines so top-level [skill: ...] invocations
+          // get a non-zero `frame.line` — the client uses it to paint
+          // running/pass on the test file's `[skill: ...]` step row.
+          // Without this, the row stays blank.
+          request.sourceLines,
+        );
+        effectiveSteps = expansion.steps;
+        stepsTotal = effectiveSteps.length;
+        expansionOrigins = expansion.origins;
+        // Translate ExpandedFrame (parser shape) into FrameInfo (wire shape):
+        // the parser uses `invocationLine | null`, the wire carries a non-null
+        // line. We pin the test-frame line to 0 when absent; consumers treat
+        // it as "frame has no parent line".
+        expansionFrames = {};
+        for (const [id, f] of Object.entries(expansion.frames)) {
+          expansionFrames[id] = {
+            id: f.id,
+            parentId: f.parentId,
+            kind: f.kind,
+            uri: f.uri,
+            line: f.invocationLine ?? 0,
+            ...(f.skillName !== undefined && { skillName: f.skillName }),
+          };
+          // Parallel input map kept server-side only (not part of the
+          // wire FrameInfo). Merged into the `frame:scope` payload on
+          // `frame:push` so a debugger pause inside the skill can see
+          // the caller-supplied parameter values, which would
+          // otherwise be invisible because the expander inlines them
+          // directly into the step text rather than into the
+          // resolvedParameters map.
+          if (f.inputs) frameInputs[id] = { ...f.inputs };
+        }
+        // Re-derive sourceLines: skill-body steps point at the skill file's
+        // own line; inline steps keep their original test-file line. Without
+        // this, a status emitted for a skill-body step would land on the
+        // wrong line in the test editor.
+        effectiveSourceLines = expansion.origins.map((o) => {
+          if (o.skillLine !== undefined) return o.skillLine;
+          return request.sourceLines?.[o.inputIndex] ?? o.inputIndex + 1;
+        });
+      } catch (err) {
+        // Skill expansion failures (cycles, missing files, bad args) abort
+        // the run before the browser does any work. Mirror the existing
+        // executeStep error path so the SSE stream emits a clean `done`.
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(`Session "${sessionId}": skill expansion failed: ${message}`);
+        emit({ type: 'output', msg: `Skill expansion failed: ${message}`, kind: 'error' });
+        emit({ type: 'done', status: 'error' });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          error: { step: 0, message },
+          pageTitle: '',
+        };
+      }
+    }
+
     // Detect conditional step groups for multi-outcome branching — interpolate
     // env/data substitutions first so grouping looks at the final step text
     // (otherwise `${data.foo}` placeholders could change which steps look
     // alike for grouping purposes).
     const interpolatedSteps = envDataCtx
-      ? request.steps.map((s) => interpolateEnvData(s, envDataCtx))
-      : request.steps;
+      ? effectiveSteps.map((s) => interpolateEnvData(s, envDataCtx))
+      : effectiveSteps;
     const stepGroups = identifyStepGroups(interpolatedSteps);
 
+    // ─── Frame stack ────────────────────────────────────────────────────────
+    //
+    // For step-into-aware clients: maintain a stack of currently-pushed
+    // skill frames, emit `frame:push` / `frame:pop` events to transition
+    // the stack to the frame each step belongs to, and return the FrameInfo
+    // payload to attach to `step:start` / `step:pass` / `step:fail`.
+    //
+    // `activeFrames` is the stack of frame ids (without the implicit test
+    // root). `desiredFrameChain(frameId)` walks parentId links via
+    // `expansionFrames` to produce the chain from outermost to the given
+    // frame (empty when the step lives in the test frame).
+    const activeFrames: string[] = [];
+    const desiredFrameChain = (frameId: string): string[] => {
+      if (!expansionFrames || frameId === '') return [];
+      const chain: string[] = [];
+      let cur: string | null = frameId;
+      while (cur && cur !== '') {
+        chain.unshift(cur);
+        cur = expansionFrames[cur]?.parentId ?? null;
+      }
+      return chain;
+    };
+    const transitionToFrame = (frameId: string): void => {
+      if (!expansionFrames) return;
+      const desired = desiredFrameChain(frameId);
+      // Pop until activeFrames matches a prefix of desired.
+      while (activeFrames.length > 0) {
+        const idx = activeFrames.length - 1;
+        if (idx < desired.length && activeFrames[idx] === desired[idx]) break;
+        const popped = activeFrames.pop()!;
+        emit({ type: 'frame:pop', frameId: popped, outputs: {} });
+      }
+      // Push the remainder. Each push is paired with a `frame:scope`
+      // snapshot so a client that pauses BEFORE the first step in the
+      // new frame (e.g. via a skill-file breakpoint) can still see
+      // the variables the expander has placed into resolvedParameters
+      // for that frame — most importantly, the input parameters the
+      // caller passed in. Without this scope-on-entry emit, the
+      // Variables view stays empty until a step inside the frame
+      // passes/fails, which is too late for a debugger pause point.
+      //
+      // Merge order matters: `frameInputs[f.id]` (the caller's
+      // resolved arg values) overlays `resolvedParameters` so the
+      // skill's declared param names take precedence over any same-
+      // named entries that may already exist in the test scope.
+      while (activeFrames.length < desired.length) {
+        const nextId = desired[activeFrames.length]!;
+        const f = expansionFrames[nextId];
+        if (!f) break;
+        activeFrames.push(nextId);
+        emit({ type: 'frame:push', frame: f });
+        emit({
+          type: 'frame:scope',
+          frameId: f.id,
+          scope: { ...resolvedParameters, ...(frameInputs[f.id] ?? {}) },
+        });
+      }
+    };
+    const frameInfoFor = (i: number): FrameInfo | undefined => {
+      if (!expansionOrigins || !expansionFrames) return undefined;
+      const origin = expansionOrigins[i];
+      if (!origin) return undefined;
+      if (origin.frameId === '') {
+        // Test (top-level inline) frame. Synthesise a FrameInfo so clients
+        // get a uri attribution even without an explicit push event.
+        return request.testFilePath
+          ? { id: '', parentId: null, kind: 'test', uri: request.testFilePath, line: 0 }
+          : undefined;
+      }
+      return expansionFrames[origin.frameId];
+    };
+
+    /**
+     * Walk the frame's ancestry to get the step's depth. Test (root)
+     * frame is depth 0; each nested skill is +1. Used by stepMode pause
+     * decisions: 'over' pauses when next depth ≤ current depth; 'out'
+     * pauses when next depth < current depth.
+     */
+    const depthOf = (i: number): number => {
+      if (!expansionOrigins || !expansionFrames) return 0;
+      const origin = expansionOrigins[i];
+      if (!origin || origin.frameId === '') return 0;
+      let depth = 0;
+      let cur: string | null = origin.frameId;
+      const seen = new Set<string>();
+      while (cur && cur !== '' && !seen.has(cur)) {
+        seen.add(cur);
+        depth++;
+        cur = expansionFrames[cur]?.parentId ?? null;
+      }
+      return depth;
+    };
+
+    // Initial step mode from the request. Defaults to 'continue' (legacy
+    // behaviour). The HTTP run-control endpoint can flip this mid-run by
+    // resolving the per-session pendingRunControl Promise the step loop
+    // awaits when paused.
+    let currentMode: 'continue' | 'into' | 'over' | 'out' = request.stepMode ?? 'continue';
+
+    // Seed the one-shot tool-debugger pause flag from the initial request.
+    // The HTTP run-control endpoint can flip it back on mid-run; the step
+    // loop consumes it on the first `[tool: ...]` it reaches.
+    if (request.pauseAtNextTool) {
+      session.pauseAtNextTool = true;
+    }
+
+    // Per-URI breakpoint sets for the server-side pause check. Skill-
+    // file (and any non-test-file) breakpoints land here; the test file's
+    // own breakpoints are skipped because the client already trims at
+    // them before sending the request (legacy `trimAtBreakpoint` path).
+    const breakpointSetsByUri = new Map<string, Set<number>>();
+    if (request.breakpointsByUri) {
+      for (const [uri, lines] of Object.entries(request.breakpointsByUri)) {
+        if (uri === request.testFilePath) continue;
+        if (lines.length === 0) continue;
+        breakpointSetsByUri.set(uri, new Set(lines));
+      }
+    }
+    // Initial scope for the test (root) frame. Same rationale as the
+    // scope-on-frame-push emit in `transitionToFrame`: a client that
+    // pauses BEFORE the first step (e.g. via a breakpoint trim on
+    // step 1, or stepMode='into' with run-control before the first
+    // execution) needs to see the test's resolved parameters from
+    // the start. Without this, the Variables view stays empty until
+    // step 1 passes, which is too late for the debugger UX.
+    emit({
+      type: 'frame:scope',
+      frameId: '',
+      scope: { ...resolvedParameters },
+    });
+
+    // Step indexes that have already had their breakpoint pause consumed
+    // in this batch. Without this, the loop would re-pause forever on
+    // the same step after a Continue.
+    const consumedBreakpoints = new Set<number>();
+
     try {
-      for (let i = 0; i < request.steps.length; i++) {
+      for (let i = 0; i < effectiveSteps.length; i++) {
         // Check abort BEFORE starting each step. We don't try to interrupt
         // a step mid-flight (Playwright actions / AI calls aren't reliably
         // cancelable today) — between-step granularity is the contract.
@@ -655,7 +1083,7 @@ export class SessionManager {
           logger.info(`Session "${sessionId}": run aborted by client at step ${i + 1}/${stepsTotal}`);
           break;
         }
-        const originalStep = request.steps[i]!;
+        const originalStep = effectiveSteps[i]!;
 
         // Apply env-data interpolation first (parse-time semantics: fixed for
         // the whole session), then runtime `{{...}}` parameter substitution.
@@ -695,7 +1123,7 @@ export class SessionManager {
               result.status === 'skipped' ? 'passed' : result.status;
 
             results.push({
-              step: request.steps[result.index] ?? result.instruction,
+              step: effectiveSteps[result.index] ?? result.instruction,
               status: resultStatus,
               actions: result.turns.flatMap((t) => t.subActions).map((sa) => sa.action),
               screenshot: screenshotValue,
@@ -740,10 +1168,70 @@ export class SessionManager {
           continue;
         }
 
+        // Transition the frame stack to this step's frame before emitting
+        // anything tagged with `line` — clients use the most recent
+        // frame:push to scope the line to a file. `frameForStep` is spread
+        // into each step event below so step-into-aware clients can attach
+        // origin metadata without legacy clients seeing a new mandatory field.
+        const stepFrameId = expansionOrigins?.[i]?.frameId ?? '';
+        transitionToFrame(stepFrameId);
+        const frameForStep = frameInfoFor(i);
+        const frameSpread: { frame?: FrameInfo } = frameForStep ? { frame: frameForStep } : {};
+
+        // ── Server-side breakpoint check ────────────────────────────
+        //
+        // If the next step's origin (URI + source line) matches a
+        // breakpoint AND we haven't already paused for this exact step
+        // index, emit `step:awaiting` and park on `pendingRunControl`
+        // — same machinery the stepMode flow uses. The client treats
+        // the pause as step-paused state; F5 / F11 / F10 / Shift+F11
+        // all just work.
+        //
+        // Skill-file breakpoints are the primary reason this exists.
+        // Test-file breakpoints are filtered out at map-build time
+        // because the client already trims at them client-side via
+        // `trimAtBreakpoint` before the request is sent.
+        if (
+          breakpointSetsByUri.size > 0 &&
+          !consumedBreakpoints.has(i) &&
+          frameForStep?.uri &&
+          !signal?.aborted
+        ) {
+          const stepUriBps = breakpointSetsByUri.get(frameForStep.uri);
+          const stepLine = sourceLineFor(i);
+          if (stepUriBps?.has(stepLine)) {
+            consumedBreakpoints.add(i);
+            emit({
+              type: 'step:awaiting',
+              line: stepLine,
+              ...frameSpread,
+            });
+            const newMode = await new Promise<'continue' | 'into' | 'over' | 'out'>((resolve) => {
+              session.pendingRunControl = { resolve };
+              if (signal?.aborted) {
+                session.pendingRunControl = null;
+                resolve('continue');
+                return;
+              }
+              signal?.addEventListener(
+                'abort',
+                () => {
+                  if (session.pendingRunControl?.resolve === resolve) {
+                    session.pendingRunControl = null;
+                    resolve('continue');
+                  }
+                },
+                { once: true },
+              );
+            });
+            currentMode = newMode;
+          }
+        }
+
         // Check for skippable steps ([input:] and [interactive])
         if (isSkippableStep(interpolated)) {
           logger.info(`Session "${sessionId}": skipping step ${i + 1} (input/interactive not supported in API mode)`);
-          emit({ type: 'step:start', line: sourceLineFor(i) });
+          emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
           results.push({
             step: originalStep,
             status: 'passed',
@@ -752,7 +1240,7 @@ export class SessionManager {
             reasoning: 'Skipped: [input] and [interactive] steps are not supported in API mode',
             outputs: {},
           });
-          emit({ type: 'step:pass', line: sourceLineFor(i), output: 'skipped' });
+          emit({ type: 'step:pass', line: sourceLineFor(i), output: 'skipped', ...frameSpread });
           stepsCompleted++;
           session.totalStepsExecuted++;
           continue;
@@ -775,32 +1263,143 @@ export class SessionManager {
           stepInstruction,
         );
 
-        emit({ type: 'step:start', line: sourceLineFor(i) });
+        emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
 
-        // Execute the step
+        // Tool-step branch — when the step is a `[tool: ...]` invocation
+        // AND we have a loaded catalogue, dispatch through `executeToolStep`
+        // (the same code path the CLI runner uses) and shape the outcome
+        // into a `StepResult` so the rest of the loop is unchanged. Without
+        // a catalogue, fall through to `executeStep` and let the AI loop
+        // see the raw `[tool: ...]` text (legacy behaviour).
+        const toolCall = toolCatalogue ? parseToolCall(originalStep) : null;
         let stepResult: StepResult;
         try {
-          stepResult = await executeStep(
-            i + 1,
-            stepsTotal,
-            stepInstruction,
-            {
+          if (toolCall && toolCatalogue) {
+            // Tool step-into — Phase 5. When the session's one-shot
+            // pause-at-next-tool flag is set, surface a
+            // `tool:awaiting-debugger` event and wait for the client to
+            // attach VS Code's Node debugger. The cooperative
+            // `debugger;` lives inside `executeToolStep` immediately
+            // before `def.run(...)` so stepping past it lands the user
+            // in the tool body rather than in argument-coercion
+            // boilerplate (see step-into-design.md §Tool step-into).
+            // The flag is consumed here so each F11 yields exactly one
+            // pause.
+            let pauseBeforeRun = false;
+            if (session.pauseAtNextTool && !signal?.aborted) {
+              session.pauseAtNextTool = false;
+              const registered = toolCatalogue.get(toolCall.name);
+              emit({
+                type: 'tool:awaiting-debugger',
+                toolName: toolCall.name,
+                ...(registered?.filePath && { toolFilePath: registered.filePath }),
+                line: sourceLineFor(i),
+                ...frameSpread,
+              });
+              // Park on the ack. If the run is aborted while we're
+              // parked, resolve immediately so the next-iteration abort
+              // check picks it up — and skip the cooperative pause
+              // because there's no debugger attached on this path.
+              let abortedDuringWait = false;
+              await new Promise<void>((resolve) => {
+                session.pendingDebuggerAck = { resolve };
+                if (signal?.aborted) {
+                  session.pendingDebuggerAck = null;
+                  abortedDuringWait = true;
+                  resolve();
+                  return;
+                }
+                signal?.addEventListener(
+                  'abort',
+                  () => {
+                    if (session.pendingDebuggerAck?.resolve === resolve) {
+                      session.pendingDebuggerAck = null;
+                      abortedDuringWait = true;
+                      resolve();
+                    }
+                  },
+                  { once: true },
+                );
+              });
+              // Only arm the cooperative pause when the ack actually
+              // arrived (vs. abort). Otherwise we'd hit `debugger;`
+              // with no attached inspector even though the user
+              // cancelled.
+              pauseBeforeRun = !abortedDuringWait;
+            }
+            const startedAt = Date.now();
+            const outcome = await executeToolStep(toolCall, {
               page: session.browserSession.pageTracker.getActive(),
-              config: this.config,
-              aiClient: session.aiClient,
-              contextContent: session.contextContent,
-              testName: `session:${sessionId}`,
+              context: session.browserSession.context,
+              browser: session.browserSession.browser,
+              resolvedParameters,
+              catalogue: toolCatalogue,
               ...(session.sessionConfig.baseUrl !== undefined && {
                 baseUrl: session.sessionConfig.baseUrl,
               }),
-              conversationHistory: [...session.conversationHistory],
-              apiResponseStore: session.apiResponseStore,
-              csrfTokens: session.csrfTokens,
-              resolvedParameters,
-              pageTracker: session.browserSession.pageTracker,
-              browserTracker: session.browserTracker,
-            },
-          );
+              ...(pauseBeforeRun && { pauseBeforeRun: true }),
+            });
+            const passed = outcome.status === 'passed';
+            stepResult = {
+              index: i + 1,
+              instruction: originalStep,
+              status: passed ? 'passed' : 'failed',
+              turns: [],
+              durationMs: Date.now() - startedAt,
+              retried: false,
+              ...(outcome.error !== undefined && { error: outcome.error }),
+              aiExplanation: passed
+                ? `Tool "${outcome.toolName}" produced outputs: ${
+                    Object.keys(outcome.outputs).length
+                      ? Object.entries(outcome.outputs)
+                          .map(([k, v]) => `${k}="${v}"`)
+                          .join(', ')
+                      : '(none)'
+                  }`
+                : `Tool "${outcome.toolName}" failed`,
+              toolStep: {
+                name: outcome.toolName,
+                args: outcome.args,
+                outputs: outcome.outputs,
+                logs: outcome.logs,
+              },
+            };
+            // The tool's `setVar` writes to resolvedParameters via the alias.
+            // Surface each captured value via a `capture` event so the
+            // Variables panel reflects it without waiting for an explicit
+            // `[output: ...]` prefix.
+            for (const [aliasName, aliasValue] of Object.entries(outcome.outputs)) {
+              session.outputs[aliasName] = aliasValue;
+              emit({
+                type: 'capture',
+                line: sourceLineFor(i),
+                name: aliasName,
+                value: aliasValue,
+              });
+            }
+          } else {
+            stepResult = await executeStep(
+              i + 1,
+              stepsTotal,
+              stepInstruction,
+              {
+                page: session.browserSession.pageTracker.getActive(),
+                config: this.config,
+                aiClient: session.aiClient,
+                contextContent: session.contextContent,
+                testName: `session:${sessionId}`,
+                ...(session.sessionConfig.baseUrl !== undefined && {
+                  baseUrl: session.sessionConfig.baseUrl,
+                }),
+                conversationHistory: [...session.conversationHistory],
+                apiResponseStore: session.apiResponseStore,
+                csrfTokens: session.csrfTokens,
+                resolvedParameters,
+                pageTracker: session.browserSession.pageTracker,
+                browserTracker: session.browserTracker,
+              },
+            );
+          }
         } catch (err) {
           // Unexpected error during step execution
           const message = err instanceof Error ? err.message : String(err);
@@ -843,6 +1442,7 @@ export class SessionManager {
             line: sourceLineFor(i),
             error: message,
             ...(errorScreenshot && { screenshot: errorScreenshot }),
+            ...frameSpread,
           });
 
           overallStatus = 'error';
@@ -918,7 +1518,94 @@ export class SessionManager {
             line: sourceLineFor(i),
             ...(stepResult.aiExplanation && { output: stepResult.aiExplanation }),
             ...(screenshotValue && { screenshot: screenshotValue }),
+            ...frameSpread,
           });
+
+          // ── Frame scope snapshot (Phase 4) ──────────────────────────
+          //
+          // After every successful step, emit the current scope so the
+          // Variables panel can keep up. Phase 4 ships a flat scope —
+          // the full `resolvedParameters`, including any namespaced
+          // skill-internal `__skillN_x` entries. Per-frame filtering
+          // (reverse-rename resolution + skill-private vars only) is
+          // tracked as Phase 4.B follow-up; the user gets visibility
+          // into the actual runtime state in the meantime.
+          //
+          // Frame inputs (recorded at expansion time from the caller's
+          // `[skill: foo X=...]` args) overlay resolvedParameters so
+          // declared parameters stay visible across the frame's
+          // lifetime — without this, they'd vanish after step 1 because
+          // the expander inlines them into step text rather than into
+          // the live scope map.
+          emit({
+            type: 'frame:scope',
+            frameId: stepFrameId,
+            scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
+          });
+
+          // Persist variables captured via [store as: X] to session scope.
+          // The outputVars loop above only handles [output: X] prefix steps;
+          // [store as: X] writes directly to resolvedParameters via the step
+          // executor and would be lost when a breakpoint splits the run into
+          // separate batch requests (the next batch seeds resolvedParameters
+          // from session.outputs, which never got the value).
+          for (const [key, value] of Object.entries(resolvedParameters)) {
+            if (!key.startsWith('__skill')) {
+              session.outputs[key] = value;
+            }
+          }
+
+          // ── Step-mode pause decision ────────────────────────────────
+          //
+          // When the client started this batch with `stepMode !== 'continue'`,
+          // we pause after each step depending on the depth relationship
+          // between the just-executed step and the next one. The yellow ▶
+          // moves to the next step's frame/line on the client; the loop
+          // blocks on `pendingRunControl` until the client sends a new
+          // mode via the `run-control` endpoint.
+          if (currentMode !== 'continue' && i < effectiveSteps.length - 1) {
+            const nextI = i + 1;
+            const curDepth = depthOf(i);
+            const nextDepth = depthOf(nextI);
+            const shouldPause =
+              currentMode === 'into' ||
+              (currentMode === 'over' && nextDepth <= curDepth) ||
+              (currentMode === 'out' && nextDepth < curDepth);
+            if (shouldPause) {
+              // Pre-transition the frame stack to the next step's frame so
+              // step:awaiting carries the right frame payload (the call
+              // stack view + yellow ▶ both need the destination, not the
+              // origin).
+              const nextFrameId = expansionOrigins?.[nextI]?.frameId ?? '';
+              transitionToFrame(nextFrameId);
+              const nextFrame = frameInfoFor(nextI);
+              const nextLine = sourceLineFor(nextI);
+              emit({
+                type: 'step:awaiting',
+                line: nextLine,
+                ...(nextFrame && { frame: nextFrame }),
+              });
+              // Block until the client sends the next mode (or the run
+              // gets aborted). On abort we resolve with 'continue' to
+              // unblock cleanly — the abort check at the top of the next
+              // iteration catches the actual abort.
+              const newMode = await new Promise<'continue' | 'into' | 'over' | 'out'>((resolve) => {
+                session.pendingRunControl = { resolve };
+                if (signal?.aborted) {
+                  session.pendingRunControl = null;
+                  resolve('continue');
+                  return;
+                }
+                signal?.addEventListener('abort', () => {
+                  if (session.pendingRunControl?.resolve === resolve) {
+                    session.pendingRunControl = null;
+                    resolve('continue');
+                  }
+                }, { once: true });
+              });
+              currentMode = newMode;
+            }
+          }
         } else {
           // Step failed
           overallStatus = 'failed';
@@ -934,6 +1621,16 @@ export class SessionManager {
             line: sourceLineFor(i),
             error: stepResult.error ?? 'Step failed',
             ...(screenshotValue && { screenshot: screenshotValue }),
+            ...frameSpread,
+          });
+          // Phase 4 — surface the scope at failure time too. The user
+          // wants to see "what were the variables when this step blew
+          // up." Same flat shape as the pass-path emission above.
+          // Same frameInputs overlay rationale (see above).
+          emit({
+            type: 'frame:scope',
+            frameId: stepFrameId,
+            scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
           });
           break;
         }
@@ -1021,6 +1718,12 @@ export class SessionManager {
         logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);
       }
     }
+
+    // Unwind any frames still on the stack — happens on early exit (fail,
+    // error, abort) and on a clean finish where the last executed step was
+    // inside a skill body. Clients need the matching pops to keep their
+    // call-stack model consistent.
+    transitionToFrame('');
 
     emit({ type: 'done', status: overallStatus });
 

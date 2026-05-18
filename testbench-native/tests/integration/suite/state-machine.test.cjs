@@ -239,6 +239,51 @@ describe('TestBench debug state machine', function () {
     await waitFor('isRunning becomes false', () => !hooks.isRunning());
   });
 
+  it('continueRun from idle is a safe no-op (no stream opened, no exception)', async () => {
+    // Phase 5 follow-up: when there's no run to continue (idle state),
+    // the unified continueRun falls through to a status-bar message
+    // rather than crashing or opening a stream. Easy to break if a
+    // future change drops one of the guard conditions.
+    assert.equal(hooks.isRunning(), false, 'precondition: must be idle');
+    await vscode.commands.executeCommand('testbench-native.continueRun');
+    // Give any spurious async work a chance to surface.
+    await sleep(100);
+    assert.equal(hooks.isRunning(), false, 'continueRun from idle must not start a run');
+    assert.equal(fake.hasActiveStream, false, 'continueRun from idle must not open a stream');
+    assert.equal(fake.runControlCalls.length, 0, 'continueRun from idle must not POST run-control');
+  });
+
+  it('paused → running (continueRun handles breakpoint state too): the unified Continue command re-opens the stream', async () => {
+    // Phase 5 follow-up: testbench-native.continueRun was originally a
+    // step-paused-only command (POST run-control). It's now unified so
+    // it ALSO handles breakpoint-pause (the old resume path). The
+    // existing `testbench-native.resume` test below still passes via
+    // the back-compat alias; THIS test asserts that calling continueRun
+    // directly from a breakpoint-pause state also re-opens the stream.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('running on line 9', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('paused at 9', () => hooks.tracker.snapshot().breakpointStop === 9);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('isRunning back to true', () => hooks.isRunning());
+    await waitFor('new fake stream', () => fake.hasActiveStream);
+    assert.equal(
+      hooks.tracker.snapshot().breakpointStop,
+      null,
+      'continueRun from breakpoint-pause must clear the pause indicator',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('paused → running (resume): testbench-native.resume re-opens the stream from paused line', async () => {
     // Drive into paused state.
     void vscode.commands.executeCommand('testbench-native.runSelected');
@@ -873,5 +918,133 @@ describe('TestBench debug state machine', function () {
       return hooks.tracker.snapshot().breakpointStop === 10;
     });
     await waitFor('idle after second run hits the breakpoint', () => !hooks.isRunning());
+  });
+
+  it('paused-on-error: step:fail parks a breakpointStop so the user can edit and Continue to retry the failed step', async () => {
+    // Prototype for fix-and-resume on failure. Without this, a step:fail
+    // ends the run via done(failed); the user has no recourse but to fix
+    // the markdown and click Run from scratch (paying for browser nav
+    // and any preceding steps again).
+    //
+    // With it: step:fail still propagates fail icon + done(failed), but
+    // we ALSO park breakpointStop on the failed line. The existing Continue
+    // command re-opens the stream from that line against the still-alive
+    // server session, so an edited step text gets retried in-place.
+    //
+    // The session/browser survives a step:fail on the server side
+    // (overallStatus = 'failed' just breaks the step loop; the browser
+    // stays open), which is what makes this safe.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('line 9 running', () => {
+      return Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running';
+    });
+
+    // Failure on line 9.
+    fake.push({
+      type: 'step:fail',
+      line: 9,
+      error: 'page.goto: net::ERR_NAME_NOT_RESOLVED',
+    });
+    fake.end();
+    await waitFor('idle after failure', () => !hooks.isRunning());
+
+    // The failure icon is in place (existing behaviour) AND the
+    // breakpointStop is parked on the failed line so Continue is enabled.
+    const snap = hooks.tracker.snapshot();
+    const statuses = Object.fromEntries(snap.statuses);
+    assert.equal(statuses[9], 'fail', 'precondition: failed step shows fail icon');
+    assert.equal(
+      snap.breakpointStop,
+      9,
+      'paused-on-error: breakpointStop parks on the failed line so Continue is enabled',
+    );
+
+    // Continue re-opens the stream from the failed line — same path as
+    // breakpoint-paused continueRun. Track the new request's sourceLines
+    // to prove it carries the failed step (and only steps from there onward).
+    const requestsBefore = fake.requests.length;
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('retry stream opens', () => fake.hasActiveStream);
+
+    const retryRequest = fake.requests[requestsBefore];
+    assert.ok(retryRequest, 'Continue from paused-on-error must trigger a new streamSteps call');
+    assert.ok(
+      retryRequest.sourceLines.includes(9),
+      `Retry must include the failed step's line in sourceLines. Got ${JSON.stringify(retryRequest.sourceLines)}.`,
+    );
+
+    fake.end();
+    await waitFor('idle after retry', () => !hooks.isRunning());
+  });
+
+  it('resume from breakpoint preserves pass marks from the first batch', async () => {
+    // Regression: continueRun called runLines() which unconditionally called
+    // clearStatusesForUris() — the same wipe a fresh re-run performs. After
+    // pausing at a breakpoint and hitting Continue, every step that had passed
+    // in the first batch was blanked out, making it look like those steps
+    // never ran.
+    //
+    // The contract: statuses from the first batch (steps that ran before the
+    // breakpoint) must survive the Continue and remain visible while the
+    // second batch executes. Only a deliberate Stop → Run is a hard reset.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    // Breakpoint on step 3 (line 10). Steps 1 (line 8) and 2 (line 9) run
+    // in the first batch; step 3 runs after the user hits Continue.
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+
+    // ---------- First batch: steps 1 and 2 pass, breakpoint pauses before 3 ----------
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+
+    await waitFor('paused at line 10 after first batch', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    const afterFirstBatch = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(afterFirstBatch[8], 'pass', 'precondition: step 1 passed in first batch');
+    assert.equal(afterFirstBatch[9], 'pass', 'precondition: step 2 passed in first batch');
+
+    // ---------- Continue: second batch runs step 3 ----------
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('second stream active after Continue', () => fake.hasActiveStream);
+
+    // First-batch pass marks must NOT be wiped at the moment the stream opens.
+    const duringResume = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(
+      duringResume[8],
+      'pass',
+      'step 1 pass must survive the Continue — not blanked by clearStatusesForUris',
+    );
+    assert.equal(
+      duringResume[9],
+      'pass',
+      'step 2 pass must survive the Continue — not blanked by clearStatusesForUris',
+    );
+
+    fake.push({ type: 'step:start', line: 10 });
+    fake.push({ type: 'step:pass', line: 10 });
+    fake.end();
+
+    await waitFor('idle after second batch', () => !hooks.isRunning());
+
+    const afterResume = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(afterResume[8], 'pass', 'step 1 still pass after resume completes');
+    assert.equal(afterResume[9], 'pass', 'step 2 still pass after resume completes');
+    assert.equal(afterResume[10], 'pass', 'step 3 (the resumed step) also passed');
   });
 });

@@ -204,6 +204,14 @@ function TestBenchRunner() {
   const outputLogRef = useRef(null);
   const outputAtBottomRef = useRef(true);
 
+  // Diagnostic — push the current runtimeVariables map to the host on
+  // every change so test hooks can observe the webview-side state
+  // without round-tripping a request. Test-only consumer; production
+  // code reads the same state from the controller's per-frame map.
+  useEffect(() => {
+    hostBridge.postWebviewState(runtimeVariables);
+  }, [runtimeVariables]);
+
   // Subscribe to host messages on mount.
   useEffect(() => {
     const unsubscribe = hostBridge.subscribe((msg) => {
@@ -266,6 +274,22 @@ function TestBenchRunner() {
       case "capture":
         setRuntimeVariables((prev) => ({ ...prev, [event.name]: event.value }));
         log(`✎ ${event.name} ← ${maskIfSecretInline(event.name, event.value)}`, "info");
+        break;
+      case "frame:scope":
+        // Phase 4 / Phase 5 follow-up — surface the server's per-frame
+        // scope payload in the webview's Variables panel too. The
+        // separate TreeView Variables provider already subscribes to
+        // these events, but the webview-internal Variables section
+        // (which renders based on the active file's declared
+        // parameters + a runtimeValues map) was reading only
+        // `parametersResolved` + `capture` events. When the active
+        // editor is on a skill `.md` and we're paused inside that
+        // skill, the skill's declared parameter (e.g. `query`) needs
+        // the caller-supplied value here — without this merge, the
+        // panel falls back to the parameter's DESCRIPTION text from
+        // the skill's `## Parameters` section, which reads as if the
+        // parameter wasn't passed in at all.
+        setRuntimeVariables((prev) => ({ ...prev, ...event.scope }));
         break;
       case "done":
         log(`Run ${event.status}`, event.status === "passed" ? "pass" : event.status === "failed" || event.status === "error" ? "fail" : "info");

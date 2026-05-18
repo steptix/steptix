@@ -6,7 +6,7 @@
  */
 
 import { SseParser, type SseFrame } from './sse-parser.js';
-import type { RunEvent } from './protocol.js';
+import type { RunEvent, StepMode } from './protocol.js';
 
 export type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
 export type LogFileMode = 'off' | 'compact' | 'full';
@@ -15,6 +15,21 @@ export interface StreamStepsRequest {
   steps: string[];
   /** Per-line break indices (1-based step indices into `steps`). */
   breakpoints?: number[];
+  /**
+   * Per-URI breakpoint sets keyed by absolute file path. Used by the server
+   * to pause execution before any step whose origin (test file OR an
+   * expanded skill body line) matches a breakpoint. The pause surfaces as
+   * a `step:awaiting` event so the client treats it like a step-paused
+   * state — same yellow ▶ + Continue / StepOver / StepInto / StepOut
+   * machinery as the stepMode flow.
+   *
+   * Test-file breakpoints are still trimmed CLIENT-side (legacy
+   * back-compat path); the server skips them in this map to avoid
+   * double-triggering. Skill-file breakpoints aren't visible to the
+   * client's `trimAtBreakpoint` (skill expansion is server-side) and
+   * are the primary motivation for this field.
+   */
+  breakpointsByUri?: Record<string, number[]>;
   /** Per-request env (e.g. AI_API_KEY). Server applies these to the session, not its own process.env. */
   env?: Record<string, string>;
   /**
@@ -29,6 +44,43 @@ export interface StreamStepsRequest {
   config?: { baseUrl?: string; timeout?: string };
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */
   sourceLines?: number[];
+  /**
+   * Absolute path of the file each step in `steps` was authored in. Parallel
+   * to `steps`; defaults to the test file when omitted per-step. Used by the
+   * server to attribute frame origins when a request is sent already-expanded
+   * (rare today; reserved for client-side expansion paths).
+   */
+  sourceUris?: string[];
+  /**
+   * Absolute path to the project's skills directory (`skillsDir` in
+   * `aiui.config.*`). When supplied, the server runs `expandSkills` over the
+   * incoming `steps`, dispatches the flattened result, and emits
+   * `frame:push` / `frame:pop` events around each skill body. Omit to use
+   * the legacy behaviour (raw steps shipped straight to the runner — fine
+   * for tests with no `[skill: ...]` lines).
+   */
+  skillsDir?: string;
+  /**
+   * Absolute path of the test file the steps were authored in. Used as the
+   * URI for the top-level (test) frame when the server emits frame events.
+   * Optional; servers without frame support ignore it.
+   */
+  testFilePath?: string;
+  /**
+   * Absolute path to the project's tools directory (`toolsDir` in
+   * `aiui.config.*`). When supplied, the server loads the tool catalogue
+   * once per session and dispatches `[tool: ...]` steps through
+   * `executeToolStep` — without it, tool lines reach the AI as plain text.
+   */
+  toolsDir?: string;
+  /**
+   * Initial step-mode for the run. `continue` (default) runs to completion
+   * or the next breakpoint; `into` / `over` / `out` start the run paused
+   * between steps so the client can drive step-by-step execution via the
+   * `runControl` endpoint. Servers that don't support stepMode ignore the
+   * field — the run executes as a normal `continue`.
+   */
+  stepMode?: StepMode;
   /**
    * Per-request logging override. Each field falls back to the server's
    * configured default when omitted. Override scope is this request only —
@@ -196,6 +248,93 @@ export class ApiClient {
       });
     } catch {
       // Best effort — ignore.
+    }
+  }
+
+  /**
+   * Send a step-control command to a session that is paused awaiting next-
+   * step direction. Used to drive Step Into / Over / Out / Continue from
+   * the UI. The server resolves the pending Promise in its step loop and
+   * the SSE stream from `streamSteps` continues emitting events.
+   *
+   * Throws an `ApiClientError` of kind `not-found` if the session has no
+   * paused run, or `server-error` for any other failure. Callers in the
+   * extension translate those into a status-bar message — there's no
+   * fatal-state recovery beyond surfacing the diagnostic.
+   */
+  async runControl(
+    sessionId: string,
+    mode: StepMode,
+    opts?: { pauseAtNextTool?: boolean },
+  ): Promise<void> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/run-control`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+        },
+        body: JSON.stringify({
+          mode,
+          ...(opts?.pauseAtNextTool && { pauseAtNextTool: true }),
+        }),
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new ApiClientError('connect-failed', reason);
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    // 409 (no paused run) is reported as 'not-found' so the extension's
+    // existing error mapping flags it as a transient state mismatch — not
+    // a connectivity failure.
+    if (response.status === 404 || response.status === 409) {
+      throw new ApiClientError('not-found', 'No paused run', { status: response.status });
+    }
+    if (response.status >= 400) {
+      const body = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('server-error', `HTTP ${response.status}`, {
+        status: response.status,
+        ...(body !== undefined && { bodyExcerpt: body }),
+      });
+    }
+  }
+
+  /**
+   * Acknowledge that VS Code's Node debugger is attached and the server
+   * may now hit its `debugger;` pause at the tool dispatcher. Resolves
+   * the per-session debugger-attach Promise the step loop is awaiting.
+   *
+   * 409 when no run is currently awaiting an ack — handled by the
+   * caller via the standard `not-found` mapping.
+   */
+  async ackToolDebugger(sessionId: string): Promise<void> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/tool-debugger-ack`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'x-api-key': this.apiKey },
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new ApiClientError('connect-failed', reason);
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    if (response.status === 404 || response.status === 409) {
+      throw new ApiClientError('not-found', 'No run awaiting debugger', { status: response.status });
+    }
+    if (response.status >= 400) {
+      const body = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('server-error', `HTTP ${response.status}`, {
+        status: response.status,
+        ...(body !== undefined && { bodyExcerpt: body }),
+      });
     }
   }
 }

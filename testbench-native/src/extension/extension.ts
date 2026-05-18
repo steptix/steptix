@@ -16,6 +16,8 @@ import { workspaceFolderFor } from './workspace.js';
 import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
 import { InvocationDefinitionProvider } from './definition-provider.js';
+import { CallStackTreeProvider } from './call-stack-view.js';
+import { VariablesTreeProvider } from './variables-view.js';
 
 const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
 
@@ -30,6 +32,29 @@ class RunControllerRegistry implements vscode.Disposable {
    *  key. VS Code doesn't expose context keys for read, so this is the
    *  only handle the integration suite has on toolbar visibility. */
   private lastRunningContextValue = false;
+
+  /** Fires whenever any controller's frame stack changes. The Call Stack
+   *  view re-renders against this — driving its tree off a single registry
+   *  event keeps the view decoupled from individual controllers (which
+   *  come and go as documents open). */
+  private readonly anyFrameStackEmitter = new vscode.EventEmitter<void>();
+  readonly onAnyFrameStackChange = this.anyFrameStackEmitter.event;
+  /** Fires whenever any controller's scope-per-frame map updates. Same
+   *  bridging pattern as `onAnyFrameStackChange`. */
+  private readonly anyScopeEmitter = new vscode.EventEmitter<void>();
+  readonly onAnyScopeChange = this.anyScopeEmitter.event;
+  /** Per-controller subscription handle so we don't leak listeners when a
+   *  controller is removed. */
+  private readonly frameSubs = new Map<string, vscode.Disposable>();
+  private readonly scopeSubs = new Map<string, vscode.Disposable>();
+  /** Per-controller record of where a step:awaiting yellow ▶ is currently
+   *  painted. Set on step:awaiting, cleared on the next step:start (or on
+   *  done). Lets us drop the marker even when it lives on a different URI
+   *  from the controller's own document (skill files). */
+  private readonly stepPausedAt = new Map<
+    string,
+    { uri: vscode.Uri; line: number }
+  >();
 
   /** Test-only readback of the `testbench-native.running` context key. */
   get runningContextValue(): boolean {
@@ -61,9 +86,105 @@ class RunControllerRegistry implements vscode.Disposable {
     if (!folder) return undefined;
 
     const post = this.makePostCallback(document.uri);
-    const controller = new RunController(document, folder, post, this.clientFactory);
+    const controller = new RunController(
+      document,
+      folder,
+      post,
+      this.clientFactory,
+      // Re-evaluated on every request so a breakpoint added mid-session
+      // (between batches) reaches the server next time. Filters to .md
+      // files; the server skips entries matching testFilePath since the
+      // client trims those before sending.
+      () => this.tracker.allMarkdownBreakpoints(),
+      // At run start, controller asks us to clear statuses on the test
+      // file + every skill file the previous run descended into. This
+      // gives a "re-run = fresh slate" UX: the new run repaints as it
+      // goes, and lines/files the new run doesn't touch correctly stay
+      // blank instead of showing stale ✓s from the prior run.
+      (uris) => {
+        for (const uri of uris) this.tracker.clearStatuses(uri);
+      },
+    );
     this.controllers.set(key, controller);
+    // Re-fire the controller's frame-stack changes through the registry
+    // so a single view subscriber catches every controller's transitions.
+    this.frameSubs.set(
+      key,
+      controller.onFrameStackChange(() => this.anyFrameStackEmitter.fire()),
+    );
+    this.scopeSubs.set(
+      key,
+      controller.onScopeChange(() => this.anyScopeEmitter.fire()),
+    );
     return controller;
+  }
+
+  /** The currently-running controller, if any. The Call Stack view reads
+   *  the active frame stack from this. Only one run can be in flight at
+   *  a time today; if that ever changes the view will need to disambiguate. */
+  runningController(): RunController | undefined {
+    for (const c of this.controllers.values()) {
+      if (c.isRunning) return c;
+    }
+    return undefined;
+  }
+
+  /** Phase 3.1.b — true when this controller has an outstanding
+   *  step:awaiting (the SSE stream is open and the server is blocked on
+   *  pendingRunControl). Used by dispatchStep to distinguish step-paused
+   *  from running-but-mid-step, which need different diagnostics. */
+  isStepPaused(controllerUri: vscode.Uri): boolean {
+    return this.stepPausedAt.has(controllerUri.toString());
+  }
+
+  /** Where a step:awaiting yellow ▶ is currently parked for this
+   *  controller — `null` if no pause is in flight. Used by Phase 5
+   *  dispatch to decide whether F11 should request a tool-debugger
+   *  pause (when the parked line is a `[tool: ...]` invocation). */
+  stepPausedEntry(controllerUri: vscode.Uri): { uri: vscode.Uri; line: number } | null {
+    return this.stepPausedAt.get(controllerUri.toString()) ?? null;
+  }
+
+  /** Last-known webview-side runtimeVariables map, posted by the
+   *  webview on every change via `webviewState` messages. Test hook
+   *  reads this to verify the webview's Variables panel actually
+   *  sees the data flowing through `frame:scope` (which is rendered
+   *  by `collectVariables` in the React component — invisible to
+   *  the host except via this readback channel). */
+  private lastWebviewRuntimeVariables: Record<string, string> = {};
+  private webviewStateUpdateCount = 0;
+
+  recordWebviewRuntimeVariables(runtimeVariables: Record<string, string>): void {
+    this.lastWebviewRuntimeVariables = { ...runtimeVariables };
+    this.webviewStateUpdateCount += 1;
+  }
+
+  getWebviewRuntimeVariables(): Record<string, string> {
+    return { ...this.lastWebviewRuntimeVariables };
+  }
+
+  /** Count of `webviewState` messages received from the webview since
+   *  activation. Used by tests to confirm the webview is actually
+   *  mounted and posting state, not just returning the default {}. */
+  getWebviewStateUpdateCount(): number {
+    return this.webviewStateUpdateCount;
+  }
+
+  /** Phase 3.1.a — clear every step-paused yellow ▶ marker across all
+   *  tracked controllers. Called on Stop so a step:awaiting on a skill
+   *  file's URI doesn't linger after the user has cancelled the run.
+   *  (The active-editor-only setBreakpointStop(null) in the Stop
+   *  handlers misses skill-file markers.) */
+  clearAllStepPausedMarkers(): void {
+    for (const [, entry] of this.stepPausedAt) {
+      this.tracker.setBreakpointStop(entry.uri, null);
+    }
+    this.stepPausedAt.clear();
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.stepPaused',
+      false,
+    );
   }
 
   /** The controller for the currently-active TestBench file, if any. */
@@ -98,17 +219,123 @@ class RunControllerRegistry implements vscode.Disposable {
     if (msg.type === 'runEvent') {
       const ev = msg.event;
       switch (ev.type) {
-        case 'step:start':
-          this.tracker.setStatus(uri, ev.line, 'running');
+        case 'step:start': {
+          // A step:start means we've advanced past whatever step:awaiting
+          // we were paused on. Clear that marker (and its context key) so
+          // the yellow ▶ doesn't linger while the new step is running.
+          this.clearStepPaused(uri);
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setStatus(target, ev.line, 'running');
+          if (ev.frame) this.maybeRevealFrame(uri, ev.frame, ev.line);
           break;
-        case 'step:pass':
-          this.tracker.setStatus(uri, ev.line, 'pass');
+        }
+        case 'step:awaiting': {
+          // The server has paused between steps and is waiting on a
+          // run-control. Paint the yellow ▶ on the next step's
+          // line+frame so the user sees where execution will resume.
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setBreakpointStop(target, ev.line);
+          this.stepPausedAt.set(uri.toString(), { uri: target, line: ev.line });
+          void vscode.commands.executeCommand(
+            'setContext',
+            'testbench-native.stepPaused',
+            true,
+          );
+          // Reveal the frame's file the same way a step:start would, so
+          // the user can SEE the line about to execute (e.g. inside a
+          // skill body) without having to open it manually.
+          if (ev.frame) this.maybeRevealFrame(uri, ev.frame, ev.line);
           break;
-        case 'step:fail':
-          this.tracker.setStatus(uri, ev.line, 'fail');
+        }
+        case 'step:pass': {
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setStatus(target, ev.line, 'pass');
           break;
+        }
+        case 'step:fail': {
+          const target = this.targetUriFor(uri, ev.frame);
+          this.tracker.setStatus(target, ev.line, 'fail');
+          // Propagate the failure to the originating test-file `[skill:]` line
+          // so the user sees the red icon on the line they actually authored,
+          // not just on the skill's body line they may not even have open.
+          let root: { testUri: vscode.Uri; testLine: number } | null = null;
+          if (ev.frame) {
+            const controller = this.controllers.get(uri.toString());
+            root = controller?.markFrameFailed(ev.frame.id) ?? null;
+            if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail');
+          }
+          // Paused-on-error: park a breakpointStop on the failed step so the
+          // user can edit the line and hit Continue to retry against the
+          // still-alive server session. Routed to the same spot the fail
+          // icon went — the test-file [skill: ...] line for in-skill
+          // failures, otherwise the failed step's own line. The existing
+          // run-start clear wipes it before any fresh run, and Stop clears
+          // it explicitly. If the user does nothing, it stays parked but
+          // is harmless (the run is idle).
+          if (root) {
+            this.tracker.setBreakpointStop(root.testUri, root.testLine);
+          } else {
+            this.tracker.setBreakpointStop(uri, ev.line);
+          }
+          break;
+        }
+        case 'frame:push': {
+          const controller = this.controllers.get(uri.toString());
+          controller?.handleFramePush(ev.frame);
+          // Aggregate test-file status: a top-level skill (parentId === null)
+          // is the one anchored on the test's `[skill:]` line. Mark it
+          // `running` so the user sees activity on that line even though
+          // the step events for the descent will land on the skill file.
+          if (ev.frame.parentId === null && ev.frame.line > 0) {
+            this.tracker.setStatus(uri, ev.frame.line, 'running');
+          }
+          break;
+        }
+        case 'frame:pop': {
+          const controller = this.controllers.get(uri.toString());
+          const result = controller?.handleFramePop(ev.frameId);
+          if (result?.root) {
+            // Only overwrite the aggregate status with `pass` when the
+            // descent had no failures — failures already painted `fail`
+            // synchronously in the step:fail branch and we don't want to
+            // step on them here.
+            if (!result.failed) {
+              this.tracker.setStatus(result.root.testUri, result.root.testLine, 'pass');
+            }
+          }
+          break;
+        }
+        case 'frame:scope': {
+          // Phase 4 — pipe the scope payload into the controller's
+          // per-frame map. The Variables view subscribes via the
+          // registry's onAnyScopeChange bridge.
+          const controller = this.controllers.get(uri.toString());
+          controller?.handleFrameScope(ev.frameId, ev.scope);
+          break;
+        }
+        case 'tool:awaiting-debugger': {
+          // Phase 5 — tool step-into. The server is parked at its
+          // cooperative `debugger;` waiting for us to attach VS Code's
+          // Node debugger. Hand off to the in-extension flow that
+          // resolves the inspector port from settings, calls
+          // `vscode.debug.startDebugging` with a Node attach config, and
+          // — once attached — POSTs the ack so the server can proceed.
+          const controller = this.controllers.get(uri.toString());
+          if (!controller) break;
+          void this.handleToolAwaitingDebugger(controller, ev);
+          break;
+        }
         case 'done':
           this.refreshRunningContext();
+          // The per-controller revealedFrameUris is cleared by
+          // resetFrameState() at the START of the next run, so we don't
+          // need to wipe anything here — the auto-reveal gate stays
+          // honored until then.
+          //
+          // Phase 3: any step-paused marker dies with the run. The
+          // yellow ▶ would otherwise be left behind if the user clicks
+          // Stop while step-paused.
+          this.clearStepPaused(uri);
           break;
       }
       return;
@@ -125,6 +352,157 @@ class RunControllerRegistry implements vscode.Disposable {
     if (msg.type === 'breakpointStop') {
       this.tracker.setBreakpointStop(uri, msg.line);
     }
+  }
+
+  /**
+   * Resolve the URI a step event's status should be written against. When
+   * the server supplies a `frame`, the step lives in that frame's source
+   * file (a skill `.md` for skill-body steps; the test file for inline
+   * steps). Otherwise the legacy assumption holds — everything lives in
+   * the controller's own document.
+   */
+  private targetUriFor(testUri: vscode.Uri, frame: import('ai-ui-automation-runner-core').FrameInfo | undefined): vscode.Uri {
+    if (!frame) return testUri;
+    return vscode.Uri.file(frame.uri);
+  }
+
+  /**
+   * Drop the step-paused yellow ▶ for this controller (if any). Called
+   * when execution advances past a step:awaiting (next step:start) and
+   * when the run completes (done). The breakpointStop marker on the
+   * tracker is the same field the breakpoint-pause UI uses, so we wipe
+   * just the URI we set it on — leaving any unrelated breakpoint pause
+   * on other URIs alone.
+   */
+  private clearStepPaused(controllerUri: vscode.Uri): void {
+    const entry = this.stepPausedAt.get(controllerUri.toString());
+    if (!entry) return;
+    this.stepPausedAt.delete(controllerUri.toString());
+    this.tracker.setBreakpointStop(entry.uri, null);
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.stepPaused',
+      false,
+    );
+  }
+
+  /**
+   * On the first `step:start` inside a non-test frame, open the frame's
+   * file in a non-preview tab next to the user's current editor. Without
+   * this the user runs a test and "nothing happens" while the descent is
+   * executing — the test file's line shows `running` aggregate but the
+   * actual stepping is invisible. The reveal is best-effort and uses
+   * `preserveFocus: true` so it never steals keyboard focus.
+   *
+   * The first-time-per-run gate lives on the controller (not on the
+   * registry) so two controllers running back-to-back can both reveal
+   * the same skill — the previous controller's reveal set doesn't bleed
+   * into the next run.
+   */
+  private maybeRevealFrame(
+    controllerUri: vscode.Uri,
+    frame: import('ai-ui-automation-runner-core').FrameInfo,
+    line: number,
+  ): void {
+    if (frame.kind !== 'skill') return;
+    const controller = this.controllers.get(controllerUri.toString());
+    if (!controller?.shouldRevealFrameUri(frame.uri)) return;
+    const target = vscode.Uri.file(frame.uri);
+    const revealLine = Math.max(0, line - 1);
+    void vscode.window.showTextDocument(target, {
+      preserveFocus: true,
+      preview: false,
+      viewColumn: vscode.ViewColumn.Beside,
+      selection: new vscode.Range(revealLine, 0, revealLine, 0),
+    });
+  }
+
+  /**
+   * Phase 5 — handle a `tool:awaiting-debugger` event. The server is
+   * blocked at its cooperative pause point waiting for VS Code's Node
+   * debugger to attach. Steps:
+   *
+   *  1. Local-server check: tool step-into requires a Node inspector
+   *     reachable from this machine. Fail with a status-bar diagnostic
+   *     when the run is against a remote `SERVER_URL`.
+   *  2. Resolve the inspector port + host from settings (defaults
+   *     9229 / 127.0.0.1). If an attach is already in flight from a
+   *     previous tool in the same session we just reuse it.
+   *  3. `vscode.debug.startDebugging` with a Node attach config. When
+   *     the user already has a Node debug session attached (e.g. they
+   *     launched the server from VS Code's Run panel) startDebugging is
+   *     a no-op and we proceed.
+   *  4. Ack the server, which then hits `debugger;` and the inspector
+   *     traps execution inside the tool's `.ts` source.
+   *
+   * Errors at any step fall back to a "send the ack anyway" path so the
+   * run isn't left hanging — the user still ends up inside the tool
+   * (just without a debugger to drive it).
+   */
+  private async handleToolAwaitingDebugger(
+    controller: RunController,
+    ev: {
+      type: 'tool:awaiting-debugger';
+      toolName: string;
+      toolFilePath?: string;
+      line: number;
+    },
+  ): Promise<void> {
+    const ackAndExit = async (note?: string): Promise<void> => {
+      if (note) vscode.window.setStatusBarMessage(`TestBench: ${note}`, 3500);
+      await controller.ackToolDebugger();
+    };
+
+    if (!controller.isLocalServer()) {
+      await ackAndExit(
+        `Tool step-into requires a local server (SERVER_URL must be 127.0.0.1) — running "${ev.toolName}" without a debugger attached`,
+      );
+      return;
+    }
+
+    const cfg = vscode.workspace.getConfiguration('testbench-native');
+    const port = cfg.get<number>('inspectorPort', 9229);
+    const host = cfg.get<string>('inspectorHost', '127.0.0.1');
+
+    // If our pwa-node session is already attached (a previous tool
+    // in this run brought it up), reuse it. Filter to `pwa-node`
+    // only — a Chrome devtools (`chrome` / `pwa-chrome`) session is
+    // not the inspector we want and treating it as "attached" would
+    // skip the real attach call.
+    const alreadyAttached = vscode.debug.activeDebugSession?.type === 'pwa-node';
+
+    if (!alreadyAttached) {
+      try {
+        const folder = controller.workspaceFolder;
+        const started = await vscode.debug.startDebugging(folder, {
+          type: 'pwa-node',
+          request: 'attach',
+          name: 'TestBench: tool step-into',
+          address: host,
+          port,
+          skipFiles: ['<node_internals>/**'],
+          sourceMaps: true,
+        });
+        if (!started) {
+          await ackAndExit(
+            `Couldn't attach Node debugger on ${host}:${port}. Launch the server with --inspect=${port} to enable tool step-into.`,
+          );
+          return;
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        await ackAndExit(`Debugger attach failed (${reason})`);
+        return;
+      }
+    }
+
+    if (ev.toolFilePath) {
+      vscode.window.setStatusBarMessage(
+        `TestBench: stepping into tool "${ev.toolName}" — use the Debug toolbar`,
+        4000,
+      );
+    }
+    await controller.ackToolDebugger();
   }
 
   /** Refresh the `testbench-native.running` context key from current state. Used
@@ -171,6 +549,12 @@ class RunControllerRegistry implements vscode.Disposable {
   dispose(): void {
     for (const c of this.controllers.values()) c.stop();
     this.controllers.clear();
+    for (const sub of this.frameSubs.values()) sub.dispose();
+    this.frameSubs.clear();
+    for (const sub of this.scopeSubs.values()) sub.dispose();
+    this.scopeSubs.clear();
+    this.anyFrameStackEmitter.dispose();
+    this.anyScopeEmitter.dispose();
   }
 }
 
@@ -221,6 +605,37 @@ export interface TestBenchTestHooks {
   testItemMetadata: (uri: vscode.Uri) => { label: string; description: string; tags: string[] } | undefined;
   /** Best-effort: wait until tracker.snapshot() satisfies the predicate. */
   waitFor: (predicate: () => boolean, timeoutMs?: number) => Promise<void>;
+  /** Frame stack of the currently-running controller, outermost first.
+   *  Empty when no run is in flight or when the run is in the test (root)
+   *  frame. Used by Phase 2 tests to assert that frame events drive the
+   *  call-stack model. */
+  runningFrameStack: () => Array<import('ai-ui-automation-runner-core').FrameInfo>;
+  /** Scope of the currently-running controller's top frame (or the test
+   *  frame if no skill frames are active). Used by Phase 4 tests to
+   *  assert that frame:scope events flow from server → controller →
+   *  Variables view. */
+  runningScope: () => Record<string, string>;
+  /** Render the Variables view's children as { name, description }
+   *  pairs. The `description` is what the view actually shows — for
+   *  secret-named variables it's the masked form via runner-core's
+   *  `maskIfSecret`. Used by Phase 4.1 tests to assert the view's
+   *  render path actually applies masking (the integration tests at
+   *  the `runningScope` layer alone wouldn't catch a render-side
+   *  regression that bypassed maskIfSecret). */
+  variablesViewItems: () => Array<{ name: string; description: string }>;
+  /** Test-only: is the running controller's run currently parked on a
+   *  step:awaiting (Phase 3 step-paused state)? */
+  isStepPaused: () => boolean;
+  /** Last-known runtimeVariables map from inside the Test Runner
+   *  webview, posted on every state change via the `webviewState`
+   *  message. Lets tests verify the webview-rendered Variables
+   *  section actually reflects `frame:scope` events — independent of
+   *  the separate Variables TreeView's `variablesViewItems()` hook. */
+  webviewRuntimeVariables: () => Record<string, string>;
+  /** Diagnostic counter — how many `webviewState` messages the host
+   *  has received since activation. Zero means the webview never
+   *  mounted (e.g. sidebar never opened); positive means it's posting. */
+  webviewStateUpdateCount: () => number;
 }
 
 export interface TestBenchExports {
@@ -249,6 +664,53 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
 
   // Wire webview → host messages.
   view.setMessageHandler((msg) => handleWebviewMessage(msg, registry, tracker));
+
+  // Call Stack view — read-only tree showing the running controller's
+  // frame stack. Bridged to the registry's union event so a single tree
+  // provider sees every controller's transitions.
+  const callStackProvider = new CallStackTreeProvider({
+    currentStack: () => registry.runningController()?.frameStack ?? [],
+    currentTestUri: () => registry.runningController()?.document.uri ?? null,
+    onChange: registry.onAnyFrameStackChange,
+  });
+
+  // Phase 4 Variables view — flat scope of the currently-running
+  // controller's top frame. Both the frame-stack and scope emitters
+  // need to feed the view: scope events when the server pushes a new
+  // scope, frame-stack events to flip which frame's scope is
+  // "current" when the user steps in/out. Phase 4 ships a single
+  // current-scope renderer; per-frame click-to-select is Phase 4.B.
+  const variablesProvider = new VariablesTreeProvider({
+    currentScope: () => registry.runningController()?.currentScope() ?? {},
+    // The "current frame" the view is rendering is the controller's top
+    // frame, or the test (root) frame when no skill is active. Used by
+    // the view to (a) update its title to "Variables (skill: name)" /
+    // "Variables (test)" and (b) decide whether to hide
+    // skill-internal `__skillN_x` names from the rendered list.
+    currentFrame: () => {
+      const controller = registry.runningController();
+      if (!controller) return null;
+      const top = controller.frameStack[controller.frameStack.length - 1];
+      if (!top) return { id: '' };
+      return top.skillName !== undefined
+        ? { id: top.id, skillName: top.skillName }
+        : { id: top.id };
+    },
+  });
+  const variablesScopeSub = registry.onAnyScopeChange(() =>
+    variablesProvider.refresh(),
+  );
+  const variablesFrameSub = registry.onAnyFrameStackChange(() =>
+    variablesProvider.refresh(),
+  );
+  // Use createTreeView (not registerTreeDataProvider) so we can drive
+  // the title/description from the active frame. The provider keeps a
+  // handle so refresh() can update it.
+  const variablesView = vscode.window.createTreeView(
+    'testbench-native.variables',
+    { treeDataProvider: variablesProvider },
+  );
+  variablesProvider.attachView(variablesView);
 
   // "Detach to editor" command. Spawns a webview panel in the editor area
   // wired to the same broadcaster as the sidebar — once the panel is a
@@ -282,6 +744,15 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     vscode.window.registerWebviewViewProvider(TestBenchRunnerView.viewId, view, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
+    vscode.window.registerTreeDataProvider('testbench-native.callStack', callStackProvider),
+    callStackProvider,
+    // Variables view registered via createTreeView (above) so the view
+    // handle can drive title/description per active frame. The
+    // TreeView itself is disposable so it goes into subscriptions too.
+    variablesView,
+    variablesProvider,
+    variablesScopeSub,
+    variablesFrameSub,
     new EnvSelector(),
     openInEditor,
     // F12 / Ctrl+Click / Peek on `[skill: ...]` and `[tool: ...]` step
@@ -338,6 +809,33 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         }
         throw new Error('waitFor: predicate did not become true within ' + timeoutMs + 'ms');
       },
+      runningFrameStack: () => {
+        const controller = registry.runningController();
+        return controller ? [...controller.frameStack] : [];
+      },
+      isStepPaused: () => {
+        const controller = registry.runningController();
+        return controller ? registry.isStepPaused(controller.document.uri) : false;
+      },
+      webviewRuntimeVariables: () => registry.getWebviewRuntimeVariables(),
+      webviewStateUpdateCount: () => registry.getWebviewStateUpdateCount(),
+      runningScope: () => {
+        const controller = registry.runningController();
+        return controller ? { ...controller.currentScope() } : {};
+      },
+      variablesViewItems: () => {
+        const nodes = variablesProvider.getChildren();
+        return nodes.map((node) => {
+          const item = variablesProvider.getTreeItem(node);
+          // TreeItem.label is the string we supply; description is the
+          // string the view renders after it (the value, masked when
+          // secret-named).
+          return {
+            name: typeof item.label === 'string' ? item.label : node.name,
+            description: typeof item.description === 'string' ? item.description : '',
+          };
+        });
+      },
     },
   };
 }
@@ -374,14 +872,23 @@ async function handleWebviewMessage(
     case 'stop': {
       const controller = registry.active();
       controller?.stop();
+      // Phase 2.1: parity with testbench-native.stop — frame state cleared
+      // and ALL `running` statuses (test file + any descended skill file)
+      // flipped to `stopped`. Without this a Stop while inside a skill
+      // leaves skill-body lines spinning.
+      controller?.resetFrameState();
       // Also clear any breakpoint pause so the user fully exits the run.
       // Without this, hitting Stop while paused at a breakpoint would leave
       // the yellow ▶ marker stuck and the Resume button still active.
       const editor = tracker.activeEditor;
       if (editor && tracker.isActiveTestFile) {
         tracker.setBreakpointStop(editor.document.uri, null);
-        tracker.markRunningStopped(editor.document.uri);
       }
+      tracker.markAllRunningStopped();
+      // Phase 3.1.a: clear step-paused markers on whatever URIs they were
+      // painted on — the active-editor-only clear above misses any marker
+      // step:awaiting placed on a skill file the run descended into.
+      registry.clearAllStepPausedMarkers();
       registry.notifyRunning(false);
       return;
     }
@@ -391,6 +898,10 @@ async function handleWebviewMessage(
       // The run-controller's abort handler will publish breakpointStop +
       // done(aborted) once the stream actually unwinds. We don't flip
       // running=false here — the .finally on the running runLines() does.
+      // BUT: flip any `running` statuses to `stopped` synchronously so the
+      // skill-body / test-file spinner doesn't spin forever after pause.
+      // Matches what testbench-native.pause does on the command path.
+      tracker.markAllRunningStopped();
       return;
     }
     case 'resume': {
@@ -464,6 +975,15 @@ async function handleWebviewMessage(
     case 'focusTestResults': {
       // Triggered by the batch-run banner's "Open Test Results" link.
       void vscode.commands.executeCommand('workbench.panel.testResults.focus');
+      return;
+    }
+    case 'webviewState': {
+      // Test-hook channel: the webview posts its current
+      // `runtimeVariables` map on every state change. We cache it
+      // on the registry so integration tests can read the
+      // webview-visible variable state without round-tripping a
+      // query. Production code path is unchanged.
+      registry.recordWebviewRuntimeVariables(msg.runtimeVariables);
       return;
     }
   }

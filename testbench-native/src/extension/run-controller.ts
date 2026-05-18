@@ -17,11 +17,14 @@ import {
   resolveSection,
   type ClassifiedStep,
   type ErrorPayload,
+  type FrameInfo,
   type HostToWebviewMsg,
   type RunEvent,
+  type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
+import { resolveProjectDirs } from './aiui-config.js';
 
 /**
  * Subset of the ApiClient surface we depend on. Defining it lets tests
@@ -36,6 +39,17 @@ export interface ApiClientLike {
     signal: AbortSignal,
   ): AsyncIterable<RunEvent>;
   closeSession(sessionId: string): Promise<void>;
+  /** Optional in tests that predate Phase 3 — when absent, run-control
+   *  commands are no-ops. The real ApiClient implements this against
+   *  `POST /sessions/:id/run-control`. */
+  runControl?(
+    sessionId: string,
+    mode: StepMode,
+    opts?: { pauseAtNextTool?: boolean },
+  ): Promise<void>;
+  /** Optional Phase-5 ack used by tool step-into. Tests that don't
+   *  exercise the tool-debugger flow omit it. */
+  ackToolDebugger?(sessionId: string): Promise<void>;
 }
 
 export type ApiClientFactory = (config: { serverUrl: string; apiKey: string }) => ApiClientLike;
@@ -83,11 +97,83 @@ export class RunController {
    *  without having to subscribe to the host→webview message channel. */
   private currentEventListener: ((event: RunEvent) => void) | null = null;
 
+  /**
+   * Stack of frames currently active, most recent on top. Maintained from
+   * `frame:push` / `frame:pop` events on the SSE stream when the server
+   * supports the step-into protocol. Empty when execution is in the test
+   * (top-level) frame. Read by the Call Stack view; written only here.
+   */
+  private _frameStack: FrameInfo[] = [];
+  /** Root attribution for each pushed frame — the (uri, line) in the test
+   *  file the descent ultimately started from. Inherited from parent on
+   *  nested pushes. Drives the aggregate test-file status on `[skill: ...]`
+   *  lines so the user sees pass/fail on those lines even though the actual
+   *  step events for the descent land on the skill file's lines.
+   *
+   *  Persists across the frame's `frame:pop` until end-of-run — a late
+   *  `step:fail` event (out-of-order, or from a server that emits pop
+   *  before all its descendants' events have drained) still needs to
+   *  resolve the root so the failure paints on the test file. Cleared
+   *  by `resetFrameState`. */
+  private frameRoot = new Map<string, { testUri: vscode.Uri; testLine: number }>();
+  /** Parent id for every frame we've seen this run, persistent across the
+   *  frame's own `frame:pop`. Used by `markFrameFailed` to walk ancestry
+   *  reliably even after the frame has been popped off the live stack. */
+  private frameParents = new Map<string, string | null>();
+  /** Frame ids whose descent has had a step:fail somewhere underneath.
+   *  Propagated to the test-file [skill:] line on `frame:pop`. */
+  private failedFrames = new Set<string>();
+  /** URIs auto-revealed this run, so we don't keep re-revealing the same
+   *  skill file each time its first step starts. Per-controller (not
+   *  per-registry) so two test files running in sequence both reveal
+   *  shared skills independently. Cleared by `resetFrameState` at the
+   *  start of each run. */
+  private readonly revealedFrameUris = new Set<string>();
+  /** Captured at the start of each run so step-control commands
+   *  (sendRunControl) can target the right session via POST. Cleared in
+   *  the `runLines` finally block. */
+  private currentClient: ApiClientLike | null = null;
+  private currentSessionId: string | null = null;
+  /** Captured along with currentClient so the tool step-into feature can
+   *  test whether the server is reachable as a Node debugger target.
+   *  Cleared in the same finally block. */
+  private currentServerUrl: string | null = null;
+
+  /** Latest variable scope emitted by `frame:scope` per frame id. The
+   *  test (root) frame uses key '' to match the server-side convention.
+   *  Cleared by `resetFrameState` at the start of each run. */
+  private readonly scopesByFrame = new Map<string, Record<string, string>>();
+  private readonly scopeEmitter = new vscode.EventEmitter<void>();
+  /** Fires whenever any frame's scope is updated. The Variables view
+   *  subscribes — bridged through the registry so a single subscriber
+   *  catches every controller's transitions. */
+  readonly onScopeChange = this.scopeEmitter.event;
+  private readonly frameStackEmitter = new vscode.EventEmitter<void>();
+  /** Fires whenever `frameStack` changes. The Call Stack view subscribes. */
+  readonly onFrameStackChange = this.frameStackEmitter.event;
+
   constructor(
     public readonly document: vscode.TextDocument,
     public readonly workspaceFolder: vscode.WorkspaceFolder,
     private readonly post: (msg: HostToWebviewMsg) => void,
     private readonly clientFactory: ApiClientFactory = defaultApiClientFactory,
+    /**
+     * Optional provider for the full per-URI breakpoint map shipped to
+     * the server on every steps request (Phase 5 follow-up — skill-file
+     * breakpoint support). The registry passes a closure over its
+     * tracker; tests pass a fixed map or omit entirely.
+     */
+    private readonly breakpointsByUriProvider?: () => Record<string, number[]>,
+    /**
+     * Optional sink for clearing tracker statuses on a list of URIs at
+     * the start of every run. Without this, statuses from a prior run
+     * persist on lines that the new run never reaches — most visible
+     * when a skill failure short-circuits the test: the trailing test
+     * step's old `pass` tick stays painted even though it didn't
+     * execute, which reads as "the test continued past the failure."
+     * The registry passes a closure over its tracker; tests can omit.
+     */
+    private readonly clearStatusesForUris?: (uris: vscode.Uri[]) => void,
   ) {}
 
   get isRunning(): boolean {
@@ -96,6 +182,223 @@ export class RunController {
 
   get lastEnvPath(): string | null {
     return this.lastResolvedEnvPath;
+  }
+
+  /** Read-only view of the active frame stack. Empty when execution is in
+   *  the test (top-level) frame. The top of the stack is the deepest frame. */
+  get frameStack(): readonly FrameInfo[] {
+    return this._frameStack;
+  }
+
+  /**
+   * Consume a frame event from the SSE stream. Pushes/pops the frame stack,
+   * tracks root attribution for the aggregate test-file [skill:] status,
+   * and fires `onFrameStackChange`. Called by the extension's per-run
+   * router (`applyToTracker`) so the controller stays the source of truth
+   * for frame state, even though the router does the side-effect work
+   * (decorations, editor reveal).
+   *
+   * Returns `{ failed }` on a `frame:pop` so the caller can update the
+   * test-file aggregate status — `true` if any descendant step failed
+   * during this frame's lifetime, `false` for a clean exit.
+   */
+  handleFramePush(frame: FrameInfo): void {
+    this._frameStack.push(frame);
+    // Root attribution: top-level skills (parentId is the test root, i.e.
+    // null) anchor themselves on the test file. Nested skills inherit the
+    // same root so a deep failure still marks the outermost `[skill:]`
+    // line in the test.
+    const root = frame.parentId
+      ? this.frameRoot.get(frame.parentId)
+      : { testUri: this.document.uri, testLine: frame.line };
+    if (root) this.frameRoot.set(frame.id, root);
+    // Remember ancestry for `markFrameFailed` to walk after the frame has
+    // been popped (the live stack alone isn't enough when step:fail and
+    // frame:pop arrive close together).
+    this.frameParents.set(frame.id, frame.parentId);
+    this.frameStackEmitter.fire();
+  }
+
+  handleFramePop(frameId: string): { failed: boolean; root: { testUri: vscode.Uri; testLine: number } | null } {
+    const idx = this._frameStack.findIndex((f) => f.id === frameId);
+    const failed = this.failedFrames.has(frameId);
+    const root = this.frameRoot.get(frameId) ?? null;
+    if (idx >= 0) {
+      // Pop this frame and anything pushed above it. Nested-skill servers
+      // emit pops in the right order, but defending against truncated
+      // streams keeps the UI from showing a phantom frame after stop/abort.
+      this._frameStack.length = idx;
+    }
+    // Deliberately keep frameRoot / frameParents populated until run end:
+    // a late step:fail (after pop) needs ancestry to propagate the failure
+    // to the test file's [skill:] line. resetFrameState clears them.
+    this.frameStackEmitter.fire();
+    return { failed, root };
+  }
+
+  /** Mark a frame as having had a failed descendant step. Walks the parent
+   *  chain via the persistent `frameParents` map so the root frame (the one
+   *  anchored on the test file's `[skill:]` line) inherits the failure even
+   *  if the immediate step that failed lives several levels deep AND even
+   *  if the frame has already been popped off the live stack. */
+  markFrameFailed(frameId: string): { testUri: vscode.Uri; testLine: number } | null {
+    let cur: string | null = frameId;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      this.failedFrames.add(cur);
+      cur = this.frameParents.get(cur) ?? null;
+    }
+    return this.frameRoot.get(frameId) ?? null;
+  }
+
+  /** Reset the frame stack — called on run start so a fresh run never
+   *  inherits leftover frames from an aborted or completed previous run. */
+  resetFrameState(): void {
+    this._frameStack = [];
+    this.frameRoot.clear();
+    this.frameParents.clear();
+    this.failedFrames.clear();
+    this.revealedFrameUris.clear();
+    this.scopesByFrame.clear();
+    this.frameStackEmitter.fire();
+    this.scopeEmitter.fire();
+  }
+
+  /**
+   * Record a `frame:scope` event for one frame. Called by the extension
+   * router (`applyToTracker`) so the controller owns the per-frame scope
+   * map and the Variables view has a single source of truth. Fires
+   * `onScopeChange` so subscribers re-render.
+   */
+  handleFrameScope(frameId: string, scope: Record<string, string>): void {
+    // Copy the payload — the SSE deserialiser shares the object across
+    // listeners and mutating downstream would surprise others.
+    this.scopesByFrame.set(frameId, { ...scope });
+    this.scopeEmitter.fire();
+  }
+
+  /** Latest scope for a frame, or undefined if none has been emitted
+   *  this run. The Variables view reads this when the user selects a
+   *  frame in the Call Stack (future Phase 4.B); today we render the
+   *  top frame's scope as the "current" view. */
+  scopeFor(frameId: string): Record<string, string> | undefined {
+    return this.scopesByFrame.get(frameId);
+  }
+
+  /** The scope of the currently-active (top) frame, or the test frame's
+   *  scope if execution is at the root. Used by the Variables view's
+   *  "show the running scope" default. */
+  currentScope(): Record<string, string> {
+    const topId = this._frameStack[this._frameStack.length - 1]?.id ?? '';
+    return this.scopesByFrame.get(topId) ?? this.scopesByFrame.get('') ?? {};
+  }
+
+  /** Atomic test-and-mark: returns true the first time a URI is seen this
+   *  run, false on subsequent calls. Caller uses the return value to gate
+   *  the auto-reveal side-effect so the same skill file isn't re-opened
+   *  on every `step:start` inside it. */
+  shouldRevealFrameUri(uri: string): boolean {
+    if (this.revealedFrameUris.has(uri)) return false;
+    this.revealedFrameUris.add(uri);
+    return true;
+  }
+
+  /**
+   * Send a step-control command to the server, advancing a step-paused
+   * run. No-op when nothing is running, when the active client doesn't
+   * support runControl (legacy / test fakes), or when the request fails.
+   *
+   * The matching SSE stream is still open and will continue emitting
+   * events once the server picks up the new mode.
+   *
+   * Phase 3.1.c — error reporting is split:
+   *   - `not-found` (HTTP 409 in disguise) means there's no paused run
+   *     to deliver to. Common race when the user mashes F11 between
+   *     events. Silent — the next event from the stream will tell the
+   *     user where they actually are.
+   *   - everything else (connect-failed, server-error) gets a status-
+   *     bar diagnostic so the user knows the server side actually
+   *     failed, not just a UX race.
+   */
+  async sendRunControl(
+    mode: StepMode,
+    opts?: { pauseAtNextTool?: boolean },
+  ): Promise<void> {
+    const client = this.currentClient;
+    const sessionId = this.currentSessionId;
+    if (!client || !sessionId) return;
+    if (typeof client.runControl !== 'function') return;
+    try {
+      await client.runControl(sessionId, mode, opts);
+    } catch (err) {
+      const isNotFound =
+        err !== null &&
+        typeof err === 'object' &&
+        'kind' in err &&
+        (err as { kind?: string }).kind === 'not-found';
+      if (isNotFound) {
+        // Benign race: no paused run on the server side. Don't bother the
+        // user — they'll see the next event in a moment.
+        return;
+      }
+      const reason = err instanceof Error ? err.message : String(err);
+      vscode.window.setStatusBarMessage(
+        `TestBench: run-control failed (${reason})`,
+        2500,
+      );
+    }
+  }
+
+  /**
+   * True when the active run's server URL resolves to localhost
+   * (127.0.0.1 / ::1 / localhost). Tool step-into requires this — the
+   * VS Code Node debugger attaches to a local inspector socket, and we
+   * can't reach a remote `--inspect` port. The extension uses this to
+   * surface a clean "feature unavailable" error instead of attempting
+   * the attach and failing opaquely.
+   */
+  isLocalServer(): boolean {
+    if (!this.currentServerUrl) return false;
+    try {
+      const host = new URL(this.currentServerUrl).hostname.toLowerCase();
+      return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Acknowledge a `tool:awaiting-debugger` pause point — the extension
+   * calls this after `vscode.debug.startDebugging` has actually attached
+   * VS Code's Node debugger to the server process. The server then
+   * proceeds past its cooperative `debugger;` statement, which the
+   * inspector traps so the user lands inside the tool's TypeScript.
+   *
+   * 409 / not-found means we missed the parking window (e.g. the run
+   * was aborted between event and ack). Silent — the SSE stream will
+   * carry the actual state on the next event.
+   */
+  async ackToolDebugger(): Promise<void> {
+    const client = this.currentClient;
+    const sessionId = this.currentSessionId;
+    if (!client || !sessionId) return;
+    if (typeof client.ackToolDebugger !== 'function') return;
+    try {
+      await client.ackToolDebugger(sessionId);
+    } catch (err) {
+      const isNotFound =
+        err !== null &&
+        typeof err === 'object' &&
+        'kind' in err &&
+        (err as { kind?: string }).kind === 'not-found';
+      if (isNotFound) return;
+      const reason = err instanceof Error ? err.message : String(err);
+      vscode.window.setStatusBarMessage(
+        `TestBench: tool-debugger ack failed (${reason})`,
+        2500,
+      );
+    }
   }
 
   stop(): void {
@@ -195,6 +498,24 @@ export class RunController {
        *  this call (step:start, step:pass, step:fail, output, capture,
        *  done). Receives events in flight order. */
       onEvent?: (event: RunEvent) => void;
+      /** Initial step-mode for the run. `into` / `over` / `out` start
+       *  the run paused between steps so the user can drive Step Into /
+       *  Over / Out from a freshly-launched stepping session. `continue`
+       *  (default) runs to the next breakpoint or end-of-batch. */
+      stepMode?: StepMode;
+      /** Phase 5 — start the run with the one-shot pauseAtNextTool flag
+       *  set. The server emits `tool:awaiting-debugger` before the next
+       *  `[tool: ...]` step and parks for the debugger-attach ack. Used
+       *  when F11 is hit on a tool line from a breakpoint pause (the
+       *  run isn't in flight yet — we have to seed the flag in the
+       *  initial steps request). */
+      pauseAtNextTool?: boolean;
+      /** True when this call is a continuation of a breakpoint-paused run
+       *  (i.e. Continue / Resume). Skips the status-clear that a fresh run
+       *  performs so that pass marks from the first batch are preserved. The
+       *  skill-file URIs revealed in the first batch are carried forward so
+       *  the NEXT fresh re-run still cleans them up correctly. */
+      isContinuation?: boolean;
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -207,6 +528,39 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
+
+    // Snapshot the previous run's skill-file URIs BEFORE resetFrameState
+    // wipes them — we want to clear those files' statuses too. Without
+    // this, a re-run after a successful run leaves the old skill-body
+    // ✓/✗ marks on the skill file, masking which steps actually ran
+    // this time (and making a failure-short-circuit scenario look like
+    // "test continued past the failure").
+    const previousTouchedSkillUris = [...this.revealedFrameUris];
+
+    // Wipe any frame state from a previous run so the Call Stack view starts
+    // empty. Pause/resume mid-skill is a Phase 3 concern; in Phase 2 the
+    // stack is always empty at the entry to a run.
+    this.resetFrameState();
+
+    if (options.isContinuation) {
+      // Carry the first-batch skill-file URIs forward into the new run's
+      // tracking set. This preserves their pass marks (we don't clear them)
+      // AND ensures the NEXT fresh re-run still knows to clean them up.
+      for (const uri of previousTouchedSkillUris) {
+        this.revealedFrameUris.add(uri);
+      }
+    } else if (this.clearStatusesForUris) {
+      // Clear test-file statuses AND every skill file the previous run
+      // descended into. The new run will repaint as it goes; anything
+      // that doesn't run this time stays blank, which matches user intent
+      // ("re-run = fresh slate") and prevents stale ✓s from making a
+      // short-circuited run look like it continued.
+      const uris: vscode.Uri[] = [this.document.uri];
+      for (const fsPath of previousTouchedSkillUris) {
+        uris.push(vscode.Uri.file(fsPath));
+      }
+      this.clearStatusesForUris(uris);
+    }
 
     // First run on this controller? Close any session the server may still
     // be holding from a previous VS Code session — see staleSessionCleared
@@ -359,6 +713,11 @@ export class RunController {
     this.active = ac;
     this.pauseRequested = false;
     this.lastStepStartLine = null;
+    // Capture so step-control commands (Phase 3) can target the same
+    // session via the same client without rebuilding either.
+    this.currentClient = client;
+    this.currentSessionId = sessionId;
+    this.currentServerUrl = serverUrl;
 
     // Resolve which env name to send to the server. Explicit override (batch
     // mode passes one per test) wins over the workspace-level EnvSelector.
@@ -392,6 +751,8 @@ export class RunController {
             logging,
             signal: ac.signal,
             log,
+            ...(options.stepMode && { stepMode: options.stepMode }),
+            ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
           });
           if (!ok) {
             anyFailed = true;
@@ -482,13 +843,26 @@ export class RunController {
         // and offers Resume; on stop we just mark the run aborted.
         if (this.pauseRequested) {
           // Resume point: the line that was executing when pause fired.
-          // Fall back to the first step in the run if no step:start has
-          // arrived yet (e.g. the user hit Pause immediately after Run,
-          // before the server emitted the first event). Without this
-          // fallback, paused state is never set and the Resume button
-          // doesn't render.
+          //
+          // Pause-inside-skill: when the active frame stack is non-empty,
+          // the step that was running lives on a skill file — but Resume
+          // can't continue mid-skill (the server doesn't support that
+          // yet). Instead we anchor the resume on the test-file's
+          // `[skill: ...]` invocation line, which `frameRoot` records on
+          // every frame:push. Continue from there re-runs the whole
+          // skill, which is the closest honest semantic.
+          //
+          // Pause-at-top-level: fall back to the line of the most recent
+          // step:start. If pause fired before any step:start (e.g. the
+          // user hit Pause immediately after Run), fall back to the first
+          // step in the run — without this, paused state is never set and
+          // the Resume button doesn't render.
+          const topFrame = this._frameStack[this._frameStack.length - 1];
+          const root = topFrame ? this.frameRoot.get(topFrame.id) : undefined;
           const firstStepLine = classified.find((c) => c.kind === 'step')?.line ?? null;
-          const resumeLine = this.lastStepStartLine ?? firstStepLine;
+          const resumeLine = root
+            ? root.testLine
+            : this.lastStepStartLine ?? firstStepLine;
           if (resumeLine != null) {
             this.post({ type: 'breakpointStop', line: resumeLine });
             this.emitRunEvent({ type: 'done', status: 'aborted' });
@@ -509,6 +883,9 @@ export class RunController {
       this.cancelPrompt();
       this.post({ type: 'promptDone' });
       this.currentEventListener = null;
+      this.currentClient = null;
+      this.currentSessionId = null;
+      this.currentServerUrl = null;
     }
   }
 
@@ -524,11 +901,29 @@ export class RunController {
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
+    /** Initial stepMode to send with the request body — when set, the
+     *  server pauses between steps and the run is driven by `run-control`
+     *  POSTs from the extension. */
+    stepMode?: StepMode;
+    /** Phase 5 — when true, the request body carries `pauseAtNextTool: true`.
+     *  The server emits `tool:awaiting-debugger` before the next
+     *  `[tool: ...]` step and parks for a debugger-attach ack. */
+    pauseAtNextTool?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, stepMode, pauseAtNextTool } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
+
+    // Resolve the project's skills directory so the server can expand
+    // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around
+    // their bodies. Without a resolved skillsDir the server falls back to
+    // the legacy raw-step path — fine for tests that never reference a
+    // skill, but skill invocations would hit the AI as literal strings.
+    const projectDirs = resolveProjectDirs(this.document.uri);
+    const skillsDir = projectDirs?.skillsDir ?? null;
+    const toolsDir = projectDirs?.toolsDir ?? null;
+    const testFilePath = this.document.uri.fsPath;
 
     const events = client.streamSteps(
       sessionId,
@@ -542,6 +937,15 @@ export class RunController {
         }),
         ...(Object.keys(params).length > 0 && { parameters: params }),
         ...(logging && { logging }),
+        ...(skillsDir && { skillsDir }),
+        ...(toolsDir && { toolsDir }),
+        testFilePath,
+        ...(stepMode && { stepMode }),
+        ...(pauseAtNextTool && { pauseAtNextTool: true }),
+        ...(this.breakpointsByUriProvider && (() => {
+          const map = this.breakpointsByUriProvider!();
+          return Object.keys(map).length > 0 ? { breakpointsByUri: map } : {};
+        })()),
       },
       signal,
     );

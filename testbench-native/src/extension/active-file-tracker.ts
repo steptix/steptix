@@ -167,6 +167,34 @@ export class ActiveFileTracker {
     return out;
   }
 
+  /**
+   * Every enabled SourceBreakpoint across markdown files, grouped by
+   * absolute file path. Used at run-start to ship the full per-URI map
+   * to the server so it can pause before any step (test file OR
+   * expanded skill body line) that matches a breakpoint.
+   *
+   * Filters to `.md` files only — VS Code's breakpoint store is global
+   * across all languages, but we only care about TestBench files.
+   */
+  allMarkdownBreakpoints(): Record<string, number[]> {
+    const out: Record<string, Set<number>> = {};
+    for (const bp of vscode.debug.breakpoints) {
+      if (!(bp instanceof vscode.SourceBreakpoint)) continue;
+      if (!bp.enabled) continue;
+      const uri = bp.location.uri;
+      if (uri.scheme !== 'file') continue;
+      if (!uri.fsPath.toLowerCase().endsWith('.md')) continue;
+      const key = uri.fsPath;
+      if (!out[key]) out[key] = new Set();
+      out[key].add(bp.location.range.start.line + 1);
+    }
+    const result: Record<string, number[]> = {};
+    for (const [key, set] of Object.entries(out)) {
+      result[key] = [...set].sort((a, b) => a - b);
+    }
+    return result;
+  }
+
   toggleBreakpoint(uri: vscode.Uri, line: number): void {
     // Find an existing SourceBreakpoint on this line; remove if present,
     // otherwise add a new one. Goes through vscode.debug so VS Code's
@@ -236,6 +264,26 @@ export class ActiveFileTracker {
     if (changed) this.emit();
   }
 
+  /**
+   * Flip every `running` status across every tracked URI to `stopped`.
+   * Used on Stop: a run that descended into a skill leaves `running`
+   * statuses on both the test file's `[skill: ...]` aggregate line AND
+   * on the skill file's own body lines. The single-URI `markRunningStopped`
+   * only catches one of those, so a Stop while inside a skill would
+   * leave skill-file lines spinning indefinitely.
+   */
+  markAllRunningStopped(): void {
+    let changed = false;
+    for (const state of this.states.values()) {
+      for (const [line, status] of state.statuses) {
+        if (status !== 'running') continue;
+        state.statuses.set(line, 'stopped');
+        changed = true;
+      }
+    }
+    if (changed) this.emit();
+  }
+
   setError(uri: vscode.Uri, line: number, error: ErrorPayload): void {
     const state = this.state(uri);
     state.errors.set(line, error);
@@ -247,6 +295,52 @@ export class ActiveFileTracker {
     state.breakpointStop = line;
     void vscode.commands.executeCommand('setContext', 'testbench-native.paused', line != null);
     this.emit();
+  }
+
+  /**
+   * Snapshot for an arbitrary URI. Returns null when no state exists for
+   * the URI — the caller can treat that as "no decorations needed."
+   * Distinct from `snapshot()` which returns the active-editor snapshot
+   * for the sidebar webview; this variant lets the DecorationManager
+   * paint every visible editor against its own per-URI state, which is
+   * what Phase 2 needs when a run descends into a skill `.md` that lives
+   * in a different file from the test.
+   */
+  snapshotFor(uri: vscode.Uri): FileStateSnapshot | null {
+    const key = uri.toString();
+    const state = this.states.get(key);
+    if (!state) return null;
+    if (
+      state.statuses.size === 0 &&
+      state.errors.size === 0 &&
+      state.breakpointStop === null
+    ) {
+      return null;
+    }
+    // Editor may not currently be open — fall back to an empty doc text;
+    // decorations only need the URI + line numbers, not the document body.
+    const editor = this.findEditorFor(uri);
+    const document = editor?.document;
+    const text = document?.getText() ?? '';
+    return {
+      uri: key,
+      filePath: uri.fsPath,
+      isTestFile: document ? isTestbenchDocument(document) : false,
+      text,
+      breakpoints: [...this.breakpoints(uri)].sort((a, b) => a - b),
+      statuses: [...state.statuses.entries()],
+      errors: [...state.errors.entries()],
+      breakpointStop: state.breakpointStop,
+      selectedLines: [],
+      cursorLine: 1,
+    };
+  }
+
+  private findEditorFor(uri: vscode.Uri): vscode.TextEditor | undefined {
+    const target = uri.toString();
+    return vscode.window.visibleTextEditors.find(
+      (e) => e.document.uri.toString() === target,
+    );
   }
 
   /** Snapshot for the sidebar webview. */

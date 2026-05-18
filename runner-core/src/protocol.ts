@@ -15,10 +15,34 @@ import type { ErrorPayload } from './errors.js';
 export type RunStatus = 'passed' | 'failed' | 'error' | 'aborted';
 export type StepStatus = 'passed' | 'failed' | 'error';
 
+/**
+ * Origin frame for a step event. Present from servers that support the
+ * step-into protocol (added in Phase 1 of the step-into work). Absent on
+ * legacy servers — clients must tolerate missing `frame`.
+ *
+ * A frame is one execution scope: the top-level test, or a `[skill: ...]`
+ * invocation. Frames nest when skills call skills. `id` is unique per run
+ * and stable for the lifetime of the frame; `parentId` is null for the
+ * test frame and the parent's id otherwise.
+ */
+export interface FrameInfo {
+  id: string;
+  parentId: string | null;
+  kind: 'test' | 'skill';
+  /** Absolute path (file:// URI form) of the file this frame's steps live in. */
+  uri: string;
+  /** 1-based line of the step in that file. */
+  line: number;
+  /** Set when `kind === 'skill'` — the skill name as authored. */
+  skillName?: string;
+}
+
 export interface StepStartEvent {
   type: 'step:start';
   /** 1-based source line of the step in the original document. */
   line: number;
+  /** Origin frame the step belongs to. Optional for backward compat. */
+  frame?: FrameInfo;
 }
 
 export interface StepPassEvent {
@@ -28,6 +52,7 @@ export interface StepPassEvent {
   output?: string;
   /** data:image/png;base64 URI, may be empty. */
   screenshot?: string;
+  frame?: FrameInfo;
 }
 
 export interface StepFailEvent {
@@ -35,6 +60,38 @@ export interface StepFailEvent {
   line: number;
   error: string;
   screenshot?: string;
+  frame?: FrameInfo;
+}
+
+/**
+ * Emitted when execution enters a new frame — i.e. just before the first
+ * step of a `[skill: ...]` invocation runs. Pairs 1:1 with a `frame:pop`.
+ */
+export interface FramePushEvent {
+  type: 'frame:push';
+  frame: FrameInfo;
+}
+
+/**
+ * Emitted when a frame finishes (its last step passed, or execution fell
+ * off the end of the skill body). `outputs` carries the values the skill
+ * exposed back to the caller — aliased into the caller's variable scope.
+ */
+export interface FramePopEvent {
+  type: 'frame:pop';
+  frameId: string;
+  outputs: Record<string, string>;
+}
+
+/**
+ * Snapshot of the variable scope visible inside a frame at a step boundary.
+ * Used by the Variables panel (Phase 4) — Phase 1 servers may emit these
+ * sparsely or not at all; clients must treat the type as informational.
+ */
+export interface FrameScopeEvent {
+  type: 'frame:scope';
+  frameId: string;
+  scope: Record<string, string>;
 }
 
 export interface OutputEvent {
@@ -59,13 +116,80 @@ export interface DoneEvent {
   status: RunStatus;
 }
 
+/**
+ * Step-mode controls available on requests and resume commands. The runner
+ * uses these to decide whether to pause between steps, and at what depth:
+ *
+ *  - `continue` — run to the next breakpoint or end-of-batch. No
+ *    between-step pauses.
+ *  - `into` — pause unconditionally after each emitted step. Stepping
+ *    "into" a `[skill: ...]` happens naturally: the next step the server
+ *    pauses on is the first step of the skill body.
+ *  - `over` — pause when the next step is at or shallower than the
+ *    just-executed step's frame depth. Skips the entire body of any
+ *    deeper skill invocation as a single atomic step.
+ *  - `out` — pause when the next step is strictly shallower than the
+ *    just-executed step's frame depth. Runs to the end of the current
+ *    frame. No-op at the test (root) frame.
+ */
+export type StepMode = 'continue' | 'into' | 'over' | 'out';
+
+/**
+ * Emitted by step-mode-aware servers when they reach a pause point
+ * between steps. `line` and `frame` point at the next step that will
+ * execute when the client sends the next run-control command. Acts as
+ * the "yellow ▶" signal for the step-into UI; mirrors how
+ * `breakpointStop` signals the pause at a breakpoint hit.
+ *
+ * Servers that don't support stepMode never emit this; legacy clients
+ * that don't read it stay on the existing breakpoint-only pause story.
+ */
+export interface StepAwaitingEvent {
+  type: 'step:awaiting';
+  line: number;
+  frame?: FrameInfo;
+}
+
+/**
+ * Emitted right before the server hits its `debugger;` pause at the tool
+ * dispatcher's call site (Phase 5 — tool step-into). The client takes this
+ * as its cue to attach VS Code's Node debugger to the server process and
+ * then POST `/sessions/:id/tool-debugger-ack` so the server proceeds.
+ *
+ * Only fires when the client opted into tool step-into via
+ * `pauseAtNextTool` on the next-run-control. Servers that don't support
+ * tool step-into never emit this; clients that don't read it stay on the
+ * existing pause-between-steps story.
+ */
+export interface ToolAwaitingDebuggerEvent {
+  type: 'tool:awaiting-debugger';
+  /** The tool name as authored on the `[tool: ...]` line. */
+  toolName: string;
+  /** Absolute path to the tool's source file (`.ts` from the catalogue's
+   *  `RegisteredTool.filePath`). The extension uses this to scope the
+   *  Node debugger's source-map handling and to surface "we're stepping
+   *  into <file>" in the UI overlay. */
+  toolFilePath?: string;
+  /** 1-based source line of the `[tool: ...]` invocation in the test/skill
+   *  file. The yellow ▶ stays parked on this line while VS Code's Node
+   *  debugger drives the user inside the tool body. */
+  line: number;
+  /** Origin frame the tool call belongs to. */
+  frame?: FrameInfo;
+}
+
 export type RunEvent =
   | StepStartEvent
   | StepPassEvent
   | StepFailEvent
   | OutputEvent
   | CaptureEvent
-  | DoneEvent;
+  | DoneEvent
+  | FramePushEvent
+  | FramePopEvent
+  | FrameScopeEvent
+  | StepAwaitingEvent
+  | ToolAwaitingDebuggerEvent;
 
 // ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)
@@ -264,6 +388,20 @@ export interface WebviewClearStatusMsg {
   line: number;
 }
 
+/**
+ * Diagnostic readback from the webview to the host. The webview posts
+ * this whenever its internal `runtimeVariables` map changes (i.e. when
+ * a `frame:scope` / `capture` / `parametersResolved` event updates it).
+ * Used only by the test hooks — production code reads the same state
+ * from the controller's per-frame scope map. Posted unconditionally so
+ * a test harness doesn't have to drive the webview's request/response
+ * cycle.
+ */
+export interface WebviewStateMsg {
+  type: 'webviewState';
+  runtimeVariables: Record<string, string>;
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -277,7 +415,8 @@ export type WebviewToHostMsg =
   | WebviewResumeMsg
   | WebviewPauseMsg
   | WebviewFocusTestResultsMsg
-  | WebviewClearStatusMsg;
+  | WebviewClearStatusMsg
+  | WebviewStateMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -315,7 +454,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'resume' ||
     t === 'pause' ||
     t === 'focusTestResults' ||
-    t === 'clearStatus'
+    t === 'clearStatus' ||
+    t === 'webviewState'
   );
 }
 
@@ -328,6 +468,11 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'step:fail' ||
     t === 'output' ||
     t === 'capture' ||
-    t === 'done'
+    t === 'done' ||
+    t === 'frame:push' ||
+    t === 'frame:pop' ||
+    t === 'frame:scope' ||
+    t === 'step:awaiting' ||
+    t === 'tool:awaiting-debugger'
   );
 }

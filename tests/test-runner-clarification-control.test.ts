@@ -117,6 +117,7 @@ function makeTest(steps: string[]): ParsedTest {
     config: {},
     parameters: {},
     steps,
+    stepLines: steps.map((_, i) => i + 1),
     skipHooks: steps.map(() => false),
     toolCalls: steps.map(() => null),
     sourceSkills: steps.map(() => null),

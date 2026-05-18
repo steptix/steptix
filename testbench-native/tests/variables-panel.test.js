@@ -91,3 +91,33 @@ test("collectVariables: case-insensitive [INPUT:] / [OUTPUT:] markers", () => {
   const got = collectVariables(text, {}, {});
   assert.deepEqual(got.map((v) => v.name), ["x", "y"]);
 });
+
+test("collectVariables: [skill: foo out.x=\"alias\"] surfaces alias as an output", () => {
+  // Real-world shape from skill-demo.md — caller exposes the skill's
+  // captured value under a friendlier name and references it
+  // downstream as `{{target_url}}`. Without surfacing the alias the
+  // panel hides the value the user can actually see at runtime.
+  const text = [
+    "## Steps",
+    "1. [skill: duckduckgo_search query=\"OpenAI GPT-5\" out.first_result_url=\"target_url\"]",
+    "2. Navigate to {{target_url}}",
+  ].join("\n");
+  const got = collectVariables(text, {}, { target_url: "https://example.com" });
+  const target = got.find((v) => v.name === "target_url");
+  assert.ok(target, `target_url not found in ${JSON.stringify(got)}`);
+  assert.equal(target.source, "output");
+  assert.equal(target.value, "https://example.com");
+});
+
+test("collectVariables: multiple out.X=\"Y\" aliases on a single skill call", () => {
+  const text = [
+    "## Steps",
+    "1. [skill: foo out.a=\"first\" out.b=\"second\"]",
+  ].join("\n");
+  const got = collectVariables(text, {}, { first: "F", second: "S" });
+  const names = got.map((v) => v.name);
+  assert.ok(names.includes("first"), `missing first: ${names}`);
+  assert.ok(names.includes("second"), `missing second: ${names}`);
+  assert.equal(got.find((v) => v.name === "first").value, "F");
+  assert.equal(got.find((v) => v.name === "second").value, "S");
+});

@@ -452,7 +452,11 @@ body {
   cursor: default;
 }
 .send-btn.busy {
-  animation: spin 0.8s linear infinite;
+  animation: btn-pulse 1.5s ease-in-out infinite;
+}
+@keyframes btn-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%       { opacity: 1;   }
 }
 
 /* --- settings overlay ----------------------------------------------------- */

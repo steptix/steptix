@@ -114,6 +114,16 @@ export interface ParsedTest {
   parameters: Record<string, string>;
   /** Ordered list of natural language step instructions (skills already expanded) */
   steps: string[];
+  /**
+   * Parallel to `steps` — 1-based source line in `filePath` for each step
+   * before skill expansion. After `expandSkills` runs the array length will
+   * exceed the count of inline test-file steps; entries that came from a
+   * skill body keep the *invocation* line in the test file (so reports and
+   * inline-mode runs can still point at a real line in the open test file).
+   * The step-into wire trace carries the per-skill-body origin separately
+   * via `frame:push` events.
+   */
+  stepLines: number[];
   /** Parallel to `steps` — true when the step was authored with `[no-hooks]`
    *  and should skip `beforeEach` / `afterEach` wrapping. */
   skipHooks: boolean[];
@@ -149,6 +159,10 @@ export interface ParsedSkill {
   outputs: string[];
   /** Skill body — natural-language steps, may reference {{param}} and other skills */
   steps: string[];
+  /** Parallel to `steps` — 1-based source line in `filePath`. Used by the
+   *  step-into protocol (Phase 1) to attribute each expanded step to its
+   *  origin file+line inside the skill .md. */
+  stepLines: number[];
   /**
    * Skill-private named data-source files declared in frontmatter. Each
    * entry registers a placeholder namespace `${<name>.X.Y}` resolved locally

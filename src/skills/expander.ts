@@ -24,16 +24,77 @@ interface SkillCall {
 }
 
 /**
+ * Identity record for a single frame in the step-into call stack. One per
+ * `[skill: ...]` invocation instance (nested skills get distinct frames).
+ *
+ *  - `id` — unique within a single `expandSkills` call. Stable; referenced
+ *    by `ExpandedStepOrigin.frameId` and `parentFrameId`.
+ *  - `parentId` — the frame the skill was invoked *from*. `null` for the
+ *    test frame (the root of every stack).
+ *  - `uri` — absolute file path of the file containing this frame's steps.
+ *    The test frame's file is the calling test; a skill frame's file is the
+ *    skill `.md`.
+ *  - `invocationLine` — 1-based line of the `[skill: ...]` call **in the
+ *    parent frame's file**. `null` on the test frame (no parent).
+ */
+export interface ExpandedFrame {
+  id: string;
+  parentId: string | null;
+  kind: 'test' | 'skill';
+  uri: string;
+  invocationLine: number | null;
+  skillName?: string;
+  /**
+   * Resolved input parameter values for this skill invocation, keyed
+   * by the parameter name as declared in the skill's `## Parameters`.
+   * Captured at expansion time from the caller's `call.args`. The
+   * server includes these in the `frame:scope` payload emitted on
+   * `frame:push` so the Variables view can show "what was passed in"
+   * when execution pauses at a breakpoint inside the skill — even
+   * before the first step has run. Absent for the test (root) frame.
+   *
+   * The expander already INTERPOLATES these values directly into the
+   * skill body's step text at expansion time (so the runner never
+   * sees `{{query}}`), which is why they don't otherwise show up in
+   * `resolvedParameters` for the run. This snapshot is the only way
+   * a debugger pause inside the skill can surface them.
+   */
+  inputs?: Record<string, string>;
+}
+
+/**
+ * Origin of a single expanded step. One per entry in `SkillExpansion.steps`.
+ *
+ *  - `inputIndex` — the index in the input `steps` array this expanded entry
+ *    came from. Inline steps map to themselves; every step a skill emitted
+ *    maps to the `[skill: ...]` line that invoked the (outermost) skill.
+ *  - `frameId` — the frame this step runs inside. `''` for top-level inline
+ *    steps (the test frame).
+ *  - `skillFilePath` / `skillLine` — the per-step origin inside a skill
+ *    body, when the entry came from a skill. Absent for inline entries.
+ */
+export interface ExpandedStepOrigin {
+  inputIndex: number;
+  frameId: string;
+  skillFilePath?: string;
+  skillLine?: number;
+}
+
+/**
  * Result of skill expansion. `steps` is the flat list of natural-language
  * step strings the runner sees. `sourceSkills` is a parallel array tagging
  * each step with the *outermost* skill the test author invoked from the
  * caller scope — `null` for steps that were authored inline (not via any
- * skill). The runner threads this through to the report so each step row
- * can show "from skill X" provenance without changing how skills compose.
+ * skill). `origins` is a parallel array carrying file/line/frame metadata
+ * for the step-into protocol (server emits `frame:push` between origin
+ * transitions); `frames` is a flat lookup of every frame referenced by
+ * `origins`. Legacy consumers can ignore both new fields.
  */
 export interface SkillExpansion {
   steps: string[];
   sourceSkills: (string | null)[];
+  origins: ExpandedStepOrigin[];
+  frames: Record<string, ExpandedFrame>;
 }
 
 /**
@@ -50,20 +111,44 @@ export async function expandSkills(
   skillsDir: string,
   envCtx?: EnvDataContext,
   callerFilePath?: string,
+  /** Per-step line numbers parallel to `steps`, pulled from the test
+   *  file's parsed steps. Threads into the top-level recursion as
+   *  `stepLines` so a `[skill: ...]` invocation in the test file gets
+   *  its `invocationLine` recorded (which becomes `frame.line` on the
+   *  wire — clients use it to paint pass/fail on the test's
+   *  `[skill: ...]` row). Optional: legacy callers and tests that don't
+   *  care about line attribution can omit it. */
+  sourceLines?: number[],
 ): Promise<SkillExpansion> {
+  const frames: Record<string, ExpandedFrame> = {};
   const ctx: ExpandContext = {
     skillsDir,
     seq: 0,
+    frames,
     ...(envCtx && { envCtx }),
     ...(callerFilePath && { callerFilePath }),
   };
-  return expandRecursive(steps, ctx, new Set(), 0, null);
+  const result = await expandRecursive(
+    steps,
+    ctx,
+    new Set(),
+    0,
+    null,
+    '',
+    null,
+    sourceLines ?? null,
+  );
+  return { ...result, frames };
 }
 
 interface ExpandContext {
   skillsDir: string;
   /** Monotonic counter producing unique prefixes for internal capture names. */
   seq: number;
+  /** Shared `frames` lookup populated as the recursion enters each skill
+   *  body. The top-level call seeds this in `expandSkills` so every nested
+   *  recursion writes to the same map. */
+  frames: Record<string, ExpandedFrame>;
   /** When set, threaded into `parseSkillFile` so the skill's own
    *  `dataSources` resolve via the same env context the caller is using. */
   envCtx?: EnvDataContext;
@@ -71,6 +156,13 @@ interface ExpandContext {
    *  expansion. Used to wrap `parseSkillFile` errors with both endpoints —
    *  the skill where the failure landed and the test that triggered it. */
   callerFilePath?: string;
+  /** Absolute path of the skill `.md` whose body we're currently emitting
+   *  steps from. Set when recursing into a skill; absent at the top level
+   *  (where the caller is the test file). Used by origin recording. */
+  currentSkillFilePath?: string;
+  /** Name of the skill we're currently inside, for symmetry with the above —
+   *  retained as part of the recursion context for diagnostics. */
+  currentSkillName?: string;
 }
 
 async function expandRecursive(
@@ -82,19 +174,44 @@ async function expandRecursive(
    *  the outermost skill the caller invoked. `null` at the top level
    *  (inline steps from the test file). */
   sourceSkill: string | null,
-): Promise<SkillExpansion> {
+  /** Frame id of the calling scope. `''` at the top level (test frame). */
+  parentFrameId: string,
+  /** Lookup `inputIndex` to attribute every step we emit to a caller-scope
+   *  input. Non-null only while recursing inside a skill body; at the top
+   *  level we use the current step's own index. */
+  attribInputIndex: number | null,
+  /** Per-step line numbers parallel to `steps`. Top-level callers pass the
+   *  test file's pre-expansion `stepLines`; recursive callers pass the
+   *  skill's `stepLines`. */
+  stepLines: number[] | null,
+): Promise<Omit<SkillExpansion, 'frames'>> {
   if (depth > MAX_DEPTH) {
     throw new Error(`Skill expansion exceeded max depth of ${MAX_DEPTH} (possible recursion)`);
   }
 
   const out: string[] = [];
   const sources: (string | null)[] = [];
+  const origins: ExpandedStepOrigin[] = [];
 
-  for (const step of steps) {
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!;
     const call = parseSkillCall(step);
     if (!call) {
       out.push(step);
       sources.push(sourceSkill);
+      // Inline-emit attribution: at top level the caller is the test
+      // (inputIndex = our own index, no skill origin); inside a skill body
+      // we record the skill's file + its own per-step line.
+      origins.push({
+        inputIndex: attribInputIndex ?? i,
+        frameId: parentFrameId,
+        ...(ctx.currentSkillFilePath !== undefined && {
+          skillFilePath: ctx.currentSkillFilePath,
+        }),
+        ...(stepLines?.[i] !== undefined && stepLines![i]! > 0 && {
+          skillLine: stepLines![i]!,
+        }),
+      });
       continue;
     }
 
@@ -119,23 +236,54 @@ async function expandRecursive(
 
     const instanceId = ++ctx.seq;
     const expandedBody = applySkillScope(skill, call, instanceId);
+    const newFrameId = `f${instanceId}`;
+
+    // Record this frame's identity for the server to look up on transitions.
+    // `invocationLine` is the line of the `[skill: ...]` call in the parent
+    // file — what the call-stack view shows as "invoked from <uri>:<line>".
+    ctx.frames[newFrameId] = {
+      id: newFrameId,
+      parentId: parentFrameId === '' ? null : parentFrameId,
+      kind: 'skill',
+      uri: skill.filePath,
+      invocationLine: stepLines?.[i] ?? null,
+      skillName: call.name,
+      // Snapshot the caller-supplied parameter values so a debugger
+      // pause at the skill's first step (or any step before the
+      // skill captures something into the scope) can show what was
+      // passed in. The values are also interpolated directly into
+      // the skill body's step text (see `applySkillScope`), but
+      // that interpolation isn't reversible from the runtime side.
+      inputs: { ...call.args },
+    };
 
     // Outermost-skill attribution: keep the first skill we entered as the
     // source for every inner step, so report rows point back to a name the
     // test author actually wrote.
+    const innerCtx: ExpandContext = {
+      ...ctx,
+      currentSkillFilePath: skill.filePath,
+      currentSkillName: call.name,
+    };
     const recursed = await expandRecursive(
       expandedBody,
-      ctx,
+      innerCtx,
       new Set([...visited, call.name]),
       depth + 1,
       sourceSkill ?? call.name,
+      newFrameId,
+      // Inside a skill body, every emitted step is attributed to the
+      // [skill: ...] invocation at the current level — that's `i` here.
+      attribInputIndex ?? i,
+      skill.stepLines,
     );
 
     out.push(...recursed.steps);
     sources.push(...recursed.sourceSkills);
+    origins.push(...recursed.origins);
   }
 
-  return { steps: out, sourceSkills: sources };
+  return { steps: out, sourceSkills: sources, origins };
 }
 
 /**

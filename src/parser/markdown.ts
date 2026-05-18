@@ -54,9 +54,18 @@ export async function parseTestFile(
     // frontmatter) can resolve `${envName}` / `${env.X}` in their paths and
     // load env-appropriate JSON files at parse time.
     const envCtxForSkills = options.envData;
+    const preExpansionStepLines = parsed.stepLines;
     const stepsExp = await expandSkills(parsed.steps, options.skillsDir, envCtxForSkills, absPath);
     parsed.steps = stepsExp.steps;
     parsed.sourceSkills = stepsExp.sourceSkills;
+    // Re-align stepLines with the now-flattened step list. For inline
+    // entries the inputIndex points to themselves; for skill-expanded
+    // entries the inputIndex points to the `[skill: ...]` invocation line
+    // in the test file — the only file the user has open when looking at a
+    // CLI report, so that's the most useful pointer.
+    parsed.stepLines = stepsExp.origins.map(
+      (o) => preExpansionStepLines[o.inputIndex] ?? 0,
+    );
 
     const beforeExp = await expandSkills(parsed.hooks.before, options.skillsDir, envCtxForSkills, absPath);
     const beforeEachExp = await expandSkills(parsed.hooks.beforeEach, options.skillsDir, envCtxForSkills, absPath);
@@ -282,6 +291,7 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
     config: sections.config,
     parameters: sections.parameters,
     steps: sections.steps,
+    stepLines: sections.stepLines,
     skipHooks: sections.skipHooks,
     toolCalls: sections.toolCalls,
     // Pre-skill-expansion: every step is inline (no source skill yet). Will be
@@ -312,6 +322,7 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
     parameters: sections.parameters,
     outputs: sections.outputs,
     steps: sections.steps,
+    stepLines: sections.stepLines,
     ...(frontmatter.dataSources && { dataSources: frontmatter.dataSources }),
   };
 }
@@ -325,6 +336,12 @@ interface ParsedSections {
   skipHooks: boolean[];
   /** Parallel to `steps` — non-null when the line is a `[tool: ...]` invocation. */
   toolCalls: (ToolCall | null)[];
+  /**
+   * Parallel to `steps` — 1-based source line in the original raw content
+   * (including frontmatter). Populated by `extractStepLinesFromRaw`. Used by
+   * the step-into protocol so frame events can carry origin file+line.
+   */
+  stepLines: number[];
   hooks: TestHooks;
 }
 
@@ -334,6 +351,15 @@ function parseSections(rawContent: string, filePath: string): {
   title: string;
 } {
   const { frontmatter, body } = parseFrontmatter(rawContent);
+
+  // Pre-compute the raw 1-based line number of every `## Steps` item. The
+  // marked AST throws away line positions, so we do a second pass over the
+  // unparsed content. The Nth step line we find here corresponds 1:1 with
+  // the Nth step `extractSteps` pushes into the parallel array below — both
+  // honour the same rules (numbered list, top-level only, inside the Steps
+  // section). Origins for skill-expanded steps fall out of this too: skill
+  // files use the same parser.
+  const rawStepLines = extractStepLinesFromRaw(rawContent);
 
   const tokens = marked.lexer(body);
 
@@ -412,11 +438,66 @@ function parseSections(rawContent: string, filePath: string): {
     logger.warn(`File ${filePath} has no steps defined in ## Steps section`);
   }
 
+  // Pair each extracted step with its raw source line. The two passes (marked
+  // for text, raw scan for lines) walk the document in the same order, so
+  // alignment by index is correct as long as we trim the line array to the
+  // step count — extractStepLinesFromRaw is permissive on edge cases (blank
+  // numbered lines) where extractSteps already culled.
+  const stepLines: number[] = steps.map((_, i) => rawStepLines[i] ?? 0);
+
   return {
-    sections: { config, parameters, outputs, steps, skipHooks, toolCalls, hooks },
+    sections: { config, parameters, outputs, steps, skipHooks, toolCalls, stepLines, hooks },
     frontmatter,
     title,
   };
+}
+
+/**
+ * Find the 1-based source line of every numbered step item inside the `##
+ * Steps` (or deeper-level Steps) section of the raw markdown content. Lines
+ * are relative to the *raw* content — i.e. they include the YAML frontmatter
+ * block — so they match what the user sees in their editor.
+ *
+ * Mirrors the runner-core step-line classifier so server-side parsing agrees
+ * with the client's editor-side line model. Kept here (rather than importing
+ * runner-core) because the server isn't a runner-core consumer today.
+ */
+function extractStepLinesFromRaw(rawContent: string): number[] {
+  const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
+  const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
+  const STEP_LINE_RE = /^\d+\.\s+\S/;
+
+  const lines = rawContent.split(/\r?\n/);
+
+  // Skip leading frontmatter (--- ... ---).
+  let i = 0;
+  while (i < lines.length && (lines[i] ?? '').trim() === '') i++;
+  if (i < lines.length && (lines[i] ?? '').trim() === '---') {
+    for (let j = i + 1; j < lines.length; j++) {
+      if ((lines[j] ?? '').trim() === '---') { i = j + 1; break; }
+    }
+  } else {
+    i = 0;
+  }
+
+  // Find the Steps heading. Bail if not present.
+  let headingIndex = -1;
+  let headingDepth = 0;
+  for (; i < lines.length; i++) {
+    const m = STEPS_HEADING_RE.exec(lines[i] ?? '');
+    if (m) { headingIndex = i; headingDepth = m[1]!.length; break; }
+  }
+  if (headingIndex < 0) return [];
+
+  // Walk to the next equal-or-shallower heading (or EOF), collecting step lines.
+  const out: number[] = [];
+  for (let j = headingIndex + 1; j < lines.length; j++) {
+    const raw = lines[j] ?? '';
+    const heading = ANY_HEADING_RE.exec(raw);
+    if (heading && heading[1]!.length <= headingDepth) break;
+    if (STEP_LINE_RE.test(raw)) out.push(j + 1);
+  }
+  return out;
 }
 
 /** Parse a list of "- key: value" items into a key-value map */

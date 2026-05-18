@@ -26,6 +26,16 @@ export interface ExecuteToolStepOptions {
    * value from the test-info block; deterministic tools have no such fallback.
    */
   baseUrl?: string;
+  /**
+   * Phase 5 tool step-into — when true, hit a `debugger;` statement
+   * immediately before `def.run(...)`. Node's V8 inspector traps
+   * execution and the user lands one Step Over away from the tool's
+   * body. No-op when no inspector is attached. The session manager
+   * sets this only after it has already emitted
+   * `tool:awaiting-debugger` and received the client's ack, so by the
+   * time we get here the debugger is guaranteed to be listening.
+   */
+  pauseBeforeRun?: boolean;
 }
 
 /**
@@ -161,6 +171,14 @@ export async function executeToolStep(
   };
 
   try {
+    if (options.pauseBeforeRun) {
+      // Cooperative pause point for Phase 5 tool step-into. The
+      // session manager has already emitted `tool:awaiting-debugger`
+      // and waited for the client's ack, so a debugger is attached.
+      // Stepping past this line lands the user inside `def.run`.
+      // eslint-disable-next-line no-debugger
+      debugger;
+    }
     await Promise.resolve(def.run(typedArgs as never, ctx));
     return {
       toolName: call.name,

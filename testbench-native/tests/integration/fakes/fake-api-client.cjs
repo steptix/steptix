@@ -24,6 +24,13 @@ class FakeApiClient {
      *  that receives this fake and is invoked exactly when streamSteps is
      *  called for that stream index. Avoids polling races. */
     this.streamScripts = [];
+    /** Phase 3 — each call to runControl is appended here as
+     *  { sessionId, mode, opts? }. Tests assert against this to check the
+     *  extension dispatches Step Into / Over / Out with the right modes.
+     *  `opts` carries Phase 5 fields like pauseAtNextTool. */
+    this.runControlCalls = [];
+    /** Phase 5 — each call to ackToolDebugger. */
+    this.ackToolDebuggerCalls = [];
   }
 
   /**
@@ -88,6 +95,32 @@ class FakeApiClient {
     this.closeSessionCalls += 1;
     if (this.closeSessionImpl) {
       await this.closeSessionImpl(sessionId);
+    }
+  }
+
+  /**
+   * Phase 3 — server delivers step-control via POST /sessions/:id/run-control.
+   * The fake records each call so tests can assert the extension's
+   * stepInto/stepOver/stepOut commands fire it with the right mode.
+   * Default implementation is a no-op; tests can replace it with one
+   * that drives the next event push.
+   */
+  async runControl(sessionId, mode, opts) {
+    this.runControlCalls.push({ sessionId, mode, opts: opts ?? null });
+    if (this.runControlImpl) {
+      await this.runControlImpl(sessionId, mode, opts);
+    }
+  }
+
+  /**
+   * Phase 5 — extension calls this after VS Code's Node debugger has
+   * attached in response to a tool:awaiting-debugger event. Records the
+   * call so tests can assert the ack flow fired in the right order.
+   */
+  async ackToolDebugger(sessionId) {
+    this.ackToolDebuggerCalls.push({ sessionId });
+    if (this.ackToolDebuggerImpl) {
+      await this.ackToolDebuggerImpl(sessionId);
     }
   }
 
