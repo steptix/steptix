@@ -396,6 +396,30 @@ function isBrowserClosed(browserSession: BrowserSession): boolean {
   }
 }
 
+/**
+ * Walk the frame chain rooted at `frameId` and return the name of the
+ * outermost skill encountered. Mirrors the CLI runner's
+ * `test.sourceSkills[i]` semantics: for nested `skill_a → skill_b`,
+ * every body step (inner or outer) reports `skill_a` so the report's
+ * "from skill X" chip reflects the user-visible invocation rather than
+ * the immediate frame. Returns undefined for top-level inline steps
+ * (frameId empty or pointing at the test frame).
+ */
+function outermostSkillName(
+  frameId: string | undefined,
+  frames: Record<string, FrameInfo> | null,
+): string | undefined {
+  if (!frameId || !frames) return undefined;
+  let outermost: FrameInfo | undefined;
+  let current: FrameInfo | undefined = frames[frameId];
+  while (current) {
+    if (current.kind === 'skill') outermost = current;
+    if (!current.parentId) break;
+    current = frames[current.parentId];
+  }
+  return outermost?.skillName;
+}
+
 // ---------------------------------------------------------------------------
 // SessionManager
 // ---------------------------------------------------------------------------
@@ -1554,7 +1578,35 @@ export class SessionManager {
           reasoning: stepResult.aiExplanation ?? '',
           outputs: stepOutputs,
         });
-        fullStepResults.push({ ...stepResult, instruction: originalStep });
+        // Report parity with the CLI runner. The CLI tags each step
+        // with two things the server must mirror here so the HTML
+        // report renders identically:
+        //
+        //   index        — ordinal in the post-expansion step list
+        //                  (1-based). The cache uses source line as
+        //                  its identity (so step-<line>.json reads
+        //                  human-meaningfully) but the report header
+        //                  must show "Step 1, Step 2, …" not
+        //                  "Step 17, Step 18, …" because the latter
+        //                  leaks the skill-file line number into the
+        //                  test author's report.
+        //
+        //   sourceSkill  — name of the OUTERMOST skill this step came
+        //                  from (matches `test.sourceSkills[i]` in
+        //                  the CLI's test-runner.ts). For nested
+        //                  `skill_a → skill_b`, both inner and outer
+        //                  body steps surface "skill_a" so the chip
+        //                  reflects the user-visible invocation.
+        const sourceSkill = outermostSkillName(
+          expansionOrigins?.[i]?.frameId,
+          expansionFrames,
+        );
+        fullStepResults.push({
+          ...stepResult,
+          index: i + 1,
+          instruction: originalStep,
+          ...(sourceSkill && { sourceSkill }),
+        });
 
         // Update conversation history
         let currentUrl = '';

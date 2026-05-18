@@ -326,6 +326,60 @@ describe('api-server step-into protocol', () => {
     expect(push.frame.line).toBe(2); // sourceLines[1] = 2 (the [skill:] line)
   });
 
+  it('report StepResults use ordinal indexes and carry sourceSkill (parity with CLI runner)', async () => {
+    // The server emits step:* events keyed by source line so the client
+    // gutter can paint accurately. But the HTML report needs different
+    // identity — ordinal indexes ("Step 1, 2, 3…") and per-step
+    // sourceSkill chips, matching what the CLI's test-runner produces.
+    // This test asserts the session-manager re-stamps both before
+    // pushing into the report's StepResults array.
+    const { generateReport } = await import('../src/report/generator.js');
+    const reportMock = vi.mocked(generateReport);
+    reportMock.mockClear();
+
+    const sessionId = 'report-parity-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    for await (const ev of sseEvents(url, {
+      // Test layout: inline → skill expansion (multiple body steps) → inline.
+      // The skill is `demo_skill`, defined in this test file's skillsDir.
+      steps: ['Open the page', '[skill: demo_skill]', 'Verify result'],
+      sourceLines: [10, 20, 30],
+      skillsDir,
+      testFilePath,
+    })) {
+      if (ev.type === 'done') break;
+    }
+
+    expect(reportMock).toHaveBeenCalledOnce();
+    const report = reportMock.mock.calls[0]![0];
+    const steps = report.steps;
+
+    // Index sequencing: ordinal 1, 2, 3, … regardless of where the
+    // steps came from (test vs skill body) or what their source lines
+    // are. Pre-fix this was effectiveSourceLines values like 10, <skill
+    // body lines>, 30 — leaking the skill-file line numbers into the
+    // report header.
+    expect(steps.map((s: { index: number }) => s.index)).toEqual(
+      steps.map((_: unknown, i: number) => i + 1),
+    );
+
+    // sourceSkill: present on the skill-body steps, absent on the
+    // inline top-level steps. CLI's test-runner.ts threads
+    // `test.sourceSkills[i]` into result.sourceSkill at the same point.
+    const sourceSkills = steps.map(
+      (s: { sourceSkill?: string }) => s.sourceSkill ?? null,
+    );
+    // First and last steps are inline (no chip); the middle steps come
+    // from demo_skill expansion (chip = 'demo_skill').
+    expect(sourceSkills[0]).toBeNull();
+    expect(sourceSkills[sourceSkills.length - 1]).toBeNull();
+    const middleSkills = sourceSkills.slice(1, -1);
+    expect(middleSkills.length).toBeGreaterThan(0);
+    for (const name of middleSkills) {
+      expect(name).toBe('demo_skill');
+    }
+  });
+
   it('edits to a skill file between requests are picked up — skill cache is invalidated per /steps call', async () => {
     // Regression: the module-level skill cache in src/skills/expander.ts is
     // keyed by `filePath::envName` with no mtime invalidation. The Electron

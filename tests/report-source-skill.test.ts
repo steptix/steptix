@@ -33,3 +33,4 @@ describe('renderStep — source-skill chip', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 });
+
