@@ -362,7 +362,9 @@ export class TestBenchTestController implements vscode.Disposable {
           outputs.push(`▶ step on line ${event.line}`);
           break;
         case 'step:pass':
-          outputs.push(`✓ step on line ${event.line} passed`);
+          outputs.push(
+            `✓ step on line ${event.line} passed${event.fromCache ? '  (cached)' : ''}`,
+          );
           if (event.output) outputs.push(`  ${event.output}`);
           break;
         case 'step:fail':

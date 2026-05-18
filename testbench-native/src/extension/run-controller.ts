@@ -914,6 +914,15 @@ export class RunController {
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
+    // Full step list (live document buffer) for cache-hash stability across
+    // multi-batch runs. When the user pauses at a breakpoint and resumes,
+    // batch 1 has steps 1..N-1 and batch 2 has steps N..end. The server
+    // hashes `fullSteps` to keep the cache identity stable across both.
+    // We use the live buffer (not disk) so unsaved edits invalidate cache
+    // correctly — otherwise an edit-but-don't-save followed by Continue
+    // would replay a stale plan.
+    const fullStepInstructions = extractSteps(this.document.getText())
+      .map((s) => s.instruction);
 
     // Resolve the project's skills directory so the server can expand
     // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around
@@ -929,6 +938,7 @@ export class RunController {
       sessionId,
       {
         steps: stepInstructions,
+        fullSteps: fullStepInstructions,
         sourceLines: stepLines,
         env,
         ...(envName && { envName }),
@@ -951,15 +961,34 @@ export class RunController {
     );
 
     let sawFail = false;
+    let cachedCount = 0;
+    let passCount = 0;
     for await (const event of events) {
       this.configSentForSession = true;
-      log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
+      // step:pass cache marker — user-visible signal that a step skipped
+      // the AI call. The decoration ⚡ glyph is the in-editor signal; this
+      // log line is the textual one for the Output channel.
+      if (event.type === 'step:pass') {
+        passCount += 1;
+        if (event.fromCache) {
+          cachedCount += 1;
+          log(`✓ step ${event.line} passed (cached)`);
+        } else {
+          log(`✓ step ${event.line} passed`);
+        }
+      } else {
+        log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
+      }
       // Track the step that's currently executing — used as the resume
       // point if the user pauses mid-step.
       if (event.type === 'step:start') this.lastStepStartLine = event.line;
       if (event.type === 'step:fail') sawFail = true;
       if (event.type === 'done') continue;
       this.emitRunEvent(event);
+    }
+    if (passCount > 0) {
+      const suffix = cachedCount > 0 ? ` (${cachedCount} cached)` : '';
+      log(`✓ ${passCount} passed${suffix}`);
     }
     return !sawFail;
   }

@@ -117,6 +117,10 @@ export interface StepResult {
   error?: string;
   /** AI explanation of what it was attempting (shown on failure) */
   aiExplanation?: string;
+  /** True when every AI turn for this step was served from `StepCache` —
+   *  no AI call was made. Surfaces in the step:pass event so clients can
+   *  paint a distinct glyph and log the run line as `(cached)`. */
+  fromCache?: boolean;
   /** True when this step was typed into the interactive REPL rather than being part of the test file. */
   interactiveAdHoc?: boolean;
   /** True when this step is a user-typed command captured inside an [interactive] step. */

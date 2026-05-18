@@ -53,6 +53,11 @@ export interface StepPassEvent {
   /** data:image/png;base64 URI, may be empty. */
   screenshot?: string;
   frame?: FrameInfo;
+  /** True when every AI turn for this step was served from `StepCache` —
+   *  no AI call was made. Absent / false means the AI was called. The
+   *  client uses this to paint a ⚡ glyph instead of the standard ✓ and
+   *  to mark the run-log line as `(cached)`. */
+  fromCache?: boolean;
 }
 
 export interface StepFailEvent {
@@ -206,7 +211,7 @@ export interface FileStateSnapshot {
   isTestFile: boolean;
   text: string;
   breakpoints: number[];
-  statuses: Array<[number, 'running' | 'pass' | 'fail' | 'skip' | 'stopped']>;
+  statuses: Array<[number, 'running' | 'pass' | 'pass-cached' | 'fail' | 'skip' | 'stopped']>;
   errors: Array<[number, ErrorPayload]>;
   breakpointStop: number | null;
   selectedLines: number[];

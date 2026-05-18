@@ -128,6 +128,21 @@ export function createApiServer(config: Config): {
       if (body.pauseAtNextTool === true) {
         request.pauseAtNextTool = true;
       }
+      // Step-cache control fields. `cacheEnabled` defaults true server-side
+      // when testFilePath is present; explicit false here disables for this
+      // request. `fullSteps` lets multi-batch runs share a stable bundle
+      // hash so cache hits survive paused-and-resumed runs.
+      if (body.cacheEnabled === false) {
+        request.cacheEnabled = false;
+      } else if (body.cacheEnabled === true) {
+        request.cacheEnabled = true;
+      }
+      if (
+        Array.isArray(body.fullSteps) &&
+        body.fullSteps.every((s: unknown) => typeof s === 'string')
+      ) {
+        request.fullSteps = body.fullSteps as string[];
+      }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);

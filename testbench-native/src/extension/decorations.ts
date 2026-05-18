@@ -16,6 +16,7 @@ export class DecorationManager implements vscode.Disposable {
 
   private readonly breakpointStopped: vscode.TextEditorDecorationType;
   private readonly statusPass: vscode.TextEditorDecorationType;
+  private readonly statusPassCached: vscode.TextEditorDecorationType;
   private readonly statusFail: vscode.TextEditorDecorationType;
   private readonly statusRunning: vscode.TextEditorDecorationType;
   private readonly statusSkip: vscode.TextEditorDecorationType;
@@ -44,6 +45,9 @@ export class DecorationManager implements vscode.Disposable {
     });
     this.statusPass = vscode.window.createTextEditorDecorationType(
       statusIcon('status-pass.svg'),
+    );
+    this.statusPassCached = vscode.window.createTextEditorDecorationType(
+      statusIcon('status-pass-cached.svg'),
     );
     this.statusFail = vscode.window.createTextEditorDecorationType(
       statusIcon('status-fail.svg'),
@@ -90,6 +94,7 @@ export class DecorationManager implements vscode.Disposable {
     this.subs.forEach((s) => s.dispose());
     this.breakpointStopped.dispose();
     this.statusPass.dispose();
+    this.statusPassCached.dispose();
     this.statusFail.dispose();
     this.statusRunning.dispose();
     this.statusSkip.dispose();
@@ -137,6 +142,7 @@ export class DecorationManager implements vscode.Disposable {
   private clear(editor: vscode.TextEditor): void {
     editor.setDecorations(this.breakpointStopped, []);
     editor.setDecorations(this.statusPass, []);
+    editor.setDecorations(this.statusPassCached, []);
     editor.setDecorations(this.statusFail, []);
     editor.setDecorations(this.statusRunning, []);
     editor.setDecorations(this.statusSkip, []);
@@ -169,6 +175,7 @@ export class DecorationManager implements vscode.Disposable {
     // Statuses — running supersedes pass/fail/skip if both happen to land
     // on the same line during a re-run.
     const passRanges: vscode.Range[] = [];
+    const passCachedRanges: vscode.Range[] = [];
     const failRanges: vscode.Range[] = [];
     const runningRanges: vscode.Range[] = [];
     const skipRanges: vscode.Range[] = [];
@@ -180,6 +187,7 @@ export class DecorationManager implements vscode.Disposable {
       linesWithStatus.add(line);
       switch (status) {
         case 'pass': passRanges.push(r); break;
+        case 'pass-cached': passCachedRanges.push(r); break;
         case 'fail': failRanges.push(r); break;
         case 'running': runningRanges.push(r); break;
         case 'skip': skipRanges.push(r); break;
@@ -195,8 +203,14 @@ export class DecorationManager implements vscode.Disposable {
 
     const errorRanges = snap.errors.map(([line]) => range(line));
     const headingLine = findStepsHeadingLine(snap.text);
+    // Both 'pass' and 'pass-cached' count as passed for the N/M summary —
+    // cache hits are still successful steps.
     const passed = snap.statuses.filter(
-      ([line, status]) => status === 'pass' && stepLineSet.has(line),
+      ([line, status]) =>
+        (status === 'pass' || status === 'pass-cached') && stepLineSet.has(line),
+    ).length;
+    const passedCached = snap.statuses.filter(
+      ([line, status]) => status === 'pass-cached' && stepLineSet.has(line),
     ).length;
     // The "N/M passed" summary belongs on the user's actual test file —
     // not on skill `.md`s we surfaced during a descent. A skill running
@@ -204,13 +218,17 @@ export class DecorationManager implements vscode.Disposable {
     // "0/4 passed" while it's still executing, and a skill the user
     // never wrote a test for shouldn't carry a passed-count signal at
     // all. Phase 2.1 cleanup.
+    const summaryText =
+      passedCached > 0
+        ? `${passed}/${stepLines.length} passed (${passedCached} cached)`
+        : `${passed}/${stepLines.length} passed`;
     const summaryRanges: vscode.DecorationOptions[] =
       snap.isTestFile && headingLine && stepLines.length > 0
         ? [{
             range: rangeAtLineEnd(headingLine),
             renderOptions: {
               after: {
-                contentText: `${passed}/${stepLines.length} passed`,
+                contentText: summaryText,
               },
             },
           }]
@@ -218,6 +236,7 @@ export class DecorationManager implements vscode.Disposable {
 
     editor.setDecorations(this.breakpointStopped, stopped);
     editor.setDecorations(this.statusPass, passRanges);
+    editor.setDecorations(this.statusPassCached, passCachedRanges);
     editor.setDecorations(this.statusFail, failRanges);
     editor.setDecorations(this.statusRunning, runningRanges);
     editor.setDecorations(this.statusSkip, skipRanges);

@@ -90,6 +90,19 @@ export interface StreamStepsRequest {
     consoleLogLevel?: LogLevel;
     serverFileLogLevel?: LogFileMode;
   };
+  /**
+   * Step-cache control. Defaults to enabled server-side when
+   * `testFilePath` is present. Set `false` to force every step through
+   * the AI even when a cache entry exists (debug aid).
+   */
+  cacheEnabled?: boolean;
+  /**
+   * Full post-expansion step list for the test. Required for multi-batch
+   * runs (breakpoint pause + Continue) so the server's cache-bundle hash
+   * stays stable across batches. Single-batch runs can omit it; the
+   * server falls back to hashing `steps` directly.
+   */
+  fullSteps?: string[];
 }
 
 export type ApiErrorKind =

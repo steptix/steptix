@@ -249,7 +249,12 @@ class RunControllerRegistry implements vscode.Disposable {
         }
         case 'step:pass': {
           const target = this.targetUriFor(uri, ev.frame);
-          this.tracker.setStatus(target, ev.line, 'pass');
+          // The server marks a step:pass with `fromCache: true` when every
+          // AI turn for that step was served from StepCache (no AI call
+          // happened). The gutter painter renders that with a ⚡ glyph and
+          // the run-log marks the line `(cached)`. Absent / false flows
+          // through the standard ✓ path.
+          this.tracker.setStatus(target, ev.line, ev.fromCache ? 'pass-cached' : 'pass');
           break;
         }
         case 'step:fail': {

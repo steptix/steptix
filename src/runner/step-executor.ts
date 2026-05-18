@@ -204,7 +204,12 @@ export async function executeStep(
           cached,
         );
         logger.success(`Step ${stepIndex} passed (from cache)`);
-        return result;
+        // Mark the result so the server's RunEvent emitter can attach
+        // `fromCache: true` to the step:pass wire event. Without this,
+        // every cache-hit step would look identical to an AI-run step on
+        // the client side — and the ⚡ glyph / `(cached)` log marker
+        // wouldn't render.
+        return { ...result, fromCache: true };
       } catch (err) {
         logger.warn(`Cached actions failed for step ${stepIndex} — invalidating and falling through to AI`);
         await opts.stepCache.invalidateStep(stepIndex);

@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { isTestFile } from 'ai-ui-automation-runner-core';
 import type { ErrorPayload } from 'ai-ui-automation-runner-core';
 
-export type LineStatus = 'running' | 'pass' | 'fail' | 'skip' | 'stopped';
+export type LineStatus = 'running' | 'pass' | 'pass-cached' | 'fail' | 'skip' | 'stopped';
 
 /**
  * Per-document RUN state. Breakpoints are NOT stored here — they live in

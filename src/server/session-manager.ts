@@ -1,4 +1,6 @@
-import { basename } from 'node:path';
+import { basename, join as pathJoin } from 'node:path';
+import { StepCache } from '../cache/step-cache.js';
+import { resolveProjectRoot } from './project-root.js';
 import type { Config } from '../config/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
@@ -132,6 +134,29 @@ export interface StepRequest {
     consoleLogLevel?: ConsoleLogLevel;
     serverFileLogLevel?: 'off' | 'compact' | 'full';
   };
+  /**
+   * Enable / disable the per-step AI response cache for this request. When
+   * true (and `testFilePath` is present so a project root can be resolved),
+   * the server reads cached AI plans from `<project-root>/.cache/<test>/`
+   * before calling the AI, and writes successful plans back. Cache hits
+   * surface to clients via `step:pass.fromCache = true`.
+   *
+   * Default: `true` when `testFilePath` is present. Set to `false` to
+   * force every step through the AI even when a cache entry exists
+   * (useful for debugging "is the cache hiding something?" scenarios).
+   */
+  cacheEnabled?: boolean;
+  /**
+   * Full post-expansion step list for the test. When a run is split into
+   * multiple HTTP batches (e.g. paused at a breakpoint), each batch's
+   * `steps` field carries only the trimmed slice this batch executes.
+   * The cache's bundle-hash needs to be stable across batches of the
+   * *same* test, so callers send the full list here. The server hashes
+   * `fullSteps ?? steps` — omitting it works for single-batch runs and
+   * misbehaves only on multi-batch runs (where the hash would differ
+   * between batches and prevent any cache hit).
+   */
+  fullSteps?: string[];
 }
 
 /**
@@ -158,7 +183,7 @@ export interface FrameInfo {
  */
 export type RunEvent =
   | { type: 'step:start'; line: number; frame?: FrameInfo }
-  | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo }
+  | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo; fromCache?: boolean }
   | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string }
@@ -928,6 +953,41 @@ export class SessionManager {
       }
     }
 
+    // ─── StepCache initialization ────────────────────────────────────────
+    //
+    // Per-request: clear the skill cache (already done at the top of
+    // executeSteps), then build a fresh StepCache anchored at the test's
+    // project root. The cache key is (testFilePath, hash(fullSteps)). The
+    // hash uses `fullSteps` when the client supplies it (multi-batch runs
+    // trim `steps` to a slice; without `fullSteps` the hash would differ
+    // between batches of the same test and no cache hit would ever land).
+    //
+    // Project root is resolved from `testFilePath`, NOT from the server's
+    // CWD — testbench-native may launch the server from anywhere. If no
+    // project marker is found by walking up from the test file, the cache
+    // is disabled for this request with a one-time warning rather than
+    // writing to a phantom `.cache` next to the server process.
+    const cacheEnabledForRequest = request.cacheEnabled !== false && !!request.testFilePath;
+    let stepCache: StepCache | undefined;
+    if (cacheEnabledForRequest && request.testFilePath) {
+      const projectRoot = await resolveProjectRoot(request.testFilePath);
+      if (projectRoot) {
+        const cacheDir = pathJoin(projectRoot, this.config.cache.dir);
+        const cacheHashSource = request.fullSteps ?? effectiveSteps;
+        try {
+          stepCache = await StepCache.initialize(cacheDir, request.testFilePath, cacheHashSource);
+        } catch (err) {
+          logger.warn(
+            `Session "${sessionId}": failed to initialize step cache: ${(err as Error).message} — proceeding without cache`,
+          );
+        }
+      } else {
+        logger.warn(
+          `Session "${sessionId}": no project root found for ${request.testFilePath} — cache disabled`,
+        );
+      }
+    }
+
     // Detect conditional step groups for multi-outcome branching — interpolate
     // env/data substitutions first so grouping looks at the final step text
     // (otherwise `${data.foo}` placeholders could change which steps look
@@ -1378,8 +1438,14 @@ export class SessionManager {
               });
             }
           } else {
+            // Use the source line as the cache identity for this step so
+            // cache files (step-<line>.json) line up with how the user
+            // identifies steps. Falls back to ordinal when sourceLines is
+            // absent (legacy CLI-driven test runs hit a different code
+            // path entirely; this fallback is just defensive).
+            const stepCacheId = effectiveSourceLines?.[i] ?? i + 1;
             stepResult = await executeStep(
-              i + 1,
+              stepCacheId,
               stepsTotal,
               stepInstruction,
               {
@@ -1397,6 +1463,8 @@ export class SessionManager {
                 resolvedParameters,
                 pageTracker: session.browserSession.pageTracker,
                 browserTracker: session.browserTracker,
+                ...(stepCache && { stepCache }),
+                cacheEnabled: cacheEnabledForRequest && !!stepCache,
               },
             );
           }
@@ -1519,6 +1587,7 @@ export class SessionManager {
             ...(stepResult.aiExplanation && { output: stepResult.aiExplanation }),
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
+            ...(stepResult.fromCache && { fromCache: true }),
           });
 
           // ── Frame scope snapshot (Phase 4) ──────────────────────────
