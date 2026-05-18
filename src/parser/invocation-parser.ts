@@ -40,6 +40,12 @@ export interface ParsedInvocation {
   outputAliases: Record<string, string>;
   /** Text after the closing `]` — preserved for callers that want to log it. */
   trailing: string;
+  /** Human-readable description that appeared *before* the `[skill:` / `[tool:`
+   *  token on the same line, trimmed of surrounding whitespace. Omitted when
+   *  the call appears at the start of the line (no prefix text) or when the
+   *  prefix text is whitespace-only. Pure metadata — the parser never feeds
+   *  it back into argument resolution. */
+  label?: string;
 }
 
 export class InvocationSyntaxError extends Error {
@@ -133,22 +139,33 @@ export interface InvocationParserOptions {
 /**
  * Try to parse `line` as an invocation of the configured kind.
  *
- * Returns `null` if the line is not a call of this kind (does not start with
- * the configured prefix after optional leading whitespace). Throws the
- * configured error class if the line opens as a call but is malformed.
+ * Returns `null` if the line does not contain the configured prefix
+ * (`[skill:` / `[tool:`) at all. Throws the configured error class if the
+ * line contains the prefix but the bracketed call is malformed.
+ *
+ * Any text that appears before the prefix is captured as `label` (trimmed)
+ * so authors can prefix an invocation with a human-readable description:
+ *
+ *   `Search with DuckDuckGo [skill: duckduckgo_search query="..."]`
+ *
+ * The label is pure metadata — the parser never threads it into arg
+ * resolution. Whitespace-only prefix text produces no label (the canonical
+ * `[skill: foo]` form is unchanged).
  */
 export function parseInvocation(
   line: string,
   options: InvocationParserOptions,
 ): ParsedInvocation | null {
   const { prefix } = options;
-  const leadingWs = line.match(/^\s*/)?.[0].length ?? 0;
-  if (line.slice(leadingWs, leadingWs + prefix.length) !== prefix) {
+  const prefixIdx = line.indexOf(prefix);
+  if (prefixIdx === -1) {
     return null;
   }
+  const labelRaw = line.slice(0, prefixIdx).trim();
+  const label = labelRaw === '' ? undefined : labelRaw;
 
   const ErrorCls = options.errorClass ?? InvocationSyntaxError;
-  const scanner = new Scanner(line, leadingWs + prefix.length, ErrorCls);
+  const scanner = new Scanner(line, prefixIdx + prefix.length, ErrorCls);
   scanner.skipInlineSpace();
 
   const name = scanner.readIdentifier({ allowHyphen: true });
@@ -164,7 +181,13 @@ export function parseInvocation(
 
     if (scanner.peek() === ']') {
       scanner.advance();
-      return { name, args, outputAliases, trailing: scanner.rest() };
+      return {
+        name,
+        args,
+        outputAliases,
+        trailing: scanner.rest(),
+        ...(label !== undefined && { label }),
+      };
     }
 
     if (scanner.atEnd()) {

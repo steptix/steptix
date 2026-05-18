@@ -20,9 +20,10 @@ export class ToolCallSyntaxError extends InvocationSyntaxError {
 /**
  * Try to parse `line` as a tool invocation.
  *
- * Returns `null` if the line is not a tool call (does not start with
- * `[tool:` after optional leading whitespace). Throws `ToolCallSyntaxError`
- * if the line opens as one but is malformed.
+ * Returns `null` if the line contains no `[tool:` token at all. Throws
+ * `ToolCallSyntaxError` if the line contains the token but the bracketed
+ * call is malformed. Any text before `[tool:` is captured as `label` —
+ * see `parseInvocation` for the full grammar.
  */
 export function parseToolCall(line: string): ToolCall | null {
   const parsed: ParsedInvocation | null = parseInvocation(line, {
@@ -34,5 +35,6 @@ export function parseToolCall(line: string): ToolCall | null {
     name: parsed.name,
     args: parsed.args,
     outputAliases: parsed.outputAliases,
+    ...(parsed.label !== undefined && { label: parsed.label }),
   };
 }

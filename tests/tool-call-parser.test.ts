@@ -17,6 +17,34 @@ describe('parseToolCall — non-matches', () => {
   });
 });
 
+describe('parseToolCall — label prefix', () => {
+  it('captures text before `[tool:` as the step label, trimmed', () => {
+    const result = parseToolCall('Fetch the CSRF token [tool: fetch_csrf_token]');
+    expect(result?.name).toBe('fetch_csrf_token');
+    expect(result?.label).toBe('Fetch the CSRF token');
+  });
+
+  it('omits the label when the call sits at start-of-line', () => {
+    const result = parseToolCall('[tool: foo]');
+    expect(result?.label).toBeUndefined();
+  });
+
+  it('omits the label when only whitespace precedes the call', () => {
+    const result = parseToolCall('   [tool: foo]');
+    expect(result?.label).toBeUndefined();
+  });
+
+  it('combines label, args, output alias, and shorthand', () => {
+    const result = parseToolCall(
+      'Print all repos [tool: print_all repos out.summary]',
+    );
+    expect(result?.label).toBe('Print all repos');
+    expect(result?.name).toBe('print_all');
+    expect(result?.args).toEqual({ repos: '{{repos}}' });
+    expect(result?.outputAliases).toEqual({ summary: 'summary' });
+  });
+});
+
 describe('parseToolCall — happy path', () => {
   it('parses a tool with no arguments', () => {
     const result = parseToolCall('[tool: read_page_title]');

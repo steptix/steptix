@@ -19,8 +19,63 @@ describe('parseSkillCall — non-matches', () => {
     expect(parseSkillCall('\t\t')).toBeNull();
   });
 
-  it('returns null for steps that mention `[skill:` only mid-line', () => {
-    expect(parseSkillCall('See the docs about [skill: foo]')).toBeNull();
+  it('returns null when `[skill:` does not appear in the line at all', () => {
+    expect(parseSkillCall('Click the [submit] button')).toBeNull();
+    expect(parseSkillCall('[skil: foo]')).toBeNull();
+  });
+});
+
+describe('parseSkillCall — label prefix', () => {
+  it('captures text before `[skill:` as the step label, trimmed', () => {
+    const result = parseSkillCall('Search with DuckDuckGo [skill: duckduckgo]');
+    expect(result?.name).toBe('duckduckgo');
+    expect(result?.label).toBe('Search with DuckDuckGo');
+  });
+
+  it('omits the label when the call sits at start-of-line', () => {
+    const result = parseSkillCall('[skill: foo]');
+    expect(result?.label).toBeUndefined();
+  });
+
+  it('omits the label when only whitespace precedes the call', () => {
+    const result = parseSkillCall('   [skill: foo]');
+    expect(result?.label).toBeUndefined();
+  });
+
+  it('trims surrounding whitespace from the label', () => {
+    const result = parseSkillCall('   Sign in   [skill: login]');
+    expect(result?.label).toBe('Sign in');
+  });
+
+  it('preserves internal whitespace inside the label', () => {
+    const result = parseSkillCall('Click and verify  [skill: foo]');
+    expect(result?.label).toBe('Click and verify');
+  });
+
+  it('combines label, args, output alias, and trailing comment', () => {
+    const result = parseSkillCall(
+      'Log in as admin [skill: login role="admin" out.session_id] # smoke',
+    );
+    expect(result?.label).toBe('Log in as admin');
+    expect(result?.name).toBe('login');
+    expect(result?.args).toEqual({ role: 'admin' });
+    expect(result?.outputAliases).toEqual({ session_id: 'session_id' });
+    expect(result?.trailing).toBe(' # smoke');
+  });
+
+  it('accepts a stray `[` in the label without treating it as the prefix', () => {
+    const result = parseSkillCall('Step [1/3] [skill: foo]');
+    expect(result?.label).toBe('Step [1/3]');
+    expect(result?.name).toBe('foo');
+  });
+
+  it('matches the first `[skill:` when the label happens to contain another', () => {
+    // Ambiguous user input — we resolve by binding to the first occurrence.
+    // The second `[skill:` lives in `trailing` and isn't re-scanned.
+    const result = parseSkillCall('a [skill: x] b [skill: y]');
+    expect(result?.name).toBe('x');
+    expect(result?.label).toBe('a');
+    expect(result?.trailing).toBe(' b [skill: y]');
   });
 });
 

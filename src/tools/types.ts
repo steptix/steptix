@@ -147,6 +147,10 @@ export interface ToolCall {
   name: string;
   args: Record<string, string>;
   outputAliases: Record<string, string>;
+  /** Human-readable description that appeared before `[tool:` on the same
+   *  line (trimmed). Omitted when the call appears at the start of the line.
+   *  Pure metadata — never used for argument resolution. */
+  label?: string;
 }
 
 /**
