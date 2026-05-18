@@ -179,6 +179,17 @@ describe('TestBench live pause/resume against real server', function () {
     await waitFor('isRunning becomes false after pause #1', () => !hooks.isRunning(), 15_000);
     console.log(`[live] Paused #1 at line ${pausePoint1}, isRunning=false ✓`);
 
+    // Snapshot of status marks at the pause point. We'll re-check this
+    // after resume to guard the wiped-pass-marks regression (f6b24c1):
+    // pre-fix, the resume call cleared every status before the new batch
+    // started, so any step that had passed before the pause vanished
+    // from the gutter when the user hit Continue.
+    const statusesAtPause1 = new Map(hooks.tracker.snapshot().statuses);
+    const passedAtPause1 = [...statusesAtPause1.entries()]
+      .filter(([, s]) => s === 'pass' || s === 'pass-cached')
+      .map(([line]) => line);
+    console.log(`[live] At pause #1, passed lines = ${JSON.stringify(passedAtPause1)}`);
+
     // ---- Resume → run continues ----------------------------------------
     console.log('[live] Resuming');
     void vscode.commands.executeCommand('testbench-native.resume');
@@ -190,6 +201,25 @@ describe('TestBench live pause/resume against real server', function () {
       15_000,
     );
     console.log('[live] Resumed ✓');
+
+    // Audit assertion (added 2026-05-18): every step that passed before
+    // the pause must still show passed immediately after resume kicks
+    // off. The wiped-pass-marks regression (fix in f6b24c1) made this
+    // assertion necessary — without it the live test would have caught
+    // the bug. Resume opens a new SSE stream against the still-alive
+    // session; the client must NOT wipe previously-painted statuses as
+    // part of that flow.
+    const statusesAfterResumeStart = Object.fromEntries(
+      hooks.tracker.snapshot().statuses,
+    );
+    for (const line of passedAtPause1) {
+      const s = statusesAfterResumeStart[line];
+      assert.ok(
+        s === 'pass' || s === 'pass-cached',
+        `Line ${line} must keep its passed status across resume — ` +
+          `got '${s}'. If undefined, the wiped-pass-marks regression returned.`,
+      );
+    }
 
     // ---- Pause #2: wait for a *new* step:start, then pause again -------
     console.log('[live] Waiting for the next step:start (different line)…');

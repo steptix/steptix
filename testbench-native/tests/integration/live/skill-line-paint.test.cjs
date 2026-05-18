@@ -176,4 +176,82 @@ describe('TestBench live — [skill:] line gets painted at breakpoint pause', fu
       vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
     }
   });
+
+  it('frame:pop paints `pass` on the test-file [skill:] row on clean exit', async () => {
+    // Audit complement (added 2026-05-18) to the running-on-frame:push
+    // test above. Same fixture, no breakpoint — let the skill body run
+    // to completion and assert the [skill:] aggregate flips through
+    // running → pass via the frame:pop event.
+    //
+    // Failure mode this guards: handleFramePop's `result.failed`
+    // check is what gates the pass paint. If failedFrames tracking
+    // ever drifts so even a clean exit reads as failed, the [skill:]
+    // line would stay running indefinitely or paint fail — both
+    // observable here when the test is paint-only-success.
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(workspaceRoot, 'no workspace folder');
+
+    const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'skill-line-paint.md');
+    const testUri = vscode.Uri.file(testFile);
+
+    if (vscode.debug.breakpoints.length > 0) {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+    }
+
+    await vscode.commands.executeCommand('vscode.open', testUri);
+    await waitFor(
+      'test file active',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),
+    );
+    await waitFor(
+      'tracker recognises test file',
+      () => hooks.tracker.snapshot().isTestFile === true,
+    );
+
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(0, 0),
+      new vscode.Position(0, 0),
+    );
+
+    console.log('[live] clean-exit: starting run without breakpoint');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+
+    await waitFor('isRunning true', () => hooks.isRunning(), 30_000);
+
+    // Wait for the whole run to complete. The fixture has 2 lines:
+    // line 14 = [skill: noop_skill], line 15 = Navigate to about:blank.
+    // Both must pass on a clean run.
+    const SKILL_INVOCATION_LINE = 14;
+    const TRAILING_STEP_LINE = 15;
+    await waitFor(
+      'run idle',
+      () => !hooks.isRunning(),
+      180_000,
+    );
+
+    const finalStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    console.log('[live] clean-exit final statuses:', finalStatuses);
+
+    // The whole point of this test: frame:pop with no failures must
+    // paint pass on the [skill:] aggregate row. Cached replay is also
+    // acceptable (the cache test runs first; if its writes survive,
+    // we'd see pass-cached here too).
+    const skillLineStatus = finalStatuses[SKILL_INVOCATION_LINE];
+    assert.ok(
+      skillLineStatus === 'pass' || skillLineStatus === 'pass-cached',
+      `[skill:] line ${SKILL_INVOCATION_LINE} must show pass after clean exit, ` +
+        `got '${skillLineStatus}'. If 'running', frame:pop didn't paint. ` +
+        `If undefined, the row never got painted at all.`,
+    );
+
+    const trailingStatus = finalStatuses[TRAILING_STEP_LINE];
+    assert.ok(
+      trailingStatus === 'pass' || trailingStatus === 'pass-cached',
+      `Trailing step on line ${TRAILING_STEP_LINE} must also be passed; ` +
+        `got '${trailingStatus}'.`,
+    );
+
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+  });
 });
