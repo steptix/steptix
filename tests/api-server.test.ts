@@ -473,6 +473,62 @@ describe('API Server', () => {
       expect(doneEvent.data.status).toBe('passed');
     });
 
+    it('done event carries reportPath when a report was written', { timeout: 30_000 }, async () => {
+      // Open Last Report wiring: the server captures generateReport's
+      // returned absolute path and threads it into the final `done` event
+      // so the client can offer a one-click "Open Report" surface.
+      // generateReport is mocked at the module top to return a fixed
+      // sentinel path; this test proves it lands on the wire.
+      const res = await fetch(`${baseUrl}/sessions/report-1/steps?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({ steps: ['Click'], sourceLines: [10] }),
+      });
+
+      expect(res.status).toBe(200);
+      const events = await readSseStream(res);
+      const doneEvent = events[events.length - 1]!;
+      expect(doneEvent.event).toBe('done');
+      expect(doneEvent.data.reportPath).toBe('/tmp/fake-report.html');
+    });
+
+    it('done event omits reportPath when report generation throws', { timeout: 30_000 }, async () => {
+      // If generateReport throws (disk full, permissions, malformed
+      // template), the server logs the failure and the `done` event
+      // simply omits reportPath. The client's "Open Report" button
+      // stays in its previous state — no error propagation back through
+      // the SSE stream.
+      const { generateReport } = await import('../src/report/generator.js');
+      const mockGen = vi.mocked(generateReport);
+      const original = mockGen.getMockImplementation();
+      mockGen.mockRejectedValueOnce(new Error('disk full'));
+
+      try {
+        const res = await fetch(`${baseUrl}/sessions/report-fail-1/steps?stream=1`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY,
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify({ steps: ['Click'], sourceLines: [10] }),
+        });
+        expect(res.status).toBe(200);
+        const events = await readSseStream(res);
+        const doneEvent = events[events.length - 1]!;
+        expect(doneEvent.event).toBe('done');
+        expect(doneEvent.data.status).toBe('passed');
+        expect(doneEvent.data.reportPath).toBeUndefined();
+      } finally {
+        mockGen.mockReset();
+        if (original) mockGen.mockImplementation(original);
+      }
+    });
+
     it('aborts the in-flight run when the client disconnects', { timeout: 30_000 }, async () => {
       const { executeStep } = await import('../src/runner/step-executor.js');
       vi.mocked(executeStep).mockClear();

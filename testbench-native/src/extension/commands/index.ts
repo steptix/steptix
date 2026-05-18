@@ -308,6 +308,34 @@ export function registerCommands(
       await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(path));
     }),
 
+    // Opens the HTML report from the most recently completed run for the
+    // active test file. The server writes the report and announces the
+    // path via the `done` event's optional `reportPath` field — see the
+    // Open Last Report spec under stories/specs/. We use openExternal so
+    // the file launches in the user's default browser; VS Code's preview
+    // is markdown-only and the report uses CSS + linked screenshots that
+    // only render correctly in a real browser.
+    vscode.commands.registerCommand('testbench-native.openLastReport', async () => {
+      const controller = registry.active();
+      if (!controller) return notifyNoActive();
+      const reportPath = controller.lastReportPath;
+      if (!reportPath) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: no report yet — run a test first',
+          3000,
+        );
+        return;
+      }
+      if (!fs.existsSync(reportPath)) {
+        vscode.window.setStatusBarMessage(
+          `TestBench: report file no longer exists at ${reportPath}`,
+          4000,
+        );
+        return;
+      }
+      await vscode.env.openExternal(vscode.Uri.file(reportPath));
+    }),
+
     vscode.commands.registerCommand('testbench-native.showRunLog', () => {
       getOutputChannel().show(true);
     }),

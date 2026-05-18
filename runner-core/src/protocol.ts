@@ -119,6 +119,12 @@ export interface CaptureEvent {
 export interface DoneEvent {
   type: 'done';
   status: RunStatus;
+  /** Absolute path of the HTML report written by the server when report
+   *  generation succeeded. Omitted when the run produced no step results
+   *  or `generateReport` threw. Clients use this to surface an "Open
+   *  Report" button after the run finishes. Backward-compatible: older
+   *  servers omit the field, older clients ignore it. */
+  reportPath?: string;
 }
 
 /**

@@ -172,6 +172,59 @@ describe('TestBench debug state machine', function () {
     assert.equal(finalStatuses[9], 'pass', 'plain pass step must stay as pass, not pass-cached');
   });
 
+  it('done event with reportPath updates lastReportPath on the controller', async () => {
+    // Open Last Report wiring: server emits the absolute HTML report
+    // path via DoneEvent.reportPath. The controller captures it so the
+    // `testbench-native.openLastReport` command (and its sidebar button)
+    // can resolve the path on click.
+    assert.equal(hooks.lastReportPath(), null, 'precondition: no report yet');
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.push({ type: 'done', status: 'passed', reportPath: '/tmp/run-1.html' });
+    fake.end();
+
+    await waitFor('idle', () => !hooks.isRunning());
+    assert.equal(
+      hooks.lastReportPath(),
+      '/tmp/run-1.html',
+      'controller must capture reportPath from the done event',
+    );
+  });
+
+  it('done event without reportPath leaves the previous lastReportPath intact', async () => {
+    // Lifecycle rule (spec §5.2): a `done` event without reportPath does
+    // NOT clear a previously-captured path. Older servers that never
+    // emit the field, or runs that produced zero step results, must
+    // not silently invalidate an existing button state.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.push({ type: 'done', status: 'passed', reportPath: '/tmp/old.html' });
+    fake.end();
+    await waitFor('first run idle', () => !hooks.isRunning());
+    assert.equal(hooks.lastReportPath(), '/tmp/old.html');
+
+    // Second run: done without a path. Old path must survive.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('second stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.push({ type: 'done', status: 'passed' });
+    fake.end();
+    await waitFor('second run idle', () => !hooks.isRunning());
+
+    assert.equal(
+      hooks.lastReportPath(),
+      '/tmp/old.html',
+      'lastReportPath must not be cleared by a done event lacking reportPath',
+    );
+  });
+
   it('running → idle (stop): testbench-native.stop aborts immediately, no pause marker, in-flight step marked stopped', async () => {
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);

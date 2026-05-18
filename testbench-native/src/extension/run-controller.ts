@@ -82,6 +82,13 @@ export class RunController {
   /** Line of the most recent step:start event in the current run. Used as
    *  the resume point when the user pauses mid-step. */
   private lastStepStartLine: number | null = null;
+  /** Absolute path of the HTML report from the most recently *completed*
+   *  run (pass or fail). Set on `done` events that include `reportPath`,
+   *  unchanged otherwise — so a paused-and-never-resumed run leaves the
+   *  previous report openable. Server omits the field when the run
+   *  produced no step results or report generation failed; null is the
+   *  no-report state. */
+  private lastResolvedReportPath: string | null = null;
   /** False until the first runLines call clears any stale server session
    *  for this file. VS Code reloads create a fresh controller but the
    *  server still has the previous session keyed on the file path — left
@@ -182,6 +189,10 @@ export class RunController {
 
   get lastEnvPath(): string | null {
     return this.lastResolvedEnvPath;
+  }
+
+  get lastReportPath(): string | null {
+    return this.lastResolvedReportPath;
   }
 
   /** Read-only view of the active frame stack. Empty when execution is in
@@ -983,7 +994,14 @@ export class RunController {
       // point if the user pauses mid-step.
       if (event.type === 'step:start') this.lastStepStartLine = event.line;
       if (event.type === 'step:fail') sawFail = true;
-      if (event.type === 'done') continue;
+      if (event.type === 'done') {
+        // Capture the report path so the "Open Last Report" surface can
+        // resolve it later. Older servers omit this field — we leave
+        // any previous value in place rather than clearing on every
+        // run boundary, matching the spec's lifecycle rules.
+        if (event.reportPath) this.lastResolvedReportPath = event.reportPath;
+        continue;
+      }
       this.emitRunEvent(event);
     }
     if (passCount > 0) {

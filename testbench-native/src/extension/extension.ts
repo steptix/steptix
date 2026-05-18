@@ -641,6 +641,11 @@ export interface TestBenchTestHooks {
    *  has received since activation. Zero means the webview never
    *  mounted (e.g. sidebar never opened); positive means it's posting. */
   webviewStateUpdateCount: () => number;
+  /** Active controller's `lastReportPath` — the absolute HTML report
+   *  path from the most recently completed run, or null if none.
+   *  Backs the integration test that verifies the protocol's
+   *  reportPath field flows controller-side. */
+  lastReportPath: () => string | null;
 }
 
 export interface TestBenchExports {
@@ -841,6 +846,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
           };
         });
       },
+      lastReportPath: () => registry.active()?.lastReportPath ?? null,
     },
   };
 }

@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.27",
+  "version": "0.5.28",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -72,13 +72,25 @@
         },
         "testbench-native.consoleLogLevel": {
           "type": "string",
-          "enum": ["", "silent", "error", "warn", "info", "debug"],
+          "enum": [
+            "",
+            "silent",
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
           "default": "",
           "description": "Console + output-panel log threshold for test runs. Leave blank to use the server's configured default. A test's '## Config: consoleLogLevel' setting overrides this."
         },
         "testbench-native.serverFileLogLevel": {
           "type": "string",
-          "enum": ["", "off", "compact", "full"],
+          "enum": [
+            "",
+            "off",
+            "compact",
+            "full"
+          ],
           "default": "",
           "description": "Per-run log file written by the server under reports/logs/. 'off' disables; 'compact' = log lines only; 'full' = log lines + AI request/response trace. Leave blank to use the server's configured default. A test's '## Config: serverFileLogLevel' setting overrides this."
         },
@@ -161,6 +173,11 @@
         "title": "TestBench: Reveal Resolved .env"
       },
       {
+        "command": "testbench-native.openLastReport",
+        "title": "TestBench: Open Last Report",
+        "icon": "$(file)"
+      },
+      {
         "command": "testbench-native.showRunLog",
         "title": "TestBench: Show Run Log",
         "icon": "$(output)"
@@ -206,9 +223,14 @@
     "menus": {
       "view/title": [
         {
-          "command": "testbench-native.openInEditor",
+          "command": "testbench-native.openLastReport",
           "when": "view == testbench-native.runner",
           "group": "navigation@1"
+        },
+        {
+          "command": "testbench-native.openInEditor",
+          "when": "view == testbench-native.runner",
+          "group": "navigation@2"
         }
       ],
       "editor/title": [

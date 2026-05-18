@@ -1752,6 +1752,10 @@ export class SessionManager {
     // behaviour so testbench F5 produces the same artifact under
     // `<reports.outputDir>/`. Failures here are logged but never break the
     // run — the SSE stream has already delivered everything the client needs.
+    // The returned path flows through to the `done` event so the client
+    // can surface an "Open Report" button. Undefined when generation
+    // failed or no steps ran.
+    let reportPath: string | undefined;
     if (fullStepResults.length > 0) {
       try {
         const reportStatus: 'passed' | 'failed' =
@@ -1781,7 +1785,7 @@ export class SessionManager {
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
         };
-        const reportPath = await generateReport(report, this.config.reports.outputDir);
+        reportPath = await generateReport(report, this.config.reports.outputDir);
         logger.info(`Report saved: ${reportPath}`);
       } catch (err) {
         logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);
@@ -1794,7 +1798,7 @@ export class SessionManager {
     // call-stack model consistent.
     transitionToFrame('');
 
-    emit({ type: 'done', status: overallStatus });
+    emit({ type: 'done', status: overallStatus, ...(reportPath && { reportPath }) });
 
     return {
       sessionId,
