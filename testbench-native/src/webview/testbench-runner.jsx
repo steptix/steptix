@@ -36,6 +36,10 @@ const STATUS = {
   IDLE: "idle",
   RUNNING: "running",
   PASS: "pass",
+  // Server emitted step:pass with fromCache=true → AI plan replayed
+  // from disk. Painted ⚡ instead of ✓ but counted as a pass for the
+  // run-summary tally and rendered with the same green color.
+  PASS_CACHED: "pass-cached",
   FAIL: "fail",
   SKIP: "skip",
   STOPPED: "stopped",
@@ -328,7 +332,7 @@ function TestBenchRunner() {
 
   const isTestFile = snapshot?.isTestFile === true;
   const statuses = useMemo(() => statusFromTuple(snapshot?.statuses ?? []), [snapshot]);
-  const passCount = Object.values(statuses).filter((s) => s === "pass").length;
+  const passCount = Object.values(statuses).filter((s) => s === "pass" || s === "pass-cached").length;
   const failCount = Object.values(statuses).filter((s) => s === "fail").length;
   const errorMap = useMemo(() => {
     const m = {};
@@ -675,6 +679,10 @@ function TestBenchRunner() {
             const cls = [
               "tb-step",
               status === STATUS.PASS ? "tb-step--pass" : "",
+              // Cache replays share the green pass color — the ⚡ glyph
+              // is the only visual difference. Counted as pass in the
+              // run summary too (see passCount filter above).
+              status === STATUS.PASS_CACHED ? "tb-step--pass" : "",
               status === STATUS.FAIL ? "tb-step--fail" : "",
               status === STATUS.RUNNING ? "tb-step--running" : "",
               status === STATUS.STOPPED ? "tb-step--stopped" : "",
@@ -714,7 +722,7 @@ function TestBenchRunner() {
                     onMouseLeave={(e) => { if (!hasBreakpoint) e.currentTarget.style.opacity = 0.25; }}
                   >●</span>
                   <span style={{ width: 14, textAlign: "center" }}>
-                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
+                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
                   </span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>
