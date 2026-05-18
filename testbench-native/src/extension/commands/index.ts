@@ -1,9 +1,12 @@
 import * as vscode from 'vscode';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { extractSteps, type StepMode } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { RunController } from '../run-controller.js';
 import { getOutputChannel } from '../output-channel.js';
+import { cacheDirForTest } from '../cache-paths.js';
 
 interface Registry {
   active(): RunController | undefined;
@@ -244,6 +247,51 @@ export function registerCommands(
       const editor = tracker.activeEditor;
       if (!editor) return notifyNoActive();
       tracker.clearStatuses(editor.document.uri);
+    }),
+
+    // Wipes <project-root>/.cache/<sanitized-test-path>/ for the active
+    // test. Skill steps invoked from this test live in the same dir (the
+    // cache is keyed off the test file, not per-skill) so they go too.
+    // Bundle-hash invalidation already covers "I edited a step" — this
+    // command is for the cases the hash can't see: env values changed,
+    // model upgraded, real-world page drift on a step that scrapes a live
+    // site, etc.
+    vscode.commands.registerCommand('testbench-native.clearCacheForThisTest', async () => {
+      const editor = tracker.activeEditor;
+      if (!editor) return notifyNoActive();
+      const testFilePath = editor.document.uri.fsPath;
+      const cacheDir = cacheDirForTest(testFilePath);
+      if (!cacheDir) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: no aiui.config.* above this file — nothing to clear',
+          3000,
+        );
+        return;
+      }
+      if (!fs.existsSync(cacheDir)) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: no cache to clear for this test',
+          2000,
+        );
+        return;
+      }
+      const fileLabel = path.basename(testFilePath);
+      const choice = await vscode.window.showWarningMessage(
+        `Delete cached AI responses for ${fileLabel}?`,
+        { modal: true, detail: `This removes ${cacheDir}.\n\nThe next run will call the AI again to repopulate it.` },
+        'Delete',
+      );
+      if (choice !== 'Delete') return;
+      try {
+        fs.rmSync(cacheDir, { recursive: true, force: true });
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `TestBench: failed to clear cache — ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+      getOutputChannel().appendLine(`Cleared step cache: ${cacheDir}`);
+      vscode.window.setStatusBarMessage(`TestBench: cleared cache for ${fileLabel}`, 3000);
     }),
 
     vscode.commands.registerCommand('testbench-native.revealEnvFile', async () => {
