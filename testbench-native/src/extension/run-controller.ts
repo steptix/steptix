@@ -843,13 +843,26 @@ export class RunController {
         // and offers Resume; on stop we just mark the run aborted.
         if (this.pauseRequested) {
           // Resume point: the line that was executing when pause fired.
-          // Fall back to the first step in the run if no step:start has
-          // arrived yet (e.g. the user hit Pause immediately after Run,
-          // before the server emitted the first event). Without this
-          // fallback, paused state is never set and the Resume button
-          // doesn't render.
+          //
+          // Pause-inside-skill: when the active frame stack is non-empty,
+          // the step that was running lives on a skill file — but Resume
+          // can't continue mid-skill (the server doesn't support that
+          // yet). Instead we anchor the resume on the test-file's
+          // `[skill: ...]` invocation line, which `frameRoot` records on
+          // every frame:push. Continue from there re-runs the whole
+          // skill, which is the closest honest semantic.
+          //
+          // Pause-at-top-level: fall back to the line of the most recent
+          // step:start. If pause fired before any step:start (e.g. the
+          // user hit Pause immediately after Run), fall back to the first
+          // step in the run — without this, paused state is never set and
+          // the Resume button doesn't render.
+          const topFrame = this._frameStack[this._frameStack.length - 1];
+          const root = topFrame ? this.frameRoot.get(topFrame.id) : undefined;
           const firstStepLine = classified.find((c) => c.kind === 'step')?.line ?? null;
-          const resumeLine = this.lastStepStartLine ?? firstStepLine;
+          const resumeLine = root
+            ? root.testLine
+            : this.lastStepStartLine ?? firstStepLine;
           if (resumeLine != null) {
             this.post({ type: 'breakpointStop', line: resumeLine });
             this.emitRunEvent({ type: 'done', status: 'aborted' });

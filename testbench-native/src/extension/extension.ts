@@ -258,10 +258,24 @@ class RunControllerRegistry implements vscode.Disposable {
           // Propagate the failure to the originating test-file `[skill:]` line
           // so the user sees the red icon on the line they actually authored,
           // not just on the skill's body line they may not even have open.
+          let root: { testUri: vscode.Uri; testLine: number } | null = null;
           if (ev.frame) {
             const controller = this.controllers.get(uri.toString());
-            const root = controller?.markFrameFailed(ev.frame.id) ?? null;
+            root = controller?.markFrameFailed(ev.frame.id) ?? null;
             if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail');
+          }
+          // Paused-on-error: park a breakpointStop on the failed step so the
+          // user can edit the line and hit Continue to retry against the
+          // still-alive server session. Routed to the same spot the fail
+          // icon went — the test-file [skill: ...] line for in-skill
+          // failures, otherwise the failed step's own line. The existing
+          // run-start clear wipes it before any fresh run, and Stop clears
+          // it explicitly. If the user does nothing, it stays parked but
+          // is harmless (the run is idle).
+          if (root) {
+            this.tracker.setBreakpointStop(root.testUri, root.testLine);
+          } else {
+            this.tracker.setBreakpointStop(uri, ev.line);
           }
           break;
         }
@@ -884,6 +898,10 @@ async function handleWebviewMessage(
       // The run-controller's abort handler will publish breakpointStop +
       // done(aborted) once the stream actually unwinds. We don't flip
       // running=false here — the .finally on the running runLines() does.
+      // BUT: flip any `running` statuses to `stopped` synchronously so the
+      // skill-body / test-file spinner doesn't spin forever after pause.
+      // Matches what testbench-native.pause does on the command path.
+      tracker.markAllRunningStopped();
       return;
     }
     case 'resume': {

@@ -326,6 +326,91 @@ describe('api-server step-into protocol', () => {
     expect(push.frame.line).toBe(2); // sourceLines[1] = 2 (the [skill:] line)
   });
 
+  it('edits to a skill file between requests are picked up — skill cache is invalidated per /steps call', async () => {
+    // Regression: the module-level skill cache in src/skills/expander.ts is
+    // keyed by `filePath::envName` with no mtime invalidation. The Electron
+    // UI runner clears the cache at run-start; the API server (which
+    // testbench-native talks to) did not. Result: editing a skill file
+    // during a paused run was masked by the stale parse until the server
+    // restarted.
+    //
+    // The fix: executeSteps() calls clearSkillCache() at the top of every
+    // request. This test exercises that wiring end-to-end.
+    const { executeStep } = await import('../src/runner/step-executor.js');
+    const exec = vi.mocked(executeStep);
+    const defaultImpl = exec.getMockImplementation();
+
+    const skillName = 'edit_pickup';
+    const skillPath = path.join(skillsDir, `${skillName}.md`);
+    await fs.writeFile(
+      skillPath,
+      `---
+type: skill
+---
+# ${skillName}
+
+## Steps
+1. ORIGINAL skill body line
+`,
+    );
+
+    const capturedInstructions: string[] = [];
+    exec.mockImplementation(async (_idx, _total, instr: string) => {
+      capturedInstructions.push(instr);
+      return {
+        index: 1, instruction: instr, status: 'passed',
+        turns: [], durationMs: 5, retried: false, aiExplanation: 'ok',
+      };
+    });
+
+    // Batch 1 — should run the ORIGINAL body.
+    const sessionId = 'skill-cache-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    for await (const ev of sseEvents(url, {
+      steps: [`[skill: ${skillName}]`],
+      sourceLines: [1],
+      skillsDir,
+      testFilePath,
+    })) {
+      if (ev.type === 'done') break;
+    }
+    const firstBatch = [...capturedInstructions];
+    expect(firstBatch.some((i) => i.includes('ORIGINAL'))).toBe(true);
+
+    // Edit the skill on disk — same path, new body.
+    capturedInstructions.length = 0;
+    await fs.writeFile(
+      skillPath,
+      `---
+type: skill
+---
+# ${skillName}
+
+## Steps
+1. UPDATED skill body line
+`,
+    );
+
+    // Batch 2 — without the cache clear, would still execute the ORIGINAL
+    // line because expander's module-level Map still holds the first parse.
+    for await (const ev of sseEvents(url, {
+      steps: [`[skill: ${skillName}]`],
+      sourceLines: [1],
+      skillsDir,
+      testFilePath,
+    })) {
+      if (ev.type === 'done') break;
+    }
+    const secondBatch = [...capturedInstructions];
+
+    expect(secondBatch.some((i) => i.includes('UPDATED'))).toBe(true);
+    expect(secondBatch.some((i) => i.includes('ORIGINAL'))).toBe(false);
+
+    exec.mockReset();
+    if (defaultImpl) exec.mockImplementation(defaultImpl);
+    await fs.rm(skillPath);
+  });
+
   it('stepMode=into pauses after every step and emits step:awaiting', async () => {
     const sessionId = 'stepmode-into-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;

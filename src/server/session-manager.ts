@@ -10,7 +10,7 @@ import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
-import { expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
+import { clearSkillCache, expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
@@ -443,6 +443,14 @@ export class SessionManager {
     onEvent?: RunEventListener,
     signal?: AbortSignal,
   ): Promise<StepResponse> {
+    // Clear the module-level skill cache at the start of every request so
+    // disk edits to skill files between batches are picked up. The API
+    // server is long-lived; without this an edit during a paused run stays
+    // masked by the earlier-cached parse. Within a single request the cache
+    // is repopulated by expandSkills and still amortises across nested
+    // invocations of the same skill.
+    clearSkillCache();
+
     let session = this.sessions.get(sessionId);
 
     // If session exists but is closed, remove it so a fresh one is created

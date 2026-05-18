@@ -72,6 +72,14 @@ export function registerCommands(
         return;
       }
       controller.pause();
+      // Pause leaves the in-flight step's status as `running` (blue spinner)
+      // unless we flip it. The spinner spins forever on whichever file the
+      // step belonged to — most visibly on a skill body line, where the
+      // yellow ▶ doesn't even live on the same file. Same wipe Stop uses
+      // (running → stopped across every tracked URI) is the right move here:
+      // the step was interrupted mid-flight, so it isn't passing, failing,
+      // or still executing.
+      tracker.markAllRunningStopped();
     }),
 
     vscode.commands.registerCommand('testbench-native.stop', () => {

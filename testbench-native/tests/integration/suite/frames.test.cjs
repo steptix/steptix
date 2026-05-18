@@ -461,4 +461,112 @@ describe('TestBench frame events (Phase 2)', function () {
     assert.equal(final[9], 'pass', '[skill:] line must keep pass after run completes');
     assert.equal(final[10], 'pass', 'caller next step must also be pass');
   });
+
+  it('user pause while inside a skill: skill-body spinner flips to stopped + yellow ▶ lands on test-file [skill:] line', async () => {
+    // Two latent bugs this test guards:
+    //   1. markAllRunningStopped was only invoked on Stop, not Pause. So a
+    //      pause while a skill-body step was executing left the blue
+    //      spinner running forever on the skill file (and on the test
+    //      file's aggregate [skill:] line).
+    //   2. The pause path posted breakpointStop using lastStepStartLine
+    //      with no URI hint — the line was the skill-body's line but the
+    //      receiver wrote it against the controller's test-file URI, so
+    //      the yellow ▶ ended up on a random test-file line that often
+    //      had nothing to do with anything.
+    //
+    // The fix: pause flips every `running` → `stopped` across both files,
+    // and the resume anchor is the test-file [skill: ...] line (taken from
+    // the active frame's frameRoot), not the skill body's own line.
+    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 9, // [skill: ...] line in the test file
+      skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Enter the skill and start executing a body line.
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 5, frame });
+    await waitFor('skill-file line 5 running', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      return snap && Object.fromEntries(snap.statuses)[5] === 'running';
+    });
+    await waitFor('test-file line 9 running (aggregate)', () => {
+      return Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running';
+    });
+
+    // Pause mid-skill-step.
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('idle after pause', () => !hooks.isRunning());
+
+    // Bug 1: both files' `running` must flip to `stopped`.
+    const skillSnap = hooks.tracker.snapshotFor(skillUri);
+    const skillStatuses = skillSnap ? Object.fromEntries(skillSnap.statuses) : {};
+    assert.equal(
+      skillStatuses[5],
+      'stopped',
+      'skill-body running spinner must flip to stopped on Pause — not stay running forever',
+    );
+    const testStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(
+      testStatuses[9],
+      'stopped',
+      'test-file [skill:] aggregate spinner must also flip to stopped on Pause',
+    );
+
+    // Bug 2: yellow ▶ goes on the test file at the [skill:] line (9),
+    // NOT on the test file at line 5 (which is the skill-body line — a
+    // line that has nothing to do with where the test-file step lives).
+    assert.equal(
+      hooks.tracker.snapshot().breakpointStop,
+      9,
+      'breakpointStop must land on the test-file [skill: ...] line, not on the skill-body line number',
+    );
+    // And it must NOT have leaked onto the skill file at line 5.
+    const skillBpStop = skillSnap ? skillSnap.breakpointStop : null;
+    assert.equal(
+      skillBpStop,
+      null,
+      'skill-file must not carry a breakpointStop — resume re-runs the whole [skill:] from the test file',
+    );
+  });
+
+  it('user pause at top-level (no active frame): running step flips to stopped, breakpointStop lands on the test file', async () => {
+    // Companion to the in-skill test above. Even without a frame on the
+    // stack the same Bug 1 applied: pause never invoked markRunningStopped,
+    // so the spinner on the running test-file step stayed forever. The yellow
+    // ▶ was correct (test-file URI matches), so this test only guards the
+    // status flip; the existing user-pause test in state-machine.test.cjs
+    // covered the breakpointStop placement but not the status of the
+    // interrupted step.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('test-file line 9 running', () => {
+      return Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running';
+    });
+
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('idle after pause', () => !hooks.isRunning());
+
+    const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(
+      statuses[9],
+      'stopped',
+      'top-level pause must flip the interrupted step from running to stopped',
+    );
+    assert.equal(
+      hooks.tracker.snapshot().breakpointStop,
+      9,
+      'top-level pause keeps breakpointStop on the same line the spinner was on',
+    );
+  });
 });

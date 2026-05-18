@@ -920,6 +920,66 @@ describe('TestBench debug state machine', function () {
     await waitFor('idle after second run hits the breakpoint', () => !hooks.isRunning());
   });
 
+  it('paused-on-error: step:fail parks a breakpointStop so the user can edit and Continue to retry the failed step', async () => {
+    // Prototype for fix-and-resume on failure. Without this, a step:fail
+    // ends the run via done(failed); the user has no recourse but to fix
+    // the markdown and click Run from scratch (paying for browser nav
+    // and any preceding steps again).
+    //
+    // With it: step:fail still propagates fail icon + done(failed), but
+    // we ALSO park breakpointStop on the failed line. The existing Continue
+    // command re-opens the stream from that line against the still-alive
+    // server session, so an edited step text gets retried in-place.
+    //
+    // The session/browser survives a step:fail on the server side
+    // (overallStatus = 'failed' just breaks the step loop; the browser
+    // stays open), which is what makes this safe.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('line 9 running', () => {
+      return Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running';
+    });
+
+    // Failure on line 9.
+    fake.push({
+      type: 'step:fail',
+      line: 9,
+      error: 'page.goto: net::ERR_NAME_NOT_RESOLVED',
+    });
+    fake.end();
+    await waitFor('idle after failure', () => !hooks.isRunning());
+
+    // The failure icon is in place (existing behaviour) AND the
+    // breakpointStop is parked on the failed line so Continue is enabled.
+    const snap = hooks.tracker.snapshot();
+    const statuses = Object.fromEntries(snap.statuses);
+    assert.equal(statuses[9], 'fail', 'precondition: failed step shows fail icon');
+    assert.equal(
+      snap.breakpointStop,
+      9,
+      'paused-on-error: breakpointStop parks on the failed line so Continue is enabled',
+    );
+
+    // Continue re-opens the stream from the failed line — same path as
+    // breakpoint-paused continueRun. Track the new request's sourceLines
+    // to prove it carries the failed step (and only steps from there onward).
+    const requestsBefore = fake.requests.length;
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('retry stream opens', () => fake.hasActiveStream);
+
+    const retryRequest = fake.requests[requestsBefore];
+    assert.ok(retryRequest, 'Continue from paused-on-error must trigger a new streamSteps call');
+    assert.ok(
+      retryRequest.sourceLines.includes(9),
+      `Retry must include the failed step's line in sourceLines. Got ${JSON.stringify(retryRequest.sourceLines)}.`,
+    );
+
+    fake.end();
+    await waitFor('idle after retry', () => !hooks.isRunning());
+  });
+
   it('resume from breakpoint preserves pass marks from the first batch', async () => {
     // Regression: continueRun called runLines() which unconditionally called
     // clearStatusesForUris() — the same wipe a fresh re-run performs. After
