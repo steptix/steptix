@@ -364,11 +364,14 @@ body {
   max-width: 90%;
   background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.12));
   border-color: var(--vscode-focusBorder);
+  /* Padding sits here, not on the inner .user-text <pre>: .card's
+     overflow: hidden lets the pre's padding get clipped under flex
+     shrink-to-fit sizing. */
+  padding: 8px 10px;
 }
 
 .user-text {
   margin: 0;
-  padding: 8px 10px;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;
