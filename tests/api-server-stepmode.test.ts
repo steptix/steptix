@@ -1424,4 +1424,52 @@ type: skill
     const awaiting = events.filter((e) => e.type === 'step:awaiting');
     expect(awaiting).toHaveLength(0);
   });
+
+  it('aborts cleanly when a [skill:] invocation has a syntax error', async () => {
+    // A malformed skill call (unterminated quoted argument) must not crash
+    // the SSE stream or run any steps. The server should surface the parser
+    // error via an `output kind:error` event AND a `done status:error`, so
+    // the client can show the message without the run silently hanging.
+    const { executeStep } = await import('../src/runner/step-executor.js');
+    const executeStepMock = vi.mocked(executeStep);
+    executeStepMock.mockClear();
+
+    const sessionId = 'skill-syntax-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+
+    const events: any[] = [];
+    for await (const ev of sseEvents(url, {
+      // Unterminated string after `query="` — parseSkillCall throws
+      // SkillCallSyntaxError, which expandSkills propagates verbatim.
+      steps: ['[skill: parameterized_skill query="oops]'],
+      sourceLines: [1],
+      skillsDir,
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    // Stream must terminate with a `done` carrying error status.
+    const done = events.find((e) => e.type === 'done');
+    expect(done).toBeDefined();
+    expect(done.status).toBe('error');
+
+    // The parser's diagnostic must reach the client via an `output` event.
+    const errorOutputs = events.filter(
+      (e) => e.type === 'output' && e.kind === 'error',
+    );
+    expect(errorOutputs.length).toBeGreaterThan(0);
+    const combined = errorOutputs.map((e) => e.msg).join('\n');
+    expect(combined).toMatch(/Skill expansion failed/);
+    expect(combined).toMatch(/unterminated string for argument 'query'/);
+
+    // No step should have been executed — expansion fails before the browser
+    // does any work.
+    expect(executeStepMock).not.toHaveBeenCalled();
+
+    // And no frame:push event should have fired (expansion never produced
+    // frames).
+    expect(events.find((e) => e.type === 'frame:push')).toBeUndefined();
+  });
 });
