@@ -556,8 +556,10 @@ describe('FlickController', () => {
       assert.ok(chromePort, 'chrome port present');
       assert.ok(edgePort, 'edge port present');
       assert.equal(chromePort!.engine, 'chrome');
+      assert.equal(chromePort!.reachable, true);
       assert.equal(chromePort!.tabs?.length, 2);
       assert.equal(edgePort!.engine, 'edge');
+      assert.equal(edgePort!.reachable, true);
       assert.equal(edgePort!.tabs?.length, 1);
       assert.equal(edgePort!.tabs?.[0].targetId, 'edge-1');
     });
@@ -594,6 +596,7 @@ describe('FlickController', () => {
 
       const dead = reply.ports.find((p) => p.port === chromeBrowser.port);
       assert.ok(dead);
+      assert.equal(dead!.reachable, false);
       assert.equal(dead!.engine, 'unknown');
       assert.equal(dead!.tabs, null);
       assert.ok(dead!.error, 'expected an error string');

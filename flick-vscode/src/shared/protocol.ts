@@ -65,7 +65,11 @@ export interface CdpAttachment {
   tab: string;
 }
 
-export type CdpEngine = 'chrome' | 'edge' | 'chromium' | 'unknown';
+/** `node` = a Node.js `--inspect` endpoint, which also speaks CDP and answers
+ *  /json/version but is NOT an attachable browser. It's classified so the
+ *  dropdown can filter it out (port 9229 is the Node inspector default and
+ *  collides with our scan list). */
+export type CdpEngine = 'chrome' | 'edge' | 'chromium' | 'node' | 'unknown';
 
 export interface CdpDiscoveryTab {
   targetId: string;
@@ -76,6 +80,12 @@ export interface CdpDiscoveryTab {
 
 export interface CdpDiscoveryPort {
   port: number;
+  /** True once /json/version returned 2xx — i.e. a CDP browser is actually
+   *  listening. Distinguishes "nothing on this port" (false) from "browser
+   *  present but /json/list failed" (true, tabs: null); both otherwise look
+   *  like engine:'unknown', tabs:null. The dropdown only renders reachable
+   *  ports. */
+  reachable: boolean;
   /** Parsed from /json/version's `Browser` field. 'unknown' for Chromium
    *  variants whose Browser string doesn't match a known prefix. */
   engine: CdpEngine;

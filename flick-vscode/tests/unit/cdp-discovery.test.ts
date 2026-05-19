@@ -63,6 +63,7 @@ test('two ports respond, one is unreachable; tabs filtered to page-type non-devt
   );
 
   assert.equal(result[0].engine, 'chrome');
+  assert.equal(result[0].reachable, true);
   assert.ok(result[0].tabs, 'port 9222 tabs should not be null');
   assert.equal(result[0].tabs!.length, 1);
   assert.equal(result[0].tabs![0].targetId, 'a1');
@@ -70,10 +71,12 @@ test('two ports respond, one is unreachable; tabs filtered to page-type non-devt
   assert.equal(result[0].error, undefined);
 
   assert.equal(result[1].engine, 'unknown');
+  assert.equal(result[1].reachable, false, 'unreachable port is not reachable');
   assert.equal(result[1].tabs, null);
   assert.ok(result[1].error && result[1].error.length > 0, 'port 9223 should carry an error');
 
   assert.equal(result[2].engine, 'edge');
+  assert.equal(result[2].reachable, true);
   assert.ok(result[2].tabs);
   assert.equal(result[2].tabs!.length, 1);
   assert.equal(result[2].tabs![0].targetId, 'e1');
@@ -113,6 +116,7 @@ test('reachable but no pages → engine classified, tabs: [], no error', async (
   });
   const [r] = await discoverCdpPorts([9222], { fetchFn });
   assert.equal(r.engine, 'chrome');
+  assert.equal(r.reachable, true);
   assert.deepEqual(r.tabs, []);
   assert.equal(r.error, undefined);
 });
@@ -160,8 +164,26 @@ test('/json/version succeeds but /json/list fails → engine kept, tabs: null, e
   });
   const [r] = await discoverCdpPorts([9222], { fetchFn });
   assert.equal(r.engine, 'chrome');
+  assert.equal(r.reachable, true, '/json/version answered, so still reachable');
   assert.equal(r.tabs, null);
   assert.ok(r.error && r.error.length > 0);
+});
+
+test('Node.js inspector → engine "node", reachable, so the dropdown can hide it', async () => {
+  // Node's --inspect endpoint (port 9229 default) speaks CDP but is not a
+  // browser. It must classify as 'node' (reachable: true) so the webview can
+  // exclude it while still showing genuine unknown-Chromium browsers.
+  const fetchFn = mockFetch({
+    '/json/version': () => ({ json: { Browser: 'node.js/v22.22.0', 'Protocol-Version': '1.1' } }),
+    '/json/list': () => ({
+      json: [{ id: 'n1', type: 'node', title: 'dist/index.js', url: 'file:///x/dist/index.js' }],
+    }),
+  });
+  const [r] = await discoverCdpPorts([9229], { fetchFn });
+  assert.equal(r.engine, 'node');
+  assert.equal(r.reachable, true);
+  // type: 'node' targets are filtered out (not pages), so tabs is empty.
+  assert.deepEqual(r.tabs, []);
 });
 
 test('empty Browser field → engine "unknown"', async () => {

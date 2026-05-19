@@ -421,18 +421,13 @@ function renderCdpSection(): HTMLElement {
     return wrap;
   }
 
-  const ports = state.cdpPorts ?? [];
-
-  // Empty discovery — collapse all CDP sections into a single line, but still
-  // render a refresh control so the user can retry.
-  if (ports.length === 0) {
-    const section = el('div', 'adopt-section');
-    section.appendChild(renderSectionHeader('Browser tabs', refreshCdp, state.cdpLoading));
-    section.appendChild(el('div', 'adopt-empty', 'No Chromium browser with CDP enabled.'));
-    wrap.appendChild(section);
-    return wrap;
-  }
-
+  // Only show ports a CDP browser is actually listening on. Unreachable ports
+  // (the common case — nothing on 9223/9229) are omitted so the dropdown
+  // collapses to just the Launch CTA when nothing is attached. Node.js
+  // --inspect endpoints answer CDP too (port 9229 is its default) but aren't
+  // attachable browsers, so they're excluded as well. See Delta 1 in
+  // stories/flick-vscode-cdp-attach.md.
+  const ports = (state.cdpPorts ?? []).filter((p) => p.reachable && p.engine !== 'node');
   for (const port of ports) {
     wrap.appendChild(renderCdpPortSection(port));
   }
@@ -444,22 +439,18 @@ function renderCdpPortSection(port: CdpDiscoveryPort): HTMLElement {
   const label = sectionLabelForEngine(port.engine, port.port);
   section.appendChild(renderSectionHeader(label, refreshCdp, state.cdpLoading, port.error));
 
-  if (port.tabs === null) {
-    // Port was reachable but enumeration failed (or fetch threw). The header
-    // already shows port.error as subtitle; nothing more to add here.
-    return section;
-  }
-
-  if (port.tabs.length === 0) {
-    section.appendChild(el('div', 'adopt-empty', 'No open pages.'));
-  } else {
+  // tabs === null → reachable but enumeration failed; the header already shows
+  // port.error as subtitle. tabs === [] → reachable, no adoptable pages. In
+  // both cases we still offer "+ New tab" (it goes through the runner, not
+  // /json/list, so it can work even when enumeration didn't). Only render tab
+  // rows when there are tabs to show.
+  if (port.tabs && port.tabs.length > 0) {
     for (const tab of port.tabs) {
       section.appendChild(renderCdpTabRow(port, tab));
     }
+    section.appendChild(el('div', 'adopt-divider'));
   }
 
-  // Divider + "+ New tab in this <Engine>" row.
-  section.appendChild(el('div', 'adopt-divider'));
   section.appendChild(renderNewTabRow(port));
   return section;
 }
@@ -471,12 +462,11 @@ function renderCdpTabRow(port: CdpDiscoveryPort, tab: CdpDiscoveryTab): HTMLElem
 
   const title = el('div', 'adopt-tab-title');
   title.appendChild(el('span', 'adopt-tab-icon', '🌐'));
-  title.appendChild(
-    el('span', 'adopt-tab-name', tab.title || hostFromUrl(tab.url) || tab.targetId),
-  );
+  title.appendChild(el('span', 'adopt-tab-name', cdpTabName(tab)));
   row.appendChild(title);
 
-  if (tab.url) row.appendChild(el('div', 'adopt-tab-url', tab.url));
+  // about:blank has no meaningful URL to show on the second line.
+  if (tab.url && !isBlankTab(tab)) row.appendChild(el('div', 'adopt-tab-url', tab.url));
 
   row.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -490,6 +480,20 @@ function renderCdpTabRow(port: CdpDiscoveryPort, tab: CdpDiscoveryTab): HTMLElem
     closeAdoptDropdown();
   });
   return row;
+}
+
+/** A blank/new tab — nothing meaningful to label or link. A freshly launched
+ *  browser starts on one of these. */
+function isBlankTab(tab: CdpDiscoveryTab): boolean {
+  const url = (tab.url || '').trim();
+  return url === '' || url === 'about:blank';
+}
+
+/** Human-readable name for a CDP tab row: a friendly "New Tab" for blank tabs,
+ *  else the page title, the URL host, or finally the raw target id. */
+function cdpTabName(tab: CdpDiscoveryTab): string {
+  if (isBlankTab(tab) && !tab.title) return 'New Tab';
+  return tab.title || hostFromUrl(tab.url) || tab.targetId;
 }
 
 function renderNewTabRow(port: CdpDiscoveryPort): HTMLElement {

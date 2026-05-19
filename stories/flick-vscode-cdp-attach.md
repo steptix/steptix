@@ -380,3 +380,96 @@ For each workstream PR (or commit, since this is a personal repo):
 - **Multiple workspaces.** Profile dir is per-workspace per-engine. If the user has two windows open on different folders and launches Edge in each, two profiles → two Edges. Fine, but worth a release note.
 - **Stale `targetId` after browser restart.** Session keeps the dead id; next `submitSteps` fails preflight tab-not-found. Acceptable v1 behaviour — the error is clear and the user re-adopts.
 - **Engine detection misclassification.** A future browser variant whose `Browser` field starts with neither `Chrome/`, `Edge/`, `HeadlessChrome/`, nor `Chromium/` lands in `engine: 'unknown'` and the dropdown renders `BROWSER TABS` for it. Adoption + attach still work — only the label is generic. Add new prefixes as they appear in the wild.
+
+---
+
+# Delta 1 — Only show reachable ports; Launch is the entry point
+
+> **Status:** refinement of the shipped v1 (flick-vscode 0.4.x). Shipped
+> behaviour rendered one section per *scanned* port — and since
+> `discoverCdpPorts` returns a result for every port in `[9222, 9223, 9229]`
+> (unreachable ones come back as `{ engine: 'unknown', tabs: null, error:
+> 'fetch failed' }`), a machine with no debug browser running showed **up to
+> three errored "BROWSER TABS (port N)" sections**. The `ports.length === 0`
+> "No Chromium browser with CDP enabled." branch never fired because the list
+> is never empty. This delta makes the port sections conditional on a real
+> connection, so the Launch CTA is the entry point when nothing is attached.
+
+## Rule
+
+A port section renders **iff the port is reachable** (its `/json/version`
+returned 2xx) **and isn't a Node.js inspector**. This splits today's single
+"error" notion in two, and excludes one reachable-but-not-a-browser case:
+
+- **Alive-check failed** (connection refused / timeout / non-2xx) → nothing is
+  listening there → **hidden**.
+- **Reachable but `/json/list` failed** → a real browser with a hiccup →
+  **shown** with its error.
+- **Reachable but `engine: 'node'`** → a Node.js `--inspect` endpoint, not an
+  attachable browser → **hidden** (see "Node.js inspector exclusion" below).
+
+## Behaviour matrix
+
+| Port state | Dropdown shows |
+|---|---|
+| Alive-check failed (nothing listening) | nothing — hidden |
+| Reachable, `engine: 'node'` (Node.js inspector) | nothing — hidden |
+| Reachable, has page tabs | `CHROME TABS (port N)` + tab rows + `＋ New tab in this <Engine>` |
+| Reachable, zero adoptable tabs (all filtered) | minimal section: header + `＋ New tab` only (no "No open pages." line) |
+| Reachable, `/json/list` errored (`tabs: null`) | header + error subtitle + `＋ New tab` |
+| No visible ports at all | CDP area empty; only the Launch CTA below (no hint line, no ⟳) |
+
+`about:blank` tabs (and any page with an empty title on `about:blank`) render
+with the friendly label **"New Tab"** instead of the raw hex `targetId`, so a
+freshly launched browser's starting tab is clickable and legible.
+
+## Changes
+
+1. **Protocol** — add `reachable: boolean` to `CdpDiscoveryPort` in
+   [flick-vscode/src/shared/protocol.ts](../flick-vscode/src/shared/protocol.ts).
+   `true` once `/json/version` returns 2xx, regardless of what `/json/list`
+   does. Needed because a reachable browser with an empty `Browser` field is
+   *also* `engine: 'unknown'` with `tabs: null` — shape alone can't tell it
+   apart from a refused connection, so an explicit flag is required.
+2. **cdp-discovery.ts** — set `reachable` in `probePort`: `false` on the
+   early-return alive-check failure path, `true` once the version fetch
+   succeeds (before the `/json/list` call). Discovery still returns one entry
+   per scanned port — the unreachable-port integration test depends on that.
+3. **webview main.ts** — `renderCdpSection` filters `state.cdpPorts` to
+   `p.reachable && p.engine !== 'node'` before rendering. Drop the
+   "No Chromium browser with CDP enabled." placeholder and the "No open
+   pages." text. When the filtered list is empty, the CDP area renders
+   nothing (the Launch CTA still shows below). Add a friendly-label helper for
+   `about:blank` in `renderCdpTabRow`. No ⟳ in the empty state — the dropdown
+   already re-discovers on every open and after each launch.
+4. **Tests** — extend `cdp-discovery.test.ts` to assert `reachable` is `true`
+   for the responding cases, `false` for the unreachable case, and `engine:
+   'node'` (reachable, tabs filtered to `[]`) for the Node inspector case.
+   Add `reachable` assertions to the controller integration suite. Webview
+   render isn't unit-tested; the live `cdp-flow.test.cjs` already launches a
+   real browser so a reachable section still appears there.
+
+## Node.js inspector exclusion
+
+Port 9229 is in the scan list but is also the **Node.js `--inspect`
+default** — any `tsx` / dev-server / API-server process with a debugger
+attached answers CDP's `/json/version` there with `Browser:
+"node.js/v22.x"` and a single `type: "node"` target. Before this fix it
+rendered as a bogus `BROWSER TABS (port 9229)` section (reachable, zero
+page-tabs → minimal section). It's now classified as `engine: 'node'` and
+filtered out of the dropdown.
+
+- **Decision:** keep scanning `[9222, 9223, 9229]` (don't change the port
+  list) but classify and hide `node.js`. This handles a Node inspector on
+  *any* scanned port, not just 9229 — e.g. a process started with
+  `--inspect=9222`.
+- `classifyEngine` adds `node.js/` → `'node'`; `CdpEngine` gains `'node'`.
+- The webview filter becomes `p.reachable && p.engine !== 'node'`. Genuine
+  unknown-Chromium browsers (`engine: 'unknown'`, e.g. Brave/Arc) still show
+  via the `BROWSER TABS` fallback — only Node endpoints are excluded.
+
+## Out of scope (still)
+
+- Manual ⟳ in the empty state — re-discover-on-open covers it.
+- A "no browser connected" hint near the Launch buttons — the button labels
+  (`🚀 Launch Chrome with CDP…`) are self-explanatory.

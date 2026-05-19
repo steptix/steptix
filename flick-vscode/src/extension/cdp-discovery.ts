@@ -45,9 +45,13 @@ async function probePort(
   try {
     versionJson = await fetchJson(`http://127.0.0.1:${port}/json/version`, timeoutMs, fetchFn);
   } catch (err) {
-    return { port, engine: 'unknown', tabs: null, error: errorMessage(err) };
+    // Alive-check failed — nothing usable is listening here. `reachable: false`
+    // tells the dropdown to omit this port entirely.
+    return { port, reachable: false, engine: 'unknown', tabs: null, error: errorMessage(err) };
   }
 
+  // /json/version answered 2xx — a CDP browser is here, even if the next call
+  // fails. Everything below carries `reachable: true`.
   const browserField =
     versionJson && typeof versionJson === 'object' &&
     typeof (versionJson as { Browser?: unknown }).Browser === 'string'
@@ -59,11 +63,11 @@ async function probePort(
   try {
     listJson = await fetchJson(`http://127.0.0.1:${port}/json/list`, timeoutMs, fetchFn);
   } catch (err) {
-    return { port, engine, tabs: null, error: errorMessage(err) };
+    return { port, reachable: true, engine, tabs: null, error: errorMessage(err) };
   }
 
   if (!Array.isArray(listJson)) {
-    return { port, engine, tabs: null, error: 'malformed /json/list' };
+    return { port, reachable: true, engine, tabs: null, error: 'malformed /json/list' };
   }
 
   const tabs: CdpDiscoveryTab[] = [];
@@ -83,7 +87,7 @@ async function probePort(
     }
     tabs.push(tab);
   }
-  return { port, engine, tabs };
+  return { port, reachable: true, engine, tabs };
 }
 
 async function fetchJson(url: string, timeoutMs: number, fetchFn: typeof fetch): Promise<unknown> {
@@ -103,6 +107,10 @@ function classifyEngine(browser: string): CdpEngine {
   if (browser.startsWith('HeadlessChrome/')) return 'chrome';
   if (browser.startsWith('Chrome/')) return 'chrome';
   if (browser.startsWith('Chromium/')) return 'chromium';
+  // A Node.js --inspect endpoint also serves /json/version (Browser:
+  // "node.js/v22.x") but isn't an attachable browser. Classify it so the
+  // dropdown can hide it — port 9229 is the Node inspector default.
+  if (browser.startsWith('node.js/')) return 'node';
   return 'unknown';
 }
 

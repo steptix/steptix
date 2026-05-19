@@ -2,7 +2,7 @@
   "name": "flick-vscode",
   "displayName": "Flick",
   "publisher": "pkent",
-  "version": "0.4.10",
+  "version": "0.4.12",
   "description": "Send natural-language UI steps to the ai-ui-automation Sessions API from a chat panel inside VS Code.",
   "private": true,
   "repository": {
