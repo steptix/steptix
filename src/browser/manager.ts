@@ -791,6 +791,14 @@ export async function launchBrowser(
   const page = await context.newPage();
   const pageTracker = new PageTracker(page);
 
+  // In headed mode, ensure the new window grabs OS focus. On Windows
+  // multi-monitor setups a Playwright-launched browser frequently comes up
+  // in the background — the user sees a taskbar icon but no visible window
+  // until they click it. Page.bringToFront sends the CDP focus call.
+  if (headed) {
+    try { await page.bringToFront(); } catch { /* non-fatal */ }
+  }
+
   // Auto-register new pages (popups, new tabs) as they open
   context.on('page', async (newPage) => {
     const label = pageTracker.addPage(newPage);
@@ -851,6 +859,9 @@ async function connectOverCdpSession(
   if (tabSpec.kind === 'new') {
     page = await context.newPage();
     openedByUs = true;
+    // Match the headed-launch path: pull the window forward so the user sees
+    // it on the active monitor instead of having to click the taskbar icon.
+    try { await page.bringToFront(); } catch { /* non-fatal */ }
     logger.info(`CDP: opened new tab`);
   } else {
     const existing = context.pages();
