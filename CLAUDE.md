@@ -21,14 +21,12 @@ dev`, so Rust's linker picks up MSVC's `link.exe` instead of Git-for-Windows's.
 There are two TestBench VS Code extension source trees living side-by-side:
 
 - `testbench-monaco/` — original variant, hosts the editor inside the webview
-  using Monaco. Lives on `main`.
+  using Monaco. Extension ID `pkent.testbench`.
 - `testbench-native/` — newer variant, uses VS Code's native editor surface
-  and adds the multi-test runner. Comes from the `feat/test-runner` work.
+  and adds the multi-test runner. Extension ID `pkent.testbench-native`.
 
-Both publish under the same extension ID (`pkent.testbench`), so installing
-one VSIX replaces the other in a given VS Code profile — only one is active
-at a time. The two source trees coexist so you can build either VSIX without
-switching branches.
+Both source trees live on `main`. The extension IDs differ, so both VSIXes
+can be installed side-by-side in the same VS Code profile.
 
 ## TestBench: bump the patch version on every change
 
