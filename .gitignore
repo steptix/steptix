@@ -22,3 +22,9 @@ testbench-monaco/.vscode-test/
 testbench-monaco/*.vsix
 testbench-native/.vscode-test/
 testbench-native/*.vsix
+
+# flick-vscode CDP launcher's per-engine browser profiles. Created when the
+# user clicks "Launch with CDP" — full Chrome/Edge user-data-dir (cookies,
+# cache, etc), per-machine, may carry session state.
+.flick/
+flick-vscode/*.vsix
