@@ -10,7 +10,10 @@ export type StepStatus = 'passed' | 'failed' | 'error';
 export type BatchStatus = 'passed' | 'failed' | 'error';
 
 export interface StepAction {
-  type: string;
+  /** Action kind — e.g. 'click', 'navigate', 'assert'. Matches the
+   *  server's `AIAction.action` field, NOT `type` (an earlier mismatch
+   *  caused "undefined" to render in the Actions panel). */
+  action: string;
   [key: string]: unknown;
 }
 

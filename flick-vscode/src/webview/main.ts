@@ -222,7 +222,13 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
     case 'busy':
       if (msg.busy) state.busy.add(msg.sessionId);
       else state.busy.delete(msg.sessionId);
-      if (msg.sessionId === state.activeSessionId) updateComposer();
+      if (msg.sessionId === state.activeSessionId) {
+        updateComposer();
+        // On run completion, return focus to the input so the user can type
+        // the next step without reaching for the mouse. updateComposer has
+        // just re-enabled the textarea.
+        if (!msg.busy) inputEl.focus();
+      }
       break;
     case 'settings':
       state.settings = msg.settings;
@@ -437,11 +443,17 @@ function renderConnection(): void {
 function updateComposer(): void {
   const session = activeSession();
   const busy = !!session && state.busy.has(session.id);
-  inputEl.disabled = !session || busy;
+  // The textarea stays usable during a run so the user can queue the next
+  // step while the current one executes. Only the Go button is gated on
+  // busy (submit() also no-ops on Enter while busy as a backstop).
+  inputEl.disabled = !session;
   sendBtn.disabled = !session || busy;
   sendBtn.classList.toggle('busy', busy);
   sendBtn.textContent = busy ? '◌' : '➤';
-  if (!busy && session) inputEl.value = state.draft;
+  // Only restore the draft when the value actually drifted (tab switches);
+  // assigning to .value resets the caret to the end, which would yank the
+  // cursor away from a user mid-typing if we did it unconditionally.
+  if (session && inputEl.value !== state.draft) inputEl.value = state.draft;
   renderStaleBanner();
 }
 
@@ -503,14 +515,6 @@ function renderResultCard(entryId: string, batch: BatchResult): HTMLElement {
     card.appendChild(renderStepRow(entryId, index, result, batch.error));
   });
 
-  // Batch-level footer.
-  const footer = el('div', 'batch-footer');
-  footer.appendChild(
-    el('span', 'batch-count', `${batch.stepsCompleted} / ${batch.stepsTotal} steps`),
-  );
-  footer.appendChild(statusBadge(batch.status));
-  card.appendChild(footer);
-
   if (batch.error && batch.results.length === 0) {
     card.appendChild(el('div', 'batch-error', batch.error.message));
   }
@@ -571,13 +575,13 @@ function renderStepRow(
     if (result.actions.length > 0) {
       const actions = el('div', 'step-field');
       actions.appendChild(el('div', 'field-label', 'Actions'));
-      for (const action of result.actions) {
-        const { type, ...rest } = action;
+      for (const a of result.actions) {
+        const { action: kind, ...rest } = a;
         const detail = Object.entries(rest)
           .map(([k, v]) => `${k}: ${formatValue(v)}`)
           .join('  ');
         actions.appendChild(
-          el('div', 'action-row', detail ? `${type} — ${detail}` : type),
+          el('div', 'action-row', detail ? `${kind} — ${detail}` : kind),
         );
       }
       body.appendChild(actions);
@@ -628,7 +632,14 @@ function field(label: string, value: string, extra = ''): HTMLElement {
 }
 
 function statusBadge(status: 'passed' | 'failed' | 'error'): HTMLElement {
-  const badge = el('span', `badge badge-${status}`, status.toUpperCase());
+  // Matches TestBench: ✓ for pass, ✗ for fail, ⚠ for error. Coloured via
+  // VS Code's --vscode-testing-icon* tokens with our pass/fail/error
+  // CSS vars as fallback.
+  const icon = status === 'passed' ? '✓' : status === 'failed' ? '✗' : '⚠';
+  const label = status.charAt(0).toUpperCase() + status.slice(1);
+  const badge = el('span', `status-icon status-${status}`, icon);
+  badge.setAttribute('title', label);
+  badge.setAttribute('aria-label', label);
   return badge;
 }
 

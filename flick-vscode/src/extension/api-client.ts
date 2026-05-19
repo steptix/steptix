@@ -7,7 +7,7 @@ import type { FlickSettings } from '../shared/protocol';
 export interface RawStepResult {
   step: string;
   status: 'passed' | 'failed' | 'error';
-  actions: Array<{ type: string; [key: string]: unknown }>;
+  actions: Array<{ action: string; [key: string]: unknown }>;
   reasoning: string;
   outputs: Record<string, string>;
   screenshot: string | null;
