@@ -708,4 +708,108 @@ describe('TestBench Variables panel (Phase 4)', function () {
     fake.end();
     await waitFor('idle after run 2', () => !hooks.isRunning());
   });
+
+  it('switching to a different test file clears the webview Variables panel', async () => {
+    // Regression test for cross-test variable leak in the WEBVIEW
+    // sidebar (the host-side `runningScope()` is already covered by
+    // the test above). The webview keeps its own `runtimeVariables`
+    // React state, populated by `frame:scope` events. Before the fix
+    // that map was never cleared on file switch, so if Test A's run
+    // populated it with `query: "OpenAI GPT-5"` and the user then
+    // opened Test B, Test B's Variables panel would display Test A's
+    // value — even though it has nothing to do with B.
+    //
+    // The fix: when `snapshot.uri` changes, the webview clears
+    // runtimeVariables (mirrors how it already clears webviewSelection).
+    await vscode.commands.executeCommand('testbench-native.runner.focus');
+    await waitFor(
+      'webview mounted',
+      () => hooks.webviewStateUpdateCount() > 0,
+      8_000,
+    );
+
+    // Run Test A, push a scope event, wait for the webview to receive
+    // and rebroadcast it.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: { contaminant: 'from-test-A' },
+    });
+    await waitFor(
+      'webview saw contaminant from Test A',
+      () => hooks.webviewRuntimeVariables().contaminant === 'from-test-A',
+      4_000,
+    );
+    fake.end();
+    await waitFor('Test A idle', () => !hooks.isRunning());
+
+    // User opens a different test file. The webview must drop the
+    // previous file's runtime values — they have no business showing
+    // up on this file's Variables panel.
+    const otherUri = fixtureUri('test-with-tool.md');
+    await vscode.commands.executeCommand('vscode.open', otherUri);
+    await waitFor(
+      'switched to other test file',
+      () => hooks.tracker.snapshot().filePath === otherUri.fsPath,
+    );
+    await waitFor(
+      'webview Variables panel cleared after file switch',
+      () => hooks.webviewRuntimeVariables().contaminant === undefined,
+      4_000,
+    );
+  });
+
+  it('starting a second run on the same file clears the webview Variables panel before new scope arrives', async () => {
+    // Companion to the file-switch test above. Even if the user stays
+    // on the same test file, Run #2 must not inherit Run #1's
+    // variables in the webview. The previous host-side test already
+    // covers `runningScope()`; this one pins the WEBVIEW state, which
+    // is what the user actually sees in the Variables panel.
+    //
+    // The fix: the `running` message handler clears runtimeVariables
+    // on the false→true transition (mirrors resetFrameState).
+    await vscode.commands.executeCommand('testbench-native.runner.focus');
+    await waitFor(
+      'webview mounted',
+      () => hooks.webviewStateUpdateCount() > 0,
+      8_000,
+    );
+
+    // Run #1 — populate.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream 1 active', () => fake.hasActiveStream);
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: { run1_only: 'from-first-run' },
+    });
+    await waitFor(
+      'webview saw run1_only',
+      () => hooks.webviewRuntimeVariables().run1_only === 'from-first-run',
+      4_000,
+    );
+    fake.end();
+    await waitFor('run 1 idle', () => !hooks.isRunning());
+
+    // Run #2 — same file. The moment `running: true` flips, the
+    // webview must drop run #1's variables. Assert BEFORE any
+    // frame:scope arrives this run — otherwise the new scope could
+    // mask the old one by overwriting the same keys.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream 2 active', () => fake.hasActiveStream);
+    // Wait until the webview's runtimeVariables no longer contains
+    // `run1_only`. This is the direct user-visible contract — the
+    // first thing the host posts on run start is `{ type: 'running',
+    // running: true }`, which triggers the webview's reset.
+    await waitFor(
+      'webview cleared run1_only after run-start',
+      () => hooks.webviewRuntimeVariables().run1_only === undefined,
+      4_000,
+    );
+
+    fake.end();
+    await waitFor('run 2 idle', () => !hooks.isRunning());
+  });
 });

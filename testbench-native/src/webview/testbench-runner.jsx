@@ -207,6 +207,12 @@ function TestBenchRunner() {
 
   const outputLogRef = useRef(null);
   const outputAtBottomRef = useRef(true);
+  // Tracks the previous `running` value so the message handler can detect
+  // the false→true transition without depending on React state batching
+  // order (parametersResolved may arrive in the same tick as running:true,
+  // so a useEffect on [running] would clear AFTER parametersResolved merged
+  // — clobbering it).
+  const runningRef = useRef(false);
 
   // Diagnostic — push the current runtimeVariables map to the host on
   // every change so test hooks can observe the webview-side state
@@ -229,6 +235,15 @@ function TestBenchRunner() {
           }
           break;
         case "running":
+          // A fresh run must not inherit variables from the previous run.
+          // Mirrors resetFrameState() on the host. Clearing in the handler
+          // (rather than via useEffect on [running]) avoids the React-batching
+          // race where parametersResolved — which arrives moments after — would
+          // already be merged into runtimeVariables before the effect fires.
+          if (msg.running && !runningRef.current) {
+            setRuntimeVariables({});
+          }
+          runningRef.current = msg.running;
           setRunning(msg.running);
           break;
         case "runEvent":
@@ -315,12 +330,14 @@ function TestBenchRunner() {
     el.scrollTop = el.scrollHeight;
   }, [runLog]);
 
-  // Drop the webview's multi-selection when the user switches files —
-  // selections are file-scoped, and carrying line numbers across files
-  // would highlight unrelated steps.
+  // Drop the webview's multi-selection AND the runtimeVariables map when
+  // the user switches files — both are file-scoped. Without clearing
+  // runtimeVariables, a frame:scope event captured for test A would still
+  // render in test B's Variables panel after the user switches over.
   useEffect(() => {
     setWebviewSelection(new Set());
     selectionAnchorRef.current = null;
+    setRuntimeVariables({});
   }, [snapshot?.uri]);
 
   const onLogScroll = () => {
