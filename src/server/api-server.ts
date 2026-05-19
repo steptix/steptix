@@ -76,7 +76,11 @@ export function createApiServer(config: Config): {
 
       const request: StepRequest = { steps: body.steps as string[] };
       if (body.config !== undefined) {
-        request.config = body.config as { baseUrl?: string; timeout?: string };
+        request.config = body.config as {
+          baseUrl?: string;
+          timeout?: string;
+          cdp?: { port: number; tab?: string };
+        };
       }
       if (body.parameters !== undefined) {
         request.parameters = body.parameters as Record<string, string>;

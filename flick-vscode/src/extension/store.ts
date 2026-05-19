@@ -4,6 +4,7 @@
 // files live under the extension's globalStorageUri:
 //
 //   <globalStorage>/sessions.json        — SessionMeta[]
+//   <globalStorage>/cdp-state.json       — { lastLaunched: 'chrome' | 'edge' | null }
 //   <globalStorage>/history/<guid>.json  — HistoryEntry[]
 //   <globalStorage>/screenshots/<guid>/  — decoded PNG files
 //
@@ -15,19 +16,34 @@ import * as path from 'node:path';
 import type { HistoryEntry, SessionMeta } from '../shared/protocol';
 
 export class Store {
+  private readonly root: string;
   private readonly historyDir: string;
   private readonly screenshotsDir: string;
   private readonly sessionsFile: string;
+  private readonly cdpStateFile: string;
 
   constructor(root: string) {
+    this.root = root;
     this.historyDir = path.join(root, 'history');
     this.screenshotsDir = path.join(root, 'screenshots');
     this.sessionsFile = path.join(root, 'sessions.json');
+    // Kept as a separate tiny file rather than co-mingled with sessions.json:
+    // sessions.json is a SessionMeta[] today (no envelope) and bolting a sibling
+    // key on would change its shape, breaking the round-trip Store.loadSessions
+    // assumes. A dedicated cdp-state.json mirrors how sessions/history already
+    // each own their own file — same pattern, no migration.
+    this.cdpStateFile = path.join(root, 'cdp-state.json');
   }
 
   async init(): Promise<void> {
     await fs.mkdir(this.historyDir, { recursive: true });
     await fs.mkdir(this.screenshotsDir, { recursive: true });
+  }
+
+  /** Directory the store writes into; used by the controller as a fallback
+   *  base for CDP profile dirs when no workspace folder is open. */
+  get baseDir(): string {
+    return this.root;
   }
 
   // --- sessions.json -------------------------------------------------------
@@ -42,6 +58,21 @@ export class Store {
 
   async saveSessions(sessions: SessionMeta[]): Promise<void> {
     await writeJson(this.sessionsFile, sessions);
+  }
+
+  // --- cdp-state.json ------------------------------------------------------
+
+  /** Returns the last-launched CDP engine, or null on first run / corrupt
+   *  state. Drives which "Launch with CDP" button appears first in the
+   *  dropdown when both Chrome and Edge are installed. */
+  async loadCdpLastLaunched(): Promise<'chrome' | 'edge' | null> {
+    const raw = await readJson<{ lastLaunched?: unknown }>(this.cdpStateFile);
+    const v = raw?.lastLaunched;
+    return v === 'chrome' || v === 'edge' ? v : null;
+  }
+
+  async saveCdpLastLaunched(value: 'chrome' | 'edge' | null): Promise<void> {
+    await writeJson(this.cdpStateFile, { lastLaunched: value });
   }
 
   // --- history/<guid>.json -------------------------------------------------

@@ -9,6 +9,10 @@
 
 import type {
   BatchResult,
+  CdpDiscoveryPort,
+  CdpDiscoveryTab,
+  CdpEngine,
+  CdpInstalledBrowsers,
   ConnectionStatus,
   FlickSettings,
   HistoryEntry,
@@ -48,6 +52,13 @@ const state = {
   adoptLoading: false,
   adoptError: null as string | null,
   adoptList: null as ServerSessionItem[] | null,
+  // CDP discovery (lives alongside the server-session list in the dropdown).
+  cdpLoading: false,
+  cdpPorts: null as CdpDiscoveryPort[] | null,
+  cdpInstalled: null as CdpInstalledBrowsers | null,
+  /** Engines whose Launch button is currently mid-spawn. Cleared on the next
+   *  cdpDiscovery or cdpLaunchResult, whichever lands first. */
+  cdpLaunching: new Set<'chrome' | 'edge'>(),
 };
 
 // --- root layout (built once) ----------------------------------------------
@@ -246,6 +257,31 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
       state.adoptList = msg.sessions;
       renderAdoptPanel();
       break;
+    case 'cdpDiscovery':
+      state.cdpLoading = false;
+      state.cdpPorts = msg.ports;
+      state.cdpInstalled = msg.installed;
+      // Only clear the spinner for engines whose freshly-spawned port is now
+      // visible — leave others alone so a refresh fired DURING a launch
+      // (manual ⟳, or a second webview opening the dropdown) does not flip
+      // the button back to clickable while the host is still spawning.
+      // cdpLaunchResult is the authoritative "done" signal; this is the
+      // belt-and-braces clear once the new browser actually shows up.
+      for (const engine of [...state.cdpLaunching]) {
+        if (engineDiscovered(engine, msg.ports, msg.installed)) {
+          state.cdpLaunching.delete(engine);
+        }
+      }
+      renderAdoptPanel();
+      break;
+    case 'cdpLaunchResult':
+      state.cdpLaunching.delete(msg.engine);
+      if (!msg.ok) {
+        const engineLabel = msg.engine === 'chrome' ? 'Chrome' : 'Edge';
+        showToast('error', `Couldn't launch ${engineLabel}: ${msg.error ?? 'unknown error'}`);
+      }
+      renderAdoptPanel();
+      break;
   }
 });
 
@@ -284,6 +320,13 @@ function renderTabs(): void {
       tab.appendChild(dot);
     }
     tab.appendChild(name);
+    if (session.cdp) {
+      const badge = document.createElement('span');
+      badge.className = 'cdp-badge';
+      badge.textContent = `CDP:${session.cdp.port}`;
+      badge.title = `Attached via CDP on port ${session.cdp.port}`;
+      tab.appendChild(badge);
+    }
     tab.appendChild(close);
     tab.addEventListener('click', () => {
       if (session.id !== state.activeSessionId) {
@@ -305,6 +348,7 @@ function toggleAdoptDropdown(): void {
   state.adoptOpen = true;
   state.adoptLoading = true;
   state.adoptError = null;
+  state.cdpLoading = true;
   // Keep the previous list visible while the new one loads — refreshing
   // shouldn't blank the panel.
   adoptBtn.setAttribute('aria-expanded', 'true');
@@ -312,6 +356,7 @@ function toggleAdoptDropdown(): void {
   adoptPanel.hidden = false;
   renderAdoptPanel();
   post({ type: 'listServerSessions' });
+  post({ type: 'discoverCdp' });
 }
 
 function closeAdoptDropdown(): void {
@@ -325,39 +370,275 @@ function renderAdoptPanel(): void {
   if (!state.adoptOpen) return;
   adoptPanel.innerHTML = '';
 
-  const header = el('div', 'adopt-header');
-  header.appendChild(el('span', 'adopt-title', 'Server sessions'));
-  const refresh = el('button', 'adopt-refresh', '⟳') as HTMLButtonElement;
-  refresh.type = 'button';
-  refresh.title = 'Refresh';
-  refresh.disabled = state.adoptLoading;
-  refresh.addEventListener('click', (e) => {
-    e.stopPropagation();
-    state.adoptLoading = true;
-    state.adoptError = null;
-    renderAdoptPanel();
-    post({ type: 'listServerSessions' });
-  });
-  header.appendChild(refresh);
-  adoptPanel.appendChild(header);
+  adoptPanel.appendChild(renderServerSessionsSection());
+  adoptPanel.appendChild(renderCdpSection());
+  adoptPanel.appendChild(renderLaunchCta());
+}
+
+function renderServerSessionsSection(): HTMLElement {
+  const section = el('div', 'adopt-section');
+  section.appendChild(
+    renderSectionHeader('Server sessions', () => {
+      state.adoptLoading = true;
+      state.adoptError = null;
+      renderAdoptPanel();
+      post({ type: 'listServerSessions' });
+    }, state.adoptLoading),
+  );
 
   if (state.adoptLoading && !state.adoptList) {
-    adoptPanel.appendChild(el('div', 'adopt-empty', 'Loading…'));
-    return;
+    section.appendChild(el('div', 'adopt-empty', 'Loading…'));
+    return section;
   }
   if (state.adoptError) {
-    adoptPanel.appendChild(el('div', 'adopt-error', state.adoptError));
-    return;
+    section.appendChild(el('div', 'adopt-error', state.adoptError));
+    return section;
   }
   const list = state.adoptList ?? [];
   if (list.length === 0) {
-    adoptPanel.appendChild(
-      el('div', 'adopt-empty', 'No active sessions on the server.'),
-    );
-    return;
+    section.appendChild(el('div', 'adopt-empty', 'No active sessions.'));
+    return section;
   }
   for (const item of list) {
-    adoptPanel.appendChild(renderAdoptRow(item));
+    section.appendChild(renderAdoptRow(item));
+  }
+  return section;
+}
+
+function renderCdpSection(): HTMLElement {
+  const wrap = el('div', 'adopt-cdp-wrap');
+
+  // Loading-only state: never seen any discovery yet, request is pending.
+  if (state.cdpLoading && !state.cdpPorts) {
+    const section = el('div', 'adopt-section');
+    section.appendChild(renderSectionHeader('Looking for browsers…', refreshCdp, true));
+    section.appendChild(el('div', 'adopt-empty', 'Looking for browsers…'));
+    wrap.appendChild(section);
+    return wrap;
+  }
+
+  const ports = state.cdpPorts ?? [];
+
+  // Empty discovery — collapse all CDP sections into a single line, but still
+  // render a refresh control so the user can retry.
+  if (ports.length === 0) {
+    const section = el('div', 'adopt-section');
+    section.appendChild(renderSectionHeader('Browser tabs', refreshCdp, state.cdpLoading));
+    section.appendChild(el('div', 'adopt-empty', 'No Chromium browser with CDP enabled.'));
+    wrap.appendChild(section);
+    return wrap;
+  }
+
+  for (const port of ports) {
+    wrap.appendChild(renderCdpPortSection(port));
+  }
+  return wrap;
+}
+
+function renderCdpPortSection(port: CdpDiscoveryPort): HTMLElement {
+  const section = el('div', 'adopt-section');
+  const label = sectionLabelForEngine(port.engine, port.port);
+  section.appendChild(renderSectionHeader(label, refreshCdp, state.cdpLoading, port.error));
+
+  if (port.tabs === null) {
+    // Port was reachable but enumeration failed (or fetch threw). The header
+    // already shows port.error as subtitle; nothing more to add here.
+    return section;
+  }
+
+  if (port.tabs.length === 0) {
+    section.appendChild(el('div', 'adopt-empty', 'No open pages.'));
+  } else {
+    for (const tab of port.tabs) {
+      section.appendChild(renderCdpTabRow(port, tab));
+    }
+  }
+
+  // Divider + "+ New tab in this <Engine>" row.
+  section.appendChild(el('div', 'adopt-divider'));
+  section.appendChild(renderNewTabRow(port));
+  return section;
+}
+
+function renderCdpTabRow(port: CdpDiscoveryPort, tab: CdpDiscoveryTab): HTMLElement {
+  const row = el('button', 'adopt-tab-row') as HTMLButtonElement;
+  row.type = 'button';
+  row.title = tab.url || tab.targetId;
+
+  const title = el('div', 'adopt-tab-title');
+  title.appendChild(el('span', 'adopt-tab-icon', '🌐'));
+  title.appendChild(
+    el('span', 'adopt-tab-name', tab.title || hostFromUrl(tab.url) || tab.targetId),
+  );
+  row.appendChild(title);
+
+  if (tab.url) row.appendChild(el('div', 'adopt-tab-url', tab.url));
+
+  row.addEventListener('click', (e) => {
+    e.stopPropagation();
+    post({
+      type: 'adoptCdpTab',
+      port: port.port,
+      targetId: tab.targetId,
+      title: tab.title || undefined,
+      url: tab.url || undefined,
+    });
+    closeAdoptDropdown();
+  });
+  return row;
+}
+
+function renderNewTabRow(port: CdpDiscoveryPort): HTMLElement {
+  const row = el('button', 'adopt-tab-row adopt-new-tab') as HTMLButtonElement;
+  row.type = 'button';
+  row.title = `Open a new tab in the browser on port ${port.port}`;
+  const engineLabel = engineDisplayName(port.engine);
+  row.appendChild(el('span', 'adopt-tab-icon', '＋'));
+  row.appendChild(el('span', 'adopt-tab-name', `New tab in this ${engineLabel}`));
+  row.addEventListener('click', (e) => {
+    e.stopPropagation();
+    post({ type: 'newTabInCdp', port: port.port });
+    closeAdoptDropdown();
+  });
+  return row;
+}
+
+function renderLaunchCta(): HTMLElement {
+  const row = el('div', 'adopt-launch-cta');
+  const installed = state.cdpInstalled;
+  // Until discovery has come back at least once, hide the CTA — we don't
+  // know which buttons to render.
+  if (!installed) return row;
+
+  const { chrome, edge } = installed;
+
+  if (!chrome && !edge) {
+    const btn = el('button', 'adopt-launch-btn disabled', '🚀 No Chromium browser found.') as HTMLButtonElement;
+    btn.type = 'button';
+    btn.disabled = true;
+    btn.title = 'Install Chrome or Edge to use Launch.';
+    row.appendChild(btn);
+    return row;
+  }
+
+  if (chrome && !edge) {
+    row.appendChild(renderLaunchButton('chrome', '🚀 Launch Chrome with CDP…'));
+    return row;
+  }
+  if (edge && !chrome) {
+    row.appendChild(renderLaunchButton('edge', '🚀 Launch Edge with CDP…'));
+    return row;
+  }
+
+  // Both installed — split button. Order: lastLaunched first, else Chrome first.
+  row.appendChild(el('span', 'adopt-launch-label', '🚀 Launch with CDP:'));
+  const order: Array<'chrome' | 'edge'> =
+    installed.lastLaunched === 'edge' ? ['edge', 'chrome'] : ['chrome', 'edge'];
+  for (const engine of order) {
+    row.appendChild(
+      renderLaunchButton(engine, engine === 'chrome' ? 'Chrome' : 'Edge', /*split=*/ true),
+    );
+  }
+  return row;
+}
+
+function engineDiscovered(
+  engine: 'chrome' | 'edge',
+  ports: CdpDiscoveryPort[],
+  _installed: CdpInstalledBrowsers,
+): boolean {
+  // A launched engine is "discovered" once any responding port reports a
+  // matching engine string. The launcher always uses port 9222 today, but
+  // we don't pin the check to that — if the user has another Chrome already
+  // running on 9223, that's still proof the launch happened.
+  return ports.some((p) => p.tabs !== null && p.engine === engine);
+}
+
+function renderLaunchButton(
+  engine: 'chrome' | 'edge',
+  label: string,
+  split = false,
+): HTMLButtonElement {
+  const btn = el(
+    'button',
+    'adopt-launch-btn' + (split ? ' split' : ''),
+  ) as HTMLButtonElement;
+  btn.type = 'button';
+  const pending = state.cdpLaunching.has(engine);
+  btn.textContent = pending ? 'Launching…' : label;
+  btn.disabled = pending;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (state.cdpLaunching.has(engine)) return;
+    state.cdpLaunching.add(engine);
+    renderAdoptPanel();
+    post({ type: 'launchBrowserCdp', engine, port: 9222 });
+  });
+  return btn;
+}
+
+function renderSectionHeader(
+  label: string,
+  onRefresh: () => void,
+  loading: boolean,
+  subtitle?: string,
+): HTMLElement {
+  const header = el('div', 'adopt-section-header');
+  const titleWrap = el('div', 'adopt-section-title-wrap');
+  titleWrap.appendChild(el('span', 'adopt-title', label));
+  if (subtitle) titleWrap.appendChild(el('span', 'adopt-section-subtitle', subtitle));
+  header.appendChild(titleWrap);
+
+  const refresh = el('button', 'adopt-refresh', '⟳') as HTMLButtonElement;
+  refresh.type = 'button';
+  refresh.title = 'Refresh';
+  refresh.disabled = loading;
+  refresh.addEventListener('click', (e) => {
+    e.stopPropagation();
+    onRefresh();
+  });
+  header.appendChild(refresh);
+  return header;
+}
+
+function refreshCdp(): void {
+  state.cdpLoading = true;
+  renderAdoptPanel();
+  post({ type: 'discoverCdp' });
+}
+
+function sectionLabelForEngine(engine: CdpEngine, port: number): string {
+  switch (engine) {
+    case 'chrome':
+      return `Chrome tabs (port ${port})`;
+    case 'edge':
+      return `Edge tabs (port ${port})`;
+    case 'chromium':
+      return `Chromium tabs (port ${port})`;
+    default:
+      return `Browser tabs (port ${port})`;
+  }
+}
+
+function engineDisplayName(engine: CdpEngine): string {
+  switch (engine) {
+    case 'chrome':
+      return 'Chrome';
+    case 'edge':
+      return 'Edge';
+    case 'chromium':
+      return 'Chromium';
+    default:
+      return 'browser';
+  }
+}
+
+function hostFromUrl(url: string): string {
+  if (!url) return '';
+  try {
+    return new URL(url).host;
+  } catch {
+    return '';
   }
 }
 

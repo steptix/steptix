@@ -53,6 +53,45 @@ export interface SessionMeta {
   stale: boolean;
   /** True once at least one batch has been sent (so config is no longer sent). */
   used: boolean;
+  /** Present iff this session is CDP-attached. Drives the topbar badge and
+   *  is included as `cdp` in the first request's `config` payload. */
+  cdp?: CdpAttachment;
+}
+
+export interface CdpAttachment {
+  port: number;
+  /** Tab selector passed verbatim to the runner's parseCdpTabSpec — e.g.
+   *  "targetId:ABC123" or "new". */
+  tab: string;
+}
+
+export type CdpEngine = 'chrome' | 'edge' | 'chromium' | 'unknown';
+
+export interface CdpDiscoveryTab {
+  targetId: string;
+  title: string;
+  url: string;
+  faviconUrl?: string;
+}
+
+export interface CdpDiscoveryPort {
+  port: number;
+  /** Parsed from /json/version's `Browser` field. 'unknown' for Chromium
+   *  variants whose Browser string doesn't match a known prefix. */
+  engine: CdpEngine;
+  /** null = port reachable but enumeration failed; empty array = reachable, no pages. */
+  tabs: CdpDiscoveryTab[] | null;
+  error?: string;
+}
+
+/** Which launch buttons the dropdown shows. */
+export interface CdpInstalledBrowsers {
+  chrome: boolean;
+  edge: boolean;
+  /** Last-used engine, persisted per-workspace; null on first run. When both
+   *  Chrome and Edge are installed, the dropdown shows the lastLaunched
+   *  engine's button first. */
+  lastLaunched: 'chrome' | 'edge' | null;
 }
 
 export type HistoryEntry =
@@ -109,7 +148,13 @@ export type HostToWebview =
    * reach the server. The webview drives loading state off the request
    * lifecycle, so no separate "loading" payload is needed.
    */
-  | { type: 'serverSessions'; sessions: ServerSessionItem[] | null; error: string | null };
+  | { type: 'serverSessions'; sessions: ServerSessionItem[] | null; error: string | null }
+  /** Reply to the webview's `discoverCdp` request. `installed` tells the
+   *  webview which launch buttons to render. */
+  | { type: 'cdpDiscovery'; ports: CdpDiscoveryPort[]; installed: CdpInstalledBrowsers }
+  /** Result of a `launchBrowserCdp` action. On success `port` is the port the
+   *  browser is listening on (so the webview can re-discover). */
+  | { type: 'cdpLaunchResult'; engine: 'chrome' | 'edge'; ok: boolean; port?: number; error?: string };
 
 // ---------------------------------------------------------------------------
 // Webview -> Host messages
@@ -132,4 +177,14 @@ export type WebviewToHost =
    * dedupes by sessionId: if a local tab already represents this id the
    * tab is just activated, not duplicated.
    */
-  | { type: 'adoptServerSession'; item: ServerSessionItem };
+  | { type: 'adoptServerSession'; item: ServerSessionItem }
+  /** Refresh request — host responds with a `cdpDiscovery` message. */
+  | { type: 'discoverCdp' }
+  /** Adopt an existing CDP tab as a new local session. Tab is selected via
+   *  the stable `targetId` so the runner can attach to that exact page. */
+  | { type: 'adoptCdpTab'; port: number; targetId: string; title?: string; url?: string }
+  /** Adopt a CDP browser via a brand-new tab (runner opens it, closes it
+   *  at teardown). */
+  | { type: 'newTabInCdp'; port: number }
+  /** Spawn Chrome or Edge with --remote-debugging-port=port. */
+  | { type: 'launchBrowserCdp'; engine: 'chrome' | 'edge'; port: number };

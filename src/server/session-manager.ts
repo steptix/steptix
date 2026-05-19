@@ -36,7 +36,10 @@ import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 // ---------------------------------------------------------------------------
 
 export interface StepRequest {
-  config?: { baseUrl?: string; timeout?: string };
+  /** `cdp` is passed through to the runner verbatim — same loose pass-through
+   *  pattern as `baseUrl`/`timeout` — so the server stays schema-agnostic
+   *  about CDP attach. The runner validates the shape on receive. */
+  config?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } };
   steps: string[];
   parameters?: Record<string, string>;
   /**
@@ -687,7 +690,7 @@ export class SessionManager {
 
   private async createSession(
     sessionId: string,
-    sessionConfig?: { baseUrl?: string; timeout?: string },
+    sessionConfig?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } },
     envOverrides?: Record<string, string>,
   ): Promise<ManagedSession> {
     logger.info(`Creating session "${sessionId}"`);
@@ -696,7 +699,7 @@ export class SessionManager {
     // never mutated; concurrent sessions stay isolated.
     const aiConfig = applyEnvToAiConfig(this.config.ai, envOverrides);
 
-    const browserSession = await launchBrowser(this.config.browser);
+    const browserSession = await launchBrowser(this.config.browser, sessionConfig?.cdp);
     const browserTracker = new BrowserTracker(browserSession);
     const tokenTracker = new TokenTracker();
     const aiClient = new AiClient(aiConfig, tokenTracker);

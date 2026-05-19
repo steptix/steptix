@@ -546,6 +546,7 @@ export type CdpTabSpec =
   | { kind: 'index'; index: number }
   | { kind: 'urlSubstring'; value: string }
   | { kind: 'titleSubstring'; value: string }
+  | { kind: 'targetId'; value: string }
   | { kind: 'invalid'; reason: string };
 
 /**
@@ -578,9 +579,17 @@ export function parseCdpTabSpec(raw: string | undefined): CdpTabSpec {
     return { kind: 'titleSubstring', value };
   }
 
+  if (lower.startsWith('targetid:')) {
+    // Preserve the id value verbatim (case + special chars). Only the prefix
+    // is case-insensitive.
+    const value = trimmed.slice('targetid:'.length).trim();
+    if (!value) return { kind: 'invalid', reason: `cdpTab targetId: requires a non-empty id, got "${trimmed}"` };
+    return { kind: 'targetId', value };
+  }
+
   return {
     kind: 'invalid',
-    reason: `cdpTab "${trimmed}" is not recognised — expected: new, active, <integer>, url~<substr>, or title~<substr>`,
+    reason: `cdpTab "${trimmed}" is not recognised — expected: new, active, <integer>, url~<substr>, title~<substr>, or targetId:<id>`,
   };
 }
 
@@ -626,6 +635,31 @@ export async function resolveCdpTab(
     }
     throw new Error(
       `CDP: no tab matches title substring "${spec.value}". ${await formatTabList(pages)}`,
+    );
+  }
+
+  if (spec.kind === 'targetId') {
+    // Use Playwright's CDPSession to ask each page for its underlying
+    // Target.targetId. Exact string match — target ids are hex from Chrome
+    // and case-sensitive.
+    for (const p of pages) {
+      const ctx = (p as any).context?.();
+      const newCDPSession = ctx?.newCDPSession;
+      if (typeof newCDPSession !== 'function') {
+        throw new Error(
+          `CDP: targetId selector requires a context that supports newCDPSession (Playwright Chromium).`,
+        );
+      }
+      let id = '';
+      try {
+        const session = await newCDPSession.call(ctx, p);
+        const info: any = await session.send('Target.getTargetInfo');
+        id = info?.targetInfo?.targetId ?? '';
+      } catch { /* tab may have closed or CDP send failed; skip */ }
+      if (id && id === spec.value) return p;
+    }
+    throw new Error(
+      `CDP: no tab matches targetId "${spec.value}". ${await formatTabList(pages)}`,
     );
   }
 

@@ -161,8 +161,8 @@ body {
   top: 100%;
   right: 0;
   margin-top: 2px;
-  width: 320px;
-  max-height: 360px;
+  width: 340px;
+  max-height: 480px;
   overflow-y: auto;
   background: var(--vscode-dropdown-background, var(--vscode-editor-background));
   color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
@@ -170,23 +170,55 @@ body {
   border-radius: 4px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
   z-index: 50;
+  /* Sticky launch CTA needs a positioning context inside the scrolling panel. */
+  display: flex;
+  flex-direction: column;
 }
 
-.adopt-header {
-  position: sticky;
-  top: 0;
+.adopt-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.adopt-section + .adopt-section,
+.adopt-cdp-wrap .adopt-section + .adopt-section {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.adopt-section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 4px 8px;
   background: var(--vscode-dropdown-background, var(--vscode-editor-background));
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.15));
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   opacity: 0.85;
 }
+
+.adopt-section-title-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.adopt-section-subtitle {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--fail);
+  opacity: 0.9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 
 .adopt-refresh {
   border: none;
@@ -295,6 +327,129 @@ body {
   color: var(--vscode-badge-foreground, var(--vscode-foreground));
   font-size: 10px;
   font-weight: 500;
+}
+
+/* --- adopt CDP rows / launch CTA ----------------------------------------- */
+
+.adopt-tab-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.08));
+}
+.adopt-tab-row:last-child {
+  border-bottom: none;
+}
+.adopt-tab-row:hover,
+.adopt-tab-row:focus {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+  outline: none;
+}
+
+.adopt-tab-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  min-width: 0;
+}
+
+.adopt-tab-icon {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.adopt-tab-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.adopt-tab-url {
+  font-size: 11px;
+  opacity: 0.7;
+  padding-left: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.adopt-new-tab .adopt-tab-name {
+  opacity: 0.85;
+  font-style: italic;
+}
+
+.adopt-divider {
+  height: 1px;
+  background: var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  margin: 2px 8px;
+}
+
+.adopt-launch-cta {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.adopt-launch-label {
+  font-size: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.adopt-launch-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--vscode-button-border, transparent);
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+.adopt-launch-btn:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+.adopt-launch-btn:disabled,
+.adopt-launch-btn.disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.adopt-launch-btn.split {
+  flex: 0 0 auto;
+}
+
+/* CDP attachment badge on session tabs. */
+.cdp-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--vscode-charts-orange, #ffac33);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
 }
 
 .topbar-right {

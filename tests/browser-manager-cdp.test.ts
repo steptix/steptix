@@ -59,6 +59,25 @@ describe('parseCdpTabSpec', () => {
     expect(parseCdpTabSpec('foo').kind).toBe('invalid');
     expect(parseCdpTabSpec('regex:.*').kind).toBe('invalid');
   });
+
+  it('parses targetId selector, preserving id value verbatim', () => {
+    expect(parseCdpTabSpec('targetId:ABC123')).toEqual({
+      kind: 'targetId',
+      value: 'ABC123',
+    });
+  });
+
+  it('rejects empty targetId values', () => {
+    expect(parseCdpTabSpec('targetId:').kind).toBe('invalid');
+    expect(parseCdpTabSpec('targetId:   ').kind).toBe('invalid');
+  });
+
+  it('targetId prefix is case-insensitive, value is preserved', () => {
+    expect(parseCdpTabSpec('TARGETID:foo')).toEqual({
+      kind: 'targetId',
+      value: 'foo',
+    });
+  });
 });
 
 // ----- resolveCdpTab -----
@@ -155,6 +174,70 @@ describe('resolveCdpTab', () => {
     await expect(
       resolveCdpTab([] as any, { kind: 'invalid', reason: 'bad' }),
     ).rejects.toThrow(/bad/);
+  });
+
+  // ----- targetId -----
+
+  /**
+   * Fake page whose `context()` exposes a `newCDPSession` that, when sent
+   * `Target.getTargetInfo`, returns the canned targetId.
+   */
+  function fakePageWithTargetId(url: string, targetId: string) {
+    const session = {
+      send: async (method: string) => {
+        if (method === 'Target.getTargetInfo') {
+          return { targetInfo: { targetId } };
+        }
+        throw new Error(`unexpected CDP method ${method}`);
+      },
+    };
+    return {
+      url: () => url,
+      title: async () => '',
+      context: () => ({
+        newCDPSession: async (_p: unknown) => session,
+      }),
+    };
+  }
+
+  it('resolves targetId by exact match via CDP Target.getTargetInfo', async () => {
+    const pageA = fakePageWithTargetId('https://a.test', 'AAA');
+    const pageB = fakePageWithTargetId('https://b.test', 'BBB');
+    const result = await resolveCdpTab(
+      [pageA, pageB] as any,
+      { kind: 'targetId', value: 'BBB' },
+    );
+    expect(result).toBe(pageB);
+  });
+
+  it('throws with tab list when no targetId matches', async () => {
+    const pageA = fakePageWithTargetId('https://a.test', 'AAA');
+    const pageB = fakePageWithTargetId('https://b.test', 'BBB');
+    let err: Error | undefined;
+    try {
+      await resolveCdpTab(
+        [pageA, pageB] as any,
+        { kind: 'targetId', value: 'ZZZ' },
+      );
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/targetId/i);
+    expect(err!.message).toMatch(/ZZZ/);
+    expect(err!.message).toMatch(/a\.test/);
+    expect(err!.message).toMatch(/b\.test/);
+  });
+
+  it('throws clear error when context has no newCDPSession', async () => {
+    const page = {
+      url: () => 'https://a.test',
+      title: async () => '',
+      context: () => ({}),
+    };
+    await expect(
+      resolveCdpTab([page] as any, { kind: 'targetId', value: 'any' }),
+    ).rejects.toThrow(/requires.+newCDPSession/i);
   });
 });
 

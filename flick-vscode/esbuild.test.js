@@ -7,7 +7,12 @@ const path = require('node:path');
 
 esbuild
   .build({
-    entryPoints: ['tests/unit/parse-steps.test.ts', 'tests/integration/controller.test.ts'],
+    entryPoints: [
+      'tests/unit/parse-steps.test.ts',
+      'tests/unit/cdp-discovery.test.ts',
+      'tests/unit/browser-launcher.test.ts',
+      'tests/integration/controller.test.ts',
+    ],
     outdir: 'dist-test',
     bundle: true,
     platform: 'node',

@@ -20,8 +20,14 @@ import { FlickController } from '../../src/extension/controller';
 import { Store } from '../../src/extension/store';
 import type { HostToWebview } from '../../src/shared/protocol';
 import { FakeApiServer, failedBatch } from '../fakes/fake-api-server';
+import { FakeBrowserServer } from '../fakes/fake-browser-server';
 import { FakeWebview, delay } from '../fakes/fake-webview';
-import { __reset, __setConfig, __setWarningResponse } from '../fakes/vscode';
+import {
+  __reset,
+  __setConfig,
+  __setWarningResponse,
+  __setWorkspaceFolder,
+} from '../fakes/vscode';
 
 type Msg<T extends HostToWebview['type']> = Extract<HostToWebview, { type: T }>;
 
@@ -484,5 +490,311 @@ describe('FlickController', () => {
     fw.send({ type: 'adoptServerSession', item });
     const sessions = await wait(fw, 'sessions');
     assert.equal(sessions.sessions[0].name, 'www.example.org');
+  });
+
+  // --- CDP attach (W6) -----------------------------------------------------
+
+  describe('CDP attach', () => {
+    let chromeBrowser: FakeBrowserServer;
+    let edgeBrowser: FakeBrowserServer;
+
+    beforeEach(async () => {
+      chromeBrowser = new FakeBrowserServer();
+      chromeBrowser.browserField = 'Chrome/120.0.6099.130';
+      chromeBrowser.tabs = [
+        { id: 'tab-a', type: 'page', url: 'https://example.com/foo', title: 'Hello' },
+        { id: 'tab-b', type: 'page', url: 'https://localhost:3000/', title: 'Dashboard' },
+      ];
+      await chromeBrowser.start();
+
+      edgeBrowser = new FakeBrowserServer();
+      edgeBrowser.browserField = 'Edge/120.0.2210.91';
+      edgeBrowser.tabs = [
+        { id: 'edge-1', type: 'page', url: 'https://outlook.office.com/', title: 'Inbox' },
+      ];
+      await edgeBrowser.start();
+    });
+
+    afterEach(async () => {
+      await chromeBrowser.stop();
+      await edgeBrowser.stop();
+    });
+
+    /** Boot a controller, override its CDP port list to point at the two
+     *  fake browsers, and complete the webview handshake. */
+    async function bootCdp(opts?: {
+      detectInstalled?: () => { chrome: string | null; edge: string | null };
+      launchBrowserWithCdp?: (
+        o: { engine: 'chrome' | 'edge'; port: number; profileDir: string },
+      ) => Promise<{ ok: boolean; pid?: number; error?: string }>;
+      ports?: number[];
+    }): Promise<FakeWebview> {
+      controller = new FlickController(new Store(dir), {
+        ports: opts?.ports ?? [chromeBrowser.port, edgeBrowser.port],
+        detectInstalled:
+          opts?.detectInstalled ?? (() => ({ chrome: '/fake/chrome', edge: '/fake/edge' })),
+        launchBrowserWithCdp: opts?.launchBrowserWithCdp,
+      });
+      await controller.start();
+      const fw = new FakeWebview();
+      controller.attachWebview(fw as never);
+      fw.send({ type: 'ready' });
+      await fw.waitFor((m) => m.type === 'init');
+      return fw;
+    }
+
+    test('discoverCdp lists fake browser tabs with the right engine', async () => {
+      const fw = await bootCdp();
+      fw.drain();
+
+      fw.send({ type: 'discoverCdp' });
+      const reply = await wait(fw, 'cdpDiscovery');
+
+      assert.equal(reply.ports.length, 2);
+      const chromePort = reply.ports.find((p) => p.port === chromeBrowser.port);
+      const edgePort = reply.ports.find((p) => p.port === edgeBrowser.port);
+      assert.ok(chromePort, 'chrome port present');
+      assert.ok(edgePort, 'edge port present');
+      assert.equal(chromePort!.engine, 'chrome');
+      assert.equal(chromePort!.tabs?.length, 2);
+      assert.equal(edgePort!.engine, 'edge');
+      assert.equal(edgePort!.tabs?.length, 1);
+      assert.equal(edgePort!.tabs?.[0].targetId, 'edge-1');
+    });
+
+    test('cdpDiscovery includes installed booleans + lastLaunched from the store', async () => {
+      // Pre-seed the store so the post-construction load picks it up.
+      const seed = new Store(dir);
+      await seed.init();
+      await seed.saveCdpLastLaunched('chrome');
+
+      const fw = await bootCdp({
+        detectInstalled: () => ({ chrome: '/fake/chrome', edge: null }),
+      });
+      fw.drain();
+
+      fw.send({ type: 'discoverCdp' });
+      const reply = await wait(fw, 'cdpDiscovery');
+
+      assert.deepEqual(reply.installed, {
+        chrome: true,
+        edge: false,
+        lastLaunched: 'chrome',
+      });
+    });
+
+    test('discoverCdp against an unreachable port reports the per-port error', async () => {
+      // Stop the chrome server BEFORE boot — its port will refuse connections.
+      await chromeBrowser.stop();
+      const fw = await bootCdp();
+      fw.drain();
+
+      fw.send({ type: 'discoverCdp' });
+      const reply = await wait(fw, 'cdpDiscovery');
+
+      const dead = reply.ports.find((p) => p.port === chromeBrowser.port);
+      assert.ok(dead);
+      assert.equal(dead!.engine, 'unknown');
+      assert.equal(dead!.tabs, null);
+      assert.ok(dead!.error, 'expected an error string');
+    });
+
+    test('adoptCdpTab creates a SessionMeta with cdp set and used:false', async () => {
+      const fw = await bootCdp();
+      fw.drain();
+
+      fw.send({
+        type: 'adoptCdpTab',
+        port: chromeBrowser.port,
+        targetId: 'tab-a',
+        title: 'Hello',
+        url: 'https://example.com/foo',
+      });
+      const sessions = await wait(fw, 'sessions');
+      assert.equal(sessions.sessions.length, 1);
+      const s = sessions.sessions[0];
+      assert.equal(s.name, 'Hello');
+      assert.equal(s.used, false);
+      assert.deepEqual(s.cdp, { port: chromeBrowser.port, tab: 'targetId:tab-a' });
+    });
+
+    test('adoptCdpTab dedupes — re-adopting the same port+targetId just activates', async () => {
+      const fw = await bootCdp();
+      // First adopt, then create a second local session and switch away.
+      fw.send({
+        type: 'adoptCdpTab',
+        port: chromeBrowser.port,
+        targetId: 'tab-a',
+        title: 'Hello',
+      });
+      await wait(fw, 'sessions');
+      fw.send({ type: 'newSession' });
+      const after = await fw.waitFor<Msg<'sessions'>>(
+        (m) => m.type === 'sessions' && m.sessions.length === 2,
+      );
+      const otherId = after.sessions.find((s) => !s.cdp)!.id;
+      fw.send({ type: 'switchSession', sessionId: otherId });
+      await wait(fw, 'sessions');
+      fw.drain();
+
+      // Re-adopt the same tab — should just re-activate, not duplicate.
+      fw.send({
+        type: 'adoptCdpTab',
+        port: chromeBrowser.port,
+        targetId: 'tab-a',
+        title: 'Hello',
+      });
+      const second = await wait(fw, 'sessions');
+      assert.equal(second.sessions.length, 2, 'no duplicate');
+      const cdpSession = second.sessions.find((s) => s.cdp);
+      assert.equal(second.activeSessionId, cdpSession!.id);
+      // Wait for the trailing history fetch the dedupe path also kicks off,
+      // so afterEach doesn't rm the temp dir mid-write.
+      await wait(fw, 'history');
+    });
+
+    test('first submitSteps on a CDP session includes cdp in config; subsequent do not', async () => {
+      const fw = await bootCdp();
+      fw.drain();
+
+      fw.send({
+        type: 'adoptCdpTab',
+        port: chromeBrowser.port,
+        targetId: 'tab-a',
+        title: 'Hello',
+      });
+      const sessions = await wait(fw, 'sessions');
+      const sessionId = sessions.sessions[0].id;
+
+      fw.send({ type: 'submitSteps', sessionId, rawText: 'First step' });
+      await wait(fw, 'historyReplace');
+      fw.drain();
+      fw.send({ type: 'submitSteps', sessionId, rawText: 'Second step' });
+      await wait(fw, 'historyReplace');
+
+      const reqs = server.requests.filter((r) => /\/steps$/.test(r.path));
+      assert.equal(reqs.length, 2);
+      const firstConfig = (reqs[0].body as { config?: { cdp?: unknown } }).config;
+      assert.ok(firstConfig, 'first request must carry a config');
+      assert.deepEqual(firstConfig!.cdp, {
+        port: chromeBrowser.port,
+        tab: 'targetId:tab-a',
+      });
+      assert.equal(
+        (reqs[1].body as { config?: unknown }).config,
+        undefined,
+        'second request must omit config — CDP hint is first-only',
+      );
+    });
+
+    test('newTabInCdp creates a session with tab="new"', async () => {
+      const fw = await bootCdp();
+      fw.drain();
+
+      fw.send({ type: 'newTabInCdp', port: edgeBrowser.port });
+      const sessions = await wait(fw, 'sessions');
+      assert.equal(sessions.sessions.length, 1);
+      assert.deepEqual(sessions.sessions[0].cdp, {
+        port: edgeBrowser.port,
+        tab: 'new',
+      });
+      assert.equal(sessions.sessions[0].used, false);
+    });
+
+    test('launchBrowserCdp invokes the injected launcher, persists lastLaunched, re-broadcasts discovery', async () => {
+      __setWorkspaceFolder('C:/fake/workspace');
+      const launches: Array<{ engine: string; port: number; profileDir: string }> = [];
+      const fw = await bootCdp({
+        launchBrowserWithCdp: async (opts) => {
+          launches.push({
+            engine: opts.engine,
+            port: opts.port,
+            profileDir: opts.profileDir,
+          });
+          return { ok: true, pid: 1234 };
+        },
+      });
+      fw.drain();
+
+      fw.send({ type: 'launchBrowserCdp', engine: 'edge', port: 9222 });
+      const result = await wait(fw, 'cdpLaunchResult');
+      assert.equal(result.ok, true);
+      assert.equal(result.engine, 'edge');
+      assert.equal(result.port, 9222);
+
+      assert.equal(launches.length, 1);
+      assert.equal(launches[0].engine, 'edge');
+      assert.equal(launches[0].port, 9222);
+      assert.match(
+        launches[0].profileDir.replace(/\\/g, '/'),
+        /\.flick\/edge-profile$/,
+      );
+
+      // lastLaunched persisted.
+      const persisted = await new Store(dir).loadCdpLastLaunched();
+      assert.equal(persisted, 'edge');
+
+      // A cdpDiscovery message was also broadcast after the success path.
+      const discoveries = fw.allOf<Msg<'cdpDiscovery'>>('cdpDiscovery');
+      assert.ok(discoveries.length >= 1, 'expected a re-broadcast cdpDiscovery');
+    });
+
+    test('launchBrowserCdp failure surfaces via cdpLaunchResult and skips persistence + rediscover', async () => {
+      const fw = await bootCdp({
+        launchBrowserWithCdp: async () => ({ ok: false, error: 'Edge not found' }),
+      });
+      fw.drain();
+
+      fw.send({ type: 'launchBrowserCdp', engine: 'edge', port: 9222 });
+      const result = await wait(fw, 'cdpLaunchResult');
+      assert.equal(result.ok, false);
+      assert.equal(result.engine, 'edge');
+      assert.equal(result.error, 'Edge not found');
+
+      // No lastLaunched write.
+      const persisted = await new Store(dir).loadCdpLastLaunched();
+      assert.equal(persisted, null);
+
+      // Brief settle; no cdpDiscovery should have been broadcast.
+      await delay(50);
+      const discoveries = fw.allOf<Msg<'cdpDiscovery'>>('cdpDiscovery');
+      assert.equal(discoveries.length, 0, 'no rediscover on failure');
+    });
+
+    test('SessionMeta.cdp survives a controller restart', async () => {
+      const fw = await bootCdp();
+      fw.send({
+        type: 'adoptCdpTab',
+        port: chromeBrowser.port,
+        targetId: 'tab-a',
+        title: 'Persisted',
+      });
+      await wait(fw, 'sessions');
+      controller!.dispose();
+      controller = undefined;
+
+      const persisted = await new Store(dir).loadSessions();
+      assert.equal(persisted.length, 1);
+      assert.deepEqual(persisted[0].cdp, {
+        port: chromeBrowser.port,
+        tab: 'targetId:tab-a',
+      });
+
+      // And the second controller boots them straight back into memory.
+      controller = new FlickController(new Store(dir), {
+        ports: [chromeBrowser.port, edgeBrowser.port],
+        detectInstalled: () => ({ chrome: null, edge: null }),
+      });
+      await controller.start();
+      const fw2 = new FakeWebview();
+      controller.attachWebview(fw2 as never);
+      fw2.send({ type: 'ready' });
+      const init = await wait(fw2, 'init');
+      assert.equal(init.sessions.length, 1);
+      assert.deepEqual(init.sessions[0].cdp, {
+        port: chromeBrowser.port,
+        tab: 'targetId:tab-a',
+      });
+    });
   });
 });

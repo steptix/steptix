@@ -7,6 +7,10 @@ import { FlickController } from './controller';
 import { FlickPanel, FlickSidebarProvider } from './panel';
 import { Store } from './store';
 import { affectsFlick } from './settings';
+import {
+  detectInstalled as cdpDetectInstalled,
+  launchBrowserWithCdp as cdpLaunchBrowserWithCdp,
+} from './browser-launcher';
 
 /** `viewsContainers.secondarySidebar` contributions require VS Code >= 1.95. */
 function supportsSecondarySidebarContainers(): boolean {
@@ -28,6 +32,15 @@ export interface FlickTestHooks {
   dispatch(webview: vscode.Webview, msg: import('../shared/protocol').WebviewToHost): Promise<void>;
   /** Wait until predicate holds or throw after timeoutMs. */
   waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs?: number, label?: string): Promise<void>;
+  /** Re-exports of the CDP launch/detect helpers the controller uses
+   *  internally. The live VS Code suite spawns a REAL browser via the same
+   *  code path the production extension uses, so it must reach these
+   *  functions from inside the EDH process (not its own require()).
+   *  Intentionally a small, opaque surface — not for production callers. */
+  cdp: {
+    detectInstalled: typeof cdpDetectInstalled;
+    launchBrowserWithCdp: typeof cdpLaunchBrowserWithCdp;
+  };
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<{
@@ -111,6 +124,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<{
           await new Promise((r) => setTimeout(r, 50));
         }
         throw new Error(`flick __testHooks.waitFor: ${label} did not become true within ${timeoutMs}ms`);
+      },
+      cdp: {
+        detectInstalled: cdpDetectInstalled,
+        launchBrowserWithCdp: cdpLaunchBrowserWithCdp,
       },
     },
   };

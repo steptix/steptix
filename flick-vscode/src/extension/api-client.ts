@@ -26,6 +26,9 @@ export interface RawStepsResponse {
 export interface StepsRequestConfig {
   baseUrl?: string;
   timeout?: string;
+  /** CDP attach hint — passed through to the runner. Present only on the
+   *  first request for a CDP-adopted session. */
+  cdp?: { port: number; tab?: string };
 }
 
 /** Raised for any non-2xx HTTP response or network failure. */
@@ -61,10 +64,12 @@ export class SessionsApiClient {
     config: StepsRequestConfig | null,
   ): Promise<RawStepsResponse> {
     const body: Record<string, unknown> = { steps };
-    if (config && (config.baseUrl || config.timeout)) {
-      body.config = {};
-      if (config.baseUrl) (body.config as StepsRequestConfig).baseUrl = config.baseUrl;
-      if (config.timeout) (body.config as StepsRequestConfig).timeout = config.timeout;
+    if (config && (config.baseUrl || config.timeout || config.cdp)) {
+      const out: StepsRequestConfig = {};
+      if (config.baseUrl) out.baseUrl = config.baseUrl;
+      if (config.timeout) out.timeout = config.timeout;
+      if (config.cdp) out.cdp = config.cdp;
+      body.config = out;
     }
     const url = `${this.baseUrl()}/sessions/${encodeURIComponent(sessionId)}/steps`;
     let res: Response;

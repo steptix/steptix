@@ -8,13 +8,29 @@
 // every webview that has finished booting, so the surfaces stay in sync.
 
 import * as crypto from 'node:crypto';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ApiError, SessionsApiClient } from './api-client';
 import { Store } from './store';
 import { readSettings, writeSettings } from './settings';
 import { parseSteps } from '../shared/parse-steps';
+import {
+  DEFAULT_CDP_PORTS,
+  discoverCdpPorts as realDiscoverCdpPorts,
+} from './cdp-discovery';
+import {
+  detectInstalled as realDetectInstalled,
+  launchBrowserWithCdp as realLaunchBrowserWithCdp,
+  type CdpLaunchEngine,
+  type InstalledBinaries,
+  type LaunchOptions,
+  type LaunchResult,
+} from './browser-launcher';
+import type { StepsRequestConfig } from './api-client';
 import type {
   BatchResult,
+  CdpDiscoveryPort,
+  CdpInstalledBrowsers,
   ConnectionStatus,
   HistoryEntry,
   HostToWebview,
@@ -36,6 +52,18 @@ interface Attachment {
   showSettingsOnReady: boolean;
 }
 
+/** Injection points for CDP discovery and browser-launching. Tests stub these
+ *  to drive the controller without touching the real machine. Mirrors the
+ *  `__testSetApiClient` pattern but is constructor-injected so the
+ *  controller has the deps it needs from boot rather than mid-flight. */
+export interface CdpDeps {
+  /** Port list to scan when discoverCdp fires. Default DEFAULT_CDP_PORTS. */
+  ports?: readonly number[];
+  discoverCdpPorts?: typeof realDiscoverCdpPorts;
+  detectInstalled?: typeof realDetectInstalled;
+  launchBrowserWithCdp?: (opts: LaunchOptions) => Promise<LaunchResult>;
+}
+
 export class FlickController {
   private api: SessionsApiClient;
   private sessions: SessionMeta[] = [];
@@ -47,8 +75,36 @@ export class FlickController {
   private pingTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
 
-  constructor(private readonly store: Store) {
+  private cdpPorts: readonly number[];
+  private cdpDiscover: typeof realDiscoverCdpPorts;
+  private cdpDetectInstalled: typeof realDetectInstalled;
+  private cdpLaunch: (opts: LaunchOptions) => Promise<LaunchResult>;
+  /** Originals captured at construction so `__testSetCdpDeps(null)` can fully
+   *  restore production behaviour mid-process. The non-live VS Code suite
+   *  spans multiple test files against ONE activated controller, so any test
+   *  that overrides a dep must also be able to put it back. */
+  private readonly cdpDefaults: Readonly<Required<{
+    ports: readonly number[];
+    discoverCdpPorts: typeof realDiscoverCdpPorts;
+    detectInstalled: typeof realDetectInstalled;
+    launchBrowserWithCdp: (opts: LaunchOptions) => Promise<LaunchResult>;
+  }>>;
+
+  constructor(
+    private readonly store: Store,
+    cdpDeps?: CdpDeps,
+  ) {
     this.api = new SessionsApiClient(readSettings());
+    this.cdpPorts = cdpDeps?.ports ?? DEFAULT_CDP_PORTS;
+    this.cdpDiscover = cdpDeps?.discoverCdpPorts ?? realDiscoverCdpPorts;
+    this.cdpDetectInstalled = cdpDeps?.detectInstalled ?? realDetectInstalled;
+    this.cdpLaunch = cdpDeps?.launchBrowserWithCdp ?? realLaunchBrowserWithCdp;
+    this.cdpDefaults = {
+      ports: this.cdpPorts,
+      discoverCdpPorts: this.cdpDiscover,
+      detectInstalled: this.cdpDetectInstalled,
+      launchBrowserWithCdp: this.cdpLaunch,
+    };
   }
 
   async start(): Promise<void> {
@@ -108,6 +164,26 @@ export class FlickController {
   /** Replace the API client wholesale — e.g. to point at a fake HTTP server. */
   __testSetApiClient(client: SessionsApiClient): void {
     this.api = client;
+  }
+  /** Override any subset of the CDP dependency seams after construction.
+   *  Symmetric with `__testSetApiClient`; useful when a test needs to bind
+   *  to a fake browser server whose port isn't known until after start().
+   *  Pass `null` to restore every dep to its construction-time default —
+   *  required for the non-live VS Code suite, which runs many `.test.cjs`
+   *  files against ONE activated extension and must not leak overrides
+   *  between cases. */
+  __testSetCdpDeps(deps: CdpDeps | null): void {
+    if (deps === null) {
+      this.cdpPorts = this.cdpDefaults.ports;
+      this.cdpDiscover = this.cdpDefaults.discoverCdpPorts;
+      this.cdpDetectInstalled = this.cdpDefaults.detectInstalled;
+      this.cdpLaunch = this.cdpDefaults.launchBrowserWithCdp;
+      return;
+    }
+    if (deps.ports) this.cdpPorts = deps.ports;
+    if (deps.discoverCdpPorts) this.cdpDiscover = deps.discoverCdpPorts;
+    if (deps.detectInstalled) this.cdpDetectInstalled = deps.detectInstalled;
+    if (deps.launchBrowserWithCdp) this.cdpLaunch = deps.launchBrowserWithCdp;
   }
   /** Feed a message into the controller as if it came from `webview`. */
   async __testDispatch(webview: vscode.Webview, msg: WebviewToHost): Promise<void> {
@@ -176,6 +252,18 @@ export class FlickController {
       case 'adoptServerSession':
         await this.adoptServerSession(msg.item);
         break;
+      case 'discoverCdp':
+        await this.handleDiscoverCdp(webview);
+        break;
+      case 'adoptCdpTab':
+        await this.adoptCdpTab(msg.port, msg.targetId, msg.title, msg.url);
+        break;
+      case 'newTabInCdp':
+        await this.newTabInCdp(msg.port);
+        break;
+      case 'launchBrowserCdp':
+        await this.launchBrowserCdp(msg.engine, msg.port, webview);
+        break;
     }
   }
 
@@ -218,6 +306,130 @@ export class FlickController {
     await this.store.saveHistory(session.id, []);
     this.postSessions();
     await this.sendHistory(session.id);
+  }
+
+  // --- CDP discovery / adoption / launch ----------------------------------
+
+  private async handleDiscoverCdp(webview: vscode.Webview): Promise<void> {
+    // Discovery + install detection are independent network/fs probes; run
+    // them in parallel along with the persisted lastLaunched read.
+    const [ports, installed, lastLaunched] = await Promise.all([
+      this.cdpDiscover(this.cdpPorts),
+      Promise.resolve(this.cdpDetectInstalled()),
+      this.store.loadCdpLastLaunched(),
+    ]);
+    this.postTo(webview, this.buildCdpDiscoveryMessage(ports, installed, lastLaunched));
+  }
+
+  private buildCdpDiscoveryMessage(
+    ports: CdpDiscoveryPort[],
+    installed: InstalledBinaries,
+    lastLaunched: 'chrome' | 'edge' | null,
+  ): HostToWebview {
+    const payload: CdpInstalledBrowsers = {
+      chrome: !!installed.chrome,
+      edge: !!installed.edge,
+      lastLaunched,
+    };
+    return { type: 'cdpDiscovery', ports, installed: payload };
+  }
+
+  /**
+   * Adopt an existing CDP tab as a new local session. Dedupe by
+   * `{port, targetId}` — re-adopting the same tab just activates the
+   * existing local session, matching `adoptServerSession`'s behaviour.
+   * Unlike server-session adoption, `used: false` so the first submit
+   * carries the CDP hint through to the runner.
+   */
+  private async adoptCdpTab(
+    port: number,
+    targetId: string,
+    title?: string,
+    url?: string,
+  ): Promise<void> {
+    const tab = `targetId:${targetId}`;
+    const existing = this.sessions.find(
+      (s) => s.cdp?.port === port && s.cdp?.tab === tab,
+    );
+    if (existing) {
+      this.activeSessionId = existing.id;
+      this.postSessions();
+      await this.sendHistory(existing.id);
+      return;
+    }
+    const session: SessionMeta = {
+      id: crypto.randomUUID(),
+      name: deriveCdpName(title, url),
+      order: this.sessions.length,
+      stale: false,
+      used: false,
+      cdp: { port, tab },
+    };
+    this.sessions.push(session);
+    this.activeSessionId = session.id;
+    await this.persistSessions();
+    await this.store.saveHistory(session.id, []);
+    this.postSessions();
+    await this.sendHistory(session.id);
+  }
+
+  /** Each "+ New tab in this X" click should spawn a fresh local session
+   *  even when one for the same port already exists — no dedupe here. The
+   *  runner opens the tab on attach and closes it at teardown. */
+  private async newTabInCdp(port: number): Promise<void> {
+    const session: SessionMeta = {
+      id: crypto.randomUUID(),
+      name: deriveCdpName(undefined, undefined),
+      order: this.sessions.length,
+      stale: false,
+      used: false,
+      cdp: { port, tab: 'new' },
+    };
+    this.sessions.push(session);
+    this.activeSessionId = session.id;
+    await this.persistSessions();
+    await this.store.saveHistory(session.id, []);
+    this.postSessions();
+    await this.sendHistory(session.id);
+  }
+
+  private async launchBrowserCdp(
+    engine: CdpLaunchEngine,
+    port: number,
+    _webview: vscode.Webview,
+  ): Promise<void> {
+    const profileDir = this.resolveCdpProfileDir(engine);
+    const result = await this.cdpLaunch({ engine, port, profileDir });
+    // Broadcast both outcomes so every attached webview (sidebar + editor
+    // panel) clears its per-engine "Launching…" state, not just the one that
+    // sent the click.
+    if (!result.ok) {
+      this.post({
+        type: 'cdpLaunchResult',
+        engine,
+        ok: false,
+        error: result.error ?? 'Unknown error',
+      });
+      return;
+    }
+    await this.store.saveCdpLastLaunched(engine);
+    this.post({ type: 'cdpLaunchResult', engine, ok: true, port });
+    // Re-discover so the freshly spawned browser's tabs surface immediately
+    // across every webview without the user clicking the refresh button.
+    const [ports, installed, lastLaunched] = await Promise.all([
+      this.cdpDiscover(this.cdpPorts),
+      Promise.resolve(this.cdpDetectInstalled()),
+      this.store.loadCdpLastLaunched(),
+    ]);
+    this.post(this.buildCdpDiscoveryMessage(ports, installed, lastLaunched));
+  }
+
+  private resolveCdpProfileDir(engine: CdpLaunchEngine): string {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (folder) return path.join(folder.uri.fsPath, '.flick', `${engine}-profile`);
+    // No workspace open (single-file mode) — fall back to the store's base
+    // dir so we still have a writeable, per-installation profile.
+    return path.join(this.store.baseDir, 'cdp-profiles', engine);
   }
 
   private async handleReady(webview: vscode.Webview): Promise<void> {
@@ -366,11 +578,20 @@ export class FlickController {
     this.schedulePing(0);
 
     // SPEC-FLICK: send config only on the first request for a session.
+    // For CDP-adopted sessions the `cdp` hint is also first-request-only,
+    // gated by the same `!session.used` rule — so a non-null config may be
+    // required even when baseUrl/timeout are both empty.
     const settings = readSettings();
-    const config =
-      !session.used && (settings.defaultBaseUrl || settings.defaultTimeout)
-        ? { baseUrl: settings.defaultBaseUrl, timeout: settings.defaultTimeout }
-        : null;
+    let config: StepsRequestConfig | null = null;
+    if (!session.used) {
+      const out: StepsRequestConfig = {};
+      if (settings.defaultBaseUrl) out.baseUrl = settings.defaultBaseUrl;
+      if (settings.defaultTimeout) out.timeout = settings.defaultTimeout;
+      if (session.cdp) {
+        out.cdp = { port: session.cdp.port, tab: session.cdp.tab };
+      }
+      if (out.baseUrl || out.timeout || out.cdp) config = out;
+    }
 
     let resultEntry: HistoryEntry;
     try {
@@ -562,4 +783,23 @@ function deriveAdoptedName(item: ServerSessionItem): string {
     }
   }
   return `Session ${item.sessionId.slice(0, 8)}`;
+}
+
+/**
+ * Pick a label for a CDP-adopted session tab. Prefers the discovered page
+ * title, then the URL host, then a literal "CDP tab" — mirrors the spirit
+ * of deriveAdoptedName but cannot fall back to a session id since CDP
+ * sessions are id'd by random UUID, which carries no information.
+ */
+function deriveCdpName(title: string | undefined, url: string | undefined): string {
+  const t = title?.trim();
+  if (t) return t.length > 32 ? `${t.slice(0, 31)}…` : t;
+  if (url) {
+    try {
+      return new URL(url).host || url;
+    } catch {
+      return url;
+    }
+  }
+  return 'CDP tab';
 }

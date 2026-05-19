@@ -13,11 +13,21 @@ export function __setConfig(key: string, value: unknown): void {
   configStore.set(key, value);
 }
 
+let workspaceFoldersInternal: Array<{ uri: { fsPath: string } }> | undefined;
+
+/** Test helper: stand in for an open workspace folder so code paths like
+ *  `vscode.workspace.workspaceFolders?.[0]` resolve to something. Pass
+ *  `undefined` (the default after __reset) to model single-file mode. */
+export function __setWorkspaceFolder(fsPath: string | undefined): void {
+  workspaceFoldersInternal = fsPath ? [{ uri: { fsPath } }] : undefined;
+}
+
 /** Test helper: reset all fake state between tests. */
 export function __reset(): void {
   configStore.clear();
   __warningResponse = 'Delete';
   executedCommands.length = 0;
+  workspaceFoldersInternal = undefined;
 }
 
 export enum ConfigurationTarget {
@@ -40,6 +50,9 @@ export const workspace = {
   },
   onDidChangeConfiguration(): { dispose(): void } {
     return { dispose() {} };
+  },
+  get workspaceFolders(): Array<{ uri: { fsPath: string } }> | undefined {
+    return workspaceFoldersInternal;
   },
 };
 
