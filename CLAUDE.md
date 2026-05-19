@@ -55,3 +55,25 @@ a directory name and there's no visible signal that anything changed.
 Plain `code` from PowerShell on this machine resolves to the GUI exe, which
 rejects `--install-extension`. Always invoke the CLI shim at the full path
 above.
+
+## Seed gitignored files into a new worktree
+
+After creating a worktree (via `git worktree add` or the `EnterWorktree`
+tool), the new directory only contains tracked files. The repo needs several
+gitignored files/dirs to actually run — `.env` (API keys), several
+`node_modules/`, `flick/src-tauri/target/`, etc. Without them, nothing works
+and `npm install` × 6 + a Tauri rebuild costs ~10 minutes.
+
+Run this script once, right after the worktree is created:
+
+```powershell
+c:\Projects\vibe\ai-ui-automation\scripts\init-worktree.ps1 `
+    -Destination <full-path-to-new-worktree>
+```
+
+It copies (not symlinks) env files and build dirs from the main checkout at
+`c:\Projects\vibe\ai-ui-automation`, so the worktree is independent and
+safe if `package.json` / `Cargo.toml` diverge.
+
+Add `-SkipBuilds` to copy only the env files when you don't need the heavy
+build artifacts (e.g. for a docs-only change).
