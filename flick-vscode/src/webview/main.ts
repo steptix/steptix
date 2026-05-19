@@ -45,6 +45,10 @@ const state = {
   busy: new Set<string>(),
   /** Expanded step rows, keyed by `${entryId}:${stepIndex}`. */
   expanded: new Set<string>(),
+  /** Keys we've already auto-expanded once on first render. Without this,
+   *  failed/error steps re-expanded on every renderChat, so a user collapse
+   *  was instantly reversed by the next state broadcast. */
+  autoExpanded: new Set<string>(),
   draft: '',
   settingsOpen: false,
   // Adopt-server-session dropdown.
@@ -822,9 +826,12 @@ function renderStepRow(
   batchError: { step: number; message: string } | null,
 ): HTMLElement {
   const key = `${entryId}:${index}`;
-  // Failed/error steps auto-expand so the user immediately sees what went wrong.
-  if (result.status !== 'passed' && !state.expanded.has(key)) {
+  // Failed/error steps auto-expand ONCE on first render so the user
+  // immediately sees what went wrong — but a subsequent user collapse must
+  // stick (don't re-expand every renderChat).
+  if (result.status !== 'passed' && !state.autoExpanded.has(key)) {
     state.expanded.add(key);
+    state.autoExpanded.add(key);
   }
   const expanded = state.expanded.has(key);
 
