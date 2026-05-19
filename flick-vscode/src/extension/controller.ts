@@ -37,7 +37,7 @@ interface Attachment {
 }
 
 export class FlickController {
-  private readonly api: SessionsApiClient;
+  private api: SessionsApiClient;
   private sessions: SessionMeta[] = [];
   private activeSessionId: string | null = null;
   private readonly busy = new Set<string>();
@@ -94,6 +94,28 @@ export class FlickController {
     this.api.update(settings);
     this.post({ type: 'settings', settings });
     this.schedulePing(0);
+  }
+
+  // Test-only accessors. Kept on the controller (not gated by a flag) so the
+  // @vscode/test-electron suite can drive the host without forking production
+  // behaviour. None of these are wired into the production extension surface.
+  get __testSessions(): readonly SessionMeta[] {
+    return this.sessions;
+  }
+  get __testActiveSessionId(): string | null {
+    return this.activeSessionId;
+  }
+  /** Replace the API client wholesale — e.g. to point at a fake HTTP server. */
+  __testSetApiClient(client: SessionsApiClient): void {
+    this.api = client;
+  }
+  /** Feed a message into the controller as if it came from `webview`. */
+  async __testDispatch(webview: vscode.Webview, msg: WebviewToHost): Promise<void> {
+    await this.handleMessage(msg, webview);
+  }
+  /** Every webview currently attached to this controller. */
+  get __testAttachedWebviews(): vscode.Webview[] {
+    return [...this.attachments.keys()];
   }
 
   // --- commands (invoked from the command palette / view title) ------------

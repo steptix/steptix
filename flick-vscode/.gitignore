@@ -2,3 +2,6 @@ node_modules/
 dist/
 dist-test/
 *.vsix
+.vscode-test/
+tests/vscode/test-report.json
+tests/vscode-live/live-test-report.json

@@ -14,7 +14,25 @@ function supportsSecondarySidebarContainers(): boolean {
   return major > 1 || (major === 1 && minor >= 95);
 }
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
+/**
+ * Test-only surface returned from activate(). Lets the @vscode/test-electron
+ * suite reach into the extension and drive it without depending on the
+ * webview's DOM. Production code never reads these — they are intentionally
+ * prefixed `__` to signal "internal".
+ */
+export interface FlickTestHooks {
+  controller: FlickController;
+  /** Every webview currently attached to the controller (panel + sidebar). */
+  webviews(): vscode.Webview[];
+  /** Forge a message from `webview` to the controller, as the real bridge would. */
+  dispatch(webview: vscode.Webview, msg: import('../shared/protocol').WebviewToHost): Promise<void>;
+  /** Wait until predicate holds or throw after timeoutMs. */
+  waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs?: number, label?: string): Promise<void>;
+}
+
+export async function activate(context: vscode.ExtensionContext): Promise<{
+  __testHooks: FlickTestHooks;
+}> {
   // Drives the dual view-container `when` clauses: the sidebar lives in the
   // secondary side bar where supported, and falls back to the activity bar
   // otherwise — the pattern Claude Code / Codex use to dock on the right.
@@ -80,6 +98,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (affectsFlick(e)) controller.onSettingsChanged();
     }),
   );
+
+  return {
+    __testHooks: {
+      controller,
+      webviews: () => collectAttachedWebviews(controller),
+      dispatch: (webview, msg) => controller.__testDispatch(webview, msg),
+      waitFor: async (predicate, timeoutMs = 5000, label = 'predicate') => {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+          if (await predicate()) return;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        throw new Error(`flick __testHooks.waitFor: ${label} did not become true within ${timeoutMs}ms`);
+      },
+    },
+  };
+}
+
+/**
+ * Reach into the controller's attachments map. The controller holds it as
+ * private; the test surface reads it via the test-only accessor. Production
+ * has no other reason to enumerate webviews — the controller broadcasts via
+ * `post()` and routes by webview identity internally.
+ */
+function collectAttachedWebviews(controller: FlickController): vscode.Webview[] {
+  // Accessor exists on the controller; declared as a getter on the class.
+  return [...controller.__testAttachedWebviews];
 }
 
 export function deactivate(): void {
