@@ -398,18 +398,30 @@ async function executeStepAttempt(
       }
     }
 
-    // 2. Capture current page state (full-page so AI sees content below the fold)
+    // 2. Capture current page state. The DOM snapshot is *only* AI input —
+    // once a turn is served from cache, the snapshot has no consumer (the
+    // cached action plan was already decided, and cached assertions run
+    // against the live DOM via Playwright, not against the snapshot string).
+    // Skipping the snapshot on cache hits is the single biggest wall-clock
+    // win for cached replays — captureDomSnapshot is typically 200ms–2s.
+    //
+    // Screenshots are kept on cache hits when the user has opted into the
+    // per-action filmstrip (`captureScreenshotsPerAction`). The `sendScreenshots`
+    // setting only feeds the AI, so it's irrelevant when we're not calling AI.
     const turnTimestamp = new Date().toISOString();
-    const domSnapshot = await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
-      captureDomSnapshot(page, {
-        ...config.browser.domNoiseReduction,
-        maxIframeDepth: config.browser.maxIframeDepth,
-        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-      }),
-    );
-    // Capture if either consumer needs it: AI (sees this frame on the current turn)
-    // or report (per-action filmstrip via captureScreenshotsPerAction).
-    const wantPreTurnShot = config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
+    const cachedTurnForCapture = cachedTurns?.[currentTurn - 1];
+    const domSnapshot = cachedTurnForCapture
+      ? ''
+      : await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
+          captureDomSnapshot(page, {
+            ...config.browser.domNoiseReduction,
+            maxIframeDepth: config.browser.maxIframeDepth,
+            domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+          }),
+        );
+    const wantPreTurnShot = cachedTurnForCapture
+      ? config.browser.captureScreenshotsPerAction !== false
+      : config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
     const screenshot = wantPreTurnShot
       ? await traceOp(`captureScreenshot (turn ${currentTurn})`, () =>
           captureScreenshot(page, config.browser.fullPageScreenshots),
@@ -425,28 +437,32 @@ async function executeStepAttempt(
     // Stall detection: if the prior turn's action was a "wait" and neither the
     // page (URL + DOM) nor the network moved since then, the preceding click
     // (or whatever triggered the wait) likely didn't register. Bail out instead
-    // of burning more turns.
-    const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
-    if (currentTurn > 1 && lastActionWasWait) {
-      const unchanged = pageFingerprint === prevPageFingerprint;
-      const networkIdle = tracker.isIdle();
-      if (unchanged && networkIdle) {
-        stallCount++;
-        logger.warn(
-          `Stall detected (${stallCount}/${STALL_LIMIT}): page unchanged since last turn, network idle, last action was "wait" — prior action may not have registered`,
-        );
-        if (stallCount >= STALL_LIMIT) {
-          throw new StepFailureError(
-            `Step stalled: page did not advance after prior action across ${stallCount + 1} turns (URL, DOM, and network all quiet). The preceding action may not have registered — check selector targeting and element interactability.`,
-            [],
-            allTurns,
+    // of burning more turns. Skipped on cached turns — the cached action plan
+    // is deterministic, "wait" decisions are not in play, and we don't have a
+    // DOM snapshot to fingerprint against anyway.
+    if (!cachedTurnForCapture) {
+      const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
+      if (currentTurn > 1 && lastActionWasWait) {
+        const unchanged = pageFingerprint === prevPageFingerprint;
+        const networkIdle = tracker.isIdle();
+        if (unchanged && networkIdle) {
+          stallCount++;
+          logger.warn(
+            `Stall detected (${stallCount}/${STALL_LIMIT}): page unchanged since last turn, network idle, last action was "wait" — prior action may not have registered`,
           );
+          if (stallCount >= STALL_LIMIT) {
+            throw new StepFailureError(
+              `Step stalled: page did not advance after prior action across ${stallCount + 1} turns (URL, DOM, and network all quiet). The preceding action may not have registered — check selector targeting and element interactability.`,
+              [],
+              allTurns,
+            );
+          }
+        } else {
+          stallCount = 0;
         }
-      } else {
-        stallCount = 0;
       }
+      prevPageFingerprint = pageFingerprint;
     }
-    prevPageFingerprint = pageFingerprint;
 
     // Per-turn accumulators
     const turnAiInteractions: AiInteraction[] = [];
@@ -1180,14 +1196,21 @@ async function executeStepAttempt(
         logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
       }
 
-      // Capture state after action (full-page for report visibility)
-      const postDom = await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
-        captureDomSnapshot(page, {
-          ...config.browser.domNoiseReduction,
-          maxIframeDepth: config.browser.maxIframeDepth,
-          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-        }),
-      ).catch(() => '');
+      // Capture state after action (full-page for report visibility).
+      // Skipped on cache replay — the per-action DOM is only consumed by
+      // the report's sub-action filmstrip, and matches the pre-turn rule:
+      // when the AI plan came from cache, we don't pay for DOM serialisation.
+      // The post-action screenshot below still runs when the user has opted
+      // into the filmstrip, since that's the cheap-and-useful half.
+      const postDom = cachedTurnForCapture
+        ? ''
+        : await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
+            captureDomSnapshot(page, {
+              ...config.browser.domNoiseReduction,
+              maxIframeDepth: config.browser.maxIframeDepth,
+              domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+            }),
+          ).catch(() => '');
       // The post-action shot is only consumed by the report filmstrip — the AI
       // sees the next pre-turn capture rather than this one — so it gates only
       // on captureScreenshotsPerAction, not on ai.sendScreenshots.
