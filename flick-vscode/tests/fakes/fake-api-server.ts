@@ -36,6 +36,20 @@ export class FakeApiServer {
   /** Status returned by GET /sessions (the connectivity ping). */
   pingStatus = 200;
 
+  /**
+   * Sessions array returned by GET /sessions. Defaults to empty so the
+   * connectivity ping keeps working unchanged; tests for the "adopt server
+   * session" dropdown override this to script a populated list (or an
+   * error via `pingStatus`).
+   */
+  sessionsList: Array<{
+    sessionId: string;
+    status: string;
+    currentUrl: string;
+    pageTitle: string;
+    totalStepsExecuted: number;
+  }> = [];
+
   private server: http.Server | undefined;
   private boundPort = 0;
 
@@ -113,7 +127,7 @@ export class FakeApiServer {
 
     // GET /sessions
     if (method === 'GET' && url === '/sessions') {
-      return send(res, this.pingStatus, { sessions: [] });
+      return send(res, this.pingStatus, { sessions: this.sessionsList });
     }
 
     send(res, 404, { error: 'unknown route' });

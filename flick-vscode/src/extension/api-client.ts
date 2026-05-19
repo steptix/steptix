@@ -115,6 +115,43 @@ export class SessionsApiClient {
       return false;
     }
   }
+
+  /**
+   * GET /sessions — return the active sessions the server is currently
+   * holding. Used by the "Adopt server session" dropdown so users can pick
+   * up an existing browser instead of starting a fresh one. Throws ApiError
+   * on any non-2xx response or network failure so the UI can surface the
+   * message; callers handle the empty-list case in the response, not here.
+   */
+  async listSessions(): Promise<ServerSessionItem[]> {
+    const url = `${this.baseUrl()}/sessions`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET', headers: this.headers() });
+    } catch (err) {
+      throw new ApiError(
+        `Cannot reach the API server. Check your connection and settings. (${(err as Error).message})`,
+      );
+    }
+    if (!res.ok) {
+      const detail = await safeText(res);
+      throw new ApiError(
+        `API returned ${res.status} ${res.statusText}${detail ? `: ${detail}` : ''}`,
+        res.status,
+      );
+    }
+    const body = (await res.json()) as { sessions?: ServerSessionItem[] };
+    return Array.isArray(body.sessions) ? body.sessions : [];
+  }
+}
+
+/** Shape returned by GET /sessions — matches the server's SessionListItem. */
+export interface ServerSessionItem {
+  sessionId: string;
+  status: string;
+  currentUrl: string;
+  pageTitle: string;
+  totalStepsExecuted: number;
 }
 
 async function safeText(res: Response): Promise<string> {

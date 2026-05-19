@@ -13,6 +13,7 @@ import type {
   FlickSettings,
   HistoryEntry,
   HostToWebview,
+  ServerSessionItem,
   SessionMeta,
   StepResult,
   WebviewToHost,
@@ -42,6 +43,11 @@ const state = {
   expanded: new Set<string>(),
   draft: '',
   settingsOpen: false,
+  // Adopt-server-session dropdown.
+  adoptOpen: false,
+  adoptLoading: false,
+  adoptError: null as string | null,
+  adoptList: null as ServerSessionItem[] | null,
 };
 
 // --- root layout (built once) ----------------------------------------------
@@ -51,6 +57,10 @@ app.innerHTML = `
   <div class="topbar">
     <div class="tabs" id="tabs"></div>
     <button class="tab-add" id="tab-add" title="New session">+</button>
+    <div class="adopt-wrap">
+      <button class="tab-adopt" id="tab-adopt" title="Attach an existing server session" aria-haspopup="listbox" aria-expanded="false">▾</button>
+      <div class="adopt-panel" id="adopt-panel" hidden role="listbox"></div>
+    </div>
     <div class="topbar-right">
       <span class="status-dot" id="status-dot" title="Connection status"></span>
       <button class="icon-btn" id="settings-btn" title="Settings">⚙</button>
@@ -83,6 +93,8 @@ const settingsOverlay = byId<HTMLDivElement>('settings-overlay');
 const imageOverlay = byId<HTMLDivElement>('image-overlay');
 const imageOverlayImg = byId<HTMLImageElement>('image-overlay-img');
 const toastsEl = byId<HTMLDivElement>('toasts');
+const adoptBtn = byId<HTMLButtonElement>('tab-adopt');
+const adoptPanel = byId<HTMLDivElement>('adopt-panel');
 
 // --- input box --------------------------------------------------------------
 
@@ -108,6 +120,18 @@ function submit(): void {
 
 byId<HTMLButtonElement>('tab-add').addEventListener('click', () => post({ type: 'newSession' }));
 byId<HTMLButtonElement>('settings-btn').addEventListener('click', openSettings);
+adoptBtn.addEventListener('click', toggleAdoptDropdown);
+
+// Close the dropdown when clicking outside it. The capture-phase listener
+// fires before any inner click handler, so it can swallow without preventing
+// the adoption itself (which uses `mousedown` on the panel rows? No — the
+// row uses `click`, which still fires after `mousedown` so order is fine).
+document.addEventListener('mousedown', (e) => {
+  if (!state.adoptOpen) return;
+  const target = e.target as Node | null;
+  if (target && (adoptPanel.contains(target) || adoptBtn.contains(target))) return;
+  closeAdoptDropdown();
+});
 
 // --- image overlay ----------------------------------------------------------
 
@@ -210,6 +234,12 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
     case 'toast':
       if (msg.message) showToast(msg.level, msg.message);
       break;
+    case 'serverSessions':
+      state.adoptLoading = false;
+      state.adoptError = msg.error;
+      state.adoptList = msg.sessions;
+      renderAdoptPanel();
+      break;
   }
 });
 
@@ -257,6 +287,111 @@ function renderTabs(): void {
     tab.addEventListener('dblclick', () => beginRename(session, name));
     tabsEl.appendChild(tab);
   }
+}
+
+// --- adopt-server-session dropdown -----------------------------------------
+
+function toggleAdoptDropdown(): void {
+  if (state.adoptOpen) {
+    closeAdoptDropdown();
+    return;
+  }
+  state.adoptOpen = true;
+  state.adoptLoading = true;
+  state.adoptError = null;
+  // Keep the previous list visible while the new one loads — refreshing
+  // shouldn't blank the panel.
+  adoptBtn.setAttribute('aria-expanded', 'true');
+  adoptBtn.classList.add('active');
+  adoptPanel.hidden = false;
+  renderAdoptPanel();
+  post({ type: 'listServerSessions' });
+}
+
+function closeAdoptDropdown(): void {
+  state.adoptOpen = false;
+  adoptBtn.setAttribute('aria-expanded', 'false');
+  adoptBtn.classList.remove('active');
+  adoptPanel.hidden = true;
+}
+
+function renderAdoptPanel(): void {
+  if (!state.adoptOpen) return;
+  adoptPanel.innerHTML = '';
+
+  const header = el('div', 'adopt-header');
+  header.appendChild(el('span', 'adopt-title', 'Server sessions'));
+  const refresh = el('button', 'adopt-refresh', '⟳') as HTMLButtonElement;
+  refresh.type = 'button';
+  refresh.title = 'Refresh';
+  refresh.disabled = state.adoptLoading;
+  refresh.addEventListener('click', (e) => {
+    e.stopPropagation();
+    state.adoptLoading = true;
+    state.adoptError = null;
+    renderAdoptPanel();
+    post({ type: 'listServerSessions' });
+  });
+  header.appendChild(refresh);
+  adoptPanel.appendChild(header);
+
+  if (state.adoptLoading && !state.adoptList) {
+    adoptPanel.appendChild(el('div', 'adopt-empty', 'Loading…'));
+    return;
+  }
+  if (state.adoptError) {
+    adoptPanel.appendChild(el('div', 'adopt-error', state.adoptError));
+    return;
+  }
+  const list = state.adoptList ?? [];
+  if (list.length === 0) {
+    adoptPanel.appendChild(
+      el('div', 'adopt-empty', 'No active sessions on the server.'),
+    );
+    return;
+  }
+  for (const item of list) {
+    adoptPanel.appendChild(renderAdoptRow(item));
+  }
+}
+
+function renderAdoptRow(item: ServerSessionItem): HTMLElement {
+  const alreadyAdopted = state.sessions.some((s) => s.id === item.sessionId);
+  const row = el('div', 'adopt-item' + (alreadyAdopted ? ' adopted' : ''));
+  row.setAttribute('role', 'option');
+  row.setAttribute('tabindex', '0');
+  row.title = item.sessionId;
+
+  const title = el(
+    'div',
+    'adopt-item-title',
+    item.pageTitle || item.currentUrl || `Session ${item.sessionId.slice(0, 8)}`,
+  );
+  row.appendChild(title);
+
+  const meta = el('div', 'adopt-item-meta');
+  meta.appendChild(el('span', `adopt-status adopt-status-${cssSafe(item.status)}`, item.status));
+  if (item.currentUrl) meta.appendChild(el('span', 'adopt-url', item.currentUrl));
+  meta.appendChild(el('span', 'adopt-steps', `${item.totalStepsExecuted} steps`));
+  if (alreadyAdopted) meta.appendChild(el('span', 'adopt-tag', 'already open'));
+  row.appendChild(meta);
+
+  row.addEventListener('click', () => {
+    post({ type: 'adoptServerSession', item });
+    closeAdoptDropdown();
+  });
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      post({ type: 'adoptServerSession', item });
+      closeAdoptDropdown();
+    }
+  });
+  return row;
+}
+
+function cssSafe(s: string): string {
+  return s.replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
 function beginRename(session: SessionMeta, nameEl: HTMLElement): void {

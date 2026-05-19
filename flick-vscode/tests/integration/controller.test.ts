@@ -337,4 +337,152 @@ describe('FlickController', () => {
     assert.equal(persisted.length, 1);
     assert.equal(persisted[0].id, sessionId);
   });
+
+  // --- adopt server session ------------------------------------------------
+
+  test('listServerSessions forwards the server list back to the webview', async () => {
+    server.sessionsList = [
+      {
+        sessionId: 'server-1',
+        status: 'active',
+        currentUrl: 'https://example.com/dash',
+        pageTitle: 'Dashboard',
+        totalStepsExecuted: 4,
+      },
+      {
+        sessionId: 'server-2',
+        status: 'executing',
+        currentUrl: 'https://other.test/',
+        pageTitle: 'Other',
+        totalStepsExecuted: 0,
+      },
+    ];
+    const fw = await boot();
+    fw.drain();
+
+    fw.send({ type: 'listServerSessions' });
+    const reply = await wait(fw, 'serverSessions');
+    assert.equal(reply.error, null);
+    assert.ok(reply.sessions);
+    assert.equal(reply.sessions!.length, 2);
+    assert.equal(reply.sessions![0].sessionId, 'server-1');
+    assert.equal(reply.sessions![0].pageTitle, 'Dashboard');
+  });
+
+  test('listServerSessions surfaces an error when the server is unreachable', async () => {
+    // Crash the server before the request fires; the listSessions client
+    // method maps the network failure to ApiError with a clear message.
+    const fw = await boot();
+    await server.stop();
+    fw.drain();
+
+    fw.send({ type: 'listServerSessions' });
+    const reply = await wait(fw, 'serverSessions');
+    assert.equal(reply.sessions, null);
+    assert.ok(reply.error, 'error message must be present');
+    assert.match(reply.error!, /Cannot reach the API server/);
+  });
+
+  test('adoptServerSession creates a new local tab with the supplied id and marks it used', async () => {
+    const fw = await boot();
+    fw.drain();
+
+    const item = {
+      sessionId: 'adopted-abc',
+      status: 'active',
+      currentUrl: 'https://example.com/path',
+      pageTitle: 'Example Page',
+      totalStepsExecuted: 3,
+    };
+    fw.send({ type: 'adoptServerSession', item });
+
+    const sessions = await wait(fw, 'sessions');
+    assert.equal(sessions.sessions.length, 1);
+    const adopted = sessions.sessions[0];
+    assert.equal(adopted.id, 'adopted-abc', 'tab id matches the server session id verbatim');
+    assert.equal(adopted.name, 'Example Page', 'name derives from the page title');
+    assert.equal(adopted.used, true, 'adopted sessions skip the first-request config send');
+    assert.equal(sessions.activeSessionId, 'adopted-abc');
+
+    // The adopted tab survives a controller restart — the id was persisted.
+    const persisted = await new Store(dir).loadSessions();
+    assert.equal(persisted[0].id, 'adopted-abc');
+    assert.equal(persisted[0].used, true);
+
+    // SPEC-FLICK rule: `used: true` means the FIRST request after adoption
+    // must NOT include config — the server already initialized this session.
+    __setConfig('flick.defaultBaseUrl', 'http://localhost:3000');
+    __setConfig('flick.defaultTimeout', '60s');
+    controller!.onSettingsChanged();
+    fw.drain();
+    fw.send({
+      type: 'submitSteps',
+      sessionId: 'adopted-abc',
+      rawText: '1. Click button',
+    });
+    await wait(fw, 'historyReplace');
+    const reqs = stepsRequests();
+    assert.equal(reqs.length, 1);
+    assert.equal(
+      (reqs[0].body as { config?: unknown }).config,
+      undefined,
+      'adopted session must not send config on its first request',
+    );
+  });
+
+  test('adoptServerSession dedupes — re-adopting an already-open id just activates the existing tab', async () => {
+    const fw = await boot();
+    // Create one local session first; we'll keep it active, then adopt a
+    // server item with a different id to flip activeSessionId.
+    const firstId = await createSession(fw);
+    fw.drain();
+
+    const item = {
+      sessionId: 'server-only',
+      status: 'active',
+      currentUrl: '',
+      pageTitle: 'Adopted Tab',
+      totalStepsExecuted: 0,
+    };
+    fw.send({ type: 'adoptServerSession', item });
+    const afterAdopt = await wait(fw, 'sessions');
+    assert.equal(afterAdopt.sessions.length, 2);
+    assert.equal(afterAdopt.activeSessionId, 'server-only');
+
+    // Now switch BACK to the first tab, then re-adopt the same server
+    // session. The dedupe path must just re-activate it, not create a
+    // duplicate.
+    fw.send({ type: 'switchSession', sessionId: firstId });
+    await wait(fw, 'sessions');
+    fw.drain();
+
+    fw.send({ type: 'adoptServerSession', item });
+    const afterReadopt = await wait(fw, 'sessions');
+    assert.equal(
+      afterReadopt.sessions.length,
+      2,
+      'must NOT duplicate the tab — the local map is keyed by id',
+    );
+    assert.equal(
+      afterReadopt.activeSessionId,
+      'server-only',
+      'must reactivate the existing tab',
+    );
+  });
+
+  test('adoptServerSession falls back to the URL host when there is no page title', async () => {
+    const fw = await boot();
+    fw.drain();
+
+    const item = {
+      sessionId: 'no-title',
+      status: 'active',
+      currentUrl: 'https://www.example.org/page?x=1',
+      pageTitle: '',
+      totalStepsExecuted: 0,
+    };
+    fw.send({ type: 'adoptServerSession', item });
+    const sessions = await wait(fw, 'sessions');
+    assert.equal(sessions.sessions[0].name, 'www.example.org');
+  });
 });

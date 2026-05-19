@@ -134,6 +134,169 @@ body {
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
 
+/* --- adopt server session dropdown --------------------------------------- */
+
+.adopt-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.tab-adopt {
+  border: none;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.tab-adopt:hover,
+.tab-adopt.active {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.adopt-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 2px;
+  width: 320px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.4)));
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  z-index: 50;
+}
+
+.adopt-header {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+
+.adopt-refresh {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+  line-height: 1;
+}
+.adopt-refresh:hover:not(:disabled) {
+  opacity: 1;
+}
+.adopt-refresh:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.adopt-empty,
+.adopt-error {
+  padding: 12px;
+  font-size: 12px;
+  text-align: center;
+  opacity: 0.75;
+}
+
+.adopt-error {
+  color: var(--fail);
+  opacity: 1;
+}
+
+.adopt-item {
+  padding: 6px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.15));
+}
+.adopt-item:last-child {
+  border-bottom: none;
+}
+.adopt-item:hover,
+.adopt-item:focus {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+  outline: none;
+}
+.adopt-item.adopted {
+  opacity: 0.7;
+}
+
+.adopt-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.adopt-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.adopt-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+}
+
+.adopt-steps {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+.adopt-status {
+  flex: 0 0 auto;
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+}
+.adopt-status-active {
+  background: color-mix(in srgb, var(--pass) 25%, transparent);
+  color: var(--pass);
+}
+.adopt-status-executing {
+  background: color-mix(in srgb, var(--error) 25%, transparent);
+  color: var(--error);
+}
+
+.adopt-tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+  font-size: 10px;
+  font-weight: 500;
+}
+
 .topbar-right {
   display: flex;
   align-items: center;

@@ -18,6 +18,7 @@ import type {
   ConnectionStatus,
   HistoryEntry,
   HostToWebview,
+  ServerSessionItem,
   SessionMeta,
   StepResult,
   WebviewToHost,
@@ -147,7 +148,54 @@ export class FlickController {
         await writeSettings(msg.settings);
         // onSettingsChanged fires via the configuration listener and re-posts.
         break;
+      case 'listServerSessions':
+        await this.handleListServerSessions(webview);
+        break;
+      case 'adoptServerSession':
+        await this.adoptServerSession(msg.item);
+        break;
     }
+  }
+
+  // --- adopt-server-session flow ------------------------------------------
+
+  private async handleListServerSessions(webview: vscode.Webview): Promise<void> {
+    try {
+      const sessions = await this.api.listSessions();
+      this.postTo(webview, { type: 'serverSessions', sessions, error: null });
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : (err as Error).message;
+      this.postTo(webview, { type: 'serverSessions', sessions: null, error: message });
+    }
+  }
+
+  /**
+   * Attach an existing server session as a local tab. If a local tab already
+   * represents this server id, just activate it — never duplicate. Newly
+   * adopted sessions are marked `used: true` so the SPEC-FLICK "send config
+   * only on the first request" rule treats them as already-initialized.
+   */
+  private async adoptServerSession(item: ServerSessionItem): Promise<void> {
+    const existing = this.sessions.find((s) => s.id === item.sessionId);
+    if (existing) {
+      this.activeSessionId = existing.id;
+      this.postSessions();
+      await this.sendHistory(existing.id);
+      return;
+    }
+    const session: SessionMeta = {
+      id: item.sessionId,
+      name: deriveAdoptedName(item),
+      order: this.sessions.length,
+      stale: false,
+      used: true,
+    };
+    this.sessions.push(session);
+    this.activeSessionId = session.id;
+    await this.persistSessions();
+    await this.store.saveHistory(session.id, []);
+    this.postSessions();
+    await this.sendHistory(session.id);
   }
 
   private async handleReady(webview: vscode.Webview): Promise<void> {
@@ -475,4 +523,21 @@ export class FlickController {
     }
     return msg;
   }
+}
+
+/**
+ * Pick the most human-readable label for an adopted session tab. Prefers the
+ * page title (truncated), falls back to the URL host, then a short id.
+ */
+function deriveAdoptedName(item: ServerSessionItem): string {
+  const title = item.pageTitle?.trim();
+  if (title) return title.length > 32 ? `${title.slice(0, 31)}…` : title;
+  if (item.currentUrl) {
+    try {
+      return new URL(item.currentUrl).host || item.currentUrl;
+    } catch {
+      return item.currentUrl;
+    }
+  }
+  return `Session ${item.sessionId.slice(0, 8)}`;
 }
