@@ -271,6 +271,53 @@ describe('api-server tool dispatch', () => {
     expect(captures).toHaveLength(0); // no setVar fired
   });
 
+  it('reloads the catalogue when toolsDir is corrected on a later batch (same session)', async () => {
+    // Regression: a first batch with a missing/empty toolsDir caches an
+    // empty catalogue on the session. Before the fix that empty catalogue
+    // was reused for the session's whole life, so fixing the config and
+    // hitting Continue / re-running on the SAME session kept failing with
+    // "tool not found". The cache must invalidate when the toolsDir changes
+    // (or the cached catalogue is empty) so the corrected dir is picked up
+    // without a full session restart.
+    const sessionId = 'tools-reload-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+
+    // Batch 1: point at a directory that doesn't exist → empty catalogue,
+    // the [tool: echo] step fails because the tool isn't registered.
+    const missingDir = path.join(os.tmpdir(), 'tools-missing-' + Date.now());
+    const firstEvents: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: ['[tool: echo value="v1"]'],
+      sourceLines: [1],
+      toolsDir: missingDir,
+    })) {
+      firstEvents.push(ev);
+      if (ev.type === 'done') break;
+    }
+    expect(firstEvents.filter((e) => e.type === 'capture')).toHaveLength(0);
+    expect(firstEvents.some((e) => e.type === 'step:fail')).toBe(true);
+
+    // Batch 2: SAME session, corrected toolsDir → catalogue reloads and the
+    // tool now runs to completion.
+    const secondEvents: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: ['[tool: echo value="v2"]'],
+      sourceLines: [1],
+      toolsDir, // the real fixture dir
+    })) {
+      secondEvents.push(ev);
+      if (ev.type === 'done') break;
+    }
+    const captures = secondEvents.filter((e) => e.type === 'capture');
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({
+      name: 'echoed',
+      value: 'v2',
+      source: 'toolOutput',
+    });
+    expect(secondEvents.find((e) => e.type === 'done')?.status).toBe('passed');
+  });
+
   it('pauseAtNextTool emits tool:awaiting-debugger and parks until ack arrives', async () => {
     // Phase 5.B — when the request body sets `pauseAtNextTool: true`,
     // the server emits `tool:awaiting-debugger` before the next

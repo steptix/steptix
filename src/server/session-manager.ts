@@ -289,12 +289,19 @@ interface ManagedSession {
   envBundle?: EnvBundle;
   /**
    * Cached tool catalogue once `toolsDir` is supplied. Loaded lazily on the
-   * first batch that supplies one; subsequent batches reuse the catalogue
-   * (re-scanning the directory per batch would slow every step run for no
-   * gain — the file watcher / `loadToolCatalogue` re-run on session restart
-   * is the explicit reload story).
+   * first batch that supplies one; a non-empty catalogue from the same
+   * `toolsDir` is reused across batches (re-scanning per batch would slow
+   * every step run for no gain). The cache is invalidated — and the
+   * catalogue reloaded — when the incoming `toolsDir` differs from
+   * `toolCatalogueDir`, or when the cached catalogue is empty (a previously
+   * missing/empty dir that may now exist or have gained tools). This lets a
+   * Continue / re-run on the same session recover from a misconfigured
+   * `toolsDir` without a full session restart.
    */
   toolCatalogue?: ToolCatalogue;
+  /** Absolute `toolsDir` that produced `toolCatalogue`. Used to detect a
+   *  changed `toolsDir` between batches so the catalogue can be reloaded. */
+  toolCatalogueDir?: string;
   /**
    * When the step loop pauses awaiting next-step direction (stepMode !==
    * 'continue'), this holds the resolver for the Promise the loop is
@@ -902,15 +909,29 @@ export class SessionManager {
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
       ?? this.config.execution.timeout;
 
-    // Tool catalogue — when the caller supplies `toolsDir`, load it once and
-    // cache on the session. The step loop later dispatches `[tool: ...]`
-    // lines through `executeToolStep` so deterministic tool code runs on the
-    // server (parallel to how the CLI runner dispatches them). Without
-    // `toolsDir` `[tool: ...]` lines reach the AI as plain text — same as
-    // pre-Phase-5 behaviour.
-    if (request.toolsDir && !session.toolCatalogue) {
+    // Tool catalogue — when the caller supplies `toolsDir`, load it and cache
+    // on the session. The step loop later dispatches `[tool: ...]` lines
+    // through `executeToolStep` so deterministic tool code runs on the server
+    // (parallel to how the CLI runner dispatches them). Without `toolsDir`
+    // `[tool: ...]` lines reach the AI as plain text — same as pre-Phase-5
+    // behaviour.
+    //
+    // Reload (rather than reuse the cache) when the `toolsDir` changed since
+    // the cached catalogue was built, or when that catalogue is empty — a
+    // previously missing/misconfigured dir that the user has since fixed.
+    // This makes a Continue / re-run self-heal without a session restart. A
+    // populated catalogue from the same dir is reused (the steady-state perf
+    // case).
+    const cachedCatalogue = session.toolCatalogue;
+    const needsCatalogueLoad =
+      !!request.toolsDir &&
+      (!cachedCatalogue ||
+        session.toolCatalogueDir !== request.toolsDir ||
+        cachedCatalogue.size === 0);
+    if (request.toolsDir && needsCatalogueLoad) {
       try {
         session.toolCatalogue = await loadToolCatalogue(request.toolsDir);
+        session.toolCatalogueDir = request.toolsDir;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         logger.error(`Session "${sessionId}": failed to load tool catalogue "${request.toolsDir}": ${message}`);
