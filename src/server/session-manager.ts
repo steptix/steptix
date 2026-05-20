@@ -1552,6 +1552,10 @@ export class SessionManager {
                 browserTracker: session.browserTracker,
                 ...(stepCache && { stepCache }),
                 cacheEnabled: cacheEnabledForRequest && !!stepCache,
+                // No interactive console attached to a server-driven run —
+                // an AI clarification prompt must fail the step fast rather
+                // than block on stdin and hang the stream. See issues/014.
+                nonInteractive: true,
               },
             );
           }

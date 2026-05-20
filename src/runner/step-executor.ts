@@ -96,6 +96,14 @@ export interface StepExecutorOptions {
    *  Optional — when absent, the REPL still works but `/resume` only allows
    *  the immediate-next-step default. */
   testSteps?: string[];
+  /** When true, there is no interactive console attached to this run (e.g.
+   *  it's driven by the Sessions API server, not the CLI). The AI
+   *  clarification prompt reads its answer from `process.stdin` via
+   *  `readline`; with no console that blocks forever and hangs the run. In
+   *  this mode a clarification request fails the step fast instead, with the
+   *  AI's question surfaced as the error so the client can show it. See
+   *  issues/014. */
+  nonInteractive?: boolean;
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -363,7 +371,11 @@ async function executeStepAttempt(
   /** Set when the user takes control inside the AI clarification REPL. The post-loop
    *  return uses this to short-circuit with the right `runnerControl` payload so the
    *  test-runner doesn't double-prompt. */
-  let controlSignal: { kind: 'resume'; fromStepIndex: number } | { kind: 'exit' } | null = null;
+  let controlSignal:
+    | { kind: 'resume'; fromStepIndex: number }
+    | { kind: 'exit' }
+    | { kind: 'clarification-unavailable'; question: string }
+    | null = null;
   /** Ad-hoc StepResults produced inside the clarification REPL (typed Flick steps,
    *  /screenshot captures). Returned via a side-channel for the runner to merge. */
   const clarificationAdHoc: StepResult[] = [];
@@ -594,6 +606,21 @@ async function executeStepAttempt(
     const promptAction = aiResponse.actions.find((a) => a.action === 'prompt');
     if (promptAction && config.execution.promptOnAmbiguity) {
       const question = promptAction.question ?? promptAction.description;
+      if (opts.nonInteractive) {
+        // No console to read an answer from (server-driven run). Asking via
+        // readline would block on stdin forever and hang the test. Fail the
+        // step fast, carrying the AI's question as the error so the client
+        // can surface it. See issues/014.
+        controlSignal = { kind: 'clarification-unavailable', question };
+        allTurns.push({
+          turnNumber: currentTurn,
+          attemptNumber,
+          timestamp: turnTimestamp,
+          aiInteractions: turnAiInteractions,
+          subActions: turnSubActions,
+        });
+        break;
+      }
       const outcome = await promptUserWithReplEscape({
         question,
         page,
@@ -1341,6 +1368,26 @@ async function executeStepAttempt(
   }
 
   const durationMs = Date.now() - startTime;
+
+  if (controlSignal && controlSignal.kind === 'clarification-unavailable') {
+    // Server-driven run with no interactive console: the AI asked a
+    // question we can't answer here. Fail the step with the question as the
+    // error rather than blocking on stdin. See issues/014.
+    return {
+      index: stepIndex,
+      instruction,
+      status: 'failed',
+      turns: allTurns,
+      ...(assertionResults.length > 0 && { assertions: assertionResults }),
+      pageUrl: page.url(),
+      durationMs,
+      retried,
+      aiExplanation: `AI asked for clarification: ${controlSignal.question}`,
+      error:
+        `AI needs clarification, but this run has no interactive prompt ` +
+        `to answer it: ${controlSignal.question}`,
+    };
+  }
 
   if (controlSignal) {
     // User took control inside the AI clarification REPL. Return a fully
