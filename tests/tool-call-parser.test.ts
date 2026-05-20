@@ -128,6 +128,21 @@ describe('parseToolCall — syntax errors', () => {
     );
   });
 
+  it('gives a targeted hint when a template variable is unquoted', () => {
+    // `items={{repos}}` is a common mistake — the bare-identifier shorthand
+    // auto-quotes, but an explicit `=` value does not. The error must name
+    // the fix (quote it) rather than the generic value-forms list.
+    try {
+      parseToolCall('[tool: print_all items={{repos}}]');
+      throw new Error('expected throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(ToolCallSyntaxError);
+      const err = e as ToolCallSyntaxError;
+      expect(err.reason).toMatch(/template variable for argument 'items' must be quoted/);
+      expect(err.reason).toMatch(/items="\{\{\.\.\.\}\}"/);
+    }
+  });
+
   it('error class name is ToolCallSyntaxError (distinct from skill error)', () => {
     try {
       parseToolCall('[tool: foo bar=baz]');

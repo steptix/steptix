@@ -120,6 +120,16 @@ function readArgValue(
     }
     return scanner.readBareLiteral(argName);
   }
+  if (next === '{') {
+    // Almost certainly an unquoted `{{var}}` template reference — a common
+    // mistake, since the bare-identifier shorthand auto-quotes but an
+    // explicit `=` value does not. Point straight at the fix rather than
+    // listing the generic value forms (which never mention templates).
+    scanner.errorHere(
+      `template variable for argument '${argName}' must be quoted — ` +
+        `write ${argName}="{{...}}" (e.g. ${argName}="{{repos}}"), not ${argName}={{...}}`,
+    );
+  }
   scanner.errorHere(
     `expected '"', '[', a number, or true/false after '=' for argument '${argName}'`,
   );
