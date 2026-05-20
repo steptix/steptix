@@ -450,14 +450,16 @@ When a step fails and is retried, the retry is not blind — it includes context
 
 ### `aiui.config.json`
 
-A plain JSON object. The optional `"$schema"` key gives editors autocomplete
-and validation; every other key is optional and falls back to the built-in
+A plain JSON object. Every key is optional and falls back to the built-in
 defaults (omitted keys, and omitted siblings of partial nested objects, inherit
-from `DEFAULT_CONFIG` via a recursive deep merge).
+from `DEFAULT_CONFIG` via a recursive deep merge). Editing inside VS Code with
+the TestBench extension provides autocomplete + validation automatically (the
+extension ships the schema and binds it to `aiui.config.json`); outside the
+extension, an optional `"$schema"` key pointing at
+`./node_modules/ai-ui-automation/schema/aiui.config.schema.json` gives the same.
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
   "ai": {
     "gatewayUrl": "https://llm.corp.example",
     "model": "gpt-5.4",

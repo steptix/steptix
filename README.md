@@ -446,7 +446,6 @@ Create `aiui.config.json` in your project root:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
   "browser": {
     "headed": true,
     "viewport": { "width": 1280, "height": 720 },
@@ -464,7 +463,12 @@ Create `aiui.config.json` in your project root:
 }
 ```
 
-The optional `"$schema"` key gives editors autocomplete and validation. Secrets such as `AI_API_KEY` live in `.env`, never in this file.
+Editing `aiui.config.json` inside VS Code with the TestBench extension gives you
+autocomplete, enum-checking, and hover docs automatically — the extension ships
+the JSON schema and binds it to that filename, so no `"$schema"` key is needed.
+Outside the extension, add a `"$schema"` key pointing at the schema shipped in
+the installed package, e.g. `"./node_modules/ai-ui-automation/schema/aiui.config.schema.json"`.
+Secrets such as `AI_API_KEY` live in `.env`, never in this file.
 
 ### Environment variables
 

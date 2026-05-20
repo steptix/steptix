@@ -1,5 +1,4 @@
 {
-  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
   "ai": {
     "gatewayUrl": "https://aiapi.example.com",
     "model": "gpt-5.4-mini"

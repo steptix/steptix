@@ -44,7 +44,6 @@ Example:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
   "ai": { "gatewayUrl": "https://aiapi.example.com", "model": "gpt-5.4-mini" },
   "browser": { "headed": true },
   "tests": {
@@ -63,11 +62,14 @@ Two behavior notes:
   recursive deep merge, so a partial nested object inherits its sibling
   defaults — `"browser": { "viewport": { "width": 800 } }` now keeps the
   default `height` instead of dropping it. Arrays still replace wholesale.
-- **Optional `"$schema"` key.** Add the top-level `"$schema"` URL above for
-  editor autocomplete and validation. The loader strips it before merging, so
-  it never affects the resolved config. Malformed JSON is now a hard error
-  (fails loudly with the file path); a *missing* file still falls back to
-  defaults silently.
+- **Editor autocomplete + validation.** The TestBench VS Code extension ships
+  the JSON schema and binds it to `aiui.config.json`, so editing the file in
+  VS Code gives autocomplete, enum-checking, and hover docs with no setup.
+  Outside the extension, add an optional top-level `"$schema"` key pointing at
+  `./node_modules/ai-ui-automation/schema/aiui.config.schema.json`. The loader
+  strips `"$schema"` before merging, so it never affects the resolved config.
+  Malformed JSON is now a hard error (fails loudly with the file path); a
+  *missing* file still falls back to defaults silently.
 
 ### Breaking — `BrowserConfig` shape
 

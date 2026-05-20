@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.33",
+  "version": "0.5.34",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -17,6 +17,12 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": "aiui.config.json",
+        "url": "./schema/aiui.config.schema.json"
+      }
+    ],
     "breakpoints": [
       {
         "language": "markdown"
@@ -358,9 +364,10 @@
   },
   "scripts": {
     "typecheck:extension": "tsc -p tsconfig.extension.json --noEmit",
+    "copy:schema": "node -e \"const fs=require('fs');fs.mkdirSync('schema',{recursive:true});fs.copyFileSync('../schema/aiui.config.schema.json','schema/aiui.config.schema.json')\"",
     "build:extension": "node esbuild.extension.js",
     "build:webview": "vite build --config vite.config.webview.js",
-    "build": "npm run build:webview && npm run build:extension",
+    "build": "npm run copy:schema && npm run build:webview && npm run build:extension",
     "watch:extension": "node esbuild.extension.js --watch",
     "watch:webview": "vite build --config vite.config.webview.js --watch",
     "watch": "concurrently -n webview,extension -c blue,green \"npm:watch:webview\" \"npm:watch:extension\"",

@@ -84,7 +84,6 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
 async function writeDefaultTemplate(templateName: string, destPath: string): Promise<void> {
   const defaults: Record<string, string> = {
     'aiui.config.json': `{
-  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
   "ai": {
     "gatewayUrl": "https://aiapi.example.com",
     "model": "gpt-5.4-mini"
