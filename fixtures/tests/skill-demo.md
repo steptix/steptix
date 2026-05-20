@@ -9,5 +9,6 @@ exports `first_result_url`; we rename it to `target_url` in the caller scope
 and use it in a follow-up step.
 
 ## Steps
-1. [skill: duckduckgo_search query="OpenAI GPT-5" out.first_result_url="target_url"]
+1. Navigate to https://duckduckgo.com and verify the search box is visible
+2. [skill: duckduckgo_search query="OpenAI GPT-5" out.first_result_url="target_url"]
 2. Navigate to {{target_url}}
