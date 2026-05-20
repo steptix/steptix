@@ -55,6 +55,32 @@ export function registerCommands(
     await controller.runLines(lines, { breakpoints }).finally(() => registry.notifyRunning(false));
   };
 
+  /**
+   * Fully stop the active run and wipe its UI state. Shared by the Stop
+   * command and Close Session — closing a session while a run is in flight
+   * (or paused awaiting Continue) must first tear the run down, otherwise
+   * spinners and the yellow ▶ stay painted with no session behind them.
+   */
+  const performStop = (): void => {
+    const controller = registry.active();
+    controller?.stop();
+    // Stop must flip running statuses on BOTH the test file and any skill
+    // file the run descended into — otherwise skill-body lines keep
+    // spinning. Frame state on the controller is wiped too so a subsequent
+    // run doesn't inherit stale frames.
+    controller?.resetFrameState();
+    const editor = tracker.activeEditor;
+    if (editor && tracker.isActiveTestFile) {
+      tracker.setBreakpointStop(editor.document.uri, null);
+    }
+    tracker.markAllRunningStopped();
+    // A step-paused yellow ▶ may live on a SKILL file the run descended
+    // into — `setBreakpointStop` above only cleared the test-file marker.
+    // Walk every recorded step-paused entry and clear it where painted.
+    registry.clearAllStepPausedMarkers();
+    registry.notifyRunning(false);
+  };
+
   return [
     vscode.commands.registerCommand('testbench-native.runSelected', runSelected),
 
@@ -86,24 +112,7 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand('testbench-native.stop', () => {
-      const controller = registry.active();
-      controller?.stop();
-      // Phase 2.1: stop must flip running statuses on BOTH the test file
-      // and any skill file the run descended into — otherwise skill-body
-      // lines stay spinning after Stop. Frame state on the controller is
-      // wiped too so a subsequent run doesn't inherit stale frames.
-      controller?.resetFrameState();
-      const editor = tracker.activeEditor;
-      if (editor && tracker.isActiveTestFile) {
-        tracker.setBreakpointStop(editor.document.uri, null);
-      }
-      tracker.markAllRunningStopped();
-      // Phase 3.1.a: a step-paused yellow ▶ may live on a SKILL file the
-      // run descended into — `setBreakpointStop` above only cleared the
-      // test-file marker. Walk every recorded step-paused entry and
-      // clear it where it actually was painted.
-      registry.clearAllStepPausedMarkers();
-      registry.notifyRunning(false);
+      performStop();
     }),
 
     // ── Phase 3 step controls ────────────────────────────────────────
@@ -193,6 +202,11 @@ export function registerCommands(
     vscode.commands.registerCommand('testbench-native.restartSession', async () => {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
+      // Close Session must also stop the test: a run that's in flight (or
+      // paused awaiting Continue) otherwise keeps its spinners / yellow ▶
+      // painted after the session is gone, and a later Continue would spin
+      // up a brand-new session against stale UI state.
+      performStop();
       await controller.closeSession();
       vscode.window.setStatusBarMessage(
         'TestBench: session closed — next F5 starts a fresh browser',

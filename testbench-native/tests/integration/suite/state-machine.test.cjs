@@ -255,6 +255,67 @@ describe('TestBench debug state machine', function () {
     );
   });
 
+  it('running → idle (Close Session): restartSession stops the in-flight run AND closes the session', async () => {
+    // Close Session must also stop the test — otherwise the in-flight step's
+    // spinner / yellow ▶ stay painted after the session is gone, and a later
+    // Continue would spin up a fresh session against stale UI state.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('status running', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+
+    const closeCallsBefore = fake.closeSessionCalls;
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+
+    await waitFor('idle after Close Session', () => !hooks.isRunning());
+    const snap = hooks.tracker.snapshot();
+    assert.equal(
+      snap.breakpointStop,
+      null,
+      'Close Session must clear any pause indicator',
+    );
+    const statuses = Object.fromEntries(snap.statuses);
+    assert.equal(
+      statuses[9],
+      'stopped',
+      'Close Session must flip the in-flight running step to stopped (parity with Stop)',
+    );
+    assert.ok(
+      fake.closeSessionCalls > closeCallsBefore,
+      'Close Session must still close the server session',
+    );
+  });
+
+  it('paused → idle (Close Session): restartSession clears the yellow ▶ on a paused run', async () => {
+    // A breakpoint-paused run isn't actively streaming (controller.active is
+    // null), so closeSession's own abort is a no-op. The explicit stop in the
+    // command is what clears the parked yellow ▶ — guard that it does.
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(fixtureUri('test-with-steps.md'), new vscode.Position(9, 0)),
+        true,
+      ),
+    ]);
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at line 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+    await waitFor('yellow arrow cleared by Close Session', () => {
+      return hooks.tracker.snapshot().breakpointStop === null;
+    });
+    assert.equal(hooks.isRunning(), false);
+  });
+
   it('running → idle (webview stop): webview-driven stop also marks in-flight step stopped', async () => {
     // Guards the two-handler regression class: testbench-native.stop and the
     // webview-message `{ type: 'stop' }` handler are separate code paths.
