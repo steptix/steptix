@@ -10,7 +10,7 @@
     "dir": "./tests",
     "contextDir": "./context",
     "skillsDir": "./skills",
-    "toolsDir": "./tools/src"
+    "toolsDir": "../../fixtures/tools/src"
   },
   "reports": {
     "outputDir": "./reports"
