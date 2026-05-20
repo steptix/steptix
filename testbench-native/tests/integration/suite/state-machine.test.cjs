@@ -385,6 +385,48 @@ describe('TestBench debug state machine', function () {
     );
   });
 
+  it('Step Into from a breakpoint pause preserves earlier steps\' pass marks', async () => {
+    // Regression: Step Into / Over / Out resuming from a breakpoint pause
+    // must be a continuation (like Continue). Without isContinuation, the
+    // relaunch clears all statuses and the ✓ earned by steps before the
+    // breakpoint vanishes the moment the user Steps Into the next step.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(8, 0),
+      new vscode.Position(9, 0),
+    );
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at 10 after step 9 passes', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+    assert.equal(
+      Object.fromEntries(hooks.tracker.snapshot().statuses)[9],
+      'pass',
+      'precondition: step 9 passed before the breakpoint',
+    );
+
+    // Step Into → relaunches from the breakpoint line. The earlier pass
+    // mark must survive the relaunch.
+    void vscode.commands.executeCommand('testbench-native.stepInto');
+    await waitFor('new stream after Step Into', () => fake.hasActiveStream);
+    assert.equal(
+      Object.fromEntries(hooks.tracker.snapshot().statuses)[9],
+      'pass',
+      'Step Into from a breakpoint pause must NOT clear earlier pass marks',
+    );
+  });
+
   it('running → paused (user pause): testbench-native.pause marks resume point', async () => {
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);

@@ -507,6 +507,11 @@ async function dispatchStep(
         breakpoints,
         skipBreakpointAtStart: true,
         stepMode: mode,
+        // Resuming from a breakpoint pause is a continuation (same as
+        // Continue) — without this, runLines clears all statuses and the
+        // pass marks earned by steps before the breakpoint disappear when
+        // the user Steps Into the next step.
+        isContinuation: true,
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
       })
       .finally(() => registry.notifyRunning(false));
