@@ -49,13 +49,25 @@
         },
         "testbench.consoleLogLevel": {
           "type": "string",
-          "enum": ["", "silent", "error", "warn", "info", "debug"],
+          "enum": [
+            "",
+            "silent",
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
           "default": "",
           "description": "Console + output-panel log threshold for test runs. Leave blank to use the server's configured default. A test's '## Config: consoleLogLevel' setting overrides this."
         },
         "testbench.serverFileLogLevel": {
           "type": "string",
-          "enum": ["", "off", "compact", "full"],
+          "enum": [
+            "",
+            "off",
+            "compact",
+            "full"
+          ],
           "default": "",
           "description": "Per-run log file written by the server under reports/logs/. 'off' disables; 'compact' = log lines only; 'full' = log lines + AI request/response trace. Leave blank to use the server's configured default. A test's '## Config: serverFileLogLevel' setting overrides this."
         },
@@ -154,7 +166,6 @@
     "concurrently": "^9.0.0",
     "esbuild": "^0.28.0",
     "glob": "^13.0.6",
-    "mocha": "^11.7.5",
     "typescript": "^5.5.0",
     "vite": "^7.0.0"
   }
