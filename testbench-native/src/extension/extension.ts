@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import {
-  extractSteps,
   type HostToWebviewMsg,
   type WebviewToHostMsg,
 } from 'ai-ui-automation-runner-core';
@@ -880,76 +879,27 @@ async function handleWebviewMessage(
         .finally(() => registry.notifyRunning(false));
       return;
     }
+    // The four run-lifecycle controls delegate to their commands so the
+    // sidebar buttons and the editor/keybinding commands share ONE
+    // implementation. Re-implementing them here is what caused the
+    // "fixed in one place" drift class — e.g. the command Continue
+    // preserved pass marks (isContinuation) while a hand-rolled webview
+    // Resume cleared them, and the command Close Session stopped the run
+    // while the webview one didn't.
     case 'stop': {
-      const controller = registry.active();
-      controller?.stop();
-      // Phase 2.1: parity with testbench-native.stop — frame state cleared
-      // and ALL `running` statuses (test file + any descended skill file)
-      // flipped to `stopped`. Without this a Stop while inside a skill
-      // leaves skill-body lines spinning.
-      controller?.resetFrameState();
-      // Also clear any breakpoint pause so the user fully exits the run.
-      // Without this, hitting Stop while paused at a breakpoint would leave
-      // the yellow ▶ marker stuck and the Resume button still active.
-      const editor = tracker.activeEditor;
-      if (editor && tracker.isActiveTestFile) {
-        tracker.setBreakpointStop(editor.document.uri, null);
-      }
-      tracker.markAllRunningStopped();
-      // Phase 3.1.a: clear step-paused markers on whatever URIs they were
-      // painted on — the active-editor-only clear above misses any marker
-      // step:awaiting placed on a skill file the run descended into.
-      registry.clearAllStepPausedMarkers();
-      registry.notifyRunning(false);
+      await vscode.commands.executeCommand('testbench-native.stop');
       return;
     }
     case 'pause': {
-      const controller = registry.active();
-      controller?.pause();
-      // The run-controller's abort handler will publish breakpointStop +
-      // done(aborted) once the stream actually unwinds. We don't flip
-      // running=false here — the .finally on the running runLines() does.
-      // BUT: flip any `running` statuses to `stopped` synchronously so the
-      // skill-body / test-file spinner doesn't spin forever after pause.
-      // Matches what testbench-native.pause does on the command path.
-      tracker.markAllRunningStopped();
+      await vscode.commands.executeCommand('testbench-native.pause');
       return;
     }
     case 'resume': {
-      const controller = registry.active();
-      if (!controller) return notifyNoActive();
-      const state = tracker.state(controller.document.uri);
-      if (state.breakpointStop == null) return;
-      const startLine = state.breakpointStop;
-      // Clear the pause indicator before kicking off — the run will set a
-      // new one if it hits another breakpoint.
-      tracker.setBreakpointStop(controller.document.uri, null);
-      registry.notifyRunning(true);
-      // Resume continues from startLine through the rest of the document
-      // (or until the next breakpoint). Passing `[startLine]` alone would
-      // collapse through resolveRunLines to a single-step run — useful if
-      // we wanted "step over" semantics, but Resume's contract is to
-      // *continue execution*, matching how F5 works in a debugger.
-      const resumeLines = extractSteps(controller.document.getText())
-        .map((s) => s.line)
-        .filter((line) => line >= startLine);
-      void controller
-        .runLines(resumeLines, {
-          breakpoints: tracker.breakpoints(controller.document.uri),
-          // First step is the pause line itself; let it through.
-          skipBreakpointAtStart: true,
-        })
-        .finally(() => registry.notifyRunning(false));
+      await vscode.commands.executeCommand('testbench-native.continueRun');
       return;
     }
     case 'restartSession': {
-      const controller = registry.active();
-      if (!controller) return notifyNoActive();
-      await controller.closeSession();
-      vscode.window.setStatusBarMessage(
-        'TestBench: session closed — next F5 starts a fresh browser',
-        3000,
-      );
+      await vscode.commands.executeCommand('testbench-native.restartSession');
       return;
     }
     case 'promptResponse': {

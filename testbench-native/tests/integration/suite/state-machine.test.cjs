@@ -427,6 +427,73 @@ describe('TestBench debug state machine', function () {
     );
   });
 
+  it('webview Resume from a breakpoint pause preserves earlier pass marks', async () => {
+    // The sidebar ▶ Resume button posts {type:'resume'}, which now
+    // delegates to the continueRun command. Guards that the delegation
+    // carries isContinuation (earlier hand-rolled webview Resume cleared
+    // statuses; the command path never did).
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(8, 0),
+      new vscode.Position(9, 0),
+    );
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+    assert.equal(
+      Object.fromEntries(hooks.tracker.snapshot().statuses)[9],
+      'pass',
+      'precondition: step 9 passed before the breakpoint',
+    );
+
+    await hooks.dispatchWebviewMessage({ type: 'resume' });
+    await waitFor('new stream after webview Resume', () => fake.hasActiveStream);
+    assert.equal(
+      Object.fromEntries(hooks.tracker.snapshot().statuses)[9],
+      'pass',
+      'webview Resume must preserve earlier pass marks (delegates to continueRun)',
+    );
+  });
+
+  it('webview Close Session stops the in-flight run and closes the session', async () => {
+    // The sidebar Close Session button posts {type:'restartSession'}, which
+    // now delegates to the restartSession command — so it gets the same
+    // stop-the-run cleanup as the editor-title command (parity).
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('status running', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[9] === 'running';
+    });
+
+    const closeBefore = fake.closeSessionCalls;
+    await hooks.dispatchWebviewMessage({ type: 'restartSession' });
+    await waitFor('idle after webview Close Session', () => !hooks.isRunning());
+    const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(
+      statuses[9],
+      'stopped',
+      'webview Close Session must flip the in-flight running step to stopped',
+    );
+    assert.ok(
+      fake.closeSessionCalls > closeBefore,
+      'webview Close Session must still close the server session',
+    );
+  });
+
   it('running → paused (user pause): testbench-native.pause marks resume point', async () => {
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
