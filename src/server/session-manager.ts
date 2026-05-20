@@ -189,7 +189,7 @@ export type RunEvent =
   | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo; fromCache?: boolean }
   | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
-  | { type: 'capture'; line: number; name: string; value: string }
+  | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' }
   | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' }
   | { type: 'frame:push'; frame: FrameInfo }
   | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
@@ -215,6 +215,9 @@ export interface StepResponse {
   stepsTotal: number;
   results: StepResultResponse[];
   outputs: Record<string, string>;
+  /** Per-key provenance for `outputs`, same keys. Additive: older clients
+   *  ignore it. See `ManagedSession.outputSources` for the labelling rules. */
+  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput'>;
   error: { step: number; message: string } | null;
   pageTitle: string;
 }
@@ -264,6 +267,16 @@ interface ManagedSession {
   sessionConfig: { baseUrl?: string; timeout?: string };
   configSet: boolean;
   outputs: Record<string, string>;
+  /**
+   * Provenance label for each key in `outputs`. Written at each variable
+   * write site (parameter seeding, tool/skill output, `[output:]` capture,
+   * end-of-step sweep). First-write-wins: once a name is labelled it keeps
+   * that label even if a later write overwrites the *value* — so a parameter
+   * shadowed by a same-named capture still reads as `'parameter'`, preserving
+   * the variable's original identity rather than hiding it behind the latest
+   * source.
+   */
+  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput'>;
   totalStepsExecuted: number;
   conversationHistory: string[];
   aiClient: AiClient;
@@ -728,6 +741,7 @@ export class SessionManager {
       sessionConfig: sessionConfig ?? {},
       configSet: sessionConfig !== undefined,
       outputs: {},
+      outputSources: {},
       totalStepsExecuted: 0,
       conversationHistory: [],
       aiClient,
@@ -853,6 +867,15 @@ export class SessionManager {
       ...(request.parameters ?? {}),
     };
 
+    // Label every incoming parameter as 'parameter'. First-write-wins: if a
+    // name was already labelled by an earlier batch we leave it alone, so a
+    // value reused across batches keeps its original provenance.
+    if (request.parameters) {
+      for (const k of Object.keys(request.parameters)) {
+        if (!(k in session.outputSources)) session.outputSources[k] = 'parameter';
+      }
+    }
+
     // Resolve env+data bundle on first request that supplies an envName.
     // Cached on the session so subsequent batches skip the disk hit. A
     // request that omits envName never triggers loading and falls through
@@ -900,6 +923,7 @@ export class SessionManager {
           stepsTotal,
           results: [],
           outputs: session.outputs,
+          outputSources: { ...session.outputSources },
           error: { step: 0, message },
           pageTitle: '',
         };
@@ -950,6 +974,18 @@ export class SessionManager {
           // directly into the step text rather than into the
           // resolvedParameters map.
           if (f.inputs) frameInputs[id] = { ...f.inputs };
+          // Tag this skill's declared outputs as 'toolOutput' provenance.
+          // They reach session scope via a rewritten `[store as: ...]` and
+          // would otherwise be swept as plain 'capture' (the runtime can't
+          // tell a skill return from a page capture). Seed the label here —
+          // before the step loop — using first-write-wins so a name already
+          // claimed by a parameter keeps 'parameter'. Skill-internal
+          // (`__skill*`) names never reach `session.outputs`, so skip them.
+          for (const name of f.outputs ?? []) {
+            if (!name.startsWith('__skill') && !(name in session.outputSources)) {
+              session.outputSources[name] = 'toolOutput';
+            }
+          }
         }
         // Re-derive sourceLines: skill-body steps point at the skill file's
         // own line; inline steps keep their original test-file line. Without
@@ -974,6 +1010,7 @@ export class SessionManager {
           stepsTotal,
           results: [],
           outputs: session.outputs,
+          outputSources: { ...session.outputSources },
           error: { step: 0, message },
           pageTitle: '',
         };
@@ -1457,11 +1494,13 @@ export class SessionManager {
             // `[output: ...]` prefix.
             for (const [aliasName, aliasValue] of Object.entries(outcome.outputs)) {
               session.outputs[aliasName] = aliasValue;
+              if (!(aliasName in session.outputSources)) session.outputSources[aliasName] = 'toolOutput';
               emit({
                 type: 'capture',
                 line: sourceLineFor(i),
                 name: aliasName,
                 value: aliasValue,
+                source: 'toolOutput',
               });
             }
           } else {
@@ -1552,6 +1591,7 @@ export class SessionManager {
             stepOutputs[varName] = resolvedParameters[varName]!;
             // Accumulate into session outputs
             session.outputs[varName] = resolvedParameters[varName]!;
+            if (!(varName in session.outputSources)) session.outputSources[varName] = 'capture';
             // Surface the capture to streaming clients so the Variables
             // panel can update live. We only emit for values that were
             // actually set — missing extractions stay silent.
@@ -1560,6 +1600,7 @@ export class SessionManager {
               line: sourceLineFor(i),
               name: varName,
               value: resolvedParameters[varName]!,
+              source: 'capture',
             });
           }
         }
@@ -1676,6 +1717,10 @@ export class SessionManager {
           for (const [key, value] of Object.entries(resolvedParameters)) {
             if (!key.startsWith('__skill')) {
               session.outputs[key] = value;
+              // Anything that reaches the sweep unlabelled was set by a
+              // `[store as:]` modifier (the other write sites label inline).
+              // Default to 'capture'; never overwrite an existing label.
+              if (!(key in session.outputSources)) session.outputSources[key] = 'capture';
             }
           }
 
@@ -1862,6 +1907,7 @@ export class SessionManager {
       stepsTotal,
       results,
       outputs: { ...session.outputs },
+      outputSources: { ...session.outputSources },
       error: errorInfo,
       pageTitle,
     };

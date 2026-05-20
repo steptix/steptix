@@ -87,6 +87,51 @@ type: skill
     expect(result.origins[2]?.skillLine).toBeGreaterThan(result.origins[1]!.skillLine!);
   });
 
+  it('records a skill frame\'s effective output names (aliased + unaliased)', async () => {
+    await writeSkill(
+      'count',
+      `---
+type: skill
+---
+# count
+## Outputs
+- result_count
+- page_total
+## Steps
+1. Count rows [store as: result_count]
+2. Read total [store as: page_total]
+`,
+    );
+
+    // Caller aliases one output, leaves the other under its declared name.
+    const result = await expandSkills(
+      ['[skill: count out.result_count="my_count"]'],
+      tmpDir,
+    );
+
+    const frame = result.frames[Object.keys(result.frames)[0]!]!;
+    // Effective session-scope names: aliased output uses the alias, the
+    // unaliased one keeps its declared name. Order follows `## Outputs`.
+    expect(frame.outputs).toEqual(['my_count', 'page_total']);
+  });
+
+  it('omits frame.outputs detail for skills with no declared outputs', async () => {
+    await writeSkill(
+      'noop',
+      `---
+type: skill
+---
+# noop
+## Steps
+1. Do nothing
+`,
+    );
+
+    const result = await expandSkills(['[skill: noop]'], tmpDir);
+    const frame = result.frames[Object.keys(result.frames)[0]!]!;
+    expect(frame.outputs).toEqual([]);
+  });
+
   it('chains frames when a skill calls another skill', async () => {
     await writeSkill(
       'inner',

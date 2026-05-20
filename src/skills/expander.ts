@@ -60,6 +60,18 @@ export interface ExpandedFrame {
    * a debugger pause inside the skill can surface them.
    */
   inputs?: Record<string, string>;
+  /**
+   * Effective session-scope names this skill's `## Outputs` write to,
+   * i.e. each declared output mapped through the caller's alias
+   * (`call.outputAliases[output] ?? output`). The server uses these to
+   * tag the resulting variables as `'toolOutput'` provenance — without
+   * this hint they reach session scope via a rewritten `[store as: ...]`
+   * and would be indistinguishable from a plain page capture. Names that
+   * are skill-internal (namespaced `__skillN_*`) never reach session
+   * scope, so labelling a stale one is harmless. Absent for the test
+   * (root) frame.
+   */
+  outputs?: string[];
 }
 
 /**
@@ -255,6 +267,10 @@ async function expandRecursive(
       // the skill body's step text (see `applySkillScope`), but
       // that interpolation isn't reversible from the runtime side.
       inputs: { ...call.args },
+      // Effective session-scope names for this skill's declared outputs,
+      // each mapped through the caller's alias (or the declared name when
+      // unaliased). Lets the server tag these variables as 'toolOutput'.
+      outputs: skill.outputs.map((o) => call.outputAliases[o] ?? o),
     };
 
     // Outermost-skill attribution: keep the first skill we entered as the

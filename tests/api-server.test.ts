@@ -274,6 +274,19 @@ describe('API Server', () => {
       expect(body.error).toBeNull();
     });
 
+    it('returns outputSources alongside outputs, tagging parameters', async () => {
+      const { status, body } = await api('POST', '/sessions/sources-1/steps', {
+        steps: ['Click the login button'],
+        parameters: { user: 'bob' },
+      });
+
+      expect(status).toBe(200);
+      expect(body).toHaveProperty('outputs');
+      expect(body).toHaveProperty('outputSources');
+      expect(body.outputs).toMatchObject({ user: 'bob' });
+      expect(body.outputSources).toMatchObject({ user: 'parameter' });
+    });
+
     it('returns 400 when steps array is empty', async () => {
       const { status, body } = await api('POST', '/sessions/empty-steps/steps', {
         steps: [],
@@ -572,6 +585,32 @@ describe('API Server', () => {
       // We requested 5 steps. If the server propagates abort, fewer than 5
       // executeStep calls should have fired before the loop tore down.
       expect(callsAfterAbort).toBeLessThan(5);
+    });
+
+    it('capture events stream with source="capture" for [output:] extractions', { timeout: 30_000 }, async () => {
+      // Verify the capture source rides the SSE wire (not just the manager's
+      // internal emit). Override executeStep for this one run so the mocked
+      // step "extracts" the [output:] var into resolvedParameters.
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
+        if (opts.resolvedParameters) opts.resolvedParameters['orderId'] = 'ORD-42';
+        return { index: 1, instruction, status: 'passed', turns: [], durationMs: 10, retried: false };
+      });
+
+      const res = await fetch(`${baseUrl}/sessions/capture-src/steps?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({ steps: ['[output: orderId] Get the order ID'], sourceLines: [10] }),
+      });
+
+      const events = await readSseStream(res);
+      const captures = events.filter((e) => e.event === 'capture');
+      expect(captures).toHaveLength(1);
+      expect(captures[0]!.data).toMatchObject({ name: 'orderId', value: 'ORD-42', source: 'capture' });
     });
 
     it('falls back to step index when sourceLines omitted', { timeout: 30_000 }, async () => {

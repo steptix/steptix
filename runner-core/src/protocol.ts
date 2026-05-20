@@ -114,6 +114,16 @@ export interface CaptureEvent {
   line: number;
   name: string;
   value: string;
+  /**
+   * Where this variable came from. Only `'capture'` (an `[output:]`/`[store
+   * as:]` extraction) and `'toolOutput'` (a `[tool:]`/`[skill:]` return)
+   * flow through this event — `'parameter'` values arrive via the separate
+   * `parametersResolved` event, which already tags them by event type, so it
+   * is intentionally absent here. Required on new emitters; consumers talking
+   * to a not-yet-upgraded server must treat an absent `source` as
+   * `'capture'` (the conservative default).
+   */
+  source: 'capture' | 'toolOutput';
 }
 
 export interface DoneEvent {

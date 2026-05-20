@@ -81,6 +81,25 @@ test('isRunEvent: step events still narrow when carrying frame info', () => {
   assert.equal(isRunEvent(stepWithFrame), true);
 });
 
+test('isRunEvent: capture event narrows with a source discriminator', () => {
+  for (const source of ['capture', 'toolOutput']) {
+    assert.equal(
+      isRunEvent({ type: 'capture', line: 7, name: 'x', value: 'v', source }),
+      true,
+      source,
+    );
+  }
+});
+
+test('isRunEvent: capture event from an old server (no source) still narrows', () => {
+  // Backward compat: a server that predates source tagging emits a capture
+  // without the field. Narrowing keys off `type` only, so it must still pass;
+  // consumers that read `source` are expected to treat absent as 'capture'.
+  const legacyCapture = { type: 'capture', line: 7, name: 'x', value: 'v' };
+  assert.equal(isRunEvent(legacyCapture), true);
+  assert.equal(legacyCapture.source ?? 'capture', 'capture');
+});
+
 test('isRunEvent: accepts frame:push/pop/scope payloads', () => {
   assert.equal(
     isRunEvent({

@@ -211,10 +211,14 @@ describe('api-server tool dispatch', () => {
       if (ev.type === 'done') break;
     }
 
-    // The tool ran — capture event mirrored the setVar.
+    // The tool ran — capture event mirrored the setVar, tagged toolOutput.
     const captures = events.filter((e) => e.type === 'capture');
     expect(captures).toHaveLength(1);
-    expect(captures[0]).toMatchObject({ name: 'echoed', value: 'hello-from-tool' });
+    expect(captures[0]).toMatchObject({
+      name: 'echoed',
+      value: 'hello-from-tool',
+      source: 'toolOutput',
+    });
 
     // The step passed; aiExplanation mentions the tool name + outputs.
     const passes = events.filter((e) => e.type === 'step:pass');
@@ -223,6 +227,28 @@ describe('api-server tool dispatch', () => {
 
     const done = events.find((e) => e.type === 'done');
     expect(done?.status).toBe('passed');
+  });
+
+  it('non-streaming response tags a tool output as toolOutput in outputSources', async () => {
+    // Same echo tool, but via the plain JSON route. The /steps response
+    // must carry outputSources alongside outputs with the right provenance.
+    const sessionId = 'tools-json-' + Date.now();
+    const res = await fetch(
+      `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+        body: JSON.stringify({
+          steps: ['[tool: echo value="json-tool"]'],
+          sourceLines: [1],
+          toolsDir,
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outputs).toMatchObject({ echoed: 'json-tool' });
+    expect(body.outputSources).toMatchObject({ echoed: 'toolOutput' });
   });
 
   it('without toolsDir, [tool: ...] steps fall through to executeStep (legacy)', async () => {

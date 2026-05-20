@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { Config } from '../src/config/types.js';
 import type { StepResult } from '../src/report/types.js';
 
@@ -479,6 +482,7 @@ describe('SessionManager', () => {
         line: 1,
         name: 'orderId',
         value: 'ORD-789',
+        source: 'capture',
       });
     });
 
@@ -602,6 +606,114 @@ describe('SessionManager', () => {
       });
 
       expect(response.results[0]!.outputs).toEqual({});
+    });
+
+    it('tags request parameters as source "parameter" in outputSources', async () => {
+      const response = await manager.executeSteps('session-1', {
+        steps: ['Click the button'],
+        parameters: { username: 'alice', region: 'eu' },
+      });
+
+      expect(response.outputs).toMatchObject({ username: 'alice', region: 'eu' });
+      expect(response.outputSources).toMatchObject({
+        username: 'parameter',
+        region: 'parameter',
+      });
+    });
+
+    it('tags [output:] captures as source "capture" in outputSources', async () => {
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['orderId'] = 'ORD-1';
+        }
+        return {
+          index: 1,
+          instruction,
+          status: 'passed',
+          turns: [],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const response = await manager.executeSteps('session-1', {
+        steps: ['[output: orderId] Get the order ID'],
+      });
+
+      expect(response.outputs).toMatchObject({ orderId: 'ORD-1' });
+      expect(response.outputSources).toMatchObject({ orderId: 'capture' });
+    });
+
+    it('keeps the "parameter" label when a same-named capture overwrites the value (first-write-wins)', async () => {
+      // The collision case: a value seeded as a parameter stays labelled
+      // 'parameter' even after a later [output:] capture overwrites the
+      // value, preserving the variable's original identity.
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
+        if (opts.resolvedParameters) {
+          // A capture re-extracts the same name with a new value.
+          opts.resolvedParameters['token'] = 'captured-value';
+        }
+        return {
+          index: 1,
+          instruction,
+          status: 'passed',
+          turns: [],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const response = await manager.executeSteps('session-1', {
+        steps: ['[output: token] Re-read the token'],
+        parameters: { token: 'param-value' },
+      });
+
+      // Value follows last-write (the capture); label stays the first source.
+      expect(response.outputs).toMatchObject({ token: 'captured-value' });
+      expect(response.outputSources).toMatchObject({ token: 'parameter' });
+    });
+
+    it('tags skill ## Outputs as source "toolOutput" in outputSources', async () => {
+      // A skill output reaches session scope via a rewritten `[store as:]`,
+      // which is otherwise indistinguishable from a plain page capture. The
+      // expander surfaces the effective output name and the server seeds the
+      // 'toolOutput' label from it — so this must NOT fall through to 'capture'.
+      const skillsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-skill-'));
+      await fs.writeFile(
+        path.join(skillsDir, 'fetch_order.md'),
+        `---
+type: skill
+---
+# fetch_order
+## Outputs
+- order_id
+## Steps
+1. Read the order id [store as: order_id]
+`,
+      );
+
+      // Simulate the step executor storing the aliased output into scope.
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
+        if (opts.resolvedParameters) opts.resolvedParameters['myOrder'] = 'ORD-9';
+        return {
+          index: 1,
+          instruction,
+          status: 'passed',
+          turns: [],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const response = await manager.executeSteps('session-1', {
+        steps: ['[skill: fetch_order out.order_id="myOrder"]'],
+        skillsDir,
+      });
+
+      await fs.rm(skillsDir, { recursive: true, force: true });
+
+      expect(response.outputs).toMatchObject({ myOrder: 'ORD-9' });
+      expect(response.outputSources).toMatchObject({ myOrder: 'toolOutput' });
     });
 
     it('handles executeStep throwing an unexpected error', async () => {
