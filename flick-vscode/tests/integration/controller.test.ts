@@ -19,7 +19,7 @@ import * as path from 'node:path';
 import { FlickController } from '../../src/extension/controller';
 import { Store } from '../../src/extension/store';
 import type { HostToWebview } from '../../src/shared/protocol';
-import { FakeApiServer, failedBatch } from '../fakes/fake-api-server';
+import { FakeApiServer, failedBatch, passedBatch } from '../fakes/fake-api-server';
 import { FakeBrowserServer } from '../fakes/fake-browser-server';
 import { FakeWebview, delay } from '../fakes/fake-webview';
 import {
@@ -195,6 +195,51 @@ describe('FlickController', () => {
     assert.equal(entry.batch.results[1].status, 'failed');
     assert.equal(entry.batch.error?.step, 1);
     assert.match(entry.batch.error?.message ?? '', /Assertion failed/);
+  });
+
+  test('outputSources from the server are passed through onto the batch', async () => {
+    const fw = await boot();
+    const sessionId = await createSession(fw);
+    server.stepsResponse = (id, body) => ({
+      json: passedBatch(
+        id,
+        body.steps,
+        { user: 'alice', pageTitle: 'Home', token: 'abc' },
+        { user: 'parameter', pageTitle: 'capture', token: 'toolOutput' },
+      ),
+    });
+    fw.drain();
+
+    fw.send({ type: 'submitSteps', sessionId, rawText: 'Do a thing' });
+    const replace = await wait(fw, 'historyReplace');
+
+    const entry = replace.entry;
+    if (entry.kind !== 'result') throw new Error('unreachable');
+    assert.deepEqual(entry.batch.outputs, { user: 'alice', pageTitle: 'Home', token: 'abc' });
+    assert.deepEqual(entry.batch.outputSources, {
+      user: 'parameter',
+      pageTitle: 'capture',
+      token: 'toolOutput',
+    });
+  });
+
+  test('a server that omits outputSources leaves the field undefined (back-compat)', async () => {
+    const fw = await boot();
+    const sessionId = await createSession(fw);
+    // passedBatch with no `outputSources` arg omits the field from the payload,
+    // mirroring an older server.
+    server.stepsResponse = (id, body) => ({
+      json: passedBatch(id, body.steps, { pageTitle: 'Home' }),
+    });
+    fw.drain();
+
+    fw.send({ type: 'submitSteps', sessionId, rawText: 'Do a thing' });
+    const replace = await wait(fw, 'historyReplace');
+
+    const entry = replace.entry;
+    if (entry.kind !== 'result') throw new Error('unreachable');
+    assert.deepEqual(entry.batch.outputs, { pageTitle: 'Home' });
+    assert.equal(entry.batch.outputSources, undefined);
   });
 
   test('an unreachable server produces an error result entry and an error toast', async () => {

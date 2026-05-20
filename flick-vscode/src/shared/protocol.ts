@@ -28,6 +28,10 @@ export interface StepResult {
   screenshotUri: string | null;
 }
 
+/** Where a session-scope variable came from. A closed union; new sources
+ *  require a protocol bump. See stories/output-source-tagging.md. */
+export type OutputSource = 'parameter' | 'capture' | 'toolOutput';
+
 /** The result of one submitted batch of steps, persisted into session history. */
 export interface BatchResult {
   status: BatchStatus;
@@ -36,6 +40,10 @@ export interface BatchResult {
   results: StepResult[];
   /** Outputs newly accumulated by this batch. */
   outputs: Record<string, string>;
+  /** Per-key provenance for `outputs` (same keys), labelled by source.
+   *  Optional and additive — absent when talking to an older server, in
+   *  which case the UI falls back to a single un-labelled outputs block. */
+  outputSources?: Record<string, OutputSource>;
   error: { step: number; message: string } | null;
 }
 

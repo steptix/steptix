@@ -724,6 +724,30 @@ body {
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.15));
 }
 
+.output-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Parameters section: a clickable summary row that expands the rows below. */
+.outputs-summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.outputs-summary .chevron {
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+}
+.outputs-summary .outputs-label {
+  /* The label already styles as the uppercase section heading; keep it from
+     stretching so the whole row isn't a wide click target edge-to-edge. */
+  flex: 0 0 auto;
+}
+
 /* --- composer ------------------------------------------------------------- */
 
 .composer {

@@ -140,9 +140,21 @@ function send(res: http.ServerResponse, status: number, json: unknown): void {
   res.end(payload);
 }
 
-/** Default "everything passed" batch response, echoing the submitted steps. */
-export function passedBatch(sessionId: string, steps: string[]): unknown {
-  return {
+/**
+ * Default "everything passed" batch response, echoing the submitted steps.
+ *
+ * `outputs` (and the parallel `outputSources` provenance map) can be supplied
+ * to drive the output-source-tagging tests. When `outputSources` is left
+ * undefined the field is omitted from the payload entirely, mirroring an older
+ * server that predates the feature (back-compat path).
+ */
+export function passedBatch(
+  sessionId: string,
+  steps: string[],
+  outputs: Record<string, string> = {},
+  outputSources?: Record<string, 'parameter' | 'capture' | 'toolOutput'>,
+): unknown {
+  const body: Record<string, unknown> = {
     sessionId,
     status: 'passed',
     stepsCompleted: steps.length,
@@ -155,9 +167,11 @@ export function passedBatch(sessionId: string, steps: string[]): unknown {
       outputs: {},
       screenshot: TINY_PNG,
     })),
-    outputs: {},
+    outputs,
     error: null,
   };
+  if (outputSources !== undefined) body.outputSources = outputSources;
+  return body;
 }
 
 /** A batch where the step at `failIndex` failed. */

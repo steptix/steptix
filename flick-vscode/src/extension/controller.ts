@@ -615,6 +615,9 @@ export class FlickController {
         stepsTotal: raw.stepsTotal,
         results,
         outputs: raw.outputs ?? {},
+        // Pass provenance through when the server supplies it; older servers
+        // omit `outputSources` entirely, so leave it undefined in that case.
+        outputSources: raw.outputSources,
         error: raw.error ?? null,
       };
       resultEntry = { kind: 'result', id: pendingId, ts: Date.now(), batch };

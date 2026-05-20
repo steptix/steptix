@@ -20,6 +20,9 @@ export interface RawStepsResponse {
   stepsTotal: number;
   results: RawStepResult[];
   outputs: Record<string, string>;
+  /** Per-key provenance for `outputs`, same keys, labelled by where the
+   *  variable came from. Optional — an older server omits it. */
+  outputSources?: Record<string, 'parameter' | 'capture' | 'toolOutput'>;
   error: { step: number; message: string } | null;
 }
 

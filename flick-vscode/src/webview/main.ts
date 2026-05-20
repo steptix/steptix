@@ -22,6 +22,7 @@ import type {
   StepResult,
   WebviewToHost,
 } from '../shared/protocol';
+import { buildOutputSections } from './output-sections';
 
 interface VsCodeApi {
   postMessage(msg: WebviewToHost): void;
@@ -774,12 +775,26 @@ function renderChat(): void {
     );
     return;
   }
+  // Track the previous result batch's outputs while walking the history so the
+  // delta filter (Captures / Tool Outputs only show what's new or changed vs.
+  // the prior batch) has something to diff against.
+  let prevOutputs: Record<string, string> | undefined;
   for (const entry of history) {
-    chatEl.appendChild(renderEntry(entry));
+    chatEl.appendChild(renderEntry(entry, prevOutputs));
+    // Only advance the delta baseline past *successful* batches. A network
+    // error synthesizes a batch with `outputs: {}` (controller.ts) rather than
+    // the server's cumulative map; letting it become the baseline would make
+    // the next good batch re-report every already-seen capture as "new".
+    if (entry.kind === 'result' && entry.batch.status !== 'error') {
+      prevOutputs = entry.batch.outputs;
+    }
   }
 }
 
-function renderEntry(entry: HistoryEntry): HTMLElement {
+function renderEntry(
+  entry: HistoryEntry,
+  prevOutputs: Record<string, string> | undefined,
+): HTMLElement {
   if (entry.kind === 'user') {
     const card = el('div', 'card user-card');
     const pre = document.createElement('pre');
@@ -794,10 +809,14 @@ function renderEntry(entry: HistoryEntry): HTMLElement {
     card.appendChild(el('span', 'pending-label', 'Running steps…'));
     return card;
   }
-  return renderResultCard(entry.id, entry.batch);
+  return renderResultCard(entry.id, entry.batch, prevOutputs);
 }
 
-function renderResultCard(entryId: string, batch: BatchResult): HTMLElement {
+function renderResultCard(
+  entryId: string,
+  batch: BatchResult,
+  prevOutputs: Record<string, string> | undefined,
+): HTMLElement {
   const card = el('div', 'card result-card');
 
   batch.results.forEach((result, index) => {
@@ -808,19 +827,55 @@ function renderResultCard(entryId: string, batch: BatchResult): HTMLElement {
     card.appendChild(el('div', 'batch-error', batch.error.message));
   }
 
-  const newOutputs = Object.entries(batch.outputs);
-  if (newOutputs.length > 0) {
-    const outs = el('div', 'batch-outputs');
-    outs.appendChild(el('div', 'outputs-label', 'Outputs'));
-    for (const [key, value] of newOutputs) {
-      const row = el('div', 'output-row');
-      row.appendChild(el('span', 'output-key', key));
-      row.appendChild(el('span', 'output-value', value));
-      outs.appendChild(row);
-    }
-    card.appendChild(outs);
+  // Source-tagged sections, with the delta filter applied. Falls back to a
+  // single un-labelled block when the server didn't send `outputSources`.
+  const sections = buildOutputSections(batch.outputs, batch.outputSources, prevOutputs);
+  for (const section of sections) {
+    card.appendChild(renderOutputSection(`${entryId}:${section.kind}`, section));
   }
   return card;
+}
+
+/** Render one output section. The Parameters section is collapsed by default
+ *  behind a `▸ Parameters (N)` summary that toggles open on click; the others
+ *  render their rows inline. */
+function renderOutputSection(
+  key: string,
+  section: ReturnType<typeof buildOutputSections>[number],
+): HTMLElement {
+  const outs = el('div', `batch-outputs batch-outputs-${section.kind}`);
+
+  const rows = el('div', 'output-rows');
+  for (const [k, v] of section.entries) {
+    const row = el('div', 'output-row');
+    // Values arrive already secret-masked from the server (name-based masking
+    // is done server-side); rendering them verbatim preserves that behavior.
+    row.appendChild(el('span', 'output-key', k));
+    row.appendChild(el('span', 'output-value', v));
+    rows.appendChild(row);
+  }
+
+  if (section.collapsed) {
+    const expanded = state.expanded.has(key);
+    const summary = el('div', 'outputs-summary');
+    summary.appendChild(el('span', 'chevron', expanded ? '▾' : '▸'));
+    summary.appendChild(
+      el('span', 'outputs-label', `${section.label} (${section.entries.length})`),
+    );
+    summary.addEventListener('click', () => {
+      if (state.expanded.has(key)) state.expanded.delete(key);
+      else state.expanded.add(key);
+      const scroll = chatEl.scrollTop;
+      renderChat();
+      chatEl.scrollTop = scroll;
+    });
+    outs.appendChild(summary);
+    if (expanded) outs.appendChild(rows);
+  } else {
+    outs.appendChild(el('div', 'outputs-label', section.label));
+    outs.appendChild(rows);
+  }
+  return outs;
 }
 
 function renderStepRow(
