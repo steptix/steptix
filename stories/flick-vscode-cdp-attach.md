@@ -253,7 +253,7 @@ Widen the inline `config` type in [src/server/api-server.ts:78-80](../src/server
 - **Brave, Opera, Vivaldi, Arc.** All Chromium-based and discoverable for free if the user manually launches them with `--remote-debugging-port=...`, but the launch helper only supports Chrome and Edge in v1. The `engine: 'unknown'` discovery fallback keeps them functional via the dropdown — just no one-click launch.
 - **Live tab polling.** Manual + on-open refresh only.
 - **Multi-port launch.** The Launch buttons only spawn on 9222.
-- **`cdp:` field in `aiui.config.ts`.** Still future, per the older story.
+- **`cdp:` field in `aiui.config.json`.** Still future, per the older story.
 
 ---
 

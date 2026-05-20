@@ -12,12 +12,16 @@ The skill returns successfully whether or not an obstacle was found — it's a
 no-op when the page is already clean.
 
 Intended use: as a `beforeEach` hook in a test's `## Hooks` section, or as a
-project-level default hook in `aiui.config.ts`:
+project-level default hook in `aiui.config.json`:
 
-```yaml
-execution:
-  defaultHooks:
-    beforeEach: ['[skill: dismiss_obstacles]']
+```json
+{
+  "execution": {
+    "defaultHooks": {
+      "beforeEach": ["[skill: dismiss_obstacles]"]
+    }
+  }
+}
 ```
 
 ## Steps

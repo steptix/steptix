@@ -263,7 +263,7 @@ export function registerCommands(
       const cacheDir = cacheDirForTest(testFilePath);
       if (!cacheDir) {
         vscode.window.setStatusBarMessage(
-          'TestBench: no aiui.config.* above this file — nothing to clear',
+          'TestBench: no aiui.config.json above this file — nothing to clear',
           3000,
         );
         return;

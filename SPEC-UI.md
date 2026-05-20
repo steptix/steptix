@@ -24,7 +24,7 @@ The Electron renderer process is built as a pure web application (React + standa
 aiui ui [directory]
 ```
 
-- `directory` — optional path to the tests root directory. Defaults to `tests/` in the current working directory (same as `aiui.config.ts` → `tests.dir`).
+- `directory` — optional path to the tests root directory. Defaults to `tests/` in the current working directory (same as `aiui.config.json` → `tests.dir`).
 - Launches the Electron window and loads the specified directory into the Explorer.
 - Accepts the same `--config` and `--env` options as the `run` command.
 

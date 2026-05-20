@@ -20,7 +20,8 @@
     }
   },
   "scripts": {
-    "build": "tsc && node -e \"require('fs').cpSync('src/browser/scripts','dist/browser/scripts',{recursive:true})\"",
+    "build": "npm run build:schema && tsc && node -e \"require('fs').cpSync('src/browser/scripts','dist/browser/scripts',{recursive:true})\"",
+    "build:schema": "node scripts/build-schema.mjs",
     "build:watch": "tsc --watch",
     "build:ui": "vite build --config src/ui/renderer/vite.config.ts",
     "build:all": "npm run build && npm run build:ui",
@@ -69,8 +70,10 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitest/coverage-v8": "^4.1.4",
+    "ajv": "^8.17.1",
     "concurrently": "^9.2.1",
     "electron-builder": "^26.8.1",
+    "ts-json-schema-generator": "^2.4.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   },

@@ -1,12 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-const PROJECT_MARKERS = [
-  'aiui.config.ts',
-  'aiui.config.js',
-  'aiui.config.mjs',
-  'aiui.config.json',
-];
+const PROJECT_MARKERS = ['aiui.config.json'];
 
 /**
  * Walk up from `testFilePath` looking for a project marker. Returns the
@@ -45,7 +40,7 @@ export function sanitizeTestName(name: string): string {
 /**
  * Compute the on-disk cache directory for a given test file, or null if the
  * project root can't be located. The caller decides what to do with null
- * (typically: show a "no aiui.config.* above this file" status message).
+ * (typically: show a "no aiui.config.json above this file" status message).
  */
 export function cacheDirForTest(testFilePath: string): string | null {
   const projectRoot = resolveProjectRoot(testFilePath);

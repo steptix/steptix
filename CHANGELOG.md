@@ -6,6 +6,69 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Breaking — config is now JSON-only (`aiui.config.json`)
+
+`aiui.config.json` is now the **only** config format the framework reads. All
+TypeScript/JavaScript config support — `aiui.config.ts`, `aiui.config.js`,
+`aiui.config.mjs`, the legacy `ai-ui-auto.config.*` names — and the
+`defineConfig` helper have been **removed**. Both consumers (the CLI/server
+loader and TestBench-native) now read the same file via `JSON.parse`.
+
+A project that still ships only an `aiui.config.ts` is treated as
+**unconfigured**: the CLI silently falls back to defaults and TestBench reports
+"no config found" (no skills/tools, F12 warns). There is no shim or
+auto-migration.
+
+**Migration — one step.** Rename your config to `aiui.config.json` and reshape
+the exported object to a plain JSON object: drop the `import { defineConfig }`
+line and the `export default defineConfig(...)` wrapper, quote every key,
+replace numeric separators (`1_000_000` → `1000000`), and remove any
+`process.env.*` references — secrets such as `AI_API_KEY` belong in `.env` and
+are injected at load time, never in the committed config.
+
+While reshaping, **nest `skillsDir` / `toolsDir` under `tests`** — the
+canonical location is `tests.skillsDir` / `tests.toolsDir`. Older configs (and
+some older docs) placed these at the top level or under a `tools` key; those
+are no longer recognized.
+
+| Before (`aiui.config.ts`)                                  | After (`aiui.config.json`)                                  |
+| ---------------------------------------------------------- | ----------------------------------------------------------- |
+| `import { defineConfig } from 'ai-ui-automation';`         | _(removed)_                                                 |
+| `export default defineConfig({ ... });`                    | `{ ... }`                                                   |
+| `skillsDir: './skills'` / top-level or under `tools`       | `"tests": { "skillsDir": "./skills" }`                      |
+| `toolsDir: './tools/src'` / `tools.dir`                    | `"tests": { "toolsDir": "./tools/src" }`                    |
+| `maxInputTokens: 1_000_000`                                | `"maxInputTokens": 1000000`                                 |
+| `apiKey: process.env.AI_API_KEY`                           | _(removed — set `AI_API_KEY` in `.env`)_                    |
+
+Example:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
+  "ai": { "gatewayUrl": "https://aiapi.example.com", "model": "gpt-5.4-mini" },
+  "browser": { "headed": true },
+  "tests": {
+    "dir": "./tests",
+    "contextDir": "./context",
+    "skillsDir": "./skills",
+    "toolsDir": "./tools/src"
+  },
+  "reports": { "outputDir": "./reports" }
+}
+```
+
+Two behavior notes:
+
+- **Deep merge of nested objects.** Config now merges over the defaults with a
+  recursive deep merge, so a partial nested object inherits its sibling
+  defaults — `"browser": { "viewport": { "width": 800 } }` now keeps the
+  default `height` instead of dropping it. Arrays still replace wholesale.
+- **Optional `"$schema"` key.** Add the top-level `"$schema"` URL above for
+  editor autocomplete and validation. The loader strips it before merging, so
+  it never affects the resolved config. Malformed JSON is now a hard error
+  (fails loudly with the file path); a *missing* file still falls back to
+  defaults silently.
+
 ### Breaking — `BrowserConfig` shape
 
 The seven DOM-snapshot noise-reduction toggles have been grouped under a new

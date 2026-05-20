@@ -15,7 +15,7 @@ import { resolveProjectDirs } from './aiui-config.js';
  * The alias *value* (the text after `=`) is a new name the caller is
  * creating, not a reference, so it is deliberately not a jump target.
  *
- * Skill/tool directories come from the project's `aiui.config.*` file,
+ * Skill/tool directories come from the project's `aiui.config.json` file,
  * located by walking up from the test file (see `aiui-config.ts`).
  */
 export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
@@ -37,7 +37,7 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
     const dirs = resolveProjectDirs(document.uri);
     if (!dirs) {
       this.warn(
-        `TestBench: no aiui.config.{ts,js,mjs} found above ${document.uri.fsPath} — ` +
+        `TestBench: no aiui.config.json found above ${document.uri.fsPath} — ` +
           `can't resolve skills/tools directory.`,
       );
       return undefined;

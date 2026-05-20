@@ -12,7 +12,7 @@ export function registerServeCommand(program: Command): void {
   program
     .command('serve')
     .description('Start the Sessions API server')
-    .option('-c, --config <path>', 'Path to config file', 'aiui.config.ts')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
     .option('-p, --port <number>', 'Port to listen on', parseInt)
     .option('-H, --host <host>', 'Host to bind to')
     .option(

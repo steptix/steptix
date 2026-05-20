@@ -475,7 +475,7 @@ type: skill
 
     beforeEach(async () => {
       cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-cache-'));
-      await fs.writeFile(path.join(cacheRoot, 'aiui.config.ts'), '// marker\n');
+      await fs.writeFile(path.join(cacheRoot, 'aiui.config.json'), '{}\n');
       cacheTestFile = path.join(cacheRoot, 'test.md');
       await fs.writeFile(cacheTestFile, '# test\n');
     });
@@ -486,7 +486,7 @@ type: skill
 
     it('wires stepCache into executeStep when testFilePath resolves a project root', async () => {
       // The simplest wiring assertion: when testFilePath is supplied AND a
-      // project marker (aiui.config.ts) exists above it, executeStep
+      // project marker (aiui.config.json) exists above it, executeStep
       // receives a non-undefined `stepCache` with `cacheEnabled: true`.
       const { executeStep } = await import('../src/runner/step-executor.js');
       const exec = vi.mocked(executeStep);

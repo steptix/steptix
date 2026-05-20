@@ -386,7 +386,7 @@ my-project/
 ├── .env.t2
 ├── .env.staging
 ├── .env.production
-├── aiui.config.ts
+├── aiui.config.json
 ├── context/
 ├── specs/
 ├── tests/
@@ -580,20 +580,21 @@ Full values are available in a debug mode (`--debug-report`) for troubleshooting
 
 ### 9.1 New Config Fields
 
-Added to `aiui.config.ts`:
+Added to `aiui.config.json` (merged with the existing config from SPEC.md §7):
 
-```typescript
-export default defineConfig({
-  // ... existing config from SPEC.md §7 ...
-
-  // API Configuration
-  api: {
-    specsDir: './specs',                   // Cache directory for OpenAPI specs
-    requestTimeout: 30_000,                // Default timeout per API request (ms)
-    redactSensitive: true,                 // Redact auth values in reports
-  },
-});
+```json
+{
+  "api": {
+    "specsDir": "./specs",
+    "requestTimeout": 30000,
+    "redactSensitive": true
+  }
+}
 ```
+
+- `api.specsDir` is the cache directory for OpenAPI specs.
+- `api.requestTimeout` is the default timeout per API request (ms).
+- `api.redactSensitive` redacts auth values in reports.
 
 ### 9.2 New CLI Flags
 

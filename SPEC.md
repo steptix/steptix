@@ -448,55 +448,60 @@ When a step fails and is retried, the retry is not blind — it includes context
 
 ## 7. Configuration
 
-### `aiui.config.ts`
+### `aiui.config.json`
 
-```typescript
-import { defineConfig } from 'ai-ui-automation';
+A plain JSON object. The optional `"$schema"` key gives editors autocomplete
+and validation; every other key is optional and falls back to the built-in
+defaults (omitted keys, and omitted siblings of partial nested objects, inherit
+from `DEFAULT_CONFIG` via a recursive deep merge).
 
-export default defineConfig({
-  // AI Configuration
-  ai: {
-    gatewayUrl: 'https://llm.corp.example',
-    apiKey: process.env.AI_API_KEY,       // Bearer token for aiapi
-    model: 'gpt-5.4',
-    maxInputTokens: 1_000_000,
-    streamResponses: true,
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
+  "ai": {
+    "gatewayUrl": "https://llm.corp.example",
+    "model": "gpt-5.4",
+    "maxInputTokens": 1000000,
+    "streamResponses": true
   },
-
-  // Browser Configuration
-  browser: {
-    headed: true,                          // Default: true. Override with --headless
-    viewport: { width: 1280, height: 720 },
-    slowMo: 0,                             // ms delay between actions (for debugging)
-    browser: 'chromium',                   // 'chromium' | 'firefox' | 'webkit'
+  "browser": {
+    "headed": true,
+    "viewport": { "width": 1280, "height": 720 },
+    "slowMo": 0,
+    "browser": "chromium"
   },
-
-  // Test Discovery
-  tests: {
-    dir: './tests',                        // Test file directory
-    contextDir: './context',               // Context files directory
-    pattern: '**/*.md',                    // Glob pattern for test files
+  "tests": {
+    "dir": "./tests",
+    "contextDir": "./context",
+    "pattern": "**/*.md"
   },
-
-  // Execution
-  execution: {
-    timeout: 60_000,                       // Default test timeout (ms)
-    retries: 1,                            // Retries per step before failure
-    screenshotOnFailure: true,
-    promptOnAmbiguity: true,               // Ask user when AI is unsure
-    // defaultHooks: { beforeEach: ['[skill: dismiss_obstacles]'] },
+  "execution": {
+    "timeout": 60000,
+    "retries": 1,
+    "screenshotOnFailure": true,
+    "promptOnAmbiguity": true
   },
-
-  // Reporting
-  reports: {
-    outputDir: './reports',
-    includeScreenshots: true,
-    includeDomSnapshots: true,
-    includeAiReasoning: true,
-    embedScreenshots: true,                // Base64 embed vs separate files
-  },
-});
+  "reports": {
+    "outputDir": "./reports",
+    "includeScreenshots": true,
+    "includeDomSnapshots": true,
+    "includeAiReasoning": true,
+    "embedScreenshots": true
+  }
+}
 ```
+
+Field notes:
+
+- `browser.headed` defaults to `true`; override with `--headless`.
+- `browser.slowMo` adds a ms delay between actions (for debugging).
+- `browser.browser` is one of `'chromium' | 'firefox' | 'webkit'`.
+- `execution.promptOnAmbiguity` asks the user when the AI is unsure.
+- `execution.defaultHooks` can declare project-level hooks, e.g.
+  `"defaultHooks": { "beforeEach": ["[skill: dismiss_obstacles]"] }`.
+- `reports.embedScreenshots` toggles base64 embed vs separate files.
+- Secrets (`AI_API_KEY`, etc.) live in `.env`, never in this file — they are
+  injected at load time.
 
 ---
 
@@ -536,7 +541,7 @@ npx aiui list --tag smoke
 
 | Flag              | Type    | Default                  | Description                        |
 |-------------------|---------|--------------------------|------------------------------------|
-| `--config`        | string  | `aiui.config.ts`  | Path to config file                |
+| `--config`        | string  | `aiui.config.json` | Path to config file                |
 | `--tag`           | string  | —                        | Filter by tag (comma-separated)    |
 | `--headless`      | boolean | `false`                  | Run browser in headless mode       |
 | `--timeout`       | number  | `60000`                  | Test timeout in ms                 |
@@ -551,7 +556,7 @@ Scaffolds a new project:
 
 ```
 my-project/
-├── aiui.config.ts
+├── aiui.config.json
 ├── context/
 │   └── app-overview.md
 ├── tests/
@@ -880,7 +885,7 @@ The following actions were tried and failed. Choose a DIFFERENT approach — do 
 
 ```
 1. CLI parses arguments
-2. Load config from aiui.config.ts
+2. Load config from aiui.config.json
 3. Discover test files (filtered by --tag if specified)
 4. Load context files from context/
 5. For each test file:

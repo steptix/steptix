@@ -80,7 +80,7 @@ describe('TestBench live — step cache replay paints ⚡ on second run', functi
     // Clean slate: nuke any cache state from prior runs of this fixture so
     // we can be sure the first run is the one that populates it. The
     // server resolves projectRoot by walking up from testFilePath looking
-    // for aiui.config.ts; templates/init/aiui.config.ts is the marker, so
+    // for aiui.config.json; templates/init/aiui.config.json is the marker, so
     // the cache lives at templates/init/.cache/.
     const projectRoot = path.resolve(workspaceRoot, 'init');
     const cacheDir = path.join(projectRoot, '.cache');

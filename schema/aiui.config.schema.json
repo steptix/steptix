@@ -1,0 +1,409 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$ref": "#/definitions/UserConfig",
+  "definitions": {
+    "UserConfig": {
+      "$ref": "#/definitions/DeepPartial%3CConfig%3E"
+    },
+    "DeepPartial<Config>": {
+      "type": "object",
+      "properties": {
+        "ai": {
+          "$ref": "#/definitions/DeepPartial%3CAiConfig%3E"
+        },
+        "browser": {
+          "$ref": "#/definitions/DeepPartial%3CBrowserConfig%3E"
+        },
+        "tests": {
+          "$ref": "#/definitions/DeepPartial%3CTestsConfig%3E"
+        },
+        "execution": {
+          "$ref": "#/definitions/DeepPartial%3CExecutionConfig%3E"
+        },
+        "reports": {
+          "$ref": "#/definitions/DeepPartial%3CReportsConfig%3E"
+        },
+        "api": {
+          "$ref": "#/definitions/DeepPartial%3CApiConfig%3E"
+        },
+        "server": {
+          "$ref": "#/definitions/DeepPartial%3CServerConfig%3E"
+        },
+        "cache": {
+          "$ref": "#/definitions/DeepPartial%3CCacheConfig%3E"
+        },
+        "logging": {
+          "$ref": "#/definitions/DeepPartial%3CLoggingConfig%3E"
+        },
+        "$schema": {
+          "type": "string",
+          "description": "URL or path to this JSON Schema, enabling editor autocomplete and validation. Ignored at runtime."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<AiConfig>": {
+      "type": "object",
+      "properties": {
+        "gatewayUrl": {
+          "type": "string",
+          "description": "Base URL for the aiapi gateway"
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "Bearer token for authentication"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier"
+        },
+        "maxInputTokens": {
+          "type": "number",
+          "description": "Maximum input tokens per request"
+        },
+        "streamResponses": {
+          "type": "boolean",
+          "description": "Use streaming endpoint instead of vision"
+        },
+        "sendScreenshots": {
+          "type": "boolean",
+          "description": "Include a screenshot in each AI request (set false to reduce token usage)"
+        },
+        "diagnoseFailures": {
+          "type": "boolean",
+          "description": "Run a post-failure AI diagnosis pass and attach the result to the report"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<BrowserConfig>": {
+      "type": "object",
+      "properties": {
+        "headed": {
+          "type": "boolean",
+          "description": "Show browser window (false = headless)"
+        },
+        "viewport": {
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-3022-3056-src_config_types.ts-2964-3057-src_config_types.ts-2863-5049-src_config_types.ts-0-9655449752545%3E"
+        },
+        "windowSize": {
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-3113-3147-src_config_types.ts-3057-3148-src_config_types.ts-2863-5049-src_config_types.ts-0-96551327565221%3E"
+        },
+        "slowMo": {
+          "type": "number",
+          "description": "Milliseconds to wait between Playwright actions (for debugging)"
+        },
+        "browser": {
+          "type": "string",
+          "enum": [
+            "chromium",
+            "firefox",
+            "webkit"
+          ],
+          "description": "Browser engine to use"
+        },
+        "fullPageScreenshots": {
+          "type": "boolean",
+          "description": "Capture full-page screenshots (entire scrollable page) instead of viewport-only"
+        },
+        "stealth": {
+          "type": "boolean",
+          "description": "Apply puppeteer-extra-plugin-stealth to Chromium. Some sites (e.g. Polymer 1 stacks) break when stealth monkey-patches navigator/chrome internals — turn this off to load such sites. Chromium only; default true."
+        },
+        "bypassCSP": {
+          "type": "boolean",
+          "description": "Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts the site itself needs (cascading failures). Default false."
+        },
+        "domNoiseReduction": {
+          "$ref": "#/definitions/DomNoiseReductionConfig",
+          "description": "DOM snapshot noise-reduction toggles — the primary lever for keeping AI input compact on framework-heavy pages. See DomNoiseReductionConfig."
+        },
+        "maxIframeDepth": {
+          "type": "number",
+          "description": "Maximum nesting depth for recursive iframe content capture in DOM snapshots. Iframes deeper than this are emitted as a placeholder comment instead of recursing. Default 5."
+        },
+        "domSnapshotCharLimit": {
+          "type": "number",
+          "description": "Hard character cap on the rendered DOM snapshot. Snapshots that exceed this length are truncated with a marker. Prevents runaway token usage on pathologically large pages. Default 300000."
+        },
+        "captureScreenshotsPerAction": {
+          "type": "boolean",
+          "description": "Capture a screenshot before/after every action and on each AI turn. When `false`, per-action screenshots are skipped to reduce runtime cost, but end-of-step and on-failure captures still fire so HTML reports retain visual context. Note: when `ai.sendScreenshots` is true, screenshots are still captured per turn regardless of this flag — the AI needs them in its request. Default true."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<structure-src_config_types.ts-3022-3056-src_config_types.ts-2964-3057-src_config_types.ts-2863-5049-src_config_types.ts-0-9655449752545>": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<structure-src_config_types.ts-3113-3147-src_config_types.ts-3057-3148-src_config_types.ts-2863-5049-src_config_types.ts-0-96551327565221>": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DomNoiseReductionConfig": {
+      "type": "object",
+      "properties": {
+        "collapseRepetitiveDom": {
+          "type": "boolean",
+          "description": "Collapse long repetitive sibling runs (table rows, list items, card grids) in DOM snapshots into head + omission marker + tail. Reduces token usage on pages with hundreds of similar elements. Default true."
+        },
+        "compactSvg": {
+          "type": "boolean",
+          "description": "Strip inner geometry (paths, shapes) from <svg> elements in DOM snapshots, keeping the opening tag + <title>/<desc> children only. Large SVG icon sets are the biggest per-element token cost on many sites. Default true."
+        },
+        "hideHiddenInputs": {
+          "type": "boolean",
+          "description": "Drop `<input type=\"hidden\">` elements from DOM snapshots. They are never interactable by the AI and often carry long opaque values (CSRF tokens, encoded state). Default true."
+        },
+        "hideDisplayNoneElements": {
+          "type": "boolean",
+          "description": "Drop elements (and their subtrees) whose computed style is `display: none`. Slightly costlier to detect — requires `getComputedStyle` per element — but cuts large amounts of off-screen template/menu markup on many SPAs. Default true."
+        },
+        "hideAriaHiddenElements": {
+          "type": "boolean",
+          "description": "Drop elements (and their subtrees) marked `aria-hidden=\"true\"`. Default true."
+        },
+        "useDomAttributeAllowlist": {
+          "type": "boolean",
+          "description": "Restrict attributes emitted in the whole-page DOM snapshot to a curated allowlist (id, data-testid, name, type, role, aria-*, alt, label, etc.). Drops framework noise like `data-react-*`, `data-emotion`, long Tailwind/Bootstrap class strings, etc. Default true."
+        },
+        "dropUnstableIds": {
+          "type": "boolean",
+          "description": "Drop `id` attributes that match known framework-generated unstable patterns (React 18 useId, Radix UI, Headless UI, MUI, React server- streaming). Prevents the AI from picking a selector that won't survive the next render. Default false (opt-in)."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Group of independent toggles that reduce DOM-snapshot noise — the primary lever for keeping AI input compact on framework-heavy pages.\n\nEach flag is independent. Hard-cap settings that are NOT noise filters (`maxIframeDepth`, `domSnapshotCharLimit`) live flat on `BrowserConfig` since they're safety guards rather than reductions."
+    },
+    "DeepPartial<TestsConfig>": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Directory containing test .md files"
+        },
+        "contextDir": {
+          "type": "string",
+          "description": "Directory containing context .md files"
+        },
+        "skillsDir": {
+          "type": "string",
+          "description": "Directory containing skill .md files (reusable parameterised step macros)"
+        },
+        "toolsDir": {
+          "type": "string",
+          "description": "Directory containing tool .ts/.js files (deterministic code callable from tests via `[tool: name ...]`). Files are auto-discovered at run start; each must default-export a `defineTool(...)` result."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Glob pattern for discovering test files"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<ExecutionConfig>": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": "number",
+          "description": "Default test timeout in milliseconds"
+        },
+        "retries": {
+          "type": "number",
+          "description": "Number of retries per failed step"
+        },
+        "screenshotOnFailure": {
+          "type": "boolean",
+          "description": "Capture screenshot on step failure"
+        },
+        "promptOnAmbiguity": {
+          "type": "boolean",
+          "description": "Ask user when AI cannot determine next action"
+        },
+        "maxTurns": {
+          "type": "number",
+          "description": "Maximum number of AI turns per step for multi-turn execution (default: 15)"
+        },
+        "interactiveOnFailure": {
+          "type": "boolean",
+          "description": "Drop into a REPL when a step fails after retries (headed + TTY only)."
+        },
+        "defaultHooks": {
+          "$ref": "#/definitions/DefaultHooksConfig",
+          "description": "Default `## Hooks` entries merged into every test unless the test sets `hooks: replace` in frontmatter."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DefaultHooksConfig": {
+      "type": "object",
+      "properties": {
+        "before": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "beforeEach": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "afterEach": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Project-level default hooks merged into every test's `## Hooks` section. Per-test `hooks: replace` frontmatter disables merging for that test."
+    },
+    "DeepPartial<ReportsConfig>": {
+      "type": "object",
+      "properties": {
+        "outputDir": {
+          "type": "string",
+          "description": "Directory to write HTML reports"
+        },
+        "includeScreenshots": {
+          "type": "boolean",
+          "description": "Include screenshots in report"
+        },
+        "includeDomSnapshots": {
+          "type": "boolean",
+          "description": "Include DOM snapshots in report"
+        },
+        "includeAiReasoning": {
+          "type": "boolean",
+          "description": "Include AI reasoning trace in report"
+        },
+        "embedScreenshots": {
+          "type": "boolean",
+          "description": "Embed screenshots as base64 (vs separate files)"
+        },
+        "openInBrowserAfterRun": {
+          "type": "boolean",
+          "description": "After a test run completes, open the last generated HTML report in the OS default browser. Driven by the OPEN_REPORT_IN_BROWSER_AFTER_RUN env var. Skipped automatically when the `CI` env var is set."
+        },
+        "appendRunHistoryToTestFile": {
+          "type": "boolean",
+          "description": "After a test completes, append a \"Latest runs\" section at the bottom of the test .md file linking to generated HTML reports. Driven by the APPEND_RUN_HISTORY_TO_TEST_FILE env var. Default false."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<ApiConfig>": {
+      "type": "object",
+      "properties": {
+        "specsDir": {
+          "type": "string",
+          "description": "Directory to cache downloaded OpenAPI/Swagger specs"
+        },
+        "requestTimeout": {
+          "type": "number",
+          "description": "Default timeout per API request in milliseconds"
+        },
+        "redactSensitive": {
+          "type": "boolean",
+          "description": "Redact auth values (API keys, tokens, cookies) in HTML reports"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<ServerConfig>": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Host to bind the API server to"
+        },
+        "port": {
+          "type": "number",
+          "description": "Port to listen on"
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "API key for authentication (checked via x-api-key header)"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<CacheConfig>": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable AI response caching for test steps"
+        },
+        "dir": {
+          "type": "string",
+          "description": "Directory for cache storage (relative to project root)"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<LoggingConfig>": {
+      "type": "object",
+      "properties": {
+        "consoleLogLevel": {
+          "type": "string",
+          "enum": [
+            "silent",
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
+          "description": "Threshold for the console + testbench SSE output stream. Levels are suppressed below this threshold:   - 'silent': nothing   - 'error':  errors only   - 'warn':   errors + warnings   - 'info':   errors + warnings + info (no debug noise)   - 'debug':  everything, including BEGIN/END traceOp markers The run log file always captures every level regardless of this setting."
+        },
+        "serverFileLogLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "compact",
+            "full"
+          ],
+          "description": "Per-run server log file mode:   - 'off':     no file written   - 'compact': inline log lines only (no AI request/response payloads)   - 'full':    log lines + full AI request/response trace blocks"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    }
+  }
+}

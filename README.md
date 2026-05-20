@@ -172,7 +172,7 @@ Tools live in their own TypeScript subproject so they get the full IDE experienc
 
 ```
 my-test-project/
-├── aiui.config.ts          ← framework config
+├── aiui.config.json        ← framework config
 ├── tests/
 │   └── login-flow.md             ← natural-language tests
 ├── skills/
@@ -186,7 +186,7 @@ my-test-project/
         └── fetch_otp.ts          ← rung 3 (`defineTool({...})`)
 ```
 
-The `tools/` folder is just a path. Point `tools.dir` at any directory you like — alongside the tests, in a sibling repo, or `node_modules/@your-org/test-tools/dist` if you want a versioned shared catalogue across projects.
+The `tools/` folder is just a path. Point `tests.toolsDir` at any directory you like — alongside the tests, in a sibling repo, or `node_modules/@your-org/test-tools/dist` if you want a versioned shared catalogue across projects.
 
 ### One-time setup
 
@@ -241,14 +241,14 @@ That's it. VS Code now autocompletes `context.request.`, `page.locator(...)`, et
 
 **4. Tell the framework where the tools live**
 
-In `aiui.config.ts`:
+In `aiui.config.json`:
 
-```ts
-export default {
-  tests: {
-    toolsDir: './tools/src',
-  },
-};
+```json
+{
+  "tests": {
+    "toolsDir": "./tools/src"
+  }
+}
 ```
 
 (`./tools/src` is the default — you only need this entry if you want a different path.)
@@ -442,28 +442,29 @@ When you run a test, here's what happens end to end:
 
 ## Configuration
 
-Create `aiui.config.ts` in your project root:
+Create `aiui.config.json` in your project root:
 
-```typescript
-import { defineConfig } from 'ai-ui-automation';
-
-export default defineConfig({
-  browser: {
-    headed: true,
-    viewport: { width: 1280, height: 720 },
-    windowSize: { width: 1280, height: 720 },
-    browser: 'chromium',
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
+  "browser": {
+    "headed": true,
+    "viewport": { "width": 1280, "height": 720 },
+    "windowSize": { "width": 1280, "height": 720 },
+    "browser": "chromium"
   },
-  tests: {
-    dir: 'tests',
-    contextDir: 'context',
+  "tests": {
+    "dir": "tests",
+    "contextDir": "context"
   },
-  execution: {
-    timeout: 60000,
-    retries: 1,
-  },
-});
+  "execution": {
+    "timeout": 60000,
+    "retries": 1
+  }
+}
 ```
+
+The optional `"$schema"` key gives editors autocomplete and validation. Secrets such as `AI_API_KEY` live in `.env`, never in this file.
 
 ### Environment variables
 

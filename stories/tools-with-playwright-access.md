@@ -69,7 +69,7 @@ via a path or `npm install`):
 
 ```
 my-test-project/
-├── aiui.config.ts
+├── aiui.config.json
 ├── tests/
 │   └── login-with-otp.md
 ├── skills/
@@ -86,16 +86,17 @@ my-test-project/
 devDependencies for type access. The directory is *not* required to be inside
 the test repo:
 
-```ts
-// aiui.config.ts
-export default {
-  tools: {
-    dir: './tools/src',          // sibling project
-    // dir: '../shared-tools/dist', // separate repo's compiled output
-    // dir: 'node_modules/@org/test-tools/dist', // installed npm package
-  },
-};
+```json
+{
+  "tests": {
+    "toolsDir": "./tools/src"
+  }
+}
 ```
+
+`tests.toolsDir` can point anywhere — a sibling project (`./tools/src`), a
+separate repo's compiled output (`../shared-tools/dist`), or an installed npm
+package (`node_modules/@org/test-tools/dist`).
 
 ### Defining a tool — `defineTool`
 
@@ -213,7 +214,7 @@ Tool calls work identically inside skills, including from inside hooks:
 
 ### Tool catalogue
 
-At startup, the runner scans `tools.dir` (defaulting to `./tools/src`) and
+At startup, the runner scans `tests.toolsDir` (defaulting to `./tools/src`) and
 imports every `*.ts` / `*.js` file. Each module's default export is read and
 registered by its declared `name`. Failures (file doesn't compile, default
 export isn't a `defineTool` result, name collision) abort startup with a
@@ -427,7 +428,7 @@ A test that uses this skill is a one-liner:
 - `src/report/generator.ts` and `src/report/types.ts` — new `ToolStepResult`
   shape with args, outputs, duration, logs, status.
 - `src/cli/commands/run.ts` and the project config types — add
-  `tools.dir` config, default to `./tools/src`. Surface tool catalogue
+  `tests.toolsDir` config, default to `./tools/src`. Surface tool catalogue
   load errors as a clear startup failure.
 
 ### Package exports
@@ -467,9 +468,9 @@ So tool authors do `import { defineTool } from 'ai-ui-automation/tools'`.
 ## Migration
 
 Purely additive. Existing tests, skills, and hooks are unaffected. Projects
-that don't configure `tools.dir` get an empty catalogue; any `[tool: ...]`
+that don't configure `tests.toolsDir` get an empty catalogue; any `[tool: ...]`
 reference in such a project fails parse-time with "no tools registered;
-configure `tools.dir` in `aiui.config.ts`."
+configure `tests.toolsDir` in `aiui.config.json`."
 
 The skill mechanism is unchanged — tools are a sibling layer, not a
 replacement.
@@ -485,7 +486,7 @@ replacement.
   that legitimately race (network polls, eventual consistency).
 - **Hot reload during dev.** Editing a tool file while `--watch` is running
   should re-import that file. v1 reloads the catalogue on each test run.
-- **Tool versioning across teams.** Once `tools.dir` can point at
+- **Tool versioning across teams.** Once `tests.toolsDir` can point at
   `node_modules/...`, tool authors get full npm semver. No framework work
   needed; worth documenting.
 - **Sandboxing for untrusted tool authors.** Out of scope for v1 (tools are

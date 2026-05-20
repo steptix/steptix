@@ -2,12 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 /** File names that identify a project root when walking up from a test file. */
-const PROJECT_MARKERS = [
-  'aiui.config.ts',
-  'aiui.config.js',
-  'aiui.config.mjs',
-  'aiui.config.json',
-];
+const PROJECT_MARKERS = ['aiui.config.json'];
 
 /**
  * Walk up from `testFilePath` looking for a project marker. Returns the

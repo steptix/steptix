@@ -232,8 +232,3 @@ export type DeepPartial<T> = {
 };
 
 export type UserConfig = DeepPartial<Config>;
-
-/** Helper function for type-safe config definition */
-export function defineConfig(config: UserConfig): UserConfig {
-  return config;
-}

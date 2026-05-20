@@ -85,7 +85,7 @@ export class ToolCatalogue {
         lines.push(
           `  tools.dir does not exist: ${toolsDir}`,
           `  Either create the directory and add tool files there, or update`,
-          `  \`tests.toolsDir\` in your aiui.config.ts to point at where your tools live.`,
+          `  \`tests.toolsDir\` in your aiui.config.json to point at where your tools live.`,
         );
       } else {
         lines.push(`  Scanned: ${toolsDir} (${filesScanned} file${filesScanned === 1 ? '' : 's'})`);
@@ -153,7 +153,7 @@ export async function loadToolCatalogue(dir: string): Promise<ToolCatalogue> {
     // surfaces loudly the first time a `[tool:...]` step is invoked.
     logger.warn(
       `tools.dir "${dir}" does not exist — no tools registered. ` +
-      `Update \`tests.toolsDir\` in aiui.config.ts if your tools live elsewhere.`,
+      `Update \`tests.toolsDir\` in aiui.config.json if your tools live elsewhere.`,
     );
     catalogue.diagnostics = { toolsDir: dir, toolsDirMissing: true, filesScanned: 0 };
     return catalogue;

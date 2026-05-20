@@ -406,7 +406,7 @@ export default defineTool({
     <div class="tool-hint-body">
       <p>The framework couldn't find <code>${toolName}</code> in the tool catalogue.
          Drop a TypeScript file into the directory configured as
-         <code>tests.toolsDir</code> in <code>aiui.config.ts</code>. Its default
+         <code>tests.toolsDir</code> in <code>aiui.config.json</code>. Its default
          export must be a <code>defineTool(...)</code> result, like:</p>
       <pre class="tool-hint-recipe">${escapeHtml(recipe)}</pre>
       <p class="tool-hint-foot">If the tool already exists, double-check that

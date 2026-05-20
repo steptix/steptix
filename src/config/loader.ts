@@ -1,38 +1,53 @@
-import { createRequire } from 'node:module';
+import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { DEFAULT_CONFIG } from './defaults.js';
 import type { Config, UserConfig } from './types.js';
 import { parseBoolEnv } from '../env/loader.js';
 import { logger } from '../utils/logger.js';
 
-/** Recursively merge user config over defaults */
-function mergeConfig(defaults: Config, overrides: UserConfig): Config {
-  const result = { ...defaults };
-
-  for (const key of Object.keys(overrides) as Array<keyof UserConfig>) {
-    const override = overrides[key];
-    if (override === undefined) continue;
-
-    const defaultVal = defaults[key];
-    if (
-      typeof override === 'object' &&
-      !Array.isArray(override) &&
-      typeof defaultVal === 'object' &&
-      !Array.isArray(defaultVal)
-    ) {
-      // @ts-expect-error — recursive merge of matching sub-object types
-      result[key] = { ...defaultVal, ...override };
-    } else {
-      // @ts-expect-error — direct assignment of overriding primitive
-      result[key] = override;
-    }
-  }
-
-  return result;
+/** True for a non-null, non-array object literal. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Resolve a config file path, searching common locations */
+/**
+ * Recursively merge `override` over `base`. Plain objects are merged
+ * key-by-key (so a partial nested object inherits its sibling defaults);
+ * arrays and primitives replace wholesale; an `undefined` override is skipped
+ * (falling through to the base value).
+ */
+function deepMerge<T>(base: T, override: unknown): T {
+  if (!isPlainObject(base) || !isPlainObject(override)) {
+    return (override === undefined ? base : (override as T));
+  }
+
+  const result: Record<string, unknown> = { ...base };
+  for (const key of Object.keys(override)) {
+    const overrideVal = override[key];
+    if (overrideVal === undefined) continue;
+
+    const baseVal = result[key];
+    if (isPlainObject(baseVal) && isPlainObject(overrideVal)) {
+      result[key] = deepMerge(baseVal, overrideVal);
+    } else {
+      result[key] = overrideVal;
+    }
+  }
+  return result as T;
+}
+
+/** Recursively merge user config over defaults. */
+function mergeConfig(defaults: Config, overrides: UserConfig): Config {
+  return deepMerge(defaults, overrides);
+}
+
+/**
+ * Resolve the config file path. With an explicit `configPath` (from `--config`)
+ * that path is used as-is; otherwise we look for `aiui.config.json` in the cwd.
+ * Returns `null` when no config file is present (an unconfigured project is
+ * valid and falls back to defaults).
+ */
 function resolveConfigPath(configPath?: string): string | null {
   const cwd = process.cwd();
 
@@ -40,31 +55,8 @@ function resolveConfigPath(configPath?: string): string | null {
     return path.resolve(cwd, configPath);
   }
 
-  // Search for default config filenames
-  const candidates = [
-    'aiui.config.ts',
-    'aiui.config.js',
-    'aiui.config.mjs',
-    // Legacy filenames — kept so a project that hasn't migrated still loads
-    // its config without an explicit `--config` flag. New projects scaffolded
-    // by `aiui init` use the canonical `aiui.config.ts` form.
-    'ai-ui-auto.config.ts',
-    'ai-ui-auto.config.js',
-    'ai-ui-auto.config.mjs',
-  ];
-
-  for (const candidate of candidates) {
-    const fullPath = path.resolve(cwd, candidate);
-    try {
-      // Check existence by attempting a require resolve
-      createRequire(import.meta.url).resolve(fullPath);
-      return fullPath;
-    } catch {
-      // File doesn't exist, try next
-    }
-  }
-
-  return null;
+  const candidate = path.resolve(cwd, 'aiui.config.json');
+  return existsSync(candidate) ? candidate : null;
 }
 
 /**
@@ -117,37 +109,67 @@ function withEnvDefaults(config: Config): Config {
   return result;
 }
 
-/** Load and merge configuration from file + defaults */
+/**
+ * Load and merge configuration from `aiui.config.json` + defaults.
+ *
+ * A missing config file is valid — the project runs on defaults. A config
+ * file that exists but contains malformed JSON (or a non-object top level) is
+ * a hard error: a typo in the sole config source should fail loudly rather
+ * than silently changing how every test runs.
+ */
 export async function loadConfig(configPath?: string): Promise<Config> {
+  const explicit = configPath !== undefined;
+
+  if (explicit && !configPath!.endsWith('.json')) {
+    throw new Error(
+      `Config path must point to a .json file (got "${configPath!}").`,
+    );
+  }
+
   const resolvedPath = resolveConfigPath(configPath);
+
+  // Fresh copy of the defaults so the resolved config never aliases (and can
+  // never be mutated back into) the shared DEFAULT_CONFIG singleton.
+  const baseDefaults = structuredClone(DEFAULT_CONFIG);
 
   if (!resolvedPath) {
     logger.debug('No config file found, using defaults');
-    return withEnvDefaults(DEFAULT_CONFIG);
+    return withEnvDefaults(baseDefaults);
   }
 
   logger.debug(`Loading config from: ${resolvedPath}`);
 
+  let raw: string;
   try {
-    const fileUrl = pathToFileURL(resolvedPath).href;
-
-    // Use tsx to handle TypeScript config files at runtime
-    let module: { default?: UserConfig };
-
-    if (resolvedPath.endsWith('.ts')) {
-      // tsx registers TypeScript handling — import works directly in tsx context
-      module = await import(fileUrl) as { default?: UserConfig };
-    } else {
-      module = await import(fileUrl) as { default?: UserConfig };
-    }
-
-    const userConfig = module.default ?? {};
-    return withEnvDefaults(mergeConfig(DEFAULT_CONFIG, userConfig));
+    raw = await fs.readFile(resolvedPath, 'utf8');
   } catch (err) {
-    logger.warn(`Failed to load config from ${resolvedPath}: ${String(err)}`);
-    logger.warn('Falling back to default configuration');
-    return withEnvDefaults(DEFAULT_CONFIG);
+    // An explicit --config path that doesn't exist is a user error — fail
+    // loudly. An implicit (auto-discovered) miss means an unconfigured
+    // project, which is valid and falls back to defaults.
+    if (explicit) {
+      throw new Error(`Config file not found: ${resolvedPath}`);
+    }
+    logger.debug(`Config file not readable, using defaults: ${String(err)}`);
+    return withEnvDefaults(baseDefaults);
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Failed to parse config file ${resolvedPath}: ${(err as Error).message}`,
+    );
+  }
+
+  if (!isPlainObject(parsed)) {
+    throw new Error(`Config file ${resolvedPath} must contain a JSON object.`);
+  }
+
+  // `$schema` is an editor-only hint (autocomplete/validation), not a Config
+  // field — strip it before merging so it never reaches the resolved config.
+  const { $schema: _schema, ...userConfig } = parsed;
+  return withEnvDefaults(mergeConfig(baseDefaults, userConfig as UserConfig));
 }
 
 /** Apply CLI flag overrides onto an already-loaded config */

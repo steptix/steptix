@@ -89,14 +89,16 @@ dismiss (modals, popovers, toasts the test genuinely wants).
 
 ### Project-level defaults — `execution.defaultHooks`
 
-Projects can declare default hooks in `aiui.config.ts`:
+Projects can declare default hooks in `aiui.config.json`:
 
-```ts
-execution: {
-  defaultHooks: {
-    beforeEach: ['[skill: dismiss_obstacles]'],
-  },
-},
+```json
+{
+  "execution": {
+    "defaultHooks": {
+      "beforeEach": ["[skill: dismiss_obstacles]"]
+    }
+  }
+}
 ```
 
 Per-test `## Hooks` entries **merge** with project defaults (defaults run
@@ -224,7 +226,7 @@ A new fixture `fixtures/tests/hooks-demo.md` exercises the new mechanism with:
 
 ## Migration
 
-`dismissObstacles: true/false` in `aiui.config.ts` and in existing test
+`dismissObstacles: true/false` in `aiui.config.json` and in existing test
 files is ignored with a warning logged on startup. Authors who relied on
 automatic dismissal can add:
 

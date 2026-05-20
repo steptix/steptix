@@ -40,7 +40,7 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
 
   // Copy template files
   const templateFiles: Array<{ src: string; dest: string }> = [
-    { src: 'aiui.config.ts', dest: 'aiui.config.ts' },
+    { src: 'aiui.config.json', dest: 'aiui.config.json' },
     { src: 'tests/example.md', dest: 'tests/example.md' },
     { src: 'context/app.md', dest: 'context/app.md' },
   ];
@@ -74,7 +74,7 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
   console.log(chalk.bold(`\n${'─'.repeat(50)}`));
   console.log(chalk.bold('  Next steps:'));
   console.log('');
-  console.log(`  1. Edit ${chalk.cyan('aiui.config.ts')} — set your base URL and AI gateway`);
+  console.log(`  1. Edit ${chalk.cyan('aiui.config.json')} — set your base URL and AI gateway`);
   console.log(`  2. Edit ${chalk.cyan('tests/example.md')}   — write your first test`);
   console.log(`  3. Edit ${chalk.cyan('context/app.md')}     — describe your application`);
   console.log(`  4. Run   ${chalk.cyan('aiui run')}     — execute the tests`);
@@ -83,25 +83,25 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
 
 async function writeDefaultTemplate(templateName: string, destPath: string): Promise<void> {
   const defaults: Record<string, string> = {
-    'aiui.config.ts': `import { defineConfig } from 'ai-ui-automation';
-
-export default defineConfig({
-  ai: {
-    gatewayUrl: 'https://aiapi.example.com',
-    // apiKey: process.env.AI_API_KEY,
-    model: 'gpt-5.4',
+    'aiui.config.json': `{
+  "$schema": "https://raw.githubusercontent.com/pkent/ai-ui-automation/main/schema/aiui.config.schema.json",
+  "ai": {
+    "gatewayUrl": "https://aiapi.example.com",
+    "model": "gpt-5.4-mini"
   },
-  browser: {
-    headed: true,
+  "browser": {
+    "headed": true
   },
-  tests: {
-    dir: './tests',
-    contextDir: './context',
+  "tests": {
+    "dir": "./tests",
+    "contextDir": "./context",
+    "skillsDir": "./skills",
+    "toolsDir": "./tools/src"
   },
-  reports: {
-    outputDir: './reports',
-  },
-});
+  "reports": {
+    "outputDir": "./reports"
+  }
+}
 `,
     'tests/example.md': `---
 tags: [smoke]

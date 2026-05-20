@@ -53,10 +53,9 @@ anywhere.
 Resolution algorithm, applied per request using `testFilePath`:
 
 1. Start at `dirname(testFilePath)`.
-2. Walk up looking for any of: `aiui.config.ts`, `aiui.config.js`,
-   `aiui.config.json`, `package.json` containing `"aiui"` config, or the
-   workspace root (passed as a request hint, or detected via the
-   server's launch directory).
+2. Walk up looking for any of: `aiui.config.json`, `package.json` containing
+   `"aiui"` config, or the workspace root (passed as a request hint, or
+   detected via the server's launch directory).
 3. First hit wins — that's the project root.
 4. If no marker is found by the filesystem root, **disable cache for this
    request** and log a one-time warning. Better to skip cache than write
