@@ -15,10 +15,19 @@
  *   runtimeValues    — values gathered during a run: [input:] answers
  *                      collected via the composer + [output:] captures
  *                      arriving as `capture` events.
+ *   runtimeSources   — optional map {name → 'capture' | 'toolOutput'} carrying
+ *                      the `source` discriminator from each `capture` event
+ *                      (see runner-core CaptureEvent). Lets the panel tell a
+ *                      value a skill/tool returned apart from one extracted
+ *                      from the page. Absent / unknown names default to
+ *                      `'capture'` (the conservative back-compat default for
+ *                      a server that predates the field).
  *
- * Returns: an ordered list of { name, source, value, line? }, with
- * duplicates removed (param > input > output if a name appears in more
- * than one place).
+ * Returns: an ordered list of { name, source, value, line?, captureSource? },
+ * with duplicates removed (param > input > output if a name appears in more
+ * than one place). `captureSource` is only set on rows whose runtime value
+ * arrived via a `capture` event; it is the wire `source` discriminator
+ * (`'capture'` | `'toolOutput'`), classified by `classifyCaptureSource`.
  */
 
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
@@ -33,11 +42,34 @@ const OUTPUT_PATTERN = /\[output:\s*(\w+)\]/i;
 // that's both captured (via `capture` events) and used downstream.
 const SKILL_OUT_ALIAS_RE = /\bout\.\w+\s*=\s*"([^"]+)"/g;
 
-export function collectVariables(text, parameterValues, runtimeValues) {
+/**
+ * Map a `capture` event's wire `source` discriminator onto the value the
+ * panel renders. Closed union per the protocol: `'capture'` (extracted from
+ * the page) or `'toolOutput'` (returned by a `[tool:]` / `[skill:]` call).
+ *
+ * Back-compat: a server that predates the field omits `source`, so an
+ * `undefined` / unrecognised value collapses to `'capture'` — the
+ * conservative default mandated by the spec. Never throws.
+ */
+export function classifyCaptureSource(source) {
+  return source === "toolOutput" ? "toolOutput" : "capture";
+}
+
+export function collectVariables(text, parameterValues, runtimeValues, runtimeSources) {
   const params = parameterValues || {};
   const runtime = runtimeValues || {};
+  const sources = runtimeSources || {};
   const out = [];
   const seen = new Set();
+
+  // Stamp a row with the `capture`-event source discriminator when its
+  // runtime value arrived via a `capture` event. Parameters and unfilled
+  // input/output rows have no capture provenance, so they stay unstamped.
+  // Returns a spreadable fragment so the `captureSource` key is *omitted*
+  // entirely (not set to undefined) on unstamped rows — keeps the row shape
+  // minimal and stable for deepEqual-based callers/tests.
+  const captureSourceFor = (name) =>
+    name in sources ? { captureSource: classifyCaptureSource(sources[name]) } : {};
 
   // 1. Declared parameters first — preserve insertion order.
   for (const [name, declared] of Object.entries(params)) {
@@ -65,6 +97,7 @@ export function collectVariables(text, parameterValues, runtimeValues) {
         source: "input",
         line: i + 1,
         value: runtime[inputMatch[1]],
+        ...captureSourceFor(inputMatch[1]),
       });
       seen.add(inputMatch[1]);
     }
@@ -75,6 +108,7 @@ export function collectVariables(text, parameterValues, runtimeValues) {
         source: "output",
         line: i + 1,
         value: runtime[outputMatch[1]],
+        ...captureSourceFor(outputMatch[1]),
       });
       seen.add(outputMatch[1]);
     }
@@ -92,6 +126,7 @@ export function collectVariables(text, parameterValues, runtimeValues) {
           source: "output",
           line: i + 1,
           value: runtime[aliasName],
+          ...captureSourceFor(aliasName),
         });
         seen.add(aliasName);
       }

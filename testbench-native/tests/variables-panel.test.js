@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { collectVariables } from "../src/webview/lib/variables-panel.js";
+import { collectVariables, classifyCaptureSource } from "../src/webview/lib/variables-panel.js";
 
 test("collectVariables: empty text + no values → empty list", () => {
   assert.deepEqual(collectVariables("", {}, {}), []);
@@ -120,4 +120,98 @@ test("collectVariables: multiple out.X=\"Y\" aliases on a single skill call", ()
   assert.ok(names.includes("second"), `missing second: ${names}`);
   assert.equal(got.find((v) => v.name === "first").value, "F");
   assert.equal(got.find((v) => v.name === "second").value, "S");
+});
+
+// ── Output-source tagging (spec test plan item 11) ────────────────────
+
+test("classifyCaptureSource: 'toolOutput' passes through", () => {
+  assert.equal(classifyCaptureSource("toolOutput"), "toolOutput");
+});
+
+test("classifyCaptureSource: 'capture' passes through", () => {
+  assert.equal(classifyCaptureSource("capture"), "capture");
+});
+
+test("classifyCaptureSource: absent source defaults to 'capture' (back-compat)", () => {
+  assert.equal(classifyCaptureSource(undefined), "capture");
+});
+
+test("classifyCaptureSource: unrecognised source defaults to 'capture'", () => {
+  // A future/garbage value must not leak through as a non-capture label.
+  assert.equal(classifyCaptureSource("parameter"), "capture");
+  assert.equal(classifyCaptureSource("bogus"), "capture");
+  assert.equal(classifyCaptureSource(null), "capture");
+});
+
+test("collectVariables: capture-sourced [output:] row is annotated captureSource='capture'", () => {
+  const text = ["## Steps", "1. [output: pageTitle] grab the title"].join("\n");
+  const got = collectVariables(
+    text,
+    {},
+    { pageTitle: "Welcome" },
+    { pageTitle: "capture" },
+  );
+  const row = got.find((v) => v.name === "pageTitle");
+  assert.equal(row.value, "Welcome");
+  assert.equal(row.captureSource, "capture");
+});
+
+test("collectVariables: toolOutput-sourced row is annotated captureSource='toolOutput'", () => {
+  // Skill aliases its captured value into the caller's scope; the
+  // streaming capture event carried source: 'toolOutput'.
+  const text = [
+    "## Steps",
+    '1. [skill: search query="x" out.first_result_url="target_url"]',
+  ].join("\n");
+  const got = collectVariables(
+    text,
+    {},
+    { target_url: "https://example.com" },
+    { target_url: "toolOutput" },
+  );
+  const row = got.find((v) => v.name === "target_url");
+  assert.equal(row.source, "output");
+  assert.equal(row.captureSource, "toolOutput");
+});
+
+test("collectVariables: a row with no matching runtimeSources entry has no captureSource", () => {
+  const text = ["## Steps", "1. [output: pageTitle] grab"].join("\n");
+  const got = collectVariables(text, {}, { pageTitle: "T" }, {});
+  assert.equal(got.find((v) => v.name === "pageTitle").captureSource, undefined);
+});
+
+test("collectVariables: absent source map renders captures normally (no crash, no badge)", () => {
+  // Legacy server: capture event omitted `source`, so the webview never
+  // populated runtimeSources for this name. Row must still render with a
+  // value and simply carry no captureSource (the React layer shows no
+  // tool badge).
+  const text = ["## Steps", "1. [output: legacyVar] grab"].join("\n");
+  const got = collectVariables(text, {}, { legacyVar: "v" });
+  const row = got.find((v) => v.name === "legacyVar");
+  assert.equal(row.value, "v");
+  assert.equal(row.captureSource, undefined);
+});
+
+test("collectVariables: distinguishes parameter, page capture, and tool output in one file", () => {
+  const text = [
+    "## Parameters",
+    "- user: $USER",
+    "## Steps",
+    "1. [output: pageTitle] grab the title",
+    '2. [skill: search query="x" out.url="resultUrl"]',
+  ].join("\n");
+  const got = collectVariables(
+    text,
+    { user: "alice" },
+    { pageTitle: "Home", resultUrl: "https://example.com" },
+    { pageTitle: "capture", resultUrl: "toolOutput" },
+  );
+  const byName = Object.fromEntries(got.map((v) => [v.name, v]));
+  // Parameter: no captureSource (arrives via parametersResolved path).
+  assert.equal(byName.user.source, "param");
+  assert.equal(byName.user.captureSource, undefined);
+  // Page capture.
+  assert.equal(byName.pageTitle.captureSource, "capture");
+  // Tool output — the visually distinct one.
+  assert.equal(byName.resultUrl.captureSource, "toolOutput");
 });

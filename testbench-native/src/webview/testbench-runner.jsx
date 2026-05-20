@@ -10,7 +10,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { hostBridge } from "./lib/host-bridge.js";
-import { collectVariables, parseParametersInline, maskIfSecretInline } from "./lib/variables-panel.js";
+import { collectVariables, parseParametersInline, maskIfSecretInline, classifyCaptureSource } from "./lib/variables-panel.js";
 import { extractStepLineIds } from "./lib/step-lines-inline.js";
 
 // Inline narrowing helper. The webview can't import named exports from
@@ -176,6 +176,13 @@ function TestBenchRunner() {
   const [composerText, setComposerText] = useState("");
   const [runLog, setRunLog] = useState([]);
   const [runtimeVariables, setRuntimeVariables] = useState({});
+  // Parallel to runtimeVariables: records the `source` discriminator from
+  // each `capture` event (runner-core CaptureEvent → 'capture' | 'toolOutput')
+  // keyed by variable name. Lets the Variables panel mark a value a skill or
+  // tool returned apart from one scraped off the page. frame:scope and
+  // parametersResolved carry no such discriminator, so they leave this map
+  // untouched — those rows render as parameters / plain captures.
+  const [runtimeSources, setRuntimeSources] = useState({});
   const [variablesCollapsed, setVariablesCollapsed] = useState(false);
   const [logCollapsed, setLogCollapsed] = useState(false);
   const [hostError, setHostError] = useState(null);
@@ -242,6 +249,7 @@ function TestBenchRunner() {
           // already be merged into runtimeVariables before the effect fires.
           if (msg.running && !runningRef.current) {
             setRuntimeVariables({});
+            setRuntimeSources({});
           }
           runningRef.current = msg.running;
           setRunning(msg.running);
@@ -292,6 +300,10 @@ function TestBenchRunner() {
         break;
       case "capture":
         setRuntimeVariables((prev) => ({ ...prev, [event.name]: event.value }));
+        // Record where the value came from. An older server omits `source`;
+        // classifyCaptureSource collapses absent/unknown to 'capture' (the
+        // conservative default), so this never crashes on legacy events.
+        setRuntimeSources((prev) => ({ ...prev, [event.name]: classifyCaptureSource(event.source) }));
         log(`✎ ${event.name} ← ${maskIfSecretInline(event.name, event.value)}`, "info");
         break;
       case "frame:scope":
@@ -338,6 +350,7 @@ function TestBenchRunner() {
     setWebviewSelection(new Set());
     selectionAnchorRef.current = null;
     setRuntimeVariables({});
+    setRuntimeSources({});
   }, [snapshot?.uri]);
 
   const onLogScroll = () => {
@@ -360,8 +373,8 @@ function TestBenchRunner() {
   const variableRows = useMemo(() => {
     if (!snapshot?.text) return [];
     const declared = parseParametersInline(snapshot.text);
-    return collectVariables(snapshot.text, declared, runtimeVariables);
-  }, [snapshot, runtimeVariables]);
+    return collectVariables(snapshot.text, declared, runtimeVariables, runtimeSources);
+  }, [snapshot, runtimeVariables, runtimeSources]);
 
   const stepLines = useMemo(() => {
     if (!snapshot?.text) return [];
@@ -670,14 +683,41 @@ function TestBenchRunner() {
             </div>
             {!variablesCollapsed && (
               <div className="tb-section-body" style={{ maxHeight: 180, overflowY: "auto" }}>
-                {variableRows.map((row) => (
-                  <div key={row.name} style={{ display: "flex", justifyContent: "space-between", padding: "2px 4px", fontSize: "0.92em" }}>
-                    <span style={{ opacity: 0.8 }}>{row.name}</span>
-                    <span style={{ fontFamily: "var(--vscode-editor-font-family, monospace)", color: "var(--vscode-textPreformat-foreground, inherit)" }}>
-                      {maskIfSecretInline(row.name, row.value)}
-                    </span>
-                  </div>
-                ))}
+                {variableRows.map((row) => {
+                  // Mark values a skill/tool returned (capture event with
+                  // source: 'toolOutput') apart from page captures and from
+                  // parameters. The badge sits beside the name; absent
+                  // captureSource (parameters, plain page captures, legacy
+                  // servers that omit `source`) renders no badge — those rows
+                  // stay visually as before.
+                  const isToolOutput = row.captureSource === "toolOutput";
+                  return (
+                    <div key={row.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6, padding: "2px 4px", fontSize: "0.92em" }}>
+                      <span style={{ display: "flex", alignItems: "baseline", gap: 4, minWidth: 0 }}>
+                        <span style={{ opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.name}</span>
+                        {isToolOutput && (
+                          <span
+                            title="Returned by a [tool:] / [skill:] invocation"
+                            style={{
+                              flexShrink: 0,
+                              fontSize: "0.82em",
+                              lineHeight: 1.2,
+                              padding: "0 4px",
+                              borderRadius: 3,
+                              textTransform: "uppercase",
+                              letterSpacing: "0.4px",
+                              background: "var(--vscode-badge-background, #4d4d4d)",
+                              color: "var(--vscode-badge-foreground, #fff)",
+                            }}
+                          >tool</span>
+                        )}
+                      </span>
+                      <span style={{ fontFamily: "var(--vscode-editor-font-family, monospace)", color: "var(--vscode-textPreformat-foreground, inherit)" }}>
+                        {maskIfSecretInline(row.name, row.value)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
