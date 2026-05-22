@@ -57,7 +57,7 @@ export async function executeToolStep(
 
   let registered;
   try {
-    registered = options.catalogue.require(call.name);
+    registered = await options.catalogue.resolve(call.name);
   } catch (err) {
     const message = (err as Error).message;
     // Mirror the catalogue error into the tool-step logs so the HTML report

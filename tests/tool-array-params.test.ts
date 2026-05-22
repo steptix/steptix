@@ -14,10 +14,15 @@ import type { ToolDefinition } from '../src/tools/types.js';
 import type { ToolCall } from '../src/tools/types.js';
 
 function makeCatalogue(def: ToolDefinition): {
+  resolve: (name: string) => Promise<{ definition: ToolDefinition }>;
   require: (name: string) => { definition: ToolDefinition };
   has: (name: string) => boolean;
 } {
   return {
+    async resolve(name) {
+      if (name !== def.name) throw new Error(`unknown tool ${name}`);
+      return { definition: def };
+    },
     require(name) {
       if (name !== def.name) throw new Error(`unknown tool ${name}`);
       return { definition: def };

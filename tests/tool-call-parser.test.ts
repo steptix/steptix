@@ -74,6 +74,17 @@ describe('parseToolCall — happy path', () => {
     const result = parseToolCall('[tool: my-cool-tool]');
     expect(result?.name).toBe('my-cool-tool');
   });
+
+  it('accepts a path-qualified tool reference (file/tool)', () => {
+    const result = parseToolCall('[tool: auth/login]');
+    expect(result?.name).toBe('auth/login');
+  });
+
+  it('accepts a nested path-qualified reference with args', () => {
+    const result = parseToolCall('[tool: integrations/stripe/refund/refund orderId="123"]');
+    expect(result?.name).toBe('integrations/stripe/refund/refund');
+    expect(result?.args).toEqual({ orderId: '123' });
+  });
 });
 
 describe('parseToolCall — bare-identifier shorthand (parity with skill calls)', () => {

@@ -29,6 +29,9 @@ export function parseToolCall(line: string): ToolCall | null {
   const parsed: ParsedInvocation | null = parseInvocation(line, {
     prefix: '[tool:',
     errorClass: ToolCallSyntaxError,
+    // Tool references may be path-qualified (`auth/login/login`) to name the
+    // file plus the tool inside it — see `parseToolRef` in the registry.
+    allowSlashInName: true,
   });
   if (!parsed) return null;
   return {

@@ -204,11 +204,15 @@ describe('extract_order_ids — tool emits a string[] back to the test scope', (
         browser,
         resolvedParameters: params,
         catalogue: {
-          require: (n) => {
+          resolve: async (n: string) => {
             if (n === 'order-sink') return { definition: sink };
             throw new Error(`unknown tool ${n}`);
           },
-          has: (n) => n === 'order-sink',
+          require: (n: string) => {
+            if (n === 'order-sink') return { definition: sink };
+            throw new Error(`unknown tool ${n}`);
+          },
+          has: (n: string) => n === 'order-sink',
         } as never,
       },
     );
