@@ -71,9 +71,29 @@ c:\Projects\vibe\ai-ui-automation\scripts\init-worktree.ps1 `
     -Destination <full-path-to-new-worktree>
 ```
 
-It copies (not symlinks) env files and build dirs from the main checkout at
-`c:\Projects\vibe\ai-ui-automation`, so the worktree is independent and
-safe if `package.json` / `Cargo.toml` diverge.
+It copies (not symlinks/junctions) env files and build dirs from the main
+checkout at `c:\Projects\vibe\ai-ui-automation`, so the worktree is
+independent and safe if `package.json` / `Cargo.toml` diverge.
 
 Add `-SkipBuilds` to copy only the env files when you don't need the heavy
 build artifacts (e.g. for a docs-only change).
+
+**Then build `dist/` in the worktree** — the script does not copy it:
+
+```powershell
+cd <full-path-to-new-worktree>; npm run build
+```
+
+This matters because the package self-import `ai-ui-automation/tools` (used
+by the fixture tools) resolves via the `exports` field + the *nearest*
+`package.json` to `dist/tools/index.js` **under whichever package root the
+importing file lives in**. For a worktree fixture that's the worktree's own
+`dist/`, so the worktree's tests run the worktree's tool code — but only once
+that `dist/` is built. `dist/` is gitignored, so a fresh worktree has none
+until you build.
+
+Do **not** try to junction/symlink `node_modules` back to the main checkout
+to save time: it has no effect on that self-import (resolved by path, not via
+`node_modules`), and a shared `node_modules` means a worktree `npm install`
+writes through to main. Copying + a worktree-local `npm install` is correct
+*and* fast (the install is incremental on top of the copied tree).

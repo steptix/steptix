@@ -4,9 +4,24 @@
 #   .\scripts\init-worktree.ps1 -Destination C:\path\to\worktree
 #   .\scripts\init-worktree.ps1 -Destination ..\.claude\worktrees\foo -SkipBuilds
 #
-# Copies (rather than symlinks) so the worktree is fully independent — safe
-# when package.json / Cargo.toml diverge between branches. The trade-off is
-# disk: a full seed is ~5 GB once flick/src-tauri/target is populated.
+# Copies (rather than symlinks/junctions) so the worktree is fully independent
+# — safe when package.json / Cargo.toml diverge between branches. The trade-off
+# is disk: a full seed is ~5 GB once flick/src-tauri/target is populated.
+#
+# NOTE: this seeds node_modules + Rust target, NOT dist/. The package
+# self-import `ai-ui-automation/tools` resolves (via the package `exports`
+# field + nearest package.json) to dist/tools/index.js *under the worktree
+# root*, so the worktree's fixtures use the worktree's own tool code — but only
+# once dist/ exists. dist/ is gitignored and not copied, so after seeding you
+# MUST build it in the worktree:
+#
+#   cd <worktree>; npm run build
+#
+# Don't junction node_modules back to the main checkout to "save time": it
+# doesn't affect the self-import (that's resolved by path, not node_modules),
+# and a shared node_modules means `npm install` in the worktree writes through
+# to main. Copy + a worktree-local `npm install`/`npm run build` is both
+# correct and fast (the install is incremental on top of the copied tree).
 
 [CmdletBinding()]
 param(
@@ -96,3 +111,9 @@ if ($SkipBuilds) {
 
 Write-Host ""
 Write-Host "Done. Copied $copied, skipped $skipped."
+Write-Host ""
+Write-Host "Next: build dist/ in the worktree so the package self-import"
+Write-Host "('ai-ui-automation/tools' -> dist/tools/index.js) resolves to this"
+Write-Host "worktree's code, not the main checkout's:"
+Write-Host ""
+Write-Host "    cd `"$dest`"; npm run build"
