@@ -22,6 +22,6 @@ You are working in a git repository at a known path. Create a clean zip of the p
    - Any nested `node_modules` directories — find them with `find . -name node_modules -type d -not -path '*/node_modules/*/node_modules/*'` and add each one to the exclusion list.
    - Build outputs for any nested toolchains (e.g. Rust `target/`, Tauri `src-tauri/target/`).
 
-4. Verify: run `ls -lh` on the resulting file. Expected size for a typical TypeScript/Node project with a packed `.git` is **1–3 MB**. If it's larger than 5 MB, run `unzip -l <zip> | sort -rn | head -20` to find the bloat — usually unexpected `node_modules`, `target/`, or unconsolidated `.pack` files.
+4. Verify: run `ls -lh` on the resulting file. Expected size for a typical TypeScript/Node project with a packed `.git` is **3–10 MB**. If it's larger than 10 MB, run `unzip -l <zip> | sort -rn | head -20` to find the bloat — usually unexpected `node_modules`, `target/`, or unconsolidated `.pack` files.
 
 Report the final path and size.
