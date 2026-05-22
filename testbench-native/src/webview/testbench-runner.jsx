@@ -169,6 +169,13 @@ function StepContextMenu({ menu, onClose }) {
   );
 }
 
+// Minimum heights (px) that keep each resizable section usable when the
+// panel is short. Steps is the protected region — it never shrinks below
+// ~a few rows, so the Output panel can no longer cover it. Output yields
+// first, collapsing toward just its header (OUTPUT_MIN_HEIGHT).
+const STEPS_MIN_HEIGHT = 120;
+const OUTPUT_MIN_HEIGHT = 36;
+
 function TestBenchRunner() {
   const [snapshot, setSnapshot] = useState(null);
   const [running, setRunning] = useState(false);
@@ -184,6 +191,7 @@ function TestBenchRunner() {
   // untouched — those rows render as parameters / plain captures.
   const [runtimeSources, setRuntimeSources] = useState({});
   const [variablesCollapsed, setVariablesCollapsed] = useState(false);
+  const [stepsCollapsed, setStepsCollapsed] = useState(false);
   const [logCollapsed, setLogCollapsed] = useState(false);
   const [hostError, setHostError] = useState(null);
   /**
@@ -723,8 +731,29 @@ function TestBenchRunner() {
           </div>
         )}
 
-        <div style={{ flex: 1, overflow: "auto" }}>
-          <div className="tb-section-header" style={{ cursor: "default" }}>Steps</div>
+        <div style={{
+          display: "flex",
+          flexDirection: "column",
+          // Steps is the protected region: it grows to fill space and never
+          // shrinks below STEPS_MIN_HEIGHT, so the Output panel can no longer
+          // cover it on a short panel. Collapsing it hands its space to Output
+          // (which gets flexGrow while steps are collapsed) rather than leaving
+          // a void.
+          flex: stepsCollapsed ? "0 0 auto" : "1 1 auto",
+          minHeight: stepsCollapsed ? undefined : STEPS_MIN_HEIGHT,
+          overflow: "hidden",
+        }}>
+          <div className="tb-section-header" onClick={() => setStepsCollapsed((v) => !v)}>
+            <ChevronIcon open={!stepsCollapsed} />
+            <span>Steps</span>
+            {stepRows.length > 0 && (
+              <span style={{ opacity: 0.6, fontSize: "0.85em", textTransform: "none", letterSpacing: 0 }}>
+                ({stepRows.length})
+              </span>
+            )}
+          </div>
+          {!stepsCollapsed && (
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           {stepRows.length === 0 && (
             <div style={{ padding: "4px 12px", opacity: 0.6, fontStyle: "italic" }}>No steps under <code>## Steps</code> yet.</div>
           )}
@@ -792,10 +821,17 @@ function TestBenchRunner() {
               </React.Fragment>
             );
           })}
+          </div>
+          )}
         </div>
 
         <div style={{
-          flexShrink: 0,
+          // Output yields before Steps: flexShrink lets it give back height on
+          // a short panel (down to OUTPUT_MIN_HEIGHT — about its header), and it
+          // only grows to fill space when Steps is collapsed.
+          flexShrink: 1,
+          flexGrow: stepsCollapsed && !logCollapsed ? 1 : 0,
+          minHeight: logCollapsed ? undefined : OUTPUT_MIN_HEIGHT,
           // Reserve a vertical slice for the output log so it never collapses
           // to zero when the step list is tall. User can resize via the sash
           // handle on the top edge; goes to auto when collapsed so only the
