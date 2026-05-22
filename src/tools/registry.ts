@@ -11,6 +11,13 @@ export interface RegisteredTool {
   filePath: string;
 }
 
+/** Result of importing one tool file: its tools (by name), or an import error. */
+interface FileLoad {
+  tools: Map<string, RegisteredTool>;
+  /** Set when the file threw on import — confined to refs naming this file. */
+  error?: string;
+}
+
 /**
  * Diagnostic state attached to a `ToolCatalogue` so error messages can name
  * the directory the framework actually scanned and tell the author exactly
@@ -30,12 +37,54 @@ export interface CatalogueDiagnostics {
 
 export class ToolCatalogue {
   private readonly tools = new Map<string, RegisteredTool>();
+  /**
+   * Index of tool files discovered by `loadToolCatalogue`, keyed by the path
+   * relative to `toolsDir` with the extension stripped and separators
+   * normalised to `/` (e.g. `auth`, `integrations/stripe/refund`). Values are
+   * absolute file paths. Built without importing anything — files are imported
+   * lazily on first `resolve`.
+   */
+  private readonly fileIndex = new Map<string, string>();
+  /**
+   * Outcome of importing each tool file, keyed by absolute path. Tools are
+   * stored *per file* (not in one flat name map) so two files may each define a
+   * tool with the same short name — `auth/login` and `auth/login/login` both
+   * expose `login` — without colliding. `error` is set when the file threw on
+   * import (a missing package, an illegal filename, an in-file duplicate); the
+   * failure is confined to references that name this file.
+   */
+  private readonly byFile = new Map<string, FileLoad>();
   /** Set by `loadToolCatalogue` after the scan; not used by direct constructor users. */
   diagnostics?: CatalogueDiagnostics;
 
+  /** Number of tools available — directly-registered plus lazily-loaded so far. */
   get size(): number {
-    return this.tools.size;
+    let n = this.tools.size;
+    for (const fl of this.byFile.values()) n += fl.tools.size;
+    return n;
   }
+
+  /**
+   * Number of tool files discovered during the scan. Unlike `size` (which
+   * counts *loaded* tools and is 0 until something resolves), this reflects the
+   * directory contents and is the right "is this catalogue empty?" signal for
+   * the server's reload gate.
+   */
+  get indexedCount(): number {
+    return this.fileIndex.size;
+  }
+
+  /** Record a discovered tool file in the index without importing it. */
+  indexFile(relPath: string, absPath: string): void {
+    this.fileIndex.set(relPath, absPath);
+  }
+
+  // NOTE: `has`/`get`/`names`/`require` below report only *directly-registered*
+  // tools (via `register`), NOT lazily-indexed disk tools — those are reached
+  // through the async `resolve`, which imports on demand and stores them
+  // per-file. Don't use `has`/`get` as a cheap "is this a known tool?" gate for
+  // a disk catalogue; they will answer `false` until (and unless) the file is
+  // imported. `resolve` is the single entry point for invocation.
 
   has(name: string): boolean {
     return this.tools.has(name);
@@ -58,6 +107,88 @@ export class ToolCatalogue {
       throw new Error(this.buildNotFoundMessage(name));
     }
     return tool;
+  }
+
+  /**
+   * Lazily resolve a (possibly path-qualified) tool reference, importing the
+   * one file it names if not already loaded. This is the entry point used at
+   * invocation time, so a file that fails to load fails only the step that
+   * referenced it — unrelated tools and tests are untouched.
+   *
+   * Resolution (see `parseToolRef`):
+   *   - `name`              → file `name.ts`, tool named `name` (sugar)
+   *   - `dir/.../file/tool` → file `dir/.../file.ts`, tool named `tool`
+   *
+   * Falls back to a directly-registered tool of the matching name when the ref
+   * names no indexed file — this keeps programmatic registration (and the
+   * pre-loaded path) working.
+   */
+  async resolve(ref: string): Promise<RegisteredTool> {
+    const { file, tool } = parseToolRef(ref);
+    const abs = this.fileIndex.get(file);
+
+    if (abs !== undefined) {
+      if (!this.byFile.has(abs)) {
+        await this.loadFile(abs);
+      }
+      const fl = this.byFile.get(abs)!;
+      if (fl.error !== undefined) {
+        throw new Error(`Tool "${ref}" could not be loaded from ${abs}: ${fl.error}`);
+      }
+      const got = fl.tools.get(tool);
+      if (got) return got;
+      throw new Error(this.buildToolNotInFileMessage(ref, tool, abs, [...fl.tools.keys()]));
+    }
+
+    // No indexed file for this ref — fall back to a directly-registered tool.
+    const existing = this.tools.get(tool);
+    if (existing) return existing;
+    throw new Error(this.buildNotFoundMessage(ref));
+  }
+
+  /** Import one tool file, isolating any failure into its `FileLoad.error`. */
+  private async loadFile(absPath: string): Promise<void> {
+    try {
+      const defs = await importToolFile(absPath);
+      const tools = new Map<string, RegisteredTool>();
+      for (const rt of defs) {
+        if (tools.has(rt.definition.name)) {
+          throw new Error(
+            `Duplicate tool name "${rt.definition.name}" — defined twice in ${absPath}`,
+          );
+        }
+        tools.set(rt.definition.name, rt);
+      }
+      if (defs.length === 0) {
+        logger.warn(
+          `Skipping ${absPath}: no tool exports found (expected a defineTool/tool default export, a bare function, or named tool exports)`,
+        );
+      }
+      this.byFile.set(absPath, { tools });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.byFile.set(absPath, { tools: new Map(), error: message });
+    }
+  }
+
+  /** Error for "the file loaded, but has no tool by that name". */
+  private buildToolNotInFileMessage(
+    ref: string,
+    tool: string,
+    absPath: string,
+    names: string[],
+  ): string {
+    const lines = [`Tool "${tool}" not found in ${absPath} (referenced as "${ref}").`];
+    if (names.length > 0) {
+      // Build the example from the file portion of the ref so a sugar ref
+      // (`unrelated`) suggests `unrelated/preferred`, not the bare `preferred`.
+      const { file } = parseToolRef(ref);
+      lines.push(`  That file registers: [${names.join(', ')}].`);
+      lines.push(`  Reference one as "<file>/<name>", e.g. "${file}/${names[0]!}".`);
+    } else {
+      lines.push(`  That file registers no tools.`);
+    }
+    return lines.join('\n');
   }
 
   names(): string[] {
@@ -122,10 +253,37 @@ export class ToolCatalogue {
 const TOOL_FILE_EXTS = new Set(['.ts', '.mts', '.js', '.mjs']);
 
 /**
- * Walk `dir` (recursively) and import every `.ts` / `.js` file as a tool.
+ * Split a tool reference into the file path and tool name it addresses.
  *
- * Each file's default export must be the result of `defineTool`. Files that
- * don't export a tool are skipped with a warning. Name collisions abort.
+ * The **last** `/`-separated segment is the tool name; everything before it is
+ * the file path (relative to `toolsDir`, no extension). A lone segment is sugar
+ * for "the tool named after the file":
+ *
+ *   parseToolRef('check_health')   → { file: 'check_health',          tool: 'check_health' }
+ *   parseToolRef('auth/login')     → { file: 'auth',                  tool: 'login' }
+ *   parseToolRef('a/b/c/run')      → { file: 'a/b/c',                 tool: 'run' }
+ *
+ * Throws on malformed refs (empty segments, leading/trailing slash) so the
+ * caller surfaces a clear parse error rather than a confusing "not found".
+ */
+export function parseToolRef(ref: string): { file: string; tool: string } {
+  const segments = ref.split('/');
+  if (segments.some((s) => s.length === 0)) {
+    throw new Error(
+      `Invalid tool reference "${ref}": empty path segment (no leading/trailing or doubled '/').`,
+    );
+  }
+  if (segments.length === 1) {
+    return { file: ref, tool: ref };
+  }
+  return { file: segments.slice(0, -1).join('/'), tool: segments[segments.length - 1]! };
+}
+
+/**
+ * Scan `dir` (recursively) and build a *lazy* tool catalogue: every `.ts` /
+ * `.js` file is recorded in the file index, but **none are imported**. Tools
+ * are imported on first `resolve`, so one broken file can't abort the scan and
+ * a project with thousands of tools pays nothing at load time.
  *
  * Returns an empty catalogue if `dir` is missing — projects that don't use
  * tools shouldn't be forced to create the directory.
@@ -160,12 +318,17 @@ export async function loadToolCatalogue(dir: string): Promise<ToolCatalogue> {
   }
 
   const files = await listToolFiles(dir);
-  for (const file of files) {
-    await loadOne(file, catalogue);
+  for (const abs of files) {
+    // Key by path relative to the tools dir, extension stripped, `/`-normalised.
+    const rel = path
+      .relative(dir, abs)
+      .replace(/\\/g, '/')
+      .replace(/\.[^./]+$/, '');
+    catalogue.indexFile(rel, abs);
   }
 
   catalogue.diagnostics = { toolsDir: dir, toolsDirMissing: false, filesScanned: files.length };
-  logger.debug(`Loaded ${catalogue.size} tool(s) from ${dir}`);
+  logger.debug(`Indexed ${files.length} tool file(s) from ${dir} (lazy load)`);
   return catalogue;
 }
 
@@ -193,7 +356,12 @@ async function listToolFiles(dir: string): Promise<string[]> {
   return out;
 }
 
-async function loadOne(filePath: string, catalogue: ToolCatalogue): Promise<void> {
+/**
+ * Import one tool file and finalise every tool it exports. Returns the parsed
+ * `RegisteredTool`s without registering them — the caller (`loadFile`) stores
+ * them in a per-file map. Throws on an import failure or an illegal filename.
+ */
+async function importToolFile(filePath: string): Promise<RegisteredTool[]> {
   let mod: Record<string, unknown>;
   try {
     mod = (await import(pathToFileURL(filePath).href)) as Record<string, unknown>;
@@ -202,16 +370,13 @@ async function loadOne(filePath: string, catalogue: ToolCatalogue): Promise<void
   }
 
   const filename = path.basename(filePath, path.extname(filePath));
-  let registeredFromThisFile = 0;
+  const out: RegisteredTool[] = [];
 
   // Default export — may be a fully-formed ToolDefinition (rung 3), a
   // DeferredTool from `tool(...)` (rung 2), or a bare function (rung 1).
   if (mod.default !== undefined) {
     const defaultDef = finaliseToolExport(mod.default, { filename, filePath });
-    if (defaultDef) {
-      catalogue.register({ definition: defaultDef, filePath });
-      registeredFromThisFile += 1;
-    }
+    if (defaultDef) out.push({ definition: defaultDef, filePath });
   }
 
   // Named exports — multi-tool files. Each export key serves as the tool name
@@ -219,20 +384,9 @@ async function loadOne(filePath: string, catalogue: ToolCatalogue): Promise<void
   // ignored so authors can keep helper types/constants alongside their tools.
   for (const [exportKey, value] of Object.entries(mod)) {
     if (exportKey === 'default') continue;
-    const namedDef = finaliseToolExport(value, {
-      filename,
-      filePath,
-      exportKey,
-    });
-    if (namedDef) {
-      catalogue.register({ definition: namedDef, filePath });
-      registeredFromThisFile += 1;
-    }
+    const namedDef = finaliseToolExport(value, { filename, filePath, exportKey });
+    if (namedDef) out.push({ definition: namedDef, filePath });
   }
 
-  if (registeredFromThisFile === 0) {
-    logger.warn(
-      `Skipping ${filePath}: no tool exports found (expected a defineTool/tool default export, a bare function, or named tool exports)`,
-    );
-  }
+  return out;
 }

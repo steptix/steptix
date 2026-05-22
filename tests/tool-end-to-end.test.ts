@@ -97,17 +97,32 @@ afterAll(async () => {
 }, 15_000);
 
 describe('end-to-end tool execution against fixtures/test-app', () => {
-  it('loads the fixture tools from disk via the registry', () => {
-    expect(catalogue.size).toBeGreaterThanOrEqual(2);
-    expect(catalogue.has('fetch_csrf_token')).toBe(true);
-    expect(catalogue.has('read_page_title')).toBe(true);
+  it('indexes the fixture tools from disk and resolves them lazily by name', async () => {
+    expect(catalogue.indexedCount).toBeGreaterThanOrEqual(2);
+    expect((await catalogue.resolve('fetch_csrf_token')).definition.name).toBe('fetch_csrf_token');
+    expect((await catalogue.resolve('read_page_title')).definition.name).toBe('read_page_title');
   });
 
-  it('also discovers rung-1 (bare function), rung-2 (tool() helper), and named-export tools', () => {
-    expect(catalogue.has('uuid')).toBe(true);          // rung 1, filename-as-name
-    expect(catalogue.has('check_health')).toBe(true);  // rung 2, filename-as-name
-    expect(catalogue.has('slugify')).toBe(true);       // named export
-    expect(catalogue.has('upper')).toBe(true);         // named export
+  it('resolves rung-1 (bare function), rung-2 (tool() helper), and named-export tools', async () => {
+    expect((await catalogue.resolve('uuid')).definition.name).toBe('uuid');                  // rung 1
+    expect((await catalogue.resolve('check_health')).definition.name).toBe('check_health');  // rung 2
+    // Named exports live in a multi-tool file — referenced as `<file>/<tool>`.
+    expect((await catalogue.resolve('strings/slugify')).definition.name).toBe('slugify');
+    expect((await catalogue.resolve('strings/upper')).definition.name).toBe('upper');
+  });
+
+  it('isolates a broken tool file — healthy tools run, the broken one fails only when invoked', async () => {
+    // `broken_tool.ts` (imports a missing package) is indexed alongside the
+    // healthy tools. A tool we don't reference is unaffected by its presence:
+    expect((await catalogue.resolve('uuid')).definition.name).toBe('uuid');
+    // …and the broken tool fails as a single failed step, with the real error,
+    // only because this step referenced it.
+    const outcome = await executeToolStep(
+      { name: 'broken_tool', args: {}, outputAliases: {} },
+      { page, context, browser, resolvedParameters: {}, catalogue },
+    );
+    expect(outcome.status).toBe('failed');
+    expect(outcome.error).toMatch(/could not be loaded/);
   });
 
   it('runs a rung-1 bare-function tool — return value lands in scope under the tool name', async () => {
@@ -136,17 +151,18 @@ describe('end-to-end tool execution against fixtures/test-app', () => {
     expect(resolvedParameters['check_health']).toBe('true');
   });
 
-  it('runs a multi-tool-file named export — caller arg destructured from scope', async () => {
+  it('runs a multi-tool-file named export via file/tool — caller arg destructured from scope', async () => {
     const resolvedParameters: Record<string, string> = {};
     const outcome = await executeToolStep(
       {
-        name: 'slugify',
+        name: 'strings/slugify',
         args: { s: 'Hello, World! 2026' },
         outputAliases: {},
       },
       { page, context, browser, resolvedParameters, catalogue },
     );
     expect(outcome.status).toBe('passed');
+    // Output lands under the tool's own name, not the path-qualified ref.
     expect(resolvedParameters['slugify']).toBe('hello-world-2026');
   });
 

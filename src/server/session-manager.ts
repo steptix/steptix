@@ -927,7 +927,11 @@ export class SessionManager {
       !!request.toolsDir &&
       (!cachedCatalogue ||
         session.toolCatalogueDir !== request.toolsDir ||
-        cachedCatalogue.size === 0);
+        // Lazy catalogues report 0 *loaded* tools until something resolves, so
+        // gate the rescan on the indexed file count — re-scan only when the
+        // previous scan found no files (a dir that was missing/empty and may
+        // since have been populated).
+        cachedCatalogue.indexedCount === 0);
     if (request.toolsDir && needsCatalogueLoad) {
       try {
         session.toolCatalogue = await loadToolCatalogue(request.toolsDir);
@@ -1433,7 +1437,10 @@ export class SessionManager {
             let pauseBeforeRun = false;
             if (session.pauseAtNextTool && !signal?.aborted) {
               session.pauseAtNextTool = false;
-              const registered = toolCatalogue.get(toolCall.name);
+              // Resolve (and lazily import) the tool so its filePath is known
+              // for the debugger-attach. Swallow failures — the imminent
+              // executeToolStep will surface the real error as a failed step.
+              const registered = await toolCatalogue.resolve(toolCall.name).catch(() => undefined);
               emit({
                 type: 'tool:awaiting-debugger',
                 toolName: toolCall.name,
