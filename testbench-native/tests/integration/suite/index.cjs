@@ -3,6 +3,9 @@ const path = require('node:path');
 const fs = require('node:fs');
 const Mocha = require('mocha');
 const { glob } = require('glob');
+const vscode = require('vscode');
+
+const EXT_ID = 'pkent.testbench-native';
 
 async function run() {
   const mocha = new Mocha({
@@ -14,6 +17,18 @@ async function run() {
   const testsRoot = __dirname;
   const files = await glob('**/*.test.cjs', { cwd: testsRoot });
   for (const f of files) mocha.addFile(path.resolve(testsRoot, f));
+
+  // Run statuses now persist to a `.testbench/run-state.json` file in the
+  // workspace folder, and the suite reuses one workspace folder across cases,
+  // so without this the file would leak statuses across test cases (and across
+  // separate runs). Wipe it before every test so each starts from the clean
+  // slate it was written against.
+  mocha.suite.beforeEach('reset persisted run state', function () {
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    if (ext && ext.isActive && ext.exports?.__testHooks?.resetRunState) {
+      ext.exports.__testHooks.resetRunState();
+    }
+  });
 
   // Mocha output isn't captured cleanly through ELECTRON_RUN_AS_NODE +
   // stdio:'inherit' on Windows, so dump a structured summary the runner

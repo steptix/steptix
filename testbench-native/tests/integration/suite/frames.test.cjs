@@ -538,6 +538,234 @@ describe('TestBench frame events (Phase 2)', function () {
     );
   });
 
+  it('persists run state to .testbench/run-state.json keyed by a workspace-relative path', async () => {
+    // The whole point of the file backend (vs workspaceState) is portability:
+    // the ticks must travel when the folder is zipped/copied. That only works
+    // if the on-disk key is the workspace-RELATIVE path, never an absolute
+    // path or a file:// URI (which wouldn't match on another machine).
+    const fs = require('node:fs');
+    const stateFile = path.resolve(FIXTURES_DIR, '.testbench', 'run-state.json');
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor(
+      'line 9 pass',
+      () => Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'pass',
+    );
+
+    // Writes are debounced (~400ms). Wait for the file to land with the mark.
+    await waitFor('run-state.json written with the pass', () => {
+      if (!fs.existsSync(stateFile)) return false;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        const entry = parsed?.files?.['test-with-steps.md'];
+        return entry && Object.fromEntries(entry.statuses)[9] === 'pass';
+      } catch {
+        return false;
+      }
+    }, 4_000);
+
+    const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const keys = Object.keys(parsed.files);
+    assert.ok(
+      keys.includes('test-with-steps.md'),
+      `expected workspace-relative key 'test-with-steps.md', got: ${keys.join(', ')}`,
+    );
+    for (const k of keys) {
+      assert.ok(
+        !k.includes(':') && !k.startsWith('/') && !k.startsWith('file:'),
+        `key must be workspace-relative, not absolute/URI: ${k}`,
+      );
+    }
+  });
+
+  it('a different test descending into a shared skill clears the prior test’s stale statuses', async () => {
+    // Bug class: skill state is keyed only by the skill file's URI, shared
+    // across every test. The run-start clear only wipes skills THIS
+    // controller descended into before — so Test B stepping into a skill
+    // Test A had fully passed would show B's ✗ on the failing step PLUS A's
+    // stale ✓ on the steps B never reaches (a short-circuited failure looks
+    // like it "continued"). Now persisted across close/reload, that mix
+    // would be durable. Fix: clear the skill URI on first descent each run.
+    const skillPath = path.resolve(FIXTURES_DIR, 'shared-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const testAUri = fixtureUri('test-shared-a.md');
+    const testBUri = fixtureUri('test-shared-b.md');
+
+    const openTest = async (uri) => {
+      await vscode.commands.executeCommand('vscode.open', uri);
+      await waitFor('editor active ' + uri.fsPath, () => {
+        const ed = vscode.window.activeTextEditor;
+        return ed && ed.document.uri.toString() === uri.toString();
+      });
+      await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
+    };
+
+    // ── Test A: descend into the shared skill, pass body lines 8 AND 9 ──
+    await openTest(testAUri);
+    const frameA = {
+      id: 'a1', parentId: null, kind: 'skill',
+      uri: skillPath, line: 8, skillName: 'shared_skill',
+    };
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('A stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'frame:push', frame: frameA });
+    fake.push({ type: 'step:start', line: 8, frame: frameA });
+    fake.push({ type: 'step:pass', line: 8, frame: frameA });
+    fake.push({ type: 'step:start', line: 9, frame: frameA });
+    fake.push({ type: 'step:pass', line: 9, frame: frameA });
+    fake.push({ type: 'frame:pop', frameId: 'a1', outputs: {} });
+    await waitFor('shared skill lines 8 & 9 pass after A', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      if (!snap) return false;
+      const s = Object.fromEntries(snap.statuses);
+      return s[8] === 'pass' && s[9] === 'pass';
+    });
+    fake.end();
+    await waitFor('idle after A', () => !hooks.isRunning());
+
+    // ── Test B: a DIFFERENT test file descends into the SAME skill and
+    //    fails on body line 8 (short-circuit — line 9 never runs) ──
+    await openTest(testBUri);
+    const frameB = {
+      id: 'b1', parentId: null, kind: 'skill',
+      uri: skillPath, line: 8, skillName: 'shared_skill',
+    };
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('B stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'frame:push', frame: frameB });
+
+    // The descent-clear fires on frame:push, before any step events — so A's
+    // stale ✓ on line 9 (which B will never reach) must be gone immediately.
+    await waitFor('A’s stale pass on line 9 cleared on B’s descent', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      const s = snap ? Object.fromEntries(snap.statuses) : {};
+      return s[9] === undefined;
+    });
+
+    fake.push({ type: 'step:start', line: 8, frame: frameB });
+    fake.push({ type: 'step:fail', line: 8, error: 'boom', frame: frameB });
+    await waitFor('shared skill line 8 fail after B', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      const s = snap ? Object.fromEntries(snap.statuses) : {};
+      return s[8] === 'fail';
+    });
+
+    // The crux: the shared skill shows ONLY B's failure — not a misleading
+    // mix of B's ✗ on line 8 and A's stale ✓ on line 9.
+    const finalSkill = Object.fromEntries(
+      (hooks.tracker.snapshotFor(skillUri)?.statuses) ?? [],
+    );
+    assert.equal(finalSkill[8], 'fail', 'shared skill line 8 must be fail (Test B)');
+    assert.equal(
+      finalSkill[9],
+      undefined,
+      'Test A’s stale pass on line 9 must be cleared, not left as a ✓',
+    );
+
+    fake.push({ type: 'frame:pop', frameId: 'b1', outputs: {} });
+    fake.end();
+    await waitFor('idle after B', () => !hooks.isRunning());
+  });
+
+  it('second descent into the same skill in ONE run does not re-clear the first descent’s marks', async () => {
+    // The descent-clear is once-per-URI-per-run (clearedDescentUris). A test
+    // that invokes the same skill twice must not have its first invocation's
+    // ✓ wiped when the second invocation pushes the same skill frame.
+    const skillPath = path.resolve(FIXTURES_DIR, 'shared-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const frame1 = {
+      id: 'f1', parentId: null, kind: 'skill',
+      uri: skillPath, line: 8, skillName: 'shared_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // First invocation: pass skill body line 8, then pop.
+    fake.push({ type: 'frame:push', frame: frame1 });
+    fake.push({ type: 'step:start', line: 8, frame: frame1 });
+    fake.push({ type: 'step:pass', line: 8, frame: frame1 });
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    await waitFor('skill line 8 pass after first invocation', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      return snap && Object.fromEntries(snap.statuses)[8] === 'pass';
+    });
+
+    // Second invocation of the SAME skill, same run (different frame id).
+    // The descent-clear must NOT fire again — line 8's pass must survive.
+    fake.push({
+      type: 'frame:push',
+      frame: { ...frame1, id: 'f2' },
+    });
+    await sleep(50);
+    const snap = hooks.tracker.snapshotFor(skillUri);
+    assert.equal(
+      snap && Object.fromEntries(snap.statuses)[8],
+      'pass',
+      'second same-run descent must not re-clear the first invocation’s mark',
+    );
+
+    fake.push({ type: 'frame:pop', frameId: 'f2', outputs: {} });
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a continuation run (Continue after pause) does NOT clear a re-pushed skill’s marks', async () => {
+    // shouldClearDescentStatuses returns false for continuation runs:
+    // resetFrameState empties clearedDescentUris at the start of the new
+    // (continuation) stream, so without the isContinuation guard a re-pushed
+    // skill frame would wipe the pass marks earned before the pause. Drive a
+    // genuine continuation via user-pause → continueRun (which re-opens the
+    // stream with isContinuation: true).
+    const skillPath = path.resolve(FIXTURES_DIR, 'shared-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const frame = {
+      id: 'f1', parentId: null, kind: 'skill',
+      uri: skillPath, line: 8, skillName: 'shared_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Descend and pass skill body line 8.
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 8, frame });
+    fake.push({ type: 'step:pass', line: 8, frame });
+    await waitFor('skill line 8 pass before pause', () => {
+      const snap = hooks.tracker.snapshotFor(skillUri);
+      return snap && Object.fromEntries(snap.statuses)[8] === 'pass';
+    });
+
+    // User pause → idle + breakpointStop set (a non-step-paused pause, so
+    // continueRun takes the stream-reopen path, not the runControl path).
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Continue — re-opens the stream as a continuation (isContinuation: true).
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('isRunning again', () => hooks.isRunning());
+    await waitFor('new continuation stream', () => fake.hasActiveStream);
+
+    // The continuation re-pushes the skill frame. The guard must suppress the
+    // descent-clear so line 8's pass survives.
+    fake.push({ type: 'frame:push', frame });
+    await sleep(50);
+    const snap = hooks.tracker.snapshotFor(skillUri);
+    assert.equal(
+      snap && Object.fromEntries(snap.statuses)[8],
+      'pass',
+      'continuation must preserve the pre-pause pass mark, not clear it on re-descent',
+    );
+
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('user pause at top-level (no active frame): running step flips to stopped, breakpointStop lands on the test file', async () => {
     // Companion to the in-skill test above. Even without a frame on the
     // stack the same Bug 1 applied: pause never invoked markRunningStopped,

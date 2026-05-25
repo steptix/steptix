@@ -136,6 +136,17 @@ export class RunController {
    *  shared skills independently. Cleared by `resetFrameState` at the
    *  start of each run. */
   private readonly revealedFrameUris = new Set<string>();
+  /** Skill-file URIs whose stale statuses have already been wiped on first
+   *  descent THIS run. Distinct from `revealedFrameUris` (which gates the
+   *  editor auto-reveal): a shared skill needs its prior-run marks cleared
+   *  the first time the current run steps into it, so a different test
+   *  reusing the skill doesn't inherit the other test's ✓/✗. Cleared by
+   *  `resetFrameState`. */
+  private readonly clearedDescentUris = new Set<string>();
+  /** True while the in-flight run is a Continue/Resume continuation. The
+   *  descent-clear is suppressed for these — a continuation must preserve
+   *  the marks painted before the pause. */
+  private currentRunIsContinuation = false;
   /** Captured at the start of each run so step-control commands
    *  (sendRunControl) can target the right session via POST. Cleared in
    *  the `runLines` finally block. */
@@ -271,6 +282,7 @@ export class RunController {
     this.frameParents.clear();
     this.failedFrames.clear();
     this.revealedFrameUris.clear();
+    this.clearedDescentUris.clear();
     this.scopesByFrame.clear();
     this.frameStackEmitter.fire();
     this.scopeEmitter.fire();
@@ -312,6 +324,18 @@ export class RunController {
   shouldRevealFrameUri(uri: string): boolean {
     if (this.revealedFrameUris.has(uri)) return false;
     this.revealedFrameUris.add(uri);
+    return true;
+  }
+
+  /** Atomic test-and-mark: returns true the first time the current run
+   *  descends into `uri`, so the caller can wipe statuses a PREVIOUS run
+   *  (possibly a different test sharing the skill) left on that file.
+   *  Returns false on repeat descents and false for continuation runs,
+   *  which must keep the marks painted before the pause. */
+  shouldClearDescentStatuses(uri: string): boolean {
+    if (this.currentRunIsContinuation) return false;
+    if (this.clearedDescentUris.has(uri)) return false;
+    this.clearedDescentUris.add(uri);
     return true;
   }
 
@@ -547,6 +571,11 @@ export class RunController {
     // this time (and making a failure-short-circuit scenario look like
     // "test continued past the failure").
     const previousTouchedSkillUris = [...this.revealedFrameUris];
+
+    // Record continuation intent BEFORE resetFrameState so the descent-clear
+    // (gated by shouldClearDescentStatuses) can suppress itself on a
+    // Continue/Resume, which must preserve pre-pause marks.
+    this.currentRunIsContinuation = options.isContinuation === true;
 
     // Wipe any frame state from a previous run so the Call Stack view starts
     // empty. Pause/resume mid-skill is a Phase 3 concern; in Phase 2 the

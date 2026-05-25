@@ -4,6 +4,9 @@ dist-ui/
 reports/
 memory/
 .cache/
+# TestBench per-workspace run-state (gutter ✓/✗ marks). Travels in the
+# project zip but stays out of git to avoid churn. Matches at any depth.
+.testbench/
 *.tsbuildinfo
 .env
 .env.*

@@ -1,8 +1,45 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { isTestFile } from 'ai-ui-automation-runner-core';
 import type { ErrorPayload } from 'ai-ui-automation-runner-core';
+import { extractStepLineIds } from './step-lines.js';
 
 export type LineStatus = 'running' | 'pass' | 'pass-cached' | 'fail' | 'skip' | 'stopped';
+
+/**
+ * Run statuses + errors are persisted to a `.testbench/run-state.json` file
+ * at the workspace-folder root so the gutter ✓/✗/⚡ marks survive closing the
+ * `.md`, restarting VS Code, AND being zipped/copied to another machine.
+ * Entries are keyed by the file's path RELATIVE to the workspace folder
+ * (forward-slashed) so they still match after the project moves to a
+ * different absolute path. `running` statuses and the transient
+ * `breakpointStop` pause-arrow are NOT persisted — there is no live run after
+ * a reload.
+ *
+ * `signature` is a hash of the file's step lines (their 1-based line numbers
+ * + text) at persist time. On reopen we recompute it from the live document
+ * and discard the whole file's state on mismatch: a status is pinned to a
+ * line number, so if the file changed while closed (an edit elsewhere, a
+ * `git pull`, a branch switch, a teammate's edits) the saved lines can no
+ * longer be trusted and we'd otherwise paint marks on the wrong steps.
+ */
+interface PersistedFileState {
+  statuses: Array<[number, LineStatus]>;
+  errors: Array<[number, ErrorPayload]>;
+  signature: string;
+}
+
+/** On-disk shape of `.testbench/run-state.json`. `files` is keyed by
+ *  workspace-relative, forward-slashed path. */
+interface RunStateFile {
+  version: 1;
+  files: Record<string, PersistedFileState>;
+}
+
+const RUN_STATE_DIR = '.testbench';
+const RUN_STATE_FILE = 'run-state.json';
+const PERSIST_DEBOUNCE_MS = 400;
 
 /**
  * Per-document RUN state. Breakpoints are NOT stored here — they live in
@@ -54,8 +91,18 @@ export class ActiveFileTracker {
   private activeTabIsTextEditor = false;
   private readonly listeners = new Set<Listener>();
   private readonly subs: vscode.Disposable[] = [];
+  /** Step-line signature each URI's persisted state was captured against.
+   *  Compared to the live document on reopen to detect line drift. */
+  private readonly signatures = new Map<string, string>();
+  private persistTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor() {
+    // Restore persisted run state before wiring listeners or painting, then
+    // reconcile every already-open document (VS Code restores editors before
+    // our `onStartupFinished` activation) so stale marks are dropped up front.
+    this.hydrate();
+    for (const doc of vscode.workspace.textDocuments) this.reconcile(doc);
+
     this.subs.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
         // `undefined` means no text editor has focus — typically a webview
@@ -90,19 +137,26 @@ export class ActiveFileTracker {
         }
       }),
       vscode.workspace.onDidCloseTextDocument((doc) => {
-        // Drop run state when the user closes the file. Breakpoints live in
-        // vscode.debug.breakpoints and persist independently — VS Code
-        // restores them on next session.
-        this.states.delete(doc.uri.toString());
-        // If the closed doc was our sticky reference, release it so the
-        // sidebar correctly falls back to "no test file" instead of
-        // reporting on a disposed document.
+        // Run state is intentionally KEPT on close — it lives on in the
+        // `.testbench/run-state.json` file so the ✓/✗ marks reappear when the
+        // file is reopened (after a restart, or for whoever the project is
+        // zipped to). `reconcile` validates it against the live document on
+        // the next open. Breakpoints persist independently via
+        // vscode.debug.breakpoints.
+        //
+        // We only release the sticky `currentEditor` reference so the
+        // sidebar falls back to "no test file" instead of reporting on a
+        // disposed document.
         if (this.currentEditor?.document === doc) {
           this.currentEditor = undefined;
           this.updateContextKey();
           this.emit();
         }
       }),
+      // Reopening a file (or any other doc opening) is where we check the
+      // persisted state's signature against the live text and drop it on
+      // drift.
+      vscode.workspace.onDidOpenTextDocument((doc) => this.reconcile(doc)),
       // Mirror VS Code's debug breakpoint store into our snapshot. Adding /
       // removing a SourceBreakpoint via gutter-click, F9, or our right-click
       // menu all funnel through here, so the snapshot stays consistent
@@ -116,6 +170,12 @@ export class ActiveFileTracker {
   }
 
   dispose(): void {
+    // Flush any debounced write so state isn't lost on a quick quit.
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+      this.persist();
+    }
     this.subs.forEach((s) => s.dispose());
     this.listeners.clear();
   }
@@ -380,6 +440,166 @@ export class ActiveFileTracker {
   emit(): void {
     const snap = this.snapshot();
     for (const l of this.listeners) l(snap);
+    // Every state mutation funnels through emit(), so this is the single
+    // chokepoint for keeping the persisted store in sync. Debounced because
+    // emit() also fires on selection moves, which don't change run state.
+    this.schedulePersist();
+  }
+
+  // ---- persistence -------------------------------------------------------
+
+  /** Absolute path to a workspace folder's run-state file. */
+  private runStateFilePath(folder: vscode.WorkspaceFolder): string {
+    return path.join(folder.uri.fsPath, RUN_STATE_DIR, RUN_STATE_FILE);
+  }
+
+  /** A file URI's key relative to its workspace folder, forward-slashed so
+   *  the persisted key is portable across machines and OSes. */
+  private relativeKey(folder: vscode.WorkspaceFolder, uri: vscode.Uri): string {
+    return path.relative(folder.uri.fsPath, uri.fsPath).split(path.sep).join('/');
+  }
+
+  /** Restore persisted run state from each workspace folder's
+   *  `.testbench/run-state.json` into the in-memory map. Drops any `running`
+   *  status (no run is in flight after a reload). */
+  private hydrate(): void {
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      let parsed: RunStateFile | undefined;
+      try {
+        parsed = JSON.parse(
+          fs.readFileSync(this.runStateFilePath(folder), 'utf8'),
+        ) as RunStateFile;
+      } catch {
+        continue; // missing or unreadable — nothing to restore for this folder
+      }
+      if (!parsed || typeof parsed.files !== 'object') continue;
+      for (const [rel, persisted] of Object.entries(parsed.files)) {
+        const key = vscode.Uri.joinPath(folder.uri, rel).toString();
+        const statuses = new Map<number, LineStatus>(
+          persisted.statuses.filter(([, s]) => s !== 'running'),
+        );
+        const errors = new Map<number, ErrorPayload>(persisted.errors);
+        if (statuses.size === 0 && errors.size === 0) continue;
+        this.states.set(key, { statuses, errors, breakpointStop: null });
+        this.signatures.set(key, persisted.signature);
+      }
+    }
+  }
+
+  /** Hash of the step lines (1-based line number + text) — the surface a
+   *  status is pinned to. Two documents with the same steps in the same
+   *  places share a signature even if surrounding prose differs. */
+  private stepSignature(text: string): string {
+    const lines = text.split(/\r?\n/);
+    const parts = extractStepLineIds(text).map((id) => `${id}:${lines[id - 1] ?? ''}`);
+    return hashString(parts.join('\n'));
+  }
+
+  /**
+   * Validate a document's persisted state against its live text. On a
+   * signature mismatch the file changed while our state was stored, so the
+   * saved line numbers are untrustworthy — drop the state rather than paint
+   * marks on the wrong steps. A match (or first sighting) just refreshes the
+   * stored signature.
+   */
+  private reconcile(doc: vscode.TextDocument): void {
+    const key = doc.uri.toString();
+    if (!this.states.has(key)) return;
+    const expected = this.signatures.get(key);
+    const actual = this.stepSignature(doc.getText());
+    if (expected === undefined || expected === actual) {
+      this.signatures.set(key, actual);
+      return;
+    }
+    this.states.delete(key);
+    this.signatures.delete(key);
+    this.schedulePersist();
+    if (this.currentEditor?.document === doc) this.emit();
+  }
+
+  private schedulePersist(): void {
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.persist();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  /**
+   * Write every tracked URI's run state to `.testbench/run-state.json` under
+   * the workspace folder that owns it, excluding `running` statuses and the
+   * transient breakpoint-stop marker. URIs outside every workspace folder are
+   * skipped — there's nowhere portable to write them. Best-effort: a
+   * read-only filesystem must never break the run UX.
+   */
+  private persist(): void {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) return;
+
+    // Bucket non-empty state by owning workspace folder, keyed by relative path.
+    const buckets = new Map<string, Record<string, PersistedFileState>>();
+    for (const [key, state] of this.states) {
+      const statuses = [...state.statuses.entries()].filter(([, s]) => s !== 'running');
+      if (statuses.length === 0 && state.errors.size === 0) continue;
+      const uri = vscode.Uri.parse(key);
+      const folder = vscode.workspace.getWorkspaceFolder(uri);
+      if (!folder) continue;
+      // Capture the signature from the live document when one is open; the
+      // statuses were written against its current text. Otherwise keep the
+      // signature we last stored for this URI.
+      const editor = this.findEditorFor(uri);
+      if (editor) this.signatures.set(key, this.stepSignature(editor.document.getText()));
+      const bucket = buckets.get(folder.uri.toString()) ?? {};
+      bucket[this.relativeKey(folder, uri)] = {
+        statuses,
+        errors: [...state.errors.entries()],
+        signature: this.signatures.get(key) ?? '',
+      };
+      buckets.set(folder.uri.toString(), bucket);
+    }
+
+    for (const folder of folders) {
+      const files = buckets.get(folder.uri.toString());
+      const filePath = this.runStateFilePath(folder);
+      try {
+        if (files && Object.keys(files).length > 0) {
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(
+            filePath,
+            JSON.stringify({ version: 1, files } satisfies RunStateFile, null, 2),
+          );
+        } else if (fs.existsSync(filePath)) {
+          // Folder had state before; it's all been cleared — drop the file.
+          fs.rmSync(filePath, { force: true });
+        }
+      } catch {
+        // best-effort — persistence must not break the run
+      }
+    }
+  }
+
+  /**
+   * Test-only: wipe every in-memory and persisted run state. The integration
+   * suite reuses one workspace folder across cases, so without an explicit
+   * reset the run-state file would leak statuses across test cases (and across
+   * separate test runs). Production code never calls this — closing a file
+   * deliberately keeps its state.
+   */
+  resetAllStateForTests(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
+    this.states.clear();
+    this.signatures.clear();
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      try {
+        fs.rmSync(this.runStateFilePath(folder), { force: true });
+      } catch {
+        // ignore — best-effort cleanup
+      }
+    }
+    this.emit();
   }
 
   private updateContextKey(): void {
@@ -393,6 +613,16 @@ export class ActiveFileTracker {
       this.activeTabIsTextEditor && this.isActiveTestFile,
     );
   }
+}
+
+/** djb2 string hash, base-36 encoded. Not cryptographic — only needs to
+ *  change when the step lines change, to invalidate stale persisted state. */
+function hashString(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
 }
 
 function isTestbenchDocument(doc: vscode.TextDocument): boolean {

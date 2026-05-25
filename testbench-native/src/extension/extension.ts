@@ -286,6 +286,24 @@ class RunControllerRegistry implements vscode.Disposable {
         case 'frame:push': {
           const controller = this.controllers.get(uri.toString());
           controller?.handleFramePush(ev.frame);
+          // First descent into a skill file this run: wipe any statuses a
+          // PREVIOUS run left on it. Skill state is keyed only by the skill
+          // file's URI, shared across every test, and the run-start clear
+          // only wipes skills THIS controller descended into before. So
+          // Test B stepping into a skill Test A had fully passed would
+          // otherwise show B's ✗ on the failing step plus A's stale ✓ on the
+          // steps B never reaches. Clearing on descent makes a shared skill
+          // always reflect the most recent run. Suppressed for continuations
+          // (shouldClearDescentStatuses returns false) so Resume keeps its
+          // pre-pause marks.
+          const frameUri = vscode.Uri.file(ev.frame.uri);
+          if (
+            controller &&
+            frameUri.toString() !== uri.toString() &&
+            controller.shouldClearDescentStatuses(frameUri.toString())
+          ) {
+            this.tracker.clearStatuses(frameUri);
+          }
           // Aggregate test-file status: a top-level skill (parentId === null)
           // is the one anchored on the test's `[skill:]` line. Mark it
           // `running` so the user sees activity on that line even though
@@ -609,6 +627,11 @@ export interface TestBenchTestHooks {
   testItemMetadata: (uri: vscode.Uri) => { label: string; description: string; tags: string[] } | undefined;
   /** Best-effort: wait until tracker.snapshot() satisfies the predicate. */
   waitFor: (predicate: () => boolean, timeoutMs?: number) => Promise<void>;
+  /** Test-only: wipe all in-memory + persisted run state. The suite calls
+   *  this before each test because run state now persists to a
+   *  `.testbench/run-state.json` file in the (reused) workspace folder, so it
+   *  would otherwise leak across cases. */
+  resetRunState: () => void;
   /** Frame stack of the currently-running controller, outermost first.
    *  Empty when no run is in flight or when the run is in the test (root)
    *  frame. Used by Phase 2 tests to assert that frame events drive the
@@ -810,6 +833,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       controllerItemIds: () => testController.controllerItemIds(),
       triggerInitialResolve: () => testController.triggerInitialResolve(),
       testItemMetadata: (uri) => testController.itemMetadata(uri),
+      resetRunState: () => tracker.resetAllStateForTests(),
       waitFor: async (predicate, timeoutMs = 5000) => {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {

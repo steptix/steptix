@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.38",
+  "version": "0.5.42",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -394,6 +394,7 @@
     "concurrently": "^9.0.0",
     "esbuild": "^0.28.0",
     "glob": "^13.0.6",
+    "mocha": "^10.8.2",
     "typescript": "^5.5.0",
     "vite": "^7.0.0"
   }
