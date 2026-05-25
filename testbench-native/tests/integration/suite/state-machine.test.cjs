@@ -303,6 +303,7 @@ describe('TestBench debug state machine', function () {
     editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
 
     void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
     fake.push({ type: 'step:start', line: 9 });
     fake.push({ type: 'step:pass', line: 9 });
     fake.end();
@@ -458,13 +459,20 @@ describe('TestBench debug state machine', function () {
       'precondition: step 9 passed before the breakpoint',
     );
 
-    await hooks.dispatchWebviewMessage({ type: 'resume' });
+    // Fire-and-forget: the resume delegates to continueRun, whose body awaits
+    // runLines() → the SSE stream. Awaiting here would deadlock, since this
+    // test is the one that must feed and end that stream (see the
+    // `testbench-native.resume` test below for the same rule).
+    void hooks.dispatchWebviewMessage({ type: 'resume' });
     await waitFor('new stream after webview Resume', () => fake.hasActiveStream);
     assert.equal(
       Object.fromEntries(hooks.tracker.snapshot().statuses)[9],
       'pass',
       'webview Resume must preserve earlier pass marks (delegates to continueRun)',
     );
+
+    fake.end();
+    await waitFor('idle after resume completes', () => !hooks.isRunning());
   });
 
   it('webview Close Session stops the in-flight run and closes the session', async () => {
