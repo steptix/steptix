@@ -1,6 +1,17 @@
 # 017 — CLI branched/conditional steps use a 0-based cache key, colliding with 1-based normal steps
 
-**Status:** open / medium priority
+> **RESOLVED 2026-05-26.** Fixed via Option 2: `executeBranchedStep` now passes
+> an explicit **1-based** `cacheKey` (`index + 1`) to its inner `executeStep`
+> calls (matched outcome + continuation), matching the normal loop's
+> `executeStep(i + 1, …)` keying — so every array position maps to a unique
+> 1-based `step-<n>.json` and branched/normal steps can't collide. `StepResult.index`
+> is left 0-based (the group skip/display logic depends on it); the latent
+> attribution off-by-one noted below is deliberately out of scope. No dedicated
+> E2E test was added — `executeBranchedStep`'s inner `executeStep` is in-module
+> and needs a heavy page/AI mock surface to drive; the fix is a 2-line wiring
+> change guarded by the full branched-step suite + code review.
+
+**Status:** resolved 2026-05-26 (was: open / medium priority)
 **Area:** [src/runner/step-executor.ts](../src/runner/step-executor.ts) — `executeBranchedStep` (inner `executeStep` calls); [src/runner/test-runner.ts](../src/runner/test-runner.ts) — normal step loop; [src/runner/step-grouper.ts](../src/runner/step-grouper.ts) — 0-based group indices
 **Related:** [016-skill-cache-key-collisions.md](016-skill-cache-key-collisions.md) (same flat `step-<id>.json` cache, different code path), [step-cache-server.md](../testbench-native/stories/specs/step-cache-server.md)
 **Opened:** 2026-05-26

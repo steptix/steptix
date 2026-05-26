@@ -1997,7 +1997,12 @@ export async function executeBranchedStep(
       matchedOutcome.index,
       totalSteps,
       matchedOutcome.instruction,
-      opts,
+      // Cache by the 1-based step identity (issue 017). `matchedOutcome.index`
+      // is the group's 0-based array index, but the normal step loop keys the
+      // cache as `executeStep(i + 1, …)`; without this override a branched step
+      // and a normal step one position apart would share `step-<n>.json`.
+      // `result.index` stays 0-based for the skip/display logic below.
+      { ...opts, cacheKey: matchedOutcome.index + 1 },
     );
   } else {
     // No actions needed (e.g. continuation step = "Wait for dashboard" and dashboard is already loaded)
@@ -2038,7 +2043,8 @@ export async function executeBranchedStep(
       group.continuationStep.index,
       totalSteps,
       group.continuationStep.instruction,
-      opts,
+      // 1-based cache identity, matching the normal step loop (issue 017).
+      { ...opts, cacheKey: group.continuationStep.index + 1 },
     );
     results.push(contResult);
   } else {
