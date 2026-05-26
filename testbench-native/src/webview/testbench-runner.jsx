@@ -26,6 +26,7 @@ const HOST_MSG_TYPES = new Set([
   "running",
   "breakpointStop",
   "batchBanner",
+  "skillRerunAvailable",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -191,6 +192,11 @@ function TestBenchRunner() {
   // untouched — those rows render as parameters / plain captures.
   const [runtimeSources, setRuntimeSources] = useState({});
   const [variablesCollapsed, setVariablesCollapsed] = useState(false);
+  // "Re-run a skill step with its variables": { skillName, scope, paramNames }
+  // when a top-level skill step fails on a live session, else null.
+  // `rerunEdits` holds the user's in-progress edits to the editable rows.
+  const [skillRerun, setSkillRerun] = useState(null);
+  const [rerunEdits, setRerunEdits] = useState({});
   const [stepsCollapsed, setStepsCollapsed] = useState(false);
   const [logCollapsed, setLogCollapsed] = useState(false);
   const [hostError, setHostError] = useState(null);
@@ -258,6 +264,10 @@ function TestBenchRunner() {
           if (msg.running && !runningRef.current) {
             setRuntimeVariables({});
             setRuntimeSources({});
+            // A new run invalidates any parked skill-failure re-run offer (its
+            // captured scope is wiped on the host side too).
+            setSkillRerun(null);
+            setRerunEdits({});
           }
           runningRef.current = msg.running;
           setRunning(msg.running);
@@ -281,6 +291,10 @@ function TestBenchRunner() {
           break;
         case "batchBanner":
           setBatchBanner(msg.state);
+          break;
+        case "skillRerunAvailable":
+          setSkillRerun(msg.failure);
+          setRerunEdits({});
           break;
         default:
           break;
@@ -359,6 +373,8 @@ function TestBenchRunner() {
     selectionAnchorRef.current = null;
     setRuntimeVariables({});
     setRuntimeSources({});
+    setSkillRerun(null);
+    setRerunEdits({});
   }, [snapshot?.uri]);
 
   const onLogScroll = () => {
@@ -684,6 +700,54 @@ function TestBenchRunner() {
       )}
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {skillRerun && !running && (
+          <div style={{ flexShrink: 0, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)", padding: "6px 8px" }}>
+            <div style={{ fontWeight: 600, marginBottom: 2 }}>
+              Re-run “{skillRerun.skillName}” from the failed step
+            </div>
+            <div style={{ opacity: 0.8, fontSize: "0.9em", marginBottom: 6 }}>
+              Edit the captured variables, then re-run from the failed step to the end of the skill on the live page.
+            </div>
+            {Object.entries(skillRerun.scope).map(([name, value]) => {
+              const isParam = skillRerun.paramNames.includes(name);
+              const masked = /password|secret|token|apikey|api_key/i.test(name);
+              const readOnly = isParam || masked;
+              const current = name in rerunEdits ? rerunEdits[name] : value;
+              return (
+                <div key={name} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: "0.92em" }}>
+                  <span
+                    title={isParam ? `${name} (parameter — read-only; edit the [skill:] line and Continue to change it)` : name}
+                    style={{ flex: "0 0 40%", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.85 }}
+                  >
+                    {name}{isParam ? " (param)" : ""}
+                  </span>
+                  {readOnly ? (
+                    <span style={{ flex: 1, fontFamily: "var(--vscode-editor-font-family, monospace)", opacity: 0.65 }}>
+                      {maskIfSecretInline(name, value)}
+                    </span>
+                  ) : (
+                    <input
+                      type="text"
+                      value={current}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setRerunEdits((prev) => ({ ...prev, [name]: v }));
+                      }}
+                      style={{ flex: 1, minWidth: 0, fontFamily: "var(--vscode-editor-font-family, monospace)", background: "var(--vscode-input-background)", color: "var(--vscode-input-foreground)", border: "1px solid var(--vscode-input-border, transparent)", borderRadius: 2, padding: "1px 4px" }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+            <button
+              onClick={() => hostBridge.postRerunSkillStep(skillRerun.testUri, rerunEdits)}
+              title="Re-run from the failed step to the end of the skill on the live session"
+              style={{ marginTop: 4, padding: "2px 10px", cursor: "pointer", background: "var(--vscode-button-background)", color: "var(--vscode-button-foreground)", border: "none", borderRadius: 2 }}
+            >
+              ↻ Re-run from failed step
+            </button>
+          </div>
+        )}
         {variableRows.length > 0 && (
           <div style={{ flexShrink: 0, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)" }}>
             <div className="tb-section-header" onClick={() => setVariablesCollapsed((v) => !v)}>

@@ -251,6 +251,33 @@ export class ApiClient {
     }
   }
 
+  /**
+   * Liveness probe: `GET /sessions/:id`. Returns true if the server still
+   * holds a live (non-closed) session under this id, false if it's gone
+   * (404). The testbench "re-run a skill step" path calls this before reusing
+   * a session — the server would otherwise silently replace a dead session
+   * with a fresh blank browser and run the tail against `about:blank`.
+   * Throws `ApiClientError('connect-failed')` if the server is unreachable so
+   * the caller can distinguish "server down" from "session gone".
+   */
+  async isSessionAlive(sessionId: string): Promise<boolean> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'GET',
+        headers: { 'x-api-key': this.apiKey },
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new ApiClientError('connect-failed', reason);
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    return response.status === 200;
+  }
+
   /** Fire-and-best-effort: tells the server to drop the session and close the browser. */
   async closeSession(sessionId: string): Promise<void> {
     const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}`;

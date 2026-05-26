@@ -67,4 +67,7 @@ export const hostBridge = {
   postWebviewState(runtimeVariables) {
     post({ type: 'webviewState', runtimeVariables });
   },
+  /** Re-run the failed skill step (identified by its test URI) with the user's
+   *  edited captured vars. */
+  postRerunSkillStep(testUri, edits) { post({ type: 'rerunSkillStep', testUri, edits }); },
 };

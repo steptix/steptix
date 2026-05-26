@@ -149,6 +149,32 @@ export function createApiServer(config: Config): {
       ) {
         request.fullSteps = body.fullSteps as string[];
       }
+      // Re-run-with-variables fields (testbench "re-run a skill step"):
+      // `seedScope` injects captured/runtime vars before the run; `startAt`
+      // starts execution partway into the expanded skill body. Both optional.
+      if (
+        body.seedScope !== undefined &&
+        body.seedScope !== null &&
+        typeof body.seedScope === 'object' &&
+        !Array.isArray(body.seedScope)
+      ) {
+        const scope: Record<string, string> = {};
+        for (const [k, v] of Object.entries(body.seedScope)) {
+          if (typeof v === 'string') scope[k] = v;
+        }
+        if (Object.keys(scope).length > 0) request.seedScope = scope;
+      }
+      if (
+        body.startAt !== undefined &&
+        body.startAt !== null &&
+        typeof body.startAt === 'object' &&
+        !Array.isArray(body.startAt)
+      ) {
+        const sa = body.startAt as { uri?: unknown; line?: unknown };
+        if (typeof sa.uri === 'string' && typeof sa.line === 'number') {
+          request.startAt = { uri: sa.uri, line: sa.line };
+        }
+      }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);

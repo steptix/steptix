@@ -201,6 +201,23 @@ class RunControllerRegistry implements vscode.Disposable {
     return false;
   }
 
+  /** The controller for a specific test document URI string, if one exists.
+   *  Used to route the re-run action to the test that owns the displayed
+   *  failure (by the `testUri` echoed from the panel). */
+  controllerForUri(uri: string): RunController | undefined {
+    return this.controllers.get(uri);
+  }
+
+  /** The controller holding a parked skill-step failure, if any. Fallback for
+   *  the re-run routing when the test URI doesn't resolve a controller. At most
+   *  one is parked at a time in practice. */
+  controllerWithSkillFailure(): RunController | undefined {
+    for (const c of this.controllers.values()) {
+      if (c.lastSkillFailure) return c;
+    }
+    return undefined;
+  }
+
   /**
    * Build the `post` callback for a controller. Each event flows to:
    *  1. the sidebar webview (UI updates)
@@ -267,6 +284,15 @@ class RunControllerRegistry implements vscode.Disposable {
             const controller = this.controllers.get(uri.toString());
             root = controller?.markFrameFailed(ev.frame.id) ?? null;
             if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail');
+            // Park the failure context so the Variables panel can offer
+            // "re-run this skill step with its variables". No-ops on the
+            // controller for nested frames (v1 is top-level skills only), in
+            // which case the payload is null and the panel offers nothing.
+            controller?.recordSkillFailure(ev.frame, ev.line);
+            this.view.post({
+              type: 'skillRerunAvailable',
+              failure: controller?.skillRerunPayload() ?? null,
+            });
           }
           // Paused-on-error: park a breakpointStop on the failed step so the
           // user can edit the line and hit Continue to retry against the
@@ -598,6 +624,10 @@ export interface TestBenchTestHooks {
   notifyRunningHistory: () => boolean[];
   /** Diagnostic: last runError payload, or null if none. */
   lastRunError: () => { code: string; diagnosis: string; fix?: string } | null;
+  /** True when any controller has a parked skill-step failure (the Variables
+   *  re-run panel would be offered). Used to assert a refused dead-session
+   *  re-run does NOT wipe the parked failure. */
+  skillFailureParked: () => boolean;
   /** Drive the webview→host message path directly so tests can verify it
    *  mirrors the registered command behavior (markRunningStopped, etc).
    *  Guards the two-handler regression class. */
@@ -819,6 +849,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       activeControllerResolves: () => registry.active() !== undefined,
       notifyRunningHistory: () => [...registry.notifyRunningHistory],
       lastRunError: () => registry.lastRunError,
+      skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
       dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker),
       discoveredTests: () =>
         discovery.eligibleTests().map((t) => ({
@@ -969,6 +1000,34 @@ async function handleWebviewMessage(
       // webview-visible variable state without round-tripping a
       // query. Production code path is unchanged.
       registry.recordWebviewRuntimeVariables(msg.runtimeVariables);
+      return;
+    }
+    case 'rerunSkillStep': {
+      // Route to the controller that owns the DISPLAYED failure by its test
+      // URI. Critical when two tests share a skill and both have a parked
+      // failure — `active()` / first-match could pick the wrong one and re-run
+      // it with the other test's edits.
+      const controller =
+        registry.controllerForUri(msg.testUri) ?? registry.controllerWithSkillFailure();
+      if (!controller || !controller.lastSkillFailure) {
+        vscode.window.setStatusBarMessage('TestBench: no failed skill step to re-run', 2500);
+        return;
+      }
+      // Probe liveness BEFORE notifyRunning / resetFrameState, so refusing a
+      // dead session leaves the parked failure (and its Variables panel)
+      // intact rather than wiping it on the way to an aborted run.
+      const live = await controller.isRerunSessionLive();
+      if (!live) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: the browser session for this test is no longer open — re-run the whole test instead.',
+          4000,
+        );
+        return;
+      }
+      registry.notifyRunning(true);
+      void controller
+        .rerunSkillStepFromFailure(msg.edits)
+        .finally(() => registry.notifyRunning(false));
       return;
     }
   }

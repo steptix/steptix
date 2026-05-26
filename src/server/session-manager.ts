@@ -161,6 +161,30 @@ export interface StepRequest {
    * between batches and prevent any cache hit).
    */
   fullSteps?: string[];
+  /**
+   * Re-run seed scope (testbench "re-run a skill step with its variables").
+   * Captured/runtime variables to inject into the session scope BEFORE the
+   * run, so a partial re-run that starts mid-skill (see `startAt`) can resolve
+   * values the skipped earlier steps would have produced. Merged over
+   * `session.outputs` and `parameters` (seed wins) — these are the values the
+   * user saw, and optionally edited, in the Variables panel.
+   *
+   * `__skill*`-namespaced names are server-owned internals and are ignored if
+   * present. When `seedScope` is set the per-step cache is force-disabled for
+   * the run (see `cacheEnabled` handling) so an edited value re-plans instead
+   * of replaying a frozen cached action list.
+   */
+  seedScope?: Record<string, string>;
+  /**
+   * Start executing partway into the (expanded) step list: skip every expanded
+   * step before the first whose origin file === `startAt.uri` AND whose source
+   * line ≥ `startAt.line`. Used by "re-run this skill step" — the client sends
+   * the single failed `[skill: …]` invocation plus the failed body step's
+   * (skill-file) location, and the server runs from there to the end of that
+   * expansion. Qualified by `uri` so a line number that recurs in a different
+   * (e.g. nested) skill file can't false-match. Omit to run from the start.
+   */
+  startAt?: { uri: string; line: number };
 }
 
 /**
@@ -869,10 +893,23 @@ export class SessionManager {
       ? attachRunLogBridges(runLog, fileMode)
       : () => {};
 
-    // Build the parameter map: session outputs as base, request parameters as overrides
+    // Re-run seed scope: captured/runtime vars to inject before the run so a
+    // partial re-run starting mid-skill (see `startAt`) can resolve values the
+    // skipped earlier steps would have produced. `__skill*` names are
+    // server-owned internals and are never accepted from a seed.
+    const seedScope: Record<string, string> = {};
+    for (const [k, v] of Object.entries(request.seedScope ?? {})) {
+      if (!k.startsWith('__skill')) seedScope[k] = v;
+    }
+
+    // Build the parameter map: session outputs as base, request parameters as
+    // overrides, then the seed scope on top (the values the user saw / edited
+    // win). The existing post-step sweep persists these into session.outputs
+    // and labels them, so no explicit provenance write is needed here.
     const resolvedParameters: Record<string, string> = {
       ...session.outputs,
       ...(request.parameters ?? {}),
+      ...seedScope,
     };
 
     // Label every incoming parameter as 'parameter'. First-write-wins: if a
@@ -1061,7 +1098,14 @@ export class SessionManager {
     // An absent flag (`undefined`) means OFF, so a caller that says nothing
     // about caching gets none. (Previously `undefined` meant ON, which made
     // the cache impossible to turn off from clients that never set the flag.)
-    const cacheEnabledForRequest = request.cacheEnabled === true && !!request.testFilePath;
+    // A partial re-run (`startAt`) seeds scope and may carry edited values, but
+    // its per-step cache keys are identical to the full run's (same expanded
+    // bundle hash + frame-scoped keys), so a cache HIT would replay the frozen
+    // action plan and silently ignore an edit meant to change behaviour. Force
+    // the cache OFF for any partial re-run regardless of what the client sent.
+    const isPartialRerun = request.startAt !== undefined;
+    const cacheEnabledForRequest =
+      request.cacheEnabled === true && !!request.testFilePath && !isPartialRerun;
     let stepCache: StepCache | undefined;
     if (cacheEnabledForRequest && request.testFilePath) {
       const projectRoot = await resolveProjectRoot(request.testFilePath);
@@ -1258,13 +1302,64 @@ export class SessionManager {
       scope: { ...resolvedParameters },
     });
 
+    // Partial re-run ("re-run this skill step with its variables"): skip every
+    // expanded step before the failed one. Match by (origin file, source line)
+    // so a line that recurs in a different frame can't false-match. The single
+    // sent `[skill: …]` invocation expands to just that skill's body, so running
+    // from here to the end of `effectiveSteps` is exactly "from the failed step
+    // to the end of the skill".
+    let startIndex = 0;
+    if (request.startAt) {
+      const { uri: startUri, line: startLine } = request.startAt;
+      const uriOfStep = (i: number): string | undefined => {
+        const origin = expansionOrigins?.[i];
+        if (!origin || origin.frameId === '') return request.testFilePath;
+        return expansionFrames?.[origin.frameId]?.uri;
+      };
+      startIndex = effectiveSteps.findIndex(
+        (_, i) => uriOfStep(i) === startUri && (effectiveSourceLines?.[i] ?? -1) >= startLine,
+      );
+      if (startIndex < 0) {
+        const message =
+          `Re-run anchor not found: no step at or after line ${startLine} in ${startUri}. ` +
+          `The skill may have changed since the failed run.`;
+        logger.error(`Session "${sessionId}": ${message}`);
+        emit({ type: 'output', msg: message, kind: 'error' });
+        emit({ type: 'done', status: 'error' });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          outputSources: { ...session.outputSources },
+          error: { step: 0, message },
+          pageTitle: '',
+        };
+      }
+      // Guard: starting on a non-first member of a conditional group would skip
+      // the group (the loop's group check `continue`s for non-first members) and
+      // finish as a misleading "passed" having executed nothing. Snap the anchor
+      // back to the group's first step so its lookahead stays intact. (Latent
+      // today — branched steps emit no step:fail, so the client never anchors
+      // here — but `startAt` is a public field, so guard it.)
+      const anchorGroup = stepGroups.get(startIndex);
+      if (anchorGroup && startIndex !== anchorGroup.conditionalSteps[0]!.index) {
+        startIndex = anchorGroup.conditionalSteps[0]!.index;
+      }
+      logger.info(
+        `Session "${sessionId}": partial re-run from step ${startIndex + 1}/${stepsTotal} (${startUri}:${startLine})`,
+      );
+    }
+
     // Step indexes that have already had their breakpoint pause consumed
     // in this batch. Without this, the loop would re-pause forever on
     // the same step after a Continue.
     const consumedBreakpoints = new Set<number>();
 
     try {
-      for (let i = 0; i < effectiveSteps.length; i++) {
+      for (let i = startIndex; i < effectiveSteps.length; i++) {
         // Check abort BEFORE starting each step. We don't try to interrupt
         // a step mid-flight (Playwright actions / AI calls aren't reliably
         // cancelable today) — between-step granularity is the contract.
@@ -1281,6 +1376,41 @@ export class SessionManager {
           ? interpolateEnvData(originalStep, envDataCtx)
           : originalStep;
         const interpolated = interpolate(envInterpolated, resolvedParameters);
+
+        // Partial re-run guard: a leftover `{{__skill…}}` after interpolation
+        // means this tail step needs an internal value that an earlier (skipped)
+        // step in the skill produced. Those are namespaced per-expansion and
+        // can't be seeded, so refuse with a clear message rather than send the
+        // AI a step with a literal placeholder baked in. Can't trip on a normal
+        // full run — every internal var is produced before it's consumed. The
+        // common case (the failed step itself depends on a skipped step) trips
+        // on the first tail step, so nothing runs before the refusal.
+        if (isPartialRerun && /\{\{__skill\w*\}\}/.test(interpolated)) {
+          const frame = frameInfoFor(i);
+          const message =
+            `Can't re-run from this step on its own — it uses a value an earlier step ` +
+            `in the skill produced, which can't be restored for a partial re-run. ` +
+            `Use Continue to re-run the whole skill instead.`;
+          logger.info(`Session "${sessionId}": partial re-run refused at step ${i + 1}: ${message}`);
+          emit({
+            type: 'step:fail',
+            line: effectiveSourceLines?.[i] ?? i + 1,
+            error: message,
+            ...(frame && { frame }),
+          });
+          emit({ type: 'done', status: 'error' });
+          return {
+            sessionId,
+            status: 'error',
+            stepsCompleted: Math.max(0, i - startIndex),
+            stepsTotal,
+            results: [],
+            outputs: session.outputs,
+            outputSources: { ...session.outputSources },
+            error: { step: i + 1, message },
+            pageTitle: '',
+          };
+        }
 
         // Check if this step is part of a conditional group
         const group = stepGroups.get(i);

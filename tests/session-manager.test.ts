@@ -270,6 +270,47 @@ describe('SessionManager', () => {
       expect(response2.outputs).toHaveProperty('confirmCode', 'CONF-456');
     });
 
+    // ── Re-run a skill step with its variables (startAt + seedScope) ─────────
+    it('a partial re-run (startAt) runs only the tail and seeds the scope', async () => {
+      const ran: string[] = [];
+      const scopeSeen: Array<Record<string, string>> = [];
+      vi.mocked(executeStep).mockImplementation(async (_idx, _total, instruction, opts: any) => {
+        ran.push(instruction);
+        scopeSeen.push({ ...(opts.resolvedParameters ?? {}) });
+        return { index: 1, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
+      });
+
+      const response = await manager.executeSteps('session-rerun', {
+        steps: ['Step one', 'Step two', 'Step three'],
+        sourceLines: [10, 11, 12],
+        testFilePath: '/proj/test.md',
+        startAt: { uri: '/proj/test.md', line: 11 },
+        seedScope: { foo: 'bar', __skill1_internal: 'secret' },
+      });
+
+      expect(response.status).toBe('passed');
+      // Step one (line 10) is skipped; the tail (lines 11, 12) runs.
+      expect(ran).toEqual(['Step two', 'Step three']);
+      // The seed reaches the run; the __skill* internal is stripped.
+      expect(scopeSeen[0]).toHaveProperty('foo', 'bar');
+      expect(scopeSeen[0]).not.toHaveProperty('__skill1_internal');
+    });
+
+    it('refuses a partial re-run whose tail needs an unseedable internal var', async () => {
+      const response = await manager.executeSteps('session-refuse', {
+        steps: ['Type {{__skill1_token}} into the box'],
+        sourceLines: [10],
+        testFilePath: '/proj/test.md',
+        startAt: { uri: '/proj/test.md', line: 10 },
+        seedScope: {},
+      });
+
+      expect(response.status).toBe('error');
+      expect(response.error?.message ?? '').toMatch(/re-run the whole skill/i);
+      // The step must NOT have been executed with a literal placeholder.
+      expect(vi.mocked(executeStep)).not.toHaveBeenCalled();
+    });
+
     it('parameters from request override accumulated outputs', async () => {
       // First call: output gets stored
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {

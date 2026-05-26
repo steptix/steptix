@@ -316,6 +316,32 @@ export interface HostBatchBannerMsg {
   state: { running: number; total: number } | null;
 }
 
+/**
+ * Offer (or withdraw) the "re-run this skill step with its variables" action
+ * in the Variables panel. Sent with a non-null `failure` when a step inside a
+ * top-level skill fails and its session is still live; the webview shows the
+ * captured scope with editable capture rows and a "Re-run from failed step"
+ * button. `failure: null` withdraws it. The webview also withdraws it on the
+ * next `running: true` (a new run invalidates the parked failure's scope).
+ */
+export interface HostSkillRerunAvailableMsg {
+  type: 'skillRerunAvailable';
+  failure: {
+    /** Owning test document URI (as a string). Echoed back in the re-run
+     *  message so the host targets THIS test's controller — critical when two
+     *  tests share a skill and both have a parked failure. */
+    testUri: string;
+    /** Skill name, for the panel heading. */
+    skillName: string;
+    /** Captured scope to seed, already stripped of `__skill*` internals. */
+    scope: Record<string, string>;
+    /** Names within `scope` that are the skill's input parameters — read-only
+     *  in v1 (baked into step text at expansion). Everything else is an
+     *  editable captured/runtime var. */
+    paramNames: string[];
+  } | null;
+}
+
 export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
@@ -325,7 +351,8 @@ export type HostToWebviewMsg =
   | HostParametersResolvedMsg
   | HostRunningMsg
   | HostBreakpointStopMsg
-  | HostBatchBannerMsg;
+  | HostBatchBannerMsg
+  | HostSkillRerunAvailableMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -423,6 +450,21 @@ export interface WebviewStateMsg {
   runtimeVariables: Record<string, string>;
 }
 
+/**
+ * User clicked "Re-run from failed step" in the Variables panel. `edits` are
+ * the (caller-visible) captured-var values the user changed; the host overlays
+ * them on the captured scope and re-runs the failed skill from the failed step
+ * to the end of the skill on the live session. Param / `__skill*` names are
+ * never included (params are read-only in v1; internals aren't editable).
+ */
+export interface WebviewRerunSkillStepMsg {
+  type: 'rerunSkillStep';
+  /** Owning test document URI (echoed from `skillRerunAvailable`) so the host
+   *  re-runs the right test when more than one has a parked failure. */
+  testUri: string;
+  edits: Record<string, string>;
+}
+
 export type WebviewToHostMsg =
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -437,7 +479,8 @@ export type WebviewToHostMsg =
   | WebviewPauseMsg
   | WebviewFocusTestResultsMsg
   | WebviewClearStatusMsg
-  | WebviewStateMsg;
+  | WebviewStateMsg
+  | WebviewRerunSkillStepMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -455,7 +498,8 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'parametersResolved' ||
     t === 'running' ||
     t === 'breakpointStop' ||
-    t === 'batchBanner'
+    t === 'batchBanner' ||
+    t === 'skillRerunAvailable'
   );
 }
 
@@ -476,7 +520,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'pause' ||
     t === 'focusTestResults' ||
     t === 'clearStatus' ||
-    t === 'webviewState'
+    t === 'webviewState' ||
+    t === 'rerunSkillStep'
   );
 }
 

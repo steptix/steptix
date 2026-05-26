@@ -31,6 +31,17 @@ class FakeApiClient {
     this.runControlCalls = [];
     /** Phase 5 — each call to ackToolDebugger. */
     this.ackToolDebuggerCalls = [];
+    /** "Re-run a skill step" liveness probe. `isSessionAlive` returns this by
+     *  default; a test flips it to false to exercise the refusal path. Each
+     *  call's sessionId is recorded so tests can assert the pre-flight ran. */
+    this.sessionAlive = true;
+    this.isSessionAliveCalls = [];
+  }
+
+  /** Liveness probe used by the re-run pre-flight (GET /sessions/:id). */
+  async isSessionAlive(sessionId) {
+    this.isSessionAliveCalls.push({ sessionId });
+    return this.sessionAlive;
   }
 
   /**

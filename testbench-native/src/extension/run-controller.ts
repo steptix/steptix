@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import {
   ApiClient,
   ApiClientError,
@@ -50,6 +51,10 @@ export interface ApiClientLike {
   /** Optional Phase-5 ack used by tool step-into. Tests that don't
    *  exercise the tool-debugger flow omit it. */
   ackToolDebugger?(sessionId: string): Promise<void>;
+  /** Optional liveness probe (`GET /sessions/:id`). Used by the "re-run a
+   *  skill step" path to refuse before reusing a dead session. When absent
+   *  (older fakes) the re-run treats the session as live. */
+  isSessionAlive?(sessionId: string): Promise<boolean>;
 }
 
 export type ApiClientFactory = (config: { serverUrl: string; apiKey: string }) => ApiClientLike;
@@ -61,6 +66,23 @@ export const defaultApiClientFactory: ApiClientFactory = (config) => new ApiClie
 export interface RunOutcome {
   ok: boolean;
   error?: ErrorPayload;
+}
+
+/** Everything the "re-run this skill step with its variables" action needs,
+ *  captured when a step inside a TOP-LEVEL skill fails. */
+export interface SkillFailure {
+  /** Server frame id of the failed (top-level) skill invocation. */
+  frameId: string;
+  /** Skill name, for the panel heading. */
+  skillName: string;
+  /** Absolute path of the skill file the failed step lives in. */
+  skillUri: string;
+  /** The failed step's 1-based line within the skill file. */
+  skillLine: number;
+  /** The test file that owns the `[skill: …]` invocation. */
+  testUri: vscode.Uri;
+  /** The `[skill: …]` invocation's 1-based line in the test file. */
+  testLine: number;
 }
 
 /**
@@ -284,6 +306,10 @@ export class RunController {
     this.revealedFrameUris.clear();
     this.clearedDescentUris.clear();
     this.scopesByFrame.clear();
+    // The parked skill failure's seed scope lives in scopesByFrame, which we
+    // just wiped — drop the failure too so the re-run affordance can't offer a
+    // stale, unseedable retry.
+    this._lastSkillFailure = null;
     this.frameStackEmitter.fire();
     this.scopeEmitter.fire();
   }
@@ -307,6 +333,107 @@ export class RunController {
    *  top frame's scope as the "current" view. */
   scopeFor(frameId: string): Record<string, string> | undefined {
     return this.scopesByFrame.get(frameId);
+  }
+
+  /** Captured when a step inside a TOP-LEVEL skill fails — the context the
+   *  "re-run this skill step with its variables" action needs. null when no
+   *  re-runnable skill failure is parked. Cleared by `resetFrameState` (any new
+   *  run) and `clearSkillFailure` (Stop / Close Session). Nested-skill failures
+   *  are out of scope for v1 and are not recorded. */
+  private _lastSkillFailure: SkillFailure | null = null;
+
+  /** The parked re-runnable skill failure, or null. The Variables view gates
+   *  its edit-and-re-run affordance on this. */
+  get lastSkillFailure(): SkillFailure | null {
+    return this._lastSkillFailure;
+  }
+
+  /** Record a `step:fail` that occurred inside a skill frame, IF that frame is
+   *  a top-level invocation (`parentId === null`). `failedLine` is the step's
+   *  1-based line in the skill file. Called by the run-event router. */
+  recordSkillFailure(frame: FrameInfo, failedLine: number): void {
+    if (frame.parentId !== null) return; // v1: top-level skills only
+    const root = this.frameRoot.get(frame.id);
+    if (!root) return;
+    this._lastSkillFailure = {
+      frameId: frame.id,
+      skillName: frame.skillName ?? 'skill',
+      skillUri: frame.uri,
+      skillLine: failedLine,
+      testUri: root.testUri,
+      testLine: root.testLine,
+    };
+  }
+
+  /**
+   * Variables-panel payload for the parked skill failure, or null if none. The
+   * scope is the captured frame scope minus `__skill*` internals; `paramNames`
+   * are the skill's declared parameters (rendered read-only — they're baked
+   * into the step text at expansion, so editing them here wouldn't take
+   * effect). Best-effort: a missing/unreadable skill file just yields no
+   * param names (all rows editable).
+   */
+  skillRerunPayload(): { testUri: string; skillName: string; scope: Record<string, string>; paramNames: string[] } | null {
+    const failure = this._lastSkillFailure;
+    if (!failure) return null;
+    const captured = this.scopeFor(failure.frameId) ?? {};
+    const scope: Record<string, string> = {};
+    for (const [k, v] of Object.entries(captured)) {
+      if (!k.startsWith('__skill')) scope[k] = v;
+    }
+    let paramNames: string[] = [];
+    try {
+      paramNames = Object.keys(parseParameters(fs.readFileSync(failure.skillUri, 'utf8')));
+    } catch {
+      // best-effort — skill file unreadable; leave all rows editable
+    }
+    return { testUri: failure.testUri.toString(), skillName: failure.skillName, scope, paramNames };
+  }
+
+  /** Forget any parked skill failure — its scope is gone (resetFrameState) or
+   *  the user explicitly tore the run down (Stop / Close Session). */
+  clearSkillFailure(): void {
+    this._lastSkillFailure = null;
+  }
+
+  /**
+   * Re-run a parked top-level skill failure from the failed step to the end of
+   * the skill, on the live session, seeding the captured scope plus `edits`.
+   * `edits` overrides captured values by their (caller-visible) name; `__skill*`
+   * internals are never seeded — they're re-minted per expansion and can't be
+   * restored, and the server refuses a tail that needs one. Returns the run
+   * outcome (a no-op `{ ok: false }` if nothing is parked). The caller runs the
+   * liveness pre-flight (`isRerunSessionLive`) BEFORE this — so a dead session
+   * is refused without tearing down the parked failure here. The partial-run
+   * request wiring lives in `runLines`'s `rerun` option.
+   */
+  async rerunSkillStepFromFailure(edits: Record<string, string> = {}): Promise<RunOutcome> {
+    const failure = this._lastSkillFailure;
+    if (!failure) {
+      vscode.window.setStatusBarMessage('TestBench: no failed skill step to re-run', 2500);
+      return { ok: false };
+    }
+    // Seed = captured frame scope (minus server-owned __skill* internals) with
+    // the user's edits overlaid. Read it BEFORE runLines, which calls
+    // resetFrameState and wipes scopesByFrame + the parked failure.
+    // `edits` arrives from an untrusted webview message; tolerate a malformed
+    // payload rather than throw in Object.entries.
+    const safeEdits = edits && typeof edits === 'object' ? edits : {};
+    const captured = this.scopeFor(failure.frameId) ?? {};
+    const seedScope: Record<string, string> = {};
+    for (const [k, v] of Object.entries(captured)) {
+      if (!k.startsWith('__skill')) seedScope[k] = v;
+    }
+    for (const [k, v] of Object.entries(safeEdits)) {
+      if (!k.startsWith('__skill') && typeof v === 'string') seedScope[k] = v;
+    }
+    return this.runLines([failure.testLine], {
+      isContinuation: true,
+      rerun: {
+        startAt: { uri: failure.skillUri, line: failure.skillLine },
+        seedScope,
+      },
+    });
   }
 
   /** The scope of the currently-active (top) frame, or the test frame's
@@ -479,37 +606,64 @@ export class RunController {
   /**
    * Tell the server to drop this session and close its browser.
    */
-  async closeSession(): Promise<void> {
-    const out = getOutputChannel();
-    const ts = () => new Date().toISOString().slice(11, 23);
-
+  /**
+   * Resolve an ApiClient for this controller's test from its env file, or null
+   * when the env can't be resolved (no env file, missing SERVER_URL/API_KEY).
+   * `sessionId` is the test file path — the server's session key. Shared by
+   * `closeSession` and the re-run liveness probe.
+   */
+  private async resolveClient(): Promise<{ client: ApiClientLike; sessionId: string } | null> {
     const settings = vscode.workspace.getConfiguration('testbench-native');
     const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
     const filePath = this.document.uri.fsPath;
-
     const envResolution = await resolveEnvFile({
       testFile: filePath,
       workspaceRoot: this.workspaceFolder.uri.fsPath,
       fallbackPath: fallbackSetting,
     });
-    if (!envResolution.hit) return;
-
+    if (!envResolution.hit) return null;
     let env: Record<string, string>;
     try {
       env = await readEnvFile(envResolution.path);
     } catch {
-      return;
+      return null;
     }
     const serverUrl = env['SERVER_URL']?.trim();
     const apiKey = env['SERVER_API_KEY']?.trim();
-    if (!serverUrl || !apiKey) return;
+    if (!serverUrl || !apiKey) return null;
+    return { client: this.clientFactory({ serverUrl, apiKey }), sessionId: filePath };
+  }
 
-    out.appendLine(`[${ts()}] closing server session for ${filePath}`);
+  /**
+   * Liveness gate for the re-run, called by the command handler BEFORE it
+   * tears down any state (notifyRunning / resetFrameState) — so refusing a
+   * dead session leaves the parked failure and its Variables panel intact.
+   * Returns true when the probe is unavailable (assume live) and false only on
+   * a definitive "gone" or a connection failure, so a dead session never gets
+   * a partial re-run that would spin up a blank browser.
+   */
+  async isRerunSessionLive(): Promise<boolean> {
+    const resolved = await this.resolveClient();
+    if (!resolved || !resolved.client.isSessionAlive) return true;
+    try {
+      return await resolved.client.isSessionAlive(resolved.sessionId);
+    } catch {
+      return false;
+    }
+  }
+
+  async closeSession(): Promise<void> {
+    const out = getOutputChannel();
+    const ts = () => new Date().toISOString().slice(11, 23);
+    const resolved = await this.resolveClient();
+    if (!resolved) return;
+    out.appendLine(`[${ts()}] closing server session for ${resolved.sessionId}`);
     this.active?.abort();
-
-    const client = this.clientFactory({ serverUrl, apiKey });
-    await client.closeSession(filePath);
+    await resolved.client.closeSession(resolved.sessionId);
     this.configSentForSession = false;
+    // The session (and its live page) is gone — a parked skill-step re-run
+    // can no longer reuse it, so withdraw the affordance.
+    this.clearSkillFailure();
     out.appendLine(`[${ts()}] session closed`);
   }
 
@@ -551,6 +705,16 @@ export class RunController {
        *  skill-file URIs revealed in the first batch are carried forward so
        *  the NEXT fresh re-run still cleans them up correctly. */
       isContinuation?: boolean;
+      /** "Re-run a skill step with its variables" (see
+       *  `rerunSkillStepFromFailure`). When set, the single step in `lines` is
+       *  the failed `[skill: …]` invocation; the server re-expands it, starts
+       *  at `startAt` (the failed body step), and seeds `seedScope` into the
+       *  run. Triggers a server liveness pre-flight and forces the per-step
+       *  cache off for this run. */
+      rerun?: {
+        startAt: { uri: string; line: number };
+        seedScope: Record<string, string>;
+      };
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -794,6 +958,7 @@ export class RunController {
             log,
             ...(options.stepMode && { stepMode: options.stepMode }),
             ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
+            ...(options.rerun && { rerun: options.rerun }),
           });
           if (!ok) {
             anyFailed = true;
@@ -954,8 +1119,17 @@ export class RunController {
      *  The server emits `tool:awaiting-debugger` before the next
      *  `[tool: ...]` step and parks for a debugger-attach ack. */
     pauseAtNextTool?: boolean;
+    /** "Re-run a skill step with its variables": start the (re-expanded)
+     *  invocation partway in at `startAt` and seed `seedScope` before running.
+     *  Forces the per-step cache off for this request (the server also does,
+     *  defensively) so an edited value re-plans instead of replaying a frozen
+     *  cached action list. */
+    rerun?: {
+      startAt: { uri: string; line: number };
+      seedScope: Record<string, string>;
+    };
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -999,10 +1173,13 @@ export class RunController {
         ...(logging && { logging }),
         ...(skillsDir && { skillsDir }),
         ...(toolsDir && { toolsDir }),
-        ...(cacheEnabled && { cacheEnabled: true }),
+        // A re-run forces the cache off (see `rerun` doc) so an edited value
+        // re-plans rather than replaying a frozen cached action list.
+        ...(cacheEnabled && !rerun && { cacheEnabled: true }),
         testFilePath,
         ...(stepMode && { stepMode }),
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
+        ...(rerun && { startAt: rerun.startAt, seedScope: rerun.seedScope }),
         ...(this.breakpointsByUriProvider && (() => {
           const map = this.breakpointsByUriProvider!();
           return Object.keys(map).length > 0 ? { breakpointsByUri: map } : {};

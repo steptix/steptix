@@ -964,4 +964,89 @@ describe('TestBench frame events (Phase 2)', function () {
       // best-effort — beforeEach closeAllEditors is the backstop
     }
   });
+
+  // ── Re-run a skill step with its variables ───────────────────────────────
+  it('a top-level skill step failure offers a seeded re-run from the failed step on the live session', async () => {
+    const skillUri = vscode.Uri.file(path.resolve(FIXTURES_DIR, 'fake-skill.md'));
+    const frame = {
+      id: 'f1', parentId: null, kind: 'skill',
+      uri: skillUri.fsPath, line: 9, skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Descend into a top-level skill, capture a scope (incl. a __skill* internal
+    // that must never be seeded), then fail a body step.
+    fake.push({ type: 'frame:push', frame });
+    fake.push({
+      type: 'frame:scope',
+      frameId: 'f1',
+      scope: { query: 'cats', first_result_url: 'http://x', __skill1_tmp: 'internal' },
+    });
+    fake.push({ type: 'step:start', line: 8, frame });
+    fake.push({ type: 'step:fail', line: 8, error: 'boom', frame });
+    fake.end();
+    await waitFor('idle after the failed skill run', () => !hooks.isRunning());
+
+    // The re-run stream (index 1) ends immediately — we assert on the request
+    // the extension sends, not on a scripted result.
+    fake.streamScripts[1] = (f) => f.end();
+
+    // Fire the Variables-panel "Re-run from failed step" with one edit. The
+    // test file stays active (skill reveal uses preserveFocus), so its URI is
+    // the controller key the host routes by.
+    const testUri = vscode.window.activeTextEditor.document.uri.toString();
+    void hooks.dispatchWebviewMessage({
+      type: 'rerunSkillStep',
+      testUri,
+      edits: { first_result_url: 'http://edited' },
+    });
+    await waitFor('re-run request sent', () => fake.requests.length >= 2);
+
+    const req = fake.requests[1];
+    assert.ok(req.startAt, 'partial re-run must carry a startAt anchor');
+    assert.equal(req.startAt.uri, skillUri.fsPath, 'startAt targets the skill file');
+    assert.equal(req.startAt.line, 8, 'startAt targets the failed step line');
+    assert.ok(req.seedScope, 'must carry seedScope');
+    assert.equal(req.seedScope.query, 'cats', 'seeds the captured value');
+    assert.equal(req.seedScope.first_result_url, 'http://edited', 'applies the user edit');
+    assert.ok(!('__skill1_tmp' in req.seedScope), '__skill* internals are never seeded');
+    assert.notEqual(req.cacheEnabled, true, 'a seeded re-run must not enable the cache');
+    assert.ok(fake.isSessionAliveCalls.length >= 1, 'must probe session liveness first');
+
+    await waitFor('idle after re-run', () => !hooks.isRunning());
+  });
+
+  it('refuses the skill re-run when the session is no longer alive', async () => {
+    const skillUri = vscode.Uri.file(path.resolve(FIXTURES_DIR, 'fake-skill.md'));
+    const frame = {
+      id: 'f1', parentId: null, kind: 'skill',
+      uri: skillUri.fsPath, line: 9, skillName: 'fake_skill',
+    };
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'frame:scope', frameId: 'f1', scope: { query: 'cats' } });
+    fake.push({ type: 'step:start', line: 8, frame });
+    fake.push({ type: 'step:fail', line: 8, error: 'boom', frame });
+    fake.end();
+    await waitFor('idle after the failed skill run', () => !hooks.isRunning());
+
+    // The server has dropped the session — the pre-flight must refuse, and the
+    // parked failure must survive (panel stays).
+    fake.sessionAlive = false;
+    const testUri = vscode.window.activeTextEditor.document.uri.toString();
+    void hooks.dispatchWebviewMessage({ type: 'rerunSkillStep', testUri, edits: {} });
+    await waitFor('liveness probed', () => fake.isSessionAliveCalls.length >= 1);
+    await sleep(150);
+
+    assert.equal(fake.requests.length, 1, 'a dead session must not open a re-run stream');
+    assert.ok(
+      hooks.skillFailureParked(),
+      'a refused re-run must NOT wipe the parked failure (panel stays)',
+    );
+    await waitFor('still idle', () => !hooks.isRunning());
+  });
 });
