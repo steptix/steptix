@@ -533,6 +533,24 @@ describe('TestBench debug state machine', function () {
     assert.equal(fake.runControlCalls.length, 0, 'continueRun from idle must not POST run-control');
   });
 
+  it('resetAllStateForTests clears the resume anchor (no phantom pause leaks into the next test)', async () => {
+    // Regression guard for the leak that hid behind test ordering: the resume
+    // anchor is tracker-level (not per-URI), so wiping `states` alone left it
+    // behind. A stale anchor surfaced via breakpointStopFor() as a phantom
+    // pause in the following test, which then hung opening a stream. This
+    // asserts the reset clears the anchor directly, independent of test order.
+    const uri = fixtureUri('test-with-steps.md');
+    hooks.tracker.setBreakpointStop(uri, 9);
+    assert.equal(hooks.tracker.breakpointStopFor(uri), 9, 'precondition: anchor set at line 9');
+
+    hooks.tracker.resetAllStateForTests();
+    assert.equal(
+      hooks.tracker.breakpointStopFor(uri),
+      null,
+      'resetAllStateForTests must drop the tracker-level resume anchor',
+    );
+  });
+
   it('paused → running (continueRun handles breakpoint state too): the unified Continue command re-opens the stream', async () => {
     // Phase 5 follow-up: testbench-native.continueRun was originally a
     // step-paused-only command (POST run-control). It's now unified so
@@ -1326,5 +1344,250 @@ describe('TestBench debug state machine', function () {
     assert.equal(afterResume[8], 'pass', 'step 1 still pass after resume completes');
     assert.equal(afterResume[9], 'pass', 'step 2 still pass after resume completes');
     assert.equal(afterResume[10], 'pass', 'step 3 (the resumed step) also passed');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Resume position-anchor (spec stories/specs/resume-position-anchor.md §6).
+  //
+  // These cases EDIT the test document between pause and Continue. Before the
+  // anchor change `breakpointStop` was a raw line and went stale on edit; now
+  // it's derived from a position that shifts with the text. Edits are made
+  // in-memory via editor.edit (no save) and reverted at the end of each case so
+  // the shared fixture's on-disk content is never mutated.
+  // ---------------------------------------------------------------------------
+
+  /** Insert `text` (which should end in \n) at the start of 1-based `line`. */
+  async function insertLine(editor, line, text) {
+    const ok = await editor.edit((b) => {
+      b.insert(new vscode.Position(line - 1, 0), text);
+    });
+    assert.ok(ok, 'editor.edit (insert) should apply');
+  }
+
+  /** Delete the whole of 1-based `line` (including its trailing newline). */
+  async function deleteLine(editor, line) {
+    const ok = await editor.edit((b) => {
+      b.delete(
+        new vscode.Range(new vscode.Position(line - 1, 0), new vscode.Position(line, 0)),
+      );
+    });
+    assert.ok(ok, 'editor.edit (delete) should apply');
+  }
+
+  /** Replace whole 1-based lines `from`..`to` (inclusive) with `text`. Mirrors
+   *  selecting those lines in the gutter and pasting: the range ends at column
+   *  0 of the line after `to`, exactly as VS Code reports a whole-line
+   *  selection. `text` should end in \n to keep the line structure intact. */
+  async function replaceLines(editor, from, to, text) {
+    const ok = await editor.edit((b) => {
+      b.replace(
+        new vscode.Range(new vscode.Position(from - 1, 0), new vscode.Position(to, 0)),
+        text,
+      );
+    });
+    assert.ok(ok, 'editor.edit (replace) should apply');
+  }
+
+  /** Revert any unsaved edits so the next case starts from the on-disk fixture
+   *  text — closeAllEditors alone can leave a dirty buffer / save prompt. */
+  async function revertActiveEditor() {
+    try {
+      await vscode.commands.executeCommand('workbench.action.revertActiveEditor');
+    } catch {
+      // best-effort — the beforeEach closeAllEditors is the backstop
+    }
+  }
+
+  it('resume after inserting a step ABOVE the pause line resumes the original step (no ghost step runs)', async () => {
+    // Steps are on lines 8, 9, 10. Breakpoint on step 3 (line 10): steps 1
+    // and 2 run, the run pauses at line 10. The user then inserts a NEW step
+    // above the pause line; old step 3 slides down to line 11. With a raw
+    // line number, Continue's `line >= 10` filter would pick up the inserted
+    // line 10 (a ghost step) AND the shifted-down original. The anchor shifts
+    // to 11, so Continue resumes ONLY the original step at its new line.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at line 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Insert a new step on line 9 (above the pause line). Old steps 9 and 10
+    // shift down by one → original step 3 is now line 11.
+    const editor = vscode.window.activeTextEditor;
+    await insertLine(editor, 9, '2.5. Inserted ghost step\n');
+
+    // Derived breakpointStop must track the shift to line 11.
+    await waitFor('anchor shifted to line 11 after insert above', () => {
+      return hooks.tracker.snapshot().breakpointStop === 11;
+    });
+
+    const requestsBefore = fake.requests.length;
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('resume stream opens', () => fake.hasActiveStream);
+
+    const resumeRequest = fake.requests[requestsBefore];
+    assert.ok(resumeRequest, 'Continue should have opened a new stream');
+    assert.deepEqual(
+      resumeRequest.sourceLines,
+      [11],
+      `Resume must carry only the original step (now line 11), not the inserted ghost. Got ${JSON.stringify(resumeRequest.sourceLines)}.`,
+    );
+
+    fake.end();
+    await waitFor('idle after resume', () => !hooks.isRunning());
+    await revertActiveEditor();
+  });
+
+  it('resume after DELETING the pause-line step snaps forward to the next surviving step', async () => {
+    // Breakpoint on step 2 (line 9): step 1 runs, pause at line 9. The user
+    // then deletes the pause-line step. Old step 3 (line 10) slides up into
+    // line 9. With a raw line number, Continue's `line >= 9` filter would run
+    // the slid-up step as if it were the paused one. The anchor snaps to the
+    // next surviving step at/after the deleted position — which after the
+    // delete is line 9 (the slid-up original step 3).
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(8, 0)), // line 9
+        true,
+      ),
+    ]);
+
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.end();
+    await waitFor('paused at line 9', () => hooks.tracker.snapshot().breakpointStop === 9);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Delete the pause-line step (line 9). Old step 3 (line 10) moves to 9.
+    const editor = vscode.window.activeTextEditor;
+    await deleteLine(editor, 9);
+
+    // The anchor snaps forward to the next surviving step at/after the
+    // deleted position — line 9, now holding the original step 3.
+    await waitFor('anchor snaps to next surviving step (line 9)', () => {
+      return hooks.tracker.snapshot().breakpointStop === 9;
+    });
+
+    const requestsBefore = fake.requests.length;
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('resume stream opens', () => fake.hasActiveStream);
+    const resumeRequest = fake.requests[requestsBefore];
+    assert.ok(resumeRequest, 'Continue should have opened a new stream');
+    assert.deepEqual(
+      resumeRequest.sourceLines,
+      [9],
+      `Resume must snap to the surviving step at line 9. Got ${JSON.stringify(resumeRequest.sourceLines)}.`,
+    );
+
+    fake.end();
+    await waitFor('idle after resume', () => !hooks.isRunning());
+    await revertActiveEditor();
+  });
+
+  it('paused-on-error: inserting a step above the failed line resumes the original failed step (no ghost step)', async () => {
+    // step:fail on line 9 parks breakpointStop on line 9. The user inserts a
+    // new step above it (intending to fix something) and hits Continue. The
+    // anchor shifts to line 10 so the retry targets the ORIGINAL failed step
+    // at its new line, never the inserted one.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('line 9 running', () => {
+      return Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running';
+    });
+    fake.push({ type: 'step:fail', line: 9, error: 'boom' });
+    fake.end();
+    await waitFor('paused-on-error at line 9', () => hooks.tracker.snapshot().breakpointStop === 9);
+    await waitFor('idle after failure', () => !hooks.isRunning());
+
+    // Insert a step on line 8 (above the failed line 9). Failed step → line 10.
+    const editor = vscode.window.activeTextEditor;
+    await insertLine(editor, 8, '0.5. Inserted before the failed step\n');
+    await waitFor('anchor shifted to line 10 after insert above', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+
+    const requestsBefore = fake.requests.length;
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('retry stream opens', () => fake.hasActiveStream);
+    const retryRequest = fake.requests[requestsBefore];
+    assert.ok(retryRequest, 'Continue from paused-on-error must open a new stream');
+    assert.ok(
+      retryRequest.sourceLines.includes(10),
+      `Retry must target the shifted failed step (line 10). Got ${JSON.stringify(retryRequest.sourceLines)}.`,
+    );
+    assert.ok(
+      !retryRequest.sourceLines.includes(8),
+      `Retry must NOT execute the inserted ghost step (line 8). Got ${JSON.stringify(retryRequest.sourceLines)}.`,
+    );
+
+    fake.end();
+    await waitFor('idle after retry', () => !hooks.isRunning());
+    await revertActiveEditor();
+  });
+
+  it('resume after selecting whole lines ABOVE the pause and pasting one line shifts to the original step (no snap)', async () => {
+    // The "select multiple lines, paste one line" case. Breakpoint on step 3
+    // (line 10): steps 1 and 2 run, pause at line 10. The user selects whole
+    // lines 8–9 (steps 1 and 2) and pastes a single merged step. VS Code
+    // reports that as a replace whose range ends at column 0 of line 10 — so it
+    // does NOT touch the paused step's content; the anchor must shift UP to the
+    // step's new line (9), not snap forward. Net lines removed: 2 → 1.
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at line 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Select whole lines 8–9 and replace with ONE step line. Old step 3 (line
+    // 10) slides up to line 9; its content is untouched by the edit.
+    const editor = vscode.window.activeTextEditor;
+    await replaceLines(editor, 8, 9, '1. Merged setup step\n');
+
+    await waitFor('anchor shifts up to line 9 (not a snap)', () => {
+      return hooks.tracker.snapshot().breakpointStop === 9;
+    });
+
+    const requestsBefore = fake.requests.length;
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('resume stream opens', () => fake.hasActiveStream);
+    const resumeRequest = fake.requests[requestsBefore];
+    assert.ok(resumeRequest, 'Continue should have opened a new stream');
+    assert.deepEqual(
+      resumeRequest.sourceLines,
+      [9],
+      `Resume must carry only the original step at its new line 9, not re-run the merged step. Got ${JSON.stringify(resumeRequest.sourceLines)}.`,
+    );
+
+    fake.end();
+    await waitFor('idle after resume', () => !hooks.isRunning());
+    await revertActiveEditor();
   });
 });
