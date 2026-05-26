@@ -1,6 +1,7 @@
 import { basename, join as pathJoin } from 'node:path';
 import { StepCache, frameScopedStepKey } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
+import { chooseCacheHashSource } from './cache-hash-source.js';
 import type { Config } from '../config/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
@@ -1066,7 +1067,43 @@ export class SessionManager {
       const projectRoot = await resolveProjectRoot(request.testFilePath);
       if (projectRoot) {
         const cacheDir = pathJoin(projectRoot, this.config.cache.dir);
-        const cacheHashSource = request.fullSteps ?? effectiveSteps;
+        // Bundle-hash source (issue 016 Bug 2). The hash must change when a
+        // skill body changes AND be stable across every batch of one document.
+        // `effectiveSteps` (the expansion of this batch) is the right source
+        // only when the batch IS the whole document; a subset batch must hash
+        // the expansion of the FULL document so it matches a full run's hash.
+        let cacheHashSource: string[];
+        const choice = chooseCacheHashSource(request.steps, request.fullSteps, !!request.skillsDir);
+        if (choice === 'raw-full') {
+          cacheHashSource = request.fullSteps!;
+        } else if (choice === 'expand-full') {
+          // Subset batch with skills: expand the full document for the hash.
+          // Own try/catch — a skill referenced only outside this batch may be
+          // mid-edit/broken; fall back to the raw full list rather than fail an
+          // otherwise-valid batch (the broken skill aborts the run elsewhere if
+          // the user resumes into it).
+          try {
+            const fullExpansion = await expandSkills(
+              request.fullSteps!,
+              request.skillsDir!,
+              envDataCtx ?? undefined,
+              request.testFilePath,
+              request.sourceLines,
+            );
+            cacheHashSource = fullExpansion.steps;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(
+              `Session "${sessionId}": cache-hash full-document expansion failed (${msg}); falling back to raw fullSteps`,
+            );
+            cacheHashSource = request.fullSteps!;
+          }
+        } else {
+          // 'effective': batch == fullSteps (or legacy no-fullSteps caller).
+          // effectiveSteps already IS the expanded full document — or the raw
+          // steps when no skillsDir — so it bakes in skill bodies for the hash.
+          cacheHashSource = effectiveSteps;
+        }
         try {
           stepCache = await StepCache.initialize(cacheDir, request.testFilePath, cacheHashSource);
         } catch (err) {

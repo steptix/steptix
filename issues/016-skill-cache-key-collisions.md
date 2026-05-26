@@ -1,6 +1,17 @@
 # 016 — Server step-cache keys collide across skill/test files; skill-body edits don't invalidate
 
-**Status:** open / high priority (Bug 1 fix in progress)
+> **RESOLVED 2026-05-26.** Both bugs fixed. **Bug 1** (per-step key collision):
+> frame-scoped cache keys (`f<n>-<line>`) so skill-body steps and repeated
+> invocations no longer share a `step-<line>.json` — design
+> [skill-cache-key-collision.md](../testbench-native/stories/specs/skill-cache-key-collision.md).
+> **Bug 2** (skill-body edits didn't invalidate): the bundle hash is now over
+> the **expanded** document, so editing a skill body changes the hash and clears
+> the bundle, while a subset/resume batch re-expands the full document to stay
+> hash-stable — design
+> [skill-cache-invalidation.md](../testbench-native/stories/specs/skill-cache-invalidation.md).
+> Original analysis kept below.
+
+**Status:** resolved 2026-05-26 (Bug 1 + Bug 2 fixed; was: open / high priority)
 **Area:** [src/server/session-manager.ts](../src/server/session-manager.ts) — per-step cache id (`stepCacheId`), cache-hash source; [src/cache/step-cache.ts](../src/cache/step-cache.ts) — `step-<id>.json` naming
 **Related:** [012-step-cache-not-env-aware.md](012-step-cache-not-env-aware.md) (sibling cache-key issue), [step-cache-server.md](../testbench-native/stories/specs/step-cache-server.md) §2/§8 (the spec claims this violates), fix spec [skill-cache-key-collision.md](../testbench-native/stories/specs/skill-cache-key-collision.md)
 **Opened:** 2026-05-26
@@ -96,12 +107,13 @@ on-disk filename gains the frame prefix. Schema version bumps to discard
 pre-fix line-keyed caches. CLI path is unaffected (it keys by post-expansion
 ordinal, which never collides). Design: [skill-cache-key-collision.md](../testbench-native/stories/specs/skill-cache-key-collision.md).
 
-**Bug 2 (deferred, needs the spec's multi-batch design preserved):** the hash
-must change when a skill body changes. Candidates: hash `effectiveSteps`
-(post-expansion) instead of the client's pre-expansion `fullSteps`, or fold
-skill-file content/mtime into the bundle hash — either way the batched-resume
-hash-stability contract (§4 of step-cache-server.md) must be kept. Tracked in
-the fix spec's "Bug 2 — deferred" section.
+**Bug 2 (fixed):** hash the **expanded** document instead of the client's
+pre-expansion `fullSteps`, so a skill-body edit changes the expanded text and
+the bundle hash. A subset (paused/resumed or `[input:]`-split) batch re-expands
+the full document for the hash so it stays identical to a full run's — the
+batched-resume hash-stability contract (§4 of step-cache-server.md) is preserved.
+Whole-bundle invalidation (matching prior behaviour). Design + edge cases:
+[skill-cache-invalidation.md](../testbench-native/stories/specs/skill-cache-invalidation.md).
 
 ## Tests this needs
 

@@ -116,6 +116,7 @@ vi.mock('../src/utils/logger.js', () => ({
 
 import { SessionManager } from '../src/server/session-manager.js';
 import { executeStep } from '../src/runner/step-executor.js';
+import { sanitizeTestName, computeStepsHash } from '../src/cache/step-cache.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -762,6 +763,96 @@ type: skill
       expect(frameB).toMatch(/^f\d+$/);
       expect(frameA).not.toBe(frameB);    // distinct invocation frames (f1 vs f2)
       expect(lineA).toBe(lineB);          // same skill-body source line
+    });
+
+    it('invalidates the bundle cache when a skill body is edited (issue 016 / Bug 2)', async () => {
+      // The bug: the bundle hash was over the pre-expansion test steps, so
+      // editing what a skill DOES left the hash unchanged and stale skill steps
+      // replayed. The fix hashes the EXPANDED document, so a skill-body edit
+      // flips the hash and StepCache.initialize wipes the bundle. executeStep is
+      // mocked, so the observable is the on-disk meta.json hash + a planted
+      // sentinel cache file (StepCache.initialize runs in the manager, not the
+      // executor).
+      const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-bug2-edit-'));
+      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}'); // project marker
+      const skillsDir = path.join(projectRoot, 'skills');
+      await fs.mkdir(skillsDir);
+      const skillPath = path.join(skillsDir, 'greet.md');
+      const writeGreet = (line: string) =>
+        fs.writeFile(skillPath, `---\ntype: skill\n---\n# greet\n## Steps\n1. ${line}\n`);
+      await writeGreet('Say hello');
+      const testFilePath = path.join(projectRoot, 'tests', 't.md');
+      const req = {
+        steps: ['[skill: greet]'],
+        fullSteps: ['[skill: greet]'],
+        skillsDir,
+        testFilePath,
+        cacheEnabled: true,
+      };
+
+      // Run 1 — populates the bundle.
+      await manager.executeSteps('bug2-edit-1', req);
+      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+      // Plant a sentinel cached-step file so we can prove the wipe.
+      const sentinel = path.join(cacheDir, 'step-sentinel.json');
+      await fs.writeFile(sentinel, '{"turns":[]}');
+
+      // Edit what the skill DOES, then re-run the same test request.
+      await writeGreet('Say goodbye');
+      await manager.executeSteps('bug2-edit-2', req);
+      const meta2 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+
+      await fs.rm(projectRoot, { recursive: true, force: true });
+
+      expect(meta2.stepsHash).not.toBe(meta1.stepsHash); // edit reached the hash
+      await expect(fs.readFile(sentinel, 'utf-8')).rejects.toThrow(); // bundle wiped
+    });
+
+    it('full-run and resumed-subset-batch hashes match for the same document (issue 016 / Bug 2)', async () => {
+      // A paused/resumed run sends a subset batch but the same fullSteps. The
+      // fix expands the FULL document for a subset batch's hash, so it matches
+      // the full run's — otherwise the cache would never hit across a pause. Two
+      // invocations + an internal var (`v`) make the seq-based __skillN_
+      // namespacing diverge if a subset wrongly hashed only its own expansion.
+      const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-bug2-batch-'));
+      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}');
+      const skillsDir = path.join(projectRoot, 'skills');
+      await fs.mkdir(skillsDir);
+      await fs.writeFile(
+        path.join(skillsDir, 'cap.md'),
+        `---\ntype: skill\n---\n# cap\n## Steps\n1. Read the value [store as: v]\n2. Use {{v}}\n`,
+      );
+      const testFilePath = path.join(projectRoot, 'tests', 't.md');
+      const fullSteps = ['[skill: cap]', '[skill: cap]'];
+      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+
+      // Full run: steps == fullSteps.
+      await manager.executeSteps('batch-full', { steps: fullSteps, fullSteps, skillsDir, testFilePath, cacheEnabled: true });
+      const hFull = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8')).stepsHash;
+
+      // Resumed subset batch: only the 2nd invocation, same fullSteps.
+      await manager.executeSteps('batch-resume', { steps: [fullSteps[1]!], fullSteps, skillsDir, testFilePath, cacheEnabled: true });
+      const hSubset = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8')).stepsHash;
+
+      await fs.rm(projectRoot, { recursive: true, force: true });
+
+      expect(hSubset).toBe(hFull); // batch-stable: the subset re-expands the full doc
+    });
+
+    it('hashes raw steps for a no-skills test (no Bug 2 regression)', async () => {
+      const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-bug2-noskill-'));
+      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}');
+      const testFilePath = path.join(projectRoot, 'tests', 't.md');
+      const steps = ['Click login', 'Type username'];
+
+      await manager.executeSteps('noskill', { steps, fullSteps: steps, testFilePath, cacheEnabled: true });
+      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      const meta = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+
+      await fs.rm(projectRoot, { recursive: true, force: true });
+
+      expect(meta.stepsHash).toBe(computeStepsHash(steps)); // raw steps, byte-identical to pre-fix
     });
 
     it('handles executeStep throwing an unexpected error', async () => {
