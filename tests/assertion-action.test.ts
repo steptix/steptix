@@ -189,13 +189,14 @@ describe('StepCache — per-assertion code map', () => {
     expect(result).toContain('"bob"');
   });
 
-  it('bumps schema version to 3 (clears legacy v2 caches)', async () => {
-    // Pre-populate a v2 meta file
+  it('bumps schema version to 4 (clears legacy v3 line-keyed caches)', async () => {
+    // Pre-populate a v3 meta file (the previous, line-keyed scheme — its
+    // entries may be poisoned by the skill-collision bug, so they must clear).
     const testDir = path.join(tmpDir, 'my-test');
     await fs.mkdir(testDir, { recursive: true });
     await fs.writeFile(
       path.join(testDir, 'meta.json'),
-      JSON.stringify({ stepsHash: 'old', schemaVersion: 2 }, null, 2),
+      JSON.stringify({ stepsHash: 'old', schemaVersion: 3 }, null, 2),
     );
     await fs.writeFile(path.join(testDir, 'step-1.json'), JSON.stringify({ turns: [] }));
 
@@ -203,7 +204,7 @@ describe('StepCache — per-assertion code map', () => {
     expect(cache).toBeDefined();
 
     const meta = JSON.parse(await fs.readFile(path.join(testDir, 'meta.json'), 'utf-8'));
-    expect(meta.schemaVersion).toBe(3);
+    expect(meta.schemaVersion).toBe(4);
 
     // Old step file should be cleared
     await expect(fs.readFile(path.join(testDir, 'step-1.json'), 'utf-8')).rejects.toThrow();

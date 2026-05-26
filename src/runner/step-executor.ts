@@ -31,7 +31,7 @@ import { logger, traceOp } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
-import type { StepCache, CachedStepData } from '../cache/step-cache.js';
+import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cache.js';
 import { fingerprintAssertion } from '../cache/step-cache.js';
 import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
@@ -88,6 +88,11 @@ export interface StepExecutorOptions {
   stepCache?: StepCache;
   /** When true, step action responses are read from / written to the step cache */
   cacheEnabled?: boolean;
+  /** On-disk cache identity for this step's files (`step-<cacheKey>.json`). The
+   *  server passes a frame-scoped key (`f1-17`) so skill-body steps and repeated
+   *  invocations don't collide on a shared source line (issue 016). When absent
+   *  (CLI path), the cache falls back to `stepIndex` — the legacy behaviour. */
+  cacheKey?: StepCacheKey;
   /** When true, include dismissal-related guidance in the system prompt and
    *  retry hints. Enabled by the runner when the test has hooks configured. */
   dismissalGuidance?: boolean;
@@ -194,9 +199,12 @@ export async function executeStep(
   let retried = false;
   let priorFailures: PriorFailureContext[] = [];
   let priorAttemptTurns: TurnResult[] = [];
+  // Cache files are named by the frame-scoped key when the server supplies one
+  // (skill-body steps, repeated invocations); otherwise by stepIndex (CLI path).
+  const cacheKey: StepCacheKey = opts.cacheKey ?? stepIndex;
   // --- Cache attempt (before normal AI flow) ---
   if (opts.stepCache && opts.cacheEnabled) {
-    const cached = await opts.stepCache.read(stepIndex, opts.resolvedParameters ?? {});
+    const cached = await opts.stepCache.read(cacheKey, opts.resolvedParameters ?? {});
     if (cached) {
       logger.info(`Cache HIT for step ${stepIndex} — replaying ${cached.length} cached turn(s)`);
       try {
@@ -220,7 +228,7 @@ export async function executeStep(
         return { ...result, fromCache: true };
       } catch (err) {
         logger.warn(`Cached actions failed for step ${stepIndex} — invalidating and falling through to AI`);
-        await opts.stepCache.invalidateStep(stepIndex);
+        await opts.stepCache.invalidateStep(cacheKey);
         // Do NOT propagate failure context — give AI a clean slate
       }
     } else {
@@ -264,7 +272,7 @@ export async function executeStep(
     // Write all turns to cache on success (non-assertion steps only)
     if (opts.stepCache && opts.cacheEnabled && cacheCapture.turns.length > 0) {
       await opts.stepCache.write(
-        stepIndex,
+        cacheKey,
         cacheCapture.turns,
         opts.resolvedParameters ?? {},
       );
@@ -690,6 +698,7 @@ async function executeStepAttempt(
         const assertResult = await evaluateAssertion({
           page,
           stepIndex,
+          cacheKey: opts.cacheKey ?? stepIndex,
           assertIndex: myAssertIndex,
           turnNumber: currentTurn,
           subActionIndex: ++globalSubActionIndex,
@@ -1461,6 +1470,10 @@ interface ApiCallSubResult {
 interface EvaluateAssertionParams {
   page: Page;
   stepIndex: number;
+  /** Frame-scoped on-disk cache id for this step's assertion files
+   *  (`step-<cacheKey>-asserts.json`); see `StepExecutorOptions.cacheKey`.
+   *  Distinct from `stepIndex`, which is the display/source line. */
+  cacheKey: StepCacheKey;
   assertIndex: number;
   turnNumber: number;
   subActionIndex: number;
@@ -1505,7 +1518,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
   let assertionCode: string | null = null;
   let fromCache = false;
   if (p.stepCache && p.cacheEnabled) {
-    assertionCode = await p.stepCache.readAssertion(p.stepIndex, p.assertIndex, fingerprint, p.resolvedParams);
+    assertionCode = await p.stepCache.readAssertion(p.cacheKey, p.assertIndex, fingerprint, p.resolvedParams);
     fromCache = assertionCode !== null;
   }
 
@@ -1586,7 +1599,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 
       if (p.stepCache && p.cacheEnabled) {
         await p.stepCache.writeAssertion(
-          p.stepIndex,
+          p.cacheKey,
           p.assertIndex,
           fingerprint,
           assertionCode,
@@ -1605,7 +1618,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     } catch (codeErr) {
       lastErr = String(codeErr);
       logger.warn(`Assertion code failed (attempt ${attempt}/${MAX_ASSERTION_CODE_ATTEMPTS}): ${lastErr}`);
-      if (p.stepCache) await p.stepCache.invalidateAssertion(p.stepIndex, p.assertIndex);
+      if (p.stepCache) await p.stepCache.invalidateAssertion(p.cacheKey, p.assertIndex);
       assertionCode = null; // force regeneration on next loop iteration
       fromCache = false;
     }

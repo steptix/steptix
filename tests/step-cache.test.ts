@@ -6,6 +6,7 @@ import {
   StepCache,
   computeStepsHash,
   sanitizeTestName,
+  frameScopedStepKey,
   reverseInterpolate,
   forwardInterpolate,
 } from '../src/cache/step-cache.js';
@@ -39,6 +40,25 @@ describe('computeStepsHash', () => {
     const a = computeStepsHash(['Step 1', 'Step 2']);
     const b = computeStepsHash(['Step 2', 'Step 1']);
     expect(a).not.toBe(b);
+  });
+});
+
+describe('frameScopedStepKey (issue 016)', () => {
+  it('returns the bare line for an inline (frameless) step', () => {
+    expect(frameScopedStepKey('', 17)).toBe(17);
+    expect(frameScopedStepKey(undefined, 12)).toBe(12);
+  });
+
+  it('qualifies a skill-body step with its frame', () => {
+    expect(frameScopedStepKey('f1', 17)).toBe('f1-17');
+  });
+
+  it('distinguishes two invocations of one skill on the same source line', () => {
+    expect(frameScopedStepKey('f1', 17)).not.toBe(frameScopedStepKey('f2', 17));
+  });
+
+  it('distinguishes a skill-body step from a test step on the same line', () => {
+    expect(frameScopedStepKey('f1', 17)).not.toBe(frameScopedStepKey(undefined, 17));
   });
 });
 
@@ -153,7 +173,7 @@ describe('StepCache', () => {
     const metaPath = path.join(tmpDir, 'my-test', 'meta.json');
     const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
     expect(meta.stepsHash).toBe(computeStepsHash(testSteps));
-    expect(meta.schemaVersion).toBe(3);
+    expect(meta.schemaVersion).toBe(4);
   });
 
   it('returns null on cache miss', async () => {
@@ -231,5 +251,59 @@ describe('StepCache', () => {
 
     const result = await cache.read(1, {});
     expect(result![0]!.needs_reeval).toBe(true);
+  });
+});
+
+// ── Frame-scoped keys: skill collision prevention (issue 016) ─────────────
+
+describe('StepCache frame-scoped keys (issue 016)', () => {
+  const steps = ['a', 'b', 'c'];
+
+  it('keeps two invocations of one skill (same source line) in separate files', async () => {
+    const cache = await StepCache.initialize(tmpDir, 'Skill Test', steps);
+    // Both invocations expand to skill line 17 but get distinct frames (f1/f2).
+    await cache.write(
+      'f1-17',
+      [{ rawResponse: '{}', actions: [{ action: 'type', selector: '#q', value: 'cats', description: 'type cats' }], reasoning: 'cats' }],
+      {},
+    );
+    await cache.write(
+      'f2-17',
+      [{ rawResponse: '{}', actions: [{ action: 'type', selector: '#q', value: 'dogs', description: 'type dogs' }], reasoning: 'dogs' }],
+      {},
+    );
+
+    // Second invocation must NOT replay the first's actions (the old collision).
+    expect((await cache.read('f1-17', {}))![0]!.actions[0]!.value).toBe('cats');
+    expect((await cache.read('f2-17', {}))![0]!.actions[0]!.value).toBe('dogs');
+  });
+
+  it('keeps a skill-body step and a test step on the same line independent', async () => {
+    const cache = await StepCache.initialize(tmpDir, 'Mixed Test', steps);
+    await cache.write(17, [{ rawResponse: '{}', actions: [], reasoning: 'test-step' }], {});
+    await cache.write('f1-17', [{ rawResponse: '{}', actions: [], reasoning: 'skill-step' }], {});
+
+    expect((await cache.read(17, {}))![0]!.reasoning).toBe('test-step');
+    expect((await cache.read('f1-17', {}))![0]!.reasoning).toBe('skill-step');
+  });
+
+  it('writes one file per frame-scoped key', async () => {
+    const cache = await StepCache.initialize(tmpDir, 'Files Test', steps);
+    await cache.write('f1-17', [{ rawResponse: '{}', actions: [], reasoning: 'x' }], {});
+    await cache.write('f2-17', [{ rawResponse: '{}', actions: [], reasoning: 'y' }], {});
+
+    const dir = path.join(tmpDir, 'files-test');
+    const files = (await fs.readdir(dir)).filter((f) => f.startsWith('step-')).sort();
+    expect(files).toEqual(['step-f1-17.json', 'step-f2-17.json']);
+  });
+
+  it('scopes assertion code by frame too', async () => {
+    const cache = await StepCache.initialize(tmpDir, 'Assert Test', steps);
+    const fp = 'fingerprint-1';
+    await cache.writeAssertion('f1-17', 0, fp, 'return { pass: true, actual: "x" };', {});
+
+    expect(await cache.readAssertion('f1-17', 0, fp, {})).toContain('pass: true');
+    // A different invocation's frame must not see it.
+    expect(await cache.readAssertion('f2-17', 0, fp, {})).toBeNull();
   });
 });

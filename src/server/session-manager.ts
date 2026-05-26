@@ -1,5 +1,5 @@
 import { basename, join as pathJoin } from 'node:path';
-import { StepCache } from '../cache/step-cache.js';
+import { StepCache, frameScopedStepKey } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
 import type { Config } from '../config/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
@@ -1536,14 +1536,22 @@ export class SessionManager {
               });
             }
           } else {
-            // Use the source line as the cache identity for this step so
-            // cache files (step-<line>.json) line up with how the user
-            // identifies steps. Falls back to ordinal when sourceLines is
-            // absent (legacy CLI-driven test runs hit a different code
-            // path entirely; this fallback is just defensive).
-            const stepCacheId = effectiveSourceLines?.[i] ?? i + 1;
+            // Display/line identity: the source line in this step's own file
+            // (test or skill). Drives StepResult.index and status events. NOT
+            // unique across files — a skill-body step and a test step (or two
+            // invocations of one skill) can share a line number.
+            const stepSourceLine = effectiveSourceLines?.[i] ?? i + 1;
+            // Cache filename identity: qualify the line with the invocation's
+            // frame (`f1-17`) so skill-body steps and repeated invocations get
+            // distinct cache files instead of colliding on a shared source line
+            // (issue 016). Inline test steps have an empty frame and keep the
+            // bare line (`step-17.json`); the no-skills path leaves origins null.
+            const stepCacheKey = frameScopedStepKey(
+              expansionOrigins?.[i]?.frameId,
+              stepSourceLine,
+            );
             stepResult = await executeStep(
-              stepCacheId,
+              stepSourceLine,
               stepsTotal,
               stepInstruction,
               {
@@ -1563,6 +1571,7 @@ export class SessionManager {
                 browserTracker: session.browserTracker,
                 ...(stepCache && { stepCache }),
                 cacheEnabled: cacheEnabledForRequest && !!stepCache,
+                cacheKey: stepCacheKey,
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.

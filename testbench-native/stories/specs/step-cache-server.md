@@ -25,8 +25,8 @@ Cache entries are keyed by three layers:
 | Layer | Key | Purpose |
 |---|---|---|
 | Namespace | sanitised `testFilePath` | All cache for one test lives in one directory |
-| Bundle hash | SHA-256 of full post-expansion step list | Editing any step (or any skill body) invalidates the whole bundle |
-| Per-step ID | `sourceLines[i]` — the 1-based line number in the test file | Stable identity for one step within the bundle |
+| Bundle hash | SHA-256 of `fullSteps ?? effectiveSteps` | Editing a step in the **test file** invalidates the whole bundle. ⚠️ Editing a **skill body** does NOT — the client's `fullSteps` is the pre-expansion test steps (Bug 2, [issue 016](../../../issues/016-skill-cache-key-collisions.md)). |
+| Per-step ID | frame-scoped: bare source line (`17`) for inline test steps, `f<n>-<line>` for skill-body steps | Unique per logical step within a run — a skill step and a test step (or two invocations of one skill) on the same line number no longer collide. See [skill-cache-key-collision.md](skill-cache-key-collision.md). |
 
 ```
 <project-root>/.cache/
@@ -43,6 +43,14 @@ hash already invalidates the whole bundle on any step change, so the
 per-step ID just needs to be a stable disambiguator within an unchanged
 bundle — line number is more human-meaningful for debugging the cache
 than `step-5.json`).
+
+> **Amended (issue 016):** "line number in the test file" assumed every
+> step came from the test file. Skill expansion puts skill-body steps —
+> carrying their *skill-file* line — into the same flat directory, so two
+> files' lines could collide (and two invocations of one skill always
+> did). The per-step ID is now frame-scoped (`f<n>-<line>`) for skill-body
+> steps; inline test steps keep the bare line. Design:
+> [skill-cache-key-collision.md](skill-cache-key-collision.md).
 
 ## 3. Project root resolution
 
@@ -214,7 +222,7 @@ is the principled escalation.
 |---|---|
 | Breakpoint batch split | Handled by `fullSteps` (§4). Hash is identical across batches; cache hits across batch boundaries. |
 | Paused-on-error retry | Failed steps don't cache (§5). Retry hits AI fresh, not the stale failed plan. |
-| Skill expansion | Skill bodies are part of `effectiveSteps` after expansion; cache invalidates on skill edits via the bundle hash. The (c) `clearSkillCache` fix ensures expansion sees the live skill on every request. |
+| Skill expansion | Skill-body steps get a frame-scoped cache id (`f<n>-<line>`) so repeated invocations / same-line steps don't collide ([issue 016](../../../issues/016-skill-cache-key-collisions.md)). ⚠️ Editing a skill *body* does NOT invalidate the bundle hash today — the client's `fullSteps` is the pre-expansion test steps, not `effectiveSteps` (Bug 2, same issue). `clearSkillCache` only refreshes the in-memory parse, not the cache hash. |
 | `[store as: X]` / `[output: X]` captures | Cached `actions` reference `{{X}}` placeholders; `session.outputs` interpolation happens at read time. Captured values from earlier batches flow into cached steps in later batches. |
 | `[tool: ...]` steps | No AI call to skip — tool dispatch is deterministic. Cache lookup is bypassed for these. |
 | `[interactive]` / `[input: ...]` | Bypassed. User-prompted steps are not cached. |
