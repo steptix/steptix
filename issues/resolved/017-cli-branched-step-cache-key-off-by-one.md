@@ -12,29 +12,29 @@
 > change guarded by the full branched-step suite + code review.
 
 **Status:** resolved 2026-05-26 (was: open / medium priority)
-**Area:** [src/runner/step-executor.ts](../src/runner/step-executor.ts) — `executeBranchedStep` (inner `executeStep` calls); [src/runner/test-runner.ts](../src/runner/test-runner.ts) — normal step loop; [src/runner/step-grouper.ts](../src/runner/step-grouper.ts) — 0-based group indices
-**Related:** [016-skill-cache-key-collisions.md](016-skill-cache-key-collisions.md) (same flat `step-<id>.json` cache, different code path), [step-cache-server.md](../testbench-native/stories/specs/step-cache-server.md)
+**Area:** [src/runner/step-executor.ts](../../src/runner/step-executor.ts) — `executeBranchedStep` (inner `executeStep` calls); [src/runner/test-runner.ts](../../src/runner/test-runner.ts) — normal step loop; [src/runner/step-grouper.ts](../../src/runner/step-grouper.ts) — 0-based group indices
+**Related:** [016-skill-cache-key-collisions.md](016-skill-cache-key-collisions.md) (same flat `step-<id>.json` cache, different code path), [step-cache-server.md](../../testbench-native/stories/specs/step-cache-server.md)
 **Opened:** 2026-05-26
 
 ## Summary
 
 The CLI runner keys a step's cache file by the index it passes as `executeStep`'s
 first arg, which becomes `step-<id>.json`
-([step-cache.ts:191](../src/cache/step-cache.ts#L191)). Two CLI code paths
+([step-cache.ts:191](../../src/cache/step-cache.ts#L191)). Two CLI code paths
 disagree on the base of that index:
 
 - **Normal steps** pass a **1-based** index: `executeStep(i + 1, …)`
-  ([test-runner.ts:574](../src/runner/test-runner.ts#L574),
-  [:600](../src/runner/test-runner.ts#L600)).
+  ([test-runner.ts:574](../../src/runner/test-runner.ts#L574),
+  [:600](../../src/runner/test-runner.ts#L600)).
 - **Branched/conditional steps** pass a **0-based** index:
   `executeStep(matchedOutcome.index, …)`
-  ([step-executor.ts:1996-1997](../src/runner/step-executor.ts#L1996-L1997),
-  continuation at [:2037](../src/runner/step-executor.ts#L2037)), where
+  ([step-executor.ts:1996-1997](../../src/runner/step-executor.ts#L1996-L1997),
+  continuation at [:2037](../../src/runner/step-executor.ts#L2037)), where
   `matchedOutcome.index` is the 0-based position assigned in
-  [step-grouper.ts:72](../src/runner/step-grouper.ts#L72)/[:79](../src/runner/step-grouper.ts#L79).
+  [step-grouper.ts:72](../../src/runner/step-grouper.ts#L72)/[:79](../../src/runner/step-grouper.ts#L79).
 
 Both paths run with caching active — the branched call forwards `stepCache` +
-`cacheEnabled` ([test-runner.ts:402-403](../src/runner/test-runner.ts#L402-L403)),
+`cacheEnabled` ([test-runner.ts:402-403](../../src/runner/test-runner.ts#L402-L403)),
 and `executeBranchedStep` forwards `opts` verbatim to its inner `executeStep`
 (no `cacheKey` override). So a normal step and a branched step that are one
 array position apart map to the **same** `step-<n>.json` and overwrite/replay
@@ -62,7 +62,7 @@ step replays the login step's cached actions, or vice-versa on the next run.
 directly as both the `StepResult.index` and the cache identity, while the rest
 of the runner treats step identity as 1-based. The codebase already assumes the
 branched `result.index` is 1-based elsewhere —
-[test-runner.ts:408-409](../src/runner/test-runner.ts#L408-L409) does
+[test-runner.ts:408-409](../../src/runner/test-runner.ts#L408-L409) does
 `test.sourceSkills[result.index - 1]` with the comment "result.index is
 1-based" — so the 0-based value is also a latent off-by-one for skill
 attribution and history lines on branched steps, not only for the cache.
@@ -71,7 +71,7 @@ attribution and history lines on branched steps, not only for the cache.
 
 - **CLI only.** The server path (`SessionManager`) does not cache branched
   steps — its `executeBranchedStep` call passes no `stepCache`
-  ([session-manager.ts](../src/server/session-manager.ts), conditional-group
+  ([session-manager.ts](../../src/server/session-manager.ts), conditional-group
   branch), so the collision can't occur there (issue 016 review, finding #3).
 - Requires `cache.enabled: true` **and** a test with conditional/branched
   steps. Narrow, but a silent wrong-replay when hit.
@@ -105,7 +105,7 @@ change).
   (no shared `step-<n>.json`).
 - Re-run of the same test hits cache on both without cross-replay.
 - Branched `StepResult.index` / skill attribution stays correct after the fix
-  (guard against re-introducing the [test-runner.ts:409](../src/runner/test-runner.ts#L409)
+  (guard against re-introducing the [test-runner.ts:409](../../src/runner/test-runner.ts#L409)
   `- 1` mismatch).
 
 ## Discovered while

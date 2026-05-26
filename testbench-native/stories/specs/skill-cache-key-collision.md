@@ -1,6 +1,6 @@
 # Frame-scoped step-cache keys (skill collision fix)
 
-Fixes [issue 016](../../../issues/016-skill-cache-key-collisions.md). Amends
+Fixes [issue 016](../../../issues/resolved/016-skill-cache-key-collisions.md). Amends
 the per-step cache identity in [step-cache-server.md](step-cache-server.md) §2,
 which assumed every step's source line came from the test file.
 

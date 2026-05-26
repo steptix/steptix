@@ -1,6 +1,6 @@
 # Skill-aware cache invalidation (Bug 2)
 
-Fixes **Bug 2** of [issue 016](../../../issues/016-skill-cache-key-collisions.md):
+Fixes **Bug 2** of [issue 016](../../../issues/resolved/016-skill-cache-key-collisions.md):
 editing a skill body does not invalidate the cache of tests that use it.
 Companion to [skill-cache-key-collision.md](skill-cache-key-collision.md)
 (Bug 1, the per-step key collision — already shipped). This spec is Bug 2 only.
@@ -247,7 +247,7 @@ the hash, not just that `computeStepsHash` differs on different arrays.
 - [ ] Tests per §6 (the skill-edit integration test is the load-bearing one).
 - [ ] Update [step-cache-server.md](step-cache-server.md) §2 (drop the Bug 2 ⚠️
   from the bundle-hash row) and §8 (skill-expansion row) once this lands.
-- [ ] Close Bug 2 in [issue 016](../../../issues/016-skill-cache-key-collisions.md).
+- [ ] Close Bug 2 in [issue 016](../../../issues/resolved/016-skill-cache-key-collisions.md).
 - [ ] Rebuild `dist/`; the server picks it up on restart. No extension version
   bump (server-side `src/`, not bundled into the VSIX).
 
