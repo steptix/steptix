@@ -144,9 +144,9 @@ export interface StepRequest {
    * before calling the AI, and writes successful plans back. Cache hits
    * surface to clients via `step:pass.fromCache = true`.
    *
-   * Default: `true` when `testFilePath` is present. Set to `false` to
-   * force every step through the AI even when a cache entry exists
-   * (useful for debugging "is the cache hiding something?" scenarios).
+   * Opt-in: caching only happens when this is explicitly `true` (and a
+   * `testFilePath` is present). An absent flag (`undefined`) or `false`
+   * means no cache — every step goes through the AI.
    */
   cacheEnabled?: boolean;
   /**
@@ -1056,7 +1056,11 @@ export class SessionManager {
     // project marker is found by walking up from the test file, the cache
     // is disabled for this request with a one-time warning rather than
     // writing to a phantom `.cache` next to the server process.
-    const cacheEnabledForRequest = request.cacheEnabled !== false && !!request.testFilePath;
+    // Cache is opt-in: the client must explicitly send `cacheEnabled: true`.
+    // An absent flag (`undefined`) means OFF, so a caller that says nothing
+    // about caching gets none. (Previously `undefined` meant ON, which made
+    // the cache impossible to turn off from clients that never set the flag.)
+    const cacheEnabledForRequest = request.cacheEnabled === true && !!request.testFilePath;
     let stepCache: StepCache | undefined;
     if (cacheEnabledForRequest && request.testFilePath) {
       const projectRoot = await resolveProjectRoot(request.testFilePath);

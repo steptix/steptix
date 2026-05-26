@@ -484,10 +484,11 @@ type: skill
       await fs.rm(cacheRoot, { recursive: true, force: true }).catch(() => undefined);
     });
 
-    it('wires stepCache into executeStep when testFilePath resolves a project root', async () => {
-      // The simplest wiring assertion: when testFilePath is supplied AND a
-      // project marker (aiui.config.json) exists above it, executeStep
-      // receives a non-undefined `stepCache` with `cacheEnabled: true`.
+    it('wires stepCache into executeStep when cacheEnabled is true and testFilePath resolves a project root', async () => {
+      // The simplest wiring assertion: when `cacheEnabled: true` is sent AND a
+      // testFilePath is supplied AND a project marker (aiui.config.json) exists
+      // above it, executeStep receives a non-undefined `stepCache` with
+      // `cacheEnabled: true`. Caching is opt-in, so the flag must be explicit.
       const { executeStep } = await import('../src/runner/step-executor.js');
       const exec = vi.mocked(executeStep);
       const defaultImpl = exec.getMockImplementation();
@@ -507,6 +508,7 @@ type: skill
         steps: ['just one step'],
         sourceLines: [1],
         testFilePath: cacheTestFile,
+        cacheEnabled: true,
       })) {
         if (ev.type === 'done') break;
       }
@@ -546,6 +548,40 @@ type: skill
         if (ev.type === 'done') break;
       }
 
+      expect(observedOpts.cacheEnabled).toBe(false);
+
+      exec.mockReset();
+      if (defaultImpl) exec.mockImplementation(defaultImpl);
+    });
+
+    it('absent cacheEnabled with testFilePath leaves the cache OFF (opt-in default)', async () => {
+      // Caching is opt-in: a request that says nothing about caching gets
+      // none, even with a resolvable testFilePath. This is the default that
+      // testbench-native relies on until it explicitly opts a run in.
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const exec = vi.mocked(executeStep);
+      const defaultImpl = exec.getMockImplementation();
+
+      let observedOpts: any;
+      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
+        observedOpts = opts;
+        return {
+          index: idx, instruction: instr, status: 'passed',
+          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
+        };
+      });
+
+      const sessionId = 'cache-default-off-' + Date.now();
+      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+      for await (const ev of sseEvents(url, {
+        steps: ['just one step'],
+        sourceLines: [1],
+        testFilePath: cacheTestFile,
+      })) {
+        if (ev.type === 'done') break;
+      }
+
+      expect(observedOpts.stepCache).toBeUndefined();
       expect(observedOpts.cacheEnabled).toBe(false);
 
       exec.mockReset();
@@ -653,6 +689,7 @@ type: skill
         sourceLines: [1, 2],
         fullSteps: ['stepA', 'stepB', 'stepC', 'stepD'],
         testFilePath: cacheTestFile,
+        cacheEnabled: true,
       })) {
         if (ev.type === 'done') break;
       }
@@ -662,6 +699,7 @@ type: skill
         sourceLines: [3, 4],
         fullSteps: ['stepA', 'stepB', 'stepC', 'stepD'],
         testFilePath: cacheTestFile,
+        cacheEnabled: true,
       })) {
         if (ev.type === 'done') break;
       }

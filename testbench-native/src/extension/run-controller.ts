@@ -789,6 +789,7 @@ export class RunController {
             params,
             sessionConfig,
             logging,
+            cacheOverride: rawConfig['cache'],
             signal: ac.signal,
             log,
             ...(options.stepMode && { stepMode: options.stepMode }),
@@ -941,6 +942,10 @@ export class RunController {
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
+    /** Raw per-test `## Config: cache:` value (e.g. "on" / "off"), if the
+     *  test declared one. Overrides the project's aiui.config.json
+     *  `cache.enabled` for this run; see `resolveCacheOverride`. */
+    cacheOverride?: string;
     /** Initial stepMode to send with the request body — when set, the
      *  server pauses between steps and the run is driven by `run-control`
      *  POSTs from the extension. */
@@ -950,7 +955,7 @@ export class RunController {
      *  `[tool: ...]` step and parks for a debugger-attach ack. */
     pauseAtNextTool?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, stepMode, pauseAtNextTool } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -972,6 +977,11 @@ export class RunController {
     const projectDirs = resolveProjectDirs(this.document.uri);
     const skillsDir = projectDirs?.skillsDir ?? null;
     const toolsDir = projectDirs?.toolsDir ?? null;
+    // Step cache is opt-in. Baseline is the project's nearest aiui.config.json
+    // `cache.enabled`; a per-test `## Config: cache: on|off` overrides it for
+    // this run. No config + no override leaves it off (flag omitted; server
+    // defaults off).
+    const cacheEnabled = resolveCacheOverride(cacheOverride, projectDirs?.cacheEnabled === true);
     const testFilePath = this.document.uri.fsPath;
 
     const events = client.streamSteps(
@@ -989,6 +999,7 @@ export class RunController {
         ...(logging && { logging }),
         ...(skillsDir && { skillsDir }),
         ...(toolsDir && { toolsDir }),
+        ...(cacheEnabled && { cacheEnabled: true }),
         testFilePath,
         ...(stepMode && { stepMode }),
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
@@ -1269,4 +1280,19 @@ function resolveLoggingOverride(
     out.serverFileLogLevel = fileRaw as LogFileMode;
   }
   return (out.consoleLogLevel || out.serverFileLogLevel) ? out : undefined;
+}
+
+/**
+ * Resolve whether the step cache is on for this run. A per-test
+ * `## Config: cache: <value>` wins when it parses to a clear boolean
+ * (on/true/yes/enabled or off/false/no/disabled, case-insensitive); anything
+ * else (absent, blank, unrecognized) falls back to the project's
+ * aiui.config.json `cache.enabled` (`fallback`). Keeps the per-test escape
+ * hatch decoupled from the project default in both directions.
+ */
+function resolveCacheOverride(raw: string | undefined, fallback: boolean): boolean {
+  const v = (raw ?? '').trim().toLowerCase();
+  if (v === 'on' || v === 'true' || v === 'yes' || v === 'enabled') return true;
+  if (v === 'off' || v === 'false' || v === 'no' || v === 'disabled') return false;
+  return fallback;
 }

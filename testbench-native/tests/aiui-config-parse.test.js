@@ -38,6 +38,32 @@ test("parseProjectDirs: no tests block → both null", () => {
   assert.equal(dirs.toolsDir, null);
 });
 
+test("parseProjectDirs: cache.enabled true → cacheEnabled true", () => {
+  const configPath = path.join(tmpDir(), "aiui.config.json");
+  const dirs = parseProjectDirs(JSON.stringify({ cache: { enabled: true } }), configPath);
+  assert.ok(dirs);
+  assert.equal(dirs.cacheEnabled, true);
+});
+
+test("parseProjectDirs: cache.enabled false / absent / non-boolean → cacheEnabled false (opt-in default)", () => {
+  const configPath = path.join(tmpDir(), "aiui.config.json");
+  // Explicit false.
+  assert.equal(
+    parseProjectDirs(JSON.stringify({ cache: { enabled: false } }), configPath).cacheEnabled,
+    false,
+  );
+  // No cache block at all.
+  assert.equal(
+    parseProjectDirs(JSON.stringify({ tests: { dir: "./tests" } }), configPath).cacheEnabled,
+    false,
+  );
+  // Truthy-but-not-true value must not flip it on.
+  assert.equal(
+    parseProjectDirs(JSON.stringify({ cache: { enabled: "yes" } }), configPath).cacheEnabled,
+    false,
+  );
+});
+
 test("parseProjectDirs: tests present but skillsDir/toolsDir missing or non-string → null", () => {
   const configPath = path.join(tmpDir(), "aiui.config.json");
   const dirs = parseProjectDirs(

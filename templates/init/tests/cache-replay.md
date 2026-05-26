@@ -9,6 +9,9 @@ deliberately deterministic AI actions (no external network, no
 flaky DOM) so a first run hits the AI, the cache populates, and a
 second run replays from cache and paints ⚡ glyphs on both lines.
 
+## Config
+- cache: on
+
 ## Steps
 1. Navigate to about:blank
 2. Verify the page URL is exactly "about:blank"

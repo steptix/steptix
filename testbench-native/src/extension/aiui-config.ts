@@ -15,6 +15,12 @@ export interface ProjectDirs {
   skillsDir: string | null;
   /** Absolute path to the tools directory, or null if undeclared. */
   toolsDir: string | null;
+  /**
+   * Whether the step cache is opted in via `cache.enabled === true` in the
+   * config. Defaults false — absent config, a missing `cache` block, or any
+   * non-`true` value leaves the cache off (the run sends no `cacheEnabled`).
+   */
+  cacheEnabled: boolean;
 }
 
 const CONFIG_FILENAMES = ['aiui.config.json'];

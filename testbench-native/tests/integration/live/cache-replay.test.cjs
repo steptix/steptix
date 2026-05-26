@@ -118,10 +118,10 @@ describe('TestBench live — step cache replay paints ⚡ on second run', functi
 
     const run1Statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     console.log('[live] Run 1 final statuses:', run1Statuses);
-    // Step lines in cache-replay.md (1-based): "1. Navigate..." on line 13,
-    // "2. Verify..." on line 14. Both should be plain `pass` on the cold
+    // Step lines in cache-replay.md (1-based): "1. Navigate..." on line 16,
+    // "2. Verify..." on line 17. Both should be plain `pass` on the cold
     // run — AI was called, cache populated.
-    const STEP_LINES = [13, 14];
+    const STEP_LINES = [16, 17];
     for (const line of STEP_LINES) {
       assert.equal(
         run1Statuses[line],

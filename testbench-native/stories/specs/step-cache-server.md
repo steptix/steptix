@@ -72,14 +72,22 @@ Two new optional fields on `StepRequest`:
 ```typescript
 interface StepRequest {
   // ... existing fields
-  cacheEnabled?: boolean;   // default true when testFilePath is present
+  cacheEnabled?: boolean;   // opt-in: caching only when explicitly true
   fullSteps?: string[];     // full post-expansion list for hash stability
 }
 ```
 
-**`cacheEnabled`** — opt-out switch. The default is `true` if and only
-if `testFilePath` is on the request. CLI / programmatic callers without
-a test file path get no cache.
+**`cacheEnabled`** — opt-in switch. The server caches only when this is
+explicitly `true` **and** a `testFilePath` is present. An absent flag
+(`undefined`) or `false` means no cache — every step goes through the AI.
+CLI / programmatic callers without a test file path get no cache.
+
+How testbench-native decides the flag (see §10.1): the run sends
+`cacheEnabled: true` only when the test's nearest `aiui.config.json`
+declares `cache.enabled: true`, or the test's own `## Config: cache: on`
+block opts it in. A per-test `## Config: cache: on|off` overrides the
+project config in either direction; absent both, the flag is omitted and
+the server keeps the cache off.
 
 **`fullSteps`** — required when a batched run trims the step list at a
 breakpoint. The hash is computed against `fullSteps ?? effectiveSteps`.
@@ -145,7 +153,7 @@ After the AI returns and the actions succeed:
 In `executeStepsInternal`, after `expandSkills` runs:
 
 ```typescript
-const cacheEnabled = request.cacheEnabled !== false && !!request.testFilePath;
+const cacheEnabled = request.cacheEnabled === true && !!request.testFilePath;
 const cacheHashSource = request.fullSteps ?? effectiveSteps;
 let stepCache: StepCache | undefined;
 if (cacheEnabled) {
@@ -251,6 +259,22 @@ run is a trimmed batch (breakpoint pause + Continue, runAll with
 selection, etc.). For full-document runs (`runLines([])`), `fullSteps`
 is equal to the post-extraction `steps` and sending it is redundant
 but harmless.
+
+**`cacheEnabled`** is added to the body only when the run opts into
+caching. The decision (in `run-controller.ts`):
+
+1. Baseline from the test's nearest `aiui.config.json` —
+   `resolveProjectDirs(uri).cacheEnabled` (`cache.enabled === true`). The
+   walk-up + nearest-wins matches the server's project-root resolution, so
+   "client enabled" and "where the server writes `.cache`" agree.
+2. A per-test `## Config: cache: <value>` overrides that baseline in either
+   direction (`on`/`true`/`yes`/`enabled` → on; `off`/`false`/`no`/`disabled`
+   → off; anything else falls through to the baseline). Parsed by
+   `resolveCacheOverride`.
+
+When the result is `true`, the body carries `cacheEnabled: true`; otherwise
+the field is omitted entirely (the server then keeps the cache off — §4).
+Interactive (`[interactive]` / `[input:]`) sub-requests never send it.
 
 ### 10.2 User-visible cache indicators
 

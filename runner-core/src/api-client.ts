@@ -91,9 +91,9 @@ export interface StreamStepsRequest {
     serverFileLogLevel?: LogFileMode;
   };
   /**
-   * Step-cache control. Defaults to enabled server-side when
-   * `testFilePath` is present. Set `false` to force every step through
-   * the AI even when a cache entry exists (debug aid).
+   * Step-cache control. Opt-in: the server only caches when this is
+   * explicitly `true` (and a `testFilePath` is present). Absent
+   * (`undefined`) or `false` means every step goes through the AI.
    */
   cacheEnabled?: boolean;
   /**
