@@ -809,6 +809,37 @@ type: skill
       await expect(fs.readFile(sentinel, 'utf-8')).rejects.toThrow(); // bundle wiped
     });
 
+    it('does NOT invalidate when an unchanged skill test is re-run — cache survives (issue 016 / Bug 2)', async () => {
+      // Complement of the invalidate-on-edit test: re-running the SAME skill
+      // test with no edits must keep the bundle hash stable so cached steps
+      // survive. Guards against the fix over-invalidating (e.g. non-deterministic
+      // expansion) and silently defeating the cache.
+      const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-bug2-stable-'));
+      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}');
+      const skillsDir = path.join(projectRoot, 'skills');
+      await fs.mkdir(skillsDir);
+      await fs.writeFile(path.join(skillsDir, 'greet.md'), `---\ntype: skill\n---\n# greet\n## Steps\n1. Say hello\n`);
+      const testFilePath = path.join(projectRoot, 'tests', 't.md');
+      const req = { steps: ['[skill: greet]'], fullSteps: ['[skill: greet]'], skillsDir, testFilePath, cacheEnabled: true };
+
+      await manager.executeSteps('stable-1', req);
+      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+      // Plant a sentinel cached-step file; an unchanged re-run must NOT wipe it.
+      const sentinel = path.join(cacheDir, 'step-sentinel.json');
+      await fs.writeFile(sentinel, '{"turns":[]}');
+
+      // Re-run with NO edits.
+      await manager.executeSteps('stable-2', req);
+      const meta2 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+      const sentinelSurvived = await fs.readFile(sentinel, 'utf-8').then(() => true, () => false);
+
+      await fs.rm(projectRoot, { recursive: true, force: true });
+
+      expect(meta2.stepsHash).toBe(meta1.stepsHash); // hash stable across re-run
+      expect(sentinelSurvived).toBe(true); // bundle NOT wiped — cache survives
+    });
+
     it('full-run and resumed-subset-batch hashes match for the same document (issue 016 / Bug 2)', async () => {
       // A paused/resumed run sends a subset batch but the same fullSteps. The
       // fix expands the FULL document for a subset batch's hash, so it matches
