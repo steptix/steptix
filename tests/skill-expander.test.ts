@@ -56,6 +56,39 @@ type: skill
     expect(result.sourceSkills).toEqual(['search', 'search', null]);
   });
 
+  it('mints a distinct frame per invocation when one skill is used twice (issue 016 / Bug 1)', async () => {
+    // Foundation of the Bug 1 cache-key fix: each [skill: ...] invocation must
+    // get its own frame, so two invocations of one skill — whose body steps
+    // share the same skill-file line — are distinguishable downstream. If the
+    // expander reused a frame id here, the frame-scoped cache key would collide
+    // again and the second invocation would replay the first's cached actions.
+    await writeSkill(
+      'echo',
+      `---
+type: skill
+---
+# echo
+## Parameters
+- msg: the message
+## Steps
+1. Note "{{msg}}"
+`,
+    );
+
+    const result = await expandSkills(
+      ['[skill: echo msg="a"]', '[skill: echo msg="b"]'],
+      tmpDir,
+    );
+
+    expect(result.steps).toEqual(['Note "a"', 'Note "b"']);
+    expect(result.origins).toHaveLength(2);
+    const [o0, o1] = result.origins;
+    expect(o0!.frameId).toMatch(/^f\d+$/);
+    expect(o1!.frameId).toMatch(/^f\d+$/);
+    expect(o0!.frameId).not.toBe(o1!.frameId);   // distinct frames per invocation
+    expect(o0!.skillLine).toBe(o1!.skillLine);   // same source line in the skill file
+  });
+
   it('strips trailing comment text after the skill bracket', async () => {
     await writeSkill(
       'noop',

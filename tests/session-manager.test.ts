@@ -716,6 +716,54 @@ type: skill
       expect(response.outputSources).toMatchObject({ myOrder: 'toolOutput' });
     });
 
+    it('passes distinct frame-scoped cache keys for one skill invoked on two steps (issue 016 / Bug 1)', async () => {
+      // Plumbing regression guard for the Bug 1 fix. Two invocations of ONE
+      // skill expand to the SAME skill-file line; before the fix they shared a
+      // step-<line>.json so the second replayed the first's actions. The fix
+      // qualifies the cache key with the per-invocation frame the expander
+      // mints. This asserts the cacheKey the SERVER hands executeStep — so it
+      // fails if the expander stops minting distinct frames OR session-manager
+      // regresses to passing the bare source line instead of the frame key.
+      // (The cacheKey opt is sent unconditionally, so no cache/project root
+      // setup is needed — only skillsDir, to make expansion mint frames.)
+      const skillsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-skill-key-'));
+      await fs.writeFile(
+        path.join(skillsDir, 'echo.md'),
+        `---
+type: skill
+---
+# echo
+## Parameters
+- msg: the message
+## Steps
+1. Note "{{msg}}"
+`,
+      );
+
+      await manager.executeSteps('session-1', {
+        steps: ['[skill: echo msg="first"]', '[skill: echo msg="second"]'],
+        skillsDir,
+      });
+
+      await fs.rm(skillsDir, { recursive: true, force: true });
+
+      // The default executeStep mock ran once per expanded skill-body step;
+      // read the cacheKey opt the SERVER handed it (4th arg). Using mock.calls
+      // rather than a custom mockImplementation avoids leaking an implementation
+      // into later tests (the suite's beforeEach clears calls, not impls).
+      const cacheKeys = vi.mocked(executeStep).mock.calls.map((c) => c[3]?.cacheKey);
+      // One body step per invocation → two executeStep calls.
+      expect(cacheKeys).toHaveLength(2);
+      // The collision was identical keys; the fix differs them by frame only.
+      expect(cacheKeys[0]).not.toBe(cacheKeys[1]);
+      const [frameA, lineA] = String(cacheKeys[0]).split('-');
+      const [frameB, lineB] = String(cacheKeys[1]).split('-');
+      expect(frameA).toMatch(/^f\d+$/);   // frame-scoped, not a bare line
+      expect(frameB).toMatch(/^f\d+$/);
+      expect(frameA).not.toBe(frameB);    // distinct invocation frames (f1 vs f2)
+      expect(lineA).toBe(lineB);          // same skill-body source line
+    });
+
     it('handles executeStep throwing an unexpected error', async () => {
       vi.mocked(executeStep).mockRejectedValueOnce(new Error('Browser crashed'));
 
