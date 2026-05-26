@@ -1,9 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { isTestFile } from 'ai-ui-automation-runner-core';
+import { isTestFile, extractSteps } from 'ai-ui-automation-runner-core';
 import type { ErrorPayload } from 'ai-ui-automation-runner-core';
-import { extractStepLineIds } from './step-lines.js';
+import { extractStepLineIds, shiftAnchorForChanges, changesTouchAnchor } from './step-lines.js';
 
 export type LineStatus = 'running' | 'pass' | 'pass-cached' | 'fail' | 'skip' | 'stopped';
 
@@ -95,6 +95,17 @@ export class ActiveFileTracker {
    *  Compared to the live document on reopen to detect line drift. */
   private readonly signatures = new Map<string, string>();
   private persistTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Live resume marker for the paused run, kept as a position (not a raw
+   * line) so it shifts with edits the way VS Code's own breakpoints do.
+   * Single-valued — only one run is live at a time — and deliberately NOT
+   * on the per-URI `FileState`, which is persisted; the anchor is transient.
+   * `setBreakpointStop` is the one writer; the `onDidChangeTextDocument`
+   * handler shifts/snaps/clears it, and the snapshots derive the line
+   * number every consumer still sees from `position.line + 1`. See
+   * stories/specs/resume-position-anchor.md.
+   */
+  private breakpointAnchor: { uri: string; position: vscode.Position } | null = null;
 
   constructor() {
     // Restore persisted run state before wiring listeners or painting, then
@@ -130,6 +141,11 @@ export class ActiveFileTracker {
         if (event.textEditor === this.currentEditor) this.emit();
       }),
       vscode.workspace.onDidChangeTextDocument((event) => {
+        // Keep the resume anchor (if this is the document holding it) shifting
+        // with the user's edits so Continue resumes the step they paused on,
+        // not whatever slid into its old line. Done before emit() so the
+        // derived breakpointStop in the snapshot reflects the new position.
+        this.maintainAnchor(event);
         if (event.document === this.currentEditor?.document) {
           // `## Steps` may have been added/removed; re-check context key.
           this.updateContextKey();
@@ -286,6 +302,7 @@ export class ActiveFileTracker {
     if (existing.length > 0) vscode.debug.removeBreakpoints(existing);
     const state = this.state(uri);
     state.breakpointStop = null;
+    this.clearAnchorFor(uri);
     this.emit();
   }
 
@@ -294,7 +311,15 @@ export class ActiveFileTracker {
     state.statuses.clear();
     state.errors.clear();
     state.breakpointStop = null;
+    this.clearAnchorFor(uri);
     this.emit();
+  }
+
+  /** Drop the live resume anchor if it belongs to `uri`. Used by the
+   *  clear paths that null `breakpointStop` without going through
+   *  `setBreakpointStop`. */
+  private clearAnchorFor(uri: vscode.Uri): void {
+    if (this.breakpointAnchor?.uri === uri.toString()) this.breakpointAnchor = null;
   }
 
   /** Single-line variant used by the webview's per-step "Clear status here"
@@ -353,8 +378,83 @@ export class ActiveFileTracker {
   setBreakpointStop(uri: vscode.Uri, line: number | null): void {
     const state = this.state(uri);
     state.breakpointStop = line;
+    // Capture (or clear) the position anchor alongside the raw line. The
+    // anchor is the source of truth that shifts on edit; `state.breakpointStop`
+    // is kept in lockstep with it (here and in the change handler) so the
+    // snapshots AND the direct consumer reads in commands/index.ts always see
+    // the current line.
+    this.breakpointAnchor =
+      line != null ? { uri: uri.toString(), position: new vscode.Position(line - 1, 0) } : null;
     void vscode.commands.executeCommand('setContext', 'testbench-native.paused', line != null);
     this.emit();
+  }
+
+  /**
+   * The current resume line for a URI, anchor-derived so it reflects any
+   * edits the user made between pausing and Continue/Step. The breakpoint-
+   * paused branches of `continueRun` and `dispatchStep` read this instead of
+   * `state(uri).breakpointStop` directly so they filter against the live
+   * position rather than the stale pause-time line.
+   */
+  breakpointStopFor(uri: vscode.Uri): number | null {
+    return this.derivedBreakpointStop(uri.toString(), this.state(uri));
+  }
+
+  /**
+   * Shift / snap / clear the resume anchor in response to a document edit,
+   * imitating how VS Code keeps its own breakpoints pinned to the text as it
+   * changes. No-op unless the edited document is the one holding the anchor.
+   *
+   * The actual shift/snap/clear math lives in `shiftAnchorForChanges`, which
+   * classifies ALL of the event's changes against the original anchor line in
+   * one pass (above edits sum their deltas; an edit touching the anchor line
+   * collapses to that edit's start and snaps to the first surviving step at or
+   * after it; no survivor clears the anchor). The post-edit step lines are
+   * extracted only when some change actually touches the anchor, so plain
+   * typing above/below the anchor doesn't re-parse on every keystroke.
+   * `state.breakpointStop` is kept in lockstep so the direct consumer reads
+   * stay current too.
+   */
+  private maintainAnchor(event: vscode.TextDocumentChangeEvent): void {
+    const anchor = this.breakpointAnchor;
+    if (!anchor || anchor.uri !== event.document.uri.toString()) return;
+    if (event.contentChanges.length === 0) return;
+
+    const before = anchor.position.line;
+    const changes = event.contentChanges.map((c) => ({
+      startLine: c.range.start.line,
+      endLine: c.range.end.line,
+      endCharacter: c.range.end.character,
+      addedLines: countNewlines(c.text),
+    }));
+
+    // The post-edit step lines (1-based) are only consulted by the snap-forward
+    // branch — i.e. when some change replaces content on the anchor line. Parse
+    // them only then so plain typing above/below the anchor doesn't re-extract
+    // steps on every keystroke. Uses the same extractor the Continue/Step
+    // consumers use so there's no parallel parser to drift.
+    const stepLines = changesTouchAnchor(changes, before)
+      ? extractSteps(event.document.getText()).map((s) => s.line)
+      : [];
+
+    const line = shiftAnchorForChanges(before, changes, stepLines);
+
+    if (line === before) return; // anchor unmoved — no repaint needed
+
+    const uri = event.document.uri;
+    const state = this.state(uri);
+    if (line === null) {
+      this.breakpointAnchor = null;
+      state.breakpointStop = null;
+      void vscode.commands.executeCommand('setContext', 'testbench-native.paused', false);
+    } else {
+      anchor.position = new vscode.Position(line, 0);
+      state.breakpointStop = line + 1;
+    }
+    // Repaint the arrow at its new home. When the edited document is the
+    // current editor the change handler already emits; emit here only
+    // otherwise so a background skill-file edit still repaints.
+    if (event.document !== this.currentEditor?.document) this.emit();
   }
 
   /**
@@ -390,10 +490,24 @@ export class ActiveFileTracker {
       breakpoints: [...this.breakpoints(uri)].sort((a, b) => a - b),
       statuses: [...state.statuses.entries()],
       errors: [...state.errors.entries()],
-      breakpointStop: state.breakpointStop,
+      breakpointStop: this.derivedBreakpointStop(key, state),
       selectedLines: [],
       cursorLine: 1,
     };
+  }
+
+  /**
+   * The current resume line for a URI: derived from the live position anchor
+   * when it belongs to this URI (so it reflects edits made since the pause),
+   * else the URI's stored `breakpointStop`. Both snapshots and the Continue /
+   * Step consumers go through this so the decorations, webview, and resume
+   * filter all agree on one current line number.
+   */
+  private derivedBreakpointStop(key: string, state: FileState): number | null {
+    if (this.breakpointAnchor?.uri === key) {
+      return this.breakpointAnchor.position.line + 1;
+    }
+    return state.breakpointStop;
   }
 
   private findEditorFor(uri: vscode.Uri): vscode.TextEditor | undefined {
@@ -430,7 +544,7 @@ export class ActiveFileTracker {
       breakpoints: [...this.breakpoints(document.uri)].sort((a, b) => a - b),
       statuses: [...state.statuses.entries()],
       errors: [...state.errors.entries()],
-      breakpointStop: state.breakpointStop,
+      breakpointStop: this.derivedBreakpointStop(document.uri.toString(), state),
       selectedLines: editor ? selectionLines(editor) : [],
       cursorLine: editor?.selection.active.line ? editor.selection.active.line + 1 : 1,
     };
@@ -513,6 +627,11 @@ export class ActiveFileTracker {
     }
     this.states.delete(key);
     this.signatures.delete(key);
+    // The resume anchor is tracker-level, so dropping the per-URI state would
+    // otherwise leave it dangling — `derivedBreakpointStop` would still report
+    // a pause on a file whose run state was just invalidated (e.g. reopened
+    // after a git pull / branch switch changed the steps). Clear it in step.
+    this.clearAnchorFor(doc.uri);
     this.schedulePersist();
     if (this.currentEditor?.document === doc) this.emit();
   }
@@ -592,6 +711,11 @@ export class ActiveFileTracker {
     }
     this.states.clear();
     this.signatures.clear();
+    // The resume anchor is tracker-level, not per-URI, so clearing `states`
+    // alone leaves it behind — a stale anchor from a paused test would then
+    // surface via `derivedBreakpointStop` in the next case (the idle Continue
+    // no-op test would see a phantom pause and hang opening a stream).
+    this.breakpointAnchor = null;
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       try {
         fs.rmSync(this.runStateFilePath(folder), { force: true });
@@ -613,6 +737,12 @@ export class ActiveFileTracker {
       this.activeTabIsTextEditor && this.isActiveTestFile,
     );
   }
+}
+
+/** Count `\n` occurrences in a string — the number of lines an edit's
+ *  replacement text adds. */
+function countNewlines(s: string): number {
+  return s.split('\n').length - 1;
 }
 
 /** djb2 string hash, base-36 encoded. Not cryptographic — only needs to

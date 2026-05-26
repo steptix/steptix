@@ -165,9 +165,10 @@ export function registerCommands(
         return;
       }
 
-      // Breakpoint-paused branch — re-open the stream.
-      const state = tracker.state(controller.document.uri);
-      const startLine = state.breakpointStop;
+      // Breakpoint-paused branch — re-open the stream. Read the anchor-derived
+      // current line (not the raw pause-time line) so edits made while paused
+      // resume the step the user actually paused on.
+      const startLine = tracker.breakpointStopFor(controller.document.uri);
       if (startLine != null && !controller.isRunning) {
         tracker.setBreakpointStop(controller.document.uri, null);
         const breakpoints = tracker.breakpoints(controller.document.uri);
@@ -487,8 +488,8 @@ async function dispatchStep(
   }
 
   // (2) Breakpoint-paused: relaunch from that line with the chosen mode.
-  const state = tracker.state(controller.document.uri);
-  const startLine = state.breakpointStop;
+  // Anchor-derived current line — see continueRun above.
+  const startLine = tracker.breakpointStopFor(controller.document.uri);
   if (startLine != null) {
     tracker.setBreakpointStop(controller.document.uri, null);
     const breakpoints = tracker.breakpoints(controller.document.uri);

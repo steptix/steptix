@@ -1,9 +1,23 @@
 # 010 — Resume / paused-on-error uses raw line numbers, not step ordinals
 
-**Status:** open / medium priority
-**Area:** [testbench-native/src/extension/commands/index.ts:151-164](../testbench-native/src/extension/commands/index.ts#L151-L164) — `continueRun` breakpoint-paused branch
-**Related:** [testbench-native/src/extension/active-file-tracker.ts](../testbench-native/src/extension/active-file-tracker.ts) — `breakpointStop` field (number, not anchor)
+> **RESOLVED 2026-05-26.** Fixed by anchoring the resume point to a
+> `vscode.Position` in `ActiveFileTracker` that shifts as the document is
+> edited (the "imitate VS Code's own breakpoint anchoring" option, kept
+> separate from `vscode.debug.breakpoints`). `breakpointStop` is still exposed
+> to the snapshot as a *current* line, so decorations/webview/protocol are
+> unchanged; both consumers (`continueRun` and `dispatchStep`) read the
+> anchor-derived value. The shift math (`shiftAnchorForChanges`) is
+> column-aware so whole-line selections above the anchor shift rather than
+> snap, and the tracker-level anchor is cleared anywhere per-URI state is
+> dropped (`reconcile`, `resetAllStateForTests`). Design + behaviour table:
+> [resume-position-anchor.md](../../testbench-native/stories/specs/resume-position-anchor.md).
+> The original design discussion below is kept for history.
+
+**Status:** resolved (was: open / medium priority)
+**Area:** [testbench-native/src/extension/commands/index.ts](../../testbench-native/src/extension/commands/index.ts) — `continueRun` breakpoint-paused branch
+**Related:** [testbench-native/src/extension/active-file-tracker.ts](../../testbench-native/src/extension/active-file-tracker.ts) — `breakpointStop` field (now anchor-derived)
 **Opened:** 2026-05-18
+**Resolved:** 2026-05-26
 
 ## Summary
 

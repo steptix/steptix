@@ -908,4 +908,60 @@ describe('TestBench frame events (Phase 2)', function () {
       '## Config cache:off must override cache.enabled:true (flag omitted)',
     );
   });
+
+  // ── Resume position-anchor: second consumer (dispatchStep / Step Into) ──
+  //
+  // continueRun and dispatchStep share the identical `breakpointStop` filter,
+  // so the anchor fix must hold for BOTH. This covers Step Into resuming from
+  // a breakpoint pause after a step is inserted above the pause line; the
+  // shifted step is the one that re-runs, not the inserted ghost.
+  it('Step Into after inserting a step ABOVE the pause line relaunches the original step (no ghost)', async () => {
+    const uri = vscode.window.activeTextEditor.document.uri;
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(9, 0)), // line 10
+        true,
+      ),
+    ]);
+
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('first stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at line 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Insert a step on line 9 (above the pause line). Original step 3 → 11.
+    const editor = vscode.window.activeTextEditor;
+    const inserted = await editor.edit((b) => {
+      b.insert(new vscode.Position(8, 0), '2.5. Inserted ghost step\n');
+    });
+    assert.ok(inserted, 'editor.edit (insert) should apply');
+    await waitFor('anchor shifted to line 11 after insert above', () => {
+      return hooks.tracker.snapshot().breakpointStop === 11;
+    });
+
+    const requestsBefore = fake.requests.length;
+    // dispatchStep with mode 'into' is the second consumer of breakpointStop.
+    void vscode.commands.executeCommand('testbench-native.stepInto');
+    await waitFor('Step Into relaunch stream opens', () => fake.requests.length > requestsBefore);
+    const stepRequest = fake.requests[requestsBefore];
+    assert.ok(stepRequest, 'Step Into from a breakpoint pause must open a new stream');
+    assert.deepEqual(
+      stepRequest.sourceLines,
+      [11],
+      `Step Into must relaunch the original step (now line 11), not the inserted ghost. Got ${JSON.stringify(stepRequest.sourceLines)}.`,
+    );
+
+    fake.end();
+    await waitFor('idle after Step Into', () => !hooks.isRunning());
+    try {
+      await vscode.commands.executeCommand('workbench.action.revertActiveEditor');
+    } catch {
+      // best-effort — beforeEach closeAllEditors is the backstop
+    }
+  });
 });
