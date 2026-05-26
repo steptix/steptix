@@ -551,6 +551,53 @@ describe('TestBench debug state machine', function () {
     );
   });
 
+  it('the `paused` context key is per-file: a stop parked on one test does not light up Continue on another', async () => {
+    // Regression for the leaking Continue button. A failure (or pause) parks a
+    // breakpointStop on the test that stopped — exactly the call below, which
+    // is what the step:fail / pause paths make. The Continue/Resume button is
+    // gated on the `testbench-native.paused` context key, which used to be a
+    // single global flag: once one test parked a stop, the button followed the
+    // user onto every OTHER test they opened. It must instead reflect only the
+    // active file's own resume point. (VS Code doesn't expose context keys to
+    // extensions, so we read the tracker's mirror of the last pushed value.)
+    const uriA = fixtureUri('test-with-steps.md'); // active from beforeEach
+    const uriB = fixtureUri('test-shared-a.md'); // a different test file
+
+    hooks.tracker.setBreakpointStop(uriA, 9);
+    await waitFor(
+      'paused key true on the test that stopped',
+      () => hooks.tracker.lastPausedContextValue === true,
+    );
+
+    // Switch to a different test — the button must not come along.
+    await vscode.commands.executeCommand('vscode.open', uriB);
+    await waitFor('editor B is active', () => {
+      const e = vscode.window.activeTextEditor;
+      return e && e.document.uri.toString() === uriB.toString();
+    });
+    await waitFor(
+      'paused key clears on the unrelated test',
+      () => hooks.tracker.lastPausedContextValue === false,
+    );
+    // The resume point itself is untouched — only the active-file-scoped key
+    // changed. Switching back must restore it.
+    assert.equal(
+      hooks.tracker.breakpointStopFor(uriA),
+      9,
+      'switching editors must not discard the parked resume point',
+    );
+
+    await vscode.commands.executeCommand('vscode.open', uriA);
+    await waitFor('editor A is active again', () => {
+      const e = vscode.window.activeTextEditor;
+      return e && e.document.uri.toString() === uriA.toString();
+    });
+    await waitFor(
+      'paused key returns on the test that still has a parked stop',
+      () => hooks.tracker.lastPausedContextValue === true,
+    );
+  });
+
   it('paused → running (continueRun handles breakpoint state too): the unified Continue command re-opens the stream', async () => {
     // Phase 5 follow-up: testbench-native.continueRun was originally a
     // step-paused-only command (POST run-control). It's now unified so

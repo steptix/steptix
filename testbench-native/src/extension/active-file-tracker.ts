@@ -89,6 +89,11 @@ export class ActiveFileTracker {
   // onto webview panels (our detached runner, the Settings UI, other
   // extensions' panels, …).
   private activeTabIsTextEditor = false;
+  /** Test-only readback of the `testbench-native.paused` context key. VS Code
+   *  doesn't expose context keys to extensions, so we mirror the last value
+   *  pushed. The Continue/Resume button's visibility hinges on this key, and
+   *  it is per-active-file (see `refreshPausedContextKey`). */
+  lastPausedContextValue = false;
   private readonly listeners = new Set<Listener>();
   private readonly subs: vscode.Disposable[] = [];
   /** Step-line signature each URI's persisted state was captured against.
@@ -385,7 +390,10 @@ export class ActiveFileTracker {
     // the current line.
     this.breakpointAnchor =
       line != null ? { uri: uri.toString(), position: new vscode.Position(line - 1, 0) } : null;
-    void vscode.commands.executeCommand('setContext', 'testbench-native.paused', line != null);
+    // `paused` is derived from the *active* file's resume point inside emit(),
+    // not set globally here — a stop parked on one test must not light up the
+    // Continue button on a different test you switch to. See
+    // refreshPausedContextKey.
     this.emit();
   }
 
@@ -446,7 +454,8 @@ export class ActiveFileTracker {
     if (line === null) {
       this.breakpointAnchor = null;
       state.breakpointStop = null;
-      void vscode.commands.executeCommand('setContext', 'testbench-native.paused', false);
+      // `paused` is recomputed from the active file in emit()/updateContextKey
+      // (both run after this returns), so no direct setContext here.
     } else {
       anchor.position = new vscode.Position(line, 0);
       state.breakpointStop = line + 1;
@@ -558,6 +567,10 @@ export class ActiveFileTracker {
     // chokepoint for keeping the persisted store in sync. Debounced because
     // emit() also fires on selection moves, which don't change run state.
     this.schedulePersist();
+    // Same chokepoint keeps the per-file `paused` context key honest: any
+    // change to the active file's resume point (or to which file is active)
+    // re-derives it. Deduped, so the selection-move emits are free.
+    this.refreshPausedContextKey();
   }
 
   // ---- persistence -------------------------------------------------------
@@ -736,6 +749,40 @@ export class ActiveFileTracker {
       'testbench-native.activeFile',
       this.activeTabIsTextEditor && this.isActiveTestFile,
     );
+    // Editor switches reach here without an emit() (the webview-focus branch),
+    // so keep the per-file `paused` key in lockstep here too.
+    this.refreshPausedContextKey();
+  }
+
+  /**
+   * Recompute the `testbench-native.paused` context key from the *active*
+   * editor's own parked resume point. The Continue/Resume button is gated on
+   * this key, so it must be per-file: a failure (or breakpoint pause) parks a
+   * `breakpointStop` on the test that stopped, and only that test should offer
+   * Continue. The previous global flag stuck to whichever file last parked a
+   * stop and bled the button onto every other test the user opened afterwards.
+   * Deduped against the last pushed value so the per-keystroke / per-selection
+   * emit()s don't spam setContext.
+   */
+  private refreshPausedContextKey(): void {
+    const paused = this.activeFileResumeLine() != null;
+    if (paused === this.lastPausedContextValue) return;
+    this.lastPausedContextValue = paused;
+    void vscode.commands.executeCommand('setContext', 'testbench-native.paused', paused);
+  }
+
+  /**
+   * The active editor's resume line (anchor-derived, the same way the
+   * snapshots compute it), or null when the active file has no parked stop.
+   * Reads `states` directly rather than via `state()` so merely looking at a
+   * file with no run state doesn't lazily allocate one for it.
+   */
+  private activeFileResumeLine(): number | null {
+    const uri = this.currentEditor?.document.uri;
+    if (!uri) return null;
+    const key = uri.toString();
+    if (this.breakpointAnchor?.uri === key) return this.breakpointAnchor.position.line + 1;
+    return this.states.get(key)?.breakpointStop ?? null;
   }
 }
 
