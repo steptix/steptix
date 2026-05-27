@@ -8,6 +8,14 @@ export class TokenTracker {
   private totalInputTokens = 0;
   private totalOutputTokens = 0;
   private stepTokens = 0;
+  // Snapshot of the cumulative totals at the start of the current run. The
+  // server reuses one TokenTracker for a session's whole lifetime, but each
+  // run writes its own HTML report — `markRunStart()` records this baseline so
+  // the `run*` getters report only the usage spent since, not the (ever-
+  // growing) session-cumulative figure. A re-run that's fully cache-served
+  // makes no AI calls and so should report ~0, not the prior run's total.
+  private runStartInputTokens = 0;
+  private runStartOutputTokens = 0;
 
   addUsage(inputTokens: number, outputTokens: number): void {
     this.totalInputTokens += inputTokens;
@@ -17,6 +25,17 @@ export class TokenTracker {
 
   resetStep(): void {
     this.stepTokens = 0;
+  }
+
+  /**
+   * Mark the start of a new run. The `run*` getters then report usage
+   * accumulated after this point. Call once at each run/report boundary.
+   * A fresh tracker (CLI/UI, one per run) need not call this — its run
+   * totals equal its cumulative totals since the baseline is 0.
+   */
+  markRunStart(): void {
+    this.runStartInputTokens = this.totalInputTokens;
+    this.runStartOutputTokens = this.totalOutputTokens;
   }
 
   checkStepBudget(maxInputTokens: number): void {
@@ -35,6 +54,21 @@ export class TokenTracker {
 
   get outputTotal(): number {
     return this.totalOutputTokens;
+  }
+
+  /** Input tokens used since the last `markRunStart()` (or construction). */
+  get runInputTotal(): number {
+    return this.totalInputTokens - this.runStartInputTokens;
+  }
+
+  /** Output tokens used since the last `markRunStart()` (or construction). */
+  get runOutputTotal(): number {
+    return this.totalOutputTokens - this.runStartOutputTokens;
+  }
+
+  /** Total tokens used since the last `markRunStart()` (or construction). */
+  get runTotal(): number {
+    return this.runInputTotal + this.runOutputTotal;
   }
 
   getSummary(): string {

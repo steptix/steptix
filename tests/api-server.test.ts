@@ -65,7 +65,13 @@ vi.mock('../src/ai/client.js', () => ({
 vi.mock('../src/utils/tokens.js', () => ({
   TokenTracker: class {
     resetStep = vi.fn();
-    totalTokens = 0;
+    markRunStart = vi.fn();
+    get total() { return 0; }
+    get inputTotal() { return 0; }
+    get outputTotal() { return 0; }
+    get runTotal() { return 0; }
+    get runInputTotal() { return 0; }
+    get runOutputTotal() { return 0; }
   },
 }));
 

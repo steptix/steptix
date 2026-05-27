@@ -801,6 +801,12 @@ export class SessionManager {
     session.status = 'executing';
 
     const runStartTime = Date.now();
+    // The session's TokenTracker lives for the whole session, accumulating
+    // across every run. Snapshot here so this run's report counts only the
+    // tokens spent during this run — otherwise a re-run (especially a fully
+    // cache-served one that makes no AI calls) would inherit the prior run's
+    // total. See src/utils/tokens.ts.
+    session.tokenTracker.markRunStart();
     const results: StepResultResponse[] = [];
     /** Full StepResult records accumulated across this request — used to
      *  generate the per-run HTML report at the end. */
@@ -2090,9 +2096,9 @@ export class SessionManager {
           failedSteps,
           totalSubActions,
           durationMs: Date.now() - runStartTime,
-          tokensUsed: session.tokenTracker.total,
-          inputTokens: session.tokenTracker.inputTotal,
-          outputTokens: session.tokenTracker.outputTotal,
+          tokensUsed: session.tokenTracker.runTotal,
+          inputTokens: session.tokenTracker.runInputTotal,
+          outputTokens: session.tokenTracker.runOutputTotal,
           date: new Date().toISOString(),
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
