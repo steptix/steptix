@@ -7,7 +7,7 @@ import { ActiveFileTracker } from './active-file-tracker.js';
 import { DecorationManager } from './decorations.js';
 import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
-import type { ApiClientFactory } from './run-controller.js';
+import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
 import { registerCommands } from './commands/index.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
@@ -103,6 +103,9 @@ class RunControllerRegistry implements vscode.Disposable {
       (uris) => {
         for (const uri of uris) this.tracker.clearStatuses(uri);
       },
+      // Fresh-run hook: a full run from the top drops this test's skill-debug
+      // context (the banner + "run on stopped session" affordance go stale).
+      () => this.clearSkillDebugIfOwnedBy(document.uri.toString()),
     );
     this.controllers.set(key, controller);
     // Re-fire the controller's frame-stack changes through the registry
@@ -216,6 +219,38 @@ class RunControllerRegistry implements vscode.Disposable {
       if (c.lastSkillFailure) return c;
     }
     return undefined;
+  }
+
+  /** Single active "debug a skill after Stop" context — the stopped test whose
+   *  skill the user is iterating on (see stories/specs/skill-debug-after-stop.md).
+   *  At most one at a time; the latest Stop-in-a-skill replaces the previous.
+   *  Drives the "Run selected skill steps on stopped session" command and the
+   *  status-bar banner. */
+  private _skillDebug: SkillDebugContext | null = null;
+  /** Wired by activate() to refresh the status-bar banner when this changes. */
+  onSkillDebugChange?: () => void;
+
+  /** The current skill-debug context, or null. */
+  get skillDebug(): SkillDebugContext | null {
+    return this._skillDebug;
+  }
+
+  /** Set/replace the skill-debug context (latest Stop wins). */
+  setSkillDebug(ctx: SkillDebugContext): void {
+    this._skillDebug = ctx;
+    this.onSkillDebugChange?.();
+  }
+
+  /** Clear the context unconditionally (Close Session; dead-session pre-flight). */
+  clearSkillDebug(): void {
+    if (!this._skillDebug) return;
+    this._skillDebug = null;
+    this.onSkillDebugChange?.();
+  }
+
+  /** Clear it only if owned by `testUri` — used when that test starts a fresh run. */
+  clearSkillDebugIfOwnedBy(testUri: string): void {
+    if (this._skillDebug?.testUri.toString() === testUri) this.clearSkillDebug();
   }
 
   /**
@@ -628,6 +663,14 @@ export interface TestBenchTestHooks {
    *  re-run panel would be offered). Used to assert a refused dead-session
    *  re-run does NOT wipe the parked failure. */
   skillFailureParked: () => boolean;
+  /** True when a "debug a skill after Stop" context is parked (the "Run on
+   *  stopped session" command + status-bar banner are offered). */
+  skillDebugActive: () => boolean;
+  /** The parked skill-debug context as plain data (or null) — lets tests assert
+   *  which test/skill/frame it points at and that it clears on Close/fresh-run. */
+  skillDebugContext: () =>
+    | { testUri: string; testLine: number; skillUri: string; skillName: string; frameId: string }
+    | null;
   /** Drive the webview→host message path directly so tests can verify it
    *  mirrors the registered command behavior (markRunningStopped, etc).
    *  Guards the two-handler regression class. */
@@ -797,7 +840,39 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     await view.attachPanel(panel);
   });
 
+  // "Debug a skill after Stop" banner — a status-bar item naming the stopped
+  // test whose skill the user is iterating on (skill-debug-after-stop.md).
+  // Visible only while a skill-debug context is parked; clicking it runs the
+  // selected skill steps on that stopped session. Also drives a context key
+  // for the command's editor-menu `when` clause.
+  const skillDebugStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    0,
+  );
+  skillDebugStatus.command = 'testbench-native.runSkillStepsOnStoppedSession';
+  const refreshSkillDebugBanner = (): void => {
+    const ctx = registry.skillDebug;
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.skillDebugActive',
+      ctx !== null,
+    );
+    if (!ctx) {
+      skillDebugStatus.hide();
+      return;
+    }
+    const testName = ctx.testUri.path.split('/').pop() ?? 'test';
+    skillDebugStatus.text = `$(debug-alt) Debugging skill ${ctx.skillName} · ${testName}`;
+    skillDebugStatus.tooltip =
+      `Run selected skill steps on the stopped session of ${testName} ` +
+      '(no selection = the whole skill). The browser stays where the test stopped.';
+    skillDebugStatus.show();
+  };
+  registry.onSkillDebugChange = refreshSkillDebugBanner;
+  refreshSkillDebugBanner();
+
   context.subscriptions.push(
+    skillDebugStatus,
     tracker,
     decorations,
     registry,
@@ -850,6 +925,19 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       notifyRunningHistory: () => [...registry.notifyRunningHistory],
       lastRunError: () => registry.lastRunError,
       skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
+      skillDebugActive: () => registry.skillDebug !== null,
+      skillDebugContext: () => {
+        const c = registry.skillDebug;
+        return c
+          ? {
+              testUri: c.testUri.toString(),
+              testLine: c.testLine,
+              skillUri: c.skillUri,
+              skillName: c.skillName,
+              frameId: c.frameId,
+            }
+          : null;
+      },
       dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker),
       discoveredTests: () =>
         discovery.eligibleTests().map((t) => ({

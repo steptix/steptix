@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.47",
+  "version": "0.5.48",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -147,6 +147,11 @@
         "command": "testbench-native.restartSession",
         "title": "TestBench: Close Session",
         "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "testbench-native.runSkillStepsOnStoppedSession",
+        "title": "TestBench: Run Selected Skill Steps on Stopped Session",
+        "icon": "$(debug-rerun)"
       },
       {
         "command": "testbench-native.toggleBreakpoint",
@@ -306,6 +311,19 @@
           "command": "testbench-native.clearCacheForThisTest",
           "when": "testbench-native.activeFile",
           "group": "3_clear@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "testbench-native.runSkillStepsOnStoppedSession",
+          "when": "testbench-native.skillDebugActive && editorLangId == markdown",
+          "group": "2_run@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "testbench-native.runSkillStepsOnStoppedSession",
+          "when": "testbench-native.skillDebugActive"
         }
       ]
     },

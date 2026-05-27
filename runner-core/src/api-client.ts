@@ -103,6 +103,22 @@ export interface StreamStepsRequest {
    * server falls back to hashing `steps` directly.
    */
   fullSteps?: string[];
+  /**
+   * Partial / bounded re-run anchors ("re-run a skill step" and "debug a skill
+   * after Stop"). `startAt` skips every expanded step before the first in file
+   * `startAt.uri` at/after `startAt.line`; `endAt` stops after the last step in
+   * `endAt.uri` at/before `endAt.line` (omit ⇒ run to the end of the skill body).
+   * Both are qualified by `uri` so a recurring line can't false-match. Sending
+   * `startAt` forces the per-step cache off server-side.
+   */
+  startAt?: { uri: string; line: number };
+  endAt?: { uri: string; line: number };
+  /**
+   * Captured/runtime vars to inject into the session scope before a partial
+   * re-run, so steps that read values a skipped earlier step produced still
+   * resolve. `__skill*`-namespaced internals are ignored server-side.
+   */
+  seedScope?: Record<string, string>;
 }
 
 export type ApiErrorKind =

@@ -85,6 +85,23 @@ export interface SkillFailure {
   testLine: number;
 }
 
+/** The single "debug a skill after Stop" context held by the registry — the
+ *  stopped test whose skill the user is iterating on. Derived from a
+ *  `SkillFailure` at Stop time; at most one at a time (latest Stop wins).
+ *  See stories/specs/skill-debug-after-stop.md. */
+export interface SkillDebugContext {
+  /** The test that owns the `[skill: …]` invocation — session key + routing. */
+  testUri: vscode.Uri;
+  /** The `[skill: …]` invocation's 1-based line in the test file. */
+  testLine: number;
+  /** Absolute path of the skill file being debugged. */
+  skillUri: string;
+  /** Skill name, for the status-bar banner. */
+  skillName: string;
+  /** Server frame id of the failed top-level invocation. */
+  frameId: string;
+}
+
 /**
  * One controller per .md test document. Owns the abort controller for the
  * active run; refuses to start a second run while one is in flight.
@@ -214,6 +231,12 @@ export class RunController {
      * The registry passes a closure over its tracker; tests can omit.
      */
     private readonly clearStatusesForUris?: (uris: vscode.Uri[]) => void,
+    /**
+     * Optional hook fired at the start of a fresh (non-continuation) run. The
+     * registry uses it to drop a parked skill-debug context owned by this test:
+     * a full re-run from the top supersedes a stopped-skill debug session.
+     */
+    private readonly onFreshRunStart?: () => void,
   ) {}
 
   get isRunning(): boolean {
@@ -713,7 +736,12 @@ export class RunController {
        *  cache off for this run. */
       rerun?: {
         startAt: { uri: string; line: number };
-        seedScope: Record<string, string>;
+        /** Upper bound for a bounded re-run ("run selected skill steps on a
+         *  stopped session"). Omit to run startAt → end of the skill body. */
+        endAt?: { uri: string; line: number };
+        /** Captured/runtime vars to inject (the merged edit path). Omitted by
+         *  the Stop-debug path, which reads vars from the live session. */
+        seedScope?: Record<string, string>;
       };
     } = {},
   ): Promise<RunOutcome> {
@@ -753,17 +781,22 @@ export class RunController {
       for (const uri of previousTouchedSkillUris) {
         this.revealedFrameUris.add(uri);
       }
-    } else if (this.clearStatusesForUris) {
-      // Clear test-file statuses AND every skill file the previous run
-      // descended into. The new run will repaint as it goes; anything
-      // that doesn't run this time stays blank, which matches user intent
-      // ("re-run = fresh slate") and prevents stale ✓s from making a
-      // short-circuited run look like it continued.
-      const uris: vscode.Uri[] = [this.document.uri];
-      for (const fsPath of previousTouchedSkillUris) {
-        uris.push(vscode.Uri.file(fsPath));
+    } else {
+      // Fresh run (not a continuation / partial re-run): a full run from the
+      // top supersedes any parked skill-debug context owned by this test.
+      this.onFreshRunStart?.();
+      if (this.clearStatusesForUris) {
+        // Clear test-file statuses AND every skill file the previous run
+        // descended into. The new run will repaint as it goes; anything
+        // that doesn't run this time stays blank, which matches user intent
+        // ("re-run = fresh slate") and prevents stale ✓s from making a
+        // short-circuited run look like it continued.
+        const uris: vscode.Uri[] = [this.document.uri];
+        for (const fsPath of previousTouchedSkillUris) {
+          uris.push(vscode.Uri.file(fsPath));
+        }
+        this.clearStatusesForUris(uris);
       }
-      this.clearStatusesForUris(uris);
     }
 
     // First run on this controller? Close any session the server may still
@@ -1126,7 +1159,8 @@ export class RunController {
      *  cached action list. */
     rerun?: {
       startAt: { uri: string; line: number };
-      seedScope: Record<string, string>;
+      endAt?: { uri: string; line: number };
+      seedScope?: Record<string, string>;
     };
   }): Promise<boolean> {
     const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun } = args;
@@ -1179,7 +1213,11 @@ export class RunController {
         testFilePath,
         ...(stepMode && { stepMode }),
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
-        ...(rerun && { startAt: rerun.startAt, seedScope: rerun.seedScope }),
+        ...(rerun && {
+          startAt: rerun.startAt,
+          ...(rerun.endAt && { endAt: rerun.endAt }),
+          ...(rerun.seedScope && { seedScope: rerun.seedScope }),
+        }),
         ...(this.breakpointsByUriProvider && (() => {
           const map = this.breakpointsByUriProvider!();
           return Object.keys(map).length > 0 ? { breakpointsByUri: map } : {};

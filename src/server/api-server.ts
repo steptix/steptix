@@ -175,6 +175,19 @@ export function createApiServer(config: Config): {
           request.startAt = { uri: sa.uri, line: sa.line };
         }
       }
+      // `endAt` bounds the partial re-run's upper end ("run selected skill
+      // steps"); same shape as `startAt`. Optional; meaningful only with startAt.
+      if (
+        body.endAt !== undefined &&
+        body.endAt !== null &&
+        typeof body.endAt === 'object' &&
+        !Array.isArray(body.endAt)
+      ) {
+        const ea = body.endAt as { uri?: unknown; line?: unknown };
+        if (typeof ea.uri === 'string' && typeof ea.line === 'number') {
+          request.endAt = { uri: ea.uri, line: ea.line };
+        }
+      }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);

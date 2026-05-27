@@ -302,6 +302,46 @@ describe('SessionManager', () => {
       expect(scopeSeen[0]).not.toHaveProperty('__skill1_internal');
     });
 
+    it('endAt bounds the slice — runs only the selected range, not to the end', async () => {
+      const ran: string[] = [];
+      vi.mocked(executeStep).mockImplementation(async (_idx, _total, instruction) => {
+        ran.push(instruction);
+        return { index: 1, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
+      });
+
+      const response = await manager.executeSteps('session-endat', {
+        steps: ['Step one', 'Step two', 'Step three', 'Step four'],
+        sourceLines: [10, 11, 12, 13],
+        testFilePath: '/proj/test.md',
+        startAt: { uri: '/proj/test.md', line: 11 },
+        endAt: { uri: '/proj/test.md', line: 12 },
+      });
+
+      expect(response.status).toBe('passed');
+      // Step one (line 10) is before the start; Step four (line 13) is after the
+      // end — both skipped. Only the selected 11–12 range runs.
+      expect(ran).toEqual(['Step two', 'Step three']);
+    });
+
+    it('absent endAt runs from startAt to the end (startAt-only regression)', async () => {
+      const ran: string[] = [];
+      vi.mocked(executeStep).mockImplementation(async (_idx, _total, instruction) => {
+        ran.push(instruction);
+        return { index: 1, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
+      });
+
+      const response = await manager.executeSteps('session-endat-none', {
+        steps: ['Step one', 'Step two', 'Step three', 'Step four'],
+        sourceLines: [10, 11, 12, 13],
+        testFilePath: '/proj/test.md',
+        startAt: { uri: '/proj/test.md', line: 11 },
+      });
+
+      expect(response.status).toBe('passed');
+      // No endAt → run to the end of the expansion (the merged startAt behaviour).
+      expect(ran).toEqual(['Step two', 'Step three', 'Step four']);
+    });
+
     it('refuses a partial re-run whose tail needs an unseedable internal var', async () => {
       const response = await manager.executeSteps('session-refuse', {
         steps: ['Type {{__skill1_token}} into the box'],

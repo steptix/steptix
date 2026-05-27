@@ -538,6 +538,87 @@ describe('TestBench frame events (Phase 2)', function () {
     );
   });
 
+  it('Stop inside a skill parks a debug context; running selected skill steps re-runs that bounded range on the stopped session; Close Session clears it', async () => {
+    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
+    const skillUri = vscode.Uri.file(skillPath);
+    const testUri = fixtureUri('test-with-steps.md');
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 9, // the [skill: ...] line in the test file
+      skillName: 'fake_skill',
+    };
+
+    // Run the test and drive a failure on a skill-body step (line 12).
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 12, frame });
+    fake.push({ type: 'step:fail', line: 12, error: 'boom', frame });
+    fake.end();
+    await waitFor('skill failure parked', () => hooks.skillFailureParked());
+
+    // The debug context is set ONLY on an explicit Stop, not on the failure.
+    assert.equal(hooks.skillDebugActive(), false, 'no debug context before Stop');
+
+    // Stop captures the context (the browser/session stays alive).
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await waitFor('debug context parked after Stop', () => hooks.skillDebugActive());
+    const ctx = hooks.skillDebugContext();
+    assert.equal(ctx.testUri, testUri.toString(), 'context points at the owning test');
+    assert.equal(ctx.skillUri, skillPath, 'context points at the skill file');
+    assert.equal(ctx.skillName, 'fake_skill', 'context carries the skill name');
+    assert.equal(ctx.testLine, 9, 'context carries the [skill:] invocation line');
+
+    // Open the skill file and select steps 2–3 (lines 12–13), then run them
+    // on the stopped session.
+    await vscode.commands.executeCommand('vscode.open', skillUri);
+    await waitFor('skill editor active', () => {
+      const e = vscode.window.activeTextEditor;
+      return e && e.document.uri.toString() === skillUri.toString();
+    });
+    vscode.window.activeTextEditor.selection = new vscode.Selection(
+      new vscode.Position(11, 0), // line 12
+      new vscode.Position(12, 5), // line 13
+    );
+
+    const before = fake.requests.length;
+    await vscode.commands.executeCommand('testbench-native.runSkillStepsOnStoppedSession');
+    await waitFor('a bounded re-run request was issued', () => fake.requests.length > before);
+
+    const req = fake.requests[fake.requests.length - 1];
+    assert.ok(req.startAt, 'request carries startAt (partial re-run)');
+    assert.equal(req.startAt.uri, skillPath, 'startAt.uri is the skill file');
+    assert.equal(req.startAt.line, 12, 'startAt is the first selected step');
+    assert.ok(req.endAt, 'request carries endAt (bounded slice — not run-to-end)');
+    assert.equal(req.endAt.line, 13, 'endAt is the last selected step');
+    assert.ok(
+      fake.isSessionAliveCalls.length >= 1,
+      'a liveness pre-flight ran before the re-run',
+    );
+
+    // Finish the re-run stream so the controller goes idle.
+    fake.end();
+    await waitFor('idle after re-run', () => !hooks.isRunning());
+
+    // Close Session clears the debug context (the page is gone). Close Session
+    // acts on the active *test* file, so switch back to it first — the skill
+    // file was active for the re-run.
+    await vscode.commands.executeCommand('vscode.open', testUri);
+    await waitFor('test editor active + detected as test file', () => {
+      const e = vscode.window.activeTextEditor;
+      return (
+        e &&
+        e.document.uri.toString() === testUri.toString() &&
+        hooks.tracker.snapshot().isTestFile === true
+      );
+    });
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+    await waitFor('context cleared on Close Session', () => !hooks.skillDebugActive());
+  });
+
   it('persists run state to .testbench/run-state.json keyed by a workspace-relative path', async () => {
     // The whole point of the file backend (vs workspaceState) is portability:
     // the ticks must travel when the folder is zipped/copied. That only works

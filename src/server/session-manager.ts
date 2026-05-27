@@ -185,6 +185,14 @@ export interface StepRequest {
    * (e.g. nested) skill file can't false-match. Omit to run from the start.
    */
   startAt?: { uri: string; line: number };
+  /**
+   * Upper bound for a bounded partial re-run ("run selected skill steps on a
+   * stopped session"): stop after the last expanded step in file `endAt.uri`
+   * whose source line ≤ `endAt.line`. Qualified by `uri` like `startAt`. Omit to
+   * run to the end of the expansion (i.e. the end of the skill body) — the
+   * `startAt`-only behaviour. Only meaningful alongside `startAt`.
+   */
+  endAt?: { uri: string; line: number };
 }
 
 /**
@@ -1314,14 +1322,18 @@ export class SessionManager {
     // sent `[skill: …]` invocation expands to just that skill's body, so running
     // from here to the end of `effectiveSteps` is exactly "from the failed step
     // to the end of the skill".
+    // Resolve the origin file of an expanded step — used to match both the
+    // startAt lower bound and the endAt upper bound. Test-frame steps map to the
+    // test file; skill-body steps map to their skill file.
+    const uriOfStep = (i: number): string | undefined => {
+      const origin = expansionOrigins?.[i];
+      if (!origin || origin.frameId === '') return request.testFilePath;
+      return expansionFrames?.[origin.frameId]?.uri;
+    };
+
     let startIndex = 0;
     if (request.startAt) {
       const { uri: startUri, line: startLine } = request.startAt;
-      const uriOfStep = (i: number): string | undefined => {
-        const origin = expansionOrigins?.[i];
-        if (!origin || origin.frameId === '') return request.testFilePath;
-        return expansionFrames?.[origin.frameId]?.uri;
-      };
       startIndex = effectiveSteps.findIndex(
         (_, i) => uriOfStep(i) === startUri && (effectiveSourceLines?.[i] ?? -1) >= startLine,
       );
@@ -1359,13 +1371,65 @@ export class SessionManager {
       );
     }
 
+    // Upper bound for a bounded re-run ("run selected skill steps"). Default: the
+    // end of the expansion — for a single sent [skill:] invocation that IS the end
+    // of the skill body, so omitting endAt preserves the startAt-only behaviour
+    // exactly.
+    let endIndex = effectiveSteps.length - 1;
+    if (request.endAt) {
+      const { uri: endUri, line: endLine } = request.endAt;
+      let found = -1;
+      for (let i = startIndex; i < effectiveSteps.length; i++) {
+        if (uriOfStep(i) === endUri && (effectiveSourceLines?.[i] ?? Number.MAX_SAFE_INTEGER) <= endLine) {
+          found = i;
+        }
+      }
+      if (found < 0) {
+        // endAt present but no step at/after the start in endAt.uri is ≤ endAt.line
+        // (an inverted or stale range). Refuse explicitly rather than silently
+        // running to the end of the skill — symmetric with the startAt guard above.
+        const message =
+          `Re-run end anchor not found: no step in the re-run range at or before ` +
+          `line ${endLine} in ${endUri}. The skill may have changed since the run was stopped.`;
+        logger.error(`Session "${sessionId}": ${message}`);
+        emit({ type: 'output', msg: message, kind: 'error' });
+        emit({ type: 'done', status: 'error' });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          outputSources: { ...session.outputSources },
+          error: { step: 0, message },
+          pageTitle: '',
+        };
+      }
+      endIndex = found;
+      // If endIndex lands inside a conditional group, snap it to the group's last
+      // *conditional* member. The group runs atomically from its first member
+      // (executeBranchedStep), after which the loop jumps past to the continuation
+      // step — so this only needs to guarantee the loop still reaches the group's
+      // first member; it can neither split a group nor drop the continuation.
+      const endGroup = stepGroups.get(endIndex);
+      if (endGroup) {
+        const lastInGroup =
+          endGroup.conditionalSteps[endGroup.conditionalSteps.length - 1]!.index;
+        if (lastInGroup > endIndex) endIndex = lastInGroup;
+      }
+      logger.info(
+        `Session "${sessionId}": bounded re-run to step ${endIndex + 1}/${stepsTotal} (${endUri}:${endLine})`,
+      );
+    }
+
     // Step indexes that have already had their breakpoint pause consumed
     // in this batch. Without this, the loop would re-pause forever on
     // the same step after a Continue.
     const consumedBreakpoints = new Set<number>();
 
     try {
-      for (let i = startIndex; i < effectiveSteps.length; i++) {
+      for (let i = startIndex; i <= endIndex; i++) {
         // Check abort BEFORE starting each step. We don't try to interrupt
         // a step mid-flight (Playwright actions / AI calls aren't reliably
         // cancelable today) — between-step granularity is the contract.
@@ -1950,7 +2014,7 @@ export class SessionManager {
           // moves to the next step's frame/line on the client; the loop
           // blocks on `pendingRunControl` until the client sends a new
           // mode via the `run-control` endpoint.
-          if (currentMode !== 'continue' && i < effectiveSteps.length - 1) {
+          if (currentMode !== 'continue' && i < endIndex) {
             const nextI = i + 1;
             const curDepth = depthOf(i);
             const nextDepth = depthOf(nextI);

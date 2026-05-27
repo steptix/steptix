@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { extractSteps, type StepMode } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
-import type { RunController } from '../run-controller.js';
+import type { RunController, SkillDebugContext } from '../run-controller.js';
 import { getOutputChannel } from '../output-channel.js';
 import { cacheDirForTest } from '../cache-paths.js';
 
@@ -27,6 +27,18 @@ interface Registry {
   /** Phase 5 — where the step-paused yellow ▶ is parked, so dispatch
    *  can detect F11-on-a-tool-line and request the tool-debugger pause. */
   stepPausedEntry(controllerUri: vscode.Uri): { uri: vscode.Uri; line: number } | null;
+  /** The controller for a test document URI string, if one exists. */
+  controllerForUri(uri: string): RunController | undefined;
+  /** The controller holding a parked skill-step failure, if any (Stop capture). */
+  controllerWithSkillFailure(): RunController | undefined;
+  /** The single active "debug a skill after Stop" context, or null. */
+  readonly skillDebug: SkillDebugContext | null;
+  /** Set/replace the skill-debug context (latest Stop wins). */
+  setSkillDebug(ctx: SkillDebugContext): void;
+  /** Clear the skill-debug context unconditionally (Close Session, dead session). */
+  clearSkillDebug(): void;
+  /** Clear the skill-debug context only if it is owned by `testUri`. */
+  clearSkillDebugIfOwnedBy(testUri: string): void;
 }
 
 /**
@@ -61,8 +73,26 @@ export function registerCommands(
    * (or paused awaiting Continue) must first tear the run down, otherwise
    * spinners and the yellow ▶ stay painted with no session behind them.
    */
-  const performStop = (): void => {
+  const performStop = (opts: { setSkillDebug?: boolean } = {}): void => {
     const controller = registry.active();
+    // On an explicit Stop (not Close Session), park a skill-debug context for a
+    // parked TOP-LEVEL skill failure — read BEFORE resetFrameState wipes
+    // lastSkillFailure. Latest Stop wins (setSkillDebug replaces any prior).
+    if (opts.setSkillDebug) {
+      const failed = controller?.lastSkillFailure
+        ? controller
+        : registry.controllerWithSkillFailure();
+      const f = failed?.lastSkillFailure;
+      if (f) {
+        registry.setSkillDebug({
+          testUri: f.testUri,
+          testLine: f.testLine,
+          skillUri: f.skillUri,
+          skillName: f.skillName,
+          frameId: f.frameId,
+        });
+      }
+    }
     controller?.stop();
     // Stop must flip running statuses on BOTH the test file and any skill
     // file the run descended into — otherwise skill-body lines keep
@@ -112,7 +142,73 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand('testbench-native.stop', () => {
-      performStop();
+      performStop({ setSkillDebug: true });
+    }),
+
+    // "Debug a skill against a stopped session": run the selected skill step(s)
+    // (or the whole skill body if nothing is selected) against the still-live
+    // session of the test that was Stopped inside this skill. Routes through the
+    // owning test's controller so the open browser + live variables are reused.
+    // See stories/specs/skill-debug-after-stop.md.
+    vscode.commands.registerCommand('testbench-native.runSkillStepsOnStoppedSession', async () => {
+      const ctx = registry.skillDebug;
+      if (!ctx) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: no stopped skill to debug — Stop a test that failed inside a skill first',
+          3000,
+        );
+        return;
+      }
+      const editor = tracker.activeEditor;
+      if (!editor || vscode.Uri.file(ctx.skillUri).toString() !== editor.document.uri.toString()) {
+        vscode.window.setStatusBarMessage(
+          `TestBench: open the skill being debugged (${ctx.skillName}) to run its steps`,
+          3000,
+        );
+        return;
+      }
+      // Range = the selected step lines, or the whole skill body when nothing is
+      // selected. `extractSteps` keys on the `## Steps` list, which skills have;
+      // its line model matches the server's expanded source lines.
+      const steps = extractSteps(editor.document.getText());
+      if (steps.length === 0) {
+        vscode.window.setStatusBarMessage('TestBench: no steps found in this skill', 2500);
+        return;
+      }
+      const bodyLines = steps.map((s) => s.line);
+      const stepLineSet = new Set(bodyLines);
+      const selected = selectionLines(editor).filter((l) => stepLineSet.has(l));
+      const targetLines = selected.length > 0 ? selected : bodyLines;
+      const startLine = targetLines[0]!;
+      const endLine = targetLines[targetLines.length - 1]!;
+
+      const controller = registry.controllerForUri(ctx.testUri.toString());
+      if (!controller) {
+        registry.clearSkillDebug();
+        vscode.window.setStatusBarMessage('TestBench: the stopped test is no longer open', 3000);
+        return;
+      }
+      // Liveness pre-flight BEFORE notifyRunning — a dead session must refuse
+      // (and clear the context) rather than silently spin up a blank browser.
+      const live = await controller.isRerunSessionLive();
+      if (!live) {
+        registry.clearSkillDebug();
+        vscode.window.setStatusBarMessage(
+          'TestBench: the stopped session is no longer alive — re-run the test to debug again',
+          4000,
+        );
+        return;
+      }
+      registry.notifyRunning(true);
+      void controller
+        .runLines([ctx.testLine], {
+          isContinuation: true,
+          rerun: {
+            startAt: { uri: ctx.skillUri, line: startLine },
+            endAt: { uri: ctx.skillUri, line: endLine },
+          },
+        })
+        .finally(() => registry.notifyRunning(false));
     }),
 
     // ── Phase 3 step controls ────────────────────────────────────────
@@ -208,6 +304,8 @@ export function registerCommands(
       // painted after the session is gone, and a later Continue would spin
       // up a brand-new session against stale UI state.
       performStop();
+      // Closing this test's session ends its debug context (page is gone).
+      registry.clearSkillDebugIfOwnedBy(controller.document.uri.toString());
       await controller.closeSession();
       vscode.window.setStatusBarMessage(
         'TestBench: session closed — next F5 starts a fresh browser',
