@@ -15,6 +15,9 @@ export interface ProjectDirs {
   skillsDir: string | null;
   /** Absolute path to the tools directory, or null if undeclared. */
   toolsDir: string | null;
+  /** Raw `tests.dataDir` string (relative to the config dir, or absolute), or
+   *  null if undeclared. The caller applies the `data` default. */
+  dataDir: string | null;
   /**
    * Whether the step cache is opted in via `cache.enabled === true` in the
    * config. Defaults false — absent config, a missing `cache` block, or any

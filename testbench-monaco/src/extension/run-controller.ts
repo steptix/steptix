@@ -394,6 +394,8 @@ export class RunController {
         {
           steps: stepInstructions,
           sourceLines: stepLines,
+          // Anchor server-side env/data resolution at the test file's project root.
+          testFilePath: this.ctx.document.uri.fsPath,
           env,
           ...(activeEnv && { envName: activeEnv }),
           ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
@@ -484,6 +486,8 @@ export class RunController {
             {
               steps: [action.text],
               sourceLines: [0],
+              // Anchor server-side env/data resolution at the test file's project root.
+              testFilePath: this.ctx.document.uri.fsPath,
               env,
               ...(activeEnv && { envName: activeEnv }),
               ...(!this.configSentForSession &&

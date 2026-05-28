@@ -48,14 +48,14 @@ function mergeConfig(defaults: Config, overrides: UserConfig): Config {
  * Returns `null` when no config file is present (an unconfigured project is
  * valid and falls back to defaults).
  */
-function resolveConfigPath(configPath?: string): string | null {
-  const cwd = process.cwd();
-
+function resolveConfigPath(configPath?: string, projectRoot: string = process.cwd()): string | null {
   if (configPath) {
-    return path.resolve(cwd, configPath);
+    // An explicit `--config` stays resolved against the cwd (today's
+    // semantics) — only auto-discovery follows the project root.
+    return path.resolve(process.cwd(), configPath);
   }
 
-  const candidate = path.resolve(cwd, 'aiui.config.json');
+  const candidate = path.resolve(projectRoot, 'aiui.config.json');
   return existsSync(candidate) ? candidate : null;
 }
 
@@ -117,7 +117,7 @@ function withEnvDefaults(config: Config): Config {
  * a hard error: a typo in the sole config source should fail loudly rather
  * than silently changing how every test runs.
  */
-export async function loadConfig(configPath?: string): Promise<Config> {
+export async function loadConfig(configPath?: string, projectRoot: string = process.cwd()): Promise<Config> {
   const explicit = configPath !== undefined;
 
   if (explicit && !configPath!.endsWith('.json')) {
@@ -126,7 +126,7 @@ export async function loadConfig(configPath?: string): Promise<Config> {
     );
   }
 
-  const resolvedPath = resolveConfigPath(configPath);
+  const resolvedPath = resolveConfigPath(configPath, projectRoot);
 
   // Fresh copy of the defaults so the resolved config never aliases (and can
   // never be mutated back into) the shared DEFAULT_CONFIG singleton.

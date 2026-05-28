@@ -38,6 +38,22 @@ test("parseProjectDirs: no tests block → both null", () => {
   assert.equal(dirs.toolsDir, null);
 });
 
+test("parseProjectDirs: tests.dataDir is surfaced raw (relative string) for env discovery", () => {
+  const configPath = path.join(tmpDir(), "aiui.config.json");
+  const dirs = parseProjectDirs(JSON.stringify({ tests: { dataDir: "./data" } }), configPath);
+  assert.ok(dirs);
+  // Raw string (not resolved) — the caller applies it relative to the root and
+  // uses it for the source label.
+  assert.equal(dirs.dataDir, "./data");
+});
+
+test("parseProjectDirs: dataDir missing / empty / non-string → null (caller applies the `data` default)", () => {
+  const configPath = path.join(tmpDir(), "aiui.config.json");
+  assert.equal(parseProjectDirs(JSON.stringify({ tests: { dir: "./tests" } }), configPath).dataDir, null);
+  assert.equal(parseProjectDirs(JSON.stringify({ tests: { dataDir: "" } }), configPath).dataDir, null);
+  assert.equal(parseProjectDirs(JSON.stringify({ tests: { dataDir: 42 } }), configPath).dataDir, null);
+});
+
 test("parseProjectDirs: cache.enabled true → cacheEnabled true", () => {
   const configPath = path.join(tmpDir(), "aiui.config.json");
   const dirs = parseProjectDirs(JSON.stringify({ cache: { enabled: true } }), configPath);

@@ -85,7 +85,8 @@ tags: [smoke, delegates]
 
 afterAll(() => {
   rmSync(tmpRoot, { recursive: true, force: true });
-  // Restore process.env — the resolver mutates it during loadEnvFile.
+  // Restore process.env defensively (these tests use the pure resolver path,
+  // which does not mutate process.env, but keep the guard for isolation).
   for (const k of Object.keys(process.env)) {
     if (!(k in originalEnv)) delete process.env[k];
   }
@@ -94,7 +95,7 @@ afterAll(() => {
 
 describe('multi-env integration: same test, two envs', () => {
   it('parses with the uat bundle → uat-specific values everywhere', async () => {
-    const bundle = await resolveEnvBundle({ envName: 'uat', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'uat', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     const parsed = await parseTestFile(testFile, {
       envData: { env: bundle.env, data: bundle.data },
     });
@@ -119,7 +120,7 @@ describe('multi-env integration: same test, two envs', () => {
   });
 
   it('parses with the staging bundle → staging-specific values everywhere', async () => {
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     const parsed = await parseTestFile(testFile, {
       envData: { env: bundle.env, data: bundle.data },
     });
@@ -155,7 +156,7 @@ describe('multi-env integration: same test, two envs', () => {
 1. Click \${data.users.admin.emial}
 `,
     );
-    const bundle = await resolveEnvBundle({ envName: 'uat', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'uat', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     await expect(
       parseTestFile(badFile, { envData: { env: bundle.env, data: bundle.data } }),
     ).rejects.toThrow(/Unknown data path 'users.admin.emial'.*broken\.md/);
@@ -179,7 +180,7 @@ env: staging
 
     const bundle = await resolveEnvBundle({
       envName: initial.frontmatter.env!,
-      projectRoot: tmpRoot,
+      projectRoot: tmpRoot, dataDir: 'fixtures/data',
     });
     const reparsed = await parseTestFile(pinnedFile, {
       envData: { env: bundle.env, data: bundle.data },

@@ -15,6 +15,7 @@
   },
   "tests": {
     "dir": "./fixtures/tests",
+    "dataDir": "./fixtures/data",
     "contextDir": "./fixtures/context",
     "skillsDir": "./fixtures/skills",
     "toolsDir": "./fixtures/tools/src",

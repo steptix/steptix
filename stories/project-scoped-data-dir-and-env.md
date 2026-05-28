@@ -378,6 +378,40 @@ reuse the session's first-resolved project root for all later batches in that
 session. (The latter also avoids re-walking per batch — store the resolved root
 on the session, keyed by testFilePath.)
 
+## Implementation notes (as built)
+
+The first pass took a **server-pure / CLI-compatible** shape rather than
+pure-load-everywhere, to fix the user's scenario + the contamination without a
+15-file refactor:
+
+- **`resolveEnvBundle` gained `mutateProcessEnv`** ([resolve-bundle.ts](../src/env/resolve-bundle.ts)).
+  The **server** composes a per-project env map and never touches the global
+  `process.env` (so concurrent projects can't contaminate each other's
+  interpolation/data path). The **CLI** passes `mutateProcessEnv: true` —
+  single-project, so it still populates `process.env` and nothing regresses for
+  consumers that read it directly.
+- **Data-secret resolution is threaded** — `loadDataFile`/`loadDataFromPath`/
+  `resolveSecrets` take an `envMap` ([data-loader.ts](../src/env/data-loader.ts)),
+  so `$VAR` leaves in data files resolve against the per-project map on the
+  server.
+- **`withEnvDefaults` was NOT split.** In this model the server never pollutes
+  the global, so `withEnvDefaults` reading `process.env` sees a stable server
+  baseline (no contamination); per-project AI keys still flow via `request.env`
+  → `applyEnvToAiConfig`. The split is therefore unnecessary here and was
+  skipped.
+- **Per-project resolution covers config (`tests.dataDir`/`cache.dir`) + env +
+  data.** `ai`/`browser`/`execution` config stay server-global (the browser is
+  launched once per session; relaunching per project is out of scope).
+
+**Deferred (documented gap):** the deep API consumers — `api/auth-resolver.ts`,
+`api/spec-loader.ts`, `parser/parameters.ts` `$VAR` — still read `process.env`.
+On the CLI that's correct (the global is populated). On the **shared server**
+they see only the server baseline, not a project's `.env.<name>`, so API-testing
+features aren't project-scoped there yet. This is not a contamination bug (the
+global is never project-polluted on the server) and these features are
+CLI-centric today; threading the map to them is the follow-up to make API
+testing project-scoped on a shared server.
+
 ## Decisions
 
 1. **Leading-slash `dataDir` is absolute.** Project-root-relative is

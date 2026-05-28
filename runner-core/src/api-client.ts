@@ -34,10 +34,11 @@ export interface StreamStepsRequest {
   env?: Record<string, string>;
   /**
    * Active environment name. The server uses it to load `.env.<envName>` and
-   * `fixtures/data/<envName>.json` (or the path in `AIUI_DATA_DIR`) from its
-   * working directory and apply `${env.X}` /
-   * `${data.X.Y}` interpolation to each step. Empty/omitted ⇒ no
-   * env-data interpolation (steps with `${...}` placeholders will fail).
+   * `<dataDir>/<envName>.json` (`dataDir` = `tests.dataDir` in the project's
+   * `aiui.config.json`, default `data`) from the **test file's project root**
+   * (resolved from `testFilePath`, not the server's cwd) and apply `${env.X}` /
+   * `${data.X.Y}` interpolation to each step. Empty/omitted ⇒ no env-data
+   * interpolation (steps with `${...}` placeholders will fail).
    */
   envName?: string;
   parameters?: Record<string, string>;

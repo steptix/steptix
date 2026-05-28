@@ -1,5 +1,6 @@
 /**
- * Tests for `fixtures/data/<env>.json` loading + dotted-path lookup.
+ * Tests for `<dataDir>/<env>.json` loading (config-driven dataDir, default
+ * `data`) + dotted-path lookup + `$VAR` secret resolution against an env map.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -32,7 +33,7 @@ describe('loadDataFile', () => {
       path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({ baseUrl: 'https://uat.example.com', timeoutMs: 5000 }),
     );
-    const data = await loadDataFile('uat', tmpRoot);
+    const data = await loadDataFile('uat', tmpRoot, 'fixtures/data');
     expect(data).toEqual({ baseUrl: 'https://uat.example.com', timeoutMs: 5000 });
   });
 
@@ -43,7 +44,7 @@ describe('loadDataFile', () => {
         users: { admin: { email: 'a@uat.example.com', password: 'pw' } },
       }),
     );
-    const data = await loadDataFile('uat', tmpRoot);
+    const data = await loadDataFile('uat', tmpRoot, 'fixtures/data');
     expect((data['users'] as DataObject)['admin']).toEqual({
       email: 'a@uat.example.com',
       password: 'pw',
@@ -58,7 +59,7 @@ describe('loadDataFile', () => {
         users: { admin: { email: 'a@uat.example.com', password: '$ADMIN_PWD' } },
       }),
     );
-    const data = await loadDataFile('uat', tmpRoot);
+    const data = await loadDataFile('uat', tmpRoot, 'fixtures/data');
     expect(((data['users'] as DataObject)['admin'] as DataObject)['password']).toBe('s3cret');
   });
 
@@ -68,23 +69,35 @@ describe('loadDataFile', () => {
       path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({ password: '$MISSING_VAR' }),
     );
-    const data = await loadDataFile('uat', tmpRoot);
+    const data = await loadDataFile('uat', tmpRoot, 'fixtures/data');
     expect(data['password']).toBe('$MISSING_VAR');
   });
 
+  it('resolves $VAR leaves against an explicit envMap (the per-project server map)', async () => {
+    // process.env deliberately does NOT have this key — the value must come
+    // from the supplied map, proving the server path doesn't depend on the global.
+    delete process.env['PROJ_PWD'];
+    writeFileSync(
+      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
+      JSON.stringify({ admin: { password: '$PROJ_PWD' } }),
+    );
+    const data = await loadDataFile('uat', tmpRoot, 'fixtures/data', { PROJ_PWD: 'from-map' });
+    expect((data['admin'] as DataObject)['password']).toBe('from-map');
+  });
+
   it('returns {} when the file does not exist', async () => {
-    const data = await loadDataFile('does-not-exist', tmpRoot);
+    const data = await loadDataFile('does-not-exist', tmpRoot, 'fixtures/data');
     expect(data).toEqual({});
   });
 
   it('throws on invalid JSON', async () => {
     writeFileSync(path.join(tmpRoot, 'fixtures', 'data', 'broken.json'), '{ not valid json');
-    await expect(loadDataFile('broken', tmpRoot)).rejects.toThrow(/Invalid JSON/);
+    await expect(loadDataFile('broken', tmpRoot, 'fixtures/data')).rejects.toThrow(/Invalid JSON/);
   });
 
   it('throws when the top-level value is not an object', async () => {
     writeFileSync(path.join(tmpRoot, 'fixtures', 'data', 'arr.json'), JSON.stringify(['a', 'b']));
-    await expect(loadDataFile('arr', tmpRoot)).rejects.toThrow(/JSON object at the top level/);
+    await expect(loadDataFile('arr', tmpRoot, 'fixtures/data')).rejects.toThrow(/JSON object at the top level/);
   });
 
   it('preserves arrays inside the data tree', async () => {
@@ -92,7 +105,7 @@ describe('loadDataFile', () => {
       path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
       JSON.stringify({ regions: ['au', 'nz', 'us'] }),
     );
-    const data = await loadDataFile('uat', tmpRoot);
+    const data = await loadDataFile('uat', tmpRoot, 'fixtures/data');
     expect(data['regions']).toEqual(['au', 'nz', 'us']);
   });
 });

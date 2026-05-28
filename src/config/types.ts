@@ -101,6 +101,12 @@ export interface BrowserConfig {
 export interface TestsConfig {
   /** Directory containing test .md files */
   dir: string;
+  /** Directory containing per-environment JSON data files, resolved relative to
+   *  the project root (the dir holding `aiui.config.json`). `${data.X}` loads
+   *  `<dataDir>/<envName>.json`. Default `data`. A leading slash / drive root is
+   *  treated as an absolute path; use `./data` for the project-relative form.
+   *  Replaces the former `AIUI_DATA_DIR` env var. */
+  dataDir: string;
   /** Directory containing context .md files */
   contextDir: string;
   /** Directory containing skill .md files (reusable parameterised step macros) */

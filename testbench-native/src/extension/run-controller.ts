@@ -1314,6 +1314,10 @@ export class RunController {
             {
               steps: [action.text],
               sourceLines: [0],
+              // Carry the test file path so the server resolves the SAME project
+              // root (and thus the same per-project env/data/config) it used for
+              // the run this interactive step continues.
+              testFilePath: this.document.uri.fsPath,
               env,
               ...(envName && { envName }),
               ...(!this.configSentForSession &&

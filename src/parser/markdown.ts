@@ -106,6 +106,7 @@ export async function parseTestFile(
     const extraData = await loadFrontmatterDataSources(
       parsed.frontmatter.dataSources,
       absPath,
+      options.envData.env,
     );
     const ctx: EnvDataContext = {
       ...options.envData,
@@ -134,6 +135,7 @@ export async function parseTestFile(
 async function loadFrontmatterDataSources(
   sources: Record<string, string> | undefined,
   testFileAbsPath: string,
+  envMap: Record<string, string | undefined>,
 ): Promise<Record<string, DataObject> | undefined> {
   if (!sources || Object.keys(sources).length === 0) return undefined;
 
@@ -141,7 +143,10 @@ async function loadFrontmatterDataSources(
   const out: Record<string, DataObject> = {};
   for (const [name, declaredPath] of Object.entries(sources)) {
     const absPath = resolveDataSourcePath(declaredPath, testDir);
-    out[name] = await loadDataFromPath(absPath);
+    // Resolve `$VAR` leaves against the run's env map (composed bundle), not
+    // the global process.env — keeps named-source secret resolution correct on
+    // the pure (server) path too.
+    out[name] = await loadDataFromPath(absPath, envMap);
   }
   return out;
 }
@@ -255,7 +260,7 @@ async function applySkillEnvDataInterpolation(
         filePath: skillAbsPath,
       });
       const absDataPath = resolveDataSourcePath(resolvedPathStr, skillDir);
-      extraData[name] = await loadDataFromPath(absDataPath);
+      extraData[name] = await loadDataFromPath(absDataPath, envCtx.env);
     }
   }
 

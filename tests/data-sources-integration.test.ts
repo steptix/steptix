@@ -114,7 +114,7 @@ dataSources:
 `,
     );
 
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     const parsed = await parseTestFile(testFile, {
       envData: { env: bundle.env, data: bundle.data },
     });
@@ -148,7 +148,7 @@ dataSources:
 `,
     );
 
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     const parsed = await parseTestFile(testFile, {
       envData: { env: bundle.env, data: bundle.data },
     });
@@ -173,7 +173,7 @@ dataSources:
 `,
     );
 
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     const parsed = await parseTestFile(testFile, {
       envData: { env: bundle.env, data: bundle.data },
     });
@@ -199,7 +199,7 @@ dataSources:
 `,
     );
 
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     await expect(
       parseTestFile(testFile, { envData: { env: bundle.env, data: bundle.data } }),
     ).rejects.toThrow(/Data source file not found.*does-not-exist\.json/);
@@ -224,7 +224,7 @@ dataSources:
 `,
     );
 
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     await expect(
       parseTestFile(testFile, { envData: { env: bundle.env, data: bundle.data } }),
     ).rejects.toThrow(/JSON object at the top level/);
@@ -248,7 +248,7 @@ env: staging
 `,
     );
 
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     const parsed = await parseTestFile(testFile, {
       envData: { env: bundle.env, data: bundle.data },
     });
@@ -275,7 +275,7 @@ dataSources:
 `,
     );
 
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot });
+    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
     await expect(
       parseTestFile(testFile, { envData: { env: bundle.env, data: bundle.data } }),
     ).rejects.toThrow(/Unknown data path in 'local'.*expectedTeir/);

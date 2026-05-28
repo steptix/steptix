@@ -1,7 +1,9 @@
 import { basename, join as pathJoin } from 'node:path';
+import { stat } from 'node:fs/promises';
 import { StepCache, frameScopedStepKey } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
 import { chooseCacheHashSource } from './cache-hash-source.js';
+import { loadConfig } from '../config/loader.js';
 import type { Config } from '../config/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
@@ -50,13 +52,15 @@ export interface StepRequest {
    */
   env?: Record<string, string>;
   /**
-   * Active environment name. When supplied, the server loads `.env.<name>`
-   * and `fixtures/data/<name>.json` (or the path in `AIUI_DATA_DIR`) from its
-   * CWD, then interpolates `${env.X}` and
-   * `${data.X.Y}` placeholders in each step before the regular `{{...}}`
-   * substitution. Resolution is cached per session — the bundle is loaded
-   * the first time it's requested and reused for subsequent step batches in
-   * the same session.
+   * Active environment name. When supplied, the server loads `.env.<name>` and
+   * `<dataDir>/<name>.json` (where `dataDir` is `tests.dataDir` from the
+   * project's `aiui.config.json`, default `data`) from the **test file's
+   * project root** — resolved via `resolveProjectRoot(testFilePath)`, NOT the
+   * server's cwd. It then interpolates `${env.X}` / `${data.X.Y}` placeholders
+   * in each step before the regular `{{...}}` substitution. Resolution is
+   * mtime-cached per project (not per session), so a saved edit to
+   * `.env`/data/config is picked up on the next batch. See
+   * stories/project-scoped-data-dir-and-env.md.
    */
   envName?: string;
   /**
@@ -318,8 +322,6 @@ interface ManagedSession {
   csrfTokens: Record<string, string>;
   contextContent: string;
   queueTail: Promise<void>;
-  /** Cached env+data bundle once `envName` is supplied; reused across step batches. */
-  envBundle?: EnvBundle;
   /**
    * Cached tool catalogue once `toolsDir` is supplied. Loaded lazily on the
    * first batch that supplies one; a non-empty catalogue from the same
@@ -480,12 +482,156 @@ function outermostSkillName(
 // SessionManager
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolved per-project context for a step batch: the project's config + the
+ * env/data bundle, anchored at the test file's project root (NOT the server's
+ * cwd). `projectRoot` is null when no `aiui.config.json` was found above the
+ * test file (the defaults fallback). See
+ * stories/project-scoped-data-dir-and-env.md.
+ */
+interface ProjectBundle {
+  projectRoot: string | null;
+  config: Config;
+  envBundle: EnvBundle | null;
+}
+
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private config: Config;
 
+  /**
+   * Per-project resolution cache, keyed by `<projectRoot>::<envName>`. Holds the
+   * resolved bundle plus the mtimes of every input file (config, `.env`,
+   * `.env.<name>`, data JSON) so a saved edit is picked up on the next batch
+   * (closes issue 011). Independent of session lifetime — survives Close
+   * Session, shared across sessions in the same project.
+   */
+  private projectBundleCache = new Map<string, { mtimes: Map<string, number>; bundle: ProjectBundle }>();
+  /** Dedupes concurrent (re)loads of the same key so two in-flight batches for
+   *  one project don't both read+parse from disk. */
+  private projectBundleInflight = new Map<string, Promise<ProjectBundle>>();
+
   constructor(config: Config) {
     this.config = config;
+  }
+
+  /**
+   * Resolve the per-project config + env/data bundle for a step batch from the
+   * test file's project root. mtime-cached; returns the cached bundle when no
+   * input file changed, otherwise reloads. A null project root (no
+   * `aiui.config.json` above the file) falls back to server defaults with no
+   * project `.env`/data.
+   */
+  private async resolveProjectBundle(
+    testFilePath: string | undefined,
+    envName: string | null,
+  ): Promise<ProjectBundle> {
+    const projectRoot = testFilePath ? await resolveProjectRoot(testFilePath) : null;
+    const key = `${projectRoot ?? '<none>'}::${envName ?? '<none>'}`;
+
+    const cached = this.projectBundleCache.get(key);
+    if (cached && (await this.bundleInputsUnchanged(cached.mtimes))) {
+      return cached.bundle;
+    }
+
+    const inflight = this.projectBundleInflight.get(key);
+    if (inflight) return inflight;
+
+    const loadPromise = this.loadProjectBundle(projectRoot, envName, key);
+    this.projectBundleInflight.set(key, loadPromise);
+    try {
+      return await loadPromise;
+    } finally {
+      this.projectBundleInflight.delete(key);
+    }
+  }
+
+  private async loadProjectBundle(
+    projectRoot: string | null,
+    envName: string | null,
+    key: string,
+  ): Promise<ProjectBundle> {
+    // Per-project config (for tests.dataDir et al.) when we have a root;
+    // the server's startup config otherwise. A malformed project config fails
+    // only this request — it's never cached, so a fix is picked up next batch.
+    let config = this.config;
+    if (projectRoot) {
+      try {
+        config = await loadConfig(undefined, projectRoot);
+      } catch (err) {
+        throw new Error(
+          `Failed to load aiui.config.json for project "${projectRoot}": ${(err as Error).message}`,
+        );
+      }
+    }
+
+    const dataDir = config.tests.dataDir;
+    let envBundle: EnvBundle | null = null;
+    if (envName) {
+      if (projectRoot) {
+        envBundle = await resolveEnvBundle({ envName, projectRoot, dataDir, mutateProcessEnv: false });
+      } else {
+        // Null fallback: no project files to read. Provide the process baseline
+        // so ${env.X} (server env) and ${envName} still resolve; data is empty,
+        // so ${data.X} fails loudly if used.
+        const baseline: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) {
+          if (typeof v === 'string') baseline[k] = v;
+        }
+        envBundle = { envName, env: baseline, data: {} };
+        logger.warn(
+          'No aiui.config.json found above the test file — using defaults ' +
+            '(no project .env/data). ${data.*} references will fail if used.',
+        );
+      }
+    }
+
+    const bundle: ProjectBundle = { projectRoot, config, envBundle };
+    const mtimes = await this.bundleInputMtimes(projectRoot, envName, dataDir);
+    this.projectBundleCache.set(key, { mtimes, bundle });
+    return bundle;
+  }
+
+  /** mtimeMs of every bundle input file (config, `.env`, `.env.<name>`, data
+   *  JSON); a missing file records 0 so its later appearance invalidates. */
+  private async bundleInputMtimes(
+    projectRoot: string | null,
+    envName: string | null,
+    dataDir: string,
+  ): Promise<Map<string, number>> {
+    const paths: string[] = [];
+    if (projectRoot) {
+      paths.push(pathJoin(projectRoot, 'aiui.config.json'));
+      paths.push(pathJoin(projectRoot, '.env'));
+      if (envName) {
+        paths.push(pathJoin(projectRoot, `.env.${envName}`));
+        paths.push(pathJoin(projectRoot, dataDir, `${envName}.json`));
+      }
+    }
+    const m = new Map<string, number>();
+    await Promise.all(
+      paths.map(async (p) => {
+        try {
+          m.set(p, (await stat(p)).mtimeMs);
+        } catch {
+          m.set(p, 0);
+        }
+      }),
+    );
+    return m;
+  }
+
+  private async bundleInputsUnchanged(mtimes: Map<string, number>): Promise<boolean> {
+    for (const [p, prev] of mtimes) {
+      let cur = 0;
+      try {
+        cur = (await stat(p)).mtimeMs;
+      } catch {
+        cur = 0;
+      }
+      if (cur !== prev) return false;
+    }
+    return true;
   }
 
   /**
@@ -935,25 +1081,31 @@ export class SessionManager {
       }
     }
 
-    // Resolve env+data bundle on first request that supplies an envName.
-    // Cached on the session so subsequent batches skip the disk hit. A
-    // request that omits envName never triggers loading and falls through
-    // to plain `{{...}}` interpolation only.
-    const requestedEnvName = request.envName?.trim();
-    if (requestedEnvName && !session.envBundle) {
-      try {
-        session.envBundle = await resolveEnvBundle({ envName: requestedEnvName });
-        logger.info(`Session "${sessionId}": env=${requestedEnvName} loaded`);
-      } catch (err) {
-        logger.error(`Session "${sessionId}": failed to load env "${requestedEnvName}": ${(err as Error).message}`);
-        throw err;
+    // Resolve the per-project bundle (config + env + data) anchored at the test
+    // file's project root — NOT the server's cwd. mtime-cached per project so
+    // repeated batches skip disk; a saved edit to .env/data/config is re-read
+    // on the next batch (closes issue 011). A request that omits envName loads
+    // no env/data and falls through to plain `{{...}}` interpolation only.
+    const requestedEnvName = request.envName?.trim() || null;
+    let projectBundle: ProjectBundle;
+    try {
+      projectBundle = await this.resolveProjectBundle(request.testFilePath, requestedEnvName);
+      if (requestedEnvName) {
+        logger.info(
+          `Session "${sessionId}": env=${requestedEnvName} resolved ` +
+            `(project ${projectBundle.projectRoot ?? 'defaults'})`,
+        );
       }
+    } catch (err) {
+      logger.error(`Session "${sessionId}": failed to resolve project bundle: ${(err as Error).message}`);
+      throw err;
     }
-    const envDataCtx = session.envBundle
+    const projectConfig = projectBundle.config;
+    const envDataCtx = projectBundle.envBundle
       ? {
-          env: session.envBundle.env,
-          data: session.envBundle.data,
-          envName: session.envBundle.envName,
+          env: projectBundle.envBundle.env,
+          data: projectBundle.envBundle.data,
+          envName: projectBundle.envBundle.envName,
         }
       : null;
 
@@ -1122,9 +1274,11 @@ export class SessionManager {
       request.cacheEnabled === true && !!request.testFilePath && !isPartialRerun;
     let stepCache: StepCache | undefined;
     if (cacheEnabledForRequest && request.testFilePath) {
-      const projectRoot = await resolveProjectRoot(request.testFilePath);
+      // Reuse the project root already resolved for the env/data bundle (it was
+      // hoisted out of this branch — it now runs for every request).
+      const projectRoot = projectBundle.projectRoot;
       if (projectRoot) {
-        const cacheDir = pathJoin(projectRoot, this.config.cache.dir);
+        const cacheDir = pathJoin(projectRoot, projectConfig.cache.dir);
         // Bundle-hash source (issue 016 Bug 2). The hash must change when a
         // skill body changes AND be stable across every batch of one document.
         // `effectiveSteps` (the expansion of this batch) is the right source

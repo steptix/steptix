@@ -1,5 +1,6 @@
-import { loadDefaultEnvFileSync } from '../env/loader.js';
+import { loadDefaultEnvFileSync, warnIfDeprecatedDataDirEnv } from '../env/loader.js';
 loadDefaultEnvFileSync();
+warnIfDeprecatedDataDirEnv();
 
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';

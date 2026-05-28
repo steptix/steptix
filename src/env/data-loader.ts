@@ -13,24 +13,25 @@ export type DataValue =
 
 export type DataObject = { [key: string]: DataValue };
 
-/**
- * Directory (relative to project root) where per-environment JSON data files
- * live. Override via `AIUI_DATA_DIR=path/to/dir` in the base `.env` file.
- */
-const DEFAULT_DATA_DIR = 'fixtures/data';
+/** A read-only env map for resolving `$VAR` secret leaves. Accepts both a
+ *  composed per-project map (`Record<string, string>`) and `process.env`
+ *  (`string | undefined` values). */
+export type EnvLookup = Record<string, string | undefined>;
 
 /**
- * Load `<dataDir>/<envName>.json` from `projectRoot` (where `dataDir` defaults
- * to `fixtures/data` but can be overridden by `AIUI_DATA_DIR` in the base
- * `.env`). Resolves `$VAR` string leaves against `process.env`. Missing file
- * returns an empty object (caller decides whether that's an error —
- * interpolation will throw on first use).
+ * Load `<dataDir>/<envName>.json` from `projectRoot`. `dataDir` comes from
+ * `tests.dataDir` in `aiui.config.json` (default `data`) — the former
+ * `AIUI_DATA_DIR` env var is gone. `$VAR` string leaves resolve against
+ * `envMap` (the per-project env map on the server; `process.env` on the CLI).
+ * Missing file returns an empty object (caller decides whether that's an
+ * error — interpolation throws on first use).
  */
 export async function loadDataFile(
   envName: string,
-  projectRoot: string = process.cwd(),
+  projectRoot: string,
+  dataDir: string,
+  envMap: EnvLookup = process.env,
 ): Promise<DataObject> {
-  const dataDir = process.env['AIUI_DATA_DIR'] ?? DEFAULT_DATA_DIR;
   const filePath = path.resolve(projectRoot, dataDir, `${envName}.json`);
 
   let content: string;
@@ -44,7 +45,7 @@ export async function loadDataFile(
     throw err;
   }
 
-  const resolved = parseAndResolve(content, filePath);
+  const resolved = parseAndResolve(content, filePath, envMap);
   const n = countLeaves(resolved);
   logger.info(`Loaded test data "${envName}" (${n} value${n === 1 ? '' : 's'})`);
   return resolved;
@@ -56,7 +57,10 @@ export async function loadDataFile(
  * Used by per-test `dataSources` namespaces, where the author has explicitly
  * named a file (so a missing file is a hard error, unlike the env default).
  */
-export async function loadDataFromPath(absPath: string): Promise<DataObject> {
+export async function loadDataFromPath(
+  absPath: string,
+  envMap: EnvLookup = process.env,
+): Promise<DataObject> {
   let content: string;
   try {
     content = await fs.readFile(absPath, 'utf-8');
@@ -67,7 +71,7 @@ export async function loadDataFromPath(absPath: string): Promise<DataObject> {
     throw err;
   }
 
-  const resolved = parseAndResolve(content, absPath);
+  const resolved = parseAndResolve(content, absPath, envMap);
   const n = countLeaves(resolved);
   logger.info(`Loaded data source ${absPath} (${n} value${n === 1 ? '' : 's'})`);
   return resolved;
@@ -78,7 +82,7 @@ export async function loadDataFromPath(absPath: string): Promise<DataObject> {
  * walk its leaves resolving `$VAR` references. The shared core of
  * `loadDataFile` and `loadDataFromPath`.
  */
-function parseAndResolve(content: string, filePath: string): DataObject {
+function parseAndResolve(content: string, filePath: string, envMap: EnvLookup): DataObject {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -90,20 +94,21 @@ function parseAndResolve(content: string, filePath: string): DataObject {
     throw new Error(`Test data file must be a JSON object at the top level: ${filePath}`);
   }
 
-  return resolveSecrets(parsed as DataObject) as DataObject;
+  return resolveSecrets(parsed as DataObject, envMap) as DataObject;
 }
 
 /**
  * Walk a JSON tree and replace any string leaf of the form `$NAME` with the
- * value of `process.env.NAME`. If the env var isn't set, the literal `$NAME`
- * is kept and a warning is logged — matches the behaviour of `## Parameters`
- * `$VAR` resolution in the existing parameters code.
+ * value of `envMap.NAME`. If the var isn't set, the literal `$NAME` is kept and
+ * a warning is logged — matches the behaviour of `## Parameters` `$VAR`
+ * resolution. `envMap` is the per-project env map on the server (so a project's
+ * secrets never leak across projects) or `process.env` on the CLI.
  */
-function resolveSecrets(value: DataValue): DataValue {
+function resolveSecrets(value: DataValue, envMap: EnvLookup): DataValue {
   if (typeof value === 'string') {
     if (value.startsWith('$') && /^\$[A-Z_][A-Z0-9_]*$/i.test(value)) {
       const name = value.slice(1);
-      const env = process.env[name];
+      const env = envMap[name];
       if (env !== undefined) return env;
       logger.warn(`Test data references $${name} but the env var is not set — using literal "$${name}"`);
       return value;
@@ -111,12 +116,12 @@ function resolveSecrets(value: DataValue): DataValue {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map(resolveSecrets);
+    return value.map((v) => resolveSecrets(v, envMap));
   }
   if (value && typeof value === 'object') {
     const out: DataObject = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = resolveSecrets(v);
+      out[k] = resolveSecrets(v, envMap);
     }
     return out;
   }

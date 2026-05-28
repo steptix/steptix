@@ -52,17 +52,7 @@ async function runCommand(
   // run-wide selector was supplied.)
   const cliEnvName = opts.env?.trim() || process.env['AUTOMATION_ENV']?.trim() || undefined;
 
-  // Load env+data bundle for the run-wide selector, if any. Per-test
-  // overrides (frontmatter `env:`) get loaded on demand below.
-  let runBundle;
-  try {
-    runBundle = await resolveEnvBundle({ envName: cliEnvName, projectRoot: process.cwd() });
-  } catch (err) {
-    console.error(chalk.red(`Error: ${(err as Error).message}`));
-    process.exit(1);
-  }
-
-  // Load config
+  // Load config first — env/data resolution needs `tests.dataDir`.
   const spinner = ora('Loading configuration...').start();
   let config = await loadConfig(opts.config);
 
@@ -73,6 +63,23 @@ async function runCommand(
   });
 
   spinner.succeed('Configuration loaded');
+
+  // Load env+data bundle for the run-wide selector, if any. Per-test
+  // overrides (frontmatter `env:`) get loaded on demand below. The CLI is
+  // single-project, so mutate process.env — consumers that read it directly
+  // (API auth, param `$VAR`) still see project values.
+  let runBundle;
+  try {
+    runBundle = await resolveEnvBundle({
+      envName: cliEnvName,
+      projectRoot: process.cwd(),
+      dataDir: config.tests.dataDir,
+      mutateProcessEnv: true,
+    });
+  } catch (err) {
+    console.error(chalk.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
+  }
 
   // Discover test files
   const testFiles = await resolveTestFiles(target, config.tests.dir, config.tests.pattern);
@@ -104,6 +111,8 @@ async function runCommand(
         const perTestBundle = await resolveEnvBundle({
           envName: initial.frontmatter.env,
           projectRoot: process.cwd(),
+          dataDir: config.tests.dataDir,
+          mutateProcessEnv: true,
         });
         return parseTestFile(f, {
           skillsDir,

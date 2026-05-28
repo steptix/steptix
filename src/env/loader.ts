@@ -14,8 +14,26 @@ export async function loadEnvFile(
   envName: string,
   projectRoot: string = process.cwd(),
 ): Promise<void> {
-  const fileName = `.env.${envName}`;
-  const filePath = path.resolve(projectRoot, fileName);
+  const vars = await readEnvFileVars(envName, projectRoot);
+  for (const [key, value] of Object.entries(vars)) {
+    process.env[key] = value;
+  }
+  logger.info(`Loaded environment "${envName}" (${Object.keys(vars).length} variables)`);
+}
+
+/**
+ * Pure read of `.env.<envName>` into a parsed key-value map. Throws when the
+ * file is missing (a named env with no file is a caller error, matching
+ * `loadEnvFile`). Unlike `loadEnvFile`, this does **NOT** mutate `process.env`
+ * — the shared server composes per-project env maps without touching the
+ * global, so concurrent runs for different projects can't contaminate each
+ * other. See stories/project-scoped-data-dir-and-env.md.
+ */
+export async function readEnvFileVars(
+  envName: string,
+  projectRoot: string = process.cwd(),
+): Promise<Record<string, string>> {
+  const filePath = path.resolve(projectRoot, `.env.${envName}`);
 
   let content: string;
   try {
@@ -27,13 +45,27 @@ export async function loadEnvFile(
     throw err;
   }
 
-  const vars = parseEnvFile(content);
+  return parseEnvFile(content);
+}
 
-  for (const [key, value] of Object.entries(vars)) {
-    process.env[key] = value;
+/**
+ * Pure read of the base `.env` into a parsed key-value map. Returns `{}` when
+ * the file is absent. Does **NOT** mutate `process.env` (see `readEnvFileVars`).
+ */
+export async function readDefaultEnvVars(
+  projectRoot: string = process.cwd(),
+): Promise<Record<string, string>> {
+  const filePath = path.resolve(projectRoot, '.env');
+
+  let content: string;
+  try {
+    content = await fs.readFile(filePath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw err;
   }
 
-  logger.info(`Loaded environment "${envName}" (${Object.keys(vars).length} variables)`);
+  return parseEnvFile(content);
 }
 
 /**
@@ -59,6 +91,22 @@ export function loadDefaultEnvFileSync(projectRoot: string = process.cwd()): voi
     if (!(key in process.env)) {
       process.env[key] = value;
     }
+  }
+}
+
+/**
+ * One-time warning if the removed `AIUI_DATA_DIR` env var is still set. The
+ * per-environment data directory is now configured via `tests.dataDir` in
+ * `aiui.config.json` (default `data`). Surfaces stale `.env` entries loudly
+ * instead of silently ignoring them. See
+ * stories/project-scoped-data-dir-and-env.md.
+ */
+export function warnIfDeprecatedDataDirEnv(): void {
+  if (process.env['AIUI_DATA_DIR'] !== undefined) {
+    logger.warn(
+      'AIUI_DATA_DIR is no longer supported and is ignored — set `tests.dataDir` ' +
+        'in aiui.config.json instead (default: `data`).',
+    );
   }
 }
 

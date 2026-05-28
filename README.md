@@ -482,7 +482,10 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
 | `APPEND_RUN_HISTORY_TO_TEST_FILE` | `true`/`false`. Append a "Latest runs" section at the bottom of each test `.md` file after it runs, linking to its HTML report (keeps the most recent 10). Default `false`. |
-| `AIUI_DATA_DIR` | Directory (relative to your project root) holding per-environment JSON test data files. Defaults to `fixtures/data`. |
+
+> The per-environment data directory is configured via `tests.dataDir` in
+> `aiui.config.json` (default `data`) — **not** an env var. The former
+> `AIUI_DATA_DIR` env var has been removed.
 
 ### Per-environment configuration
 
@@ -492,11 +495,12 @@ A typical external tests project looks like:
 
 ```
 aitests/
-├── .env                    # base config — shared across all envs (e.g. AI_API_KEY, AIUI_DATA_DIR)
+├── aiui.config.json        # project config (tests.dataDir, skillsDir, …)
+├── .env                    # base config — shared across all envs (e.g. AI_API_KEY)
 ├── .env.local              # env-specific secrets / URLs (BASE_URL, passwords, …)
 ├── .env.staging
 ├── .env.uat
-├── fixtures/data/          # default data dir (override path with AIUI_DATA_DIR)
+├── data/                   # default data dir (override path with tests.dataDir)
 │   ├── local.json          # structured test data for `--env local`
 │   ├── staging.json
 │   └── uat.json
@@ -513,9 +517,9 @@ aiui run tests/my-test.md --env staging
 
 #### Where each setting lives
 
-- **Base `.env`** — loaded first, shared across all envs. Put your AI API key, `AIUI_DATA_DIR`, and any other settings that don't change between environments here.
+- **Base `.env`** — loaded first, shared across all envs. Put your AI API key and any other settings that don't change between environments here.
 - **`.env.<name>`** — loaded on top of the base when you pass `--env <name>` (or pin the test with `env: <name>` in its frontmatter). Holds env-specific secrets and URLs as flat key/value strings. Reference these in tests as `${env.BASE_URL}`.
-- **`<AIUI_DATA_DIR>/<name>.json`** — env-specific structured test data (users, fixtures, thresholds). Reference values in tests as `${data.users.admin.email}`. JSON string leaves of the form `$VAR_NAME` are resolved against `process.env`, so secrets stay in `.env.<name>` and the JSON references them.
+- **`<dataDir>/<name>.json`** — env-specific structured test data (users, fixtures, thresholds), where `<dataDir>` is `tests.dataDir` from `aiui.config.json` (default `data`). Reference values in tests as `${data.users.admin.email}`. JSON string leaves of the form `$VAR_NAME` are resolved against the environment, so secrets stay in `.env.<name>` and the JSON references them.
 
 Both layers are env-scoped via the same `<name>` suffix. The data folder is optional — tests that don't use `${data.*}` placeholders run fine without it.
 
@@ -525,7 +529,7 @@ Both layers are env-scoped via the same `<name>` suffix. The data folder is opti
 
 #### Per-test data sources (named namespaces)
 
-Sometimes a test wants data from a file outside `<AIUI_DATA_DIR>` — a shared catalogue maintained by another team, or a one-off override that lives next to the test. Declare named **data sources** in the frontmatter:
+Sometimes a test wants data from a file outside the env-default data dir — a shared catalogue maintained by another team, or a one-off override that lives next to the test. Declare named **data sources** in the frontmatter:
 
 ```markdown
 ---

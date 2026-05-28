@@ -123,22 +123,22 @@ interface DiscoveredEnv {
   sources: string[];
 }
 
-/**
-/** Default data directory relative to workspace root (overridable via AIUI_DATA_DIR in .env). */
-const DEFAULT_DATA_DIR = 'fixtures/data';
+/** Default data directory, relative to the project root. Overridable via
+ *  `tests.dataDir` in `aiui.config.json`. */
+const DEFAULT_DATA_DIR = 'data';
 
 /**
  * Scan workspace root for `.env.*` files (excluding `.env.example`) and
- * `<dataDir>/*.json` files (default `fixtures/data`, overridable via
- * `AIUI_DATA_DIR` in the base `.env`). Each filename stem is treated as an
- * env name; the source list helps the user pick when an env is half-defined
- * (just .env, no data file or vice versa).
+ * `<dataDir>/*.json` files (default `data`, overridable via `tests.dataDir` in
+ * `aiui.config.json`). Each filename stem is treated as an env name; the source
+ * list helps the user pick when an env is half-defined (just .env, no data file
+ * or vice versa).
  */
 export async function discoverEnvs(root: string): Promise<DiscoveredEnv[]> {
   const found = new Map<string, Set<string>>();
 
-  // Read AIUI_DATA_DIR from the base .env file if present.
-  const dataDirRelative = await readDataDirFromEnv(root);
+  // Read tests.dataDir from aiui.config.json at the workspace root (default `data`).
+  const dataDirRelative = await readDataDirFromConfig(root);
 
   // .env.<name> files at workspace root
   try {
@@ -174,18 +174,16 @@ export async function discoverEnvs(root: string): Promise<DiscoveredEnv[]> {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Read AIUI_DATA_DIR from `<root>/.env` if it exists; fall back to the default. */
-async function readDataDirFromEnv(root: string): Promise<string> {
+/** Read `tests.dataDir` from `<root>/aiui.config.json` if present; fall back to
+ *  the default (`data`). Mirrors the server's config-driven data dir. */
+async function readDataDirFromConfig(root: string): Promise<string> {
   try {
-    const content = await fs.readFile(path.join(root, '.env'), 'utf-8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const m = trimmed.match(/^AIUI_DATA_DIR\s*=\s*(['"]?)(.+?)\1\s*$/);
-      if (m) return m[2]!.trim();
-    }
+    const content = await fs.readFile(path.join(root, 'aiui.config.json'), 'utf-8');
+    const parsed = JSON.parse(content) as { tests?: { dataDir?: unknown } };
+    const v = parsed?.tests?.dataDir;
+    if (typeof v === 'string' && v.trim() !== '') return v.trim();
   } catch {
-    /* no .env file — use default */
+    /* no / invalid config — use default */
   }
   return DEFAULT_DATA_DIR;
 }

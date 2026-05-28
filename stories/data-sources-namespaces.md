@@ -3,14 +3,15 @@
 ## Summary
 
 Today every test reads structured data from exactly one file:
-`<AIUI_DATA_DIR>/<envName>.json` (default `fixtures/data/<envName>.json`).
-Steps reference it via `${data.X.Y}`. The active env is selected by
-`--env <name>`, the matching `.env.<name>` file populates `process.env`, and
-`$VAR` leaves inside the JSON resolve against `process.env`.
+`<dataDir>/<envName>.json` (where `dataDir` is `tests.dataDir` in
+`aiui.config.json`, default `data`). Steps reference it via `${data.X.Y}`. The
+active env is selected by `--env <name>`, the matching `.env.<name>` file
+contributes its values, and `$VAR` leaves inside the JSON resolve against the
+environment.
 
 This is fine for the common case but breaks down when:
 
-- A test wants data from a file outside the configured `AIUI_DATA_DIR`
+- A test wants data from a file outside the configured `tests.dataDir`
   (e.g. a shared catalogue at `~/shared/vip-users.json`).
 - A test wants different steps to read from different files (e.g. step 2 uses
   the standard staging users; step 3 uses a VIP catalogue; step 4 uses a
