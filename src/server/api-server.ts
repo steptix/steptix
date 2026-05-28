@@ -88,6 +88,13 @@ export function createApiServer(config: Config): {
       if (body.env !== undefined && body.env !== null && typeof body.env === 'object') {
         request.env = body.env as Record<string, string>;
       }
+      // Active environment name — drives server-side `${env.X}` / `${data.X}`
+      // resolution (loads `.env.<name>` + `<dataDir>/<name>.json` from the test
+      // file's project root). Without this the server never interpolates
+      // env/data placeholders on the HTTP path.
+      if (typeof body.envName === 'string') {
+        request.envName = body.envName;
+      }
       if (body.breakpoints !== undefined && Array.isArray(body.breakpoints)) {
         request.breakpoints = body.breakpoints as number[];
       }

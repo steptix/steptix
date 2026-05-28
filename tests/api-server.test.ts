@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { Config } from '../src/config/types.js';
 import type { StepResult } from '../src/report/types.js';
 
@@ -278,6 +281,58 @@ describe('API Server', () => {
       expect(body.stepsTotal).toBe(1);
       expect(body.results).toHaveLength(1);
       expect(body.error).toBeNull();
+    });
+
+    // Regression: the server must PARSE `envName` off the request body and run
+    // server-side `${env.X}` / `${data.X}` interpolation. This crosses the full
+    // HTTP → api-server body-parse → session-manager seam (the earlier unit
+    // tests called the resolver directly and never exercised the body parse,
+    // which is exactly where envName was being dropped).
+    it('parses envName + interpolates ${data.X} server-side (would 500 on a missing path)', async () => {
+      const root = mkdtempSync(path.join(tmpdir(), 'aiui-apienv-'));
+      try {
+        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, '.env.uat'), 'X=1\n');
+        mkdirSync(path.join(root, 'data'), { recursive: true });
+        writeFileSync(path.join(root, 'data', 'uat.json'), JSON.stringify({ url: 'https://example.test/' }));
+
+        // Reference a key that does NOT exist. With envName parsed, interpolation
+        // throws "Unknown data path" → 500. If envName were dropped (the bug),
+        // the literal would pass through to the mock step and return 200.
+        const { status, body } = await api('POST', '/sessions/env-regression/steps', {
+          steps: ['Go to ${data.does_not_exist}'],
+          sourceLines: [1],
+          envName: 'uat',
+          testFilePath: path.join(root, 'tests', 't.md'),
+        });
+
+        expect(status).toBe(500);
+        expect(String(body.error)).toMatch(/does_not_exist/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('resolves ${data.X} to the data-file value when envName is sent', async () => {
+      const root = mkdtempSync(path.join(tmpdir(), 'aiui-apienv2-'));
+      try {
+        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, '.env.uat'), 'X=1\n');
+        mkdirSync(path.join(root, 'data'), { recursive: true });
+        writeFileSync(path.join(root, 'data', 'uat.json'), JSON.stringify({ url: 'https://example.test/' }));
+
+        const { status, body } = await api('POST', '/sessions/env-ok/steps', {
+          steps: ['Navigate to ${data.url}'],
+          sourceLines: [1],
+          envName: 'uat',
+          testFilePath: path.join(root, 'tests', 't.md'),
+        });
+
+        expect(status).toBe(200);
+        expect(body.status).toBe('passed');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
 
     it('returns outputSources alongside outputs, tagging parameters', async () => {
