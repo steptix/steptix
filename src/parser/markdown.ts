@@ -151,8 +151,10 @@ async function loadFrontmatterDataSources(
   return out;
 }
 
-/** Expand `~` and resolve relative paths against `testDir`. */
-function resolveDataSourcePath(declaredPath: string, testDir: string): string {
+/** Expand `~` and resolve relative paths against `testDir`. Exported so the
+ *  server can resolve a test's named dataSource paths the same way the CLI
+ *  parse path does. */
+export function resolveDataSourcePath(declaredPath: string, testDir: string): string {
   const expanded = expandHome(declaredPath);
   return path.isAbsolute(expanded) ? expanded : path.resolve(testDir, expanded);
 }

@@ -17,6 +17,14 @@ export interface TestFrontmatter {
   env?: string;
   /** `tags: [smoke, slow]` surface as TestItem tags for filter / run-by-tag. */
   tags?: string[];
+  /**
+   * `dataSources:` block mapping (name → path). Forwarded to the server so
+   * test-level `${<name>.X}` named data sources resolve on the server path,
+   * not just the CLI parse path. Block style only:
+   *   dataSources:
+   *     catalog: ../data/catalog.json
+   */
+  dataSources?: Record<string, string>;
 }
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
@@ -35,10 +43,13 @@ export function parseFrontmatter(text: string): TestFrontmatter {
   const body = match[1] ?? '';
   const out: TestFrontmatter = {};
 
-  for (const rawLine of body.split(/\r?\n/)) {
-    const line = stripComment(rawLine);
+  const lines = body.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripComment(lines[i] ?? '');
     if (!line.trim()) continue;
 
+    // Only top-level (non-indented) keys are matched here; indented lines are
+    // block-mapping children, consumed by their parent key's handler.
     const m = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(line);
     if (!m) continue;
     const key = m[1]!;
@@ -54,6 +65,29 @@ export function parseFrontmatter(text: string): TestFrontmatter {
       case 'env':
         out.env = unquote(valueRaw);
         break;
+      case 'dataSources': {
+        // Block mapping only: `dataSources:` on its own line, followed by
+        // indented `name: path` children. Inline/flow form isn't supported
+        // (the core parser doesn't emit it either). Consume the indented run.
+        if (valueRaw) break;
+        const sources: Record<string, string> = {};
+        let j = i + 1;
+        for (; j < lines.length; j++) {
+          const childRaw = lines[j] ?? '';
+          if (!childRaw.trim()) continue; // tolerate blank lines within the block
+          if (!/^\s/.test(childRaw)) break; // dedent → block ends
+          // Name rule matches the CLI's DATA_SOURCE_NAME_RE (no hyphens) so a
+          // source name that parses here also validates on the CLI path.
+          const cm = /^\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/.exec(stripComment(childRaw));
+          if (cm) {
+            const cval = unquote((cm[2] ?? '').trim());
+            if (cval) sources[cm[1]!] = cval;
+          }
+        }
+        i = j - 1; // resume after the consumed block
+        if (Object.keys(sources).length > 0) out.dataSources = sources;
+        break;
+      }
       case 'tags': {
         // Normalize tags to lowercase so case mismatches between two
         // tests (`[Smoke]` vs `[smoke]`) don't produce two separate VS

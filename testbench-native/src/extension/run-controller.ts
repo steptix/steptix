@@ -11,6 +11,7 @@ import {
   interpretReplCommand,
   maskIfSecret,
   parseConfig,
+  parseFrontmatter,
   parseParameters,
   readEnvFile,
   reportError,
@@ -1191,6 +1192,9 @@ export class RunController {
     // defaults off).
     const cacheEnabled = resolveCacheOverride(cacheOverride, projectDirs?.cacheEnabled === true);
     const testFilePath = this.document.uri.fsPath;
+    // The test's frontmatter dataSources (name → path) so the server can
+    // resolve `${<name>.X}` test-level named sources on its side too.
+    const dataSources = parseFrontmatter(this.document.getText()).dataSources;
 
     const events = client.streamSteps(
       sessionId,
@@ -1200,6 +1204,7 @@ export class RunController {
         sourceLines: stepLines,
         env,
         ...(envName && { envName }),
+        ...(dataSources && Object.keys(dataSources).length > 0 && { dataSources }),
         ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
           config: sessionConfig,
         }),
@@ -1320,6 +1325,10 @@ export class RunController {
               testFilePath: this.document.uri.fsPath,
               env,
               ...(envName && { envName }),
+              ...(() => {
+                const ds = parseFrontmatter(this.document.getText()).dataSources;
+                return ds && Object.keys(ds).length > 0 ? { dataSources: ds } : {};
+              })(),
               ...(!this.configSentForSession &&
                 Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),
               ...(Object.keys(params).length > 0 && { parameters: params }),

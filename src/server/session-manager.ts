@@ -1,4 +1,4 @@
-import { basename, join as pathJoin } from 'node:path';
+import { basename, dirname, join as pathJoin } from 'node:path';
 import { stat } from 'node:fs/promises';
 import { StepCache, frameScopedStepKey } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
@@ -13,7 +13,9 @@ import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
-import { interpolateEnvData } from '../parser/interpolate-env-data.js';
+import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
+import { resolveDataSourcePath } from '../parser/markdown.js';
+import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
 import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
 import { clearSkillCache, expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
@@ -63,6 +65,14 @@ export interface StepRequest {
    * stories/project-scoped-data-dir-and-env.md.
    */
   envName?: string;
+  /**
+   * The test's own frontmatter `dataSources` (name → path), forwarded by the
+   * client from the editor buffer. Each path is resolved relative to
+   * `testFilePath`'s directory and loaded into a `${<name>.X}` namespace, so
+   * test-level named data sources resolve on the server (TestBench) path — not
+   * just the CLI parse path. Paths are static (no `${envName}` interpolation).
+   */
+  dataSources?: Record<string, string>;
   /**
    * Reserved for future breakpoint pause/resume support. Currently logged and
    * ignored — the run executes to completion.
@@ -1101,13 +1111,39 @@ export class SessionManager {
       throw err;
     }
     const projectConfig = projectBundle.config;
-    const envDataCtx = projectBundle.envBundle
+    let envDataCtx: EnvDataContext | null = projectBundle.envBundle
       ? {
           env: projectBundle.envBundle.env,
           data: projectBundle.envBundle.data,
           envName: projectBundle.envBundle.envName,
         }
       : null;
+
+    // Load the test's own frontmatter `dataSources` (forwarded by the client)
+    // into `${<name>.X}` namespaces, resolved relative to the test file's dir.
+    // This makes test-level named sources interpolate on the server path too,
+    // not just the CLI parse path. Loaded per-request (tied to this test file),
+    // so it's deliberately NOT part of the per-project bundle cache.
+    if (envDataCtx && request.dataSources && request.testFilePath) {
+      const testDir = dirname(request.testFilePath);
+      const extraData: Record<string, DataObject> = {};
+      for (const [name, declaredPath] of Object.entries(request.dataSources)) {
+        // `env` / `data` are the built-in namespaces — a source using either
+        // would be silently shadowed in interpolation. The CLI parser rejects
+        // these at parse time; fail loudly here to keep parity.
+        if (name === 'env' || name === 'data') {
+          throw new Error(
+            `Frontmatter dataSources cannot use the reserved name "${name}" — ` +
+            `'env' and 'data' are the built-in namespaces.`,
+          );
+        }
+        const absPath = resolveDataSourcePath(declaredPath, testDir);
+        extraData[name] = await loadDataFromPath(absPath, envDataCtx.env);
+      }
+      if (Object.keys(extraData).length > 0) {
+        envDataCtx = { ...envDataCtx, extraData };
+      }
+    }
 
     // Determine per-step timeout
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)

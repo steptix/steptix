@@ -41,6 +41,12 @@ export interface StreamStepsRequest {
    * interpolation (steps with `${...}` placeholders will fail).
    */
   envName?: string;
+  /**
+   * The test's own frontmatter `dataSources` (name → path). Forwarded so the
+   * server can resolve `${<name>.X}` test-level named sources (relative to the
+   * test file's dir) on the server path, not just the CLI parse path.
+   */
+  dataSources?: Record<string, string>;
   parameters?: Record<string, string>;
   config?: { baseUrl?: string; timeout?: string };
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */

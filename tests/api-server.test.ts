@@ -348,6 +348,67 @@ describe('API Server', () => {
       expect(body.outputSources).toMatchObject({ user: 'parameter' });
     });
 
+    // Regression: a test's own frontmatter dataSources (sent by the client)
+    // must resolve `${<name>.X}` on the SERVER path, not just the CLI parse
+    // path. Resolved relative to testFilePath's dir; needs an active env (same
+    // as the CLI — the `${...}` pass only runs when an env is selected).
+    it('resolves test-level ${name.X} dataSources sent on the request', async () => {
+      const root = mkdtempSync(path.join(tmpdir(), 'aiui-ds-'));
+      try {
+        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, '.env.local'), 'X=1\n');
+        mkdirSync(path.join(root, 'shared'), { recursive: true });
+        writeFileSync(path.join(root, 'shared', 'catalog.json'), JSON.stringify({ site: { url: 'https://cat.test/' } }));
+
+        // Valid path → step passes (200).
+        const ok = await api('POST', '/sessions/ds-ok/steps', {
+          steps: ['Go to ${catalog.site.url}'],
+          sourceLines: [1],
+          envName: 'local',
+          testFilePath: path.join(root, 'tests', 't.md'),
+          dataSources: { catalog: '../shared/catalog.json' },
+        });
+        expect(ok.status).toBe(200);
+        expect(ok.body.status).toBe('passed');
+
+        // Missing key → interpolation throws (500), proving the namespace was
+        // registered server-side (a dropped dataSources map would pass through).
+        const miss = await api('POST', '/sessions/ds-miss/steps', {
+          steps: ['Go to ${catalog.nope}'],
+          sourceLines: [1],
+          envName: 'local',
+          testFilePath: path.join(root, 'tests', 't.md'),
+          dataSources: { catalog: '../shared/catalog.json' },
+        });
+        expect(miss.status).toBe(500);
+        expect(String(miss.body.error)).toMatch(/nope/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects a reserved dataSource name (env/data) loudly instead of shadowing', async () => {
+      const root = mkdtempSync(path.join(tmpdir(), 'aiui-ds-res-'));
+      try {
+        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, '.env.local'), 'X=1\n');
+        mkdirSync(path.join(root, 'shared'), { recursive: true });
+        writeFileSync(path.join(root, 'shared', 'catalog.json'), JSON.stringify({ x: 1 }));
+
+        const res = await api('POST', '/sessions/ds-reserved/steps', {
+          steps: ['Go to ${data.x}'],
+          sourceLines: [1],
+          envName: 'local',
+          testFilePath: path.join(root, 'tests', 't.md'),
+          dataSources: { data: '../shared/catalog.json' },
+        });
+        expect(res.status).toBe(500);
+        expect(String(res.body.error)).toMatch(/reserved name/i);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('returns 400 when steps array is empty', async () => {
       const { status, body } = await api('POST', '/sessions/empty-steps/steps', {
         steps: [],

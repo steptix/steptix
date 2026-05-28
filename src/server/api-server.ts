@@ -95,6 +95,22 @@ export function createApiServer(config: Config): {
       if (typeof body.envName === 'string') {
         request.envName = body.envName;
       }
+      // Test-level named dataSources (name → path) from the test's frontmatter,
+      // forwarded by the client. Resolved relative to testFilePath's dir and
+      // loaded into `${<name>.X}` namespaces so they interpolate on the server
+      // path too (not just the CLI parse path).
+      if (
+        body.dataSources !== undefined &&
+        body.dataSources !== null &&
+        typeof body.dataSources === 'object' &&
+        !Array.isArray(body.dataSources)
+      ) {
+        const sources: Record<string, string> = {};
+        for (const [name, p] of Object.entries(body.dataSources)) {
+          if (typeof p === 'string') sources[name] = p;
+        }
+        if (Object.keys(sources).length > 0) request.dataSources = sources;
+      }
       if (body.breakpoints !== undefined && Array.isArray(body.breakpoints)) {
         request.breakpoints = body.breakpoints as number[];
       }

@@ -37,6 +37,46 @@ test('parseFrontmatter: tags normalize to lowercase for reliable matching', () =
   assert.deepEqual(parseFrontmatter(text), { tags: ['smoke', 'slow', 'needs-network'] });
 });
 
+test('parseFrontmatter: dataSources block mapping → name→path map', () => {
+  const text = '---\ntags: [smoke]\ndataSources:\n  catalog: ../data/catalog.json\n  vip: ~/shared/vip.json\n---\n# T\n';
+  assert.deepEqual(parseFrontmatter(text), {
+    tags: ['smoke'],
+    dataSources: { catalog: '../data/catalog.json', vip: '~/shared/vip.json' },
+  });
+});
+
+test('parseFrontmatter: dataSources block ends at the next top-level key (dedent)', () => {
+  const text = '---\ndataSources:\n  catalog: ../data/catalog.json\nenv: uat\n---\n';
+  assert.deepEqual(parseFrontmatter(text), {
+    dataSources: { catalog: '../data/catalog.json' },
+    env: 'uat',
+  });
+});
+
+test('parseFrontmatter: dataSources unquotes quoted paths', () => {
+  const text = '---\ndataSources:\n  c: "../a b/cat.json"\n---\n';
+  assert.deepEqual(parseFrontmatter(text), { dataSources: { c: '../a b/cat.json' } });
+});
+
+test('parseFrontmatter: no dataSources key when absent', () => {
+  assert.deepEqual(parseFrontmatter('---\ntags: [x]\n---\n'), { tags: ['x'] });
+});
+
+test('parseFrontmatter: dataSources child names with hyphens are ignored (CLI name-rule parity)', () => {
+  const text = '---\ndataSources:\n  my-src: ../a.json\n  ok: ../b.json\n---\n';
+  assert.deepEqual(parseFrontmatter(text), { dataSources: { ok: '../b.json' } });
+});
+
+test('parseFrontmatter: dataSources block tolerates CRLF line endings', () => {
+  const text = '---\r\ndataSources:\r\n  catalog: ../data/catalog.json\r\n---\r\n';
+  assert.deepEqual(parseFrontmatter(text), { dataSources: { catalog: '../data/catalog.json' } });
+});
+
+test('parseFrontmatter: inline-flow dataSources is ignored, siblings still parse', () => {
+  const text = '---\ndataSources: { a: b }\nenv: uat\n---\n';
+  assert.deepEqual(parseFrontmatter(text), { env: 'uat' });
+});
+
 test('parseFrontmatter: tolerates unknown keys', () => {
   const text = '---\nauthor: Paul\ntype: skill\ndate: 2026-01-01\n---\n';
   assert.deepEqual(parseFrontmatter(text), { type: 'skill' });

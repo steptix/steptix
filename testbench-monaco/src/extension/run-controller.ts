@@ -10,6 +10,7 @@ import {
   interpretReplCommand,
   maskIfSecret,
   parseConfig,
+  parseFrontmatter,
   parseParameters,
   readEnvFile,
   reportError,
@@ -398,6 +399,10 @@ export class RunController {
           testFilePath: this.ctx.document.uri.fsPath,
           env,
           ...(activeEnv && { envName: activeEnv }),
+          ...(() => {
+            const ds = parseFrontmatter(this.ctx.document.getText()).dataSources;
+            return ds && Object.keys(ds).length > 0 ? { dataSources: ds } : {};
+          })(),
           ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
             config: sessionConfig,
           }),
@@ -490,6 +495,10 @@ export class RunController {
               testFilePath: this.ctx.document.uri.fsPath,
               env,
               ...(activeEnv && { envName: activeEnv }),
+              ...(() => {
+                const ds = parseFrontmatter(this.ctx.document.getText()).dataSources;
+                return ds && Object.keys(ds).length > 0 ? { dataSources: ds } : {};
+              })(),
               ...(!this.configSentForSession &&
                 Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),
               ...(Object.keys(params).length > 0 && { parameters: params }),
