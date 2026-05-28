@@ -137,9 +137,10 @@
   },
   "scripts": {
     "typecheck:extension": "tsc -p tsconfig.extension.json --noEmit",
+    "build:runner-core": "npm run build --prefix ../runner-core",
     "build:extension": "node esbuild.extension.js",
     "build:webview": "vite build --config vite.config.webview.js",
-    "build": "npm run build:webview && npm run build:extension",
+    "build": "npm run build:runner-core && npm run build:webview && npm run build:extension",
     "watch:extension": "node esbuild.extension.js --watch",
     "watch:webview": "vite build --config vite.config.webview.js --watch",
     "watch": "concurrently -n webview,extension -c blue,green \"npm:watch:webview\" \"npm:watch:extension\"",
