@@ -33,7 +33,7 @@
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist dist-ui"
+    "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-ui',{recursive:true,force:true})\""
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
