@@ -1661,9 +1661,13 @@ export class SessionManager {
 
     try {
       for (let i = startIndex; i <= endIndex; i++) {
-        // Check abort BEFORE starting each step. We don't try to interrupt
-        // a step mid-flight (Playwright actions / AI calls aren't reliably
-        // cancelable today) — between-step granularity is the contract.
+        // Check abort BEFORE starting each step — the cheap, clean halt point
+        // when a stop lands between steps. Mid-step aborts are also handled now
+        // (issue 020): the run `signal` is threaded into every AI call so an
+        // in-flight request cancels immediately, and the turn loop bails on
+        // abort. A Playwright action already in flight still runs out its own
+        // timeout (not cancelable), so worst-case residual latency is one
+        // action timeout, not the old ~120s AI window.
         if (signal?.aborted) {
           overallStatus = 'aborted';
           logger.info(`Session "${sessionId}": run aborted by client at step ${i + 1}/${stepsTotal}`);
@@ -1718,22 +1722,50 @@ export class SessionManager {
         if (group && i === group.conditionalSteps[0]!.index) {
           logger.info(`Session "${sessionId}": conditional group at step ${i + 1}`);
 
-          const branchedResults = await executeBranchedStep(group, stepsTotal, {
-            page: session.browserSession.pageTracker.getActive(),
-            config: this.config,
-            aiClient: session.aiClient,
-            contextContent: session.contextContent,
-            testName: `session:${sessionId}`,
-            ...(session.sessionConfig.baseUrl !== undefined && {
-              baseUrl: session.sessionConfig.baseUrl,
-            }),
-            conversationHistory: [...session.conversationHistory],
-            apiResponseStore: session.apiResponseStore,
-            csrfTokens: session.csrfTokens,
-            resolvedParameters,
-            pageTracker: session.browserSession.pageTracker,
-            browserTracker: session.browserTracker,
-          });
+          let branchedResults: StepResult[];
+          try {
+            branchedResults = await executeBranchedStep(group, stepsTotal, {
+              page: session.browserSession.pageTracker.getActive(),
+              config: this.config,
+              aiClient: session.aiClient,
+              contextContent: session.contextContent,
+              testName: `session:${sessionId}`,
+              ...(session.sessionConfig.baseUrl !== undefined && {
+                baseUrl: session.sessionConfig.baseUrl,
+              }),
+              conversationHistory: [...session.conversationHistory],
+              apiResponseStore: session.apiResponseStore,
+              csrfTokens: session.csrfTokens,
+              resolvedParameters,
+              pageTracker: session.browserSession.pageTracker,
+              browserTracker: session.browserTracker,
+              ...(signal && { signal }),
+            });
+          } catch (err) {
+            // An aborted branch throws (cancelled AI call / abort check in the
+            // poll loop). Treat it as a clean stop, not a server error — the
+            // for-loop has no catch, so without this the AbortError would
+            // escape to the api-server and surface as "Server error". See
+            // issues/020.
+            if (signal?.aborted) {
+              overallStatus = 'aborted';
+              logger.info(`Session "${sessionId}": run aborted by client during branched step ${i + 1}/${stepsTotal}`);
+              break;
+            }
+            throw err;
+          }
+
+          // Post-branch abort check. An abort landing during the *matched
+          // branch's* inner executeStep doesn't throw — executeStep swallows it
+          // and returns a 'failed' result. Without this, the results loop below
+          // would mark the run 'failed' instead of 'aborted'. Mirror the
+          // normal-path post-step check: end cleanly before processing results.
+          // See issues/020.
+          if (signal?.aborted) {
+            overallStatus = 'aborted';
+            logger.info(`Session "${sessionId}": run aborted by client during branched step ${i + 1}/${stepsTotal}`);
+            break;
+          }
 
           let branchFailed = false;
           for (const result of branchedResults) {
@@ -2044,10 +2076,23 @@ export class SessionManager {
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.
                 nonInteractive: true,
+                // Run abort signal — cancels in-flight AI calls and stops the
+                // step's turn loop the instant the client stops. See issues/020.
+                ...(signal && { signal }),
               },
             );
           }
         } catch (err) {
+          // Aborted (client "stop") — a throw escaping the step (e.g. a tool
+          // step interrupted) when the run was stopped. Treat as a clean abort,
+          // not an error: no error event, no error screenshot. The post-loop
+          // `done` carries status 'aborted'. See issues/020.
+          if (signal?.aborted) {
+            overallStatus = 'aborted';
+            logger.info(`Session "${sessionId}": run aborted by client during step ${i + 1}/${stepsTotal}`);
+            break;
+          }
+
           // Unexpected error during step execution
           const message = err instanceof Error ? err.message : String(err);
           logger.error(`Session "${sessionId}" step ${i + 1} error: ${message}`);
@@ -2094,6 +2139,19 @@ export class SessionManager {
 
           overallStatus = 'error';
           errorInfo = { step: i, message };
+          break;
+        }
+
+        // Post-step abort check. `executeStep` swallows a cancelled AI call's
+        // AbortError and returns a 'failed' StepResult, so without this the run
+        // would fall into the failed-step branch below and report 'failed'
+        // instead of 'aborted'. Catch it here — before the pass/fail handling —
+        // and end the run cleanly: no step:fail, no failure screenshot. The
+        // between-step check at the top of the loop only fires on the *next*
+        // iteration, which a failed-step `break` would skip. See issues/020.
+        if (signal?.aborted) {
+          overallStatus = 'aborted';
+          logger.info(`Session "${sessionId}": run aborted by client during step ${i + 1}/${stepsTotal}`);
           break;
         }
 

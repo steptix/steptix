@@ -109,6 +109,11 @@ export interface StepExecutorOptions {
    *  AI's question surfaced as the error so the client can show it. See
    *  issues/014. */
   nonInteractive?: boolean;
+  /** Run abort signal (client "stop"). Threaded into every AI call so an
+   *  in-flight request cancels immediately, checked at the top of each turn so a
+   *  stopped step stops spawning turns, and consulted in the catch so an aborted
+   *  step reports as aborted (not a spurious failure). See issues/020. */
+  signal?: AbortSignal;
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -260,6 +265,7 @@ export async function executeStep(
     const result = await withRetry(attempt, {
       maxRetries: opts.config.execution.retries,
       label: `step ${stepIndex}`,
+      ...(opts.signal && { signal: opts.signal }),
       onFailure: (err) => {
         // Collect failure context and turns from the attempt for the next retry
         if (err instanceof StepFailureError) {
@@ -291,6 +297,24 @@ export async function executeStep(
     // All attempts failed
     const durationMs = Date.now() - startTime;
     const errorMessage = err instanceof Error ? err.message : String(err);
+
+    // Aborted (client "stop") — not a real failure. Don't log it as a failure
+    // or snap a failure screenshot (the page may already be closing); the run
+    // loop detects `signal.aborted` after this returns and records the run as
+    // aborted, bypassing the step:fail path. See issues/020.
+    if (opts.signal?.aborted) {
+      return {
+        index: stepIndex,
+        instruction,
+        status: 'failed',
+        turns: priorAttemptTurns,
+        durationMs,
+        retried: true,
+        pageUrl: opts.page.url(),
+        error: 'Aborted by client',
+        aiExplanation: 'Step aborted by client (run stopped).',
+      };
+    }
 
     logger.error(`Step ${stepIndex} FAILED after retry: ${errorMessage}`);
 
@@ -391,6 +415,14 @@ async function executeStepAttempt(
   try {
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
     completedTurns = currentTurn;
+
+    // Abort check — bail before doing any work on this turn if the run was
+    // stopped, so a multi-turn step stops spawning AI calls. Throwing unwinds
+    // to withRetry (which won't retry an aborted op) and then to executeStep's
+    // catch, which returns an aborted result. See issues/020.
+    if (opts.signal?.aborted) {
+      throw new DOMException('Run aborted by client', 'AbortError');
+    }
 
     // 0. Refresh active page from tracker (handles switchPage and
     //    openBrowser/switchBrowser/closeBrowser from prior turn).
@@ -580,7 +612,7 @@ async function executeStepAttempt(
         timestamp: turnTimestamp,
       });
     } else {
-      const completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages));
+      const completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
       rawResponse = completion.text;
       aiResponse = parseAIResponse(rawResponse);
 
@@ -661,7 +693,7 @@ async function executeStepAttempt(
         { role: 'assistant', content: rawResponse },
         clarificationMsg,
       ];
-      const clarifiedCompletion = await aiClient.complete(clarificationMessages);
+      const clarifiedCompletion = await aiClient.complete(clarificationMessages, opts.signal);
       const clarifiedResponse = clarifiedCompletion.text;
       turnAiInteractions.push({
         purpose: 'clarification',
@@ -719,6 +751,7 @@ async function executeStepAttempt(
           dismissalGuidance: opts.dismissalGuidance ?? false,
           fullPageScreenshots: config.browser.fullPageScreenshots,
           sendScreenshots: config.ai.sendScreenshots,
+          ...(opts.signal && { signal: opts.signal }),
         });
 
         assertionResults.push(assertResult);
@@ -1494,6 +1527,8 @@ interface EvaluateAssertionParams {
   dismissalGuidance: boolean;
   fullPageScreenshots: boolean;
   sendScreenshots: boolean;
+  /** Run abort signal — forwarded to the assertion code-gen AI call. See issues/020. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_POLL_TIMEOUT_MS = 5000;
@@ -1574,7 +1609,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       const codeCompletion = await p.aiClient.complete([
         { role: 'system', content: assertSystemPrompt },
         codeMsg,
-      ]);
+      ], p.signal);
 
       aiInteraction = {
         purpose: `assertion[${p.assertIndex}]`,
@@ -1853,6 +1888,11 @@ export async function executeBranchedStep(
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
 
+    // Abort check — stop polling immediately if the run was stopped. See issues/020.
+    if (opts.signal?.aborted) {
+      throw new DOMException('Run aborted by client', 'AbortError');
+    }
+
     const domSnapshot = await captureDomSnapshot(page, {
       ...config.browser.domNoiseReduction,
       maxIframeDepth: config.browser.maxIframeDepth,
@@ -1897,7 +1937,7 @@ export async function executeBranchedStep(
       userMessage,
     ];
 
-    const { text: rawResponse } = await aiClient.complete(messages);
+    const { text: rawResponse } = await aiClient.complete(messages, opts.signal);
     let branchedResponse: BranchedAIResponse;
     try {
       branchedResponse = parseBranchedResponse(rawResponse);

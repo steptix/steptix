@@ -8,6 +8,10 @@ export interface RetryOptions {
   label?: string;
   /** Called after each failed attempt, before the next retry */
   onFailure?: (err: unknown) => void;
+  /** Run abort signal. When it fires, the operation isn't retried — the last
+   *  error rethrows immediately. Without this, a cancelled AI call (which throws
+   *  an AbortError) would burn a retry firing a second request after "stop". */
+  signal?: AbortSignal;
 }
 
 /**
@@ -18,7 +22,7 @@ export async function withRetry<T>(
   fn: (attempt: number) => Promise<T>,
   options: RetryOptions,
 ): Promise<T> {
-  const { maxRetries, delayMs = 0, label = 'operation', onFailure } = options;
+  const { maxRetries, delayMs = 0, label = 'operation', onFailure, signal } = options;
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
@@ -32,6 +36,11 @@ export async function withRetry<T>(
       return await fn(attempt);
     } catch (err) {
       lastError = err;
+      // Don't retry an aborted operation — the run was stopped. Rethrow now so
+      // the caller surfaces the abort instead of issuing another attempt.
+      if (signal?.aborted) {
+        throw err;
+      }
       if (attempt <= maxRetries) {
         logger.warn(`${label} failed on attempt ${attempt}: ${String(err)}`);
         onFailure?.(err);

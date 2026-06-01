@@ -61,6 +61,16 @@ vi.mock('../src/runner/step-executor.js', () => ({
     retried: false,
     aiExplanation: 'Did the thing',
   })),
+  // Default: the continuation branch passes. Overridden per-test for the abort case.
+  executeBranchedStep: vi.fn(async (group: any): Promise<StepResult[]> => [{
+    index: group.continuationStep.index,
+    instruction: group.continuationStep.instruction,
+    status: 'passed',
+    turns: [],
+    durationMs: 10,
+    retried: false,
+    aiExplanation: 'branch passed',
+  }]),
 }));
 
 vi.mock('../src/context/loader.js', () => ({
@@ -138,7 +148,7 @@ vi.mock('../src/utils/logger.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { SessionManager } from '../src/server/session-manager.js';
-import { executeStep } from '../src/runner/step-executor.js';
+import { executeStep, executeBranchedStep } from '../src/runner/step-executor.js';
 import { sanitizeTestName, computeStepsHash } from '../src/cache/step-cache.js';
 
 // ---------------------------------------------------------------------------
@@ -211,6 +221,29 @@ describe('SessionManager', () => {
     vi.clearAllMocks();
     browserTrackerInstances.length = 0;
     aiClientInstances.length = 0;
+    // Reset executeStep to the default "passed" implementation. `clearAllMocks`
+    // only clears call history, not implementations — without this, a test that
+    // sets a custom `mockImplementation` (e.g. the mid-step abort test) leaks it
+    // into later tests that rely on the default. Restoring here makes the suite
+    // order-independent.
+    vi.mocked(executeStep).mockImplementation(async (): Promise<StepResult> => ({
+      index: 1,
+      instruction: 'mock step',
+      status: 'passed',
+      turns: [{ turnNumber: 1, attemptNumber: 1, timestamp: new Date().toISOString(), aiInteractions: [], subActions: [{ index: 1, action: { action: 'click', description: 'click button' }, durationMs: 10 }] }],
+      durationMs: 100,
+      retried: false,
+      aiExplanation: 'Did the thing',
+    }));
+    vi.mocked(executeBranchedStep).mockImplementation(async (group: any): Promise<StepResult[]> => [{
+      index: group.continuationStep.index,
+      instruction: group.continuationStep.instruction,
+      status: 'passed',
+      turns: [],
+      durationMs: 10,
+      retried: false,
+      aiExplanation: 'branch passed',
+    }]);
     manager = new SessionManager(testConfig);
   });
 
@@ -564,6 +597,93 @@ describe('SessionManager', () => {
       const doneEvent = events.find((e) => e.type === 'done');
       expect(doneEvent).toBeDefined();
       expect(doneEvent?.status).toBe('aborted');
+    });
+
+    it('threads the abort signal into executeStep', async () => {
+      let received: unknown;
+      vi.mocked(executeStep).mockImplementation(async (_l, _t, _i, opts: any) => {
+        received = opts.signal;
+        return { index: 1, instruction: 's1', status: 'passed', turns: [], durationMs: 5, retried: false };
+      });
+      const ac = new AbortController();
+      await manager.executeSteps('session-1', { steps: ['Step 1'] }, undefined, ac.signal);
+      expect(received).toBe(ac.signal);
+    });
+
+    it('reports aborted (not failed) and emits no step:fail when stopped mid-step', async () => {
+      // The real executeStep swallows a cancelled AI call's AbortError and
+      // returns a 'failed' StepResult. The run loop must convert that to
+      // 'aborted' — this is the bug the first plan draft would have shipped
+      // (it would have reported 'failed'). See issues/020.
+      const ac = new AbortController();
+      let calls = 0;
+      let sawSignal = false;
+      vi.mocked(executeStep).mockImplementation(async (_l, _t, _i, opts: any) => {
+        calls++;
+        sawSignal = opts.signal instanceof AbortSignal;
+        ac.abort(); // client stops while the step is in flight
+        // Mirror executeStep's swallowed-abort return shape.
+        return {
+          index: calls,
+          instruction: `step ${calls}`,
+          status: 'failed',
+          turns: [],
+          durationMs: 5,
+          retried: true,
+          error: 'Aborted by client',
+        };
+      });
+
+      const events: { type: string; status?: string }[] = [];
+      const response = await manager.executeSteps(
+        'session-1',
+        { steps: ['Step 1', 'Step 2', 'Step 3'] },
+        (e) => events.push(e as any),
+        ac.signal,
+      );
+
+      expect(sawSignal).toBe(true);                  // signal reached executeStep
+      expect(calls).toBe(1);                          // no further steps after stop
+      expect(response.status).toBe('aborted');        // NOT 'failed'
+      expect(events.some((e) => e.type === 'step:fail')).toBe(false);
+      const done = events.find((e) => e.type === 'done');
+      expect(done?.status).toBe('aborted');
+    });
+
+    it('reports aborted (not failed) when stopped inside a conditional/branched step (BUG-1)', async () => {
+      // A conditional group ("If ..." + continuation). When the abort lands
+      // inside the matched branch's inner executeStep, executeBranchedStep
+      // returns a swallowed-abort 'failed' result rather than throwing — the
+      // run loop must still report 'aborted'. See issues/020.
+      const ac = new AbortController();
+      let sawSignal = false;
+      vi.mocked(executeBranchedStep).mockImplementation(async (group: any, _t: any, opts: any): Promise<StepResult[]> => {
+        sawSignal = opts.signal instanceof AbortSignal;
+        ac.abort(); // stop during the matched branch
+        return [{
+          index: group.continuationStep.index,
+          instruction: group.continuationStep.instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 5,
+          retried: true,
+          error: 'Aborted by client',
+        }];
+      });
+
+      const events: { type: string; status?: string }[] = [];
+      const response = await manager.executeSteps(
+        'session-branch-abort',
+        { steps: ['If a cookie banner appears, dismiss it', 'Wait for the dashboard'] },
+        (e) => events.push(e as any),
+        ac.signal,
+      );
+
+      expect(sawSignal).toBe(true);                  // signal reached executeBranchedStep
+      expect(response.status).toBe('aborted');        // NOT 'failed'
+      expect(events.some((e) => e.type === 'step:fail')).toBe(false);
+      const done = events.find((e) => e.type === 'done');
+      expect(done?.status).toBe('aborted');
     });
 
     it('skips [input:] steps', async () => {

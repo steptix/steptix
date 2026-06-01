@@ -86,16 +86,21 @@ export class AiClient {
   /**
    * Send messages to the AI and get a complete response.
    * Uses /v2/stream when streamResponses is true, otherwise /v2/vision.
+   *
+   * `signal` is the run's abort signal (from a client "stop"). When it fires,
+   * the in-flight HTTP request is cancelled immediately rather than running out
+   * the 120s timeout — this is what makes stop feel instant. It's combined with
+   * the timeout in `fetchWithAuth`, so either one aborts the request.
    */
-  async complete(messages: ChatMessage[]): Promise<CompleteResult> {
+  async complete(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
     if (this.config.streamResponses) {
-      return this.completeStream(messages);
+      return this.completeStream(messages, signal);
     }
-    return this.completeVision(messages);
+    return this.completeVision(messages, signal);
   }
 
   /** Call POST /v2/vision for non-streaming multimodal completion */
-  private async completeVision(messages: ChatMessage[]): Promise<CompleteResult> {
+  private async completeVision(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
     const url = `${this.config.gatewayUrl}/v2/vision`;
     const requestId = nextRequestId++;
 
@@ -120,7 +125,7 @@ export class AiClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
-    });
+    }, signal);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -161,7 +166,7 @@ export class AiClient {
   }
 
   /** Call POST /v2/stream for streaming multimodal completion, collect full response */
-  private async completeStream(messages: ChatMessage[]): Promise<CompleteResult> {
+  private async completeStream(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
     const url = `${this.config.gatewayUrl}/v2/stream`;
     const requestId = nextRequestId++;
 
@@ -190,7 +195,7 @@ export class AiClient {
         'Accept': 'text/event-stream',
       },
       body: JSON.stringify(request),
-    });
+    }, signal);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -340,13 +345,20 @@ export class AiClient {
       .join('');
   }
 
-  private fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
+  private fetchWithAuth(url: string, init: RequestInit, runSignal?: AbortSignal): Promise<Response> {
     const headers = new Headers(init.headers);
 
     if (this.config.apiKey) {
       headers.set('Authorization', `Bearer ${this.config.apiKey}`);
     }
 
-    return fetch(url, { ...init, headers, signal: AbortSignal.timeout(120_000) });
+    // Combine the 120s request timeout with the run's abort signal so EITHER
+    // cancels the in-flight request: the timeout caps a slow gateway, the run
+    // signal makes a client "stop" abort immediately instead of waiting it out.
+    // `AbortSignal.any` needs Node ≥18.17 / ≥20.3 — see package.json engines.
+    const timeout = AbortSignal.timeout(120_000);
+    const signal = runSignal ? AbortSignal.any([timeout, runSignal]) : timeout;
+
+    return fetch(url, { ...init, headers, signal });
   }
 }

@@ -196,6 +196,57 @@ describe('AiClient v2 gateway integration', () => {
     });
   });
 
+  describe('run abort signal (client "stop") — issue 020', () => {
+    it('passes a signal to fetch that fires when the run signal aborts', async () => {
+      let fetchSignal: AbortSignal | undefined;
+      // Simulate real fetch: reject with an AbortError when its signal fires.
+      global.fetch = vi.fn((_url, init) => {
+        fetchSignal = init?.signal ?? undefined;
+        return new Promise((_resolve, reject) => {
+          fetchSignal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+          });
+        });
+      }) as unknown as typeof fetch;
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const ctrl = new AbortController();
+      const pending = client.complete([{ role: 'user', content: 'Hi' }], ctrl.signal);
+
+      // The fetch signal must COMBINE the run signal with the 120s timeout — it
+      // is a composite, not the run signal passed through (which would drop the
+      // timeout). Aborting the run still aborts the composite.
+      expect(fetchSignal).toBeDefined();
+      expect(fetchSignal).not.toBe(ctrl.signal);
+      expect(fetchSignal!.aborted).toBe(false);
+      ctrl.abort();
+      expect(fetchSignal!.aborted).toBe(true);
+
+      await expect(pending).rejects.toThrow(/abort/i);
+    });
+
+    it('still works (timeout-only) when no run signal is passed', async () => {
+      let fetchSignal: AbortSignal | undefined;
+      global.fetch = vi.fn(async (_url, init) => {
+        fetchSignal = init?.signal ?? undefined;
+        return new Response(JSON.stringify({
+          id: 'm', object: 'response', created: 1, provider: 'anthropic',
+          model: 'claude-sonnet-4-5', role: 'assistant', stop_reason: 'end_turn',
+          content: [{ type: 'text', text: '{}' }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }) as typeof fetch;
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(result.text).toBe('{}');
+      // A timeout signal is still attached (so a slow gateway is capped), it's
+      // just not aborted under normal operation.
+      expect(fetchSignal).toBeDefined();
+      expect(fetchSignal!.aborted).toBe(false);
+    });
+  });
+
   it('keeps parsing legacy v1-style responses as a fallback during migration', async () => {
     global.fetch = vi.fn(async () => new Response(JSON.stringify({
       response: '{"actions":[],"reasoning":"legacy"}',
