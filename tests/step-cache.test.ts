@@ -307,3 +307,65 @@ describe('StepCache frame-scoped keys (issue 016)', () => {
     expect(await cache.readAssertion('f2-17', 0, fp, {})).toBeNull();
   });
 });
+
+// ── issue 018: cache invalidation must track the RESOLVED hash source ──────
+//
+// The user report: "stop a test, edit a data .json file, save, re-run — the
+// change isn't picked up." Root cause: session-manager fed the cache the RAW
+// step text (${data.*} / ${source.*} placeholders intact), so a data-VALUE
+// edit left the steps-hash — and every positional per-step key — unchanged,
+// and a cache HIT replayed the frozen action with the stale value.
+//
+// StepCache itself is a dumb string-hasher: given identical step strings it
+// (correctly) keeps the cache; given different ones it clears. So the FIX
+// lives one layer up — session-manager now interpolates env/data into the
+// hash source before StepCache.initialize (session-manager.ts ~1355). These
+// seam tests pin the StepCache contract the fix relies on; the end-to-end
+// guard that session-manager actually interpolates lives in
+// session-manager.test.ts ("issue 018").
+//
+// Models the user's named-dataSource fixture (search-engine.json →
+// ${search-engine.query}); the built-in ${data.url} namespace is identical.
+describe('cache invalidation tracks the resolved hash source (issue 018)', () => {
+  const STEP_KEY = frameScopedStepKey(undefined, 12); // inline step, source line 12
+
+  it('clears the stale entry when the RESOLVED step text changed (the fix lever)', async () => {
+    // The pre-fix hash source was the raw placeholder `Search for
+    // ${search-engine.query}` — byte-identical no matter what value sits behind
+    // it, so the hash could never tell one data value from another (the bug).
+    // session-manager now feeds the env/data-INTERPOLATED steps, so a data-value
+    // edit changes the resolved text, the hash flips, and initialize() wipes the
+    // prior entry — no stale replay.
+
+    // ── Run 1: search-engine.json query = "laptops" → resolved step text. ──
+    const run1 = await StepCache.initialize(tmpDir, 'data demo', ['Search for laptops']);
+    await run1.write(
+      STEP_KEY,
+      [{ rawResponse: '{}', actions: [{ action: 'type', selector: '#q', value: 'laptops', description: 'Search' }], reasoning: 'r' }],
+      {},
+    );
+    expect(await run1.read(STEP_KEY, {})).not.toBeNull(); // cached
+
+    // ── User edits the data file: query → "phones", re-runs. session-manager
+    // re-inits with the new resolved text → different hash → cache cleared. ──
+    const run2 = await StepCache.initialize(tmpDir, 'data demo', ['Search for phones']);
+    expect(await run2.read(STEP_KEY, {})).toBeNull(); // stale entry gone → AI re-runs with "phones"
+  });
+
+  it('contrast: a {{parameter}} edit rides the cache (params stay placeholders in the hash)', async () => {
+    // interpolateEnvData leaves {{params}} intact, so the hash source is
+    // identical across param values → cache survives → read-time interpolation
+    // fills the new value. Params ride the cache; data busts it.
+    const paramSteps = ['Search for {{query}}']; // unchanged across runs (param not resolved into the hash)
+    const run1 = await StepCache.initialize(tmpDir, 'param demo', paramSteps);
+    await run1.write(
+      STEP_KEY,
+      [{ rawResponse: '{}', actions: [{ action: 'type', selector: '#q', value: 'laptops', description: 'Search' }], reasoning: 'r' }],
+      { query: 'laptops' }, // stored as {{query}}
+    );
+
+    const run2 = await StepCache.initialize(tmpDir, 'param demo', paramSteps);
+    const hit = await run2.read(STEP_KEY, { query: 'phones' }); // cache survives; new param value
+    expect(hit![0]!.actions[0]!.value).toBe('phones');
+  });
+});

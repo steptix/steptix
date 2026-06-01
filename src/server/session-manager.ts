@@ -1352,6 +1352,28 @@ export class SessionManager {
           // steps when no skillsDir — so it bakes in skill bodies for the hash.
           cacheHashSource = effectiveSteps;
         }
+        // issue 018: fold resolved env/data values into the hash source so a
+        // data-file edit invalidates the cache exactly like a step-text edit.
+        // Without this the hash sees the RAW `${data.x}` / `${source.x}`
+        // placeholder, so changing the value behind it leaves the hash (and
+        // every positional per-step key) unchanged and a cache HIT replays the
+        // frozen action with the stale value. `{{params}}` are intentionally
+        // left intact — interpolateEnvData ignores them, so the read-time param
+        // interpolation still lets one cached plan serve many param values
+        // (params ride the cache; data busts it). Applied to whichever branch
+        // produced cacheHashSource, so full / subset / expanded hashes stay
+        // mutually consistent. A bad ref throws here; fall back to the raw line
+        // — a bad ref in this batch resurfaces at the real interpolation site
+        // (the `interpolatedSteps` map below) with a precise file/line error.
+        if (envDataCtx) {
+          cacheHashSource = cacheHashSource.map((s) => {
+            try {
+              return interpolateEnvData(s, envDataCtx);
+            } catch {
+              return s;
+            }
+          });
+        }
         try {
           stepCache = await StepCache.initialize(cacheDir, request.testFilePath, cacheHashSource);
         } catch (err) {

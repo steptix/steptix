@@ -973,6 +973,115 @@ type: skill
       expect(meta.stepsHash).toBe(computeStepsHash(steps)); // raw steps, byte-identical to pre-fix
     });
 
+    it('invalidates the cache when a ${data.*} value is edited (issue 018)', async () => {
+      // The bug: the bundle hash was over the RAW step text with ${data.x}
+      // intact, so editing the VALUE behind it left the hash unchanged and a
+      // stale action replayed. The fix interpolates env/data into the hash
+      // source, so a data-file edit flips the hash and StepCache.initialize
+      // wipes the bundle. executeStep is mocked, so the observable is meta.json's
+      // hash + a planted sentinel cache file. (Pre-fix this test FAILS: both
+      // runs hash "Search for ${data.query}" identically and the sentinel
+      // survives.)
+      const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-018-data-'));
+      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}'); // marker; dataDir defaults to 'data'
+      await fs.writeFile(path.join(projectRoot, '.env.dev'), ''); // env files are a hard error if missing when envName is set
+      await fs.mkdir(path.join(projectRoot, 'data'));
+      const dataPath = path.join(projectRoot, 'data', 'dev.json');
+      await fs.writeFile(dataPath, JSON.stringify({ query: 'laptops' }));
+      const testFilePath = path.join(projectRoot, 'tests', 't.md');
+      const req = {
+        steps: ['Search for ${data.query}'],
+        fullSteps: ['Search for ${data.query}'],
+        testFilePath,
+        envName: 'dev',
+        cacheEnabled: true,
+      };
+
+      // Run 1 — resolves "Search for laptops" into the hash, populates the bundle.
+      await manager.executeSteps('018-data-1', req);
+      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+      const sentinel = path.join(cacheDir, 'step-sentinel.json');
+      await fs.writeFile(sentinel, '{"turns":[]}');
+
+      // Edit the data VALUE (step text unchanged). We explicitly bump the mtime
+      // because the bundle reload is gated on mtime equality (issue 011), and on
+      // some filesystems an immediate rewrite reuses the same coarse mtime tick —
+      // which would NOT reload and would mask this fix. utimes makes the reload
+      // deterministic; a human-paced "save and re-run" differs in mtime naturally.
+      // (That same-tick gap is an issue-011 limitation, not issue-018.)
+      await fs.writeFile(dataPath, JSON.stringify({ query: 'phones' }));
+      const future = new Date(Date.now() + 2000);
+      await fs.utimes(dataPath, future, future);
+
+      await manager.executeSteps('018-data-2', req);
+      const meta2 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+      // Capture the sentinel's fate BEFORE removing the project dir — otherwise
+      // the rm would delete it unconditionally and the check would be vacuous.
+      const sentinelGone = await fs.readFile(sentinel, 'utf-8').then(() => false, () => true);
+
+      await fs.rm(projectRoot, { recursive: true, force: true });
+
+      // The hash is the INTERPOLATED step text, so it moved laptops → phones.
+      // Pinning to the resolved form proves the fix is engaged: pre-fix BOTH
+      // runs would hash computeStepsHash(['Search for ${data.query}']) and these
+      // two assertions fail.
+      expect(meta1.stepsHash).toBe(computeStepsHash(['Search for laptops']));
+      expect(meta2.stepsHash).toBe(computeStepsHash(['Search for phones']));
+      expect(sentinelGone).toBe(true); // initialize() wiped the bundle → no stale replay
+    });
+
+    it('does NOT invalidate when an UNREFERENCED data key changes — cache survives (issue 018)', async () => {
+      // Precision: the hash is over the interpolated STEP TEXT, not the whole
+      // data file. Editing a key no step references keeps the hash stable so
+      // the cache survives, even though the bundle reloads with fresh data.
+      // Guards against over-invalidation (e.g. a crude data-file-mtime wipe
+      // that would blow away caches for every test sharing a dataSources file).
+      const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-018-precise-'));
+      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}');
+      await fs.writeFile(path.join(projectRoot, '.env.dev'), ''); // env files are a hard error if missing when envName is set
+      await fs.mkdir(path.join(projectRoot, 'data'));
+      const dataPath = path.join(projectRoot, 'data', 'dev.json');
+      await fs.writeFile(dataPath, JSON.stringify({ query: 'laptops', region: 'US' }));
+      const testFilePath = path.join(projectRoot, 'tests', 't.md');
+      const req = {
+        steps: ['Search for ${data.query}'], // references query, NOT region
+        fullSteps: ['Search for ${data.query}'],
+        testFilePath,
+        envName: 'dev',
+        cacheEnabled: true,
+      };
+
+      await manager.executeSteps('018-precise-1', req);
+      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+      const sentinel = path.join(cacheDir, 'step-sentinel.json');
+      await fs.writeFile(sentinel, '{"turns":[]}');
+
+      // Edit ONLY the unreferenced key; force the bundle to reload (fresh data)
+      // via an explicit mtime bump — otherwise a same-tick rewrite might not
+      // reload and "survival" would be a missed reload, not precision (issue 011).
+      await fs.writeFile(dataPath, JSON.stringify({ query: 'laptops', region: 'EU' }));
+      const future = new Date(Date.now() + 2000);
+      await fs.utimes(dataPath, future, future);
+
+      await manager.executeSteps('018-precise-2', req);
+      const meta2 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
+      const sentinelSurvived = await fs.readFile(sentinel, 'utf-8').then(() => true, () => false);
+
+      await fs.rm(projectRoot, { recursive: true, force: true });
+
+      // Fix is engaged: the hash is the INTERPOLATED text. Without this anchor the
+      // test would pass even with the fix removed (raw ${data.query} is trivially
+      // stable across any data edit) — i.e. it would guard nothing. Pre-fix this
+      // equals computeStepsHash(['Search for ${data.query}']) and fails.
+      expect(meta1.stepsHash).toBe(computeStepsHash(['Search for laptops']));
+      // Precision: editing the unreferenced `region` left the resolved text — and
+      // thus the hash — unchanged, so the cache survived.
+      expect(meta2.stepsHash).toBe(meta1.stepsHash);
+      expect(sentinelSurvived).toBe(true); // cache survives — no needless re-run
+    });
+
     it('handles executeStep throwing an unexpected error', async () => {
       vi.mocked(executeStep).mockRejectedValueOnce(new Error('Browser crashed'));
 
