@@ -113,6 +113,20 @@ export interface AIAction {
    */
   multiple?: boolean;
   /**
+   * For "read" actions, an optional JavaScript regular expression applied to the
+   * captured value to slice out a substring. The first capture group is stored
+   * (or the whole match when the pattern has no group). A read with no `pattern`
+   * stores the element's whole value/textContent, as before.
+   *
+   * Applied in Node *after* capture, so it composes with `attribute` (slice an
+   * href/data-* value) and `multiple` (applied per element; non-matching
+   * elements are dropped). Fail-hard (issue 020): an invalid pattern or a
+   * non-match fails the step rather than silently storing "" or the whole text.
+   *   { action: "read", selector: "div.account", as: "account_number",
+   *     pattern: "Account number: ([0-9]{4} [0-9]{4} [0-9]{4})" }
+   */
+  pattern?: string;
+  /**
    * CSS selector identifying the <iframe> element in the main page that contains the target element.
    * When set, the action is executed inside that frame rather than the main page.
    * Omit for elements in the main page.

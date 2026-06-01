@@ -675,6 +675,39 @@ function extractValueInPage(el: any, attribute?: string): string {
 }
 
 /**
+ * Compile a `read` action's `pattern` into a RegExp. Throws a clear error on an
+ * invalid pattern — issue 020's fail-hard policy: a malformed regex fails the
+ * step instead of being silently ignored (which would store the whole text).
+ */
+function compileReadPattern(pattern: string): RegExp {
+  try {
+    return new RegExp(pattern);
+  } catch (err) {
+    throw new Error(
+      `read pattern /${pattern}/ is not a valid regular expression — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Apply a compiled `read` pattern to one captured value. Returns the first
+ * capture group, or the whole match when the pattern has no capturing group;
+ * returns null when the pattern does not match. Callers decide whether a
+ * non-match is fatal: a single `read` fails the step, a `multiple` read drops
+ * the element.
+ */
+function sliceWithReadPattern(re: RegExp, value: string): string | null {
+  const m = re.exec(value);
+  if (m === null) return null;
+  return m[1] ?? m[0];
+}
+
+/** Trim a captured value for inclusion in a fail-hard error message. */
+function truncateForError(s: string, max = 120): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/**
  * Maximum number of elements `read multiple: true` will capture in one
  * action. Authors who need more should narrow the selector (chunk by
  * section/page); a higher cap usually indicates an over-broad selector.
@@ -695,10 +728,31 @@ async function executeRead(root: Page | FrameLocator, action: AIAction): Promise
   const target = attribute ? `@${attribute}` : 'text';
   logger.subAction(`read ${selector} ${target} → ${action.as ?? '(unnamed)'}`);
 
-  const value = await root
+  let value = await root
     .locator(selector)
     .first()
     .evaluate(extractValueInPage, attribute);
+
+  // Optional substring extraction (issue 020). Applied in Node after capture so
+  // it composes with `attribute`. Fail-hard: an invalid pattern or a non-match
+  // fails the step rather than silently storing "" or the whole text.
+  if (action.pattern) {
+    const sliced = sliceWithReadPattern(compileReadPattern(action.pattern), value);
+    if (sliced === null) {
+      throw new Error(
+        `read pattern /${action.pattern}/ matched nothing in ${JSON.stringify(truncateForError(value))}`,
+      );
+    }
+    if (sliced === '') {
+      // Fail-hard extends to a match that captured nothing — storing "" is the
+      // exact silent-empty outcome `pattern` exists to prevent. (A `multiple`
+      // read keeps "": one empty among many is a legitimate list item.)
+      throw new Error(
+        `read pattern /${action.pattern}/ captured an empty substring (pattern too loose) in ${JSON.stringify(truncateForError(value))}`,
+      );
+    }
+    value = sliced;
+  }
 
   logger.info(`read captured: "${value}" → variable "${action.as ?? '(unnamed)'}"`);
   return value;
@@ -767,8 +821,24 @@ async function executeReadMultiple(
     }
   }
 
+  // Optional per-element substring extraction (issue 020). Non-matching
+  // elements are dropped (an empty result *list* is a valid outcome); a match
+  // that captured an empty string is KEPT — unlike a single read, which fails
+  // on empty, here one empty among many is a legitimate list item. An invalid
+  // pattern still fails the step via compileReadPattern.
+  let result = values;
+  if (action.pattern) {
+    const re = compileReadPattern(action.pattern);
+    result = values
+      .map((v) => sliceWithReadPattern(re, v))
+      .filter((v): v is string => v !== null);
+    logger.info(
+      `read[multiple] pattern /${action.pattern}/ sliced ${result.length} of ${values.length} captured value${values.length === 1 ? '' : 's'}`,
+    );
+  }
+
   logger.info(
-    `read[multiple] captured: ${values.length} value${values.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
+    `read[multiple] captured: ${result.length} value${result.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
   );
-  return values;
+  return result;
 }

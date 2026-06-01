@@ -241,4 +241,123 @@ describe('end-to-end tool execution against fixtures/test-app', () => {
     expect(outcome.logs[0]?.message).toContain('GET');
     expect(outcome.logs.at(-1)?.message).toContain('captured token');
   });
+
+  // ── regex_extract (issue 020 — slice a substring out of a read value) ──────
+  // Pure string tool: ignores page/context, so these exercise the extraction
+  // semantics directly. The motivating case is a `read` capturing an element's
+  // whole textContent when the test only wants a fragment of it.
+
+  it('regex_extract: stores the first capture group', async () => {
+    const resolvedParameters: Record<string, string> = {};
+    const outcome = await executeToolStep(
+      {
+        name: 'regex_extract',
+        args: {
+          text: 'Account number: 1234 1234 1234 OIN:12345678',
+          pattern: 'Account number:\\s*(\\d{4} \\d{4} \\d{4})',
+        },
+        outputAliases: {},
+      },
+      { page, context, browser, resolvedParameters, catalogue },
+    );
+    expect(outcome.status).toBe('passed');
+    expect(resolvedParameters['match']).toBe('1234 1234 1234');
+  });
+
+  it('regex_extract: falls back to the whole match when the pattern has no group', async () => {
+    const resolvedParameters: Record<string, string> = {};
+    const outcome = await executeToolStep(
+      {
+        name: 'regex_extract',
+        args: { text: 'DE89 3704 0044 0532', pattern: '^[A-Z]{2}' },
+        outputAliases: {},
+      },
+      { page, context, browser, resolvedParameters, catalogue },
+    );
+    expect(outcome.status).toBe('passed');
+    expect(resolvedParameters['match']).toBe('DE');
+  });
+
+  it('regex_extract: honours flags and an explicit capture-group index', async () => {
+    const resolvedParameters: Record<string, string> = {};
+    const outcome = await executeToolStep(
+      {
+        name: 'regex_extract',
+        args: { text: 'X-abc-Y', pattern: '(a)(B)(c)', flags: 'i', group: '2' },
+        outputAliases: {},
+      },
+      { page, context, browser, resolvedParameters, catalogue },
+    );
+    expect(outcome.status).toBe('passed');
+    expect(resolvedParameters['match']).toBe('b'); // group 2, matched case-insensitively
+  });
+
+  it('regex_extract: respects out.match output aliasing', async () => {
+    const resolvedParameters: Record<string, string> = {};
+    const outcome = await executeToolStep(
+      {
+        name: 'regex_extract',
+        args: {
+          text: 'https://shop.example.com/orders/O-1007/details',
+          pattern: '/orders/([A-Z0-9-]+)',
+        },
+        outputAliases: { match: 'order_id' },
+      },
+      { page, context, browser, resolvedParameters, catalogue },
+    );
+    expect(outcome.status).toBe('passed');
+    expect(resolvedParameters['order_id']).toBe('O-1007');
+    expect(resolvedParameters['match']).toBeUndefined();
+  });
+
+  it('regex_extract: FAILS HARD when the pattern matches nothing', async () => {
+    const resolvedParameters: Record<string, string> = {};
+    const outcome = await executeToolStep(
+      {
+        name: 'regex_extract',
+        args: { text: 'no digits anywhere', pattern: '(\\d{4})' },
+        outputAliases: {},
+      },
+      { page, context, browser, resolvedParameters, catalogue },
+    );
+    expect(outcome.status).toBe('failed');
+    expect(outcome.error).toMatch(/matched nothing/);
+    expect(resolvedParameters['match']).toBeUndefined();
+  });
+
+  it('regex_extract: FAILS HARD on an invalid pattern', async () => {
+    const resolvedParameters: Record<string, string> = {};
+    const outcome = await executeToolStep(
+      {
+        name: 'regex_extract',
+        args: { text: 'whatever', pattern: '(' },
+        outputAliases: {},
+      },
+      { page, context, browser, resolvedParameters, catalogue },
+    );
+    expect(outcome.status).toBe('failed');
+    expect(outcome.error).toMatch(/invalid pattern/);
+  });
+
+  it('parses the regex-extract demo .md, recognising the three tool steps with quoted args', async () => {
+    const parsed = await parseTestFile(
+      path.join(repoRoot, 'fixtures', 'tests', 'regex-extract-demo.md'),
+    );
+    const toolStepIndices = parsed.toolCalls
+      .map((c, i) => (c ? i : -1))
+      .filter((i) => i >= 0);
+    expect(toolStepIndices).toEqual([0, 2, 4]);
+
+    // Quoted values keep spaces and colons intact; out.match aliases the output.
+    expect(parsed.toolCalls[0]?.name).toBe('regex_extract');
+    expect(parsed.toolCalls[0]?.args['text']).toBe(
+      'Account number: 1234 1234 1234 OIN:12345678',
+    );
+    expect(parsed.toolCalls[0]?.args['pattern']).toBe(
+      'Account number: ([0-9]{4} [0-9]{4} [0-9]{4})',
+    );
+    expect(parsed.toolCalls[0]?.outputAliases).toEqual({ match: 'account_number' });
+    expect(parsed.toolCalls[2]?.outputAliases).toEqual({ match: 'iban_country' });
+    expect(parsed.toolCalls[4]?.outputAliases).toEqual({ match: 'order_id' });
+  });
 });
