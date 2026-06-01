@@ -50,7 +50,10 @@ export interface StepRequest {
   /**
    * Per-request environment variables (e.g. AI_API_KEY, AI_MODEL). Applied to
    * the session's config only — never written to the server's process.env, so
-   * concurrent sessions and the server itself remain isolated.
+   * concurrent sessions and the server itself remain isolated. AI_API_KEY /
+   * AI_MODEL are re-applied to the session's AiClient at the start of every
+   * batch (see `executeStepsInternal`), so a saved `.env` edit is picked up on
+   * the next run without closing the session.
    */
   env?: Record<string, string>;
   /**
@@ -430,10 +433,13 @@ function isSkippableStep(instruction: string): boolean {
 }
 
 /**
- * Build a per-session AiConfig with optional env overrides applied. Only
+ * Build an AiConfig with optional env overrides applied over a base. Only
  * `apiKey` and `model` are honoured today — these are the env knobs a `.env`
- * shipped from a client realistically wants to override per session. Server
- * process.env is never mutated.
+ * shipped from a client realistically wants to override. Always pass the server
+ * base config (`this.config.ai`) as `baseConfig`, never a session's current
+ * config: overrides apply only on non-empty values, so basing on the fixed
+ * server config lets a removed `.env` line revert cleanly instead of sticking
+ * on the prior override. Server process.env is never mutated.
  */
 function applyEnvToAiConfig(
   baseConfig: import('../config/types.js').AiConfig,
@@ -728,9 +734,10 @@ export class SessionManager {
       );
     }
 
-    // Create session if it does not exist. Per-request env is applied at
-    // session-creation time only — once an AiClient is bound to a session,
-    // changing env mid-session is intentionally not supported.
+    // Create session if it does not exist. The session's AiClient is built with
+    // the per-request env applied here; on a reused session, `AI_MODEL` /
+    // `AI_API_KEY` are re-applied per batch in `executeStepsInternal` so a saved
+    // `.env` edit takes effect on the next run.
     if (!session) {
       session = await this.createSession(sessionId, request.config, request.env);
     }
@@ -963,6 +970,18 @@ export class SessionManager {
     signal?: AbortSignal,
   ): Promise<StepResponse> {
     session.status = 'executing';
+
+    // Re-apply the per-request env (.env) AI overrides to this session's client
+    // so a saved AI_MODEL / AI_API_KEY edit is picked up on the next run without
+    // closing the session. Recomputed from the server base (`this.config.ai`),
+    // NOT the session's current values, so deleting a line from `.env` cleanly
+    // reverts to the base rather than sticking on the last override. This runs
+    // at the top of the `queueTail`-serialized body (not in `executeSteps`,
+    // which resolves the session before queuing) so it can never mutate the
+    // shared AiClient config out from under a concurrent in-flight batch.
+    const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
+    const aiChange = session.aiClient.syncAuth(desiredAi.model, desiredAi.apiKey);
+    if (aiChange) logger.info(`Session "${sessionId}": ${aiChange} (from .env)`);
 
     const runStartTime = Date.now();
     // The session's TokenTracker lives for the whole session, accumulating

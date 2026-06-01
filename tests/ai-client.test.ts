@@ -125,6 +125,77 @@ describe('AiClient v2 gateway integration', () => {
     ]);
   });
 
+  describe('syncAuth — re-point an already-bound client (saved .env edit)', () => {
+    /** Minimal OK response so `complete()` resolves; we only inspect the request. */
+    const okResponse = () =>
+      new Response(
+        JSON.stringify({
+          id: 'm',
+          object: 'response',
+          created: 1,
+          provider: 'anthropic',
+          model: 'ignored',
+          role: 'assistant',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: '{}' }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+
+    it('swaps the model used on the next request and reports the change', async () => {
+      let sentModel: string | undefined;
+      global.fetch = vi.fn(async (_url, init) => {
+        sentModel = JSON.parse(String(init?.body)).model;
+        return okResponse();
+      }) as typeof fetch;
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const change = client.syncAuth('gpt-5.4-mini', baseConfig.apiKey);
+
+      expect(change).toBe('AI model gpt-4o → gpt-5.4-mini');
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(sentModel).toBe('gpt-5.4-mini');
+    });
+
+    it('swaps the apiKey on the next request without leaking it into the change string', async () => {
+      let auth: string | null = null;
+      global.fetch = vi.fn(async (_url, init) => {
+        auth = (init?.headers as Headers).get('Authorization');
+        return okResponse();
+      }) as typeof fetch;
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const change = client.syncAuth(baseConfig.model, 'super-secret-key');
+
+      expect(change).toBe('AI API key changed');
+      expect(change).not.toContain('super-secret-key');
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(auth).toBe('Bearer super-secret-key');
+    });
+
+    it('reverts to the base (no Authorization header) when the key goes empty', async () => {
+      let hasAuth = true;
+      global.fetch = vi.fn(async (_url, init) => {
+        hasAuth = (init?.headers as Headers).has('Authorization');
+        return okResponse();
+      }) as typeof fetch;
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      // Mirrors recompute-from-server-base when AI_API_KEY is removed from .env.
+      const change = client.syncAuth(baseConfig.model, undefined);
+
+      expect(change).toBe('AI API key changed');
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(hasAuth).toBe(false);
+    });
+
+    it('returns null and mutates nothing when model and key are unchanged', () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      expect(client.syncAuth(baseConfig.model, baseConfig.apiKey)).toBeNull();
+    });
+  });
+
   it('keeps parsing legacy v1-style responses as a fallback during migration', async () => {
     global.fetch = vi.fn(async () => new Response(JSON.stringify({
       response: '{"actions":[],"reasoning":"legacy"}',

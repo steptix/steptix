@@ -62,6 +62,7 @@ vi.mock('../src/context/loader.js', () => ({
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     chat = vi.fn(async () => '{}');
+    syncAuth = vi.fn(() => null);
   },
 }));
 

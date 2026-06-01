@@ -55,6 +55,35 @@ export class AiClient {
   }
 
   /**
+   * Re-point an already-bound client at a new `model` / `apiKey` — used when a
+   * saved `.env` edit changes `AI_MODEL` / `AI_API_KEY` between runs on a reused
+   * session. Only these two fields are env-mutable; every other field
+   * (gatewayUrl, maxInputTokens, streaming) is server-level and left untouched.
+   * Both are read fresh on each request, so the swap takes effect on the next
+   * AI call without rebuilding the client.
+   *
+   * Returns a short, key-safe description of what changed (for logging), or
+   * `null` when nothing changed. The returned string NEVER contains the key
+   * value — only the fact that it changed.
+   */
+  syncAuth(model: string, apiKey: string | undefined): string | null {
+    const changes: string[] = [];
+    if (model !== this.config.model) {
+      changes.push(`AI model ${this.config.model} → ${model}`);
+      this.config.model = model;
+    }
+    if (apiKey !== this.config.apiKey) {
+      changes.push('AI API key changed');
+      // Delete rather than assign undefined — `apiKey` is optional and the repo
+      // builds with exactOptionalPropertyTypes. A removed key reverts to "no
+      // Authorization header" (the server base when AI_API_KEY is absent).
+      if (apiKey === undefined) delete this.config.apiKey;
+      else this.config.apiKey = apiKey;
+    }
+    return changes.length > 0 ? changes.join('; ') : null;
+  }
+
+  /**
    * Send messages to the AI and get a complete response.
    * Uses /v2/stream when streamResponses is true, otherwise /v2/vision.
    */

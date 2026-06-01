@@ -30,6 +30,10 @@ const mockBrowserSession = {
 // assert against their methods (e.g. closeAll on closeSession).
 const browserTrackerInstances: Array<{ getActive: ReturnType<typeof vi.fn>; closeAll: ReturnType<typeof vi.fn> }> = [];
 
+// Track AiClient instances so tests can assert the per-batch env re-sync
+// (issue 019) — how many clients were built and what syncAuth was called with.
+const aiClientInstances: Array<{ config: any; syncAuth: ReturnType<typeof vi.fn> }> = [];
+
 vi.mock('../src/browser/manager.js', () => {
   class BrowserTracker {
     getActive: ReturnType<typeof vi.fn>;
@@ -64,8 +68,21 @@ vi.mock('../src/context/loader.js', () => ({
 }));
 
 vi.mock('../src/ai/client.js', () => ({
+  // Mirrors the real AiClient's syncAuth contract closely enough to assert the
+  // session-manager call site: it mutates `config` in place and records calls.
+  // The real implementation is unit-tested against fetch in ai-client.test.ts.
   AiClient: class {
+    config: any;
     chat = vi.fn(async () => '{}');
+    syncAuth = vi.fn((model: string, apiKey: string | undefined) => {
+      const changed = model !== this.config.model || apiKey !== this.config.apiKey;
+      this.config = { ...this.config, model, apiKey };
+      return changed ? `AI model → ${model}` : null;
+    });
+    constructor(config: any) {
+      this.config = config;
+      aiClientInstances.push(this);
+    }
   },
 }));
 
@@ -193,7 +210,38 @@ describe('SessionManager', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     browserTrackerInstances.length = 0;
+    aiClientInstances.length = 0;
     manager = new SessionManager(testConfig);
+  });
+
+  describe('re-applies .env AI overrides per batch on a reused session (issue 019)', () => {
+    it('picks up a changed AI_MODEL/AI_API_KEY on the next run and reverts removed keys to the server base', async () => {
+      const sessionId = 'reuse-1';
+
+      // Three runs on the SAME session — the reuse path that froze the model
+      // before this fix. Each ships the .env-derived env map.
+      await manager.executeSteps(sessionId, { steps: ['s1'], env: { AI_MODEL: 'model-A', AI_API_KEY: 'key-1' } });
+      await manager.executeSteps(sessionId, { steps: ['s2'], env: { AI_MODEL: 'model-B' } });
+      await manager.executeSteps(sessionId, { steps: ['s3'] });
+
+      // Session reused → exactly one AiClient built (not rebuilt per batch, so
+      // browser state is preserved).
+      expect(aiClientInstances).toHaveLength(1);
+      const ai = aiClientInstances[0]!;
+
+      // syncAuth runs at the top of every batch, recomputed from the server
+      // base (testConfig.ai: model 'test-model', no apiKey) — so a key omitted
+      // from a later .env reverts to base rather than sticking on the prior
+      // override.
+      expect(ai.syncAuth.mock.calls).toEqual([
+        ['model-A', 'key-1'],       // batch 1: both from env
+        ['model-B', undefined],     // batch 2: model from env; key reverts to base (omitted)
+        ['test-model', undefined],  // batch 3: empty env → all revert to base
+      ]);
+      // And the live client reflects the final state.
+      expect(ai.config.model).toBe('test-model');
+      expect(ai.config.apiKey).toBeUndefined();
+    });
   });
 
   describe('executeSteps', () => {
