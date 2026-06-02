@@ -49,6 +49,7 @@ export function getReportTemplate(): string {
     .badge-pass { background: #dcfce7; color: var(--pass); }
     .badge-fail { background: #fee2e2; color: var(--fail); }
     .badge-skip { background: #fef9c3; color: var(--warn); }
+    .badge-aborted { background: #ffedd5; color: #c2410c; }
     .badge-tag { background: #ede9fe; color: #7c3aed; font-size: 0.72rem; }
 
     /* Summary bar */
@@ -162,6 +163,11 @@ export function getReportTemplate(): string {
     .failure-block { margin-top: 14px; padding: 14px; border-radius: 6px; background: #fef2f2; border: 1px solid #fecaca; }
     .failure-title { font-weight: 700; color: var(--fail); margin-bottom: 6px; }
     .failure-message { font-size: 0.875rem; color: #7f1d1d; font-family: monospace; }
+
+    /* Aborted block — the step the user stopped on (issue 021) */
+    .aborted-block { margin-top: 14px; padding: 14px; border-radius: 6px; background: #fff7ed; border: 1px solid #fed7aa; }
+    .aborted-title { font-weight: 700; color: #c2410c; margin-bottom: 6px; }
+    .aborted-message { font-size: 0.875rem; color: #9a3412; font-family: monospace; }
 
     /* Source-skill chip — origin of an expanded step */
     .badge-skill { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
@@ -430,10 +436,11 @@ export function getReportTemplate(): string {
     });
   });
 
-  // Auto-open first failed step
-  var firstFailed = document.querySelector('.step .badge-fail');
-  if (firstFailed) {
-    firstFailed.closest('.step').classList.add('open');
+  // Auto-open the first failed OR aborted step (issue 021) so a stopped run's
+  // interrupted step expands too.
+  var firstNotable = document.querySelector('.step .badge-fail, .step .badge-aborted');
+  if (firstNotable) {
+    firstNotable.closest('.step').classList.add('open');
   }
 </script>
 </body>

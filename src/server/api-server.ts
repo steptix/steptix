@@ -381,6 +381,18 @@ export function createApiServer(config: Config): {
     }
   });
 
+  // GET /sessions/:id/last-run — report path + frozen token totals for the last
+  // finalized run (issue 021). The delivery channel for a client that STOPPED a
+  // run: stopping closes the SSE stream before the final `done`, so the
+  // reportPath/tokens are dropped in transit; the client polls this until
+  // `finalized` then reads both. Cheap (no screenshot/title), survives a
+  // browser-closing stop that deleted the session. Always 200 — an unknown
+  // session reads as `{ finalized: false }`.
+  app.get('/sessions/:id/last-run', (req: Request, res: Response) => {
+    const sessionId = String(req.params.id);
+    res.status(200).json(sessionManager.getLastRun(sessionId));
+  });
+
   // DELETE /sessions/:id
   app.delete('/sessions/:id', async (req: Request, res: Response, next: NextFunction) => {
     try {

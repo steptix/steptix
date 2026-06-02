@@ -36,12 +36,37 @@ class FakeApiClient {
      *  call's sessionId is recorded so tests can assert the pre-flight ran. */
     this.sessionAlive = true;
     this.isSessionAliveCalls = [];
+    /** issue 021 — getLastRun poll. Calls recorded here; result configurable. */
+    this.getLastRunCalls = [];
+    this.lastRunResult = {
+      finalized: true,
+      tokens: { total: 42, input: 30, output: 12 },
+      reportPath: '/tmp/stopped-report.html',
+    };
+    /** Optional scripted sequence to exercise the not-finalized-then-finalized race. */
+    this.lastRunSequence = null;
   }
 
   /** Liveness probe used by the re-run pre-flight (GET /sessions/:id). */
   async isSessionAlive(sessionId) {
     this.isSessionAliveCalls.push({ sessionId });
     return this.sessionAlive;
+  }
+
+  /**
+   * issue 021: last-run info poll (GET /sessions/:id/last-run). Each call is
+   * recorded. By default returns finalized info immediately; tests can set
+   * `lastRunSequence` to an array of results to script the race (e.g. a couple
+   * of {finalized:false} then a finalized one). When the sequence is exhausted
+   * the last entry repeats.
+   */
+  async getLastRun(sessionId) {
+    this.getLastRunCalls.push({ sessionId });
+    if (this.lastRunSequence && this.lastRunSequence.length > 0) {
+      const i = Math.min(this.getLastRunCalls.length - 1, this.lastRunSequence.length - 1);
+      return this.lastRunSequence[i];
+    }
+    return this.lastRunResult;
   }
 
   /**

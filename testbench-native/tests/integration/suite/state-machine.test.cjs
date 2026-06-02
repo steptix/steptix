@@ -255,6 +255,60 @@ describe('TestBench debug state machine', function () {
     );
   });
 
+  it('stop recovers the report path + token totals via getLastRun (issue 021)', async () => {
+    // The stopped run's `done` (with reportPath/tokens) is dropped when the SSE
+    // stream is aborted; the controller must re-fetch them via getLastRun so
+    // "Open Last Report" works and tokens are surfaced.
+    assert.equal(hooks.lastReportPath(), null, 'precondition: no report yet');
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('status running', () => Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running');
+
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await waitFor('idle after stop', () => !hooks.isRunning());
+
+    // The poll runs in the background after stop; wait for it to land.
+    await waitFor('report path recovered', () => hooks.lastReportPath() === '/tmp/stopped-report.html');
+    assert.ok(fake.getLastRunCalls.length >= 1, 'controller must poll getLastRun on stop');
+    assert.deepEqual(hooks.lastRunTokens(), { total: 42, input: 30, output: 12 });
+  });
+
+  it('stop poll tolerates the finalize race — keeps polling until finalized (issue 021)', async () => {
+    // The server writes the report AFTER it sees our disconnect, so the first
+    // poll(s) can return finalized:false. The controller must keep polling.
+    fake.lastRunSequence = [
+      { finalized: false },
+      { finalized: false },
+      { finalized: true, tokens: { total: 7, input: 4, output: 3 }, reportPath: '/tmp/late.html' },
+    ];
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('status running', () => Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running');
+
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await waitFor('idle after stop', () => !hooks.isRunning());
+
+    await waitFor('late report path recovered', () => hooks.lastReportPath() === '/tmp/late.html', 8_000);
+    assert.ok(fake.getLastRunCalls.length >= 3, 'must poll past the not-finalized responses');
+  });
+
+  it('pause does NOT poll getLastRun (issue 021 — recovery is stop-only)', async () => {
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 9 });
+    await waitFor('status running', () => Object.fromEntries(hooks.tracker.snapshot().statuses)[9] === 'running');
+
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('paused (idle)', () => !hooks.isRunning());
+    // Give any erroneous background poll a chance to fire before asserting none did.
+    await sleep(300);
+    assert.equal(fake.getLastRunCalls.length, 0, 'pause must not trigger the stop-only report recovery');
+  });
+
   it('running → idle (Close Session): restartSession stops the in-flight run AND closes the session', async () => {
     // Close Session must also stop the test — otherwise the in-flight step's
     // spinner / yellow ▶ stay painted after the session is gone, and a later

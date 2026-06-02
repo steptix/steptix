@@ -290,6 +290,25 @@ export interface SessionListItem {
   totalStepsExecuted: number;
 }
 
+/** Run token totals — a frozen snapshot of the per-run tracker getters. */
+export interface RunTokens {
+  total: number;
+  input: number;
+  output: number;
+}
+
+/**
+ * Delivered via `GET /sessions/:id/last-run` so a client that stopped a run can
+ * recover the report path + token totals the dropped `done` event would have
+ * carried (issue 021). `finalized` is the poll signal; `reportPath` is absent
+ * when no report was written.
+ */
+export interface LastRunInfo {
+  finalized: boolean;
+  tokens: RunTokens;
+  reportPath?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Internal session data
 // ---------------------------------------------------------------------------
@@ -526,6 +545,21 @@ export class SessionManager {
   /** Dedupes concurrent (re)loads of the same key so two in-flight batches for
    *  one project don't both read+parse from disk. */
   private projectBundleInflight = new Map<string, Promise<ProjectBundle>>();
+
+  /**
+   * Last finalized run per session id — the channel for delivering a report path
+   * + token totals to a client that *stopped* the run (issue 021). A stop closes
+   * the SSE stream before the final `done` event, so `reportPath`/tokens are
+   * dropped in transit; the client re-fetches them here via
+   * `GET /sessions/:id/last-run`. Kept on the manager (not the session) so it
+   * survives a browser-closing stop that deletes the session. `reportPath` is
+   * absent when report generation produced nothing (0 steps that could render or
+   * a generation failure); `finalized` flips true once the run's post-loop
+   * finalize has run, so the client polls until then rather than guessing a
+   * timeout. Tokens are a FROZEN snapshot taken when the report was built — never
+   * recompute live, or a reused session's next `markRunStart` would zero it.
+   */
+  private lastRunInfo = new Map<string, LastRunInfo>();
 
   constructor(config: Config) {
     this.config = config;
@@ -807,6 +841,39 @@ export class SessionManager {
     };
   }
 
+  /** Max distinct sessions we remember finalized-run info for (bounded growth). */
+  private static readonly LAST_RUN_INFO_LIMIT = 200;
+
+  /**
+   * Record the finalized-run info for a session (issue 021). Bounded LRU-ish:
+   * re-inserting moves the key to the end; we evict the oldest once over the cap.
+   */
+  private recordLastRun(sessionId: string, info: LastRunInfo): void {
+    this.lastRunInfo.delete(sessionId);
+    this.lastRunInfo.set(sessionId, info);
+    if (this.lastRunInfo.size > SessionManager.LAST_RUN_INFO_LIMIT) {
+      const oldest = this.lastRunInfo.keys().next().value;
+      if (oldest !== undefined) this.lastRunInfo.delete(oldest);
+    }
+  }
+
+  /**
+   * Last finalized-run info for a session — report path + frozen token totals.
+   * Served by `GET /sessions/:id/last-run` so a client that stopped the run can
+   * recover what the dropped `done` event carried (issue 021). Returns
+   * `{ finalized: false, tokens: 0s }` when nothing is recorded yet (the run
+   * hasn't finalized), so the client polls until `finalized` rather than
+   * guessing a timeout. Survives session deletion (a browser-closing stop).
+   */
+  getLastRun(sessionId: string): LastRunInfo {
+    return (
+      this.lastRunInfo.get(sessionId) ?? {
+        finalized: false,
+        tokens: { total: 0, input: 0, output: 0 },
+      }
+    );
+  }
+
   /**
    * List all active (non-closed) sessions.
    */
@@ -1034,6 +1101,29 @@ export class SessionManager {
         // A failing listener must not crash the run.
         logger.warn(`Session "${sessionId}": run-event listener threw: ${String(err)}`);
       }
+    };
+
+    // Record the step that was in flight when the user STOPPED the run, so the
+    // on-disk report marks where it stopped (issue 021). Called from the three
+    // mid-step abort handlers (post-step, per-step catch, branched) — NOT the
+    // loop-top between-step check, where no step is in flight. `base` is the
+    // swallowed-abort StepResult when one exists (post-step path); otherwise a
+    // minimal record. `index` is 1-based. Marked `interrupted` so the report
+    // renders it distinctly and excludes it from the failed count.
+    const recordInterruptedStep = (index: number, instruction: string, base?: StepResult): void => {
+      const sourceSkill = outermostSkillName(expansionOrigins?.[index - 1]?.frameId, expansionFrames);
+      fullStepResults.push({
+        index,
+        instruction,
+        status: 'failed',
+        turns: base?.turns ?? [],
+        durationMs: base?.durationMs ?? 0,
+        retried: base?.retried ?? false,
+        interrupted: true,
+        aiExplanation: 'Stopped by user (run aborted).',
+        ...(base?.screenshotBase64 !== undefined && { screenshotBase64: base.screenshotBase64 }),
+        ...(sourceSkill && { sourceSkill }),
+      });
     };
 
     // Resolve per-request logging overrides. The server-level config supplies
@@ -1750,6 +1840,7 @@ export class SessionManager {
             if (signal?.aborted) {
               overallStatus = 'aborted';
               logger.info(`Session "${sessionId}": run aborted by client during branched step ${i + 1}/${stepsTotal}`);
+              recordInterruptedStep(i + 1, originalStep);
               break;
             }
             throw err;
@@ -1764,6 +1855,7 @@ export class SessionManager {
           if (signal?.aborted) {
             overallStatus = 'aborted';
             logger.info(`Session "${sessionId}": run aborted by client during branched step ${i + 1}/${stepsTotal}`);
+            recordInterruptedStep(i + 1, originalStep);
             break;
           }
 
@@ -2090,6 +2182,7 @@ export class SessionManager {
           if (signal?.aborted) {
             overallStatus = 'aborted';
             logger.info(`Session "${sessionId}": run aborted by client during step ${i + 1}/${stepsTotal}`);
+            recordInterruptedStep(i + 1, originalStep);
             break;
           }
 
@@ -2152,6 +2245,7 @@ export class SessionManager {
         if (signal?.aborted) {
           overallStatus = 'aborted';
           logger.info(`Session "${sessionId}": run aborted by client during step ${i + 1}/${stepsTotal}`);
+          recordInterruptedStep(i + 1, originalStep, stepResult);
           break;
         }
 
@@ -2426,13 +2520,26 @@ export class SessionManager {
     // The returned path flows through to the `done` event so the client
     // can surface an "Open Report" button. Undefined when generation
     // failed or no steps ran.
+    // Freeze the run token totals now (issue 021). The `run*` getters are
+    // relative to this batch's `markRunStart` baseline, so reading them here
+    // captures exactly this run's usage — including all AI calls that completed
+    // before a stop. A reused session's next run rebaselines, so we must
+    // snapshot rather than recompute when delivering to a stopped client later.
+    const runTokens: RunTokens = {
+      total: session.tokenTracker.runTotal,
+      input: session.tokenTracker.runInputTotal,
+      output: session.tokenTracker.runOutputTotal,
+    };
+
     let reportPath: string | undefined;
     if (fullStepResults.length > 0) {
       try {
         const reportStatus: 'passed' | 'failed' =
           overallStatus === 'passed' ? 'passed' : 'failed';
         const passedSteps = fullStepResults.filter((s) => s.status === 'passed').length;
-        const failedSteps = fullStepResults.filter((s) => s.status === 'failed').length;
+        // Exclude the interrupted (stopped) step from the failed count — it's
+        // rendered as its own "aborted" state, not a failure (issue 021).
+        const failedSteps = fullStepResults.filter((s) => s.status === 'failed' && !s.interrupted).length;
         const totalSubActions = fullStepResults.reduce(
           (sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0),
           0,
@@ -2449,10 +2556,14 @@ export class SessionManager {
           failedSteps,
           totalSubActions,
           durationMs: Date.now() - runStartTime,
-          tokensUsed: session.tokenTracker.runTotal,
-          inputTokens: session.tokenTracker.runInputTotal,
-          outputTokens: session.tokenTracker.runOutputTotal,
+          tokensUsed: runTokens.total,
+          inputTokens: runTokens.input,
+          outputTokens: runTokens.output,
           date: new Date().toISOString(),
+          // Distinguish a user stop from a real failure (issue 021). `status`
+          // stays a valid StepStatus ('failed'); `aborted` is the overriding
+          // display state the report generator renders as "ABORTED".
+          ...(overallStatus === 'aborted' && { aborted: true }),
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
         };
@@ -2462,6 +2573,17 @@ export class SessionManager {
         logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);
       }
     }
+
+    // Record the finalized run so a client that STOPPED the run — and so closed
+    // the SSE stream before the final `done` event — can recover the report path
+    // and token totals via GET /sessions/:id/last-run (issue 021). `finalized`
+    // is set unconditionally (even with no report) so the client's poll
+    // terminates; `reportPath` is omitted when no report was written.
+    this.recordLastRun(sessionId, {
+      finalized: true,
+      tokens: runTokens,
+      ...(reportPath !== undefined && { reportPath }),
+    });
 
     // Unwind any frames still on the stack — happens on early exit (fail,
     // error, abort) and on a clean finish where the last executed step was

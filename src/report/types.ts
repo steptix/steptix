@@ -158,6 +158,11 @@ export interface StepResult {
    *  chip in the step header so the report shows skill provenance even after
    *  parse-time expansion has flattened the call away. */
   sourceSkill?: string;
+  /** True when this is the step that was in flight when the user STOPPED the run
+   *  (issue 021). The report renders it as a distinct "aborted" state — not a red
+   *  failure — and it's excluded from the failed-step count. `status` stays a
+   *  valid `StepStatus` ('failed') for back-compat with older report readers. */
+  interrupted?: boolean;
 }
 
 /** AI-generated root-cause analysis for a failed test run */
@@ -210,6 +215,10 @@ export interface TestReport {
   diagnosis?: FailureDiagnosis;
   /** True when the run entered the interactive REPL at any point (planned [interactive] step or post-failure handoff). */
   humanIntervened?: boolean;
+  /** True when the user STOPPED this run (issue 021). Overrides the red
+   *  "FAILED" banner with an amber "ABORTED" state. `status` itself stays a
+   *  valid `StepStatus` so older report consumers still parse the file. */
+  aborted?: boolean;
 }
 
 /** Summary across all test runs in a session */

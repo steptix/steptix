@@ -150,6 +150,8 @@ vi.mock('../src/utils/logger.js', () => ({
 import { SessionManager } from '../src/server/session-manager.js';
 import { executeStep, executeBranchedStep } from '../src/runner/step-executor.js';
 import { sanitizeTestName, computeStepsHash } from '../src/cache/step-cache.js';
+import { generateReport } from '../src/report/generator.js';
+import type { TestReport } from '../src/report/types.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -695,6 +697,82 @@ describe('SessionManager', () => {
       expect(response.results).toHaveLength(1);
       expect(response.results[0]!.reasoning).toContain('Skipped');
       expect(executeStep).not.toHaveBeenCalled();
+    });
+
+    // ── issue 021: stopped-run report delivery + content ───────────────
+    describe('stopped-run report + token delivery (issue 021)', () => {
+      /** Make step N abort the run mid-flight, returning the swallowed-abort shape. */
+      const abortOnStep = (ac: AbortController, abortAtCall: number) => {
+        let calls = 0;
+        vi.mocked(executeStep).mockImplementation(async (_l, _t, _i, _opts: any): Promise<StepResult> => {
+          calls++;
+          if (calls < abortAtCall) {
+            return { index: calls, instruction: `step ${calls}`, status: 'passed', turns: [], durationMs: 5, retried: false };
+          }
+          ac.abort();
+          return { index: calls, instruction: `step ${calls}`, status: 'failed', turns: [], durationMs: 5, retried: true, error: 'Aborted by client' };
+        });
+      };
+
+      it('records last-run info (reportPath + tokens, finalized) retrievable via getLastRun after a stop', async () => {
+        const ac = new AbortController();
+        abortOnStep(ac, 2); // step 1 passes, stop during step 2
+        await manager.executeSteps('s021-a', { steps: ['one', 'two', 'three'] }, undefined, ac.signal);
+
+        const info = manager.getLastRun('s021-a');
+        expect(info.finalized).toBe(true);
+        expect(info.reportPath).toBe('/tmp/fake-report.html'); // from the generateReport mock
+        expect(info.tokens).toEqual({ total: 0, input: 0, output: 0 }); // mocked tracker → 0s, but present + frozen
+      });
+
+      it('generates a report marked aborted with the interrupted step recorded', async () => {
+        const ac = new AbortController();
+        abortOnStep(ac, 2);
+        await manager.executeSteps('s021-b', { steps: ['one', 'two', 'three'] }, undefined, ac.signal);
+
+        const report = vi.mocked(generateReport).mock.calls.at(-1)?.[0] as TestReport;
+        expect(report.aborted).toBe(true);
+        const interrupted = report.steps.filter((s) => s.interrupted);
+        expect(interrupted).toHaveLength(1);
+        expect(interrupted[0]!.index).toBe(2);
+        // The interrupted step is excluded from the failed count.
+        expect(report.failedSteps).toBe(0);
+      });
+
+      it('still produces a report when stopped during step 1 (Gap 3)', async () => {
+        const ac = new AbortController();
+        abortOnStep(ac, 1); // stop during the very first step
+        await manager.executeSteps('s021-c', { steps: ['one', 'two'] }, undefined, ac.signal);
+
+        // A report was generated (fullStepResults non-empty thanks to the
+        // recorded interrupted step) and last-run info is retrievable.
+        expect(generateReport).toHaveBeenCalled();
+        const info = manager.getLastRun('s021-c');
+        expect(info.finalized).toBe(true);
+        expect(info.reportPath).toBe('/tmp/fake-report.html');
+        const report = vi.mocked(generateReport).mock.calls.at(-1)?.[0] as TestReport;
+        expect(report.steps.some((s) => s.interrupted)).toBe(true);
+      });
+
+      it('getLastRun returns finalized:false for an unknown session', () => {
+        const info = manager.getLastRun('never-ran');
+        expect(info.finalized).toBe(false);
+        expect(info.reportPath).toBeUndefined();
+      });
+
+      it('a normal (non-aborted) run is unmarked: no report.aborted, emits step:fail on real failure', async () => {
+        vi.mocked(executeStep).mockImplementation(async (): Promise<StepResult> => ({
+          index: 1, instruction: 'boom', status: 'failed', turns: [], durationMs: 5, retried: false, error: 'real failure',
+        }));
+        const events: { type: string }[] = [];
+        const response = await manager.executeSteps('s021-d', { steps: ['boom'] }, (e) => events.push(e as any));
+
+        expect(response.status).toBe('failed');
+        expect(events.some((e) => e.type === 'step:fail')).toBe(true);
+        const report = vi.mocked(generateReport).mock.calls.at(-1)?.[0] as TestReport;
+        expect(report.aborted).toBeUndefined();
+        expect(report.steps.some((s) => s.interrupted)).toBeFalsy();
+      });
     });
 
     it('skips [interactive] steps', async () => {

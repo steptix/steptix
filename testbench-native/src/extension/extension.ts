@@ -741,6 +741,10 @@ export interface TestBenchTestHooks {
    *  Backs the integration test that verifies the protocol's
    *  reportPath field flows controller-side. */
   lastReportPath: () => string | null;
+  /** Active controller's `lastRunTokens` — token totals recovered for the most
+   *  recently finalized run (incl. a STOPPED one, issue 021), or null. Backs the
+   *  live stop-report test's token assertion. */
+  lastRunTokens: () => { total: number; input: number; output: number } | null;
 }
 
 export interface TestBenchExports {
@@ -989,6 +993,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         });
       },
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
+      lastRunTokens: () => registry.active()?.lastRunTokens ?? null,
     },
   };
 }

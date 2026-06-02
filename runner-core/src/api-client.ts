@@ -11,6 +11,25 @@ import type { RunEvent, StepMode } from './protocol.js';
 export type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
 export type LogFileMode = 'off' | 'compact' | 'full';
 
+/** Per-run token totals (frozen snapshot from the server). */
+export interface RunTokens {
+  total: number;
+  input: number;
+  output: number;
+}
+
+/**
+ * Last finalized run for a session — report path + token totals. Returned by
+ * `getLastRun` so a client that stopped a run can recover what the dropped
+ * `done` event carried (issue 021). `tokens` is absent only on a malformed/older
+ * payload; `reportPath` is absent when no report was written.
+ */
+export interface LastRunInfo {
+  finalized: boolean;
+  tokens?: RunTokens;
+  reportPath?: string;
+}
+
 export interface StreamStepsRequest {
   steps: string[];
   /** Per-line break indices (1-based step indices into `steps`). */
@@ -299,6 +318,47 @@ export class ApiClient {
       throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
     }
     return response.status === 200;
+  }
+
+  /**
+   * Fetch the last finalized run's report path + token totals for a session
+   * (issue 021). The delivery channel for a STOPPED run: stopping aborts the SSE
+   * stream before the final `done` event, so the report path/tokens are dropped
+   * in transit — the client polls this until `finalized` then reads both.
+   *
+   * Defensive about server age: an older server has no such route and 404s,
+   * which we surface as `null` (caller falls back / stops polling). Body fields
+   * are read tolerantly so a partial/older payload yields `undefined`, not a
+   * throw. Throws `ApiClientError('connect-failed')` on a transport failure and
+   * `('unauthorized')` on 401, mirroring `isSessionAlive`.
+   */
+  async getLastRun(sessionId: string): Promise<LastRunInfo | null> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/last-run`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'GET',
+        headers: { 'x-api-key': this.apiKey },
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new ApiClientError('connect-failed', reason);
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    if (response.status === 404) {
+      return null; // older server without the route
+    }
+    if (response.status !== 200) {
+      return null;
+    }
+    const body = (await response.json().catch(() => ({}))) as Partial<LastRunInfo>;
+    return {
+      finalized: body.finalized === true,
+      ...(body.tokens && { tokens: body.tokens }),
+      ...(typeof body.reportPath === 'string' && { reportPath: body.reportPath }),
+    };
   }
 
   /** Fire-and-best-effort: tells the server to drop the session and close the browser. */

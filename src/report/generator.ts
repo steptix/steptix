@@ -48,9 +48,15 @@ function renderReport(report: TestReport): string {
   const template = Handlebars.compile(getReportTemplate());
 
   const status = report.status;
-  const statusClass = status === 'passed' ? 'badge-pass' : status === 'failed' ? 'badge-fail' : 'badge-skip';
-  const statusIcon = status === 'passed' ? '✓' : status === 'failed' ? '✗' : '—';
-  const statusText = status.toUpperCase();
+  // A stopped run (issue 021) renders as an amber "ABORTED" banner rather than
+  // the red FAILED its underlying `status` carries for back-compat.
+  const statusClass = report.aborted
+    ? 'badge-aborted'
+    : status === 'passed' ? 'badge-pass' : status === 'failed' ? 'badge-fail' : 'badge-skip';
+  const statusIcon = report.aborted
+    ? '■'
+    : status === 'passed' ? '✓' : status === 'failed' ? '✗' : '—';
+  const statusText = report.aborted ? 'ABORTED' : status.toUpperCase();
 
   const date = new Date(report.date).toLocaleString('en-AU', {
     dateStyle: 'medium',
@@ -249,8 +255,16 @@ interface RenderStepOverrides {
 }
 
 function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): string {
-  const statusClass = step.status === 'passed' ? 'badge-pass' : step.status === 'failed' ? 'badge-fail' : 'badge-skip';
-  const statusIcon = step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '—';
+  // The interrupted step (run stopped here — issue 021) is its own state, not a
+  // failure: amber "ABORTED" badge, no red failure block. Checked first so it
+  // overrides the underlying 'failed' status it carries for back-compat.
+  const statusClass = step.interrupted
+    ? 'badge-aborted'
+    : step.status === 'passed' ? 'badge-pass' : step.status === 'failed' ? 'badge-fail' : 'badge-skip';
+  const statusIcon = step.interrupted
+    ? '■'
+    : step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '—';
+  const statusLabel = step.interrupted ? 'ABORTED' : step.status.toUpperCase();
   const duration = formatDuration(step.durationMs);
   const retryBadge = step.retried ? '<span class="badge badge-skip">Retried</span>' : '';
 
@@ -264,7 +278,14 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     .map((a) => renderAssertion(a))
     .join('\n');
 
-  const failureHtml = step.status === 'failed'
+  // Interrupted step: an amber "stopped here" note instead of the red failure
+  // block (issue 021).
+  const failureHtml = step.interrupted
+    ? `<div class="aborted-block">
+        <div class="aborted-title">■ Run stopped here</div>
+        <div class="aborted-message">${escapeHtml(step.aiExplanation ?? 'Stopped by user (run aborted).')}</div>
+       </div>`
+    : step.status === 'failed'
     ? `<div class="failure-block">
         <div class="failure-title">✗ Step Failed</div>
         <div class="failure-message">${escapeHtml(step.error ?? 'Unknown error')}</div>
@@ -281,7 +302,9 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
        </details>`
     : '';
 
-  const endScreenshotLabel = step.status === 'failed' ? 'Page state at failure' : 'Page state at step end';
+  const endScreenshotLabel = step.interrupted
+    ? 'Page state when stopped'
+    : step.status === 'failed' ? 'Page state at failure' : 'Page state at step end';
   const endUrlHtml = step.pageUrl ? `<div class="screenshot-url">${escapeHtml(step.pageUrl)}</div>` : '';
   const endScreenshotHtml = step.screenshotBase64
     ? `<div class="screenshot-container step-end-screenshot">
@@ -310,7 +333,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ${sourceSkillBadge}
     ${retryBadge}
     <span class="step-duration">${duration}</span>
-    <span class="badge ${statusClass}">${statusIcon} ${step.status.toUpperCase()}</span>
+    <span class="badge ${statusClass}">${statusIcon} ${statusLabel}</span>
     <span class="step-chevron">▼</span>
   </div>
   <div class="step-body">

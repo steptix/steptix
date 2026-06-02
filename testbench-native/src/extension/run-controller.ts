@@ -56,6 +56,18 @@ export interface ApiClientLike {
    *  skill step" path to refuse before reusing a dead session. When absent
    *  (older fakes) the re-run treats the session as live. */
   isSessionAlive?(sessionId: string): Promise<boolean>;
+  /** Optional (issue 021): the last finalized run's report path + token totals
+   *  (`GET /sessions/:id/last-run`). Polled on STOP to recover what the dropped
+   *  `done` event would have carried. Absent on older clients/fakes → the stop
+   *  path simply skips recovery. Returns null on an older server (404). */
+  getLastRun?(sessionId: string): Promise<LastRunInfoLike | null>;
+}
+
+/** Shape returned by {@link ApiClientLike.getLastRun} (mirrors runner-core). */
+export interface LastRunInfoLike {
+  finalized: boolean;
+  tokens?: { total: number; input: number; output: number };
+  reportPath?: string;
 }
 
 export type ApiClientFactory = (config: { serverUrl: string; apiKey: string }) => ApiClientLike;
@@ -113,6 +125,9 @@ export interface SkillDebugContext {
  */
 export class RunController {
   private active: AbortController | null = null;
+  /** Incremented per run; lets a background post-stop report poll (issue 021)
+   *  detect that a newer run started and skip clobbering its report path. */
+  private runGeneration = 0;
   private lastResolvedEnvPath: string | null = null;
   private configSentForSession = false;
   private pendingPrompt: { resolve: (text: string | null) => void } | null = null;
@@ -129,6 +144,10 @@ export class RunController {
    *  produced no step results or report generation failed; null is the
    *  no-report state. */
   private lastResolvedReportPath: string | null = null;
+  /** Token totals for the most recently finalized run (issue 021). Set from the
+   *  `done` event on a normal run, or recovered via `getLastRun` on STOP (where
+   *  the `done` is dropped). null until a run finalizes. */
+  private lastRunTokensValue: { total: number; input: number; output: number } | null = null;
   /** False until the first runLines call clears any stale server session
    *  for this file. VS Code reloads create a fresh controller but the
    *  server still has the previous session keyed on the file path — left
@@ -238,6 +257,13 @@ export class RunController {
      * a full re-run from the top supersedes a stopped-skill debug session.
      */
     private readonly onFreshRunStart?: () => void,
+    /**
+     * Injectable delay for the post-stop report poll (issue 021). Defaults to a
+     * real timer; tests pass an instant resolver so the poll is deterministic
+     * and not wall-clock-bound.
+     */
+    private readonly pollSleep: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
 
   get isRunning(): boolean {
@@ -250,6 +276,11 @@ export class RunController {
 
   get lastReportPath(): string | null {
     return this.lastResolvedReportPath;
+  }
+
+  /** Token totals for the most recently finalized run (issue 021), or null. */
+  get lastRunTokens(): { total: number; input: number; output: number } | null {
+    return this.lastRunTokensValue;
   }
 
   /** Read-only view of the active frame stack. Empty when execution is in
@@ -691,6 +722,44 @@ export class RunController {
     out.appendLine(`[${ts()}] session closed`);
   }
 
+  /**
+   * After a STOP, poll `GET /sessions/:id/last-run` until the run is finalized,
+   * then record its report path + token totals — the data the dropped `done`
+   * event would have carried (issue 021). Report generation writes HTML + copies
+   * screenshots AFTER the server sees our disconnect, so the path isn't ready on
+   * the first poll; we poll until `finalized` with a ~12s safety ceiling sized to
+   * a heavy report (not a blind short timeout). Tolerant of an older server
+   * (`getLastRun` → null) and transport errors (give up, keep the prior report).
+   * `generation` guards against a newer run having started meanwhile.
+   */
+  private async pollForLastRunAfterStop(
+    client: ApiClientLike,
+    sessionId: string,
+    generation: number,
+  ): Promise<void> {
+    if (typeof client.getLastRun !== 'function') return;
+    // Exponential-ish backoff; sums to ~11.5s across the sleeps.
+    const delays = [50, 100, 200, 400, 800, 1200, 1600, 2000, 2400, 2800];
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      let info: LastRunInfoLike | null;
+      try {
+        info = await client.getLastRun(sessionId);
+      } catch {
+        return; // transport / unauthorized — keep the previous report
+      }
+      if (info === null) return; // older server without the route
+      if (info.finalized) {
+        // Don't clobber a newer run's already-recorded report.
+        if (this.runGeneration === generation) {
+          if (info.reportPath) this.lastResolvedReportPath = info.reportPath;
+          if (info.tokens) this.lastRunTokensValue = info.tokens;
+        }
+        return;
+      }
+      if (attempt < delays.length) await this.pollSleep(delays[attempt]!);
+    }
+  }
+
   async runLines(
     lines: number[],
     options: {
@@ -949,6 +1018,9 @@ export class RunController {
     const client = this.clientFactory({ serverUrl, apiKey });
     const ac = new AbortController();
     this.active = ac;
+    // Monotonic run id — a background post-stop report poll (issue 021) uses it
+    // to avoid clobbering a newer run's report path if one starts meanwhile.
+    const myGeneration = ++this.runGeneration;
     this.pauseRequested = false;
     this.lastStepStartLine = null;
     // Capture so step-control commands (Phase 3) can target the same
@@ -1112,6 +1184,21 @@ export class RunController {
         }
         this.emitRunEvent({ type: 'done', status: 'aborted' });
         log('run aborted by user');
+        // On a real STOP (not a pause — note line is reachable on a pause whose
+        // resumeLine resolved to null), recover the report path + token totals
+        // the dropped `done` event would have carried (issue 021). Fire-and-
+        // forget with the client/session captured into LOCALS now: the `finally`
+        // below nulls this.currentClient/SessionId and flips isRunning false
+        // immediately, so we must not await (that would keep the run "running"
+        // for the whole poll). The generation guard stops a late result from
+        // clobbering a newer run's report.
+        if (!this.pauseRequested) {
+          const c = this.currentClient;
+          const sid = this.currentSessionId;
+          if (c && sid && typeof c.getLastRun === 'function') {
+            void this.pollForLastRunAfterStop(c, sid, myGeneration);
+          }
+        }
         return { ok: true };
       }
       const payload = mapApiErrorToPayload(err, { serverUrl, envPath: envResolution.path });

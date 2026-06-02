@@ -502,6 +502,31 @@ describe('API Server', () => {
     });
   });
 
+  describe('GET /sessions/:id/last-run (issue 021)', () => {
+    it('returns the report path + token totals after a finalized run', async () => {
+      await api('POST', '/sessions/lastrun-1/steps', { steps: ['Click something'] });
+
+      const { status, body } = await api('GET', '/sessions/lastrun-1/last-run');
+
+      expect(status).toBe(200);
+      expect(body.finalized).toBe(true);
+      expect(body.reportPath).toBe('/tmp/fake-report.html'); // from the generateReport mock
+      expect(body.tokens).toMatchObject({
+        total: expect.any(Number),
+        input: expect.any(Number),
+        output: expect.any(Number),
+      });
+    });
+
+    it('returns finalized:false (200, not 404) for a session that never ran', async () => {
+      const { status, body } = await api('GET', '/sessions/never-ran/last-run');
+
+      expect(status).toBe(200);
+      expect(body.finalized).toBe(false);
+      expect(body.reportPath).toBeUndefined();
+    });
+  });
+
   describe('GET /sessions', () => {
     it('returns list of active sessions', async () => {
       // Ensure at least one session exists (from prior tests)

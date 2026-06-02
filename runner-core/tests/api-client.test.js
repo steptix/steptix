@@ -162,3 +162,58 @@ test('isUserAbort: false for non-error values', () => {
   assert.equal(isUserAbort('aborted'), false);
   assert.equal(isUserAbort({ kind: 'aborted' }), false);
 });
+
+// ── getLastRun (issue 021) ───────────────────────────────────────────────
+function jsonResponse(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+test('getLastRun: parses finalized + tokens + reportPath from a 200 body', async () => {
+  let captured;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return jsonResponse({
+      finalized: true,
+      tokens: { total: 30, input: 20, output: 10 },
+      reportPath: '/reports/r.html',
+    });
+  };
+  const client = new ApiClient({ serverUrl: 'http://x:1', apiKey: 'k', fetch: fetchImpl });
+
+  const info = await client.getLastRun('sess-1');
+
+  assert.equal(captured.init.method, 'GET');
+  assert.equal(captured.init.headers['x-api-key'], 'k');
+  assert.match(captured.url, /\/sessions\/sess-1\/last-run$/);
+  assert.deepEqual(info, {
+    finalized: true,
+    tokens: { total: 30, input: 20, output: 10 },
+    reportPath: '/reports/r.html',
+  });
+});
+
+test('getLastRun: returns null on 404 (older server without the route)', async () => {
+  const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => jsonResponse({}, 404) });
+  assert.equal(await client.getLastRun('id'), null);
+});
+
+test('getLastRun: tolerant of a partial/older body — missing fields stay undefined', async () => {
+  const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => jsonResponse({ finalized: false }) });
+  const info = await client.getLastRun('id');
+  assert.equal(info.finalized, false);
+  assert.equal(info.tokens, undefined);
+  assert.equal(info.reportPath, undefined);
+});
+
+test('getLastRun: throws unauthorized on 401', async () => {
+  const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => jsonResponse({}, 401) });
+  await assert.rejects(() => client.getLastRun('id'), (err) => err instanceof ApiClientError && err.kind === 'unauthorized');
+});
+
+test('getLastRun: throws connect-failed on transport error', async () => {
+  const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => { throw new Error('ECONNREFUSED'); } });
+  await assert.rejects(() => client.getLastRun('id'), (err) => err instanceof ApiClientError && err.kind === 'connect-failed');
+});
