@@ -10,11 +10,11 @@
  * Covers (issue 022):
  *   1. STOP cancels a long in-flight wait promptly (abort-aware waits) — the
  *      run halts in seconds, not the ~120s the wait would otherwise run.
- *   2. The AI's timeout hint extends a conditional wait — a "wait up to 30s"
- *      for a never-appearing thing fails at ~30s, not the 10s default.
- *   3. Default preserved — a wait with no "up to N" wording fails at ~10s.
- *   4. Slow success — "wait up to 30s" for an element that appears at ~12s
- *      PASSES (the 10s default would have failed it).
+ *   2. The AI's timeout hint extends a wait — a "wait up to 30s" for a
+ *      never-appearing thing runs ~20s+ longer than the no-hint default,
+ *      measured as a difference (robust to step retries + AI/browser overhead).
+ *   3. Slow success — "wait up to 50s" for an element that appears ~35s after
+ *      load PASSES (the 10s default would have failed it).
  *
  * IMPORTANT: the live server runs the BUILT dist/, so rebuild (`npm run build`
  * at repo root) and restart the server before running, or these assertions test
@@ -54,7 +54,11 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
   throw new Error(`timeout waiting for: ${label}`);
 }
 
-/** Page whose #delayed / "Ready now" element appears only after ~12s. */
+/** Delay (ms) before the fixture page adds its "Ready now" element. Long enough
+ *  that it reliably appears AFTER the wait step starts (navigate + AI overhead
+ *  can eat ~10s) and well past the 10s default — so a successful wait proves the
+ *  timeout hint extended it. */
+const FIXTURE_DELAY_MS = 35000;
 const FIXTURE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Wait Fixture</title></head>
 <body><h1>Wait fixture</h1><button id="go">Go</button>
 <script>
@@ -63,7 +67,7 @@ const FIXTURE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Wa
     d.id = 'delayed';
     d.textContent = 'Ready now';
     document.body.appendChild(d);
-  }, 12000);
+  }, ${FIXTURE_DELAY_MS});
 </script>
 </body></html>`;
 
@@ -205,44 +209,48 @@ describe('TestBench live wait timeout-hint + abort-aware waits (issue 022)', fun
     }
   });
 
-  // ── Scenario 2 — the timeout hint extends a conditional wait ──────────
-  it('honours an AI timeout hint: "wait up to 30s" for a never-appearing thing fails at ~30s, not 10s', async () => {
-    const { uri, waitLine } = writeFixture(
+  // ── Scenarios 2+3 — the hint makes a wait run far longer than the default ──
+  // Compared as a DIFFERENCE, which is robust to two confounds an absolute
+  // threshold can't survive: (a) a failed wait step RETRIES (server default
+  // retries:1), doubling BOTH durations; (b) navigate + AI overhead. Both cancel
+  // in `hint - default`, so a "30s" hint must add ~20s+ (×retry) of real waiting
+  // over the ~10s default before the never-satisfied condition fails.
+  it('the timeout hint makes a wait run far longer than the no-hint default', async () => {
+    const d = writeFixture(
+      'wait-default',
+      'Wait for an element matching the CSS selector #never-appears-default to become visible',
+    );
+    const dflt = await timeWaitStep(d.uri, d.waitLine);
+    console.log(`[live] default (no hint) wait ran ${dflt.waitMs}ms, status=${dflt.status}`);
+    assert.equal(dflt.status, 'fail', 'the never-appearing selector must fail the step');
+
+    const h = writeFixture(
       'wait-hint',
       "Wait up to 30 seconds for the text 'NeverShowsUpOnThisPage' to appear",
     );
-    const { waitMs, status } = await timeWaitStep(uri, waitLine);
-    console.log(`[live] hinted wait ran ${waitMs}ms, status=${status}`);
+    const hint = await timeWaitStep(h.uri, h.waitLine);
+    console.log(`[live] hinted (30s) wait ran ${hint.waitMs}ms, status=${hint.status}`);
+    assert.equal(hint.status, 'fail', 'the never-appearing text must fail the step');
 
-    assert.equal(status, 'fail', 'the never-appearing condition must fail the step');
-    assert.ok(waitMs > 22_000, `wait ran only ${waitMs}ms — the 30s timeout hint was not honoured (default 10s?)`);
-    assert.ok(waitMs < 70_000, `wait ran ${waitMs}ms — unexpectedly long (cap/regression?)`);
-  });
-
-  // ── Scenario 3 — default preserved (no hint → ~10s) ───────────────────
-  it('preserves the 10s default when the step gives no "up to N" wording', async () => {
-    const { uri, waitLine } = writeFixture(
-      'wait-default',
-      "Wait for an element matching the CSS selector #never-appears-default to become visible",
+    const added = hint.waitMs - dflt.waitMs;
+    assert.ok(
+      added > 15_000,
+      `the 30s hint added only ${added}ms over the default (hint=${hint.waitMs}, default=${dflt.waitMs}) — ` +
+        `the timeout hint was not honoured`,
     );
-    const { waitMs, status } = await timeWaitStep(uri, waitLine);
-    console.log(`[live] default wait ran ${waitMs}ms, status=${status}`);
-
-    assert.equal(status, 'fail', 'the never-appearing selector must fail the step');
-    assert.ok(waitMs < 22_000, `wait ran ${waitMs}ms — expected ~10s default (was the hint set without "up to N"?)`);
   });
 
   // ── Scenario 4 — slow success past the 10s default ────────────────────
-  it('lets a hinted wait SUCCEED on an element that appears at ~12s (the 10s default would fail)', async () => {
+  it('lets a hinted wait SUCCEED on an element that appears at ~35s (the 10s default would fail)', async () => {
     const { uri, waitLine } = writeFixture(
       'wait-slow-success',
-      "Wait up to 30 seconds for the text 'Ready now' to appear",
+      'Wait up to 50 seconds for an element matching the CSS selector #delayed to become visible',
     );
     const { waitMs, status } = await timeWaitStep(uri, waitLine);
     console.log(`[live] slow-success wait ran ${waitMs}ms, status=${status}`);
 
     assert.ok(status === 'pass' || status === 'pass-cached', `expected the wait to succeed once the element appears (got ${status})`);
-    assert.ok(waitMs > 10_000, `wait resolved in ${waitMs}ms — element appears at ~12s, so a pass under 10s is suspicious`);
-    assert.ok(waitMs < 30_000, `wait took ${waitMs}ms — longer than expected`);
+    assert.ok(waitMs > 12_000, `wait resolved in ${waitMs}ms — element appears ~35s after load, so a pass this fast means it didn't wait past the 10s default`);
+    assert.ok(waitMs < 50_000, `wait took ${waitMs}ms — longer than expected`);
   });
 });

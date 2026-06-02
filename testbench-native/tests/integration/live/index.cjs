@@ -17,6 +17,14 @@ async function run() {
     timeout: 240_000, // 4 min — browser launch + multiple AI-driven steps
   });
 
+  // Optional scope: TESTBENCH_LIVE_GREP restricts the run to suites/tests
+  // whose title matches (Mocha --grep). Useful for running one live test
+  // (e.g. just the wait-timeout scenarios) without the others that need
+  // GitHub creds. Unset → run all live tests.
+  if (process.env.TESTBENCH_LIVE_GREP) {
+    mocha.grep(process.env.TESTBENCH_LIVE_GREP);
+  }
+
   const testsRoot = __dirname;
   const files = await glob('**/*.test.cjs', { cwd: testsRoot });
   for (const f of files) mocha.addFile(path.resolve(testsRoot, f));
