@@ -89,6 +89,7 @@ export async function executeAction(
   page: Page,
   action: AIAction,
   baseUrl?: string,
+  signal?: AbortSignal,
 ): Promise<ActionExecutionResult> {
   logger.subAction(action.description);
 
@@ -159,7 +160,7 @@ export async function executeAction(
         break;
 
       case 'wait':
-        await executeWait(page, root, eff);
+        await executeWait(page, root, eff, signal);
         break;
 
       case 'scroll':
@@ -231,6 +232,15 @@ export async function executeAction(
 
     return { success: true };
   } catch (err) {
+    // A run abort (issue 022) must propagate as a throw, not be swallowed into a
+    // failed-action result — the step loop / withRetry recognise it and end the
+    // run as `aborted` (issue 020), instead of recording a spurious failed
+    // action. `executeWait`'s abort race throws an AbortError; any other error
+    // raised while the run is already aborting is likewise an abort artifact.
+    if (signal?.aborted) {
+      throw err;
+    }
+
     const errorMessage = err instanceof Error ? err.message : String(err);
     logger.error(`Action failed [${eff.action}]: ${errorMessage}`);
 
@@ -404,11 +414,78 @@ export function sanitizeCssSelector(selector: string): string {
   return sanitized;
 }
 
-async function executeWait(page: Page, root: Page | FrameLocator, action: AIAction): Promise<void> {
+/** Default wait timeout when the AI gives no `timeout` hint. */
+export const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
+/** Upper bound on an AI-supplied wait `timeout` hint (issue 022) — guards
+ *  against a hallucinated huge value. Generous (10 min) because waits are now
+ *  abort-aware (`withAbort`): a STOP cancels an in-flight wait immediately, so a
+ *  long cap no longer hurts stop responsiveness. A genuinely stuck wait the user
+ *  doesn't stop is still bounded by the overall test timeout. */
+export const MAX_WAIT_TIMEOUT_MS = 600_000;
+
+/**
+ * Resolve the effective wait timeout from the AI's optional `timeout` hint
+ * (issue 022). A valid positive hint is honoured up to {@link MAX_WAIT_TIMEOUT_MS};
+ * anything missing/non-finite/non-positive falls back to
+ * {@link DEFAULT_WAIT_TIMEOUT_MS}. The plumbing already carries `action.timeout`
+ * end-to-end (AI → parser → here); this just bounds it.
+ */
+export function clampWaitTimeout(hint: number | undefined): number {
+  if (typeof hint !== 'number' || !Number.isFinite(hint) || hint <= 0) {
+    return DEFAULT_WAIT_TIMEOUT_MS;
+  }
+  return Math.min(hint, MAX_WAIT_TIMEOUT_MS);
+}
+
+/**
+ * Race `work` against the run's abort signal (issue 022). A run abort does NOT
+ * cancel an in-flight Playwright wait, so a STOP would otherwise be delayed until
+ * the wait runs out its own timeout (the residual issue 020 documented). Racing
+ * it makes STOP near-instant: when the signal fires we reject with an AbortError
+ * immediately and let the orphaned Playwright promise settle on its own (its
+ * eventual resolve/reject is swallowed — harmless). The `abort` listener is
+ * removed on settle so it can't accumulate on the long-lived run signal.
+ *
+ * The thrown AbortError propagates as the same kind of mid-step abort issue 020
+ * already handles (turn-loop catch → withRetry no-retry → executeStep returns an
+ * aborted result → run reported `aborted`).
+ */
+export function withAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    void work.catch(() => undefined);
+    return Promise.reject(new DOMException('Run aborted by client', 'AbortError'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      void work.catch(() => undefined);
+      reject(new DOMException('Run aborted by client', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (err) => { signal.removeEventListener('abort', onAbort); reject(err); },
+    );
+  });
+}
+
+// Exported for unit tests (issue 022) — verifies the clamped `timeout` is the
+// value actually forwarded into Playwright's wait calls. Not part of the public
+// API; `executeAction` is the entry point in normal use.
+export async function executeWait(
+  page: Page,
+  root: Page | FrameLocator,
+  action: AIAction,
+  signal?: AbortSignal,
+): Promise<void> {
   const condition = action.condition ?? action.value ?? '';
-  const timeout = action.timeout ?? 10_000;
+  const timeout = clampWaitTimeout(action.timeout);
   const waitType = action.waitType ?? inferWaitType(condition);
 
+  // Run the wait, but race it against the run's abort signal so a STOP ends an
+  // in-flight wait immediately rather than waiting out its (possibly long)
+  // timeout. See `withAbort` / issue 022.
+  const runWait = async (): Promise<void> => {
   switch (waitType) {
     case 'duration': {
       const durationMs = parseDuration(condition);
@@ -552,6 +629,9 @@ async function executeWait(page: Page, root: Page | FrameLocator, action: AIActi
       );
       break;
   }
+  };
+
+  await withAbort(runWait(), signal);
 }
 
 /**

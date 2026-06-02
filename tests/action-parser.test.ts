@@ -249,3 +249,25 @@ describe('parseAIResponse — expand action', () => {
     expect(result.needs_reeval).toBe(true);
   });
 });
+
+describe('parseAIResponse — wait timeout hint (issue 022)', () => {
+  it('preserves a numeric timeout on a wait action', () => {
+    const raw = JSON.stringify({
+      actions: [{ action: 'wait', waitType: 'url', condition: '**/newurl', timeout: 90000, description: 'Wait up to 90s for /newurl' }],
+      reasoning: 'Slow navigation.',
+      needs_reeval: false,
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]?.action).toBe('wait');
+    expect(result.actions[0]?.timeout).toBe(90000);
+  });
+
+  it('drops a non-numeric timeout (e.g. a string)', () => {
+    const raw = JSON.stringify({
+      actions: [{ action: 'wait', waitType: 'url', condition: '**/x', timeout: '90s', description: 'bad timeout' }],
+      reasoning: 'r',
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]?.timeout).toBeUndefined();
+  });
+});

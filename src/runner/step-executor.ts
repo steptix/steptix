@@ -1234,7 +1234,7 @@ async function executeStepAttempt(
         : undefined;
 
       const result = await traceOp(`action.${action.action}: ${action.description}`, () =>
-        executeAction(page, action, baseUrl),
+        executeAction(page, action, baseUrl, opts.signal),
       );
       const subDuration = Date.now() - subStartTime;
 
