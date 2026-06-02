@@ -24,6 +24,16 @@ const closeBrowserMock = vi.fn();
 vi.mock('../src/browser/manager.js', () => ({
   launchBrowser: (...args: unknown[]) => launchBrowserMock(...args),
   closeBrowser: (...args: unknown[]) => closeBrowserMock(...args),
+  // Video recording: 'off' so the runner takes no recording path. The runner
+  // now routes teardown through finalizeMainPageVideo, so the mock must still
+  // invoke `closeContext` — that's what fires closeBrowserMock (via the tracker
+  // stub's closeAll, or closeBrowser for CDP), preserving the prior teardown
+  // the tests assert on.
+  resolveVideoMode: () => 'off',
+  finalizeMainPageVideo: async (args: { closeContext: () => Promise<void> }) => {
+    await args.closeContext();
+    return undefined;
+  },
   // Minimal BrowserTracker stub: tracks the initial session, returns it
   // as active, and closeAll is a no-op (the test relies on closeBrowserMock
   // being called for non-CDP teardown — but the multi-browser branch uses
@@ -86,6 +96,9 @@ vi.mock('../src/utils/run-log.js', () => ({
 vi.mock('../src/report/generator.js', () => ({
   generateReport: vi.fn().mockResolvedValue(''),
   getPrimaryModel: () => undefined,
+  // Used by the runner's teardown to name the session video; a stub base name
+  // is fine since video is mocked 'off' (no .webm is actually produced here).
+  buildReportBaseName: (report: { testName: string }) => report.testName,
 }));
 
 vi.mock('../src/report/history-appender.js', () => ({

@@ -7,7 +7,7 @@ import type { ParsedTest, TestConfig, TestInstance } from '../parser/types.js';
 import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
-import { launchBrowser, closeBrowser, BrowserTracker, type CdpLaunchOptions } from '../browser/manager.js';
+import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type CdpLaunchOptions } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
@@ -15,7 +15,7 @@ import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
-import { generateReport, getPrimaryModel } from '../report/generator.js';
+import { generateReport, getPrimaryModel, buildReportBaseName } from '../report/generator.js';
 import { appendRunHistory } from '../report/history-appender.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { diagnoseFailure } from '../ai/diagnose.js';
@@ -182,7 +182,12 @@ export async function runTest(
     : () => {};
 
   const cdpOptions = parseCdpOptionsFromTestConfig(test.config);
-  const initialSession = await launchBrowser(config.browser, cdpOptions);
+  // Video recording (Tier 1 — main page only). Resolve the mode once and pass
+  // the absolute videos/ dir so launchBrowser attaches recordVideo on the
+  // non-CDP path; the .webm is finalised + named in the `finally` below.
+  const videoMode = resolveVideoMode(config.browser.video);
+  const videoDir = path.resolve(config.reports.outputDir, 'videos');
+  const initialSession = await launchBrowser(config.browser, cdpOptions, { videoDir });
   const browserTracker = new BrowserTracker(initialSession);
   // `session` is a *snapshot* of the current active browser — re-read from
   // the tracker before/after each step so openBrowser/switchBrowser actions
@@ -201,6 +206,13 @@ export async function runTest(
     logger.error(`Failed to load tool catalogue: ${(err as Error).message}`);
     throw err;
   }
+
+  // Hoisted so the `finally` can read the run outcome + mutate the report after
+  // the browser is closed (to attach `videoRelPath`). `report` is assigned the
+  // SAME object that's returned, so the in-`finally` mutation is visible to the
+  // `return report` in the `try` (try/return/finally same-object semantics).
+  let report: TestReport | undefined;
+  let overallStatus: 'passed' | 'failed' = 'failed';
 
   try {
     // Navigate to base URL if provided
@@ -788,13 +800,13 @@ export async function runTest(
     const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
     const timedOut = stepResults.length < test.steps.length && !bail;
-    const overallStatus = failedSteps > 0 || timedOut ? 'failed' : 'passed';
+    overallStatus = failedSteps > 0 || timedOut ? 'failed' : 'passed';
 
     logger.testEnd(test.title, overallStatus === 'passed', durationMs);
     logger.info(`Tokens used: ${tokenTracker.getSummary()}`);
 
     const dataRowVal = dataRowIndex !== undefined ? dataRowIndex + 1 : undefined;
-    const report: TestReport = {
+    report = {
       testName: test.title,
       filePath: test.filePath,
       tags: test.frontmatter.tags,
@@ -837,10 +849,42 @@ export async function runTest(
     // single-browser path (no openBrowser ever called), this is just the
     // initial session — same teardown as before. CDP sessions are handled
     // specially by closeBrowser; non-CDP sessions go through tracker.
-    if (initialSession.cdp) {
-      await closeBrowser(initialSession);
+    //
+    // Video recording finalises on context close (Playwright writes the .webm
+    // there), so the close is routed through finalizeMainPageVideo: it grabs
+    // the main page's video handle, closes the browser(s), then saves/renames
+    // (or, for retain-on-failure on a pass, deletes) the file. The resulting
+    // relative path is written back onto the hoisted `report` so the
+    // already-`return`ed object carries `videoRelPath` (try/return/finally
+    // same-object mutation). Recording failures never break teardown.
+    const closeContext = async (): Promise<void> => {
+      if (initialSession.cdp) {
+        await closeBrowser(initialSession);
+      } else {
+        await browserTracker.closeAll();
+      }
+    };
+    if (report) {
+      const savedAbs = await finalizeMainPageVideo({
+        page: initialSession.page,
+        mode: videoMode,
+        passed: overallStatus === 'passed',
+        videoDir,
+        stableBaseName: buildReportBaseName(report),
+        closeContext,
+      });
+      if (savedAbs) {
+        // POSIX-style relative path so the report's <video src> resolves in a
+        // browser regardless of host OS (Windows backslashes don't).
+        report.videoRelPath = path
+          .relative(config.reports.outputDir, savedAbs)
+          .split(path.sep)
+          .join('/');
+      }
     } else {
-      await browserTracker.closeAll();
+      // No report was assembled (early throw before report construction) —
+      // still close the browser(s) so nothing leaks.
+      await closeContext();
     }
     removeFileBridges();
     setLogLevel(previousLevel);

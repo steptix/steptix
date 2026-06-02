@@ -877,6 +877,9 @@ async function executeStepAttempt(
             if (action.engine) overrides.engine = action.engine;
             if (action.channel) overrides.channel = action.channel;
             if (action.headed !== undefined) overrides.headed = action.headed;
+            // No `videoDir`: Tier 1 video records only the MAIN page. Omitting it
+            // keeps secondary `openBrowser` contexts from writing stray .webm
+            // files into videos/ (the report links the main page's video only).
             const newSession = await launchBrowser(config.browser, undefined, overrides);
             opts.browserTracker.add(action.browserLabel, newSession);
             // Active session changed — refresh local `page` so the rest of

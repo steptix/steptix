@@ -96,6 +96,18 @@ export interface BrowserConfig {
    *  per turn regardless of this flag — the AI needs them in its request.
    *  Default true. */
   captureScreenshotsPerAction?: boolean | undefined;
+  /** Record a `.webm` video of the browser session, surfaced as a `<video>`
+   *  link in the HTML report. Tri-state, matching Playwright's own `video`
+   *  vocabulary:
+   *    - `'off'` (default): record nothing.
+   *    - `'on'`: record every run and keep the file.
+   *    - `'retain-on-failure'`: record every run but delete the file on a
+   *      passing run, keeping it only for failed/aborted runs.
+   *  Boolean `true`/`false` are accepted as sugar for `'on'`/`'off'`.
+   *  The `| boolean` arm is REQUIRED so the generated JSON schema (built from
+   *  `UserConfig`) accepts `"video": true/false` instead of enum-rejecting it.
+   *  Default 'off'. */
+  video?: 'off' | 'on' | 'retain-on-failure' | boolean | undefined;
 }
 
 export interface TestsConfig {

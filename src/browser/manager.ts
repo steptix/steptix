@@ -1,8 +1,41 @@
+import path from 'node:path';
 import { chromium, firefox, webkit, type Browser, type BrowserContext, type Page } from 'playwright';
 import { chromium as stealthChromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
 import { logger } from '../utils/logger.js';
+
+/**
+ * Resolved video-recording mode. The user-facing config (`BrowserConfig.video`)
+ * also admits booleans as sugar; `resolveVideoMode` normalises to these three
+ * canonical strings so every consumer (launch + teardown) sees one shape.
+ */
+export type VideoMode = 'off' | 'on' | 'retain-on-failure';
+
+/**
+ * Normalise `BrowserConfig.video` (tri-state string OR boolean sugar) to a
+ * canonical `VideoMode`. Pure + exported so the coercion is unit-testable
+ * without launching a browser, and so it is applied at exactly one
+ * consumption point rather than smeared across the config loader.
+ *   - `true`  → `'on'`
+ *   - `false` / `undefined` → `'off'` (the latter defends synthesized
+ *     BrowserConfigs — CDP, tests — that skip `DEFAULT_CONFIG`)
+ *   - any of the three strings passes through unchanged.
+ */
+export function resolveVideoMode(v: BrowserConfig['video']): VideoMode {
+  if (v === true) return 'on';
+  if (v === false || v === undefined) return 'off';
+  if (v === 'off' || v === 'on' || v === 'retain-on-failure') return v;
+  // Runtime guard: the loader is a plain deep-merge with no per-field
+  // validation, so a hand-edited config can carry a value the TS type / JSON
+  // schema would reject — e.g. a typo'd "retain-on-faliure". Fail safe to
+  // 'off' rather than silently record-and-keep on an unrecognised string.
+  logger.warn(
+    `Unknown browser.video value ${JSON.stringify(v as unknown)} — recording disabled ` +
+      `(expected "off" | "on" | "retain-on-failure", or true/false)`,
+  );
+  return 'off';
+}
 
 // Apply stealth plugin to avoid bot detection. Gated per-run via
 // BrowserConfig.stealth so sites incompatible with stealth's monkey-patching
@@ -743,6 +776,12 @@ export interface LaunchOverrides {
    *  `chrome-beta`, `chrome-dev`, `msedge-beta`, `msedge-dev`). */
   channel?: string;
   headed?: boolean;
+  /** Absolute `<reports.outputDir>/videos` directory. When set AND
+   *  `config.video` resolves to a non-`'off'` mode, the new context is created
+   *  with Playwright's `recordVideo: { dir }`. Threaded here (rather than as a
+   *  positional param) because `overrides` already carries per-launch context
+   *  not present in the shared `BrowserConfig`. */
+  videoDir?: string;
 }
 
 /**
@@ -807,6 +846,13 @@ export async function launchBrowser(
     }
   }
 
+  // Record video into `<outputDir>/videos` when the caller threaded a videoDir
+  // AND the resolved mode isn't 'off'. Playwright records the whole context at
+  // the viewport/window size (headed mode uses `viewport: null` → real window
+  // size); the .webm is finalised on context close. The CDP path short-circuits
+  // above before reaching newContext, so recording is never attached to an
+  // attached browser (Playwright can't record those).
+  const videoMode = resolveVideoMode(config.video);
   const context = await browser.newContext({
     viewport: headed ? null : config.viewport,
     // Accept all permissions by default
@@ -820,6 +866,9 @@ export async function launchBrowser(
       'Accept-Language': 'en-AU,en;q=0.9',
     },
     bypassCSP: config.bypassCSP === true,
+    ...(videoMode !== 'off' && overrides?.videoDir
+      ? { recordVideo: { dir: overrides.videoDir } }
+      : {}),
   });
 
   const page = await context.newPage();
@@ -936,12 +985,27 @@ async function connectOverCdpSession(
   };
 }
 
-function warnOnIncompatibleConfigForCdp(config: BrowserConfig): void {
+/**
+ * List the `browser` config values that CDP mode silently ignores (the user's
+ * running Chrome controls them, or — for `video` — Playwright cannot record a
+ * browser it attached to rather than launched). Pure + exported so the list is
+ * unit-testable without a real CDP connection.
+ */
+export function incompatibleCdpConfig(config: BrowserConfig): string[] {
   const ignored: string[] = [];
   if (config.headed === false) ignored.push('headed=false (headless)');
   if (config.stealth === true) ignored.push('stealth=true');
   if (config.bypassCSP === true) ignored.push('bypassCSP=true');
   if (config.slowMo && config.slowMo > 0) ignored.push(`slowMo=${config.slowMo}`);
+  // CDP attaches to a browser the harness didn't create; Playwright only
+  // records contexts it launched, so video can't be captured under CDP.
+  const videoMode = resolveVideoMode(config.video);
+  if (videoMode !== 'off') ignored.push(`video=${videoMode}`);
+  return ignored;
+}
+
+function warnOnIncompatibleConfigForCdp(config: BrowserConfig): void {
+  const ignored = incompatibleCdpConfig(config);
   if (ignored.length > 0) {
     logger.warn(
       `CDP mode ignores these browser config values (the user's running Chrome ` +
@@ -971,6 +1035,79 @@ export async function closeBrowser(session: BrowserSession): Promise<void> {
     logger.debug('Browser session closed');
   } catch (err) {
     logger.warn(`Error closing browser: ${String(err)}`);
+  }
+}
+
+export interface FinalizeMainPageVideoArgs {
+  /** The MAIN page — its `video()` handle must be grabbed BEFORE the context
+   *  is closed, so pass the page itself and let this helper read it. */
+  page: Page;
+  /** Resolved recording mode. */
+  mode: VideoMode;
+  /** Run's overall outcome: `true` = passed, `false` = failed/aborted. Drives
+   *  the `retain-on-failure` deletion. */
+  passed: boolean;
+  /** Absolute `<reports.outputDir>/videos` directory the .webm was recorded into. */
+  videoDir: string;
+  /** Stable, report-matching base name (no extension), e.g.
+   *  `<timestamp>-<safeTestName>` — produced by `buildReportBaseName` so the
+   *  .webm sits beside its .html. */
+  stableBaseName: string;
+  /** Closes the context/browser(s); awaited here so Playwright finalises the
+   *  .webm on disk before we rename/delete it. */
+  closeContext: () => Promise<void>;
+}
+
+/**
+ * Finalise the MAIN page's session video after a run.
+ *
+ * Sequence (the order matters — Playwright only writes the .webm on context
+ * close, and `page.video()` must be read while the page is still alive):
+ *   1. Grab the `Video` handle from the page (before closing).
+ *   2. Close the context/browser(s) — this finalises the .webm (random-hash
+ *      name) inside `videoDir`.
+ *   3. No video handle → nothing was recorded → return undefined.
+ *   4. `retain-on-failure` + passed → delete the .webm and return undefined
+ *      (deleting BEFORE any saveAs avoids leaking a copy).
+ *   5. Otherwise `saveAs` to the stable name (waits for finalisation; works
+ *      cross-device; unlike `path()` it does not throw under remote/CDP — though
+ *      CDP never records), then delete the original hash-named file so `videos/`
+ *      holds one file per kept run.
+ *
+ * Returns the ABSOLUTE saved path, or undefined when nothing was kept. Every
+ * failure is non-fatal (logged) — recording must never break a run, mirroring
+ * the report-generation posture.
+ */
+export async function finalizeMainPageVideo(
+  args: FinalizeMainPageVideoArgs,
+): Promise<string | undefined> {
+  // Grab the handle BEFORE closing — page.video() is only non-null when the
+  // context was created with recordVideo, and reading it post-close is unsafe.
+  const video = args.mode === 'off' ? null : args.page.video();
+
+  // Finalises the .webm on disk (under videoDir, random-hash name).
+  await args.closeContext();
+
+  if (!video) return undefined;
+
+  // retain-on-failure on a PASSING run: drop the recording, no report link.
+  if (args.mode === 'retain-on-failure' && args.passed) {
+    await video.delete().catch(() => { /* non-fatal */ });
+    return undefined;
+  }
+
+  const target = path.join(args.videoDir, `${args.stableBaseName}.webm`);
+  try {
+    // saveAs waits until the page is closed and the video fully saved, then
+    // copies the finalised file to the stable, report-matching name.
+    await video.saveAs(target);
+    // saveAs leaves the original hash-named file behind; remove it so videoDir
+    // holds exactly one stable-named file per kept run.
+    await video.delete().catch(() => { /* non-fatal */ });
+    return target;
+  } catch (err) {
+    logger.warn(`Failed to save session video to ${target}: ${String(err)}`);
+    return undefined;
   }
 }
 

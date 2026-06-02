@@ -27,7 +27,13 @@ export async function generateReport(
   return filePath;
 }
 
-function buildFileName(report: TestReport): string {
+/**
+ * Build the stable base name (no extension) shared by a run's report HTML and
+ * its session video: `<timestamp>-<safeTestName>[-row<n>]`. Exported so the
+ * teardown paths can name the `.webm` to match the `.html` (so the report's
+ * relative `<video src>` resolves to a sibling file).
+ */
+export function buildReportBaseName(report: TestReport): string {
   const timestamp = new Date(report.date)
     .toISOString()
     .replace(/[:.]/g, '-')
@@ -41,10 +47,15 @@ function buildFileName(report: TestReport): string {
     .substring(0, 60);
 
   const rowSuffix = report.dataRow !== undefined ? `-row${report.dataRow}` : '';
-  return `${timestamp}-${safeName}${rowSuffix}.html`;
+  return `${timestamp}-${safeName}${rowSuffix}`;
 }
 
-function renderReport(report: TestReport): string {
+function buildFileName(report: TestReport): string {
+  return `${buildReportBaseName(report)}.html`;
+}
+
+/** Render a TestReport to its full HTML string. Exported for unit-test use. */
+export function renderReport(report: TestReport): string {
   const template = Handlebars.compile(getReportTemplate());
 
   const status = report.status;
@@ -84,6 +95,7 @@ function renderReport(report: TestReport): string {
     baseUrl: report.baseUrl,
     filePath: report.filePath,
     dataRow: report.dataRow,
+    videoRelPath: report.videoRelPath,
     tags: report.tags,
     totalSteps: report.totalSteps,
     passedSteps: report.passedSteps,

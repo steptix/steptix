@@ -25,6 +25,7 @@ export const DEFAULT_CONFIG: Config = {
     maxIframeDepth: 5,
     domSnapshotCharLimit: 300_000,
     captureScreenshotsPerAction: false,
+    video: 'off',
     domNoiseReduction: {
       collapseRepetitiveDom: true,
       compactSvg: true,

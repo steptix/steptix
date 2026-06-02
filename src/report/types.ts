@@ -219,6 +219,11 @@ export interface TestReport {
    *  "FAILED" banner with an amber "ABORTED" state. `status` itself stays a
    *  valid `StepStatus` so older report consumers still parse the file. */
   aborted?: boolean;
+  /** Path to the session `.webm` RELATIVE to the report HTML (e.g.
+   *  `videos/<timestamp>-<test>.webm`). Set only when video recording kept this
+   *  run (mode 'on', or 'retain-on-failure' on a failed/aborted run). Drives the
+   *  `<video>` block in the report template; file-linked, not embedded. */
+  videoRelPath?: string;
 }
 
 /** Summary across all test runs in a session */

@@ -1,4 +1,4 @@
-import { basename, dirname, join as pathJoin } from 'node:path';
+import { basename, dirname, join as pathJoin, relative as pathRelative, sep } from 'node:path';
 import { stat } from 'node:fs/promises';
 import { StepCache, frameScopedStepKey } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
@@ -8,7 +8,15 @@ import type { Config } from '../config/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
-import { launchBrowser, BrowserTracker, type BrowserSession } from '../browser/manager.js';
+import type { Page } from 'playwright';
+import {
+  launchBrowser,
+  BrowserTracker,
+  resolveVideoMode,
+  finalizeMainPageVideo,
+  type BrowserSession,
+  type VideoMode,
+} from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
@@ -25,7 +33,7 @@ import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { parseTimeoutMs } from '../runner/test-runner.js';
-import { generateReport } from '../report/generator.js';
+import { generateReport, buildReportBaseName } from '../report/generator.js';
 import {
   logger,
   addLogCallback,
@@ -332,6 +340,31 @@ interface ManagedSession {
    *  added by `openBrowser`. Closing the session calls `closeAll()` so no
    *  named browser leaks. */
   browserTracker: BrowserTracker;
+  /** The MAIN page captured at session creation — needed to read its
+   *  `video()` handle at closeSession time, since the active page may have
+   *  shifted via openBrowser/switchBrowser. Tier 1 records the main page only. */
+  mainPage: Page;
+  /** Resolved video-recording mode for this session (from `config.browser.video`). */
+  videoMode: VideoMode;
+  /** Absolute `<reports.outputDir>/videos` directory the .webm records into. */
+  videoDir: string;
+  /**
+   * Set at run-end report assembly when video recording is active. Because a
+   * server session is REUSABLE (the browser context is NOT closed at run end —
+   * only at closeSession), the .webm can't be finalised yet (`saveAs` would
+   * hang waiting for the page to close). So we retain the assembled report +
+   * its path here and finalise the video — then re-render the report with
+   * `videoRelPath` set — when the session is later closed. Last run wins.
+   */
+  pendingVideo?: {
+    /** The assembled report, re-rendered with `videoRelPath` once the .webm
+     *  is finalised. */
+    report: TestReport;
+    /** Absolute path of the already-written report HTML (overwritten in place). */
+    reportPath: string;
+    /** Run outcome — drives retain-on-failure deletion. */
+    passed: boolean;
+  };
   status: 'active' | 'executing' | 'closed';
   sessionConfig: { baseUrl?: string; timeout?: string };
   configSet: boolean;
@@ -945,11 +978,42 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
+    // closeAll covers every browser the tracker owns — the initial one plus
+    // any added by openBrowser. Closing only browserSession would leak named
+    // browsers from multi-browser tests.
+    const closeContext = (): Promise<void> => session.browserTracker.closeAll();
+
     try {
-      // closeAll covers every browser the tracker owns — the initial one
-      // plus any added by openBrowser. Closing only browserSession would
-      // leak named browsers from multi-browser tests.
-      await session.browserTracker.closeAll();
+      if (session.pendingVideo) {
+        // Finalise the most recent run's video. finalizeMainPageVideo closes
+        // the context (writing the .webm), then saves/renames it — or, for
+        // retain-on-failure on a passing run, deletes it. On a kept file we
+        // re-render that run's report HTML with `videoRelPath` set, overwriting
+        // the file in place so "Open Last Report" then shows the <video>.
+        const pending = session.pendingVideo;
+        const savedAbs = await finalizeMainPageVideo({
+          page: session.mainPage,
+          mode: session.videoMode,
+          passed: pending.passed,
+          videoDir: session.videoDir,
+          stableBaseName: buildReportBaseName(pending.report),
+          closeContext,
+        });
+        if (savedAbs) {
+          try {
+            // POSIX-style relative path so <video src> resolves cross-OS.
+            pending.report.videoRelPath = pathRelative(this.config.reports.outputDir, savedAbs)
+              .split(sep)
+              .join('/');
+            await generateReport(pending.report, this.config.reports.outputDir);
+            logger.info(`Report re-rendered with session video: ${pending.reportPath}`);
+          } catch (err) {
+            logger.warn(`Failed to attach session video to report for "${sessionId}": ${String(err)}`);
+          }
+        }
+      } else {
+        await closeContext();
+      }
     } catch {
       // Best effort
     }
@@ -982,7 +1046,11 @@ export class SessionManager {
     // never mutated; concurrent sessions stay isolated.
     const aiConfig = applyEnvToAiConfig(this.config.ai, envOverrides);
 
-    const browserSession = await launchBrowser(this.config.browser, sessionConfig?.cdp);
+    // Video recording (Tier 1 — main page only). Thread the videos/ dir so the
+    // launched context records when `config.browser.video` isn't 'off'. Under
+    // CDP launchBrowser short-circuits before newContext, so nothing records.
+    const videoDir = pathJoin(this.config.reports.outputDir, 'videos');
+    const browserSession = await launchBrowser(this.config.browser, sessionConfig?.cdp, { videoDir });
     const browserTracker = new BrowserTracker(browserSession);
     const tokenTracker = new TokenTracker();
     const aiClient = new AiClient(aiConfig, tokenTracker);
@@ -1007,6 +1075,9 @@ export class SessionManager {
       id: sessionId,
       browserSession,
       browserTracker,
+      mainPage: browserSession.page,
+      videoMode: resolveVideoMode(this.config.browser.video),
+      videoDir,
       status: 'active',
       sessionConfig: sessionConfig ?? {},
       configSet: sessionConfig !== undefined,
@@ -2569,6 +2640,24 @@ export class SessionManager {
         };
         reportPath = await generateReport(report, this.config.reports.outputDir);
         logger.info(`Report saved: ${reportPath}`);
+
+        // Video (Tier 1 server limitation): a reusable session keeps its
+        // browser context open between runs, so the .webm can't be finalised
+        // now (saveAs would hang awaiting page close). Retain the report +
+        // path; finalizeMainPageVideo runs at closeSession, then re-renders
+        // this report with `videoRelPath` set. Net effect: the video link
+        // materialises only when the session is CLOSED — an explicit session
+        // DELETE or server shutdown, NOT at the end of each run and NOT on a
+        // plain re-run (which reuses the open context and overwrites this
+        // pendingVideo; the single context-spanning recording follows the
+        // last run — see caveat #8 in stories/video-recording.md).
+        if (session.videoMode !== 'off') {
+          session.pendingVideo = {
+            report,
+            reportPath,
+            passed: overallStatus === 'passed',
+          };
+        }
       } catch (err) {
         logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);
       }

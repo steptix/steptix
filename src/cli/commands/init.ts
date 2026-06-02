@@ -89,7 +89,8 @@ async function writeDefaultTemplate(templateName: string, destPath: string): Pro
     "model": "gpt-5.4-mini"
   },
   "browser": {
-    "headed": true
+    "headed": true,
+    "video": "off"
   },
   "tests": {
     "dir": "./tests",

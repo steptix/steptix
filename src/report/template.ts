@@ -33,6 +33,11 @@ export function getReportTemplate(): string {
     /* Header */
     .report-header { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 24px; box-shadow: var(--shadow); }
     .report-header h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 16px; }
+
+    /* Session video (file-linked, not embedded) */
+    .video-block { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+    .video-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 6px; }
+    .session-video { width: 100%; max-width: 720px; border: 1px solid var(--border); border-radius: var(--radius); background: #000; }
     .meta-grid { display: flex; flex-wrap: wrap; gap: 12px; }
     .meta-item { display: flex; flex-direction: column; min-width: 0; flex: 1 1 200px; }
     .meta-item-wide { flex: 1 0 100%; }
@@ -297,6 +302,12 @@ export function getReportTemplate(): string {
     {{#if tags.length}}
     <div class="tags">
       {{#each tags}}<span class="badge badge-tag">{{this}}</span>{{/each}}
+    </div>
+    {{/if}}
+    {{#if videoRelPath}}
+    <div class="video-block">
+      <div class="video-label">Session recording</div>
+      <video class="session-video" src="{{videoRelPath}}" controls preload="metadata"></video>
     </div>
     {{/if}}
   </div>

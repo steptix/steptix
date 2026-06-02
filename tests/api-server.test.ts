@@ -40,6 +40,13 @@ vi.mock('../src/browser/manager.js', () => {
     launchBrowser: vi.fn(async () => ({ ...mockBrowserSession })),
     PageTracker: vi.fn(),
     BrowserTracker,
+    // Video recording: report 'off' so no recordVideo/finalize path runs under
+    // the mock (the mocked BrowserSession has no real page.video()).
+    resolveVideoMode: vi.fn(() => 'off'),
+    finalizeMainPageVideo: vi.fn(async (args: { closeContext: () => Promise<void> }) => {
+      await args.closeContext();
+      return undefined;
+    }),
   };
 });
 
@@ -89,6 +96,7 @@ vi.mock('../src/api/response-store.js', () => ({
 vi.mock('../src/report/generator.js', () => ({
   generateReport: vi.fn(async () => '/tmp/fake-report.html'),
   getPrimaryModel: vi.fn(() => 'mock-model'),
+  buildReportBaseName: vi.fn((report: { testName: string }) => report.testName),
 }));
 
 vi.mock('../src/browser/screenshot.js', () => ({
