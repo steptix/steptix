@@ -117,6 +117,58 @@ describe('executeWait forwards the clamped timeout to Playwright (issue 022)', (
   });
 });
 
+describe('text wait matches VISIBLE text (innerText), not raw textContent (issue 029)', () => {
+  // Capture the predicate executeWait hands to waitForFunction. It runs in page
+  // context and reads the global `document`, so we can exercise it directly
+  // against a `document` we stub on globalThis — no real browser needed.
+  async function captureTextPredicate(): Promise<(t: string) => boolean> {
+    const page = { waitForFunction: vi.fn(async () => undefined) };
+    const action: AIAction = {
+      action: 'wait', waitType: 'text', condition: 'placeholder', description: 'text wait',
+    };
+    await executeWait(page as any, page as any, action);
+    return page.waitForFunction.mock.calls[0]![0] as (t: string) => boolean;
+  }
+
+  it('blocks on text that lives only in <script> source / hidden nodes, then matches once it is visible', async () => {
+    const predicate = await captureTextPredicate();
+    const originalDoc = (globalThis as any).document;
+    try {
+      // "Ready now" lives ONLY in the <script> source (textContent), exactly like
+      // the live fixture before its visible <div> is injected — the cleaned DOM
+      // the AI saw never contained it.
+      (globalThis as any).document = {
+        body: {
+          innerText: 'Wait fixture',
+          textContent: "Wait fixture setTimeout(function(){ d.textContent = 'Ready now'; }, 35000);",
+        },
+      };
+      // FIX: must NOT match — "Ready now" isn't painted yet.
+      expect(predicate('Ready now')).toBe(false);
+      // Guard: the OLD textContent check WOULD have matched here, so a revert to
+      // textContent flips this assertion red.
+      expect((globalThis as any).document.body.textContent.includes('Ready now')).toBe(true);
+
+      // Once the element renders, innerText contains it → the wait resolves.
+      (globalThis as any).document.body.innerText = 'Wait fixture Ready now';
+      expect(predicate('Ready now')).toBe(true);
+    } finally {
+      (globalThis as any).document = originalDoc;
+    }
+  });
+
+  it('falls back to false (no throw) when document.body is not present yet', async () => {
+    const predicate = await captureTextPredicate();
+    const originalDoc = (globalThis as any).document;
+    try {
+      (globalThis as any).document = {}; // body not ready
+      expect(predicate('anything')).toBe(false);
+    } finally {
+      (globalThis as any).document = originalDoc;
+    }
+  });
+});
+
 describe('withAbort — abort-aware waits (issue 022)', () => {
   it('returns the work promise unchanged when no signal is given', async () => {
     await expect(withAbort(Promise.resolve('ok'))).resolves.toBe('ok');

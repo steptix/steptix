@@ -59,6 +59,13 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
  *  can eat ~10s) and well past the 10s default — so a successful wait proves the
  *  timeout hint extended it. */
 const FIXTURE_DELAY_MS = 35000;
+// NOTE: the target literal "Ready now" is INTENTIONALLY in the <script> source.
+// This makes the fixture a regression guard for issue 029: the framework's text
+// wait must match VISIBLE text (innerText), NOT raw textContent — textContent
+// includes this <script>'s source, so the buggy version matched it in ~0s. With
+// the fix the wait blocks until the visible <div> is injected (~35s); revert the
+// fix and it matches the script source immediately, failing the `waitMs > 12s`
+// assertion in the slow-success scenario.
 const FIXTURE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Wait Fixture</title></head>
 <body><h1>Wait fixture</h1><button id="go">Go</button>
 <script>
@@ -244,7 +251,7 @@ describe('TestBench live wait timeout-hint + abort-aware waits (issue 022)', fun
   it('lets a hinted wait SUCCEED on an element that appears at ~35s (the 10s default would fail)', async () => {
     const { uri, waitLine } = writeFixture(
       'wait-slow-success',
-      'Wait up to 50 seconds for an element matching the CSS selector #delayed to become visible',
+      "Wait up to 50 seconds for the text 'Ready now' to appear",
     );
     const { waitMs, status } = await timeWaitStep(uri, waitLine);
     console.log(`[live] slow-success wait ran ${waitMs}ms, status=${status}`);

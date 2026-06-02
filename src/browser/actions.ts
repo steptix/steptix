@@ -529,8 +529,14 @@ export async function executeWait(
 
     case 'text':
       await page.waitForFunction(
+        // Match VISIBLE text via innerText — NOT textContent. textContent
+        // concatenates the source of every <script>/<style> and the text of
+        // hidden nodes, so a "wait for text X" could match a string the user
+        // never sees and the AI was never shown (the cleaned DOM strips
+        // script/style too — see dom-cleaner SKIP set). innerText is "what's
+        // painted", which is what "appears" means here. (issue 029)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (text) => (globalThis as any).document.body?.textContent?.includes(text) ?? false,
+        (text) => (globalThis as any).document.body?.innerText?.includes(text) ?? false,
         condition,
         { timeout },
       );

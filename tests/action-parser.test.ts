@@ -270,4 +270,27 @@ describe('parseAIResponse — wait timeout hint (issue 022)', () => {
     const result = parseAIResponse(raw);
     expect(result.actions[0]?.timeout).toBeUndefined();
   });
+
+  it('preserves the AI\'s explicit waitType (was silently dropped — issue 022)', () => {
+    const raw = JSON.stringify({
+      actions: [{ action: 'wait', waitType: 'text', condition: 'Ready now', timeout: 50000, description: 'wait for text' }],
+      reasoning: 'r',
+      needs_reeval: false,
+    });
+    const result = parseAIResponse(raw);
+    // Without this, executeWait falls back to inferWaitType(condition) and can
+    // misclassify the wait (e.g. a text condition read as a selector/URL).
+    expect(result.actions[0]?.waitType).toBe('text');
+    expect(result.actions[0]?.condition).toBe('Ready now');
+    expect(result.actions[0]?.timeout).toBe(50000);
+  });
+
+  it('drops an unknown waitType value rather than passing it through', () => {
+    const raw = JSON.stringify({
+      actions: [{ action: 'wait', waitType: 'telepathy', condition: 'x', description: 'bogus' }],
+      reasoning: 'r',
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]?.waitType).toBeUndefined();
+  });
 });

@@ -295,6 +295,20 @@ function parseAction(raw: unknown, index: number): AIAction {
   if (typeof obj['key'] === 'string') action.key = obj['key'];
   if (typeof obj['question'] === 'string') action.question = obj['question'];
 
+  // Preserve the AI's explicit wait kind. Without this the field was silently
+  // dropped and executeWait fell back to inferWaitType(condition) every time —
+  // ignoring the model's choice and mis-handling conditions the heuristic reads
+  // wrong (e.g. a text wait whose condition looks like a selector/URL).
+  if (
+    obj['waitType'] === 'selector' || obj['waitType'] === 'hidden' ||
+    obj['waitType'] === 'text' || obj['waitType'] === 'url' ||
+    obj['waitType'] === 'load' || obj['waitType'] === 'duration' ||
+    obj['waitType'] === 'count' || obj['waitType'] === 'attribute' ||
+    obj['waitType'] === 'navigation' || obj['waitType'] === 'stable'
+  ) {
+    action.waitType = obj['waitType'];
+  }
+
   if (typeof obj['direction'] === 'string') {
     const dir = obj['direction'];
     if (dir === 'up' || dir === 'down' || dir === 'left' || dir === 'right') {
