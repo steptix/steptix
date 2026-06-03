@@ -98,15 +98,19 @@ describe('TestBench live STOP → report recovery against real server', function
 
     // Let at least one step PASS so the report has content and an interrupted
     // step is recorded for the in-flight one.
+    // NOTE: snapshot().statuses is an ARRAY of [line, status] pairs (not a Map),
+    // so destructure each pair to read the status. The prior
+    // `[...statuses.values()].some(s => s === 'pass')` compared a [line,status]
+    // pair to a string and could never match — this wait always timed out.
     await waitFor(
       'at least one step passes',
-      () => [...hooks.tracker.snapshot().statuses.values()].some((s) => s === 'pass' || s === 'pass-cached'),
+      () => hooks.tracker.snapshot().statuses.some(([, s]) => s === 'pass' || s === 'pass-cached'),
       120_000,
     );
     // Wait until a subsequent step is actually running, so STOP lands mid-step.
     await waitFor(
       'a step is running',
-      () => [...hooks.tracker.snapshot().statuses.values()].some((s) => s === 'running'),
+      () => hooks.tracker.snapshot().statuses.some(([, s]) => s === 'running'),
       120_000,
     );
     await sleep(1_500);
