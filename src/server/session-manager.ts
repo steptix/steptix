@@ -1128,6 +1128,16 @@ export class SessionManager {
     // cache-served one that makes no AI calls) would inherit the prior run's
     // total. See src/utils/tokens.ts.
     session.tokenTracker.markRunStart();
+    // Invalidate any prior run's finalized last-run record NOW, at the start of
+    // THIS run — mirroring markRunStart above, which guards the same "a re-run
+    // inherits the previous run's state" class of bug for tokens. recordLastRun
+    // only writes at run END (finalized:true); without this reset a STOP would
+    // recover the PREVIOUS run's stale finalized report via
+    // GET /sessions/:id/last-run (a client polling "until finalized" sees the
+    // stale entry immediately and wins the race against this run's own record).
+    // getLastRun returns finalized:false for a missing entry, so the client
+    // keeps polling until THIS run finalizes. See issue 030.
+    this.lastRunInfo.delete(sessionId);
     const results: StepResultResponse[] = [];
     /** Full StepResult records accumulated across this request — used to
      *  generate the per-run HTML report at the end. */

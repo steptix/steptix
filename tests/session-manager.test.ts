@@ -783,6 +783,34 @@ describe('SessionManager', () => {
       });
     });
 
+    // ── issue 030: last-run info is reset at run START so a STOP recovers THIS
+    //    run's report, not a previously-finished run's stale one ──────────────
+    describe('last-run info reset at run start (issue 030)', () => {
+      it('a re-run clears the prior run\'s finalized report so a mid-run STOP recovers THIS run, not the previous one', async () => {
+        // Run 1: a normal completed run records finalized last-run info.
+        await manager.executeSteps('s030', { steps: ['one', 'two'] });
+        const afterRun1 = manager.getLastRun('s030');
+        expect(afterRun1.finalized).toBe(true);
+        expect(afterRun1.reportPath).toBe('/tmp/fake-report.html');
+
+        // Run 2 on the SAME session. Read last-run info MID-run (first step:pass),
+        // BEFORE run 2 finalizes. Without the reset this still returns run 1's
+        // stale { finalized: true, reportPath }, so a client that STOPS here and
+        // polls "until finalized" recovers the PREVIOUS (passed) report. With the
+        // reset it must be finalized:false with no report path.
+        let midRun: { finalized: boolean; reportPath?: string } | undefined;
+        await manager.executeSteps('s030', { steps: ['one', 'two'] }, (event) => {
+          if (midRun === undefined && event.type === 'step:pass') {
+            midRun = manager.getLastRun('s030');
+          }
+        });
+
+        expect(midRun).toBeDefined();
+        expect(midRun!.finalized).toBe(false);      // reset at run start (the fix)
+        expect(midRun!.reportPath).toBeUndefined();  // no stale report path leaks
+      });
+    });
+
     it('skips [interactive] steps', async () => {
       const response = await manager.executeSteps('session-1', {
         steps: ['[interactive] Do some manual testing'],
