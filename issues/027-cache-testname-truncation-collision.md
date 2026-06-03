@@ -1,6 +1,6 @@
 # 027 — Step cache: `sanitizeTestName` truncates to 100 chars, so two long test paths can share one cache directory
 
-**Status:** open / low-medium probability, high blast radius when it hits (cross-test poisoning)
+**Status:** open / low-medium probability, high blast radius when it hits (cross-test poisoning) — **resolution decided: folded into [028](028-cli-cache-key-collides-and-ignores-env.md)'s shared `cacheDirName` helper (basename + hash of the normalized, project-root-relative path); see [Resolution](#resolution-decided-shared-cachedirname-helper-from-028). Not yet implemented.**
 **Area:** [src/cache/step-cache.ts:262-268](../src/cache/step-cache.ts#L262) (`sanitizeTestName` — `.slice(0, 100)`), [src/cache/step-cache.ts:57](../src/cache/step-cache.ts#L57) (cache dir = `baseCacheDir/sanitizeTestName(testName)`), [src/server/session-manager.ts:1558](../src/server/session-manager.ts#L1558) (server passes the **absolute** `testFilePath` as `testName`), [testbench-native/src/extension/cache-paths.ts:32-49](../testbench-native/src/extension/cache-paths.ts#L32) (extension mirrors the same function — must stay in lockstep)
 **Related:** [issues/028-cli-cache-key-collides-and-ignores-env.md](028-cli-cache-key-collides-and-ignores-env.md) (CLI keys by title — the same collision class, different key), [issues/012-step-cache-not-env-aware.md](012-step-cache-not-env-aware.md)
 **Opened:** 2026-06-03
@@ -108,6 +108,45 @@ closing it — not recommended on its own.
 **Recommended:** Option A — preserves debuggability and closes the hole. Confirm
 the original reason for the 100-char cap first (Q1) so the prefix length is set
 safely under the path-length budget.
+
+---
+
+## Resolution (decided): shared `cacheDirName` helper from [028](028-cli-cache-key-collides-and-ignores-env.md)
+
+This issue's Option A (truncated readable prefix + hash suffix) is **adopted**,
+but the implementation is **centralized in [028](028-cli-cache-key-collides-and-ignores-env.md)**
+rather than landed as a separate `sanitizeTestName` patch — the two issues are the
+same collision class (027 = server path truncated to 100 chars; 028 = CLI keys by
+title), and a single shared helper fixes both and stops the server/CLI/extension
+copies from drifting.
+
+The agreed helper (full definition + worked example in
+[028 §Resolution](028-cli-cache-key-collides-and-ignores-env.md#resolution-decided-option-a--file-path-derived-cache-dir-name)):
+
+```ts
+cacheDirName(testFilePath, projectRoot) = `${basename}-${sha256(normalizedRelativePath).slice(0,12)}`
+```
+
+Two refinements over this issue's original sketch:
+
+- **Hash the project-root-relative path, not the raw/absolute name.** Stable across
+  checkout locations, and (normalized first) identical across the server / CLI /
+  extension on Windows — the cross-module parity this issue flagged.
+- **Prefix is the file *basename*, not a 80-char slice of the whole path.** Shorter
+  and more readable (`login-<hash>` vs `c-projects-…-login-<hash>`), and the
+  100-char truncation that caused this bug is **removed from the dir-name path**
+  entirely (it survives only inside `envCacheSegment`/`sanitizeTestName` for short
+  env names, where truncation can't bite).
+
+**For this issue, that means:** the server swaps
+`sanitizeTestName(request.testFilePath)` → `cacheDirName(request.testFilePath, projectRoot)`
+at [session-manager.ts:1592](../src/server/session-manager.ts#L1592) (note: the
+`:1558` reference in the Area header is now `:1592` after intervening edits), and
+the extension's `cache-paths.ts` mirrors `cacheDirName`. The `.slice(0, 100)`
+collision is closed because the test path no longer flows through it.
+
+Open question Q1 below (why 100?) is **answered** — see Resolved note inline; it
+no longer gates the fix because truncation leaves the dir-name path.
 
 ## Open questions
 
