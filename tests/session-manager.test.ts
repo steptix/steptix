@@ -811,6 +811,30 @@ describe('SessionManager', () => {
       });
     });
 
+    // ── issue 031: a run that exits early during setup still FINALIZES last-run
+    //    info, so a STOP-recovery poll terminates instead of hanging ──────────
+    describe('early-exit runs still finalize last-run info (issue 031)', () => {
+      it('a partial-rerun refusal (early setup exit) leaves getLastRun finalized, not hanging', async () => {
+        const response = await manager.executeSteps('s031-refuse', {
+          steps: ['Type {{__skill1_token}} into the box'],
+          sourceLines: [10],
+          testFilePath: '/proj/test.md',
+          startAt: { uri: '/proj/test.md', line: 10 },
+          seedScope: {},
+        });
+        // Refused early — before the step loop — so no report is written.
+        expect(response.status).toBe('error');
+        expect(executeStep).not.toHaveBeenCalled();
+
+        // Even so, last-run info must be FINALIZED — otherwise a client polling
+        // GET /sessions/:id/last-run "until finalized" (issue 021 stop-recovery)
+        // hangs forever. (finalized:false here without the run-exit guarantee.)
+        const info = manager.getLastRun('s031-refuse');
+        expect(info.finalized).toBe(true);
+        expect(info.reportPath).toBeUndefined(); // no report for a setup failure
+      });
+    });
+
     it('skips [interactive] steps', async () => {
       const response = await manager.executeSteps('session-1', {
         steps: ['[interactive] Do some manual testing'],

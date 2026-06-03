@@ -819,7 +819,31 @@ export class SessionManager {
     // Queue the work onto the session's promise chain so requests execute sequentially
     const resultPromise = new Promise<StepResponse>((resolve, reject) => {
       session.queueTail = session.queueTail
-        .then(() => this.executeStepsInternal(session, sessionId, request, onEvent, signal))
+        .then(async () => {
+          try {
+            return await this.executeStepsInternal(session, sessionId, request, onEvent, signal);
+          } finally {
+            // Guarantee a FINALIZED last-run record on EVERY run exit — including
+            // early run-setup failures (malformed bundle, missing skill,
+            // re-run-anchor-not-found, partial-rerun refusal) that return/throw
+            // before recordLastRun runs. Without this a STOP-recovery client
+            // polling GET /sessions/:id/last-run "until finalized" hangs. Surfaced
+            // by issue 030's run-start reset, which clears the prior run's entry
+            // that used to mask this. The guard makes the normal/abort paths
+            // (already finalized) a no-op; the queue serializes runs, so this
+            // run's finally settles before the next run starts. See issue 031.
+            if (!this.lastRunInfo.get(sessionId)?.finalized) {
+              this.recordLastRun(sessionId, {
+                finalized: true,
+                tokens: {
+                  total: session.tokenTracker.runTotal,
+                  input: session.tokenTracker.runInputTotal,
+                  output: session.tokenTracker.runOutputTotal,
+                },
+              });
+            }
+          }
+        })
         .then(resolve, reject);
     });
 
