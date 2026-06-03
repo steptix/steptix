@@ -129,10 +129,17 @@ describe('TestBench live STOP → report recovery against real server', function
     const reportPath = hooks.lastReportPath();
     assert.ok(reportPath && fs.existsSync(reportPath), `recovered report path must exist on disk: ${reportPath}`);
 
-    // The report marks the run aborted + the interrupted step.
+    // The report marks the run aborted. Match the rendered ABORTED *badge*
+    // (class + text together) — NOT the bare `.badge-aborted` class, which is in
+    // EVERY report's <style> and so matches even a passed report. This is the
+    // check that actually proves the recovered report is the aborted run's
+    // (issue 030: a stale passed report would have the CSS class but no badge).
     const html = fs.readFileSync(reportPath, 'utf8');
-    assert.match(html, /badge-aborted/, 'report must render the aborted state');
-    assert.match(html, /ABORTED/, 'report banner/badge must read ABORTED');
+    assert.match(
+      html,
+      /badge-aborted">[^<]*ABORTED/,
+      'recovered report must render the ABORTED badge element (a passed report has only the CSS class)',
+    );
 
     // Token totals recovered despite the abrupt stop.
     const tokens = hooks.lastRunTokens();
