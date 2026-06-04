@@ -1,0 +1,7 @@
+{
+  "site": {
+    "name": "DuckDuckGo",
+    "url": "https://duckduckgo.com"
+  },
+  "query": "Playwright end-to-end testing"
+}
