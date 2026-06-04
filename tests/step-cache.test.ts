@@ -9,6 +9,9 @@ import {
   frameScopedStepKey,
   reverseInterpolate,
   forwardInterpolate,
+  envCacheSegment,
+  cacheDirName,
+  NO_ENV_NAMESPACE,
 } from '../src/cache/step-cache.js';
 import type { AIAction } from '../src/ai/types.js';
 
@@ -369,3 +372,210 @@ describe('cache invalidation tracks the resolved hash source (issue 018)', () =>
     expect(hit![0]!.actions[0]!.value).toBe('phones');
   });
 });
+
+// ── issue 012: env-namespaced cache (entries are never read across envs) ───
+//
+// Before the fix the step cache lived at `<cache.dir>/<dir>/` with no env
+// component, so a `dev` run and a `staging` run of the same file shared one
+// cache directory — `staging` could replay actions the AI generated against
+// `dev`'s environment. The fix interposes an env segment:
+// `<cache.dir>/<env-segment>/<dir>/`. A run with no resolved env falls back to
+// the `default` sentinel, which must be STABLE (not oscillate run-to-run) and
+// must collide with a literal `env: default`.
+//
+// These tests exercise both the pure `envCacheSegment` helper and the real
+// on-disk behaviour: the caller is responsible for joining the env segment
+// onto the base cache dir BEFORE handing it to `StepCache.initialize`, so the
+// integration tests model exactly that — base = `<tmp>/<env-segment>`.
+describe('envCacheSegment / env namespacing (issue 012)', () => {
+  const steps = ['Navigate to login', 'Enter username', 'Click submit'];
+  const STEP_KEY = frameScopedStepKey(undefined, 12);
+
+  it('trims, lowercases/sanitises, and maps null/undefined/empty to the sentinel', () => {
+    expect(envCacheSegment('  Staging Env!  ')).toBe('staging-env'); // trim + sanitise
+    expect(envCacheSegment('DEV')).toBe('dev'); // lowercased
+    expect(envCacheSegment(undefined)).toBe(NO_ENV_NAMESPACE);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(envCacheSegment(null as any)).toBe(NO_ENV_NAMESPACE);
+    expect(envCacheSegment('')).toBe(NO_ENV_NAMESPACE);
+    expect(envCacheSegment('   ')).toBe(NO_ENV_NAMESPACE); // whitespace-only trims to sentinel
+  });
+
+  it('resolves a no-env run and an explicit env="default" to the SAME segment', () => {
+    // The sentinel is the literal string `default`, so a test with frontmatter
+    // `env: default` and a no-env run intentionally share one cache namespace.
+    expect(envCacheSegment(undefined)).toBe(envCacheSegment('default'));
+    expect(NO_ENV_NAMESPACE).toBe('default');
+  });
+
+  it('does NOT read an entry written under env=dev when reading under env=staging (MISS)', async () => {
+    // The caller joins the env segment onto the base cache dir. Model that:
+    // dev writes under <tmp>/dev, staging reads under <tmp>/staging.
+    const devBase = path.join(tmpDir, envCacheSegment('dev'));
+    const stagingBase = path.join(tmpDir, envCacheSegment('staging'));
+
+    const dev = await StepCache.initialize(devBase, 'My Test', steps);
+    await dev.write(
+      STEP_KEY,
+      [{ rawResponse: '{}', actions: [{ action: 'click', selector: '#dev', description: 'dev' }], reasoning: 'dev' }],
+      {},
+    );
+    expect(await dev.read(STEP_KEY, {})).not.toBeNull(); // HIT in dev's namespace
+
+    const staging = await StepCache.initialize(stagingBase, 'My Test', steps);
+    expect(await staging.read(STEP_KEY, {})).toBeNull(); // MISS — different env segment
+  });
+
+  it('no-env populate then no-env read → HIT (sentinel is stable, not oscillating)', async () => {
+    const base1 = path.join(tmpDir, envCacheSegment(undefined));
+    const run1 = await StepCache.initialize(base1, 'My Test', steps);
+    await run1.write(
+      STEP_KEY,
+      [{ rawResponse: '{}', actions: [{ action: 'click', selector: '#x', description: 'x' }], reasoning: 'x' }],
+      {},
+    );
+
+    // A SECOND no-env run resolves to the identical sentinel segment, so it
+    // sees the prior entry. If the sentinel oscillated this would MISS.
+    const base2 = path.join(tmpDir, envCacheSegment(''));
+    const run2 = await StepCache.initialize(base2, 'My Test', steps);
+    expect(base2).toBe(base1); // proves the segment is stable
+    expect(await run2.read(STEP_KEY, {})).not.toBeNull(); // HIT
+  });
+
+  it('steps-hash stays the inner lever: editing a step under dev invalidates only dev, leaves staging intact', async () => {
+    const devBase = path.join(tmpDir, envCacheSegment('dev'));
+    const stagingBase = path.join(tmpDir, envCacheSegment('staging'));
+
+    // Populate BOTH envs with the original steps.
+    const dev1 = await StepCache.initialize(devBase, 'My Test', steps);
+    await dev1.write(STEP_KEY, [{ rawResponse: '{}', actions: [], reasoning: 'dev-v1' }], {});
+
+    const staging1 = await StepCache.initialize(stagingBase, 'My Test', steps);
+    await staging1.write(STEP_KEY, [{ rawResponse: '{}', actions: [], reasoning: 'staging-v1' }], {});
+
+    expect(await dev1.read(STEP_KEY, {})).not.toBeNull();
+    expect(await staging1.read(STEP_KEY, {})).not.toBeNull();
+
+    // Edit a step under dev only (different steps array → different stepsHash):
+    // initialize wipes dev's namespace; staging's namespace is untouched.
+    const editedSteps = [...steps, 'Verify dashboard'];
+    const dev2 = await StepCache.initialize(devBase, 'My Test', editedSteps);
+    expect(await dev2.read(STEP_KEY, {})).toBeNull(); // dev invalidated
+
+    const staging2 = await StepCache.initialize(stagingBase, 'My Test', steps);
+    expect(await staging2.read(STEP_KEY, {})).not.toBeNull(); // staging survives
+  });
+
+  it('a 100+char test file PATH does not truncate the env segment away', async () => {
+    // The env is a SEPARATE path component, so even a pathological test dir
+    // name (which `sanitizeTestName` caps at 100 chars) cannot eat the env
+    // segment — they live in distinct directory levels.
+    const longName = 'x'.repeat(250);
+    const devBase = path.join(tmpDir, envCacheSegment('dev'));
+    const cache = await StepCache.initialize(devBase, longName, steps);
+    await cache.write(STEP_KEY, [{ rawResponse: '{}', actions: [], reasoning: 'r' }], {});
+
+    // The env dir survives as its own component under tmpDir, regardless of the
+    // 100-char-truncated test subdir beneath it.
+    const envDirContents = await fs.readdir(devBase);
+    expect(envDirContents.length).toBeGreaterThan(0); // the test subdir exists under dev/
+    expect((await fs.readdir(tmpDir))).toContain('dev'); // dev/ is intact at the top level
+    // And reading back in the same env still HITs (the long path didn't corrupt anything).
+    expect(await cache.read(STEP_KEY, {})).not.toBeNull();
+  });
+});
+
+// ── issues 027 + 028: path-derived cache dir name (kills title collisions) ──
+//
+// Before the fix the cache dir was `sanitizeTestName(test.title)`, so two
+// distinct files sharing a `# Title` collided into one cache directory, and
+// the server additionally truncated titles to 100 chars (027), conflating
+// even more files. `cacheDirName` keys the directory off the test file's PATH
+// instead: a readable basename prefix plus a 12-hex-char hash of the
+// project-root-RELATIVE normalized path. Same title, different path → different
+// dir. It's also idempotent under `sanitizeTestName`, so it can be passed
+// straight to `StepCache.initialize` as the `testName` without adding a level.
+describe('cacheDirName (issues 027 + 028)', () => {
+  const root = path.join(path.sep, 'project', 'root');
+
+  it('two files with the SAME title but different paths → DIFFERENT cacheDirName', () => {
+    // cacheDirName never sees the title at all — only the path — so identical
+    // `# Title`s in `auth/checkout.md` vs `admin/checkout.md` cannot collide.
+    const a = cacheDirName(path.join(root, 'auth', 'checkout.md'), root);
+    const b = cacheDirName(path.join(root, 'admin', 'checkout.md'), root);
+    expect(a).not.toBe(b);
+  });
+
+  it('two files with the same BASENAME in different dirs → DIFFERENT dir (hash distinguishes)', () => {
+    const a = cacheDirName(path.join(root, 'auth', 'login.md'), root);
+    const b = cacheDirName(path.join(root, 'admin', 'login.md'), root);
+    // Same readable basename prefix, but the path hash diverges.
+    expect(a.startsWith('login-')).toBe(true);
+    expect(b.startsWith('login-')).toBe(true);
+    expect(a).not.toBe(b);
+  });
+
+  it('is stable across calls for an unchanged (filePath, projectRoot) — deterministic', () => {
+    const file = path.join(root, 'tests', 'smoke.md');
+    expect(cacheDirName(file, root)).toBe(cacheDirName(file, root));
+  });
+
+  it('keys off the project-root-RELATIVE path: same relative path at two roots → SAME name', () => {
+    // Two worktree-like absolute prefixes with matching relative layouts must
+    // produce the same cache dir, so a clone/worktree reuses the cache.
+    const rootA = path.join(path.sep, 'work', 'a');
+    const rootB = path.join(path.sep, 'somewhere', 'else', 'b');
+    const a = cacheDirName(path.join(rootA, 'tests', 'login.md'), rootA);
+    const b = cacheDirName(path.join(rootB, 'tests', 'login.md'), rootB);
+    expect(a).toBe(b);
+  });
+
+  it('back/forward-slash differences in the input do not change the hash', () => {
+    // `normalizeForCache` collapses every non-alphanumeric run (including both
+    // slash flavours) to `-`, so a Windows-style and POSIX-style spelling of
+    // the same relative path hash identically.
+    const back = cacheDirName('C:\\proj\\tests\\login.md', 'C:\\proj');
+    const fwd = cacheDirName('C:/proj/tests/login.md', 'C:/proj');
+    expect(back).toBe(fwd);
+  });
+
+  it('projectRoot = null does not throw and yields a stable name (absolute-path fallback)', () => {
+    const file = path.join(root, 'tests', 'login.md');
+    let name!: string;
+    expect(() => {
+      name = cacheDirName(file, null);
+    }).not.toThrow();
+    expect(name).toBe(cacheDirName(file, null)); // stable
+    expect(name.startsWith('login-')).toBe(true);
+    // The absolute-path fallback differs from the relative keying.
+    expect(name).not.toBe(cacheDirName(file, root));
+  });
+
+  it('output is idempotent under sanitizeTestName (no extra dir level via initialize)', () => {
+    // initialize() internally does sanitizeTestName(testName). cacheDirName's
+    // output is already lowercase/[a-z0-9-]/no-edge-hyphens and well under 100
+    // chars, so sanitising it again is a no-op — the on-disk dir is exactly
+    // <base>/<cacheDirName>/, not <base>/<cacheDirName>/<sanitised-again>/.
+    const name = cacheDirName(path.join(root, 'tests', 'My Big Test.md'), root);
+    expect(sanitizeTestName(name)).toBe(name);
+  });
+
+  it('end-to-end: passing cacheDirName as initialize testName lands at exactly base/<cacheDirName>', async () => {
+    // The authoritative call shape (028 line 150): base = env-namespaced
+    // cache.dir, testName = cacheDirName(...). No double nesting.
+    const dirName = cacheDirName(path.join(root, 'tests', 'My Big Test.md'), root);
+    const cache = await StepCache.initialize(tmpDir, dirName, steps0);
+    await cache.write(0, [{ rawResponse: '{}', actions: [], reasoning: 'r' }], {});
+
+    // meta.json sits directly under <tmp>/<cacheDirName>/ — one level, not two.
+    const metaPath = path.join(tmpDir, dirName, 'meta.json');
+    const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
+    expect(meta.schemaVersion).toBe(4);
+    // The cacheDirName dir is a DIRECT child of tmpDir (no nested sanitised dir).
+    const children = await fs.readdir(path.join(tmpDir, dirName), { withFileTypes: true });
+    expect(children.some((d) => d.isDirectory())).toBe(false);
+  });
+});
+
+const steps0 = ['Navigate to login', 'Enter username', 'Click submit'];

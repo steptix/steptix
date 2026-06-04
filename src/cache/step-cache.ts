@@ -267,6 +267,59 @@ export function sanitizeTestName(name: string): string {
     .slice(0, 100);
 }
 
+/** Sentinel env-namespace segment for runs with no resolved env. */
+export const NO_ENV_NAMESPACE = 'default';
+
+/**
+ * Sanitised, collision-free directory segment for an env name (issue 012).
+ * Cache entries written under one env's segment are never read under another.
+ * A run with no resolved env falls back to the `default` sentinel.
+ */
+export function envCacheSegment(envName?: string): string {
+  return sanitizeTestName(envName?.trim() || NO_ENV_NAMESPACE);
+}
+
+/**
+ * Like `sanitizeTestName` but WITHOUT the 100-char truncation. Used to build a
+ * stable, path-derived cache directory name (issues 027/028) where the hash
+ * must see the full normalized identity.
+ */
+function normalizeForCache(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/**
+ * Stable cache directory name derived from a test file's PATH rather than its
+ * title (issues 027/028). Two tests sharing a title no longer collide, and the
+ * server's 100-char title truncation no longer conflates distinct files.
+ *
+ * Shape: `<basename>-<hash>` where `basename` is the normalized file basename
+ * (sans extension, capped at 60 chars for readability) and `hash` is the first
+ * 12 hex chars of sha256 over the normalized path identity (relative to the
+ * project root when known, else the raw path).
+ *
+ * Idempotent under `sanitizeTestName`: passing this value as the `testName`
+ * argument to `StepCache.initialize` yields exactly `<base>/<cacheDirName>/`.
+ * The post-slice `replace(/-+$/,'')` plus the empty-base guard are what make
+ * that fixed-point property hold: without them a basename that normalizes to
+ * empty (no [a-z0-9], e.g. `!!!.md`) would emit a LEADING hyphen, and a
+ * basename whose normalized form has a separator exactly at the 60-char cap
+ * would emit a DOUBLE hyphen at the join — both of which `sanitizeTestName`
+ * strips, so the server's write dir would diverge from the extension's
+ * clear-cache dir (the extension joins the raw `cacheDirName`).
+ */
+export function cacheDirName(testFilePath: string, projectRoot?: string | null): string {
+  const identity = projectRoot ? path.relative(projectRoot, testFilePath) : testFilePath;
+  const base = normalizeForCache(path.basename(testFilePath, path.extname(testFilePath)))
+    .slice(0, 60)
+    .replace(/-+$/, '');
+  const hash = createHash('sha256').update(normalizeForCache(identity)).digest('hex').slice(0, 12);
+  return base ? `${base}-${hash}` : hash;
+}
+
 /**
  * Replace resolved parameter values with {{placeholder}} tokens in action `value` fields.
  * Sorts params by value length (longest first) to avoid partial matches.

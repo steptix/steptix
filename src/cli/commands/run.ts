@@ -149,6 +149,10 @@ async function runCommand(
     summary = await runTests(filteredTests, config, {
       ...(opts.bail !== undefined && { bail: opts.bail }),
       ...(opts.verbose !== undefined && { verbose: opts.verbose }),
+      // The run-wide env (--env / AUTOMATION_ENV) the cache must key under.
+      // When unset, runTest falls back to each test's frontmatter env, matching
+      // this command's two-pass env precedence above.
+      ...(cliEnvName !== undefined && { runEnvName: cliEnvName }),
     });
   } catch (err) {
     logger.error(`Fatal error during test run: ${String(err)}`);

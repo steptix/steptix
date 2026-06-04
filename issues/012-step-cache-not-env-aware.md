@@ -1,6 +1,6 @@
 # 012 — StepCache is env-agnostic; cached responses may misapply across envs
 
-**Status:** open / medium priority — **resolution decided (Option 1: env in the cache namespace, `"default"` sentinel for no-env), see [Resolution](#resolution-decided-option-1--env-in-the-cache-namespace); not yet implemented**
+**Status:** open / medium priority — **resolution implemented (env in cache namespace + path-derived dir, combined with [028](028-cli-cache-key-collides-and-ignores-env.md)); pending verification/commit — see [Resolution](#resolution-decided-option-1--env-in-the-cache-namespace) and [Implemented](#implemented)**
 **Area:** [src/cache/step-cache.ts](../src/cache/step-cache.ts) (`sanitizeTestName`, `initialize`), [src/server/session-manager.ts:1592](../src/server/session-manager.ts#L1592) (server cache init — `cacheDir`), [src/server/session-manager.ts:1313](../src/server/session-manager.ts#L1313) (`requestedEnvName` already resolved here), [src/runner/test-runner.ts:135](../src/runner/test-runner.ts#L135) (CLI cache init), [testbench-native/src/extension/cache-paths.ts](../testbench-native/src/extension/cache-paths.ts) (`cacheDirForTest` — the extension's clear-cache mirror)
 **Related:** [issues/027-cache-testname-truncation-collision.md](027-cache-testname-truncation-collision.md) (the env segment must NOT be exposed to `sanitizeTestName`'s 100-char truncation — drives the directory-segment form chosen below), [issues/028-cli-cache-key-collides-and-ignores-env.md](028-cli-cache-key-collides-and-ignores-env.md) (the CLI manifestation — same fix applies there), [issues/018-step-cache-blind-to-data-file-value-changes.md](018-step-cache-blind-to-data-file-value-changes.md) (env *values in step text* already bust the hash — this issue covers the same-text/different-DOM residue)
 **Opened:** 2026-05-18
@@ -225,11 +225,34 @@ Designing the server-side rewiring of `StepCache` (Goal 1 of the
 was a latent property of the original CLI cache that becomes load-
 bearing in the server's longer-lived, cross-env use case.
 
+## Implemented
+
+Implemented on branch `docs/cache-issue-resolutions` (not yet committed),
+combined with [028](028-cli-cache-key-collides-and-ignores-env.md) since both
+touch the same `StepCache.initialize` call sites:
+
+- **Helpers** added to [src/cache/step-cache.ts](../src/cache/step-cache.ts)
+  (`NO_ENV_NAMESPACE = 'default'`, `envCacheSegment(envName)`) and **mirrored**
+  into [testbench-native/src/extension/cache-paths.ts](../testbench-native/src/extension/cache-paths.ts)
+  byte-for-byte (alongside the `cacheDirName` mirror from 028, guarded by the
+  shared-fixture parity tests).
+- **Call sites updated** — server ([session-manager.ts:1592](../src/server/session-manager.ts#L1592))
+  folds `envCacheSegment(requestedEnvName)` into the cache base; CLI
+  ([test-runner.ts:135](../src/runner/test-runner.ts#L135)) threads the effective
+  per-test env down and folds it in the same way; the extension's
+  `cacheDirForTest(testFilePath, envName)` inserts the env segment and its
+  clear-cache caller passes the active env.
+- **Effective env precedence (corrected).** The original sketch above wrote
+  `frontmatter.env || runEnvName`, which is inverted: [run.ts:110](../src/cli/commands/run.ts#L110)
+  only honors a test's frontmatter `env:` when **no** run-wide `--env`/`AUTOMATION_ENV`
+  is set, so the CLI flag wins. The implemented precedence keys the cache by the env
+  the test actually ran under: `effectiveEnv = runEnvName (cliEnvName) || test.frontmatter.env?.trim() || undefined`.
+
 ## Revisit when
 
 - ~~The server cache wiring lands — fix at that time.~~ **Landed** (server
   initializes `StepCache` at [session-manager.ts:1592](../src/server/session-manager.ts#L1592)),
-  so the load-bearing cross-env case is now live. Resolution above is ready to
-  implement.
+  so the load-bearing cross-env case is now live. Resolution above is **implemented**
+  (see [Implemented](#implemented)).
 - A user reports "cached action ran against the wrong selector" or
   similar cross-env weirdness.

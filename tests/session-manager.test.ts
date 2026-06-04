@@ -157,7 +157,7 @@ vi.mock('../src/utils/logger.js', () => ({
 
 import { SessionManager } from '../src/server/session-manager.js';
 import { executeStep, executeBranchedStep } from '../src/runner/step-executor.js';
-import { sanitizeTestName, computeStepsHash } from '../src/cache/step-cache.js';
+import { computeStepsHash, cacheDirName, envCacheSegment } from '../src/cache/step-cache.js';
 import { generateReport } from '../src/report/generator.js';
 import type { TestReport } from '../src/report/types.js';
 
@@ -1185,7 +1185,9 @@ type: skill
 
       // Run 1 — populates the bundle.
       await manager.executeSteps('bug2-edit-1', req);
-      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      // No envName on this request → the `default` env segment; the dir name is
+      // path-derived (issues 027/028), not the title.
+      const cacheDir = path.join(projectRoot, '.cache', envCacheSegment(undefined), cacheDirName(testFilePath, projectRoot));
       const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
       // Plant a sentinel cached-step file so we can prove the wipe.
       const sentinel = path.join(cacheDir, 'step-sentinel.json');
@@ -1216,7 +1218,8 @@ type: skill
       const req = { steps: ['[skill: greet]'], fullSteps: ['[skill: greet]'], skillsDir, testFilePath, cacheEnabled: true };
 
       await manager.executeSteps('stable-1', req);
-      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      // No envName → `default` segment; path-derived dir name.
+      const cacheDir = path.join(projectRoot, '.cache', envCacheSegment(undefined), cacheDirName(testFilePath, projectRoot));
       const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
       // Plant a sentinel cached-step file; an unchanged re-run must NOT wipe it.
       const sentinel = path.join(cacheDir, 'step-sentinel.json');
@@ -1249,7 +1252,8 @@ type: skill
       );
       const testFilePath = path.join(projectRoot, 'tests', 't.md');
       const fullSteps = ['[skill: cap]', '[skill: cap]'];
-      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      // No envName → `default` segment; path-derived dir name.
+      const cacheDir = path.join(projectRoot, '.cache', envCacheSegment(undefined), cacheDirName(testFilePath, projectRoot));
 
       // Full run: steps == fullSteps.
       await manager.executeSteps('batch-full', { steps: fullSteps, fullSteps, skillsDir, testFilePath, cacheEnabled: true });
@@ -1271,7 +1275,8 @@ type: skill
       const steps = ['Click login', 'Type username'];
 
       await manager.executeSteps('noskill', { steps, fullSteps: steps, testFilePath, cacheEnabled: true });
-      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      // No envName → `default` segment; path-derived dir name.
+      const cacheDir = path.join(projectRoot, '.cache', envCacheSegment(undefined), cacheDirName(testFilePath, projectRoot));
       const meta = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
 
       await fs.rm(projectRoot, { recursive: true, force: true });
@@ -1305,7 +1310,9 @@ type: skill
 
       // Run 1 — resolves "Search for laptops" into the hash, populates the bundle.
       await manager.executeSteps('018-data-1', req);
-      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      // req.envName === 'dev' → the `dev` env segment (issue 012); path-derived
+      // dir name (issues 027/028).
+      const cacheDir = path.join(projectRoot, '.cache', envCacheSegment('dev'), cacheDirName(testFilePath, projectRoot));
       const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
       const sentinel = path.join(cacheDir, 'step-sentinel.json');
       await fs.writeFile(sentinel, '{"turns":[]}');
@@ -1359,7 +1366,9 @@ type: skill
       };
 
       await manager.executeSteps('018-precise-1', req);
-      const cacheDir = path.join(projectRoot, '.cache', sanitizeTestName(testFilePath));
+      // req.envName === 'dev' → the `dev` env segment (issue 012); path-derived
+      // dir name (issues 027/028).
+      const cacheDir = path.join(projectRoot, '.cache', envCacheSegment('dev'), cacheDirName(testFilePath, projectRoot));
       const meta1 = JSON.parse(await fs.readFile(path.join(cacheDir, 'meta.json'), 'utf-8'));
       const sentinel = path.join(cacheDir, 'step-sentinel.json');
       await fs.writeFile(sentinel, '{"turns":[]}');
@@ -1386,6 +1395,101 @@ type: skill
       // thus the hash — unchanged, so the cache survived.
       expect(meta2.stepsHash).toBe(meta1.stepsHash);
       expect(sentinelSurvived).toBe(true); // cache survives — no needless re-run
+    });
+
+    describe('env-namespaced, path-keyed cache dir (issues 012 / 027 / 028)', () => {
+      // These drive the WHOLE server seam (SessionManager.executeSteps), not a
+      // unit of the path resolver. A request that silently dropped `envName`
+      // between the wire and the on-disk dir would be caught here, because the
+      // assertions read the directory the manager actually created — not what a
+      // helper returns in isolation (memory lesson: test at the client seam).
+      const STEPS = ['Click the only button'];
+
+      it('the same test under two envs populates two distinct on-disk dirs; the second env does NOT read the first (issue 012)', async () => {
+        const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-012-twoenv-'));
+        await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}');
+        // A missing `.env.<name>` is a hard error in the bundle resolver, so
+        // both env files must exist for the request to run at all.
+        await fs.writeFile(path.join(projectRoot, '.env.dev'), '');
+        await fs.writeFile(path.join(projectRoot, '.env.staging'), '');
+        const testFilePath = path.join(projectRoot, 'tests', 't.md');
+        const baseReq = { steps: STEPS, fullSteps: STEPS, testFilePath, cacheEnabled: true };
+
+        // The path-derived dir segment is identical across envs (same file);
+        // only the env segment differs. That is the whole point of issue 012.
+        const dirName = cacheDirName(testFilePath, projectRoot);
+        const devDir = path.join(projectRoot, '.cache', envCacheSegment('dev'), dirName);
+        const stagingDir = path.join(projectRoot, '.cache', envCacheSegment('staging'), dirName);
+
+        // dev run populates dev's namespace.
+        await manager.executeSteps('twoenv-dev', { ...baseReq, envName: 'dev' });
+        const devMeta1 = JSON.parse(await fs.readFile(path.join(devDir, 'meta.json'), 'utf-8'));
+        // Plant a sentinel under dev. If staging wrongly read/cleared dev's
+        // namespace (the pre-012 single-namespace bug), this would vanish.
+        const devSentinel = path.join(devDir, 'step-sentinel.json');
+        await fs.writeFile(devSentinel, '{"turns":[]}');
+
+        // staging run must land in a SEPARATE dir under the staging segment.
+        await manager.executeSteps('twoenv-staging', { ...baseReq, envName: 'staging' });
+        const stagingMetaExists = await fs.readFile(path.join(stagingDir, 'meta.json'), 'utf-8').then(() => true, () => false);
+        // dev's sentinel is untouched — staging never read or wiped dev's dir.
+        const devSentinelSurvived = await fs.readFile(devSentinel, 'utf-8').then(() => true, () => false);
+        const devMeta2 = JSON.parse(await fs.readFile(path.join(devDir, 'meta.json'), 'utf-8'));
+
+        await fs.rm(projectRoot, { recursive: true, force: true });
+
+        expect(devDir).not.toBe(stagingDir);                 // two distinct on-disk dirs
+        expect(path.basename(devDir)).toBe(path.basename(stagingDir)); // same path-derived segment
+        expect(devMeta1.stepsHash).toBeTruthy();             // dev was populated
+        expect(stagingMetaExists).toBe(true);                // staging populated its OWN dir
+        expect(devSentinelSurvived).toBe(true);              // staging did not touch dev's namespace
+        expect(devMeta2.stepsHash).toBe(devMeta1.stepsHash); // dev's namespace unchanged by the staging run
+      });
+
+      it('a no-env request lands under the `default` env segment (issue 012)', async () => {
+        const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-012-noenv-'));
+        await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}');
+        const testFilePath = path.join(projectRoot, 'tests', 't.md');
+
+        // envName omitted entirely.
+        await manager.executeSteps('noenv', { steps: STEPS, fullSteps: STEPS, testFilePath, cacheEnabled: true });
+
+        const defaultDir = path.join(projectRoot, '.cache', envCacheSegment(undefined), cacheDirName(testFilePath, projectRoot));
+        const landedUnderDefault = await fs.readFile(path.join(defaultDir, 'meta.json'), 'utf-8').then(() => true, () => false);
+        // And nothing leaked into a phantom non-`default` segment.
+        const cacheSegments = await fs.readdir(path.join(projectRoot, '.cache'));
+
+        await fs.rm(projectRoot, { recursive: true, force: true });
+
+        expect(envCacheSegment(undefined)).toBe('default');  // the sentinel is literally `default`
+        expect(landedUnderDefault).toBe(true);
+        expect(cacheSegments).toEqual(['default']);          // only the default namespace exists
+      });
+
+      it('the request envName is not silently dropped — the on-disk env segment is the sanitised request env (issue 012)', async () => {
+        const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-012-notdropped-'));
+        await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}');
+        // A non-trivial env name that the segment helper must sanitise — proves
+        // the dir reflects THIS request's env (not a stale/default value, and
+        // not the raw unsanitised string).
+        const envName = 'QA_East';
+        await fs.writeFile(path.join(projectRoot, `.env.${envName}`), '');
+        const testFilePath = path.join(projectRoot, 'tests', 't.md');
+
+        await manager.executeSteps('notdropped', { steps: STEPS, fullSteps: STEPS, testFilePath, envName, cacheEnabled: true });
+
+        // Read the env-segment directory the manager actually created.
+        const cacheSegments = await fs.readdir(path.join(projectRoot, '.cache'));
+        const expectedSegment = envCacheSegment(envName);    // 'qa-east'
+        const expectedDir = path.join(projectRoot, '.cache', expectedSegment, cacheDirName(testFilePath, projectRoot));
+        const landedUnderEnv = await fs.readFile(path.join(expectedDir, 'meta.json'), 'utf-8').then(() => true, () => false);
+
+        await fs.rm(projectRoot, { recursive: true, force: true });
+
+        expect(expectedSegment).toBe('qa-east');             // sanitised, not the raw 'QA_East'
+        expect(cacheSegments).toEqual([expectedSegment]);    // exactly this env's segment on disk
+        expect(landedUnderEnv).toBe(true);                   // request env reached the dir
+      });
     });
 
     it('handles executeStep throwing an unexpected error', async () => {

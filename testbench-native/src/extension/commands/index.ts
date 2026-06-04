@@ -6,7 +6,7 @@ import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { RunController, SkillDebugContext } from '../run-controller.js';
 import { getOutputChannel } from '../output-channel.js';
-import { cacheDirForTest } from '../cache-paths.js';
+import { cacheDirsForTestAllEnvs } from '../cache-paths.js';
 
 interface Registry {
   active(): RunController | undefined;
@@ -362,26 +362,25 @@ export function registerCommands(
       tracker.clearStatuses(editor.document.uri);
     }),
 
-    // Wipes <project-root>/.cache/<sanitized-test-path>/ for the active
-    // test. Skill steps invoked from this test live in the same dir (the
-    // cache is keyed off the test file, not per-skill) so they go too.
-    // Bundle-hash invalidation already covers "I edited a step" — this
-    // command is for the cases the hash can't see: env values changed,
-    // model upgraded, real-world page drift on a step that scrapes a live
-    // site, etc.
+    // Wipes <project-root>/.cache/<env>/<dir>/ for the active test across EVERY
+    // env segment, not just the active one. A single file can populate multiple
+    // segments: an interactive run uses the EnvSelector's active env, while a
+    // batch run keys off the test's frontmatter env (test-controller.ts's
+    // `frontmatter.env ?? batchEnv`), so the same file may have written
+    // `.cache/dev/<dir>/` AND `.cache/staging/<dir>/`. Clearing only the active
+    // env's entry would silently leave the others stale (issue 012 gap), so this
+    // enumerates all segments — "clear" means clear. Skill steps invoked from
+    // this test live in the same dir (the cache is keyed off the test file, not
+    // per-skill) so they go too. Bundle-hash invalidation already covers "I
+    // edited a step" — this command is for the cases the hash can't see: env
+    // values changed, model upgraded, real-world page drift on a step that
+    // scrapes a live site, etc.
     vscode.commands.registerCommand('testbench-native.clearCacheForThisTest', async () => {
       const editor = tracker.activeEditor;
       if (!editor) return notifyNoActive();
       const testFilePath = editor.document.uri.fsPath;
-      const cacheDir = cacheDirForTest(testFilePath);
-      if (!cacheDir) {
-        vscode.window.setStatusBarMessage(
-          'TestBench: no aiui.config.json above this file — nothing to clear',
-          3000,
-        );
-        return;
-      }
-      if (!fs.existsSync(cacheDir)) {
+      const cacheDirs = cacheDirsForTestAllEnvs(testFilePath);
+      if (cacheDirs.length === 0) {
         vscode.window.setStatusBarMessage(
           'TestBench: no cache to clear for this test',
           2000,
@@ -389,21 +388,31 @@ export function registerCommands(
         return;
       }
       const fileLabel = path.basename(testFilePath);
+      const detail =
+        cacheDirs.length === 1
+          ? `This removes ${cacheDirs[0]}.\n\nThe next run will call the AI again to repopulate it.`
+          : `This removes ${cacheDirs.length} cached env entries:\n${cacheDirs.join('\n')}\n\nThe next run will call the AI again to repopulate them.`;
       const choice = await vscode.window.showWarningMessage(
         `Delete cached AI responses for ${fileLabel}?`,
-        { modal: true, detail: `This removes ${cacheDir}.\n\nThe next run will call the AI again to repopulate it.` },
+        { modal: true, detail },
         'Delete',
       );
       if (choice !== 'Delete') return;
-      try {
-        fs.rmSync(cacheDir, { recursive: true, force: true });
-      } catch (err) {
+      const failed: string[] = [];
+      for (const dir of cacheDirs) {
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+          getOutputChannel().appendLine(`Cleared step cache: ${dir}`);
+        } catch (err) {
+          failed.push(`${dir} — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (failed.length > 0) {
         vscode.window.showErrorMessage(
-          `TestBench: failed to clear cache — ${err instanceof Error ? err.message : String(err)}`,
+          `TestBench: failed to clear cache — ${failed.join('; ')}`,
         );
         return;
       }
-      getOutputChannel().appendLine(`Cleared step cache: ${cacheDir}`);
       vscode.window.setStatusBarMessage(`TestBench: cleared cache for ${fileLabel}`, 3000);
     }),
 

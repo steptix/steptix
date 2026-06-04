@@ -1,6 +1,6 @@
 import { basename, dirname, join as pathJoin, relative as pathRelative, sep } from 'node:path';
 import { stat } from 'node:fs/promises';
-import { StepCache, frameScopedStepKey } from '../cache/step-cache.js';
+import { StepCache, frameScopedStepKey, cacheDirName, envCacheSegment } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
 import { chooseCacheHashSource } from './cache-hash-source.js';
 import { loadConfig } from '../config/loader.js';
@@ -1528,7 +1528,7 @@ export class SessionManager {
       // hoisted out of this branch — it now runs for every request).
       const projectRoot = projectBundle.projectRoot;
       if (projectRoot) {
-        const cacheDir = pathJoin(projectRoot, projectConfig.cache.dir);
+        const cacheDir = pathJoin(projectRoot, projectConfig.cache.dir, envCacheSegment(requestedEnvName ?? undefined));
         // Bundle-hash source (issue 016 Bug 2). The hash must change when a
         // skill body changes AND be stable across every batch of one document.
         // `effectiveSteps` (the expansion of this batch) is the right source
@@ -1589,7 +1589,7 @@ export class SessionManager {
           });
         }
         try {
-          stepCache = await StepCache.initialize(cacheDir, request.testFilePath, cacheHashSource);
+          stepCache = await StepCache.initialize(cacheDir, cacheDirName(request.testFilePath, projectRoot), cacheHashSource);
         } catch (err) {
           logger.warn(
             `Session "${sessionId}": failed to initialize step cache: ${(err as Error).message} — proceeding without cache`,

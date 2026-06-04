@@ -72,11 +72,14 @@ vi.mock('../src/runner/hooks.js', () => ({
 }));
 
 const stepCacheInitMock = vi.fn();
-vi.mock('../src/cache/step-cache.js', () => ({
+// Spread the real module so the pure path helpers (envCacheSegment,
+// cacheDirName) the runner now imports stay real; only StepCache.initialize
+// is replaced with the spy this suite asserts on.
+vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
   StepCache: {
     initialize: (...args: unknown[]) => stepCacheInitMock(...args),
   },
-  fingerprintAssertion: () => 'fp',
 }));
 
 const diagnoseFailureMock = vi.fn();

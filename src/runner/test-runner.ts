@@ -22,7 +22,8 @@ import { diagnoseFailure } from '../ai/diagnose.js';
 import { logger, setLogLevel, getLogLevel, type ConsoleLogLevel } from '../utils/logger.js';
 import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 import { ApiResponseStore } from '../api/response-store.js';
-import { StepCache } from '../cache/step-cache.js';
+import { StepCache, envCacheSegment, cacheDirName } from '../cache/step-cache.js';
+import { resolveProjectRoot } from '../server/project-root.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { executeToolStep } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
@@ -104,6 +105,53 @@ function parseCdpOptionsFromTestConfig(testConfig: TestConfig): CdpLaunchOptions
 }
 
 /**
+ * The env a test ACTUALLY runs under, used to namespace its cache (issue 012).
+ *
+ * A run-wide `--env`/`AUTOMATION_ENV` (`runEnvName`) WINS over the test's
+ * frontmatter `env:`. This mirrors run.ts's precedence: the CLI flag is honoured
+ * unconditionally, and a test's frontmatter env is consulted ONLY when no
+ * run-wide env is set. Keying the cache by anything else would read entries
+ * written under the env the test did not run under. Returns `undefined` when
+ * neither is set (callers fall back to the `default` env segment).
+ *
+ * Pure and browser-free so the CLI cache seam is unit-testable.
+ */
+export function resolveEffectiveEnv(
+  runEnvName: string | undefined,
+  frontmatterEnv: string | undefined,
+): string | undefined {
+  return runEnvName || frontmatterEnv?.trim() || undefined;
+}
+
+/**
+ * Env-namespaced cache base directory: `<cacheBaseDir>/<env-segment>` (issue
+ * 012). Pure and browser-free so the CLI cache seam is unit-testable.
+ */
+export function resolveTestCacheBase(cacheBaseDir: string, effectiveEnv?: string): string {
+  return path.join(cacheBaseDir, envCacheSegment(effectiveEnv));
+}
+
+/**
+ * Full per-run cache directory: `<cacheBaseDir>/<env-segment>/<basename>-<hash>`
+ * (issues 012/027/028). This is the directory `runTest` actually writes to —
+ * `StepCache.initialize(resolveTestCacheBase(...), cacheDirName(...))` yields
+ * exactly this path because `cacheDirName` is idempotent under the
+ * `sanitizeTestName` that `initialize` applies to its `testName` argument.
+ * Exposed purely so tests can assert the path without driving a browser.
+ */
+export function cacheDirForRun(
+  cacheBaseDir: string,
+  effectiveEnv: string | undefined,
+  testFilePath: string,
+  projectRoot?: string | null,
+): string {
+  return path.join(
+    resolveTestCacheBase(cacheBaseDir, effectiveEnv),
+    cacheDirName(testFilePath, projectRoot),
+  );
+}
+
+/**
  * Run a single test instance (ParsedTest with resolved parameters).
  * Handles browser lifecycle, step execution, and report generation.
  */
@@ -111,6 +159,7 @@ export async function runTest(
   instance: TestInstance,
   config: Config,
   contextContent: string,
+  runEnvName?: string,
 ): Promise<TestReport> {
   const { test, resolvedParameters, dataRowIndex } = instance;
   const startTime = Date.now();
@@ -132,7 +181,16 @@ export async function runTest(
   // Always initialize cache — used for assertion code even when action caching is off.
   // StepCache.initialize is idempotent (creates dir, writes meta). The stepCache
   // reference is passed to all steps; action caching is further gated by config.cache.enabled.
-  const stepCache = await StepCache.initialize(config.cache.dir, test.title, test.steps);
+  //
+  // Cache layout is env-namespaced (issue 012) and keyed by a stable path-derived
+  // directory name rather than the test title (issues 027/028). The env the test
+  // ACTUALLY runs under wins: a run-wide --env/AUTOMATION_ENV (runEnvName) overrides
+  // the test's frontmatter env, matching run.ts's precedence (frontmatter only when
+  // no run-wide env is set). Final dir: <cache.dir>/<env-segment>/<basename>-<hash>/.
+  const effectiveEnv = resolveEffectiveEnv(runEnvName, test.frontmatter.env);
+  const projectRoot = await resolveProjectRoot(test.filePath);
+  const baseDir = resolveTestCacheBase(config.cache.dir, effectiveEnv);
+  const stepCache = await StepCache.initialize(baseDir, cacheDirName(test.filePath, projectRoot), test.steps);
 
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
@@ -943,7 +1001,7 @@ export async function expandTestInstances(
 export async function runTests(
   tests: ParsedTest[],
   config: Config,
-  options: { bail?: boolean; verbose?: boolean } = {},
+  options: { bail?: boolean; verbose?: boolean; runEnvName?: string } = {},
 ): Promise<RunSummary> {
   const context = await loadContextFiles(config.tests.contextDir);
 
@@ -963,7 +1021,7 @@ export async function runTests(
     for (const instance of instances) {
       if (bailed) break;
 
-      const report = await runTest(instance, config, context.combined);
+      const report = await runTest(instance, config, context.combined, options.runEnvName);
       reports.push(report);
 
       // Save HTML report

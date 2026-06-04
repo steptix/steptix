@@ -1,6 +1,6 @@
 # 028 — CLI step cache keys by test *title* (not file path) and ignores env, so same-titled tests collide and envs share entries
 
-**Status:** open / low-medium priority (CLI path only) — **resolution decided (Option A: key by a `basename + hash(project-root-relative path)` directory name, shared across CLI/server/extension; env-sharing handled separately by [012](012-step-cache-not-env-aware.md)), see [Resolution](#resolution-decided-option-a--file-path-derived-cache-dir-name); not yet implemented**
+**Status:** open / low-medium priority (CLI path only) — **resolution implemented (path-derived `basename + hash(project-root-relative path)` dir name, shared across CLI/server/extension, combined with [012](012-step-cache-not-env-aware.md)'s env segment; closes [027](027-cache-testname-truncation-collision.md) too); pending verification/commit — see [Resolution](#resolution-decided-option-a--file-path-derived-cache-dir-name) and [Implemented](#implemented)**
 **Area:** [src/runner/test-runner.ts:135](../src/runner/test-runner.ts#L135) (`StepCache.initialize(config.cache.dir, test.title, test.steps)` — `test.title` is the key), [src/parser/types.ts:106](../src/parser/types.ts#L106) (`ParsedTest.filePath` — already in scope at the call site, no threading needed), [src/cache/step-cache.ts:51-79](../src/cache/step-cache.ts#L51) (cache dir from `testName`) + [262-268](../src/cache/step-cache.ts#L262) (`sanitizeTestName`), [src/server/project-root.ts](../src/server/project-root.ts) (`resolveProjectRoot` — to compute the relative path), [src/config/defaults.ts:69-72](../src/config/defaults.ts#L69) (`cache.dir` default `.cache`)
 **Related:** [issues/012-step-cache-not-env-aware.md](012-step-cache-not-env-aware.md) (the env-sharing half — env segment wraps this dir name as `.cache/<env>/<dir>/`), [issues/027-cache-testname-truncation-collision.md](027-cache-testname-truncation-collision.md) (**the server-side sibling — this resolution's shared helper closes it too**), [issues/018-step-cache-blind-to-data-file-value-changes.md](018-step-cache-blind-to-data-file-value-changes.md) (notes the CLI resolves data at parse time)
 **Opened:** 2026-06-03
@@ -279,6 +279,34 @@ into the key, or it would defeat the param read-time sharing.
    infeasible (root `tests/` use **vitest** against `src/`; testbench-native uses
    **node's built-in runner** against its own build) — so assert a shared fixture of
    `(input → expected dir name)` strings in *each* package's suite instead.
+
+## Implemented
+
+Implemented on branch `docs/cache-issue-resolutions` (not yet committed),
+combined with [012](012-step-cache-not-env-aware.md) (the env segment wraps the
+dir name this issue produces):
+
+- **`cacheDirName(testFilePath, projectRoot)`** (+ the `normalizeForCache` helper)
+  added to [src/cache/step-cache.ts](../src/cache/step-cache.ts) and mirrored into
+  [testbench-native/src/extension/cache-paths.ts](../testbench-native/src/extension/cache-paths.ts).
+  It now keys the per-test cache directory as `<basename>-<12-char hash>`, killing
+  same-`# Title` collisions and — on the server side, replacing the old
+  `sanitizeTestName(testFilePath).slice(0,100)` — **closing [027](027-cache-testname-truncation-collision.md)**.
+- **No double-nesting (corrected).** The Call-sites sketch above
+  ([lines 207-208](#call-sites)) wrote `initialize(path.join(baseDir, dir), test.title, ...)`,
+  which would have nested three levels deep: `StepCache.initialize` itself appends
+  `sanitizeTestName(testName)` to its base ([step-cache.ts:57](../src/cache/step-cache.ts#L57)),
+  so passing both `path.join(baseDir, dir)` **and** `test.title` yields
+  `<base>/<dir>/<sanitized-title>/`. The implemented form follows the authoritative
+  [line 150](#resolution-decided-option-a--file-path-derived-cache-dir-name) reading:
+  pass `cacheDirName(...)` **as the `testName` argument** over the env-namespaced
+  base, so the directory is exactly `<base>/<cacheDirName>/` (`sanitizeTestName` is
+  idempotent on `cacheDirName`'s output). `test.title` is no longer used to build
+  the directory.
+- Server and extension call sites updated to the same `cacheDirName`; the CLI
+  `await`s `resolveProjectRoot(test.filePath)` for the hash identity (matching the
+  server/extension). The testbench-native `package.json` patch version was bumped
+  per CLAUDE.md (the `cache-paths.ts` mirror is bundled into the extension).
 
 ## Tests this would need
 
