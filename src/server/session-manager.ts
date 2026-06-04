@@ -1,4 +1,4 @@
-import { basename, dirname, join as pathJoin, relative as pathRelative, sep } from 'node:path';
+import { basename, dirname, join as pathJoin, relative as pathRelative, resolve as pathResolve, sep } from 'node:path';
 import { stat } from 'node:fs/promises';
 import { StepCache, frameScopedStepKey, cacheDirName, envCacheSegment } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
@@ -344,9 +344,16 @@ interface ManagedSession {
    *  `video()` handle at closeSession time, since the active page may have
    *  shifted via openBrowser/switchBrowser. Tier 1 records the main page only. */
   mainPage: Page;
-  /** Resolved video-recording mode for this session (from `config.browser.video`). */
+  /** Resolved video-recording mode for this session (from the test's project
+   *  `browser.video`). */
   videoMode: VideoMode;
-  /** Absolute `<reports.outputDir>/videos` directory the .webm records into. */
+  /** Absolute, project-anchored report output dir
+   *  (`<projectRoot>/<reports.outputDir>`, or the server's startup outputDir
+   *  when no project root resolves). Reports, the per-run log, and `videoDir`
+   *  are all anchored here so they land in the TEST's project — not the
+   *  server's cwd — matching the CLI runner. */
+  reportOutputDir: string;
+  /** Absolute `<reportOutputDir>/videos` directory the .webm records into. */
   videoDir: string;
   /**
    * Set at run-end report assembly when video recording is active. Because a
@@ -599,6 +606,45 @@ export class SessionManager {
   }
 
   /**
+   * Resolve the per-project recording outputs for a NEW session from the test
+   * file's own project config: the video-record mode (`browser.video`) and the
+   * absolute report output dir (`<projectRoot>/<reports.outputDir>`). Both are
+   * fixed at session creation — the recording context is launched, and
+   * videoDir/report dir set, before the per-batch bundle resolves — so they
+   * must come from the project config HERE, not the server startup config.
+   * Anchoring the output dir to the project root makes reports + videos + the
+   * run log land in the TEST's project, matching the CLI runner. A session maps
+   * to one test file, so a reused session keeps the right dir. Other browser
+   * settings (headed, stealth, …) intentionally stay server-global. Any failure
+   * (malformed/absent project config) falls back to the server startup config's
+   * outputDir; the malformed config then surfaces when the batch re-resolves the
+   * bundle.
+   */
+  private async resolveSessionOutput(
+    request: StepRequest,
+  ): Promise<{ videoMode: VideoMode; reportOutputDir: string }> {
+    try {
+      if (request.testFilePath) {
+        const envName = request.envName?.trim() || null;
+        const bundle = await this.resolveProjectBundle(request.testFilePath, envName);
+        const reportOutputDir = bundle.projectRoot
+          ? pathResolve(bundle.projectRoot, bundle.config.reports.outputDir)
+          : pathResolve(this.config.reports.outputDir);
+        return { videoMode: resolveVideoMode(bundle.config.browser.video), reportOutputDir };
+      }
+    } catch (err) {
+      logger.warn(
+        `Could not resolve per-project recording output (${(err as Error).message}); ` +
+          `falling back to server default`,
+      );
+    }
+    return {
+      videoMode: resolveVideoMode(this.config.browser.video),
+      reportOutputDir: pathResolve(this.config.reports.outputDir),
+    };
+  }
+
+  /**
    * Resolve the per-project config + env/data bundle for a step batch from the
    * test file's project root. mtime-cached; returns the cached bundle when no
    * input file changed, otherwise reloads. A null project root (no
@@ -806,7 +852,24 @@ export class SessionManager {
     // `AI_API_KEY` are re-applied per batch in `executeStepsInternal` so a saved
     // `.env` edit takes effect on the next run.
     if (!session) {
-      session = await this.createSession(sessionId, request.config, request.env);
+      // Per-project recording outputs: the browser context is created — with or
+      // without `recordVideo` — and the report/video/log output dir is fixed at
+      // session creation, BEFORE the per-batch project bundle is resolved. So
+      // the record mode (`browser.video`) AND the output dir
+      // (`reports.outputDir`, anchored at the project root) must come from the
+      // TEST's own aiui.config.json, resolved up front here — not the server's
+      // startup config. This makes both take effect on the server/TestBench
+      // path, matching how cache/env/data are already per-project, and the CLI
+      // runner. (Props consumed at session creation read this.config unless
+      // threaded — see feedback_thread_new_config_to_server_bundle.)
+      const { videoMode, reportOutputDir } = await this.resolveSessionOutput(request);
+      session = await this.createSession(
+        sessionId,
+        request.config,
+        request.env,
+        videoMode,
+        reportOutputDir,
+      );
     }
 
     if (request.breakpoints && request.breakpoints.length > 0) {
@@ -1026,10 +1089,10 @@ export class SessionManager {
         if (savedAbs) {
           try {
             // POSIX-style relative path so <video src> resolves cross-OS.
-            pending.report.videoRelPath = pathRelative(this.config.reports.outputDir, savedAbs)
+            pending.report.videoRelPath = pathRelative(session.reportOutputDir, savedAbs)
               .split(sep)
               .join('/');
-            await generateReport(pending.report, this.config.reports.outputDir);
+            await generateReport(pending.report, session.reportOutputDir);
             logger.info(`Report re-rendered with session video: ${pending.reportPath}`);
           } catch (err) {
             logger.warn(`Failed to attach session video to report for "${sessionId}": ${String(err)}`);
@@ -1061,8 +1124,13 @@ export class SessionManager {
 
   private async createSession(
     sessionId: string,
-    sessionConfig?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } },
-    envOverrides?: Record<string, string>,
+    sessionConfig: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } } | undefined,
+    envOverrides: Record<string, string> | undefined,
+    /** Resolved per-project record mode (from the test's `browser.video`). */
+    videoMode: VideoMode,
+    /** Absolute, project-anchored output dir — reports, videos, and the run log
+     *  all land under here (see resolveSessionOutput). */
+    reportOutputDir: string,
   ): Promise<ManagedSession> {
     logger.info(`Creating session "${sessionId}"`);
 
@@ -1071,10 +1139,19 @@ export class SessionManager {
     const aiConfig = applyEnvToAiConfig(this.config.ai, envOverrides);
 
     // Video recording (Tier 1 — main page only). Thread the videos/ dir so the
-    // launched context records when `config.browser.video` isn't 'off'. Under
-    // CDP launchBrowser short-circuits before newContext, so nothing records.
-    const videoDir = pathJoin(this.config.reports.outputDir, 'videos');
-    const browserSession = await launchBrowser(this.config.browser, sessionConfig?.cdp, { videoDir });
+    // launched context records when the resolved per-project `videoMode` isn't
+    // 'off'. Under CDP launchBrowser short-circuits before newContext, so
+    // nothing records.
+    const videoDir = pathJoin(reportOutputDir, 'videos');
+    // Override only `video` with the per-project record mode; the rest of the
+    // browser config stays server-global. videoDir is co-located with where
+    // reports are written (the project-anchored reportOutputDir) so the report's
+    // relative <video> link resolves.
+    const browserSession = await launchBrowser(
+      { ...this.config.browser, video: videoMode },
+      sessionConfig?.cdp,
+      { videoDir },
+    );
     const browserTracker = new BrowserTracker(browserSession);
     const tokenTracker = new TokenTracker();
     const aiClient = new AiClient(aiConfig, tokenTracker);
@@ -1100,7 +1177,8 @@ export class SessionManager {
       browserSession,
       browserTracker,
       mainPage: browserSession.page,
-      videoMode: resolveVideoMode(this.config.browser.video),
+      videoMode,
+      reportOutputDir,
       videoDir,
       status: 'active',
       sessionConfig: sessionConfig ?? {},
@@ -1266,7 +1344,7 @@ export class SessionManager {
     // so a quiet server still produces a complete forensic trail when enabled.
     const runLog = fileMode === 'off'
       ? null
-      : openRunLogFile(sessionId, this.config.reports.outputDir);
+      : openRunLogFile(sessionId, session.reportOutputDir);
     if (runLog) {
       runLog.stream.write(
         `# session=${sessionId} startedAt=${new Date().toISOString()} steps=${stepsTotal} mode=${fileMode}\n`,
@@ -2672,7 +2750,7 @@ export class SessionManager {
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
         };
-        reportPath = await generateReport(report, this.config.reports.outputDir);
+        reportPath = await generateReport(report, session.reportOutputDir);
         logger.info(`Report saved: ${reportPath}`);
 
         // Video (Tier 1 server limitation): a reusable session keeps its
