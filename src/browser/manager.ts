@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
 import { chromium, firefox, webkit, type Browser, type BrowserContext, type Page } from 'playwright';
 import { chromium as stealthChromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -1081,29 +1082,44 @@ export interface FinalizeMainPageVideoArgs {
 export async function finalizeMainPageVideo(
   args: FinalizeMainPageVideoArgs,
 ): Promise<string | undefined> {
-  // Grab the handle BEFORE closing — page.video() is only non-null when the
-  // context was created with recordVideo, and reading it post-close is unsafe.
+  // Grab the handle + its on-disk path BEFORE closing. page.video() is only
+  // non-null when the context was created with recordVideo. video.path()
+  // resolves to the local .webm path immediately (no need to wait for close)
+  // and keeps working after the browser is gone — UNLIKE video.saveAs()/
+  // .delete(), which need the live browser connection that `closeContext()`
+  // (closeAll → browser.close()) tears down. So we capture the path now and do
+  // a filesystem rename/delete after close. Recording never happens under CDP
+  // (caveat #1 — no recordVideo on attached browsers), so page.video() is null
+  // there and path()'s remote-throw case is never reached; the file is always
+  // local to the server, and source+target share videoDir, so the rename is
+  // same-dir (never EXDEV).
   const video = args.mode === 'off' ? null : args.page.video();
+  let sourcePath: string | undefined;
+  if (video) {
+    try {
+      sourcePath = await video.path();
+    } catch (err) {
+      logger.warn(`Could not resolve session video path: ${String(err)}`);
+    }
+  }
 
-  // Finalises the .webm on disk (under videoDir, random-hash name).
+  // Finalises the .webm on disk (at sourcePath, random-hash name).
   await args.closeContext();
 
-  if (!video) return undefined;
+  if (!video || !sourcePath) return undefined;
 
   // retain-on-failure on a PASSING run: drop the recording, no report link.
   if (args.mode === 'retain-on-failure' && args.passed) {
-    await video.delete().catch(() => { /* non-fatal */ });
+    await fs.rm(sourcePath, { force: true }).catch(() => { /* non-fatal */ });
     return undefined;
   }
 
   const target = path.join(args.videoDir, `${args.stableBaseName}.webm`);
   try {
-    // saveAs waits until the page is closed and the video fully saved, then
-    // copies the finalised file to the stable, report-matching name.
-    await video.saveAs(target);
-    // saveAs leaves the original hash-named file behind; remove it so videoDir
-    // holds exactly one stable-named file per kept run.
-    await video.delete().catch(() => { /* non-fatal */ });
+    // Rename the finalised hash-named file to the stable, report-matching name.
+    // A filesystem rename works after the browser is closed; video.saveAs() does
+    // not.
+    await fs.rename(sourcePath, target);
     return target;
   } catch (err) {
     logger.warn(`Failed to save session video to ${target}: ${String(err)}`);
