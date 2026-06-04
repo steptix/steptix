@@ -605,6 +605,32 @@ export class SessionManager {
    * `aiui.config.json` above the file) falls back to server defaults with no
    * project `.env`/data.
    */
+  /**
+   * Resolve the video-recording mode for a NEW session from the test file's own
+   * project config (`browser.video`), so per-project recording works on the
+   * server path. The recording context is created at session creation, before
+   * the per-batch bundle resolves, so the mode must be known up front. Only the
+   * record mode is per-project here — other browser settings (headed, stealth,
+   * …) intentionally stay server-global. Any failure (malformed/absent project
+   * config) falls back to the server startup config's video mode; the malformed
+   * config then surfaces properly when the batch re-resolves the bundle.
+   */
+  private async resolveSessionVideoMode(request: StepRequest): Promise<VideoMode> {
+    try {
+      if (request.testFilePath) {
+        const envName = request.envName?.trim() || null;
+        const bundle = await this.resolveProjectBundle(request.testFilePath, envName);
+        return resolveVideoMode(bundle.config.browser.video);
+      }
+    } catch (err) {
+      logger.warn(
+        `Could not resolve per-project video mode (${(err as Error).message}); ` +
+          `falling back to server default`,
+      );
+    }
+    return resolveVideoMode(this.config.browser.video);
+  }
+
   private async resolveProjectBundle(
     testFilePath: string | undefined,
     envName: string | null,
@@ -806,7 +832,16 @@ export class SessionManager {
     // `AI_API_KEY` are re-applied per batch in `executeStepsInternal` so a saved
     // `.env` edit takes effect on the next run.
     if (!session) {
-      session = await this.createSession(sessionId, request.config, request.env);
+      // Per-project video recording: the browser context is created — with or
+      // without `recordVideo` — at session creation, BEFORE the per-batch
+      // project bundle is resolved. So the record mode must come from the
+      // TEST's own aiui.config.json (`browser.video`), resolved up front here,
+      // not from the server's startup config. This makes `browser.video` take
+      // effect on the server/TestBench path, matching how cache/env/data are
+      // already per-project. (See feedback_thread_new_config_to_server_bundle:
+      // props consumed at session creation read this.config unless threaded.)
+      const videoMode = await this.resolveSessionVideoMode(request);
+      session = await this.createSession(sessionId, request.config, request.env, videoMode);
     }
 
     if (request.breakpoints && request.breakpoints.length > 0) {
@@ -1061,8 +1096,10 @@ export class SessionManager {
 
   private async createSession(
     sessionId: string,
-    sessionConfig?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } },
-    envOverrides?: Record<string, string>,
+    sessionConfig: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } } | undefined,
+    envOverrides: Record<string, string> | undefined,
+    /** Resolved per-project record mode (from the test's `browser.video`). */
+    videoMode: VideoMode,
   ): Promise<ManagedSession> {
     logger.info(`Creating session "${sessionId}"`);
 
@@ -1071,10 +1108,19 @@ export class SessionManager {
     const aiConfig = applyEnvToAiConfig(this.config.ai, envOverrides);
 
     // Video recording (Tier 1 — main page only). Thread the videos/ dir so the
-    // launched context records when `config.browser.video` isn't 'off'. Under
-    // CDP launchBrowser short-circuits before newContext, so nothing records.
+    // launched context records when the resolved per-project `videoMode` isn't
+    // 'off'. Under CDP launchBrowser short-circuits before newContext, so
+    // nothing records.
     const videoDir = pathJoin(this.config.reports.outputDir, 'videos');
-    const browserSession = await launchBrowser(this.config.browser, sessionConfig?.cdp, { videoDir });
+    // Override only `video` with the per-project record mode; the rest of the
+    // browser config stays server-global. videoDir stays co-located with where
+    // reports are written (this.config.reports.outputDir) so the report's
+    // relative <video> link resolves.
+    const browserSession = await launchBrowser(
+      { ...this.config.browser, video: videoMode },
+      sessionConfig?.cdp,
+      { videoDir },
+    );
     const browserTracker = new BrowserTracker(browserSession);
     const tokenTracker = new TokenTracker();
     const aiClient = new AiClient(aiConfig, tokenTracker);
@@ -1100,7 +1146,7 @@ export class SessionManager {
       browserSession,
       browserTracker,
       mainPage: browserSession.page,
-      videoMode: resolveVideoMode(this.config.browser.video),
+      videoMode,
       videoDir,
       status: 'active',
       sessionConfig: sessionConfig ?? {},
