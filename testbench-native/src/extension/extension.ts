@@ -730,6 +730,9 @@ export interface TestBenchTestHooks {
   discoveryRefresh: () => Promise<void>;
   /** Result counts of the most recent batch run, or null if none yet. */
   lastBatchRun: () => { passed: number; failed: number; skipped: number } | null;
+  /** Lines streamed to the in-flight (or most recent) test's Test Results
+   *  output. Lets a test prove output is emitted DURING the run, not buffered. */
+  batchOutput: () => string[];
   /** Test-only: run a batch identified by file URIs. Returns the counts
    *  once the TestRun has ended. */
   runBatchByUris: (uris: vscode.Uri[]) => Promise<{ passed: number; failed: number; skipped: number }>;
@@ -998,6 +1001,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       discoveryReady: () => discovery.ready(),
       discoveryRefresh: () => discovery.refresh(),
       lastBatchRun: () => testController.lastRun,
+      batchOutput: () => [...testController.liveOutput],
       runBatchByUris: (uris) => testController.runByUris(uris),
       controllerItemIds: () => testController.controllerItemIds(),
       triggerInitialResolve: () => testController.triggerInitialResolve(),

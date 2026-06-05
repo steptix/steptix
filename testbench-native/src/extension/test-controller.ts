@@ -58,6 +58,11 @@ export class TestBenchTestController implements vscode.Disposable {
    * `enqueueRun`'s return value instead of reading this.)
    */
   private _lastRun: { passed: number; failed: number; skipped: number } | null = null;
+  /** Test-only mirror of the lines streamed to the active run's Test Results
+   *  output via `run.appendOutput`. Reset at the start of each test's runOne and
+   *  appended live as events arrive, so the integration suite can prove output
+   *  is emitted DURING the run rather than buffered until it finishes. */
+  private _liveOutput: string[] = [];
 
   constructor(
     private readonly discovery: TestDiscovery,
@@ -110,6 +115,12 @@ export class TestBenchTestController implements vscode.Disposable {
   /** Test-only readback of the most recent batch run's outcome counts. */
   get lastRun(): { passed: number; failed: number; skipped: number } | null {
     return this._lastRun;
+  }
+
+  /** Test-only readback of the output lines streamed so far for the in-flight
+   *  (or most recent) test — see `_liveOutput`. */
+  get liveOutput(): string[] {
+    return this._liveOutput;
   }
 
   /**
@@ -414,30 +425,39 @@ export class TestBenchTestController implements vscode.Disposable {
     const cached = this.discovery.get(item.uri);
     const envForThisTest = cached?.frontmatter.env ?? batchEnv;
 
+    // Stream output to the Test Results panel LIVE as events arrive, rather
+    // than buffering every line and flushing once at the end (which made the
+    // whole log appear only after the test had already finished). VS Code's
+    // appendOutput needs CRLF line breaks; passing the test item ties the
+    // output to this test in the results tree.
+    const filename = item.uri ? path.basename(item.uri.fsPath) : item.label;
+    run.appendOutput(`─── ${filename} ───\r\n`, undefined, item);
+    this._liveOutput = []; // test-only mirror of streamed lines (see `liveOutput`)
+    const emit = (line: string): void => {
+      this._liveOutput.push(line);
+      run.appendOutput(`${line}\r\n`, undefined, item);
+    };
+
     // Collect step:fail events so we can attach TestMessages on failure.
     const failures: Array<{ line: number; error: string }> = [];
-    const outputs: string[] = [];
     const onEvent = (event: RunEvent): void => {
       switch (event.type) {
         case 'step:start':
-          outputs.push(`▶ step on line ${event.line}`);
+          emit(`▶ step on line ${event.line}`);
           break;
         case 'step:pass':
-          outputs.push(
-            `✓ step on line ${event.line} passed${event.fromCache ? '  (cached)' : ''}`,
-          );
-          if (event.output) outputs.push(`  ${event.output}`);
+          emit(`✓ step on line ${event.line} passed${event.fromCache ? '  (cached)' : ''}`);
+          if (event.output) emit(`  ${event.output}`);
           break;
         case 'step:fail':
-          outputs.push(`✗ step on line ${event.line} failed — ${event.error}`);
+          emit(`✗ step on line ${event.line} failed — ${event.error}`);
           failures.push({ line: event.line, error: event.error });
           break;
         case 'output':
-          outputs.push(`[${event.kind}] ${event.msg}`);
+          emit(`[${event.kind}] ${event.msg}`);
           break;
         case 'done':
-          // Status is reported via the return value of runLines; nothing
-          // extra to log here.
+          // Status comes from runLines' return value; nothing to log here.
           break;
       }
     };
@@ -463,7 +483,8 @@ export class TestBenchTestController implements vscode.Disposable {
     }
 
     const duration = Date.now() - start;
-    appendRunOutput(run, item, outputs);
+    // Trailing blank line separates this test's live output from the next one.
+    run.appendOutput('\r\n', undefined, item);
 
     if (token.isCancellationRequested) {
       // User cancelled mid-test. Skipped is more truthful than failed —
@@ -497,11 +518,4 @@ export class TestBenchTestController implements vscode.Disposable {
     run.passed(item, duration);
     return 'passed';
   }
-}
-
-function appendRunOutput(run: vscode.TestRun, item: vscode.TestItem, lines: string[]): void {
-  if (lines.length === 0) return;
-  const filename = item.uri ? path.basename(item.uri.fsPath) : item.label;
-  const header = `─── ${filename} ───`;
-  run.appendOutput(`${header}\r\n${lines.join('\r\n')}\r\n\r\n`, undefined, item);
 }

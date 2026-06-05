@@ -449,6 +449,43 @@ describe('TestBench batch-run mode', function () {
     );
   });
 
+  it('streams step output to Test Results LIVE during the run (not buffered until the end)', async () => {
+    // Regression: output used to be buffered into an array and flushed via a
+    // single run.appendOutput AFTER runLines resolved, so the Test Results
+    // panel stayed empty until the test finished. Now each line streams as its
+    // event arrives. We prove it by snapshotting the streamed output WHILE the
+    // stream is still open — if the step lines are already there, they were
+    // emitted mid-run, not flushed at the end.
+    const uri = fixtureUri('batch-pass.tmp.md');
+    let midRunOutput = null;
+    fake.streamScripts = [
+      async (f) => {
+        f.push({ type: 'step:start', line: 4 });
+        f.push({ type: 'step:pass', line: 4 });
+        // Wait for the extension to process those events and stream their
+        // output, THEN capture it — all while the stream is still open.
+        await waitFor('step output streamed mid-run', () =>
+          hooks.batchOutput().some((l) => l.includes('step on line 4')),
+        );
+        midRunOutput = hooks.batchOutput();
+        f.end();
+      },
+    ];
+
+    const counts = await hooks.runBatchByUris([uri]);
+
+    assert.equal(counts.passed, 1, `the run should pass. Got ${JSON.stringify(counts)}`);
+    assert.ok(midRunOutput, 'output must have been captured while the run was still in flight');
+    assert.ok(
+      midRunOutput.some((l) => l.includes('▶ step on line 4')),
+      `live output must include the step:start line BEFORE the stream ended. Got ${JSON.stringify(midRunOutput)}`,
+    );
+    assert.ok(
+      midRunOutput.some((l) => l.includes('✓ step on line 4 passed')),
+      `live output must include the step:pass line mid-run. Got ${JSON.stringify(midRunOutput)}`,
+    );
+  });
+
   it('batch mode auto-fails [interactive] steps with file:line in the message', async () => {
     const counts = await runBatchWithScript(
       hooks,
