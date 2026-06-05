@@ -6,10 +6,14 @@ import type { RunController } from './run-controller.js';
 import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 
-/** Subset of RunControllerRegistry that the test controller needs. */
+/** Subset of RunControllerRegistry that the test controller needs. Batch
+ *  (flask) runs go through a DETACHED, headless controller so they never touch
+ *  the editor surface (decorations, webview, the running context key, the Call
+ *  Stack / Variables views) — see RunControllerRegistry.getBatchController.
+ *  Concurrent flask runs are serialized into a FIFO queue inside the test
+ *  controller itself, so no registry-level "is a batch running" guard is needed. */
 export interface TestControllerRegistry {
-  get(document: vscode.TextDocument): RunController | undefined;
-  anyRunning(): boolean;
+  getBatchController(document: vscode.TextDocument): RunController | undefined;
 }
 
 /** Hook so the test controller can drive the sidebar webview banner. */
@@ -47,10 +51,11 @@ export class TestBenchTestController implements vscode.Disposable {
   private readonly tagCache = new Map<string, vscode.TestTag>();
   private readonly disposables: vscode.Disposable[] = [];
   /**
-   * Counters from the most recent batch run. Test-only readback via
-   * __testHooks. Safe to be plain mutable state because runHandler
-   * refuses concurrent invocations (registry.anyRunning() check at
-   * entry) — at most one batch ever writes _lastRun at a time.
+   * Counters from the most recent batch run to FINISH. Test-only readback via
+   * __testHooks. Safe to be plain mutable state because batch runs are
+   * serialized through `runChain` — at most one `executeBatch` writes _lastRun
+   * at a time. (Concurrent callers that need their own counts get them from
+   * `enqueueRun`'s return value instead of reading this.)
    */
   private _lastRun: { passed: number; failed: number; skipped: number } | null = null;
 
@@ -161,11 +166,13 @@ export class TestBenchTestController implements vscode.Disposable {
     const request = new vscode.TestRunRequest(include, undefined, this.profile);
     const tokenSource = new vscode.CancellationTokenSource();
     try {
-      await this.runHandler(request, tokenSource.token);
+      // Go through enqueueRun (not runHandler) so this run's OWN counts come
+      // back — important when several runs are queued concurrently and `_lastRun`
+      // reflects whichever finished last.
+      return await this.enqueueRun(request, tokenSource.token);
     } finally {
       tokenSource.dispose();
     }
-    return this._lastRun ?? { passed: 0, failed: 0, skipped: 0 };
   }
 
   // ---------- Discovery → TestItem sync ----------
@@ -230,35 +237,81 @@ export class TestBenchTestController implements vscode.Disposable {
 
   // ---------- Run handler ----------
 
-  private async runHandler(
+  /** Serializes batch runs into a FIFO queue. A run requested while another
+   *  batch is in flight is CHAINED onto this promise (not refused), so the user
+   *  can stack up runs from the Test Explorer and they execute one after
+   *  another. Each link swallows its own error so a failed/cancelled run never
+   *  breaks the queue for the runs behind it. */
+  private runChain: Promise<void> = Promise.resolve();
+  /** True while a batch is actually executing (vs. merely queued). Lets a
+   *  newly-requested run tell the user it was queued rather than started. */
+  private batchRunning = false;
+
+  private runHandler(
     request: vscode.TestRunRequest,
     token: vscode.CancellationToken,
   ): Promise<void> {
-    const log = getOutputChannel();
-    const ts = () => new Date().toISOString().slice(11, 23);
+    // VS Code's run handler is fire-and-forget from our side; the per-run
+    // counts only matter to the test hook, which calls enqueueRun directly.
+    return this.enqueueRun(request, token).then(() => undefined);
+  }
 
-    if (this.registry.anyRunning()) {
-      vscode.window.setStatusBarMessage(
-        'TestBench: a run is already in flight — wait for it to finish',
-        3000,
-      );
-      return;
-    }
-
+  /**
+   * Build a TestRun for `request` and QUEUE it behind any in-flight/queued
+   * batch (FIFO), resolving with this run's own outcome counts once it has
+   * fully executed (or been skipped). The run's tests are marked `enqueued`
+   * immediately, so a queued run shows as pending in the Test Explorer while it
+   * waits its turn. The env is pinned now (at request time) so a later
+   * env-setting change can't retroactively alter a waiting run.
+   */
+  private enqueueRun(
+    request: vscode.TestRunRequest,
+    token: vscode.CancellationToken,
+  ): Promise<{ passed: number; failed: number; skipped: number }> {
     const items = this.resolveRequestItems(request);
     const run = this.controller.createTestRun(request);
-    const counts = { passed: 0, failed: 0, skipped: 0 };
-
-    // Pin the batch env at run start so a mid-batch env-setting change
-    // can never split results.
+    for (const item of items) run.enqueued(item);
     const batchEnv = EnvSelector.activeEnv();
+
+    if (this.batchRunning) {
+      vscode.window.setStatusBarMessage(
+        'TestBench: queued — will run after the current batch finishes',
+        3000,
+      );
+    }
+
+    const prior = this.runChain;
+    const mine = (async () => {
+      await prior.catch(() => undefined); // wait our turn; ignore prior's outcome
+      return this.executeBatch(run, items, batchEnv, token);
+    })();
+    // Advance the chain to this link; swallow its result/error so one run can
+    // never poison the queue for the runs behind it.
+    this.runChain = mine.then(
+      () => undefined,
+      () => undefined,
+    );
+    return mine;
+  }
+
+  /** Execute one already-created TestRun's items sequentially and report its
+   *  outcome counts. Runs serialized via {@link enqueueRun}, so at most one
+   *  executeBatch touches `batchRunning` / `_lastRun` / the banner at a time. */
+  private async executeBatch(
+    run: vscode.TestRun,
+    items: vscode.TestItem[],
+    batchEnv: string | null,
+    token: vscode.CancellationToken,
+  ): Promise<{ passed: number; failed: number; skipped: number }> {
+    const log = getOutputChannel();
+    const ts = () => new Date().toISOString().slice(11, 23);
+    const counts = { passed: 0, failed: 0, skipped: 0 };
+    this.batchRunning = true;
     log.appendLine(
       `[${ts()}] [batch] starting ${items.length} test(s) with env=${batchEnv ?? '(none)'}`,
     );
 
     try {
-      for (const item of items) run.enqueued(item);
-
       for (let i = 0; i < items.length; i++) {
         const item = items[i]!;
         if (token.isCancellationRequested) {
@@ -271,11 +324,11 @@ export class TestBenchTestController implements vscode.Disposable {
         this.banner.set({ running: i + 1, total: items.length });
         const outcome = await this.runOne(run, item, batchEnv, token);
         counts[outcome] += 1;
-        // The session teardown for each batch test (close + video finalise) is
-        // owned by runLines itself — a batch run closes its own unique per-run
-        // session in its finally (see RunController). Nothing to do here.
+        // Per-test session teardown (close + video finalise) is owned by
+        // runLines' finally (see RunController). Nothing to do here.
       }
     } finally {
+      this.batchRunning = false;
       this.banner.set(null);
       run.end();
       this._lastRun = counts;
@@ -283,6 +336,7 @@ export class TestBenchTestController implements vscode.Disposable {
         `[${ts()}] [batch] done: ${counts.passed} passed / ${counts.failed} failed / ${counts.skipped} skipped`,
       );
     }
+    return counts;
   }
 
   /** Resolve the user's TestRunRequest into an ordered list of leaf TestItems
@@ -343,7 +397,11 @@ export class TestBenchTestController implements vscode.Disposable {
       return 'failed';
     }
 
-    const controller = this.registry.get(doc);
+    // DETACHED, headless controller: a flask run must not drive the editor's
+    // decorations / webview / Pause-Stop buttons, and must be able to run
+    // independently of (even concurrently with) an interactive run of the same
+    // file. See RunControllerRegistry.getBatchController.
+    const controller = this.registry.getBatchController(doc);
     if (!controller) {
       run.errored(
         item,
@@ -394,7 +452,9 @@ export class TestBenchTestController implements vscode.Disposable {
       outcome = await controller.runLines([], {
         breakpoints: new Set(), // batch ignores breakpoints by design
         batchMode: true,
-        forceFreshSession: true,
+        // No forceFreshSession: batch isolation comes from the UNIQUE per-run
+        // session id (`<path>::run-N`, issue 032), not the interactive
+        // pre-close — which runLines skips entirely when batchMode is true.
         envOverride: envForThisTest ?? null,
         onEvent,
       });
