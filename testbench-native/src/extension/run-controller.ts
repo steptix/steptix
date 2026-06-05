@@ -211,6 +211,13 @@ export class RunController {
    *  the `runLines` finally block. */
   private currentClient: ApiClientLike | null = null;
   private currentSessionId: string | null = null;
+  /** Session id of the current/most-recent run. Like `currentSessionId` but NOT
+   *  cleared at run end, so out-of-band ops (closeSession, getLastRun,
+   *  isSessionAlive) target the right session — critically the batch post-run
+   *  close, which fires after the run. Interactive runs reuse the stable
+   *  file-path id; batch runs get a unique `<path>::run-N` so two runs of the
+   *  same file are two distinct server sessions (see the batch-session-id issue). */
+  private activeSessionId: string | null = null;
   /** Captured along with currentClient so the tool step-into feature can
    *  test whether the server is reachable as a Node debugger target.
    *  Cleared in the same finally block. */
@@ -664,8 +671,11 @@ export class RunController {
   /**
    * Resolve an ApiClient for this controller's test from its env file, or null
    * when the env can't be resolved (no env file, missing SERVER_URL/API_KEY).
-   * `sessionId` is the test file path — the server's session key. Shared by
-   * `closeSession` and the re-run liveness probe.
+   * `sessionId` is the current/most-recent run's session id (`activeSessionId`)
+   * — the stable file path for interactive runs, or the unique `<path>::run-N`
+   * for batch runs — so `closeSession`, the re-run liveness probe, and getLastRun
+   * all target the session the run actually used. Falls back to the file path
+   * before the first run.
    */
   private async resolveClient(): Promise<{ client: ApiClientLike; sessionId: string } | null> {
     const settings = vscode.workspace.getConfiguration('testbench-native');
@@ -686,7 +696,7 @@ export class RunController {
     const serverUrl = env['SERVER_URL']?.trim();
     const apiKey = env['SERVER_API_KEY']?.trim();
     if (!serverUrl || !apiKey) return null;
-    return { client: this.clientFactory({ serverUrl, apiKey }), sessionId: filePath };
+    return { client: this.clientFactory({ serverUrl, apiKey }), sessionId: this.activeSessionId ?? filePath };
   }
 
   /**
@@ -875,10 +885,14 @@ export class RunController {
     // server outage, or no existing session all just no-op here, and the
     // run that follows surfaces the real error if there is one.
     //
-    // Batch mode opts into forceFreshSession to give every test a clean
-    // slate; that path bypasses the first-run-only gate.
+    // The pre-close clears a STALE session for a STABLE session id — only the
+    // interactive (reused-session) flow has one. Batch runs use a unique per-run
+    // session id (`<path>::run-N`), so there's no collision to clear, and
+    // clearing here would wrongly close the interactive session for this file.
+    // So skip it entirely for batch; the batch's post-run close (in the test
+    // controller) tears its unique session down instead.
     const forceFresh = options.forceFreshSession === true;
-    if (forceFresh || !this.staleSessionCleared) {
+    if (!options.batchMode && (forceFresh || !this.staleSessionCleared)) {
       this.staleSessionCleared = true;
       try {
         await this.closeSession();
@@ -1014,13 +1028,21 @@ export class RunController {
           : ''),
     );
 
-    const sessionId = filePath;
     const client = this.clientFactory({ serverUrl, apiKey });
     const ac = new AbortController();
     this.active = ac;
     // Monotonic run id — a background post-stop report poll (issue 021) uses it
     // to avoid clobbering a newer run's report path if one starts meanwhile.
     const myGeneration = ++this.runGeneration;
+    // Batch runs get a UNIQUE per-run session id so two runs of the same file
+    // are two distinct server sessions (Case 2). Interactive runs reuse the
+    // stable file-path id so re-runs reuse the same session. The server names
+    // reports from the separately-sent testFilePath, so the `::run-N` suffix
+    // never leaks into report/log names. Stored in `activeSessionId` (not
+    // cleared at run end) so the batch post-run close targets this exact session.
+    const sessionId =
+      options.batchMode === true ? `${filePath}::run-${myGeneration}` : filePath;
+    this.activeSessionId = sessionId;
     this.pauseRequested = false;
     this.lastStepStartLine = null;
     // Capture so step-control commands (Phase 3) can target the same
@@ -1213,6 +1235,24 @@ export class RunController {
       this.currentClient = null;
       this.currentSessionId = null;
       this.currentServerUrl = null;
+      // Reset the persistent run id so out-of-band ops when idle (notably an
+      // interactive "Close Session"/restartSession) fall back to the stable file
+      // path via resolveClient, rather than a stale batch `::run-N` left over
+      // from a previous batch run (which would no-op and leak the interactive
+      // session — issue 032).
+      this.activeSessionId = null;
+      // A batch run owns a UNIQUE per-run session; close it HERE (where its id is
+      // a local) so its video finalises and the browser frees before the next
+      // test. Interactive runs keep their session open for reuse, so don't close.
+      // Uses the local client/sessionId (this.current* are nulled above).
+      // Best-effort — cleanup must never fail the run.
+      if (batchMode) {
+        try {
+          await client.closeSession(sessionId);
+        } catch {
+          /* swallow — teardown must not break the run */
+        }
+      }
     }
   }
 

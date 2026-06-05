@@ -289,7 +289,7 @@ describe('TestBench batch-run mode', function () {
     assert.equal(counts.skipped, 0, 'none should be skipped');
   });
 
-  it('forceFreshSession: closeSession fires before EVERY test in a batch (not just the first)', async () => {
+  it('each batch test runs in a unique per-run session, closed after it finishes', async () => {
     await runBatchWithScript(
       hooks,
       fake,
@@ -300,10 +300,59 @@ describe('TestBench batch-run mode', function () {
       ],
     );
 
+    // Batch runs use a unique per-run session id (`<path>::run-N`), so each test
+    // is its own server session — and two runs of the SAME file would be two
+    // sessions too (Case 2). No interactive-style pre-close fires for batch.
+    assert.equal(fake.streamSessionIds.length, 2, 'expected one run per test');
+    for (const sid of fake.streamSessionIds) {
+      assert.match(sid, /::run-\d+$/, `batch run session id should be unique-per-run, got ${sid}`);
+    }
+    assert.notEqual(
+      fake.streamSessionIds[0],
+      fake.streamSessionIds[1],
+      'the two batch tests must use DISTINCT session ids',
+    );
+
+    // One close per test — the post-run close (finalises video, frees browser),
+    // targeting that test's exact unique session id. No pre-close for batch.
     assert.equal(
       fake.closeSessionCalls,
       2,
-      `closeSession should fire once per batch test. Got ${fake.closeSessionCalls}.`,
+      `closeSession should fire once per batch test (post-run only). Got ${fake.closeSessionCalls}.`,
+    );
+    assert.deepEqual(
+      [...fake.closeSessionIds].sort(),
+      [...fake.streamSessionIds].sort(),
+      'each run session must be closed by its own id',
+    );
+  });
+
+  it('two batch runs of the SAME file are two distinct sessions (Case 2)', async () => {
+    // The whole point of the unique per-run id: running ONE file twice must
+    // produce TWO sessions (e.g. a future data-driven / repeat-N batch). Here
+    // the same uri is batched twice; the monotonic `::run-N` suffix is the only
+    // thing distinguishing the two ids (same file path), so this is what proves
+    // the generation suffix actually does the work — not just different paths.
+    const uri = fixtureUri('batch-a.tmp.md');
+    const pass = async (f) => {
+      f.push({ type: 'step:start', line: 4 });
+      f.push({ type: 'step:pass', line: 4 });
+      f.end();
+    };
+    // One script per run — the fake indexes streamScripts by call count, which
+    // accumulates across the two runBatchByUris calls.
+    fake.streamScripts = [pass, pass];
+    await hooks.runBatchByUris([uri]); // run #1
+    await hooks.runBatchByUris([uri]); // run #2
+
+    assert.equal(fake.streamSessionIds.length, 2, 'the same file ran twice');
+    for (const sid of fake.streamSessionIds) {
+      assert.match(sid, /::run-\d+$/, `expected a unique-per-run batch id, got ${sid}`);
+    }
+    assert.notEqual(
+      fake.streamSessionIds[0],
+      fake.streamSessionIds[1],
+      'two batch runs of the SAME file must be two DISTINCT sessions (Case 2)',
     );
   });
 
