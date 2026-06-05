@@ -271,6 +271,9 @@ export class TestBenchTestController implements vscode.Disposable {
         this.banner.set({ running: i + 1, total: items.length });
         const outcome = await this.runOne(run, item, batchEnv, token);
         counts[outcome] += 1;
+        // The session teardown for each batch test (close + video finalise) is
+        // owned by runLines itself — a batch run closes its own unique per-run
+        // session in its finally (see RunController). Nothing to do here.
       }
     } finally {
       this.banner.set(null);
@@ -406,8 +409,9 @@ export class TestBenchTestController implements vscode.Disposable {
       // User cancelled mid-test. Skipped is more truthful than failed —
       // we don't know what the result *would* have been.
       run.skipped(item);
-      // Best-effort browser-session cleanup so the next batch starts fresh.
-      void controller.closeSession().catch(() => undefined);
+      // No explicit close here: runLines closes the batch run's own unique
+      // session in its finally (which fires on the abort too), so the cancelled
+      // test's session is already torn down.
       return 'skipped';
     }
 

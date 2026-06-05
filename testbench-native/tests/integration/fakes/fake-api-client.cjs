@@ -15,7 +15,13 @@ class FakeApiClient {
     /** @type {Stream | null} */
     this.activeStream = null;
     this.closeSessionCalls = 0;
+    /** Session ids passed to closeSession(), in call order. Lets tests assert
+     *  WHICH session was closed (e.g. a batch's unique `<path>::run-N`). */
+    this.closeSessionIds = [];
     this.streamCallCount = 0;
+    /** Session ids passed to streamSteps() (the run), in call order. Lets tests
+     *  assert batch runs use distinct, unique-per-run session ids. */
+    this.streamSessionIds = [];
     /** Each entry is the request body passed to streamSteps(). Tests can
      *  read `requests[n].sourceLines` to verify which steps a particular
      *  call covered (e.g. that Resume sent multiple steps, not one). */
@@ -74,7 +80,8 @@ class FakeApiClient {
    * tests push() onto the active stream, or throws an aborted-kind
    * ApiClientError when the caller aborts.
    */
-  async *streamSteps(_sessionId, request, signal) {
+  async *streamSteps(sessionId, request, signal) {
+    this.streamSessionIds.push(sessionId);
     /** @type {Stream} */
     const stream = {
       queue: [],
@@ -129,6 +136,7 @@ class FakeApiClient {
 
   async closeSession(sessionId) {
     this.closeSessionCalls += 1;
+    this.closeSessionIds.push(sessionId);
     if (this.closeSessionImpl) {
       await this.closeSessionImpl(sessionId);
     }

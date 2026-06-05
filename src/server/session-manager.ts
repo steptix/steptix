@@ -1344,7 +1344,7 @@ export class SessionManager {
     // so a quiet server still produces a complete forensic trail when enabled.
     const runLog = fileMode === 'off'
       ? null
-      : openRunLogFile(sessionId, session.reportOutputDir);
+      : openRunLogFile(request.testFilePath ?? sessionId, session.reportOutputDir);
     if (runLog) {
       runLog.stream.write(
         `# session=${sessionId} startedAt=${new Date().toISOString()} steps=${stepsTotal} mode=${fileMode}\n`,
@@ -2727,10 +2727,15 @@ export class SessionManager {
           (sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0),
           0,
         );
-        const testName = basename(sessionId, '.md').replace(/^.*[\\/]/, '') || sessionId;
+        // Name the report after the TEST FILE, not the session id: a batch run
+        // uses a unique `<path>::run-N` session id (so two runs of the same file
+        // are two sessions) which must NOT leak into the report name/file. Falls
+        // back to sessionId for clients that don't send testFilePath.
+        const fileForName = request.testFilePath ?? sessionId;
+        const testName = basename(fileForName, '.md').replace(/^.*[\\/]/, '') || sessionId;
         const report: TestReport = {
           testName,
-          filePath: sessionId,
+          filePath: fileForName,
           tags: [],
           status: reportStatus,
           steps: fullStepResults,
