@@ -205,15 +205,24 @@ When the user clicks Run:
    descendants of an included branch.
 2. Resolve include/exclude to an ordered list of leaf TestItems (document
    order within a folder, folders sorted by path).
-3. Pre-flight: if any `RunController` is currently running (single-file or
-   batch), bail out with a status-bar message and abort the TestRun. One
-   run at a time, period — same constraint as `runLines` already enforces.
-4. Create a TestRun via `controller.createTestRun(request)`.
+3. Queue: if another **batch** is currently running, this run is chained onto
+   the test controller's internal `runChain` (FIFO) rather than refused — its
+   tests show as `enqueued` and a status-bar note says it was queued. It
+   executes when the runs ahead of it finish. An interactive editor run never
+   blocks a batch (separate controllers + sessions). See §8.
+4. Create a TestRun via `controller.createTestRun(request)` and mark its items
+   `enqueued` immediately (so a queued run shows as pending).
 5. For each test in order:
    - `run.enqueued(item)` then `run.started(item)`.
    - `vscode.workspace.openTextDocument(uri)` — loads the doc into memory
      without opening a tab.
-   - `registry.get(doc)` → `RunController` (created lazily; cached by URI).
+   - `registry.getBatchController(doc)` → a **detached, headless**
+     `RunController` (created lazily; cached by URI). It is kept OUT of the
+     editor's controller map: its `post` callback is a no-op, so a batch run
+     paints no gutter decorations, drives no sidebar webview, sets no
+     `testbench-native.running` context key (which gates the title-bar
+     Pause/Stop buttons), and never appears in the Call Stack / Variables
+     views. The editor surface is untouched by a flask run.
    - **Force a fresh session** for this test (see §6).
    - Subscribe to events on this controller for the duration of this test.
    - `controller.runLines([], { breakpoints: new Set() })` — empty lines
@@ -306,6 +315,16 @@ must restore the same clean state we already ensure between batch tests.
 
 ## 6. Session lifecycle
 
+> **Superseded by issue 032 (Case 2) + the detached batch controller.** The
+> "close before run" / `forceFreshSession` pre-close model below is no longer
+> how batch isolation works. Each batch run now gets a **unique per-run
+> session id** (`<file path>::run-N`) on a detached, headless controller, and
+> closes *that* session in `runLines`' `finally` (post-run, which also
+> finalises its video). There is no pre-close for batch. Two runs of the same
+> file are therefore two distinct sessions, and a batch can run alongside an
+> interactive run of the same file. The text below is kept for historical
+> context.
+
 Each test in a batch gets a **fresh server session** — close before run.
 This generalizes the `staleSessionCleared` flag added in 0.2.30:
 
@@ -339,20 +358,37 @@ breakpoints to fire inside the explorer.
 
 ## 8. Concurrency
 
-Only one run at a time across the entire extension — single-file or batch.
+A batch and an interactive editor run are **independent** — they use separate
+`RunController` instances (the editor's map vs. the detached batch map) and
+separate browser sessions, so they can run at the same time, even for the
+same file.
 
-- `RunController.runLines` already returns `{ ok: false }` if a run is in
-  flight per-controller.
+- `RunController.runLines` returns `{ ok: false }` if a run is already in
+  flight **on that controller**. Since the editor and batch controllers are
+  distinct instances, this only serialises runs *within* one surface.
 - Batch mode is sequential within itself.
-- Cross-mode: the batch run handler checks `registry.anyRunning()` at
-  entry. If true → status-bar message ("a run is already in flight"),
-  TestRun aborted with all items `skipped()`.
-- Inverse direction: user attempting F5 / Run Selected while a batch is
-  running gets the same refusal from `runLines`'s existing guard.
+- Batch vs. batch: a flask run requested while another batch is in flight is
+  **queued** (FIFO), not refused. The test controller chains it onto an
+  internal `runChain` promise; the queued run's tests are marked `enqueued`
+  (so they show as pending in the Test Explorer) and a status-bar note says it
+  was queued. Queued runs execute one after another. Cancelling a queued run
+  before its turn marks all its items `skipped()`.
+- An in-flight interactive run does **not** block a batch (and vice versa);
+  the two surfaces own separate controllers and sessions.
 
-This matches how the server-side session keying works (one session per
-file path) and avoids any chance of overlapping `streamSteps` calls
-hitting the same session.
+Per-run session keying keeps overlapping `streamSteps` calls safe: an
+interactive run uses the stable `<file path>` session id while a batch run
+uses a unique `<file path>::run-N` id (issue 032), so even the same file
+running in both surfaces targets two distinct server **sessions**.
+
+One shared resource remains: the server-side step **cache** is keyed by
+`testFilePath`, not by session id, so two concurrent runs of the same file
+(interactive + batch) read/write the same cache namespace. This is benign —
+the cache is opt-in (off by default), and the key is content-hashed on the
+step text, so identical files only ever collide on identical entries (a
+redundant write of the same value, never cross-contamination). If a future
+feature makes concurrent same-file runs with *different* step content
+common, the cache key would need a session/run qualifier.
 
 ## 9. Result mapping
 

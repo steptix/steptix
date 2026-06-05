@@ -26,6 +26,11 @@ const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
  */
 class RunControllerRegistry implements vscode.Disposable {
   private readonly controllers = new Map<string, RunController>();
+  /** Detached, HEADLESS controllers used only by batch (flask / Test Explorer)
+   *  runs — see getBatchController(). Kept separate from `controllers` so a
+   *  flask run never touches the editor surface, and so it can run concurrently
+   *  with an interactive run of the same file. */
+  private readonly batchControllers = new Map<string, RunController>();
   private clientFactory: ApiClientFactory = defaultApiClientFactory;
   /** Mirror of the last value pushed to the `testbench-native.running` context
    *  key. VS Code doesn't expose context keys for read, so this is the
@@ -71,6 +76,11 @@ class RunControllerRegistry implements vscode.Disposable {
     this.clientFactory = factory;
     for (const controller of this.controllers.values()) controller.stop();
     this.controllers.clear();
+    // Detached batch controllers cache the factory at construction too, so
+    // they must be discarded as well or a batch run would keep using the old
+    // client (the integration suite swaps in a FakeApiClient via this path).
+    for (const controller of this.batchControllers.values()) controller.stop();
+    this.batchControllers.clear();
   }
 
   /**
@@ -118,6 +128,40 @@ class RunControllerRegistry implements vscode.Disposable {
       key,
       controller.onScopeChange(() => this.anyScopeEmitter.fire()),
     );
+    return controller;
+  }
+
+  /**
+   * Get-or-create a DETACHED, HEADLESS controller for batch (flask / Test
+   * Explorer) runs of a document. Unlike `get()`, this controller's `post`
+   * callback goes nowhere, it never clears editor statuses, and it is
+   * deliberately kept OUT of the `controllers` map. So a flask run never
+   * touches the editor surface — no gutter decorations, no sidebar webview
+   * updates, no `testbench-native.running` context key (which gates the
+   * title-bar Pause/Stop), and the Call Stack / Variables views (which scan
+   * `controllers`) never pick it up. That makes a flask run fully independent
+   * of the editor: the same file can run interactively AND via the flask at
+   * the same time, each with its own browser session — batch runs use a
+   * unique `<path>::run-N` id (see issue 032). Cached per-URI so repeated
+   * flask runs of one file keep incrementing that controller's run generation,
+   * which is what keeps their per-run session ids distinct.
+   */
+  getBatchController(document: vscode.TextDocument): RunController | undefined {
+    const key = document.uri.toString();
+    const existing = this.batchControllers.get(key);
+    if (existing) return existing;
+    const folder = workspaceFolderFor(document.uri);
+    if (!folder) return undefined;
+    const controller = new RunController(
+      document,
+      folder,
+      () => {}, // headless: no editor / webview / context-key side-effects
+      this.clientFactory, // inherit the active factory (test injection)
+      () => ({}), // batch ignores breakpoints
+      () => {}, // never clear editor statuses
+      () => {}, // never disturb the editor's skill-debug context
+    );
+    this.batchControllers.set(key, controller);
     return controller;
   }
 
@@ -632,6 +676,8 @@ class RunControllerRegistry implements vscode.Disposable {
   dispose(): void {
     for (const c of this.controllers.values()) c.stop();
     this.controllers.clear();
+    for (const c of this.batchControllers.values()) c.stop();
+    this.batchControllers.clear();
     for (const sub of this.frameSubs.values()) sub.dispose();
     this.frameSubs.clear();
     for (const sub of this.scopeSubs.values()) sub.dispose();

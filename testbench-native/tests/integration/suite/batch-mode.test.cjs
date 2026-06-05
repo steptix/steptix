@@ -356,6 +356,99 @@ describe('TestBench batch-run mode', function () {
     );
   });
 
+  it('a flask run does NOT touch the editor surface (no decorations, no stuck Pause/Stop)', async () => {
+    // Regression: the flask runner used to reuse the EDITOR's RunController, so
+    // a batch run painted gutter statuses on the open file AND pinned the
+    // `testbench-native.running` context key TRUE — the key is only refreshed on
+    // the `done` event, which fires while the controller's `active` is still set
+    // (inside runLines' try-block), so it latched true and nothing in the batch
+    // path ever flipped it back. The visible symptom was the editor title-bar
+    // Pause/Stop buttons staying enabled after a flask run. The batch runner now
+    // uses a DETACHED, headless controller (getBatchController), so a flask run
+    // drives none of the editor surface.
+    const uri = fixtureUri('batch-pass.tmp.md');
+
+    // Precondition: nothing running, the editor "running" key is false.
+    assert.equal(
+      hooks.runningContextValue(),
+      false,
+      'precondition: running context key should be false before the run',
+    );
+
+    const counts = await runBatchWithScript(
+      hooks,
+      fake,
+      [uri],
+      [
+        async (f) => {
+          f.push({ type: 'step:start', line: 4 });
+          f.push({ type: 'step:pass', line: 4 });
+          f.end();
+        },
+      ],
+    );
+
+    // The run still produces a result through the Test Explorer channel.
+    assert.equal(counts.passed, 1, `the flask run should still pass. Got ${JSON.stringify(counts)}`);
+
+    // The editor "running" context key gates the title-bar Pause/Stop buttons
+    // (package.json `when: testbench-native.running`). A flask run must leave it
+    // false — with the old shared-controller path this latched TRUE and stuck.
+    assert.equal(
+      hooks.runningContextValue(),
+      false,
+      'a flask run must NOT pin the running context key (else Pause/Stop stay enabled)',
+    );
+
+    // And it must paint no gutter decorations: the tracker has no per-URI run
+    // state for the file (snapshotFor returns null when nothing was painted).
+    assert.equal(
+      hooks.tracker.snapshotFor(uri),
+      null,
+      'a flask run must NOT paint gutter decorations on the editor',
+    );
+  });
+
+  it('a second flask run QUEUES behind the first instead of being refused', async () => {
+    // A run requested while another batch is in flight used to be refused (a
+    // status-bar "a run is already in flight" and nothing ran). It now QUEUES:
+    // both runs execute, one after another. We fire two runs WITHOUT awaiting
+    // the first, so the second arrives mid-flight, then await both.
+    const uriA = fixtureUri('batch-a.tmp.md');
+    const uriB = fixtureUri('batch-b.tmp.md');
+    const pass = async (f) => {
+      f.push({ type: 'step:start', line: 4 });
+      f.push({ type: 'step:pass', line: 4 });
+      f.end();
+    };
+    // One script per run, indexed by the fake's global stream-call count.
+    fake.streamScripts = [pass, pass];
+
+    const p1 = hooks.runBatchByUris([uriA]);
+    const p2 = hooks.runBatchByUris([uriB]); // arrives while run #1 is in flight
+    const [c1, c2] = await Promise.all([p1, p2]);
+
+    // BOTH ran (the old behavior would have refused the second → 0 tests / no
+    // second stream). Each reports its own pass.
+    assert.equal(c1.passed, 1, `first queued run should pass. Got ${JSON.stringify(c1)}`);
+    assert.equal(c2.passed, 1, `second queued run must ALSO run (not be refused) and pass. Got ${JSON.stringify(c2)}`);
+    assert.equal(
+      fake.streamCallCount,
+      2,
+      `both runs must execute — proves queueing, not refusal. Got ${fake.streamCallCount} stream(s).`,
+    );
+
+    // Serialized, never overlapping: each run opened+closed its own unique
+    // session. (If they had run concurrently they'd have clobbered the fake's
+    // single activeStream and the pass events would have gone to the wrong run.)
+    assert.equal(fake.closeSessionCalls, 2, 'each queued run closes its own session');
+    assert.equal(
+      new Set(fake.streamSessionIds).size,
+      2,
+      `the two queued runs must use distinct sessions. Got ${JSON.stringify(fake.streamSessionIds)}`,
+    );
+  });
+
   it('batch mode auto-fails [interactive] steps with file:line in the message', async () => {
     const counts = await runBatchWithScript(
       hooks,
