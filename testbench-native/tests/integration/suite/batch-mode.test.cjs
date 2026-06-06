@@ -486,6 +486,34 @@ describe('TestBench batch-run mode', function () {
     );
   });
 
+  it('a server error (done: error with no step:fail) FAILS the test, not passes', async () => {
+    // Regression: runStepBlock returned `!sawFail` and only set `sawFail` on a
+    // step:fail event, ignoring the done event's status. A session-setup error
+    // (e.g. an invalid baseUrl) arrives as output:error + done:'error' with NO
+    // step:fail, so the block "passed" and the test was marked GREEN. It must
+    // now fail.
+    const uri = fixtureUri('batch-pass.tmp.md');
+    const counts = await runBatchWithScript(
+      hooks,
+      fake,
+      [uri],
+      [
+        async (f) => {
+          f.push({
+            type: 'output',
+            kind: 'error',
+            msg: 'Server error: page.goto: Cannot navigate to invalid URL "${env.BASE_URL}"',
+          });
+          f.push({ type: 'done', status: 'error' });
+          f.end();
+        },
+      ],
+    );
+
+    assert.equal(counts.failed, 1, `a server error must FAIL the test. Got ${JSON.stringify(counts)}`);
+    assert.equal(counts.passed, 0, 'the test must NOT be marked passed on a server error');
+  });
+
   it('batch mode auto-fails [interactive] steps with file:line in the message', async () => {
     const counts = await runBatchWithScript(
       hooks,

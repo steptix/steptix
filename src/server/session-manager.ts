@@ -1153,53 +1153,73 @@ export class SessionManager {
       { videoDir },
     );
     const browserTracker = new BrowserTracker(browserSession);
-    const tokenTracker = new TokenTracker();
-    const aiClient = new AiClient(aiConfig, tokenTracker);
-    const apiResponseStore = new ApiResponseStore();
 
-    // Load context files once per session
-    const context = await loadContextFiles(this.config.tests.contextDir);
-    if (context.files.length > 0) {
-      logger.info(`Session "${sessionId}": loaded ${context.files.length} context file(s)`);
+    // Everything past the browser launch can throw (notably an invalid baseUrl
+    // makes page.goto reject) — and the session isn't registered in
+    // `this.sessions` until the very end, so a throw here would orphan the
+    // just-launched browser: the caller's later closeSession(sessionId) finds
+    // nothing to close and the window leaks. Tear the browser down on any
+    // setup failure before re-throwing so the error still surfaces but no
+    // browser is left behind.
+    try {
+      const tokenTracker = new TokenTracker();
+      const aiClient = new AiClient(aiConfig, tokenTracker);
+      const apiResponseStore = new ApiResponseStore();
+
+      // Load context files once per session
+      const context = await loadContextFiles(this.config.tests.contextDir);
+      if (context.files.length > 0) {
+        logger.info(`Session "${sessionId}": loaded ${context.files.length} context file(s)`);
+      }
+
+      // Navigate to baseUrl if provided
+      if (sessionConfig?.baseUrl) {
+        logger.info(`Session "${sessionId}": navigating to base URL ${sessionConfig.baseUrl}`);
+        await browserSession.page.goto(sessionConfig.baseUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30_000,
+        });
+      }
+
+      const session: ManagedSession = {
+        id: sessionId,
+        browserSession,
+        browserTracker,
+        mainPage: browserSession.page,
+        videoMode,
+        reportOutputDir,
+        videoDir,
+        status: 'active',
+        sessionConfig: sessionConfig ?? {},
+        configSet: sessionConfig !== undefined,
+        outputs: {},
+        outputSources: {},
+        totalStepsExecuted: 0,
+        conversationHistory: [],
+        aiClient,
+        tokenTracker,
+        apiResponseStore,
+        csrfTokens: {},
+        contextContent: context.combined,
+        queueTail: Promise.resolve(),
+        pendingRunControl: null,
+        pendingDebuggerAck: null,
+        pauseAtNextTool: false,
+      };
+
+      this.sessions.set(sessionId, session);
+      return session;
+    } catch (err) {
+      logger.warn(
+        `Session "${sessionId}": creation failed after browser launch — closing the orphaned browser. ${err instanceof Error ? err.message : String(err)}`,
+      );
+      try {
+        await browserTracker.closeAll();
+      } catch {
+        // Best-effort cleanup; surface the ORIGINAL error to the caller.
+      }
+      throw err;
     }
-
-    // Navigate to baseUrl if provided
-    if (sessionConfig?.baseUrl) {
-      logger.info(`Session "${sessionId}": navigating to base URL ${sessionConfig.baseUrl}`);
-      await browserSession.page.goto(sessionConfig.baseUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
-      });
-    }
-
-    const session: ManagedSession = {
-      id: sessionId,
-      browserSession,
-      browserTracker,
-      mainPage: browserSession.page,
-      videoMode,
-      reportOutputDir,
-      videoDir,
-      status: 'active',
-      sessionConfig: sessionConfig ?? {},
-      configSet: sessionConfig !== undefined,
-      outputs: {},
-      outputSources: {},
-      totalStepsExecuted: 0,
-      conversationHistory: [],
-      aiClient,
-      tokenTracker,
-      apiResponseStore,
-      csrfTokens: {},
-      contextContent: context.combined,
-      queueTail: Promise.resolve(),
-      pendingRunControl: null,
-      pendingDebuggerAck: null,
-      pauseAtNextTool: false,
-    };
-
-    this.sessions.set(sessionId, session);
-    return session;
   }
 
   private async executeStepsInternal(

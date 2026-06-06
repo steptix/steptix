@@ -440,6 +440,10 @@ export class TestBenchTestController implements vscode.Disposable {
 
     // Collect step:fail events so we can attach TestMessages on failure.
     const failures: Array<{ line: number; error: string }> = [];
+    // Collect server-level error output (kind 'error', e.g. "Server error: …")
+    // so a failure with no step:fail still gets a meaningful TestMessage rather
+    // than the generic "no specific step failure recorded".
+    const serverErrors: string[] = [];
     const onEvent = (event: RunEvent): void => {
       switch (event.type) {
         case 'step:start':
@@ -455,6 +459,7 @@ export class TestBenchTestController implements vscode.Disposable {
           break;
         case 'output':
           emit(`[${event.kind}] ${event.msg}`);
+          if (event.kind === 'error') serverErrors.push(event.msg);
           break;
         case 'done':
           // Status comes from runLines' return value; nothing to log here.
@@ -507,6 +512,16 @@ export class TestBenchTestController implements vscode.Disposable {
         const payload = outcome.error;
         const text = `${payload.code}: ${payload.diagnosis}${payload.fix ? `\n\nFix: ${payload.fix}` : ''}`;
         messages.push(new vscode.TestMessage(text));
+      }
+      // A server-level error (e.g. invalid baseUrl) arrives as output:error
+      // with no step:fail and no outcome.error — surface it so the failure is
+      // explained rather than generic. De-dupe (the server's log bridge can
+      // emit the same error twice) and cap so a noisy run doesn't produce a
+      // wall of redundant messages.
+      if (messages.length === 0 && serverErrors.length > 0) {
+        for (const e of [...new Set(serverErrors)].slice(0, 5)) {
+          messages.push(new vscode.TestMessage(e));
+        }
       }
       if (messages.length === 0) {
         messages.push(new vscode.TestMessage('Test failed (no specific step failure recorded).'));

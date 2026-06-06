@@ -1387,6 +1387,13 @@ export class RunController {
         // any previous value in place rather than clearing on every
         // run boundary, matching the spec's lifecycle rules.
         if (event.reportPath) this.lastResolvedReportPath = event.reportPath;
+        // A server-level error (or an explicit failed status) that DIDN'T
+        // surface as a step:fail must still fail the block — otherwise a
+        // session-setup error like an invalid baseUrl ("Server error:
+        // page.goto: Cannot navigate to invalid URL …", delivered as
+        // output:error + done:'error') would let the test pass green.
+        // 'aborted' is a user stop, not a failure, so it's excluded.
+        if (event.status === 'error' || event.status === 'failed') sawFail = true;
         continue;
       }
       this.emitRunEvent(event);
