@@ -4,6 +4,10 @@ dist-ui/
 reports/
 memory/
 .cache/
+# Temp tool modules written by the server's hot-reload (issue 033). Created
+# inside the tools dir as a dot-dir; files are deleted right after import, so
+# this is normally empty, but ignore it so a stray temp .mjs never gets staged.
+.aiui-tool-cache/
 # TestBench per-workspace run-state (gutter ✓/✗ marks). Travels in the
 # project zip but stays out of git to avoid churn. Matches at any depth.
 .testbench/

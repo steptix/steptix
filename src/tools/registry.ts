@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { logger } from '../utils/logger.js';
 import type { ToolDefinition } from './types.js';
 import { finaliseToolExport } from './finalise.js';
+import { bundleAndImport, resolveToolCacheDir, signatureOf } from './reload.js';
 
 /** A loaded tool, with the absolute path it came from for error reporting. */
 export interface RegisteredTool {
@@ -16,6 +17,34 @@ interface FileLoad {
   tools: Map<string, RegisteredTool>;
   /** Set when the file threw on import — confined to refs naming this file. */
   error?: string;
+  /**
+   * Reload mode only: content signature of the files this load was built from
+   * (the bundle's input set — entry + relative helpers), used by `resolve` to
+   * detect an edit and re-import. `undefined` for the direct-import path (the
+   * CLI / programmatic catalogues), where loads are never invalidated.
+   */
+  signature?: string;
+  /** Reload mode only: the absolute input paths `signature` was taken over. */
+  inputs?: string[];
+}
+
+/** Options for `ToolCatalogue` / `loadToolCatalogue`. */
+export interface ToolCatalogueOptions {
+  /**
+   * Re-import a tool file when it (or a bundled helper) changes on disk,
+   * instead of loading once and caching for the process lifetime. Needed by
+   * the long-lived server so tool edits take effect without a restart (issue
+   * 033); left off for the one-shot CLI, which is unaffected by the caches.
+   */
+  reload?: boolean;
+  /**
+   * The directory `loadToolCatalogue` scanned. Stored so `refreshIndex` can
+   * re-walk it; `undefined` for a directly-constructed catalogue (which has
+   * no scanned dir and whose `refreshIndex` is a no-op).
+   */
+  scannedDir?: string;
+  /** Where reload writes temp tool modules (see `resolveToolCacheDir`). */
+  cacheDir?: string | undefined;
 }
 
 /**
@@ -57,6 +86,30 @@ export class ToolCatalogue {
   /** Set by `loadToolCatalogue` after the scan; not used by direct constructor users. */
   diagnostics?: CatalogueDiagnostics;
 
+  /** True when an edited tool file should be re-imported (see `ToolCatalogueOptions.reload`). */
+  private readonly reloadEnabled: boolean;
+  /** The scanned dir, for `refreshIndex` to re-walk. Undefined ⇒ refresh no-ops. */
+  private readonly scannedDir: string | undefined;
+  /** Where reload writes temp tool modules. Undefined ⇒ fall back to direct import. */
+  private readonly cacheDir: string | undefined;
+
+  constructor(options: ToolCatalogueOptions = {}) {
+    this.reloadEnabled = options.reload ?? false;
+    this.scannedDir = options.scannedDir;
+    this.cacheDir = options.cacheDir;
+  }
+
+  /**
+   * Reload is active only when enabled *and* a cache dir was resolved. Gating
+   * both `resolve`'s staleness check and `loadFile`'s branch on this keeps them
+   * in lockstep: a `{ reload: true }` catalogue built without a cacheDir (only
+   * reachable by direct construction, never via `loadToolCatalogue`) degrades
+   * cleanly to load-once instead of re-importing on every resolve.
+   */
+  private get canReload(): boolean {
+    return this.reloadEnabled && this.cacheDir !== undefined;
+  }
+
   /** Number of tools available — directly-registered plus lazily-loaded so far. */
   get size(): number {
     let n = this.tools.size;
@@ -77,6 +130,70 @@ export class ToolCatalogue {
   /** Record a discovered tool file in the index without importing it. */
   indexFile(relPath: string, absPath: string): void {
     this.fileIndex.set(relPath, absPath);
+  }
+
+  /**
+   * Re-walk the scanned directory and reconcile the file index with disk
+   * (issue 033 Part 2): index newly-added files, drop files that disappeared
+   * (evicting any loaded `byFile` entry so a later reference gives the clean
+   * "not found" diagnostic rather than a stale hit, and a delete-then-recreate
+   * re-imports fresh). Surviving files keep their `byFile` entry — `resolve`'s
+   * per-file change check handles their edits. **Import-free**: only `readdir`,
+   * never `import`, so the lazy invariant holds.
+   *
+   * No-op when the catalogue wasn't built from a scan (a directly-constructed +
+   * `register`ed catalogue has no dir to re-walk). Mirrors `loadToolCatalogue`'s
+   * missing / not-a-directory handling, so a dir deleted mid-session degrades to
+   * an empty catalogue (with diagnostics) rather than throwing.
+   */
+  async refreshIndex(): Promise<void> {
+    const dir = this.scannedDir;
+    if (dir === undefined) return;
+
+    let exists = true;
+    try {
+      const stat = await fs.stat(dir);
+      // A dir replaced by a *file* mid-session degrades like a missing dir
+      // (below) rather than throwing: refreshIndex is a best-effort
+      // reconcile, not the hard config check loadToolCatalogue makes on a
+      // full load.
+      if (!stat.isDirectory()) exists = false;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        exists = false;
+      } else {
+        throw err;
+      }
+    }
+
+    if (!exists) {
+      // The dir was removed/replaced mid-session: empty the index and the
+      // loaded tools, and flip diagnostics back to "missing" so the not-found
+      // hint matches reality.
+      this.fileIndex.clear();
+      this.byFile.clear();
+      this.diagnostics = { toolsDir: dir, toolsDirMissing: true, filesScanned: 0 };
+      return;
+    }
+
+    const files = await listToolFiles(dir);
+    const next = new Map<string, string>();
+    for (const abs of files) next.set(relKey(dir, abs), abs);
+
+    // Evict loaded entries whose backing file is gone (a delete drops the
+    // stale load; a recreate then re-imports fresh). Survivors are untouched.
+    const surviving = new Set(next.values());
+    for (const abs of [...this.byFile.keys()]) {
+      if (!surviving.has(abs)) this.byFile.delete(abs);
+    }
+
+    this.fileIndex.clear();
+    for (const [rel, abs] of next) this.fileIndex.set(rel, abs);
+
+    // Maintain ALL diagnostics — crucially clear `toolsDirMissing` so a dir
+    // that was absent at first scan and has since been created stops rendering
+    // the "tools.dir does not exist" hint.
+    this.diagnostics = { toolsDir: dir, toolsDirMissing: false, filesScanned: files.length };
   }
 
   // NOTE: `has`/`get`/`names`/`require` below report only *directly-registered*
@@ -128,7 +245,13 @@ export class ToolCatalogue {
     const abs = this.fileIndex.get(file);
 
     if (abs !== undefined) {
-      if (!this.byFile.has(abs)) {
+      const cached = this.byFile.get(abs);
+      // Load when unseen, or — in reload mode — when the file (or a bundled
+      // helper) changed since the cached load. Steady state is one signature
+      // check plus a map hit; a rebundle (~20 ms) happens only on an actual
+      // edit. Direct-import catalogues never re-load (the `canReload`
+      // short-circuit keeps the CLI's load-once behaviour).
+      if (cached === undefined || (this.canReload && (await this.isStale(cached)))) {
         await this.loadFile(abs);
       }
       const fl = this.byFile.get(abs)!;
@@ -146,29 +269,81 @@ export class ToolCatalogue {
     throw new Error(this.buildNotFoundMessage(ref));
   }
 
-  /** Import one tool file, isolating any failure into its `FileLoad.error`. */
+  /** Has a bundled tool's input set changed since it was loaded? (reload mode) */
+  private async isStale(fl: FileLoad): Promise<boolean> {
+    // Always retry a failed load. A bundle failure (e.g. a missing/edited-away
+    // helper) yields no esbuild metafile, so we don't know the full input set
+    // to watch — recording only the entry would leave the tool stuck-broken
+    // after a *helper* is fixed/recreated without touching the entry. Re-running
+    // the (fast-failing) bundle each reference makes recovery instant for any
+    // fix; healthy tools keep the signature short-circuit below.
+    if (fl.error !== undefined) return true;
+    // Defensive: a load with no recorded signature (shouldn't happen for a
+    // successful reload-mode load) is treated as stale rather than trusted.
+    if (fl.signature === undefined || fl.inputs === undefined) return true;
+    return (await signatureOf(fl.inputs)) !== fl.signature;
+  }
+
+  /**
+   * Import one tool file, isolating any failure into its `FileLoad.error`. In
+   * reload mode the file is bundled to a fresh temp module (defeating tsx's
+   * transpile cache) and its change signature recorded; otherwise it's
+   * imported directly once (the CLI / programmatic path).
+   */
   private async loadFile(absPath: string): Promise<void> {
+    // Read into a local so TS narrows `cacheDir` to string; the condition is
+    // exactly `canReload` (kept inline here for that narrowing).
+    const { cacheDir } = this;
+    if (this.reloadEnabled && cacheDir !== undefined) {
+      await this.loadFileWithReload(absPath, cacheDir);
+    } else {
+      await this.loadFileDirect(absPath);
+    }
+  }
+
+  /** Load-once path: import the file as-is, no change tracking. */
+  private async loadFileDirect(absPath: string): Promise<void> {
     try {
       const defs = await importToolFile(absPath);
-      const tools = new Map<string, RegisteredTool>();
-      for (const rt of defs) {
-        if (tools.has(rt.definition.name)) {
-          throw new Error(
-            `Duplicate tool name "${rt.definition.name}" — defined twice in ${absPath}`,
-          );
-        }
-        tools.set(rt.definition.name, rt);
-      }
-      if (defs.length === 0) {
-        logger.warn(
-          `Skipping ${absPath}: no tool exports found (expected a defineTool/tool default export, a bare function, or named tool exports)`,
+      this.byFile.set(absPath, { tools: this.buildToolMap(defs, absPath) });
+    } catch (err) {
+      this.byFile.set(absPath, { tools: new Map(), error: errorMessage(err) });
+    }
+  }
+
+  /** Reload path: esbuild-bundle to a fresh module and record a change signature. */
+  private async loadFileWithReload(absPath: string, cacheDir: string): Promise<void> {
+    try {
+      const { module, inputs } = await bundleAndImport(absPath, cacheDir);
+      const defs = finaliseModule(module, absPath);
+      const tools = this.buildToolMap(defs, absPath);
+      this.byFile.set(absPath, { tools, inputs, signature: await signatureOf(inputs) });
+    } catch (err) {
+      // Record just the error (no signature): a failed bundle has no reliable
+      // input set, and `isStale` always retries an errored load, so any
+      // subsequent fix — to the entry *or* a helper — recovers on the next
+      // reference without a restart.
+      this.byFile.set(absPath, { tools: new Map(), error: errorMessage(err) });
+    }
+  }
+
+  /** Turn finalised tool defs into a name→tool map (dup check + empty warning). */
+  private buildToolMap(defs: RegisteredTool[], absPath: string): Map<string, RegisteredTool> {
+    const tools = new Map<string, RegisteredTool>();
+    for (const rt of defs) {
+      if (tools.has(rt.definition.name)) {
+        throw new Error(
+          `Duplicate tool name "${rt.definition.name}" — defined twice in ${absPath}`,
         );
       }
-      this.byFile.set(absPath, { tools });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.byFile.set(absPath, { tools: new Map(), error: message });
+      tools.set(rt.definition.name, rt);
     }
+    if (defs.length === 0) {
+      logger.warn(
+        `Skipping ${absPath}: no tool exports found (expected a defineTool/tool default export, a bare function, or named tool exports)`,
+      );
+    }
+    return tools;
   }
 
   /** Error for "the file loaded, but has no tool by that name". */
@@ -288,8 +463,18 @@ export function parseToolRef(ref: string): { file: string; tool: string } {
  * Returns an empty catalogue if `dir` is missing — projects that don't use
  * tools shouldn't be forced to create the directory.
  */
-export async function loadToolCatalogue(dir: string): Promise<ToolCatalogue> {
-  const catalogue = new ToolCatalogue();
+export async function loadToolCatalogue(
+  dir: string,
+  options: ToolCatalogueOptions = {},
+): Promise<ToolCatalogue> {
+  const reload = options.reload ?? false;
+  // Where reload writes temp tool modules (a dot-dir inside `dir`); only needed
+  // in reload mode. A pure path computation — valid even if `dir` doesn't exist
+  // yet (a later `refreshIndex` may find it created).
+  const cacheDir = reload ? resolveToolCacheDir(dir) : undefined;
+  // `scannedDir` is set for both branches so `refreshIndex` can re-walk later —
+  // including a dir that was missing at first scan and is created mid-session.
+  const catalogue = new ToolCatalogue({ reload, scannedDir: dir, cacheDir });
 
   let exists = true;
   try {
@@ -319,17 +504,23 @@ export async function loadToolCatalogue(dir: string): Promise<ToolCatalogue> {
 
   const files = await listToolFiles(dir);
   for (const abs of files) {
-    // Key by path relative to the tools dir, extension stripped, `/`-normalised.
-    const rel = path
-      .relative(dir, abs)
-      .replace(/\\/g, '/')
-      .replace(/\.[^./]+$/, '');
-    catalogue.indexFile(rel, abs);
+    catalogue.indexFile(relKey(dir, abs), abs);
   }
 
   catalogue.diagnostics = { toolsDir: dir, toolsDirMissing: false, filesScanned: files.length };
   logger.debug(`Indexed ${files.length} tool file(s) from ${dir} (lazy load)`);
   return catalogue;
+}
+
+/**
+ * Index key for a tool file: its path relative to the tools dir, OS separators
+ * normalised to `/`, extension stripped (e.g. `auth`, `integrations/stripe/refund`).
+ */
+function relKey(dir: string, abs: string): string {
+  return path
+    .relative(dir, abs)
+    .replace(/\\/g, '/')
+    .replace(/\.[^./]+$/, '');
 }
 
 async function listToolFiles(dir: string): Promise<string[]> {
@@ -357,9 +548,10 @@ async function listToolFiles(dir: string): Promise<string[]> {
 }
 
 /**
- * Import one tool file and finalise every tool it exports. Returns the parsed
- * `RegisteredTool`s without registering them — the caller (`loadFile`) stores
- * them in a per-file map. Throws on an import failure or an illegal filename.
+ * Import one tool file directly (no re-transpile) and finalise every tool it
+ * exports. Returns the parsed `RegisteredTool`s without registering them — the
+ * caller (`loadFileDirect`) stores them in a per-file map. Throws on an import
+ * failure or an illegal filename.
  */
 async function importToolFile(filePath: string): Promise<RegisteredTool[]> {
   let mod: Record<string, unknown>;
@@ -368,7 +560,15 @@ async function importToolFile(filePath: string): Promise<RegisteredTool[]> {
   } catch (err) {
     throw new Error(`Failed to load tool file ${filePath}: ${(err as Error).message}`);
   }
+  return finaliseModule(mod, filePath);
+}
 
+/**
+ * Finalise every tool exported by an already-imported module. Shared by the
+ * direct-import (`importToolFile`) and reload (`bundleAndImport`) paths so both
+ * recognise the same export shapes. Throws on an illegal filename.
+ */
+function finaliseModule(mod: Record<string, unknown>, filePath: string): RegisteredTool[] {
   const filename = path.basename(filePath, path.extname(filePath));
   const out: RegisteredTool[] = [];
 
@@ -389,4 +589,9 @@ async function importToolFile(filePath: string): Promise<RegisteredTool[]> {
   }
 
   return out;
+}
+
+/** Normalise a thrown value to a message string. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

@@ -4,6 +4,13 @@ import type { ToolScope } from './types.js';
  * Marker shape returned by `tool(...)`. The registry detects this via
  * `IS_DEFERRED_TOOL` and finalises it into a full `ToolDefinition` once
  * the name is known (from explicit arg, export key, or filename).
+ *
+ * MUST stay a cross-realm `Symbol.for` (global symbol registry), never a
+ * module-local `Symbol()`: the server's tool hot-reload (issue 033) esbuild-
+ * bundles tool files, and a tool that imports the framework by absolute path
+ * gets a *second copy* of this module inlined. A module-local symbol would
+ * differ between the two copies, so `isDeferredTool` would fail to recognise a
+ * `tool(...)` result coming from the bundle. `Symbol.for` is shared across both.
  */
 export const IS_DEFERRED_TOOL = Symbol.for('ai-ui-automation/deferred-tool');
 

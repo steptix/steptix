@@ -602,4 +602,82 @@ describe('api-server tool dispatch', () => {
     expect(secondCaptures).toHaveLength(1);
     expect(secondCaptures[0]).toMatchObject({ name: 'echoed', value: 'second' });
   });
+
+  // ── Hot-reload across batches on the same session (issue 033) ──────────────
+  // The server loads the catalogue with { reload: true }, so an edited tool
+  // file is re-imported and a newly-added file is re-indexed on the next batch
+  // — no session restart. These drive it through the real HTTP route.
+
+  const defineToolImport = path
+    .resolve(__dirname, '..', 'src', 'tools', 'index.ts')
+    .replace(/\\/g, '/');
+
+  /** A parameterless tool named `name` whose single `name` output is `value`. */
+  function namedTool(name: string, value: string): string {
+    return `import { defineTool } from '${defineToolImport}';
+export default defineTool({
+  name: '${name}', description: '${name}', parameters: {}, outputs: { ${name}: { type: 'string' } },
+  async run(_args, ctx) { ctx.step.setVar('${name}', ${JSON.stringify(value)}); },
+});
+`;
+  }
+
+  async function runMarkBatch(sessionId: string, dir: string, ref: string): Promise<any[]> {
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: [`[tool: ${ref}]`],
+      sourceLines: [1],
+      toolsDir: dir,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+    return events;
+  }
+
+  it('re-imports an EDITED tool file on a later batch, same session (no restart)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tools-edit-'));
+    try {
+      await fs.writeFile(path.join(dir, 'mark.ts'), namedTool('mark', 'V1'));
+      const sessionId = 'tools-edit-' + Date.now();
+
+      const first = await runMarkBatch(sessionId, dir, 'mark');
+      expect(first.filter((e) => e.type === 'capture')).toEqual([
+        expect.objectContaining({ name: 'mark', value: 'V1' }),
+      ]);
+
+      // Edit the tool on disk, then re-run on the SAME session.
+      await fs.writeFile(path.join(dir, 'mark.ts'), namedTool('mark', 'V2'));
+      const second = await runMarkBatch(sessionId, dir, 'mark');
+      expect(second.filter((e) => e.type === 'capture')).toEqual([
+        expect.objectContaining({ name: 'mark', value: 'V2' }),
+      ]);
+      expect(second.find((e) => e.type === 'done')?.status).toBe('passed');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('discovers a tool file ADDED mid-session on a later batch, same session', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tools-add-'));
+    try {
+      await fs.writeFile(path.join(dir, 'first.ts'), namedTool('first', 'first'));
+      const sessionId = 'tools-add-' + Date.now();
+
+      // Batch 1 establishes the cached catalogue (one indexed file).
+      const first = await runMarkBatch(sessionId, dir, 'first');
+      expect(first.find((e) => e.type === 'done')?.status).toBe('passed');
+
+      // Add a brand-new tool file, then reference it on the SAME session.
+      await fs.writeFile(path.join(dir, 'late.ts'), namedTool('late', 'late'));
+      const second = await runMarkBatch(sessionId, dir, 'late');
+      expect(second.filter((e) => e.type === 'capture')).toEqual([
+        expect.objectContaining({ name: 'late', value: 'late' }),
+      ]);
+      expect(second.find((e) => e.type === 'done')?.status).toBe('passed');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

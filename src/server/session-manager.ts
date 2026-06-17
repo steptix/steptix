@@ -1474,19 +1474,23 @@ export class SessionManager {
     // This makes a Continue / re-run self-heal without a session restart. A
     // populated catalogue from the same dir is reused (the steady-state perf
     // case).
+    // A *full* (re)load builds a fresh catalogue instance: needed when there's
+    // none cached, the dir changed, or the previous scan found no files (a dir
+    // that was missing/empty and may since have been populated). `reload: true`
+    // makes the server's catalogue re-import an *edited* tool file (issue 033
+    // Part 1) — defeating the process-lifetime caches that the one-shot CLI
+    // doesn't have. A same-dir, populated catalogue is *refreshed* instead (see
+    // the else-branch) so added/removed files are picked up (Part 2) without
+    // discarding the loaded tools.
     const cachedCatalogue = session.toolCatalogue;
-    const needsCatalogueLoad =
+    const needsFullLoad =
       !!request.toolsDir &&
       (!cachedCatalogue ||
         session.toolCatalogueDir !== request.toolsDir ||
-        // Lazy catalogues report 0 *loaded* tools until something resolves, so
-        // gate the rescan on the indexed file count — re-scan only when the
-        // previous scan found no files (a dir that was missing/empty and may
-        // since have been populated).
         cachedCatalogue.indexedCount === 0);
-    if (request.toolsDir && needsCatalogueLoad) {
+    if (request.toolsDir && needsFullLoad) {
       try {
-        session.toolCatalogue = await loadToolCatalogue(request.toolsDir);
+        session.toolCatalogue = await loadToolCatalogue(request.toolsDir, { reload: true });
         session.toolCatalogueDir = request.toolsDir;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1504,6 +1508,20 @@ export class SessionManager {
           error: { step: 0, message },
           pageTitle: '',
         };
+      }
+    } else if (request.toolsDir && cachedCatalogue) {
+      // Same dir, populated catalogue: re-walk to pick up added/removed tool
+      // files (Part 2). Edits to existing files are handled lazily in `resolve`
+      // via the per-file change signature (Part 1), so this is index-only (no
+      // imports). Wrapped so a dir deleted mid-session degrades to a warning +
+      // the existing catalogue rather than crashing the batch.
+      try {
+        await cachedCatalogue.refreshIndex();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(
+          `Session "${sessionId}": tool index refresh failed for "${request.toolsDir}": ${message}`,
+        );
       }
     }
     const toolCatalogue = session.toolCatalogue;
