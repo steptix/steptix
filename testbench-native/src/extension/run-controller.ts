@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'node:path';
 import {
   ApiClient,
   ApiClientError,
   EnvParseError,
   isUserAbort,
   classifySelectedSteps,
+  composeEnv,
   extractSteps,
   resolveRunLines,
   interpretReplCommand,
@@ -14,6 +16,7 @@ import {
   parseFrontmatter,
   parseParameters,
   readEnvFile,
+  readEnvOverlayFile,
   reportError,
   resolveEnvFile,
   resolveSection,
@@ -222,6 +225,14 @@ export class RunController {
    *  test whether the server is reachable as a Node debugger target.
    *  Cleared in the same finally block. */
   private currentServerUrl: string | null = null;
+  /** Server connection the most-recent run actually targeted. Unlike
+   *  `currentServerUrl` (run-scoped, nulled at run end), these PERSIST past the
+   *  run so out-of-band lifecycle ops (closeSession, the re-run liveness probe,
+   *  getLastRun) follow the same server the run used — critical once a selected
+   *  env's `.env.<name>` can override SERVER_URL/SERVER_API_KEY away from base
+   *  `.env`. Null before the first run, when `resolveClient` falls back to disk. */
+  private lastRunServerUrl: string | null = null;
+  private lastRunApiKey: string | null = null;
 
   /** Latest variable scope emitted by `frame:scope` per frame id. The
    *  test (root) frame uses key '' to match the server-side convention.
@@ -678,9 +689,28 @@ export class RunController {
    * before the first run.
    */
   private async resolveClient(): Promise<{ client: ApiClientLike; sessionId: string } | null> {
+    const filePath = this.document.uri.fsPath;
+    const sessionId = this.activeSessionId ?? filePath;
+
+    // Prefer the server the most-recent run actually targeted, so close /
+    // liveness / getLastRun follow a run whose selected env (`.env.<name>`)
+    // overrode SERVER_URL. These persist past run end (unlike currentServerUrl).
+    if (this.lastRunServerUrl && this.lastRunApiKey) {
+      const client = this.clientFactory({
+        serverUrl: this.lastRunServerUrl,
+        apiKey: this.lastRunApiKey,
+      });
+      return { client, sessionId };
+    }
+
+    // No run yet this session (or after a window reload): resolve base `.env`
+    // from disk. Normally there's no live session to target in that state. The
+    // caveat is a window reload that orphaned a session on an env-overridden
+    // SERVER_URL — a fresh controller has no `lastRunServerUrl`, so this close
+    // would hit the base server and miss it. Accepted: that session is keyed on
+    // the file path and gets reclaimed by the next run's first-close.
     const settings = vscode.workspace.getConfiguration('testbench-native');
     const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
-    const filePath = this.document.uri.fsPath;
     const envResolution = await resolveEnvFile({
       testFile: filePath,
       workspaceRoot: this.workspaceFolder.uri.fsPath,
@@ -696,7 +726,7 @@ export class RunController {
     const serverUrl = env['SERVER_URL']?.trim();
     const apiKey = env['SERVER_API_KEY']?.trim();
     if (!serverUrl || !apiKey) return null;
-    return { client: this.clientFactory({ serverUrl, apiKey }), sessionId: this.activeSessionId ?? filePath };
+    return { client: this.clientFactory({ serverUrl, apiKey }), sessionId };
   }
 
   /**
@@ -952,6 +982,60 @@ export class RunController {
       throw err;
     }
 
+    // Which environment this run targets. An explicit override (batch mode
+    // passes one per test) wins over the workspace-level EnvSelector. The SAME
+    // value feeds both the client-side $VAR overlay below and the `envName`
+    // sent to the server, so ## Parameters / ## Config resolve against the same
+    // env the server uses for ${env.X}.
+    //
+    // Trim + treat blank as unset: EnvSelector.activeEnv() already normalises,
+    // but the batch `envOverride` carries frontmatter `env:` verbatim — a quoted
+    // `env: " t2 "` would otherwise form `.env. t2 ` and spuriously TB006.
+    const effectiveEnvName =
+      ((options.envOverride !== undefined ? options.envOverride : EnvSelector.activeEnv()) ?? '')
+        .trim() || null;
+
+    // Overlay the selected `.env.<name>` on top of base `.env` so $VAR
+    // references in ## Parameters / ## Config — and SERVER_URL/SERVER_API_KEY —
+    // honour the active environment (matching the server's ${env.X} map and the
+    // CLI). A selected env with no matching file is a hard error (TB006); a
+    // malformed overlay reuses TB005 with the overlay's path.
+    if (effectiveEnvName) {
+      // Read the overlay from the workspace root — where the env selector
+      // enumerates `.env.*` and where the CLI/server read `.env.<name>`
+      // (projectRoot). A walked-up / test-adjacent base `.env`'s directory
+      // would instead let a selector-offered env resolve to a missing file
+      // and spuriously TB006.
+      const envDir = this.workspaceFolder.uri.fsPath;
+      const overlayPath = path.join(envDir, `.env.${effectiveEnvName}`);
+      let overlay: Record<string, string> | null;
+      try {
+        overlay = await readEnvOverlayFile(envDir, effectiveEnvName);
+      } catch (err) {
+        if (err instanceof EnvParseError) {
+          const payload = reportError('TB005', {
+            envPath: overlayPath,
+            lineNumber: err.lineNumber,
+            line: err.line,
+          });
+          log(`TB005 ${payload.diagnosis}`);
+          return this.fail(payload, log);
+        }
+        throw err;
+      }
+      if (overlay === null) {
+        const payload = reportError('TB006', {
+          envName: effectiveEnvName,
+          expectedPath: overlayPath,
+          baseEnvPath: envResolution.path,
+        });
+        log(`TB006 ${payload.diagnosis}`);
+        return this.fail(payload, log);
+      }
+      env = composeEnv(env, overlay);
+      log(`.env.${effectiveEnvName} overlaid (${Object.keys(overlay).length} key(s))`);
+    }
+
     if (!env['SERVER_URL'] || env['SERVER_URL'].trim() === '') {
       const payload = reportError('TB002', { envPath: envResolution.path });
       return this.fail(payload, log);
@@ -1050,12 +1134,15 @@ export class RunController {
     this.currentClient = client;
     this.currentSessionId = sessionId;
     this.currentServerUrl = serverUrl;
+    // Persist the run's server target past run end so out-of-band lifecycle
+    // ops (close / liveness / getLastRun via resolveClient) follow this run even
+    // after currentServerUrl is nulled — needed once .env.<name> can retarget
+    // SERVER_URL away from base .env.
+    this.lastRunServerUrl = serverUrl;
+    this.lastRunApiKey = apiKey;
 
-    // Resolve which env name to send to the server. Explicit override (batch
-    // mode passes one per test) wins over the workspace-level EnvSelector.
-    const effectiveEnvName =
-      options.envOverride !== undefined ? options.envOverride : EnvSelector.activeEnv();
-
+    // `effectiveEnvName` (resolved above, alongside the env overlay) is the env
+    // sent to the server below so its ${env.X} map matches the client overlay.
     const params: Record<string, string> = { ...resolvedParameters };
     let anyFailed = false;
     const batchMode = options.batchMode === true;

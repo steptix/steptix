@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 import {
   ApiClient,
   ApiClientError,
   EnvParseError,
   isUserAbort,
   classifySelectedSteps,
+  composeEnv,
   extractSteps,
   resolveRunLines,
   interpretReplCommand,
@@ -13,6 +15,7 @@ import {
   parseFrontmatter,
   parseParameters,
   readEnvFile,
+  readEnvOverlayFile,
   reportError,
   resolveEnvFile,
   resolveSection,
@@ -117,6 +120,18 @@ export class RunController {
     } catch {
       return;
     }
+    // Best-effort overlay so close honours a selected env that retargeted
+    // SERVER_URL via .env.<name>. NOTE: this follows the *current* selector, not
+    // the env the run actually used — if the user switched envs between running
+    // and closing, this targets the new selection (monaco has no run-scoped
+    // server memory like native's option B; accepted for the legacy variant).
+    // Missing/malformed overlay → fall back to base .env; close stays forgiving.
+    try {
+      const overlaid = await this.overlayActiveEnv(env, envResolution.path);
+      if ('env' in overlaid) env = overlaid.env;
+    } catch {
+      /* unreadable overlay — proceed with base .env */
+    }
     const serverUrl = env['SERVER_URL']?.trim();
     const apiKey = env['SERVER_API_KEY']?.trim();
     if (!serverUrl || !apiKey) return;
@@ -145,6 +160,48 @@ export class RunController {
       modelOptions,
       filePath: this.ctx.document.uri.fsPath,
     });
+  }
+
+  /**
+   * Overlay the active env's `.env.<name>` onto a base `.env` map so $VAR in
+   * ## Parameters / ## Config — and SERVER_URL/SERVER_API_KEY — honour the
+   * selected environment (matching the server's ${env.X} map and the CLI).
+   *
+   * With no env selected, returns `baseEnv` unchanged. A selected env with no
+   * matching file yields a TB006 payload; a malformed overlay yields TB005 —
+   * the caller decides whether to surface (runLines) or ignore (closeSession).
+   */
+  private async overlayActiveEnv(
+    baseEnv: Record<string, string>,
+    baseEnvPath: string,
+  ): Promise<{ env: Record<string, string> } | { error: ErrorPayload }> {
+    const envName = EnvSelector.activeEnv();
+    if (!envName) return { env: baseEnv };
+
+    // Read the overlay from the workspace root — where EnvSelector enumerates
+    // `.env.*` (and where the CLI/server read `.env.<name>`), NOT next to a
+    // walked-up base `.env`, so a selector-offered env always resolves.
+    const envDir = this.ctx.workspaceFolder.uri.fsPath;
+    const overlayPath = path.join(envDir, `.env.${envName}`);
+    let overlay: Record<string, string> | null;
+    try {
+      overlay = await readEnvOverlayFile(envDir, envName);
+    } catch (err) {
+      if (err instanceof EnvParseError) {
+        return {
+          error: reportError('TB005', {
+            envPath: overlayPath,
+            lineNumber: err.lineNumber,
+            line: err.line,
+          }),
+        };
+      }
+      throw err;
+    }
+    if (overlay === null) {
+      return { error: reportError('TB006', { envName, expectedPath: overlayPath, baseEnvPath }) };
+    }
+    return { env: composeEnv(baseEnv, overlay) };
   }
 
   async runLines(lines: number[]): Promise<RunOutcome> {
@@ -197,6 +254,15 @@ export class RunController {
       }
       throw err;
     }
+
+    // 2.5 Overlay the selected `.env.<name>` so $VAR in Parameters/Config and
+    // SERVER_* honour the active env. A missing/malformed overlay fails the run.
+    const overlaid = await this.overlayActiveEnv(env, envResolution.path);
+    if ('error' in overlaid) {
+      log(`${overlaid.error.code} ${overlaid.error.diagnosis}`);
+      return this.fail(overlaid.error, log);
+    }
+    env = overlaid.env;
 
     // 3. Validate required keys + URL
     if (!env['SERVER_URL'] || env['SERVER_URL'].trim() === '') {

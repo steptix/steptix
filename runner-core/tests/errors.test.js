@@ -8,6 +8,7 @@ const SAMPLE_CONTEXTS = {
   TB003: { envPath: '/ws/.env' },
   TB004: { envPath: '/ws/.env', value: 'not-a-url' },
   TB005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
+  TB006: { envName: 't2', expectedPath: '/ws/.env.t2', baseEnvPath: '/ws/base/.env' },
   TB010: { serverUrl: 'http://localhost:3100', reason: 'ECONNREFUSED' },
   TB011: { envPath: '/ws/.env', serverUrl: 'http://localhost:3100' },
   TB012: { serverUrl: 'http://localhost:3100' },
@@ -47,6 +48,7 @@ test('errors involving a file path mention the path verbatim', () => {
     ['TB003', '/ws/.env'],
     ['TB004', '/ws/.env'],
     ['TB005', '/ws/.env'],
+    ['TB006', '/ws/.env.t2'],
     ['TB011', '/ws/.env'],
     ['TB020', '/ws/foo.md'],
   ];
@@ -78,6 +80,15 @@ test('TB005 mentions the offending line number and content', () => {
   const payload = reportError('TB005', SAMPLE_CONTEXTS.TB005);
   assert.ok(payload.message.includes('line 4'));
   assert.ok(payload.message.includes('bad line'));
+});
+
+test('TB006 names the selected env and the expected .env.<name> path', () => {
+  const payload = reportError('TB006', SAMPLE_CONTEXTS.TB006);
+  assert.ok(payload.message.includes('t2'), 'mentions the env name');
+  assert.ok(payload.message.includes('/ws/.env.t2'), 'mentions the expected overlay path');
+  // Distinct from expectedPath so this proves baseEnvPath is actually surfaced
+  // (not trivially satisfied as a substring of /ws/.env.t2).
+  assert.ok(payload.message.includes('/ws/base/.env'), 'mentions the base .env path');
 });
 
 test('actions reference real-looking command ids', () => {

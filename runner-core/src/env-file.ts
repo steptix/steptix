@@ -170,6 +170,45 @@ export async function readEnvFile(absPath: string): Promise<Record<string, strin
   return parseEnv(text);
 }
 
+/**
+ * Read the per-environment overlay `.env.<name>` from `dir` (the project root —
+ * where envs are enumerated and where the CLI/server read `.env.<name>`).
+ *
+ * Returns `null` when the overlay file does not exist; the caller decides
+ * whether a missing overlay is an error (the extension treats an explicit env
+ * selection with no matching file as a hard failure — TB006). Throws
+ * `EnvParseError` on a malformed line, exactly like `readEnvFile`.
+ *
+ * `envName` is trimmed before forming the filename, so a name with stray
+ * surrounding whitespace (e.g. a quoted `env: " t2 "` in frontmatter) still
+ * maps to `.env.t2` rather than a spuriously-missing `.env. t2 `.
+ *
+ * The overlay is read on top of the base `.env`; see `composeEnv`.
+ */
+export async function readEnvOverlayFile(
+  dir: string,
+  envName: string,
+): Promise<Record<string, string> | null> {
+  const candidate = path.join(dir, `.env.${envName.trim()}`);
+  if (!(await defaultExists(candidate))) return null;
+  return readEnvFile(candidate);
+}
+
+/**
+ * Compose a base `.env` map with a per-environment overlay. The overlay wins
+ * on conflicting keys; keys only in the base survive — the same way
+ * `.env.<name>` overrides base `.env` on the server (`resolveEnvBundle`) and
+ * the CLI (`process.env` overlay). (Those entry points add a `process.env`
+ * baseline layer that the extension has no equivalent of; only the
+ * overlay-beats-base relationship is shared here.)
+ */
+export function composeEnv(
+  base: Record<string, string>,
+  overlay: Record<string, string>,
+): Record<string, string> {
+  return { ...base, ...overlay };
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------

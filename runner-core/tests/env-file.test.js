@@ -1,7 +1,25 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import * as path from 'node:path';
-import { EnvParseError, parseEnv, resolveEnvFile } from '../dist/env-file.js';
+import { promises as fsp } from 'node:fs';
+import * as os from 'node:os';
+import {
+  EnvParseError,
+  composeEnv,
+  parseEnv,
+  readEnvOverlayFile,
+  resolveEnvFile,
+} from '../dist/env-file.js';
+
+/** Create a throwaway dir, run `fn(dir)`, then remove it. */
+async function withTempDir(fn) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'tb-env-'));
+  try {
+    return await fn(dir);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+}
 
 function fakeFs(presentPaths) {
   const set = new Set(presentPaths.map((p) => path.resolve(p)));
@@ -119,4 +137,60 @@ test('parseEnv: throws EnvParseError with line metadata', () => {
     assert.equal(err.lineNumber, 2);
     assert.equal(err.line, 'bad line');
   }
+});
+
+test('readEnvOverlayFile: reads .env.<name> beside the base .env', async () => {
+  await withTempDir(async (dir) => {
+    await fsp.writeFile(path.join(dir, '.env.t2'), 'T2_ONLY=from-t2\nSHARED=t2wins\n');
+    const overlay = await readEnvOverlayFile(dir, 't2');
+    assert.deepEqual(overlay, { T2_ONLY: 'from-t2', SHARED: 't2wins' });
+  });
+});
+
+test('readEnvOverlayFile: returns null when .env.<name> is absent', async () => {
+  await withTempDir(async (dir) => {
+    const overlay = await readEnvOverlayFile(dir, 'nope');
+    assert.equal(overlay, null);
+  });
+});
+
+test('readEnvOverlayFile: trims surrounding whitespace in the env name (quoted "  t2  " → .env.t2)', async () => {
+  await withTempDir(async (dir) => {
+    await fsp.writeFile(path.join(dir, '.env.t2'), 'T2_ONLY=from-t2\n');
+    // A quoted frontmatter `env: " t2 "` reaches here with the spaces intact;
+    // it must still resolve .env.t2, not a spuriously-missing ".env. t2 ".
+    const overlay = await readEnvOverlayFile(dir, '  t2  ');
+    assert.deepEqual(overlay, { T2_ONLY: 'from-t2' });
+  });
+});
+
+test('readEnvOverlayFile: throws EnvParseError on a malformed overlay line', async () => {
+  await withTempDir(async (dir) => {
+    await fsp.writeFile(path.join(dir, '.env.bad'), 'OK=1\nbroken line\n');
+    await assert.rejects(() => readEnvOverlayFile(dir, 'bad'), (err) => {
+      assert.ok(err instanceof EnvParseError);
+      assert.equal(err.lineNumber, 2);
+      assert.equal(err.line, 'broken line');
+      return true;
+    });
+  });
+});
+
+test('composeEnv: overlay wins on conflicts, base-only keys survive, overlay-only keys appear', () => {
+  const base = { SHARED: 'base', BASE_ONLY: 'b', SERVER_API_KEY: 'secret' };
+  const overlay = { SHARED: 'overlay', OVERLAY_ONLY: 'o' };
+  assert.deepEqual(composeEnv(base, overlay), {
+    SHARED: 'overlay',
+    BASE_ONLY: 'b',
+    SERVER_API_KEY: 'secret',
+    OVERLAY_ONLY: 'o',
+  });
+});
+
+test('composeEnv: does not mutate its inputs', () => {
+  const base = { A: '1' };
+  const overlay = { A: '2', B: '3' };
+  composeEnv(base, overlay);
+  assert.deepEqual(base, { A: '1' });
+  assert.deepEqual(overlay, { A: '2', B: '3' });
 });

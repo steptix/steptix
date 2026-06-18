@@ -16,6 +16,7 @@ export type ErrorCode =
   | 'TB003'
   | 'TB004'
   | 'TB005'
+  | 'TB006'
   | 'TB010'
   | 'TB011'
   | 'TB012'
@@ -55,6 +56,7 @@ export interface ErrorContextMap {
   TB003: { envPath: string };
   TB004: { envPath: string; value: string };
   TB005: { envPath: string; lineNumber: number; line: string };
+  TB006: { envName: string; expectedPath: string; baseEnvPath: string };
   TB010: { serverUrl: string; reason: string };
   TB011: { envPath: string; serverUrl: string };
   TB012: { serverUrl: string };
@@ -102,6 +104,11 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   TB005: (ctx) => ({
     diagnosis: `Could not parse ${ctx.envPath} at line ${ctx.lineNumber}: "${ctx.line}"`,
     fix: 'Each entry must be KEY=VALUE on its own line. Comments start with #.',
+    actions: [{ label: 'Reveal .env', command: 'testbench.revealEnvFile' }],
+  }),
+  TB006: (ctx) => ({
+    diagnosis: `Active environment "${ctx.envName}" is selected, but no .env.${ctx.envName} was found at ${ctx.expectedPath}`,
+    fix: `Create .env.${ctx.envName} next to ${ctx.baseEnvPath}, or clear the env selection in the status bar (globe → env).`,
     actions: [{ label: 'Reveal .env', command: 'testbench.revealEnvFile' }],
   }),
   TB010: (ctx) => ({

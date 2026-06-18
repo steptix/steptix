@@ -18,6 +18,10 @@ async function run() {
   const files = await glob('**/*.test.cjs', { cwd: testsRoot });
   for (const f of files) mocha.addFile(path.resolve(testsRoot, f));
 
+  // Optional scoping for local iteration: `TESTBENCH_GREP="..."` runs only the
+  // tests whose title matches. Unset in CI, so the full suite runs.
+  if (process.env.TESTBENCH_GREP) mocha.grep(process.env.TESTBENCH_GREP);
+
   // Run statuses now persist to a `.testbench/run-state.json` file in the
   // workspace folder, and the suite reuses one workspace folder across cases,
   // so without this the file would leak statuses across test cases (and across
