@@ -9,7 +9,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   ai: {
     gatewayUrl: 'https://llm.corp.example',
-    model: 'gpt-5.4-mini',
+    model: 'openai/gpt-5.4-mini',
     maxInputTokens: 1_000_000,
     streamResponses: false,
     sendScreenshots: false,
