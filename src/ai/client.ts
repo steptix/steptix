@@ -1,4 +1,5 @@
-import OpenAI from 'openai';
+import { AIGateway } from '@pkent/aigateway';
+import type { V2ContentBlock } from '@pkent/aigateway';
 import type { AiConfig } from '../config/types.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
@@ -28,77 +29,71 @@ function summarizeMessagesForTrace(messages: ChatMessage[]): unknown {
   });
 }
 
-/**
- * Map the consumer's `ChatMessage[]` onto the OpenAI SDK's
- * `ChatCompletionMessageParam[]`. The shapes are already compatible (`role` +
- * `content` string | array of `{type:'text',text}` / `{type:'image_url',image_url:{url}}`);
- * the only transform is stripping the `cache` hint from content blocks, since
- * OpenAI's content-part types don't carry it and the gateway does no caching.
- *
- * The SDK's `ChatCompletionMessageParam` is a narrower role-discriminated union
- * (e.g. `role:'tool'` requires `tool_call_id`; `system`/`tool` content is
- * text-only). The consumer never emits `role:'tool'` and system content is
- * text-only blocks, so a `cache`-stripped `ChatMessage[]` is value-compatible —
- * a narrowing cast bridges what the compiler can't prove.
- */
-function toOpenAIMessages(messages: ChatMessage[]): OpenAI.ChatCompletionMessageParam[] {
-  const mapped = messages.map((m) => {
-    if (typeof m.content === 'string') {
-      return { role: m.role, content: m.content };
-    }
-    const content = (m.content as MessageContentBlock[]).map((b) => {
-      if (b.type === 'image_url') {
-        return { type: 'image_url', image_url: { url: b.image_url.url } };
-      }
-      return { type: 'text', text: b.text };
-    });
-    return { role: m.role, content };
-  });
-  return mapped as OpenAI.ChatCompletionMessageParam[];
+/** Join the `type:'text'` blocks of a v2 response envelope into the response text. */
+function textFromV2(content: V2ContentBlock[]): string {
+  return content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text ?? '')
+    .join('');
 }
 
 /** Result of a single AI completion, including which model the gateway actually served. */
 export interface CompleteResult {
   /** The assembled text response from the AI */
   text: string;
-  /** The model reported by the gateway response envelope, or the configured model if the gateway omitted it */
+  /**
+   * The model id reported by the gateway's v2 response envelope, or the
+   * configured model if the envelope omitted it. `@pkent/aigateway` echoes the
+   * BOUND `<provider>/<model>` id (it discards the upstream's returned model),
+   * so this is effectively the configured `AI_MODEL`.
+   */
   model: string;
 }
 
 export class AiClient {
   private config: AiConfig;
   private tokenTracker: TokenTracker;
-  private client: OpenAI;
+  /**
+   * Lazily-built, memoized gateway. NOT built in the constructor:
+   * `new AIGateway(...)` throws `invalid_api_key` on an empty key and binds the
+   * model at construction, so building lazily preserves the "construct succeeds;
+   * fail at request time" behavior and lets {@link syncAuth} just null this out.
+   */
+  private gateway: AIGateway | null = null;
 
   constructor(config: AiConfig, tokenTracker: TokenTracker) {
     this.config = config;
     this.tokenTracker = tokenTracker;
-    this.client = this.buildClient();
   }
 
   /**
-   * Build the `openai` client bound to the gateway's `/v1` surface. The Bearer
-   * token (`apiKey`) is bound at construction, so a key change requires a
-   * rebuild (see {@link syncAuth}). `maxRetries: 0` matches the old fetch
-   * client — no auto-retry, avoiding duplicate calls / surprise latency.
+   * Build the `@pkent/aigateway` client bound to the current `model` + `apiKey`.
+   * The model-string prefix drives routing: `baseURL` (the gateway `/v1`
+   * surface) is supplied ONLY for `aibroker/` models — for direct models
+   * (`openai/…`, `anthropic/…`, …) passing it would point the provider's own SDK
+   * at the gateway instead of the real upstream.
    */
-  private buildClient(): OpenAI {
-    return new OpenAI({
-      baseURL: `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1`,
-      apiKey: this.config.apiKey ?? '',
-      maxRetries: 0,
-    });
+  private buildGateway(): AIGateway {
+    const opts = this.config.model.startsWith('aibroker/')
+      ? { baseURL: `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1` }
+      : {};
+    return new AIGateway(this.config.model, this.config.apiKey ?? '', opts);
+  }
+
+  /** Lazily build + memoize the gateway on first use. */
+  private getGateway(): AIGateway {
+    return (this.gateway ??= this.buildGateway());
   }
 
   /**
-   * Re-point an already-bound client at a new `model` / `apiKey` — used when a
-   * saved `.env` edit changes `AI_MODEL` / `AI_API_KEY` between runs on a reused
-   * session. Only these two fields are env-mutable; every other field
-   * (gatewayUrl, maxInputTokens, streaming) is server-level and left untouched.
+   * Re-point the client at a new `model` / `apiKey` — used when a saved `.env`
+   * edit changes `AI_MODEL` / `AI_API_KEY` between runs on a reused session.
+   * Only these two fields are env-mutable; every other field (gatewayUrl,
+   * maxInputTokens, streaming) is server-level and left untouched.
    *
-   * A `model` change applies per request via the `model` field (no rebuild). An
-   * `apiKey` change rebuilds the `openai` client, since the key is bound at
-   * construction.
+   * `@pkent/aigateway` binds the model at construction AND the `baseURL` choice
+   * depends on the model prefix, so a model change OR a key change invalidates
+   * the cached gateway — it's rebuilt on the next {@link getGateway} call.
    *
    * Returns a short, key-safe description of what changed (for logging), or
    * `null` when nothing changed. The returned string NEVER contains the key
@@ -117,10 +112,10 @@ export class AiClient {
       // Authorization header" (the server base when AI_API_KEY is absent).
       if (apiKey === undefined) delete this.config.apiKey;
       else this.config.apiKey = apiKey;
-      // The Bearer token is bound at construction — rebuild so the next request
-      // authenticates with the new key.
-      this.client = this.buildClient();
     }
+    // A model or key change invalidates the cached gateway (the model is bound
+    // at construction and the baseURL choice depends on the model prefix).
+    if (changes.length > 0) this.gateway = null;
     return changes.length > 0 ? changes.join('; ') : null;
   }
 
@@ -156,17 +151,15 @@ export class AiClient {
       messages: summarizeMessagesForTrace(messages),
     });
 
-    let res: OpenAI.Chat.Completions.ChatCompletion;
+    let v2;
     try {
-      res = await this.client.chat.completions.create(
-        {
-          model: this.config.model,
-          messages: toOpenAIMessages(messages),
-          max_completion_tokens: 4096,
-          response_format: { type: 'json_object' },
-        },
-        { signal: this.buildSignal(signal) },
-      );
+      // Messages pass through unchanged — `@pkent/aigateway` accepts the
+      // consumer's `ChatMessage` shape and handles `cache` hints itself.
+      v2 = await this.getGateway().chat(messages, {
+        maxTokens: 4096,
+        responseFormat: { type: 'json_object' },
+        signal: this.buildSignal(signal),
+      });
     } catch (err) {
       logger.trace(`ai.response#${requestId}`, {
         ok: false,
@@ -175,17 +168,18 @@ export class AiClient {
       throw err;
     }
 
-    const text = res.choices[0]?.message?.content ?? '';
-    if (res.usage) {
-      this.tokenTracker.addUsage(res.usage.prompt_tokens, res.usage.completion_tokens);
+    const text = textFromV2(v2.content);
+    if (v2.usage) {
+      // v2 field names — the library normalizes upstream usage to input/output.
+      this.tokenTracker.addUsage(v2.usage.input_tokens, v2.usage.output_tokens);
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     }
 
-    const model = res.model || this.config.model;
+    const model = v2.model ?? this.config.model;
     logger.trace(`ai.response#${requestId}`, {
       ok: true,
       model,
-      usage: res.usage,
+      usage: v2.usage,
       content: text,
     });
 
@@ -213,30 +207,25 @@ export class AiClient {
 
     let text = '';
     let model = this.config.model;
-    let promptTokens = 0;
-    let completionTokens = 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let haveUsage = false;
 
     try {
-      const stream = await this.client.chat.completions.create(
-        {
-          model: this.config.model,
-          messages: toOpenAIMessages(messages),
-          max_completion_tokens: 4096,
-          response_format: { type: 'json_object' },
-          stream: true,
-          stream_options: { include_usage: true },
-        },
-        { signal: this.buildSignal(signal) },
-      );
+      const stream = this.getGateway().stream(messages, {
+        maxTokens: 4096,
+        responseFormat: { type: 'json_object' },
+        signal: this.buildSignal(signal),
+      });
 
-      for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta?.content;
-        if (delta) text += delta;
-        if (chunk.model) model = chunk.model;
-        if (chunk.usage) {
-          promptTokens = chunk.usage.prompt_tokens;
-          completionTokens = chunk.usage.completion_tokens;
-        }
+      for await (const delta of stream) text += delta.text;
+
+      const final = await stream.final;
+      model = final.model ?? this.config.model;
+      if (final.usage && (final.usage.input_tokens || final.usage.output_tokens)) {
+        inputTokens = final.usage.input_tokens;
+        outputTokens = final.usage.output_tokens;
+        haveUsage = true;
       }
     } catch (err) {
       logger.trace(`ai.response#${requestId}`, {
@@ -246,8 +235,8 @@ export class AiClient {
       throw err;
     }
 
-    if (promptTokens > 0 || completionTokens > 0) {
-      this.tokenTracker.addUsage(promptTokens, completionTokens);
+    if (haveUsage) {
+      this.tokenTracker.addUsage(inputTokens, outputTokens);
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     } else {
       // Estimate tokens if the stream omitted usage (matches the old behavior).
@@ -258,7 +247,7 @@ export class AiClient {
       ok: true,
       streaming: true,
       model,
-      usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+      usage: { input_tokens: inputTokens, output_tokens: outputTokens },
       content: text,
     });
 

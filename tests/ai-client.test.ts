@@ -15,240 +15,311 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 /**
- * One shared `create` spy that every mock client instance delegates to, so a
- * test can inspect the request regardless of which (rebuilt) client made it.
- * `createImpl` lets each test swap in the response (or async-iterable stream).
+ * One shared `chat` / `stream` spy that every mock gateway instance delegates
+ * to, so a test can inspect the request regardless of which (rebuilt) gateway
+ * made it. `chatImpl` / `streamImpl` let each test swap in the response.
  */
-const createMock = vi.fn();
-let createImpl: (...args: any[]) => any = async () => ({ choices: [], model: 'unset' });
+const chatMock = vi.fn();
+const streamMock = vi.fn();
+let chatImpl: (...args: any[]) => any = async () => ({ content: [], model: 'unset' });
+let streamImpl: (...args: any[]) => any = () => makeStream([], { content: [], model: 'unset' });
 
-/** Records every `new OpenAI(...)` call so tests can assert construction args + rebuild count. */
+/** Records every `new AIGateway(model, key, options)` so tests can assert construction args + rebuild count. */
 const constructorMock = vi.fn();
 
-vi.mock('openai', () => {
-  class FakeOpenAI {
-    chat: { completions: { create: typeof createMock } };
-    constructor(opts: any) {
-      constructorMock(opts);
-      this.chat = { completions: { create: createMock } };
+vi.mock('@pkent/aigateway', () => {
+  class FakeAIGateway {
+    chat: typeof chatMock;
+    stream: typeof streamMock;
+    constructor(model: string, key: string, options: any) {
+      constructorMock(model, key, options);
+      this.chat = chatMock;
+      this.stream = streamMock;
     }
   }
-  return { default: FakeOpenAI };
+  return { AIGateway: FakeAIGateway, default: FakeAIGateway };
 });
 
-/** Build an OpenAI-shaped non-streaming chat.completion object. */
-function chatCompletion(opts: {
-  content?: string;
+/** Build a v2 response envelope ({ content:[{type,text}], model?, usage? }). */
+function v2Response(opts: {
+  text?: string;
   model?: string;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens?: number };
+  usage?: { input_tokens: number; output_tokens: number; total_tokens?: number };
 }) {
   return {
-    id: 'chatcmpl-1',
-    object: 'chat.completion',
+    id: 'resp-1',
+    object: 'response',
     created: 1776692376,
-    model: opts.model ?? 'gpt-4o',
-    choices: [
-      {
-        index: 0,
-        finish_reason: 'stop',
-        message: { role: 'assistant', content: opts.content ?? '{}' },
-      },
-    ],
+    provider: 'aibroker',
+    model: opts.model,
+    role: 'assistant',
+    stop_reason: 'stop',
+    content: opts.text === undefined ? [] : [{ type: 'text', text: opts.text }],
     usage: opts.usage,
   };
 }
 
-/** Build an async-iterable of streaming chunks for the `stream:true` path. */
-function streamChunks(chunks: any[]) {
+/**
+ * Build a ChatStream-shaped object: async-iterable of `{type:'text_delta',text}`
+ * deltas plus a `.final` promise resolving to the v2 envelope.
+ */
+function makeStream(deltas: string[], final: any) {
   return {
     async *[Symbol.asyncIterator]() {
-      for (const c of chunks) yield c;
+      for (const text of deltas) yield { type: 'text_delta', text };
     },
+    final: Promise.resolve(final),
   };
 }
 
-describe('AiClient — openai SDK gateway integration', () => {
+describe('AiClient — @pkent/aigateway integration', () => {
   const tokenTracker = {
     addUsage: vi.fn(),
     checkStepBudget: vi.fn(),
   };
 
-  const baseConfig: AiConfig = {
-    gatewayUrl: 'https://llm.corp.example',
-    apiKey: 'test-key',
-    model: 'gpt-4o',
-    maxInputTokens: 1_000_000,
-    streamResponses: false,
-    sendScreenshots: true,
-    diagnoseFailures: true,
-  };
+  // `syncAuth` mutates the config object it's handed (by reference), so a fresh
+  // copy per test is required — otherwise a model/key change leaks into later
+  // tests that read `baseConfig.model` / `.apiKey`.
+  let baseConfig: AiConfig;
 
   beforeEach(() => {
+    baseConfig = {
+      gatewayUrl: 'https://llm.corp.example',
+      apiKey: 'test-key',
+      model: 'aibroker/openai/chatgpt-5.5',
+      maxInputTokens: 1_000_000,
+      streamResponses: false,
+      sendScreenshots: true,
+      diagnoseFailures: true,
+    };
     vi.clearAllMocks();
-    createImpl = async () => ({ choices: [], model: 'unset' });
-    createMock.mockImplementation((...args: any[]) => createImpl(...args));
+    chatImpl = async () => v2Response({ text: '{}', model: 'aibroker/openai/chatgpt-5.5' });
+    streamImpl = () =>
+      makeStream(['{}'], v2Response({ text: '{}', model: 'aibroker/openai/chatgpt-5.5' }));
+    chatMock.mockImplementation((...args: any[]) => chatImpl(...args));
+    streamMock.mockImplementation((...args: any[]) => streamImpl(...args));
   });
 
-  it('builds the openai client against the gateway /v1 surface with no retries', () => {
-    new AiClient(baseConfig, tokenTracker as any);
-    expect(constructorMock).toHaveBeenCalledTimes(1);
-    expect(constructorMock).toHaveBeenCalledWith(
-      expect.objectContaining({
+  describe('construction — lazy + model-prefix-aware baseURL', () => {
+    it('does NOT build the gateway in the constructor (lazy)', () => {
+      new AiClient(baseConfig, tokenTracker as any);
+      expect(constructorMock).not.toHaveBeenCalled();
+    });
+
+    it('builds the gateway with the bound model+key and { baseURL } for an aibroker/ model', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      expect(constructorMock).toHaveBeenCalledTimes(1);
+      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'test-key', {
         baseURL: 'https://llm.corp.example/v1',
-        apiKey: 'test-key',
-        maxRetries: 0,
-      }),
-    );
-  });
-
-  it('sends a non-streaming request with the right shape and maps back {text,model}', async () => {
-    let sawArgs: any;
-    let sawOpts: any;
-    createImpl = async (args: any, opts: any) => {
-      sawArgs = args;
-      sawOpts = opts;
-      return chatCompletion({
-        content: '{"actions":[],"reasoning":"ok"}',
-        model: 'claude-sonnet-4-5',
-        usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 },
       });
-    };
-
-    const client = new AiClient(baseConfig, tokenTracker as any);
-    const result = await client.complete([{ role: 'user', content: 'Hello' }]);
-
-    // Request shape
-    expect(sawArgs.model).toBe('gpt-4o');
-    expect(sawArgs.messages).toEqual([{ role: 'user', content: 'Hello' }]);
-    expect(sawArgs.max_completion_tokens).toBe(4096);
-    expect(sawArgs.response_format).toEqual({ type: 'json_object' });
-    expect(sawArgs.stream).toBeUndefined();
-    // Signal forwarded as a composite AbortSignal (timeout-only when no run signal)
-    expect(sawOpts.signal).toBeInstanceOf(AbortSignal);
-    expect(sawOpts.signal.aborted).toBe(false);
-
-    // Map-back + token accounting (prompt_tokens/completion_tokens, NOT v2 input/output)
-    expect(result.text).toBe('{"actions":[],"reasoning":"ok"}');
-    expect(result.model).toBe('claude-sonnet-4-5');
-    expect(tokenTracker.addUsage).toHaveBeenCalledWith(12, 8);
-    expect(tokenTracker.checkStepBudget).toHaveBeenCalledWith(1_000_000);
-  });
-
-  it('falls back to the configured model when the response omits one', async () => {
-    createImpl = async () =>
-      chatCompletion({ content: '{}', model: '', usage: { prompt_tokens: 1, completion_tokens: 1 } });
-
-    const client = new AiClient(baseConfig, tokenTracker as any);
-    const result = await client.complete([{ role: 'user', content: 'Hi' }]);
-    expect(result.model).toBe('gpt-4o');
-  });
-
-  it('throws on empty content and does not invent a result', async () => {
-    // Minimum scenario: a 200 with empty content + no usage must NOT silently pass.
-    createImpl = async () => chatCompletion({ content: '', model: 'gpt-4o' });
-
-    const client = new AiClient(baseConfig, tokenTracker as any);
-    await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(/no content/i);
-    // No usage block → tokenTracker untouched on this path.
-    expect(tokenTracker.addUsage).not.toHaveBeenCalled();
-    expect(tokenTracker.checkStepBudget).not.toHaveBeenCalled();
-  });
-
-  it('streams: assembles text from deltas and uses final-chunk usage', async () => {
-    let sawArgs: any;
-    createImpl = async (args: any) => {
-      sawArgs = args;
-      return streamChunks([
-        { choices: [{ delta: { content: 'hello ' } }], model: 'claude-sonnet-4-5' },
-        { choices: [{ delta: { content: 'world' } }] },
-        {
-          choices: [{ delta: {}, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 21, completion_tokens: 5, total_tokens: 26 },
-        },
-      ]);
-    };
-
-    const client = new AiClient({ ...baseConfig, streamResponses: true }, tokenTracker as any);
-    const result = await client.complete([{ role: 'user', content: 'Hello' }]);
-
-    expect(sawArgs.stream).toBe(true);
-    expect(sawArgs.stream_options).toEqual({ include_usage: true });
-    expect(sawArgs.max_completion_tokens).toBe(4096);
-    expect(sawArgs.response_format).toEqual({ type: 'json_object' });
-
-    expect(result.text).toBe('hello world');
-    expect(result.model).toBe('claude-sonnet-4-5');
-    expect(tokenTracker.addUsage).toHaveBeenCalledWith(21, 5);
-    expect(tokenTracker.checkStepBudget).toHaveBeenCalledWith(1_000_000);
-  });
-
-  it('streams: estimates tokens when the stream omits usage', async () => {
-    // Minimum scenario: no usage chunk → estimate fallback (0 prompt, len/4 completion).
-    createImpl = async () =>
-      streamChunks([
-        { choices: [{ delta: { content: 'abcd' } }], model: 'gpt-4o' },
-        { choices: [{ delta: {}, finish_reason: 'stop' }] },
-      ]);
-
-    const client = new AiClient({ ...baseConfig, streamResponses: true }, tokenTracker as any);
-    const result = await client.complete([{ role: 'user', content: 'Hi' }]);
-
-    expect(result.text).toBe('abcd');
-    expect(tokenTracker.addUsage).toHaveBeenCalledWith(0, 1); // ceil(4/4)
-    expect(tokenTracker.checkStepBudget).not.toHaveBeenCalled();
-  });
-
-  it('strips cache hints from content blocks before the SDK call', async () => {
-    let sawArgs: any;
-    createImpl = async (args: any) => {
-      sawArgs = args;
-      return chatCompletion({ content: '{}', usage: { prompt_tokens: 1, completion_tokens: 1 } });
-    };
-
-    const client = new AiClient(baseConfig, tokenTracker as any);
-    await client.complete([
-      { role: 'system', content: [{ type: 'text', text: 'Core instructions', cache: true }] },
-      { role: 'user', content: [{ type: 'text', text: 'Live request data' }] },
-    ]);
-
-    // `cache` must be gone; the rest of the block shape is preserved.
-    expect(sawArgs.messages[0]).toEqual({
-      role: 'system',
-      content: [{ type: 'text', text: 'Core instructions' }],
     });
-    expect(sawArgs.messages[1]).toEqual({
-      role: 'user',
-      content: [{ type: 'text', text: 'Live request data' }],
+
+    it('builds the gateway with NO baseURL for a direct openai/ model', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'openai/chatgpt-5.5' },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      expect(constructorMock).toHaveBeenCalledTimes(1);
+      expect(constructorMock).toHaveBeenCalledWith('openai/chatgpt-5.5', 'test-key', {});
+    });
+
+    it('memoizes the gateway across calls (built once)', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      await client.complete([{ role: 'user', content: 'Hi again' }]);
+      expect(constructorMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes an empty string for the key when apiKey is absent', async () => {
+      const cfg = { ...baseConfig };
+      delete (cfg as Partial<AiConfig>).apiKey;
+      const client = new AiClient(cfg as AiConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(constructorMock).toHaveBeenCalledWith(
+        'aibroker/openai/chatgpt-5.5',
+        '',
+        expect.anything(),
+      );
     });
   });
 
-  it('strips cache hints from image_url blocks too', async () => {
-    let sawArgs: any;
-    createImpl = async (args: any) => {
-      sawArgs = args;
-      return chatCompletion({ content: '{}', usage: { prompt_tokens: 1, completion_tokens: 1 } });
-    };
+  describe('complete() — non-streaming', () => {
+    it('calls chat with passed-through messages, maxTokens, responseFormat, composite signal', async () => {
+      let sawMessages: any;
+      let sawOpts: any;
+      chatImpl = async (messages: any, opts: any) => {
+        sawMessages = messages;
+        sawOpts = opts;
+        return v2Response({
+          text: '{"actions":[],"reasoning":"ok"}',
+          model: 'aibroker/openai/chatgpt-5.5',
+          usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 },
+        });
+      };
 
-    const client = new AiClient(baseConfig, tokenTracker as any);
-    await client.complete([
-      {
-        role: 'user',
-        content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' }, cache: true }],
-      },
-    ]);
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const messages = [{ role: 'user', content: 'Hello' }];
+      const result = await client.complete(messages as any);
 
-    expect(sawArgs.messages[0]).toEqual({
-      role: 'user',
-      content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } }],
+      // Messages passed through unchanged (no cache-strip / no remapping).
+      expect(sawMessages).toBe(messages);
+      expect(sawMessages).toEqual([{ role: 'user', content: 'Hello' }]);
+      expect(sawOpts.maxTokens).toBe(4096);
+      expect(sawOpts.responseFormat).toEqual({ type: 'json_object' });
+      // Signal forwarded as a composite AbortSignal (timeout-only when no run signal).
+      expect(sawOpts.signal).toBeInstanceOf(AbortSignal);
+      expect(sawOpts.signal.aborted).toBe(false);
+
+      // Map-back from the v2 envelope.
+      expect(result.text).toBe('{"actions":[],"reasoning":"ok"}');
+      expect(result.model).toBe('aibroker/openai/chatgpt-5.5');
+      // v2 field names: addUsage(input_tokens, output_tokens) — NOT prompt/completion.
+      expect(tokenTracker.addUsage).toHaveBeenCalledWith(12, 8);
+      expect(tokenTracker.checkStepBudget).toHaveBeenCalledWith(1_000_000);
+    });
+
+    it('does NOT strip cache hints — messages (incl. cache:true blocks) reach chat verbatim', async () => {
+      let sawMessages: any;
+      chatImpl = async (messages: any) => {
+        sawMessages = messages;
+        return v2Response({ text: '{}', usage: { input_tokens: 1, output_tokens: 1 } });
+      };
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const messages = [
+        { role: 'system', content: [{ type: 'text', text: 'Core instructions', cache: true }] },
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:img,AAA' }, cache: true }] },
+      ];
+      await client.complete(messages as any);
+
+      // The library handles cache hints itself; the client passes them through.
+      expect(sawMessages).toBe(messages);
+      expect(sawMessages[0].content[0]).toEqual({ type: 'text', text: 'Core instructions', cache: true });
+      expect(sawMessages[1].content[0]).toEqual({
+        type: 'image_url',
+        image_url: { url: 'data:img,AAA' },
+        cache: true,
+      });
+    });
+
+    it('joins only type:text blocks into the response text', async () => {
+      chatImpl = async () => ({
+        model: 'aibroker/openai/chatgpt-5.5',
+        content: [
+          { type: 'text', text: 'foo ' },
+          { type: 'image', source: { url: 'x' } },
+          { type: 'text', text: 'bar' },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(result.text).toBe('foo bar');
+    });
+
+    it('falls back to the configured model when the envelope omits one', async () => {
+      chatImpl = async () =>
+        v2Response({ text: '{}', usage: { input_tokens: 1, output_tokens: 1 } }); // model undefined
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(result.model).toBe('aibroker/openai/chatgpt-5.5');
+    });
+
+    it('throws on empty content and does not invent a result', async () => {
+      // Minimum scenario: empty content + no usage must NOT silently pass.
+      chatImpl = async () => v2Response({ text: '', model: 'aibroker/openai/chatgpt-5.5' });
+
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(/no content/i);
+      // No usage block → tokenTracker untouched on this path.
+      expect(tokenTracker.addUsage).not.toHaveBeenCalled();
+      expect(tokenTracker.checkStepBudget).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('complete() — streaming', () => {
+    it('calls stream with passed-through messages, maxTokens, responseFormat, signal', async () => {
+      let sawMessages: any;
+      let sawOpts: any;
+      streamImpl = (messages: any, opts: any) => {
+        sawMessages = messages;
+        sawOpts = opts;
+        return makeStream(
+          ['hello ', 'world'],
+          v2Response({
+            text: 'hello world',
+            model: 'aibroker/openai/chatgpt-5.5',
+            usage: { input_tokens: 21, output_tokens: 5, total_tokens: 26 },
+          }),
+        );
+      };
+
+      const client = new AiClient({ ...baseConfig, streamResponses: true }, tokenTracker as any);
+      const messages = [{ role: 'user', content: 'Hello' }];
+      const result = await client.complete(messages as any);
+
+      expect(sawMessages).toBe(messages);
+      expect(sawOpts.maxTokens).toBe(4096);
+      expect(sawOpts.responseFormat).toEqual({ type: 'json_object' });
+      expect(sawOpts.signal).toBeInstanceOf(AbortSignal);
+
+      // Text assembled from the deltas; usage from .final.
+      expect(result.text).toBe('hello world');
+      expect(result.model).toBe('aibroker/openai/chatgpt-5.5');
+      expect(tokenTracker.addUsage).toHaveBeenCalledWith(21, 5);
+      expect(tokenTracker.checkStepBudget).toHaveBeenCalledWith(1_000_000);
+    });
+
+    it('estimates tokens when .final omits usage', async () => {
+      // Minimum scenario: no usage on .final → estimate fallback (0 input, len/4 output).
+      streamImpl = () =>
+        makeStream(['abcd'], v2Response({ text: 'abcd', model: 'aibroker/openai/chatgpt-5.5' }));
+
+      const client = new AiClient({ ...baseConfig, streamResponses: true }, tokenTracker as any);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      expect(result.text).toBe('abcd');
+      expect(tokenTracker.addUsage).toHaveBeenCalledWith(0, 1); // ceil(4/4)
+      expect(tokenTracker.checkStepBudget).not.toHaveBeenCalled();
+    });
+
+    it('estimates tokens when .final usage is present but zero', async () => {
+      streamImpl = () =>
+        makeStream(
+          ['abcd'],
+          v2Response({
+            text: 'abcd',
+            model: 'aibroker/openai/chatgpt-5.5',
+            usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+          }),
+        );
+
+      const client = new AiClient({ ...baseConfig, streamResponses: true }, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(tokenTracker.addUsage).toHaveBeenCalledWith(0, 1); // ceil(4/4)
+      expect(tokenTracker.checkStepBudget).not.toHaveBeenCalled();
+    });
+
+    it('throws on empty streamed content', async () => {
+      streamImpl = () => makeStream([], v2Response({ text: '', model: 'aibroker/openai/chatgpt-5.5' }));
+      const client = new AiClient({ ...baseConfig, streamResponses: true }, tokenTracker as any);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(/no content/i);
     });
   });
 
   describe('buildSignal — 120s timeout + instant stop', () => {
     it('forwards a timeout-only AbortSignal when no run signal is passed', async () => {
       let sawOpts: any;
-      createImpl = async (_args: any, opts: any) => {
+      chatImpl = async (_messages: any, opts: any) => {
         sawOpts = opts;
-        return chatCompletion({ content: '{}', usage: { prompt_tokens: 1, completion_tokens: 1 } });
+        return v2Response({ text: '{}', usage: { input_tokens: 1, output_tokens: 1 } });
       };
 
       const client = new AiClient(baseConfig, tokenTracker as any);
@@ -261,7 +332,7 @@ describe('AiClient — openai SDK gateway integration', () => {
     it('forwards an AbortSignal.any combining the run signal with the timeout', async () => {
       let sawSignal: AbortSignal | undefined;
       // Hold the call open until the run signal fires, then reject like a real abort.
-      createImpl = (_args: any, opts: any) => {
+      chatImpl = (_messages: any, opts: any) => {
         sawSignal = opts.signal;
         return new Promise((_resolve, reject) => {
           sawSignal?.addEventListener('abort', () => {
@@ -286,57 +357,74 @@ describe('AiClient — openai SDK gateway integration', () => {
   });
 
   describe('syncAuth — re-point an already-bound client (saved .env edit)', () => {
-    it('swaps the model used on the next request and reports the change', async () => {
-      let sentModel: string | undefined;
-      createImpl = async (args: any) => {
-        sentModel = args.model;
-        return chatCompletion({ content: '{}', usage: { prompt_tokens: 1, completion_tokens: 1 } });
-      };
-
+    it('rebuilds the gateway on a MODEL change and uses the new model on the next request', async () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
-      const change = client.syncAuth('gpt-5.4-mini', baseConfig.apiKey);
+      await client.complete([{ role: 'user', content: 'Hi' }]); // initial build
+      expect(constructorMock).toHaveBeenCalledTimes(1);
 
-      expect(change).toBe('AI model gpt-4o → gpt-5.4-mini');
-      await client.complete([{ role: 'user', content: 'Hi' }]);
-      expect(sentModel).toBe('gpt-5.4-mini');
+      const change = client.syncAuth('aibroker/openrouter/gemini-3-flash', baseConfig.apiKey);
+      expect(change).toBe('AI model aibroker/openai/chatgpt-5.5 → aibroker/openrouter/gemini-3-flash');
+
+      // INVERTED vs the old per-request model: the model is bound at construction,
+      // so a model change MUST rebuild the gateway (lazily, on the next call).
+      await client.complete([{ role: 'user', content: 'Hi again' }]);
+      expect(constructorMock).toHaveBeenCalledTimes(2);
+      expect(constructorMock).toHaveBeenLastCalledWith(
+        'aibroker/openrouter/gemini-3-flash',
+        'test-key',
+        expect.anything(),
+      );
     });
 
-    it('swaps the apiKey, rebuilds the client with the new key, and never leaks it', async () => {
-      createImpl = async () =>
-        chatCompletion({ content: '{}', usage: { prompt_tokens: 1, completion_tokens: 1 } });
-
+    it('rebuilds the gateway on a KEY change with the new key, and never leaks it', async () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
-      expect(constructorMock).toHaveBeenCalledTimes(1); // initial build
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(constructorMock).toHaveBeenCalledTimes(1);
 
       const change = client.syncAuth(baseConfig.model, 'super-secret-key');
 
       expect(change).toBe('AI API key changed');
       expect(change).not.toContain('super-secret-key');
-      // Key is bound at construction → a key swap must rebuild the client.
+
+      // Rebuilds lazily on the next request, bound with the new key.
+      await client.complete([{ role: 'user', content: 'Hi again' }]);
       expect(constructorMock).toHaveBeenCalledTimes(2);
       expect(constructorMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({ apiKey: 'super-secret-key' }),
+        baseConfig.model,
+        'super-secret-key',
+        expect.anything(),
       );
     });
 
     it('rebuilds with an empty key when the key goes undefined', async () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
       expect(constructorMock).toHaveBeenCalledTimes(1);
 
       const change = client.syncAuth(baseConfig.model, undefined);
-
       expect(change).toBe('AI API key changed');
-      // Removed key → rebuilt client with apiKey '' (the openai SDK requires a string).
+
+      await client.complete([{ role: 'user', content: 'Hi again' }]);
       expect(constructorMock).toHaveBeenCalledTimes(2);
-      expect(constructorMock).toHaveBeenLastCalledWith(expect.objectContaining({ apiKey: '' }));
+      expect(constructorMock).toHaveBeenLastCalledWith(baseConfig.model, '', expect.anything());
     });
 
-    it('returns null, mutates nothing, and does NOT rebuild when model and key are unchanged', () => {
+    it('reports both a model AND key change together', () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
+      const change = client.syncAuth('openai/chatgpt-5.5', 'new-key');
+      expect(change).toBe('AI model aibroker/openai/chatgpt-5.5 → openai/chatgpt-5.5; AI API key changed');
+      expect(change).not.toContain('new-key');
+    });
+
+    it('returns null, mutates nothing, and does NOT rebuild when model and key are unchanged', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]); // build once
       expect(constructorMock).toHaveBeenCalledTimes(1);
 
       expect(client.syncAuth(baseConfig.model, baseConfig.apiKey)).toBeNull();
-      // No key change → no rebuild.
+
+      // Nothing changed → gateway NOT invalidated → no rebuild on the next call.
+      await client.complete([{ role: 'user', content: 'Hi again' }]);
       expect(constructorMock).toHaveBeenCalledTimes(1);
     });
   });
