@@ -1,15 +1,6 @@
+import OpenAI from 'openai';
 import type { AiConfig } from '../config/types.js';
-import type {
-  ChatMessage,
-  LegacyStreamChunk,
-  LegacyVisionResponse,
-  MessageContentBlock,
-  ResponseContentBlock,
-  StreamEvent,
-  StreamResponseEnvelope,
-  VisionRequest,
-  VisionResponse,
-} from './types.js';
+import type { ChatMessage, MessageContentBlock } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
 
@@ -37,6 +28,35 @@ function summarizeMessagesForTrace(messages: ChatMessage[]): unknown {
   });
 }
 
+/**
+ * Map the consumer's `ChatMessage[]` onto the OpenAI SDK's
+ * `ChatCompletionMessageParam[]`. The shapes are already compatible (`role` +
+ * `content` string | array of `{type:'text',text}` / `{type:'image_url',image_url:{url}}`);
+ * the only transform is stripping the `cache` hint from content blocks, since
+ * OpenAI's content-part types don't carry it and the gateway does no caching.
+ *
+ * The SDK's `ChatCompletionMessageParam` is a narrower role-discriminated union
+ * (e.g. `role:'tool'` requires `tool_call_id`; `system`/`tool` content is
+ * text-only). The consumer never emits `role:'tool'` and system content is
+ * text-only blocks, so a `cache`-stripped `ChatMessage[]` is value-compatible —
+ * a narrowing cast bridges what the compiler can't prove.
+ */
+function toOpenAIMessages(messages: ChatMessage[]): OpenAI.ChatCompletionMessageParam[] {
+  const mapped = messages.map((m) => {
+    if (typeof m.content === 'string') {
+      return { role: m.role, content: m.content };
+    }
+    const content = (m.content as MessageContentBlock[]).map((b) => {
+      if (b.type === 'image_url') {
+        return { type: 'image_url', image_url: { url: b.image_url.url } };
+      }
+      return { type: 'text', text: b.text };
+    });
+    return { role: m.role, content };
+  });
+  return mapped as OpenAI.ChatCompletionMessageParam[];
+}
+
 /** Result of a single AI completion, including which model the gateway actually served. */
 export interface CompleteResult {
   /** The assembled text response from the AI */
@@ -48,10 +68,26 @@ export interface CompleteResult {
 export class AiClient {
   private config: AiConfig;
   private tokenTracker: TokenTracker;
+  private client: OpenAI;
 
   constructor(config: AiConfig, tokenTracker: TokenTracker) {
     this.config = config;
     this.tokenTracker = tokenTracker;
+    this.client = this.buildClient();
+  }
+
+  /**
+   * Build the `openai` client bound to the gateway's `/v1` surface. The Bearer
+   * token (`apiKey`) is bound at construction, so a key change requires a
+   * rebuild (see {@link syncAuth}). `maxRetries: 0` matches the old fetch
+   * client — no auto-retry, avoiding duplicate calls / surprise latency.
+   */
+  private buildClient(): OpenAI {
+    return new OpenAI({
+      baseURL: `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1`,
+      apiKey: this.config.apiKey ?? '',
+      maxRetries: 0,
+    });
   }
 
   /**
@@ -59,8 +95,10 @@ export class AiClient {
    * saved `.env` edit changes `AI_MODEL` / `AI_API_KEY` between runs on a reused
    * session. Only these two fields are env-mutable; every other field
    * (gatewayUrl, maxInputTokens, streaming) is server-level and left untouched.
-   * Both are read fresh on each request, so the swap takes effect on the next
-   * AI call without rebuilding the client.
+   *
+   * A `model` change applies per request via the `model` field (no rebuild). An
+   * `apiKey` change rebuilds the `openai` client, since the key is bound at
+   * construction.
    *
    * Returns a short, key-safe description of what changed (for logging), or
    * `null` when nothing changed. The returned string NEVER contains the key
@@ -79,286 +117,166 @@ export class AiClient {
       // Authorization header" (the server base when AI_API_KEY is absent).
       if (apiKey === undefined) delete this.config.apiKey;
       else this.config.apiKey = apiKey;
+      // The Bearer token is bound at construction — rebuild so the next request
+      // authenticates with the new key.
+      this.client = this.buildClient();
     }
     return changes.length > 0 ? changes.join('; ') : null;
   }
 
   /**
    * Send messages to the AI and get a complete response.
-   * Uses /v2/stream when streamResponses is true, otherwise /v2/vision.
+   * Uses the streaming chat-completions call when streamResponses is true,
+   * otherwise the non-streaming call.
    *
    * `signal` is the run's abort signal (from a client "stop"). When it fires,
    * the in-flight HTTP request is cancelled immediately rather than running out
    * the 120s timeout — this is what makes stop feel instant. It's combined with
-   * the timeout in `fetchWithAuth`, so either one aborts the request.
+   * the timeout in `buildSignal`, so either one aborts the request.
    */
   async complete(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
     if (this.config.streamResponses) {
       return this.completeStream(messages, signal);
     }
-    return this.completeVision(messages, signal);
+    return this.completeOnce(messages, signal);
   }
 
-  /** Call POST /v2/vision for non-streaming multimodal completion */
-  private async completeVision(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
-    const url = `${this.config.gatewayUrl}/v2/vision`;
+  /** Non-streaming chat completion. */
+  private async completeOnce(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
     const requestId = nextRequestId++;
-
-    const request: VisionRequest = {
-      model: this.config.model,
-      messages,
-      max_tokens: 4096,
-      response_format: { type: 'json_object' },
-    };
+    const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
     logger.debug(`POST ${url} (${messages.length} messages) [req#${requestId}]`);
     logger.trace(`ai.request#${requestId}`, {
       url,
       method: 'POST',
       model: this.config.model,
-      maxTokens: 4096,
       messageCount: messages.length,
+      streaming: false,
       messages: summarizeMessagesForTrace(messages),
     });
 
-    const response = await this.fetchWithAuth(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-    }, signal);
-
-    if (!response.ok) {
-      const errorText = await response.text();
+    let res: OpenAI.Chat.Completions.ChatCompletion;
+    try {
+      res = await this.client.chat.completions.create(
+        {
+          model: this.config.model,
+          messages: toOpenAIMessages(messages),
+          max_completion_tokens: 4096,
+          response_format: { type: 'json_object' },
+        },
+        { signal: this.buildSignal(signal) },
+      );
+    } catch (err) {
       logger.trace(`ai.response#${requestId}`, {
-        status: response.status,
         ok: false,
-        body: errorText,
+        body: err instanceof Error ? err.message : String(err),
       });
-      throw new Error(`AI API error ${response.status}: ${errorText}`);
+      throw err;
     }
 
-    const data = (await response.json()) as VisionResponse | LegacyVisionResponse;
-
-    if (data.usage) {
-      this.tokenTracker.addUsage(
-        data.usage.input_tokens,
-        data.usage.output_tokens,
-      );
+    const text = res.choices[0]?.message?.content ?? '';
+    if (res.usage) {
+      this.tokenTracker.addUsage(res.usage.prompt_tokens, res.usage.completion_tokens);
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     }
 
-    const content = this.extractTextResponse(data);
+    const model = res.model || this.config.model;
     logger.trace(`ai.response#${requestId}`, {
-      status: response.status,
       ok: true,
-      model: this.extractModel(data),
-      usage: data.usage,
-      content,
-      raw: data,
+      model,
+      usage: res.usage,
+      content: text,
     });
 
-    if (!content) {
-      throw new Error(`AI response contained no content. Response keys: ${Object.keys(data).join(', ')}`);
+    if (!text) {
+      throw new Error('AI response contained no content');
     }
 
-    const model = this.extractModel(data) ?? this.config.model;
-    return { text: content, model };
+    return { text, model };
   }
 
-  /** Call POST /v2/stream for streaming multimodal completion, collect full response */
+  /** Streaming chat completion, accumulated into a single response. */
   private async completeStream(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
-    const url = `${this.config.gatewayUrl}/v2/stream`;
     const requestId = nextRequestId++;
-
-    const request: VisionRequest = {
-      model: this.config.model,
-      messages,
-      max_tokens: 4096,
-      response_format: { type: 'json_object' },
-    };
+    const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
     logger.debug(`POST ${url} (streaming, ${messages.length} messages) [req#${requestId}]`);
     logger.trace(`ai.request#${requestId}`, {
       url,
       method: 'POST',
-      streaming: true,
       model: this.config.model,
-      maxTokens: 4096,
       messageCount: messages.length,
+      streaming: true,
       messages: summarizeMessagesForTrace(messages),
     });
 
-    const response = await this.fetchWithAuth(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-      },
-      body: JSON.stringify(request),
-    }, signal);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      logger.trace(`ai.response#${requestId}`, {
-        status: response.status,
-        ok: false,
-        body: errorText,
-      });
-      throw new Error(`AI API stream error ${response.status}: ${errorText}`);
-    }
-
-    if (!response.body) {
-      throw new Error('AI stream response has no body');
-    }
-
-    const result = await this.consumeSseStream(response.body);
-    logger.trace(`ai.response#${requestId}`, {
-      status: response.status,
-      ok: true,
-      streaming: true,
-      model: result.model,
-      content: result.text,
-    });
-    return result;
-  }
-
-  /** Consume an SSE stream and accumulate the full content string */
-  private async consumeSseStream(body: ReadableStream<Uint8Array>): Promise<CompleteResult> {
-    const { createParser } = await import('eventsource-parser');
-
-    const decoder = new TextDecoder();
-    let fullContent = '';
+    let text = '';
+    let model = this.config.model;
     let promptTokens = 0;
     let completionTokens = 0;
-    let streamedModel: string | undefined;
 
-    await new Promise<void>((resolve, reject) => {
-      const parser = createParser({
-        onEvent: (event) => {
-          if (event.data === '[DONE]') {
-            resolve();
-            return;
-          }
-
-          try {
-            const parsed = JSON.parse(event.data) as StreamEvent | LegacyStreamChunk;
-
-            if ('type' in parsed) {
-              if (parsed.type === 'response.error') {
-                reject(new Error(parsed.error.message));
-                return;
-              }
-
-              if (parsed.type === 'response.start') {
-                streamedModel = parsed.response.model ?? streamedModel;
-              }
-
-              if (parsed.type === 'response.content_block.delta' && parsed.delta.type === 'text_delta') {
-                fullContent += parsed.delta.text;
-              }
-
-              if (parsed.type === 'response.completed') {
-                const completed = parsed.response as StreamResponseEnvelope;
-                promptTokens = completed.usage?.input_tokens ?? promptTokens;
-                completionTokens = completed.usage?.output_tokens ?? completionTokens;
-                streamedModel = completed.model ?? streamedModel;
-
-                if (!fullContent) {
-                  fullContent = this.extractTextFromBlocks(completed.content);
-                }
-
-                resolve();
-              }
-            } else {
-              const delta = parsed.choices[0]?.delta?.content;
-              if (delta) {
-                fullContent += delta;
-              }
-
-              if (parsed.usage) {
-                promptTokens = parsed.usage.input_tokens;
-                completionTokens = parsed.usage.output_tokens;
-              }
-
-              if (parsed.choices[0]?.finish_reason === 'stop') {
-                resolve();
-              }
-            }
-          } catch {
-            // Ignore malformed chunks
-          }
+    try {
+      const stream = await this.client.chat.completions.create(
+        {
+          model: this.config.model,
+          messages: toOpenAIMessages(messages),
+          max_completion_tokens: 4096,
+          response_format: { type: 'json_object' },
+          stream: true,
+          stream_options: { include_usage: true },
         },
+        { signal: this.buildSignal(signal) },
+      );
+
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content;
+        if (delta) text += delta;
+        if (chunk.model) model = chunk.model;
+        if (chunk.usage) {
+          promptTokens = chunk.usage.prompt_tokens;
+          completionTokens = chunk.usage.completion_tokens;
+        }
+      }
+    } catch (err) {
+      logger.trace(`ai.response#${requestId}`, {
+        ok: false,
+        body: err instanceof Error ? err.message : String(err),
       });
-
-      const reader = body.getReader();
-
-      const pump = (): void => {
-        reader.read().then(({ done, value }) => {
-          if (done) {
-            resolve();
-            return;
-          }
-          parser.feed(decoder.decode(value, { stream: true }));
-          pump();
-        }, reject);
-      };
-
-      pump();
-    });
+      throw err;
+    }
 
     if (promptTokens > 0 || completionTokens > 0) {
       this.tokenTracker.addUsage(promptTokens, completionTokens);
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     } else {
-      // Estimate tokens if not provided
-      const estimatedTokens = Math.ceil(fullContent.length / 4);
-      this.tokenTracker.addUsage(0, estimatedTokens);
+      // Estimate tokens if the stream omitted usage (matches the old behavior).
+      this.tokenTracker.addUsage(0, Math.ceil(text.length / 4));
     }
 
-    if (!fullContent) {
+    logger.trace(`ai.response#${requestId}`, {
+      ok: true,
+      streaming: true,
+      model,
+      usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+      content: text,
+    });
+
+    if (!text) {
       throw new Error('AI stream produced no content');
     }
 
-    return { text: fullContent, model: streamedModel ?? this.config.model };
+    return { text, model };
   }
 
-  private extractModel(data: VisionResponse | LegacyVisionResponse): string | undefined {
-    const candidate = (data as Record<string, unknown>).model;
-    return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined;
-  }
-
-  private extractTextResponse(data: VisionResponse | LegacyVisionResponse): string {
-    if ('content' in data && Array.isArray(data.content)) {
-      return this.extractTextFromBlocks(data.content);
-    }
-
-    const legacy = data as LegacyVisionResponse;
-    return legacy.choices?.[0]?.message?.content
-      ?? ((legacy as Record<string, unknown>).response as string | undefined)
-      ?? '';
-  }
-
-  private extractTextFromBlocks(blocks: ResponseContentBlock[]): string {
-    return blocks
-      .filter((block): block is Extract<ResponseContentBlock, { type: 'text' }> => block.type === 'text')
-      .map((block) => block.text)
-      .join('');
-  }
-
-  private fetchWithAuth(url: string, init: RequestInit, runSignal?: AbortSignal): Promise<Response> {
-    const headers = new Headers(init.headers);
-
-    if (this.config.apiKey) {
-      headers.set('Authorization', `Bearer ${this.config.apiKey}`);
-    }
-
-    // Combine the 120s request timeout with the run's abort signal so EITHER
-    // cancels the in-flight request: the timeout caps a slow gateway, the run
-    // signal makes a client "stop" abort immediately instead of waiting it out.
-    // `AbortSignal.any` needs Node ≥18.17 / ≥20.3 — see package.json engines.
+  /**
+   * Combine the 120s request timeout with the run's abort signal so EITHER
+   * cancels the in-flight request: the timeout caps a slow gateway, the run
+   * signal makes a client "stop" abort immediately instead of waiting it out.
+   * `AbortSignal.any` needs Node ≥18.17 / ≥20.3 — see package.json engines.
+   */
+  private buildSignal(runSignal?: AbortSignal): AbortSignal {
     const timeout = AbortSignal.timeout(120_000);
-    const signal = runSignal ? AbortSignal.any([timeout, runSignal]) : timeout;
-
-    return fetch(url, { ...init, headers, signal });
+    return runSignal ? AbortSignal.any([timeout, runSignal]) : timeout;
   }
 }
