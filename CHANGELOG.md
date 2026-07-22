@@ -6,6 +6,36 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Fixed — skill frame ids and internal variable namespaces could collide
+
+`expandSkills` minted duplicate instance ids whenever a **nested** skill call
+was followed by a **sibling** call at the same level (e.g. a test invoking
+`[skill: outer]`, whose body invokes `[skill: inner]`, then invoking
+`[skill: sibling]`). The recursion passes nested levels a spread copy of its
+context, and the `seq` counter was a bare `number` — copied by value — so
+increments inside a nested body never reached the parent, and the next sibling
+re-minted an id the nested frame already held.
+
+Two things went wrong as a result:
+
+- **Frames were overwritten.** The nested skill's frame was replaced in the
+  shared map by the sibling's, so its steps reported an unrelated skill —
+  wrong `sourceSkill` chip in reports, wrong rows in TestBench's call stack,
+  and colliding per-step cache keys (`frameScopedStepKey`).
+- **Skill isolation broke.** The same id drives the `__skill<N>_` prefix used
+  to namespace a skill's internal variables, so two unrelated instances shared
+  one namespace and a `[store as:]` in one clobbered the other's value in
+  session scope.
+
+The counter is now boxed so every recursion level shares it, matching how the
+`frames` map was already shared. Regression coverage in
+`tests/skill-expander-frame-id-uniqueness.test.ts`.
+
+Instance numbering changes for tests that nest skills, so `__skill<N>_` names
+differ from before. These are internal, per-run names that never appear in
+test files or reports — but a snapshot asserting on the literal text will need
+updating.
+
 ### Breaking — config is now JSON-only (`aiui.config.json`)
 
 `aiui.config.json` is now the **only** config format the framework reads. All

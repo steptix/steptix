@@ -135,7 +135,7 @@ export async function expandSkills(
   const frames: Record<string, ExpandedFrame> = {};
   const ctx: ExpandContext = {
     skillsDir,
-    seq: 0,
+    seq: { n: 0 },
     frames,
     ...(envCtx && { envCtx }),
     ...(callerFilePath && { callerFilePath }),
@@ -155,8 +155,21 @@ export async function expandSkills(
 
 interface ExpandContext {
   skillsDir: string;
-  /** Monotonic counter producing unique prefixes for internal capture names. */
-  seq: number;
+  /**
+   * Monotonic counter producing unique frame ids and unique prefixes for
+   * internal capture names.
+   *
+   * Boxed deliberately. `expandRecursive` hands nested calls a spread copy of
+   * this context (`{ ...ctx, currentSkillFilePath }`), which copies primitives
+   * by value — so a bare `number` here meant a nested body's increments never
+   * reached the parent, and the next sibling invocation at the outer level
+   * re-minted an id the nested frame had already taken. That silently
+   * overwrote the nested frame in the shared `frames` map (mis-attributing its
+   * steps to the sibling skill) and, worse, gave two unrelated skill instances
+   * the same `__skill<N>_` namespace, so one instance's captures clobbered the
+   * other's. The box makes every level share one counter, like `frames` below.
+   */
+  seq: { n: number };
   /** Shared `frames` lookup populated as the recursion enters each skill
    *  body. The top-level call seeds this in `expandSkills` so every nested
    *  recursion writes to the same map. */
@@ -246,7 +259,7 @@ async function expandRecursive(
     }
     validateCall(skill, call);
 
-    const instanceId = ++ctx.seq;
+    const instanceId = ++ctx.seq.n;
     const expandedBody = applySkillScope(skill, call, instanceId);
     const newFrameId = `f${instanceId}`;
 
