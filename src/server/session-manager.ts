@@ -2,7 +2,7 @@ import { basename, dirname, join as pathJoin, relative as pathRelative, resolve 
 import { stat } from 'node:fs/promises';
 import { StepCache, frameScopedStepKey, cacheDirName, envCacheSegment } from '../cache/step-cache.js';
 import { resolveProjectRoot } from './project-root.js';
-import { chooseCacheHashSource } from './cache-hash-source.js';
+import { arraysEqual, chooseCacheHashSource } from './cache-hash-source.js';
 import { loadConfig } from '../config/loader.js';
 import type { Config } from '../config/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
@@ -118,6 +118,39 @@ export interface StepRequest {
    * to the runner — fine when no `[skill: ...]` lines are present).
    */
   skillsDir?: string;
+  /**
+   * Inline section definitions from the test file, keyed by `matchText(name)`
+   * (stories/test-script-sections-contract.md §2). Required whenever `steps`
+   * (or `fullSteps`) may contain bare-name section calls — the server cannot
+   * read the file, since the buffer may be unsaved. Line numbers are 1-based
+   * in the same document as `sourceLines`. Requires `testFilePath`: section
+   * frames and cycle keys derive from it, and api-server answers 400 without
+   * it.
+   *
+   * To be written out identically as `StreamStepsRequest.sections` in
+   * runner-core/src/api-client.ts, which lands with the client work — nothing
+   * links the two copies, so see the contract §3.2 and change both together.
+   *
+   * `{}` means absent. Use `hasSections()`, never a bare truthiness check:
+   * an empty object is truthy in JS, and treating it as present would put
+   * every existing sectionless run onto the expansion path.
+   */
+  sections?: Record<
+    string,
+    {
+      /** As authored, casing preserved. Display only — the incoming keys are
+       *  used verbatim and never re-derived from this. */
+      name: string;
+      headingLine: number;
+      /** Raw line minus `/^\s*\d+\.\s+/`, trimmed, `[no-hooks]` markers
+       *  preserved verbatim (the expander strips them when inlining a body).
+       *  Empty-after-strip items are culled by the client, so this never
+       *  carries a marker-only entry. */
+      steps: string[];
+      /** Parallel to `steps`. */
+      stepLines: number[];
+    }
+  >;
   /**
    * Absolute path of the test file the steps were authored in. Used as the
    * origin `uri` on `frame` payloads attached to step events emitted from
@@ -436,6 +469,24 @@ interface ManagedSession {
    * `pauseAtNextTool` on the initial steps request.
    */
   pauseAtNextTool: boolean;
+  /**
+   * Dead-section warning messages this session has already emitted.
+   *
+   * The warning is a DOCUMENT diagnostic, but the server sees batches — a run
+   * may arrive as one or as several (a breakpoint split, an `[input:]` split,
+   * a resume) and nothing in the request says which. Deduping on the message
+   * sidesteps the question entirely: it names the file, the section and the
+   * line, so it repeats exactly when the same thing is still true and changes
+   * the moment it isn't.
+   *
+   * Two attempts to infer "first batch of a run" from the request shape are
+   * why this is keyed the way it is. A positional check
+   * (`steps[0] === fullSteps[0]`) lost the warning for every run whose first
+   * batch starts mid-document, which is any test opening with an `[input:]`
+   * step. A document-shape key could not see skill files, so a section a
+   * skill edit had just orphaned went unreported for the rest of the session.
+   */
+  deadSectionsReported: Set<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +580,61 @@ function isBrowserClosed(browserSession: BrowserSession): boolean {
   } catch {
     return true;
   }
+}
+
+/**
+ * True iff this request carries usable section definitions.
+ *
+ * `{}` is truthy in JS, so a bare `request.sections` check would flip every
+ * sectionless run onto the expansion path — a behaviour change for every
+ * existing client. Contract §3.2: four gates must use this predicate.
+ */
+export function hasSections(request: {
+  sections?: Record<string, unknown> | undefined;
+}): boolean {
+  return !!request.sections && Object.keys(request.sections).length > 0;
+}
+
+/**
+ * Walk the frame chain rooted at `frameId` and return the name of the
+ * outermost **section** frame that sits OUTSIDE any skill frame.
+ *
+ * The frame-based twin of the expander's `sourceSections` rule. A skill's own
+ * internal sections are private to it, so they are never the answer: for
+ * `test → section A → skill S → section B`, a step in B reports "A", because
+ * B is skill-private while A is what the test author actually wrote. Only a
+ * skill invoked directly from the root flow yields undefined.
+ *
+ * That skip is what keeps the documented both-badges case true — one step can
+ * carry skill S and section A at once, which is why this is a separate walk
+ * from `outermostSkillName` rather than the same walk with the kind swapped.
+ */
+function outermostSectionName(
+  frameId: string | undefined,
+  frames: Record<string, FrameInfo> | null,
+): string | undefined {
+  if (!frameId || !frames) return undefined;
+
+  // Collect the ancestry leaf-to-root, then read it root-first. Scanning
+  // outward-in is what makes "outermost, but only outside every skill" a
+  // single pass with no flags: the first section wins, and a skill
+  // encountered first ends the search because everything below it is that
+  // skill's private business.
+  const chain: FrameInfo[] = [];
+  const seen = new Set<string>();
+  let current: FrameInfo | undefined = frames[frameId];
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    chain.push(current);
+    current = current.parentId ? frames[current.parentId] : undefined;
+  }
+
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const frame = chain[i]!;
+    if (frame.kind === 'skill') return undefined;
+    if (frame.kind === 'section') return frame.skillName;
+  }
+  return undefined;
 }
 
 /**
@@ -1207,6 +1313,7 @@ export class SessionManager {
         pendingRunControl: null,
         pendingDebuggerAck: null,
         pauseAtNextTool: false,
+        deadSectionsReported: new Set<string>(),
       };
 
       this.sessions.set(sessionId, session);
@@ -1279,6 +1386,26 @@ export class SessionManager {
     // (further down, once envDataCtx is resolved) these get rebound to the
     // flattened arrays; the loop only ever reads from them. Declared up
     // here so the `sourceLineFor` closure binds to the live values.
+    // Dead-section warnings, deduped on the MESSAGE.
+    //
+    // The server sees one document as one batch or several and cannot tell
+    // how a run was carved up, so it cannot ask "is this the first batch of a
+    // run". Two attempts to infer that from the request shape were both
+    // wrong: a positional check lost the warning for every run starting with
+    // an `[input:]` step, and a document-shape key could not see skill files,
+    // so a section that a skill edit had just orphaned went unreported.
+    //
+    // The message itself names the file, the section and the line, so it
+    // changes exactly when the thing being reported changes — no guessing,
+    // and nothing that can go stale. A targeted re-run stays silent
+    // regardless: the user is looking at one step, not auditing the file.
+    const emitDeadSection = (message: string): void => {
+      if (session.deadSectionsReported.has(message)) return;
+      session.deadSectionsReported.add(message);
+      logger.warn(message);
+    };
+    const reportDeadSections = request.startAt === undefined;
+
     let effectiveSteps: string[] = request.steps;
     let effectiveSourceLines: number[] | undefined = request.sourceLines;
     let expansionOrigins: ExpandedStepOrigin[] | null = null;
@@ -1317,6 +1444,10 @@ export class SessionManager {
     // renders it distinctly and excludes it from the failed count.
     const recordInterruptedStep = (index: number, instruction: string, base?: StepResult): void => {
       const sourceSkill = outermostSkillName(expansionOrigins?.[index - 1]?.frameId, expansionFrames);
+      const sourceSection = outermostSectionName(
+        expansionOrigins?.[index - 1]?.frameId,
+        expansionFrames,
+      );
       fullStepResults.push({
         index,
         instruction,
@@ -1328,6 +1459,7 @@ export class SessionManager {
         aiExplanation: 'Stopped by user (run aborted).',
         ...(base?.screenshotBase64 !== undefined && { screenshotBase64: base.screenshotBase64 }),
         ...(sourceSkill && { sourceSkill }),
+        ...(sourceSection && { sourceSection }),
       });
     };
 
@@ -1533,10 +1665,14 @@ export class SessionManager {
     // the per-step origin so step-into-aware clients see `frame:push` /
     // `frame:pop` events around each skill body. Without `skillsDir` the
     // existing flow is preserved verbatim (raw steps shipped to the runner).
-    if (request.skillsDir) {
+    if (request.skillsDir || hasSections(request)) {
       try {
         const expansion = await expandSkills(
           request.steps,
+          // Optional since sections landed: a project can define inline
+          // sections and no skills at all, in which case there is no skills
+          // directory to point at. Passing `request.skillsDir!` here would
+          // typecheck and hand `undefined` to a parameter typed `string`.
           request.skillsDir,
           envDataCtx ?? undefined,
           request.testFilePath,
@@ -1545,6 +1681,29 @@ export class SessionManager {
           // running/pass on the test file's `[skill: ...]` step row.
           // Without this, the row stays blank.
           request.sourceLines,
+          {
+            ...(request.sections && { sections: request.sections }),
+            // No `rawSteps` on this path: the server's incoming steps are
+            // already the raw/instruction form, so the contract §2.1
+            // fallback (`rawSteps?.[i] ?? steps[i]`) is exactly right.
+            //
+            // Dead-section liveness is a property of the DOCUMENT, and this
+            // batch may be a slice of it — a resumed run after a breakpoint,
+            // or an `[input:]` split. Two separate corrections are needed:
+            //
+            //  - scan `fullSteps`, so a section invoked only by a step
+            //    outside this batch is not reported dead. Scanning the batch
+            //    would cry wolf on precisely the runs a user is debugging.
+            //  - emit only on the batch that STARTS a run, so one dead
+            //    section produces one warning rather than one per breakpoint
+            //    segment.
+            //
+            // Scoping it to full-document batches instead would have meant a
+            // user who sets any breakpoint never sees the warning at all.
+            warnDeadSections: reportDeadSections,
+            onDeadSection: emitDeadSection,
+            ...(request.fullSteps && { livenessSteps: request.fullSteps }),
+          },
         );
         effectiveSteps = expansion.steps;
         stepsTotal = effectiveSteps.length;
@@ -1640,6 +1799,27 @@ export class SessionManager {
     const isPartialRerun = request.startAt !== undefined;
     const cacheEnabledForRequest =
       request.cacheEnabled === true && !!request.testFilePath && !isPartialRerun;
+
+    // Per-step cache keys are `${frameId}-${line}`, and frame ids are minted
+    // by walking THIS batch (`f1`, `f2`, …). A subset batch expands only its
+    // slice, so its ids restart from f1 and can name a different invocation
+    // than the full run that wrote the entry — replaying a frozen action plan
+    // against the wrong step. Verified: a full run writes `f2-7` for a section
+    // body step and `f1-7` for a skill body step in another file; the resumed
+    // batch then reads `f1-7` and gets the skill's plan.
+    //
+    // v1 rule (runtime spec §4.3): on a subset batch, skip per-step cache
+    // reads AND writes for steps in non-root frames. Root-frame steps keep
+    // their stable `frameId === ''` keys and stay cached. This trades some
+    // hits for guaranteed-correct misses; aligning batch frame ids to the
+    // full-document expansion would restore them and is future work
+    // (issues/037).
+    //
+    // Subset batches are not only breakpoint continuations — `[input:]` /
+    // `[interactive]` splits and run-selection also send `steps` ≠
+    // `fullSteps`, so skill body steps lose per-step caching there too.
+    const isSubsetBatch =
+      request.fullSteps !== undefined && !arraysEqual(request.steps, request.fullSteps);
     let stepCache: StepCache | undefined;
     if (cacheEnabledForRequest && request.testFilePath) {
       // Reuse the project root already resolved for the env/data bundle (it was
@@ -1653,7 +1833,14 @@ export class SessionManager {
         // only when the batch IS the whole document; a subset batch must hash
         // the expansion of the FULL document so it matches a full run's hash.
         let cacheHashSource: string[];
-        const choice = chooseCacheHashSource(request.steps, request.fullSteps, !!request.skillsDir);
+        const choice = chooseCacheHashSource(
+          request.steps,
+          request.fullSteps,
+          // Sections bake into the step text exactly as skill bodies do, so a
+          // subset batch of a sectioned document must hash the FULL expansion
+          // or it can never hit the cache a full run wrote.
+          !!request.skillsDir || hasSections(request),
+        );
         if (choice === 'raw-full') {
           cacheHashSource = request.fullSteps!;
         } else if (choice === 'expand-full') {
@@ -1665,10 +1852,20 @@ export class SessionManager {
           try {
             const fullExpansion = await expandSkills(
               request.fullSteps!,
-              request.skillsDir!,
+              request.skillsDir,
               envDataCtx ?? undefined,
               request.testFilePath,
               request.sourceLines,
+              {
+                ...(request.sections && { sections: request.sections }),
+                // This expansion exists only to compute a hash; its dead-
+                // section warnings would be byte-identical to the ones the
+                // execution expansion already emitted. Without this the user
+                // sees every "defined but never invoked" warning twice on any
+                // subset batch — and once more per resumed batch after a
+                // breakpoint.
+                warnDeadSections: false,
+              },
             );
             cacheHashSource = fullExpansion.steps;
           } catch (err) {
@@ -1839,10 +2036,18 @@ export class SessionManager {
     // file (and any non-test-file) breakpoints land here; the test file's
     // own breakpoints are skipped because the client already trims at
     // them before sending the request (legacy `trimAtBreakpoint` path).
+    //
+    // The skip is by FRAME, not by file. It used to drop the test file's
+    // whole entry, which was equivalent while every step in the test file
+    // belonged to the root frame. A section body lives in the test file too,
+    // and the client's `trimAtBreakpoint` cannot see those lines — it trims
+    // the unexpanded main flow, where the body does not appear — so dropping
+    // the file wholesale would make a breakpoint on a section body line
+    // silently never fire. Test-file entries are therefore kept, and the
+    // per-step check below ignores them only for root-frame steps.
     const breakpointSetsByUri = new Map<string, Set<number>>();
     if (request.breakpointsByUri) {
       for (const [uri, lines] of Object.entries(request.breakpointsByUri)) {
-        if (uri === request.testFilePath) continue;
         if (lines.length === 0) continue;
         breakpointSetsByUri.set(uri, new Set(lines));
       }
@@ -1875,12 +2080,133 @@ export class SessionManager {
       return expansionFrames?.[origin.frameId]?.uri;
     };
 
+    /**
+     * Whether a `startAt`/`endAt` anchor in `uri` must match a line exactly
+     * rather than snapping to the nearest step at or beyond it.
+     *
+     * The `>=` / `<=` fallbacks exist so a re-run still works when the target
+     * file was edited and the exact line moved. They rely on document order
+     * and execution order agreeing within a file — true for a skill body,
+     * because the whole file is one contiguous run.
+     *
+     * Sections break that. A section is DEFINED below the main flow but
+     * EXECUTES wherever it is called, so one file interleaves the two orders:
+     *
+     *     3. First          <- executes 1st
+     *     4. Login          <- the call; expands to lines 8-9
+     *     5. Last           <- executes 4th
+     *     ### Login
+     *     8. Type user      <- executes 2nd
+     *     9. Submit         <- executes 3rd
+     *
+     * `startAt` = (test file, 5) means "re-run from Last". A `>=` scan walks
+     * execution order and stops at the first step whose line is ≥ 5 — line 8,
+     * inside the body — silently re-running the wrong steps.
+     */
+    const anchorNeedsExactLine = (uri: string): boolean =>
+      hasSections(request) && uri === request.testFilePath;
+
+    /** Frames enclosing expanded step `i`, innermost first. */
+    const frameChainOf = (i: number): FrameInfo[] => {
+      const chain: FrameInfo[] = [];
+      const seen = new Set<string>();
+      let id = expansionOrigins?.[i]?.frameId;
+      while (id && !seen.has(id)) {
+        seen.add(id);
+        const frame = expansionFrames?.[id];
+        if (!frame) break;
+        chain.push(frame);
+        id = frame.parentId ?? undefined;
+      }
+      return chain;
+    };
+
+    /**
+     * Does expanded step `i` sit at anchor line `line` of `uri`?
+     *
+     * Two ways to sit at a line:
+     *
+     *  1. The step is authored there — its defining line, in that file.
+     *  2. The step is part of what a CALL on that line expanded into. A call
+     *     line is the most natural thing for a user to click, because it is
+     *     the row they watched fail, and it vanishes from the expansion
+     *     entirely — so matching defining lines alone refuses it outright,
+     *     with a message blaming a stale file.
+     *
+     * Case 2 is answered from the frame ancestry, not from the step's own
+     * input index. An earlier version used the input index, which only knows
+     * about TOP-LEVEL calls, and then grew a second branch that matched a
+     * section's `stepLines` to cover calls nested inside a body. That branch
+     * could not distinguish "this body step expanded to nothing" from "this
+     * body step expanded into another frame", so for a body starting with
+     * `[skill: …]` it stepped over the whole skill and started after it —
+     * silently, and reporting green.
+     *
+     * The ancestry knows. Every frame records the line it was invoked at, so
+     * "was any frame enclosing this step invoked at `line`?" is exact at any
+     * depth, and comparing against the INVOKING file (the parent frame's, or
+     * the test file at the root) is what keeps a skill-file line number from
+     * matching a test-file anchor that happens to share it.
+     */
+    const stepAtAnchor = (i: number, uri: string, line: number): boolean => {
+      // Lines are 1-based. A frame whose `invocationLine` was null carries 0,
+      // so without this an anchor of line 0 — reachable when a client sends a
+      // short or absent `sourceLines` — would match those frames and start
+      // the run somewhere it was never pointed at.
+      if (line <= 0) return false;
+      if (uriOfStep(i) === uri && (effectiveSourceLines?.[i] ?? -1) === line) return true;
+      for (const frame of frameChainOf(i)) {
+        if (frame.line !== line) continue;
+        const invokedFrom = frame.parentId
+          ? expansionFrames?.[frame.parentId]?.uri
+          : request.testFilePath;
+        if (invokedFrom === uri) return true;
+      }
+      return false;
+    };
+
+    // Note the deliberate asymmetry with `endAt` below: in exact mode
+    // `startAt` has NO nearest-step fallback, so an anchor landing on a blank
+    // line or a heading refuses the run. That is the safer failure for this
+    // field specifically. A guessed END bound stops the run early — visible,
+    // and the work already done still stands; a guessed START bound runs a
+    // different set of steps and reports on them as if they were the ones
+    // asked for. An error the user can correct beats that.
     let startIndex = 0;
     if (request.startAt) {
       const { uri: startUri, line: startLine } = request.startAt;
-      startIndex = effectiveSteps.findIndex(
-        (_, i) => uriOfStep(i) === startUri && (effectiveSourceLines?.[i] ?? -1) >= startLine,
-      );
+      const exact = anchorNeedsExactLine(startUri);
+      startIndex = effectiveSteps.findIndex((_, i) => {
+        if (exact) return stepAtAnchor(i, startUri, startLine);
+        if (uriOfStep(i) !== startUri) return false;
+        return (effectiveSourceLines?.[i] ?? -1) >= startLine;
+      });
+
+      // `stepAtAnchor` covers every anchor that produced a step, at any
+      // depth. What remains is a MAIN-FLOW step that produced NONE: a skill
+      // with an empty `## Steps` expands to nothing (sections refuse an empty
+      // body, skills do not), so no frame exists to carry its invocation
+      // line. Walk forward to the first step from a later input step.
+      //
+      // Its body-line twin — a zero-expansion step INSIDE a body — is
+      // deliberately left to refuse. Walking forward from there would have to
+      // guess which enclosing scope to continue in, and `startAt`'s posture
+      // is to refuse rather than guess.
+      if (exact && startIndex < 0) {
+        let anchorInput = -1;
+        for (let k = 0; k < request.steps.length; k++) {
+          if ((request.sourceLines?.[k] ?? k + 1) === startLine) {
+            anchorInput = k;
+            break;
+          }
+        }
+        if (anchorInput >= 0) {
+          startIndex = effectiveSteps.findIndex(
+            (_, i) => (expansionOrigins?.[i]?.inputIndex ?? -1) >= anchorInput,
+          );
+        }
+      }
+
       if (startIndex < 0) {
         const message =
           `Re-run anchor not found: no step at or after line ${startLine} in ${startUri}. ` +
@@ -1922,10 +2248,87 @@ export class SessionManager {
     let endIndex = effectiveSteps.length - 1;
     if (request.endAt) {
       const { uri: endUri, line: endLine } = request.endAt;
+      const exact = anchorNeedsExactLine(endUri);
       let found = -1;
       for (let i = startIndex; i < effectiveSteps.length; i++) {
-        if (uriOfStep(i) === endUri && (effectiveSourceLines?.[i] ?? Number.MAX_SAFE_INTEGER) <= endLine) {
-          found = i;
+        if (exact) {
+          // KEEP THE LAST match, matching both `endAt`'s documented contract
+          // ("stop after the LAST step at or before this line") and the
+          // non-exact path below. Two things depend on it:
+          //
+          //  - An end anchor on a section CALL line must run the WHOLE body.
+          //    Every step of an invocation shares the call's input line, so
+          //    keep-last lands on the body's final step; keep-first would
+          //    log in and never submit, and report a green run for it.
+          //  - Sections are defined BELOW the main flow, so the last step
+          //    line of a sectioned document is a body line. Keep-first there
+          //    truncates "run the whole file" to its first few steps.
+          //
+          // The cost is that a one-line range naming a body line of a section
+          // invoked twice spans both invocations. That is unchanged from
+          // before sections and matches the field's documented meaning; the
+          // range is widened, never silently narrowed, which is the safer
+          // direction of the two.
+          if (stepAtAnchor(i, endUri, endLine)) found = i;
+          continue;
+        }
+        if (uriOfStep(i) !== endUri) continue;
+        const line = effectiveSourceLines?.[i] ?? Number.MAX_SAFE_INTEGER;
+        if (line <= endLine) found = i;
+      }
+
+      // Exact mode disambiguates an anchor that names a real step when
+      // document and execution order interleave. It says nothing about an
+      // anchor naming no step at all — a blank line, a heading, a line past
+      // the end — and refusing those outright made a sectioned document
+      // hard-fail where a sectionless one degrades gracefully.
+      //
+      // The fallback resolves through the INPUT steps, not the expanded ones.
+      // Input lines are the main flow, so they are monotonic in the document;
+      // expanded lines are not, because a section's body is defined below the
+      // call and executes at it. Scanning `effectiveSourceLines` for the
+      // nearest preceding line therefore skipped whole invocations: an anchor
+      // on the blank line just after a section call ran the step BEFORE the
+      // call and nothing else, then reported the run passed. That is the
+      // silent narrowing this feature keeps trying to introduce, and it is
+      // why the previous comment here — "cannot mis-target" — was wrong.
+      //
+      // "Run through the last main-flow step at or before this line,
+      // including everything it expands into" is what the user means, and it
+      // is monotonic in the anchor line.
+      // `found` comes from a scan windowed to `[startIndex, end)`, so it is
+      // also -1 when the anchor names a real step that lies entirely BEFORE
+      // the start — a range that runs backwards in EXECUTION order. Falling
+      // back there resolved the end bound to a different line's step and
+      // reported the narrowed run green, while every other inverted range is
+      // refused explicitly. Require that no exact match exists ANYWHERE
+      // before degrading.
+      //
+      // This does refuse one reading that used to work: on a sectioned
+      // document, "select from a main-flow line down to a body line" is a
+      // forward range in DOCUMENT order and an inverted one in execution
+      // order. Falling back ran from the start anchor to the end of the
+      // document — which honours the start and silently discards the end.
+      // Being told the selection doesn't describe a runnable range beats
+      // being given a different range and a green tick.
+      const exactMatchExistsSomewhere =
+        exact && effectiveSteps.some((_, i) => stepAtAnchor(i, endUri, endLine));
+      if (exact && found < 0 && !exactMatchExistsSomewhere) {
+        let lastInput = -1;
+        for (let k = 0; k < request.steps.length; k++) {
+          const inputLine = request.sourceLines?.[k] ?? k + 1;
+          if (inputLine <= endLine) lastInput = k;
+        }
+        // Walk back over input steps that expanded to NOTHING. A skill with
+        // an empty `## Steps` contributes no expanded step — sections guard
+        // against an empty body, skills do not — so its call line has no
+        // `inputIndex` in the origins at all. Resolving to it and stopping
+        // there refused the run outright, on a real main-flow step, with a
+        // message blaming a stale skill file.
+        for (let k = lastInput; k >= 0 && found < 0; k--) {
+          for (let i = startIndex; i < effectiveSteps.length; i++) {
+            if (expansionOrigins?.[i]?.inputIndex === k) found = i;
+          }
         }
       }
       if (found < 0) {
@@ -2156,9 +2559,10 @@ export class SessionManager {
         // all just work.
         //
         // Skill-file breakpoints are the primary reason this exists.
-        // Test-file breakpoints are filtered out at map-build time
-        // because the client already trims at them client-side via
-        // `trimAtBreakpoint` before the request is sent.
+        // Test-file breakpoints DO reach the map — a section body line lives
+        // in the test file and the client's `trimAtBreakpoint` cannot see it —
+        // and are skipped per-step below for root-frame steps only, which are
+        // the ones the client really did trim at.
         if (
           breakpointSetsByUri.size > 0 &&
           !consumedBreakpoints.has(i) &&
@@ -2167,7 +2571,14 @@ export class SessionManager {
         ) {
           const stepUriBps = breakpointSetsByUri.get(frameForStep.uri);
           const stepLine = sourceLineFor(i);
-          if (stepUriBps?.has(stepLine)) {
+          // Root-frame steps in the test file are the client's responsibility:
+          // it already trimmed the batch at those breakpoints before sending,
+          // so pausing here as well would stop twice on one line. Every other
+          // frame — a skill body, or a section body that also lives in the
+          // test file — is invisible to that trim and must pause here.
+          const clientAlreadyTrimmed =
+            frameForStep.kind === 'test' && frameForStep.uri === request.testFilePath;
+          if (!clientAlreadyTrimmed && stepUriBps?.has(stepLine)) {
             consumedBreakpoints.add(i);
             emit({
               type: 'step:awaiting',
@@ -2200,6 +2611,24 @@ export class SessionManager {
         if (isSkippableStep(interpolated)) {
           logger.info(`Session "${sessionId}": skipping step ${i + 1} (input/interactive not supported in API mode)`);
           emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
+          // Surface the skip to the user, not just to the server log. For a
+          // MAIN-FLOW step this branch is unreachable — the client splits the
+          // batch before an `[input:]` and prompts — but a step inside a
+          // skill or section body is invisible to that split, so it lands
+          // here and the run finishes green having quietly not done it.
+          // Reporting green for work that was skipped is the failure
+          // direction worth being loud about.
+          if (frameForStep && frameForStep.kind !== 'test') {
+            emit({
+              type: 'output',
+              kind: 'warn',
+              msg:
+                `Step "${originalStep}" at ${frameForStep.uri}:${sourceLineFor(i)} was SKIPPED: ` +
+                `[input:] and [interactive] steps can't be prompted for inside a ` +
+                `${frameForStep.kind} body, which the client cannot split a batch on. ` +
+                `Move it to the main flow if it needs a value.`,
+            });
+          }
           results.push({
             step: originalStep,
             status: 'passed',
@@ -2385,7 +2814,12 @@ export class SessionManager {
                 pageTracker: session.browserSession.pageTracker,
                 browserTracker: session.browserTracker,
                 ...(stepCache && { stepCache }),
-                cacheEnabled: cacheEnabledForRequest && !!stepCache,
+                cacheEnabled:
+                  cacheEnabledForRequest &&
+                  !!stepCache &&
+                  // See `isSubsetBatch`: a non-root frame's key is not stable
+                  // across batches, so neither read nor write is safe here.
+                  !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== ''),
                 cacheKey: stepCacheKey,
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
@@ -2529,7 +2963,16 @@ export class SessionManager {
         //                  `skill_a → skill_b`, both inner and outer
         //                  body steps surface "skill_a" so the chip
         //                  reflects the user-visible invocation.
+        //
+        //   sourceSection — name of the outermost inline section this step
+        //                  came from, skipping any that a skill declared
+        //                  privately. Independent of sourceSkill: a step
+        //                  inside `section A → skill S` carries both.
         const sourceSkill = outermostSkillName(
+          expansionOrigins?.[i]?.frameId,
+          expansionFrames,
+        );
+        const sourceSection = outermostSectionName(
           expansionOrigins?.[i]?.frameId,
           expansionFrames,
         );
@@ -2538,6 +2981,7 @@ export class SessionManager {
           index: i + 1,
           instruction: originalStep,
           ...(sourceSkill && { sourceSkill }),
+          ...(sourceSection && { sourceSection }),
         });
 
         // Update conversation history

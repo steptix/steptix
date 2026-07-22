@@ -585,7 +585,12 @@ function parseSections(rawContent: string, filePath: string): {
     }
   }
 
-  const sectionMap: Record<string, ParsedSection> = {};
+  // Null-prototype: a section may legally be named `__proto__` (§2.5 bans
+  // only reserved keywords, a leading `[`, `{{` and the empty string), and on
+  // a normal object literal that assignment hits the prototype setter instead
+  // of creating an own key — the definition would silently vanish and the
+  // call would run as a literal AI instruction.
+  const sectionMap: Record<string, ParsedSection> = Object.create(null) as Record<string, ParsedSection>;
   for (const section of sectionAcc) {
     sectionMap[matchText(section.name)] = section;
   }

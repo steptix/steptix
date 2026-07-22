@@ -180,12 +180,37 @@ export async function expandSkills(
     /** Raw (match-side) text parallel to `steps`. See `matchInput`. */
     rawSteps?: string[] | undefined;
     /**
-     * Emit a `logger.warn` for each section defined but never invoked.
-     * Defaults to true. The server passes false on its cache-hash expansion
-     * and derives it from batch shape on the execution one, so a single dead
-     * section doesn't warn once per expansion site per batch.
+     * Emit a warning for each section defined but never invoked. Defaults to
+     * true. The server passes false on its cache-hash expansion, which exists
+     * only to produce a hash and would otherwise double every message.
      */
     warnDeadSections?: boolean | undefined;
+    /**
+     * Where a dead-section warning goes. Defaults to `logger.warn`.
+     *
+     * The server substitutes a deduping sink. It sees one document as several
+     * batches and cannot tell how a run was carved up, so it dedupes on the
+     * MESSAGE — which names the file, the section and the line, and therefore
+     * changes exactly when the thing being reported changes. Guessing at
+     * "is this the first batch of a run" from the request shape was tried
+     * twice and was wrong twice: once it lost the warning for every run
+     * starting with an `[input:]` step, and once it kept a key that could not
+     * see skill-file edits, so a section a skill edit had just killed went
+     * unreported.
+     */
+    onDeadSection?: ((message: string) => void) | undefined;
+    /**
+     * The step list to scan for call sites, when it differs from `steps`.
+     *
+     * Liveness is a property of the DOCUMENT (contract §2.4), but `steps` may
+     * be a slice of it — the server sends one batch per breakpoint segment. A
+     * section invoked only by a step outside the slice looks uninvoked from
+     * inside it, so without this the warning cries wolf on exactly the runs a
+     * user is already debugging. The server passes `fullSteps`.
+     *
+     * Affects the dead-section scan only; expansion still operates on `steps`.
+     */
+    livenessSteps?: string[] | undefined;
   },
 ): Promise<SkillExpansion> {
   const frames: Record<string, ExpandedFrame> = {};
@@ -197,6 +222,7 @@ export async function expandSkills(
     sections,
     sectionsFilePath: callerFilePath ?? '<inline>',
     warnDeadSections: opts?.warnDeadSections ?? true,
+    onDeadSection: opts?.onDeadSection ?? ((message: string) => logger.warn(message)),
     deadScanned: new Set(),
     insideSkill: false,
     ...(envCtx && { envCtx }),
@@ -204,12 +230,16 @@ export async function expandSkills(
     ...(opts?.rawSteps && { rawSteps: opts.rawSteps }),
   };
 
-  reportDeadSections(
-    ctx,
-    ctx.sectionsFilePath,
-    sections,
-    { steps, ...(opts?.rawSteps && { rawSteps: opts.rawSteps }) },
-  );
+  reportDeadSections(ctx, ctx.sectionsFilePath, sections, {
+    steps: opts?.livenessSteps ?? steps,
+    // `rawSteps` is parallel to `steps`, so it applies only when the liveness
+    // scan is over `steps` itself. No caller passes both today — the CLI
+    // passes `rawSteps`, the server passes `livenessSteps` and never
+    // `rawSteps` (the wire shape deliberately has none, contract §3.2) — but
+    // pairing them explicitly means a future caller that does pass both
+    // cannot silently zip mismatched arrays.
+    ...(opts?.livenessSteps ? {} : opts?.rawSteps ? { rawSteps: opts.rawSteps } : {}),
+  });
 
   const result = await expandRecursive(
     steps,
@@ -263,7 +293,7 @@ function reportDeadSections(
 
   for (const [key, section] of Object.entries(sections)) {
     if (!invoked.has(key)) {
-      logger.warn(
+      ctx.onDeadSection(
         `Section "${section.name}" in ${filePath} is defined but never ` +
           `invoked (line ${section.headingLine}). If a step was meant to call ` +
           `it, the names no longer match — a call site that doesn't resolve ` +
@@ -286,6 +316,8 @@ interface ExpandContext {
   rawSteps?: string[] | undefined;
   /** See the `opts.warnDeadSections` docstring on `expandSkills`. */
   warnDeadSections: boolean;
+  /** See the `opts.onDeadSection` docstring on `expandSkills`. */
+  onDeadSection: (message: string) => void;
   /** Files already scanned for dead sections in this `expandSkills` call. */
   deadScanned: Set<string>;
   /** True once the recursion is inside any skill frame. Gates the
@@ -588,6 +620,12 @@ function resolveSection(
   const keys = Object.keys(ctx.sections);
   if (keys.length === 0) return null;
   const key = matchText(matchInput({ steps, rawSteps: ctx.rawSteps }, i));
+  // Own-property check, not a bare index. A section name is arbitrary author
+  // text, so a step reading `constructor` or `toString` would otherwise
+  // resolve against `Object.prototype` and hand the expander a function where
+  // it expects a section — `1. constructor` aborted the whole run with
+  // "Cannot read properties of undefined (reading 'length')".
+  if (!Object.prototype.hasOwnProperty.call(ctx.sections, key)) return null;
   return ctx.sections[key] ?? null;
 }
 
@@ -777,7 +815,15 @@ function applySkillScope(
     return s;
   };
 
-  const sections: SectionDefs = {};
+  // Null-prototype, for the same reason the parser and api-server maps are:
+  // `### __proto__` is a legal section name, and assigning it into an object
+  // literal invokes the prototype setter — the entry vanishes AND the map's
+  // prototype is replaced with the section object, so `sections['name']` then
+  // resolves to a string. This is the third of three maps; missing it meant a
+  // `### __proto__` worked in a test file and silently degraded inside a
+  // skill, with the dead-section warning staying quiet because it scans the
+  // untransformed `skill.sections` where the entry is still present.
+  const sections: SectionDefs = Object.create(null) as SectionDefs;
   for (const [key, section] of Object.entries(skill.sections)) {
     sections[key] = {
       name: section.name,

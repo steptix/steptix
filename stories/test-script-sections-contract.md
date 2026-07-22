@@ -337,9 +337,49 @@ the session manager:
 |---|---|
 | non-empty `sections` without `testFilePath` | **400** |
 | entry not an object; `name` not a string; `headingLine` not a number; `steps`/`stepLines` not arrays; `steps.length !== stepLines.length` | **400**, *not* a silent drop |
+| key `!== matchText(entry.name)` | **400** — see below |
+| `matchText(entry.name) === ''` | **400** — an empty name is refused at parse time by all three implementations (§2.5) and never enters an index, so it can only arrive from a broken client, and would be uncallable |
 | `sections: {}` | treated as absent — legacy path, no 400 |
 | invoked section with an empty body; cycles | expander errors, not 400s |
 | duplicate names | unrepresentable (JSON collapses keys); the client's pre-flight owns this |
+
+**On validating the key.** The server uses incoming keys **verbatim** and
+never re-derives them for *use* — but it does check them. A key that isn't
+`matchText(name)` passes every type check and then can never be called: every
+lookup derives its key from the step text, so it misses, and the bare name
+ships to the AI as a literal instruction. That is the silent degradation this
+whole block departs from the house drop-and-continue pattern to prevent.
+
+The cost is real and worth stating: the key is produced by a hand-written copy
+of `matchText` in the client, so drift in that copy now fails the whole run
+with a 400 rather than degrading one section. That is the intended trade —
+a loud failure on a contract violation beats a quiet one — but it means the
+copies must stay in step, which is what `match-table.json` is for.
+
+**On `__proto__`.** A section may legally be named `__proto__`: §2.5 bans
+reserved keywords, a leading `[`, `{{` and the empty string, and nothing else.
+Assigning such a key into an object literal invokes the prototype setter — the
+entry vanishes *and* the map's prototype is replaced — so **every** map built
+from untrusted section names must be `Object.create(null)`, on both sides of
+the wire:
+
+| Map | Where |
+|---|---|
+| `sectionMap` | the CLI parser, `src/parser/markdown.ts` |
+| the forwarding copy | `src/server/api-server.ts` |
+| the per-invocation rebuild | `applySkillScope`, `src/skills/expander.ts` |
+| **the payload builder** | the client, when it turns `extractSections` output into the `sections` record |
+
+The last one is the client's and does not exist yet. Getting it wrong loses
+the section *before the request is sent*: `hasSections()` then reports false,
+the server never sees it, and the bare name reaches the AI — the same
+degradation, one layer up, where none of the server's validation can catch it.
+`SectionIndex` (§3.5) is a `Map` and so is safe by construction; the payload
+builder is not.
+
+Section lookup additionally uses an own-property check, so a step reading
+`constructor` resolves to nothing rather than to
+`Object.prototype.constructor` (which aborted the run outright).
 
 The 400-on-malformed is a deliberate departure from the house pattern
 (`breakpointsByUri` shape-checks and silently drops): dropping degrades to

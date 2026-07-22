@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import type { Config } from '../config/types.js';
 import { SessionManager, type RunEvent, type StepRequest } from './session-manager.js';
+import { matchText } from '../parser/section-match.js';
 import { logger } from '../utils/logger.js';
 
 /** Write a single SSE frame. */
@@ -130,7 +131,29 @@ export function createApiServer(config: Config): {
         if (Object.keys(map).length > 0) request.breakpointsByUri = map;
       }
       if (body.sourceLines !== undefined && Array.isArray(body.sourceLines)) {
-        request.sourceLines = body.sourceLines as number[];
+        // Element-type and arity checked for the same reason
+        // `validateSectionEntry` checks `steps`/`stepLines`: this array is
+        // parallel to `steps`, and a skew means a step is attributed to the
+        // wrong source line — a wrong gutter, a wrong breakpoint, a wrong
+        // re-run anchor. Historically only the sections map was checked,
+        // while the same skew one field over went through unexamined.
+        //
+        // Dropped rather than 400'd, unlike `sections`: `sourceLines` is a
+        // display/attribution aid with a documented fallback (step index),
+        // so degrading is well-defined here, where dropping a section
+        // silently changes what executes.
+        const lines = body.sourceLines as unknown[];
+        const usable =
+          lines.length === (body.steps as string[]).length &&
+          lines.every((n) => typeof n === 'number' && Number.isFinite(n) && n > 0);
+        if (usable) {
+          request.sourceLines = lines as number[];
+        } else {
+          logger.warn(
+            `Ignoring malformed "sourceLines" (${lines.length} entries for ` +
+              `${(body.steps as string[]).length} steps): step lines will fall back to step index.`,
+          );
+        }
       }
       // Step-into protocol fields. `skillsDir` triggers server-side skill
       // expansion + frame:push/pop emission; `testFilePath` anchors frame
@@ -142,6 +165,57 @@ export function createApiServer(config: Config): {
       }
       if (typeof body.testFilePath === 'string') {
         request.testFilePath = body.testFilePath;
+      }
+      // Inline section definitions (stories/test-script-sections-contract.md
+      // §3.2). This block is load-bearing: `StepRequest` is built from an
+      // explicit per-field allow-list, so widening the TYPE alone compiles
+      // cleanly and drops the field at runtime. That is exactly how `envName`
+      // was once lost.
+      //
+      // Malformed entries are a 400 rather than a silent drop — the house
+      // pattern for `breakpointsByUri` is shape-check-and-drop, but degrading
+      // here means bare section names ship to the AI as literal instructions
+      // while their bodies never run, which is the silent double-execution
+      // class this feature exists to eliminate. Fail loudly instead.
+      if (body.sections !== undefined && body.sections !== null) {
+        if (typeof body.sections !== 'object' || Array.isArray(body.sections)) {
+          res.status(400).json({ error: '"sections" must be an object keyed by section name' });
+          return;
+        }
+        const entries = Object.entries(body.sections as Record<string, unknown>);
+        // `{}` is treated as absent, not as an error: a client with no
+        // sections may legitimately send an empty map, and every gate uses
+        // `hasSections()` so it behaves as the legacy path.
+        if (entries.length > 0) {
+          if (typeof body.testFilePath !== 'string') {
+            res.status(400).json({
+              error: '"sections" requires "testFilePath" — section frames and cycle keys derive from it',
+            });
+            return;
+          }
+          // Null-prototype: a section may legally be named `__proto__`, and on
+          // a normal object literal `sections['__proto__'] = entry` invokes
+          // the prototype setter instead of creating an own key — the entry
+          // would vanish, `hasSections()` would say false, and the bare name
+          // would reach the AI as a literal instruction. Exactly the silent
+          // degradation this block refuses to allow.
+          const sections = Object.create(null) as NonNullable<StepRequest['sections']>;
+          for (const [key, raw] of entries) {
+            const invalid = validateSectionEntry(key, raw);
+            if (invalid) {
+              res.status(400).json({ error: invalid });
+              return;
+            }
+            const entry = raw as { name: string; headingLine: number; steps: string[]; stepLines: number[] };
+            sections[key] = {
+              name: entry.name,
+              headingLine: entry.headingLine,
+              steps: entry.steps,
+              stepLines: entry.stepLines,
+            };
+          }
+          request.sections = sections;
+        }
       }
       if (typeof body.toolsDir === 'string') {
         request.toolsDir = body.toolsDir;
@@ -446,4 +520,60 @@ export async function startServer(config: Config): Promise<void> {
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+}
+
+/**
+ * Validate one entry of the `sections` map, returning an error message or
+ * null. Contract §3.2's table, one condition per row.
+ *
+ * Deliberately strict about the `steps`/`stepLines` arity: they are parallel
+ * arrays, and a skew means the server would attribute a body step to the
+ * wrong source line — a wrong gutter, a wrong breakpoint, a wrong re-run
+ * anchor. Cheaper to refuse the request than to debug that later.
+ */
+function validateSectionEntry(key: string, raw: unknown): string | null {
+  const where = `sections["${key}"]`;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return `${where} must be an object`;
+  }
+  const entry = raw as Record<string, unknown>;
+  if (typeof entry.name !== 'string') return `${where}.name must be a string`;
+  if (typeof entry.headingLine !== 'number' || !Number.isFinite(entry.headingLine)) {
+    return `${where}.headingLine must be a number`;
+  }
+  if (!Array.isArray(entry.steps) || !entry.steps.every((s) => typeof s === 'string')) {
+    return `${where}.steps must be an array of strings`;
+  }
+  if (
+    !Array.isArray(entry.stepLines) ||
+    !entry.stepLines.every((n) => typeof n === 'number' && Number.isFinite(n))
+  ) {
+    return `${where}.stepLines must be an array of numbers`;
+  }
+  if (entry.steps.length !== entry.stepLines.length) {
+    return (
+      `${where}.steps and ${where}.stepLines must be the same length ` +
+      `(got ${entry.steps.length} and ${entry.stepLines.length}) — they are parallel arrays`
+    );
+  }
+  // The map is keyed by `matchText(name)` and the server uses the incoming
+  // keys VERBATIM (contract §3.2 forbids re-deriving them for use). Nothing
+  // stops a client sending a key that isn't the normalized name, and the
+  // result is a section that can never be called: every lookup derives its
+  // key from the step text, so it misses, and the bare name ships to the AI.
+  //
+  // §3.2 forbids re-deriving the key for use. It does not forbid VALIDATING
+  // it, and this is the one invariant that makes the whole map addressable.
+  const expected = matchText(entry.name);
+  if (key !== expected) {
+    return (
+      `${where} is keyed "${key}" but its name normalizes to "${expected}". ` +
+      `Section maps are keyed by matchText(name); a mismatched key can never be called.`
+    );
+  }
+  // An empty name is refused at parse time by all three implementations
+  // (contract §2.5) and never enters an index, so it cannot arrive here from
+  // a well-behaved client — and if it did, it would be uncallable.
+  if (expected === '') return `${where} has an empty name`;
+  return null;
 }

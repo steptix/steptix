@@ -11,10 +11,11 @@
  *  - **batch == fullSteps** → `'effective'`: reuse the already-computed
  *    expansion of `steps` (which equals the full document); it already bakes the
  *    skill bodies into the step text.
- *  - **batch ⊊ fullSteps, skills present** → `'expand-full'`: the caller must
- *    expand the FULL document (not just this batch) so the hash — including the
- *    `seq`-based `__skillN_` namespacing — matches a single-block full run's.
- *  - **batch ⊊ fullSteps, no skills** → `'raw-full'`: hash the raw full document.
+ *  - **batch ⊊ fullSteps, skills OR sections present** → `'expand-full'`: the
+ *    caller must expand the FULL document (not just this batch) so the hash —
+ *    including the `seq`-based `__skillN_` namespacing — matches a single-block
+ *    full run's.
+ *  - **batch ⊊ fullSteps, neither** → `'raw-full'`: hash the raw full document.
  *  - **no fullSteps** (legacy caller) → `'effective'` (matches the prior
  *    `request.fullSteps ?? effectiveSteps` behaviour).
  */
@@ -23,10 +24,17 @@ export type CacheHashChoice = 'effective' | 'expand-full' | 'raw-full';
 export function chooseCacheHashSource(
   steps: string[],
   fullSteps: string[] | undefined,
-  hasSkills: boolean,
+  /**
+   * Whether this request expands anything at all — skills OR inline sections.
+   * Callers pass `!!skillsDir || hasSections(request)`, never a bare
+   * truthiness check on the sections map: `{}` is truthy, and treating an
+   * empty map as "expands" would move every sectionless subset batch from
+   * `raw-full` to `expand-full`.
+   */
+  hasSkillsOrSections: boolean,
 ): CacheHashChoice {
   if (!fullSteps || arraysEqual(steps, fullSteps)) return 'effective';
-  return hasSkills ? 'expand-full' : 'raw-full';
+  return hasSkillsOrSections ? 'expand-full' : 'raw-full';
 }
 
 /** Element-wise equality for two string arrays. */
