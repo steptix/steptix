@@ -1,0 +1,168 @@
+{
+  "$comment": "Frozen cross-package table for the inline-sections match rule. See stories/test-script-sections-contract.md §2. Consumed by the root vitest suite (parser + expander), runner-core's node --test suite, and both extensions' copy-parity tests. Every implementation of matchText() must reproduce BOTH the derived text and the boolean. Do not edit a row to make an implementation pass — the table is the specification.",
+  "$deliberatelyAbsent": "inline-sections-runtime.md §9 lists 'a formatted call site inside a skill body' among the required rows. It is NOT here and cannot be: a pure text table cannot express which array an implementation read. In a TIGHT markdown list extractPlainText is the identity function, so a `**Login**` row passes whether the implementation reads steps[i] or rawSteps[i]. That hazard is pinned by the contract §2.3 `{{target}}` scenario, asserted through parseTestFile in the root parser/expander suite.",
+  "derivation": "matchText(s) = casefold(trim(stripLeadingNoHooksMarker(s))), where stripLeadingNoHooksMarker uses /^\\[no-hooks\\]\\s*/i (verbatim from src/parser/markdown.ts) and casefold is String.prototype.toLowerCase() — never toLocaleLowerCase().",
+  "inputContract": "Both sides arrive already stripped of the `N. ` list prefix and already trimmed. Rows that supply untrimmed input exist only to pin the strip-before-trim ORDER; they cannot occur on a real document.",
+  "rows": [
+    {
+      "name": "exact",
+      "sectionName": "Login",
+      "stepRawText": "Login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "Baseline: identical text on both sides."
+    },
+    {
+      "name": "step lowercased",
+      "sectionName": "Login",
+      "stepRawText": "login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "Matching is case-insensitive."
+    },
+    {
+      "name": "step uppercased",
+      "sectionName": "Login",
+      "stepRawText": "LOGIN",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "Case-insensitivity is symmetric."
+    },
+    {
+      "name": "heading uppercased",
+      "sectionName": "LOGIN",
+      "stepRawText": "Login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "The same casefold applies to the map key, not just the step."
+    },
+    {
+      "name": "step has trailing whitespace",
+      "sectionName": "Login",
+      "stepRawText": "Login   ",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "trim() is part of the derivation."
+    },
+    {
+      "name": "step has leading whitespace",
+      "sectionName": "Login",
+      "stepRawText": "   Login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "trim() covers both ends. The marker strip is a no-op here."
+    },
+    {
+      "name": "name contains spaces",
+      "sectionName": "Login as admin",
+      "stepRawText": "Login as admin",
+      "expectedMatchText": { "name": "login as admin", "step": "login as admin" },
+      "matches": true,
+      "why": "Names are matched as whole step text, not tokenized."
+    },
+    {
+      "name": "internal whitespace differs",
+      "sectionName": "Login as admin",
+      "stepRawText": "Login  as  admin",
+      "expectedMatchText": { "name": "login as admin", "step": "login  as  admin" },
+      "matches": false,
+      "why": "The derivation trims the ends only. Internal runs are NOT collapsed — an implementation that normalizes whitespace fails here."
+    },
+    {
+      "name": "no-hooks marker",
+      "sectionName": "Login",
+      "stepRawText": "[no-hooks] Login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "A [no-hooks]-prefixed call still resolves; the marker's hook-skipping meaning is preserved separately."
+    },
+    {
+      "name": "no-hooks marker uppercased",
+      "sectionName": "Login",
+      "stepRawText": "[NO-HOOKS] Login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "The CLI marker regex carries the /i flag; every reimplementation of the strip must too."
+    },
+    {
+      "name": "no-hooks marker with no separating space",
+      "sectionName": "Login",
+      "stepRawText": "[no-hooks]Login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "The regex trailing \\s* matches zero spaces."
+    },
+    {
+      "name": "whitespace before the no-hooks marker defeats the strip",
+      "sectionName": "Login",
+      "stepRawText": "   [no-hooks] Login",
+      "expectedMatchText": { "name": "login", "step": "[no-hooks] login" },
+      "matches": false,
+      "why": "Order is strip-then-trim, and the strip is anchored at ^. Cannot occur on a real document (inputs arrive trimmed); pinned so all six implementations agree on the order rather than each picking one."
+    },
+    {
+      "name": "bold step text",
+      "sectionName": "Login",
+      "stepRawText": "**Login**",
+      "expectedMatchText": { "name": "login", "step": "**login**" },
+      "matches": false,
+      "why": "Match is on RAW text: no markdown-formatting normalization. NOTE this row does NOT discriminate steps[i] from rawSteps[i] — in a tight list extractPlainText returns `**Login**` unchanged, so both readings produce `**login**` and pass. See $deliberatelyAbsent."
+    },
+    {
+      "name": "the heading side uses the same derivation",
+      "sectionName": "[no-hooks] Login",
+      "stepRawText": "Login",
+      "expectedMatchText": { "name": "login", "step": "login" },
+      "matches": true,
+      "why": "matchText is applied to BOTH sides, so the marker strip runs on the heading too. Without this row an implementation could use plain trim()+toLowerCase() for map keys and pass all other rows. Such a name is refused at parse time ('[' prefix, contract §2.5), so this row pins the derivation only — like the leading-whitespace row above."
+    },
+    {
+      "name": "bold on both sides is byte-equal",
+      "sectionName": "**Login**",
+      "stepRawText": "**Login**",
+      "expectedMatchText": { "name": "**login**", "step": "**login**" },
+      "matches": true,
+      "why": "Confirms the rule is raw equality, not 'formatting is always rejected'."
+    },
+    {
+      "name": "backticked step text",
+      "sectionName": "Login",
+      "stepRawText": "`Login`",
+      "expectedMatchText": { "name": "login", "step": "`login`" },
+      "matches": false,
+      "why": "Same as bold — codespan is raw text too."
+    },
+    {
+      "name": "trailing period",
+      "sectionName": "Login",
+      "stepRawText": "Login.",
+      "expectedMatchText": { "name": "login", "step": "login." },
+      "matches": false,
+      "why": "Trailing punctuation is a near-miss, not a call. The authoring diagnostic catches it; the expander does not."
+    },
+    {
+      "name": "turkish dotted capital I lowercases to i + combining dot",
+      "sectionName": "İşlem",
+      "stepRawText": "i̇şlem",
+      "expectedMatchText": { "name": "i̇şlem", "step": "i̇şlem" },
+      "matches": true,
+      "why": "toLowerCase('İ') is U+0069 U+0307 (two code points). Under toLocaleLowerCase('tr') it would be U+0069 alone and this row would NOT match."
+    },
+    {
+      "name": "turkish dotted capital I does not match plain i",
+      "sectionName": "İşlem",
+      "stepRawText": "işlem",
+      "expectedMatchText": { "name": "i̇şlem", "step": "işlem" },
+      "matches": false,
+      "why": "The discriminating row: toLocaleLowerCase('tr') WOULD match here. Any implementation returning true is locale-sensitive and will disagree between a Turkish-locale client and a C-locale server."
+    },
+    {
+      "name": "ascii capital I lowercases to plain i",
+      "sectionName": "Işlem",
+      "stepRawText": "işlem",
+      "expectedMatchText": { "name": "işlem", "step": "işlem" },
+      "matches": true,
+      "why": "The other direction: toLocaleLowerCase('tr') maps ASCII I to U+0131 (dotless) and would NOT match. Together with the row above this pins toLowerCase from both sides."
+    }
+  ]
+}

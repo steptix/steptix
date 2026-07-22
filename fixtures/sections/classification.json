@@ -1,0 +1,333 @@
+{
+  "$comment": "Frozen cross-package classification table for inline sections. See stories/test-script-sections-contract.md section 5. Consumed by runner-core (classifyLines / extractSteps / extractSections / buildSectionIndex), by the root vitest suite for the hand-mirrored server-side scanner in src/parser/markdown.ts, and by the native + monaco copy-parity tests. BLANK LINES ARE OMITTED deliberately: trailing-newline and CRLF variance across checkouts makes a dense array fragile, while a misclassified non-blank line still shows up as a mismatch.",
+  "files": {
+    "classification.md": {
+      "note": "The mainstream case: parses cleanly end-to-end and is the frozen extractSections / main-flow reference. The depth-4 heading at line 27 is inert prose and does NOT close the Login section (line 29 still belongs to it) — contrast the bare #### in classification-hashes.md, which does close a body. `### Cleanup` is deliberately never invoked, so this file doubles as the dead-section-warning fixture: expanding it must emit exactly one warning, naming Cleanup.",
+      "lines": [
+        {
+          "line": 1,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 2,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 3,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 5,
+          "kind": "heading"
+        },
+        {
+          "line": 7,
+          "kind": "prose"
+        },
+        {
+          "line": 9,
+          "kind": "heading"
+        },
+        {
+          "line": 10,
+          "kind": "prose"
+        },
+        {
+          "line": 12,
+          "kind": "heading"
+        },
+        {
+          "line": 13,
+          "kind": "step"
+        },
+        {
+          "line": 15,
+          "kind": "prose"
+        },
+        {
+          "line": 17,
+          "kind": "step"
+        },
+        {
+          "line": 18,
+          "kind": "step"
+        },
+        {
+          "line": 20,
+          "kind": "section-heading"
+        },
+        {
+          "line": 22,
+          "kind": "prose"
+        },
+        {
+          "line": 24,
+          "kind": "section-step"
+        },
+        {
+          "line": 25,
+          "kind": "section-step"
+        },
+        {
+          "line": 27,
+          "kind": "heading"
+        },
+        {
+          "line": 29,
+          "kind": "section-step"
+        },
+        {
+          "line": 31,
+          "kind": "section-heading"
+        },
+        {
+          "line": 33,
+          "kind": "section-step"
+        },
+        {
+          "line": 35,
+          "kind": "heading"
+        },
+        {
+          "line": 36,
+          "kind": "prose"
+        }
+      ],
+      "expectedSections": [
+        {
+          "name": "Login",
+          "headingLine": 20,
+          "steps": [
+            {
+              "line": 24,
+              "instruction": "Type the username"
+            },
+            {
+              "line": 25,
+              "instruction": "Click Sign in"
+            },
+            {
+              "line": 29,
+              "instruction": "Verify the dashboard loads"
+            }
+          ]
+        },
+        {
+          "name": "Cleanup",
+          "headingLine": 31,
+          "steps": [
+            {
+              "line": 33,
+              "instruction": "Sign out"
+            }
+          ]
+        }
+      ],
+      "expectedMainFlow": [
+        {
+          "line": 13,
+          "instruction": "Open the dashboard"
+        },
+        {
+          "line": 17,
+          "instruction": "Login"
+        },
+        {
+          "line": 18,
+          "instruction": "Verify the header is visible"
+        }
+      ],
+      "expectedDeadSections": [
+        "Cleanup"
+      ]
+    },
+    "classification-edge.md": {
+      "note": "Raw-scan vs marked-token behaviour. Line 16 (`4.`) matches neither scanner (no content after the dot) and is absent from both. Line 17 (`5. [no-hooks]`) is marker-only: classifyLines still reports section-step (the editor paints what looks like a step, as it does today for main-flow marker-only lines) but BOTH the CLI parser and extractSections CULL it per contract 3.1 — hence its absence from expectedSections. Line 15 is a NO-divergence control: the marker regex is anchored so `**[no-hooks]**` is not stripped by the raw scan, AND extractPlainText is the identity in a tight list, so both passes agree byte for byte. Line 20 (numbered line inside a fenced block) is the SOLE genuine divergence — invisible to marked, a step to the raw scan — so this sectioned file must throw the CLI equal-lengths assert rather than warn-and-trim.",
+      "lines": [
+        {
+          "line": 1,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 2,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 3,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 5,
+          "kind": "heading"
+        },
+        {
+          "line": 7,
+          "kind": "heading"
+        },
+        {
+          "line": 8,
+          "kind": "step"
+        },
+        {
+          "line": 9,
+          "kind": "step"
+        },
+        {
+          "line": 11,
+          "kind": "section-heading"
+        },
+        {
+          "line": 13,
+          "kind": "section-step"
+        },
+        {
+          "line": 14,
+          "kind": "section-step"
+        },
+        {
+          "line": 15,
+          "kind": "section-step"
+        },
+        {
+          "line": 16,
+          "kind": "prose"
+        },
+        {
+          "line": 17,
+          "kind": "section-step"
+        },
+        {
+          "line": 19,
+          "kind": "prose"
+        },
+        {
+          "line": 20,
+          "kind": "section-step"
+        },
+        {
+          "line": 21,
+          "kind": "prose"
+        },
+        {
+          "line": 23,
+          "kind": "section-step"
+        }
+      ],
+      "expectedSections": [
+        {
+          "name": "Edge Cases",
+          "headingLine": 11,
+          "steps": [
+            {
+              "line": 13,
+              "instruction": "Type the username"
+            },
+            {
+              "line": 14,
+              "instruction": "[no-hooks] Click Sign in"
+            },
+            {
+              "line": 15,
+              "instruction": "**[no-hooks]** Bold marker is not stripped by the marker regex"
+            },
+            {
+              "line": 20,
+              "instruction": "Numbered line inside a fenced block"
+            },
+            {
+              "line": 23,
+              "instruction": "Verify the dashboard"
+            }
+          ]
+        }
+      ],
+      "expectsCliParseError": "equal-lengths assert: the fenced numbered line at 20 is a step to the raw scan and invisible to marked"
+    },
+    "classification-hashes.md": {
+      "note": "Hashes-only headings at depths 3, 4 and 7. All classify as section-heading with an EMPTY name — ANY_HEADING_RE cannot see them (it demands a non-space after the hashes), so without the dedicated rule they would be prose and TestBench would run the bodies as main-flow steps while the CLI errored. Per contract 5 each hashes-only line both closes the preceding body and opens a new section, so this file yields THREE single-step empty-name sections, not one merged section. Empty names never enter SectionIndex.sections; all three land in duplicates under the empty-string key. The CLI must reject this file (empty section name).",
+      "lines": [
+        {
+          "line": 1,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 2,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 3,
+          "kind": "frontmatter"
+        },
+        {
+          "line": 5,
+          "kind": "heading"
+        },
+        {
+          "line": 7,
+          "kind": "heading"
+        },
+        {
+          "line": 8,
+          "kind": "step"
+        },
+        {
+          "line": 10,
+          "kind": "section-heading"
+        },
+        {
+          "line": 12,
+          "kind": "section-step"
+        },
+        {
+          "line": 14,
+          "kind": "section-heading"
+        },
+        {
+          "line": 16,
+          "kind": "section-step"
+        },
+        {
+          "line": 18,
+          "kind": "section-heading"
+        },
+        {
+          "line": 20,
+          "kind": "section-step"
+        }
+      ],
+      "expectedSections": [
+        {
+          "name": "",
+          "headingLine": 10,
+          "steps": [
+            {
+              "line": 12,
+              "instruction": "Body of an empty-name section"
+            }
+          ]
+        },
+        {
+          "name": "",
+          "headingLine": 14,
+          "steps": [
+            {
+              "line": 16,
+              "instruction": "Still inside an empty-name section"
+            }
+          ]
+        },
+        {
+          "name": "",
+          "headingLine": 18,
+          "steps": [
+            {
+              "line": 20,
+              "instruction": "And again"
+            }
+          ]
+        }
+      ],
+      "expectsCliParseError": "empty section name (hashes-only heading)"
+    }
+  }
+}
