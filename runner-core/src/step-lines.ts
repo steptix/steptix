@@ -10,9 +10,32 @@
  *  - YAML frontmatter (delimited by `---` on the first non-blank line) is
  *    excluded from classification.
  *  - Indented numbered items (e.g. nested sub-lists) are not steps.
+ *
+ * Inline sections
+ * ---------------
+ * A `### Name` heading inside a **depth-2** `## Steps` section opens a named
+ * section; its numbered items are that section's body rather than main-flow
+ * steps. See stories/test-script-sections-contract.md §5 for the frozen
+ * classification order, and §3 of the same document for which exports see
+ * body lines:
+ *
+ *  - main flow only  — `extractSteps`, `resolveRunLines`,
+ *    `classifySelectedSteps`, `nearestStepAtOrBelow|Above`. Body lines are
+ *    `section-step`, so every one of these filters them out by construction.
+ *  - main + body     — `extractStepLineIds`, which lives in the extension
+ *    hosts and webviews, not here.
  */
 
-export type LineKind = 'step' | 'frontmatter' | 'heading' | 'prose' | 'blank';
+import { NO_HOOKS_MARKER } from './section-match.js';
+
+export type LineKind =
+  | 'step'
+  | 'section-heading'
+  | 'section-step'
+  | 'frontmatter'
+  | 'heading'
+  | 'prose'
+  | 'blank';
 
 export interface ClassifiedLine {
   /** 1-based line number to match Monaco/VS Code conventions. */
@@ -23,6 +46,18 @@ export interface ClassifiedLine {
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
 const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
 const STEP_LINE_RE = /^\d+\.\s+\S/;
+/**
+ * A heading line made of nothing but hashes. `ANY_HEADING_RE` demands a
+ * non-space after the hashes and so cannot see these at all — without the
+ * dedicated rule a bare `###` would classify as prose, and TestBench would
+ * run the items below it as main-flow steps while the CLI refused the file
+ * with an empty-name parse error. Contract §5 rule 3.
+ */
+const HASHES_ONLY_RE = /^#{3,}\s*$/;
+/** Depth of the `## Steps` heading under which sections are recognised. */
+const SECTION_HOST_DEPTH = 2;
+/** The `N. ` ordinal prefix, stripped to get a step's instruction text. */
+const STEP_PREFIX_RE = /^\s*\d+\.\s+/;
 
 /**
  * Returns true iff the document contains a Steps heading. Cheap pre-check
@@ -49,6 +84,17 @@ export function classifyLines(text: string): ClassifiedLine[] {
   // Pass 2 — locate the Steps section span.
   const stepsSpan = findStepsSection(lines, frontmatterEnd + 1);
 
+  // Sections are recognised only under a depth-2 `## Steps`. Under a `###
+  // Steps` a `###` line *closes* the span rather than landing in it, so no
+  // section could be defined anyway — but a hashes-only line is invisible to
+  // the span scanner too, so without this gate rule 3 would fire inside a
+  // deeper Steps heading and diverge from the CLI. Contract §5 precondition.
+  const sectionsEnabled = stepsSpan !== null && stepsSpan.headingDepth === SECTION_HOST_DEPTH;
+
+  // Set once the first section heading in the span is seen: from there on,
+  // every step line in the span belongs to a body, not the main flow.
+  let inSectionBody = false;
+
   for (let i = 0; i < lines.length; i++) {
     const lineNumber = i + 1;
     const raw = lines[i] ?? '';
@@ -63,14 +109,30 @@ export function classifyLines(text: string): ClassifiedLine[] {
       continue;
     }
 
-    if (ANY_HEADING_RE.test(raw)) {
+    const inSteps = stepsSpan !== null && i >= stepsSpan.start && i <= stepsSpan.end;
+    const inSectionSpan = sectionsEnabled && inSteps;
+
+    if (inSectionSpan && HASHES_ONLY_RE.test(raw)) {
+      inSectionBody = true;
+      out[i] = { line: lineNumber, kind: 'section-heading' };
+      continue;
+    }
+
+    const heading = ANY_HEADING_RE.exec(raw);
+    if (heading) {
+      if (inSectionSpan && heading[1]!.length === SECTION_HOST_DEPTH + 1) {
+        inSectionBody = true;
+        out[i] = { line: lineNumber, kind: 'section-heading' };
+        continue;
+      }
+      // Depth ≥ 4 inside the span is inert prose per the grammar: it neither
+      // opens a section nor closes the body it sits in.
       out[i] = { line: lineNumber, kind: 'heading' };
       continue;
     }
 
-    const inSteps = stepsSpan && i >= stepsSpan.start && i <= stepsSpan.end;
     if (inSteps && STEP_LINE_RE.test(raw)) {
-      out[i] = { line: lineNumber, kind: 'step' };
+      out[i] = { line: lineNumber, kind: inSectionBody ? 'section-step' : 'step' };
       continue;
     }
 
@@ -80,14 +142,18 @@ export function classifyLines(text: string): ClassifiedLine[] {
   return out;
 }
 
-/** True iff the given 1-based line is a step line. */
+/**
+ * True iff the given 1-based line is a **main-flow** step line. A section
+ * body line is a step to the eye but not a runnable unit on its own, so this
+ * returns false for one.
+ */
 export function isStepLine(text: string, lineNumber: number): boolean {
   const classified = classifyLines(text);
   const entry = classified[lineNumber - 1];
   return entry?.kind === 'step';
 }
 
-/** Nearest step at or below `lineNumber` (1-based), or null. */
+/** Nearest **main-flow** step at or below `lineNumber` (1-based), or null. */
 export function nearestStepAtOrBelow(text: string, lineNumber: number): number | null {
   const classified = classifyLines(text);
   for (let i = lineNumber - 1; i < classified.length; i++) {
@@ -96,7 +162,7 @@ export function nearestStepAtOrBelow(text: string, lineNumber: number): number |
   return null;
 }
 
-/** Nearest step at or above `lineNumber` (1-based), or null. */
+/** Nearest **main-flow** step at or above `lineNumber` (1-based), or null. */
 export function nearestStepAtOrAbove(text: string, lineNumber: number): number | null {
   const classified = classifyLines(text);
   for (let i = lineNumber - 1; i >= 0; i--) {
@@ -106,8 +172,18 @@ export function nearestStepAtOrAbove(text: string, lineNumber: number): number |
 }
 
 /**
- * Extract the step instructions in order, returning each step's source line
- * number alongside the cleaned text (number prefix stripped).
+ * Extract the **main-flow** step instructions in order, returning each step's
+ * source line number alongside the cleaned text (number prefix stripped).
+ *
+ * Section body lines classify as `section-step` and are therefore excluded —
+ * a body runs only when something invokes it, so treating body lines as
+ * runnable steps would execute them twice (once inline, once per call) and
+ * once more with no enclosing frame. Contract §5, consumer split.
+ *
+ * Note this does **not** apply the §3.1 cull rule (an item that is empty
+ * after the `[no-hooks]` strip survives here). That is pre-existing
+ * behaviour, relied on by the run paths; `extractSections` culls, this
+ * doesn't, and the difference is deliberate.
  */
 export function extractSteps(text: string): { line: number; instruction: string }[] {
   const lines = text.split(/\r?\n/);
@@ -117,10 +193,153 @@ export function extractSteps(text: string): { line: number; instruction: string 
   for (let i = 0; i < classified.length; i++) {
     if (classified[i]?.kind !== 'step') continue;
     const raw = lines[i] ?? '';
-    const instruction = raw.replace(/^\s*\d+\.\s+/, '').trim();
+    const instruction = raw.replace(STEP_PREFIX_RE, '').trim();
     out.push({ line: i + 1, instruction });
   }
 
+  return out;
+}
+
+/**
+ * The inline sections defined in `text`, in document order, each with its
+ * body steps attached.
+ *
+ * Empty-name entries **are** emitted (a hashes-only heading, contract §5
+ * rule 3): monaco's refusal and native's pre-flight both need to see them in
+ * order to refuse the file rather than silently running its bodies. They are
+ * the reason this returns an array rather than a map — duplicate and empty
+ * names are exactly what the callers are looking for.
+ *
+ * Applies the §3.1 cull rule: a body item that is empty after the `N. ` strip
+ * and the `[no-hooks]` strip is dropped, so a marker-only `1. [no-hooks]`
+ * never reaches the wire as a blank instruction. (`extractSteps` does not
+ * cull; that asymmetry is deliberate and pinned by tests.)
+ */
+export function extractSections(
+  text: string,
+): { name: string; headingLine: number; steps: { line: number; instruction: string }[] }[] {
+  const lines = text.split(/\r?\n/);
+  const classified = classifyLines(text);
+  const out: {
+    name: string;
+    headingLine: number;
+    steps: { line: number; instruction: string }[];
+  }[] = [];
+
+  for (let i = 0; i < classified.length; i++) {
+    const kind = classified[i]?.kind;
+    const raw = lines[i] ?? '';
+
+    if (kind === 'section-heading') {
+      out.push({
+        name: raw.replace(/^#{3,}\s*/, '').trim(),
+        headingLine: i + 1,
+        steps: [],
+      });
+      continue;
+    }
+
+    if (kind !== 'section-step') continue;
+
+    // A `section-step` can only follow a `section-heading` in the same span,
+    // so `current` is always defined here; the guard keeps this total rather
+    // than relying on that invariant holding after a future edit.
+    const current = out[out.length - 1];
+    if (!current) continue;
+
+    const instruction = raw.replace(STEP_PREFIX_RE, '').trim();
+    if (instruction.replace(NO_HOOKS_MARKER, '').trim() === '') continue;
+    current.steps.push({ line: i + 1, instruction });
+  }
+
+  return out;
+}
+
+/**
+ * Whether the step at 0-based `index` is a list item that **wraps** onto
+ * following lines.
+ *
+ * Markdown continues a list item across lines; the CLI matches and executes
+ * the item's whole folded text, while everything in this file sees only its
+ * first physical line. So for a wrapped item the two disagree about what the
+ * step even says:
+ *
+ *     1. Type the username
+ *        into the tenant field, then press Enter
+ *
+ * runner-core reads `Type the username`; the CLI runs both lines. Folding
+ * them here would mean reimplementing marked's list semantics in a fourth
+ * place — the exact drift this feature exists to remove — so instead callers
+ * are given the means to **refuse**.
+ *
+ * A **whitelist**: this reports "not wrapped" only for shapes verified
+ * unambiguous against the real parser, so every inaccuracy is a false alarm
+ * rather than a missed one.
+ *
+ * The over-refusals are real and not few. Measured against marked, a line
+ * directly below a step folds into it when it is prose, a nested bullet, a
+ * table row, a setext underline, indented code or a link reference — but does
+ * NOT fold when it is a blockquote, an HTML comment or block, a thematic
+ * break, a fenced-code opener, or a bare `N.`. This function treats all of
+ * them as folding, so the second group is conservatively called wrapped.
+ *
+ * That list is deliberately **not** encoded here. Splitting it correctly
+ * means reimplementing markdown's block grammar in a fourth place, which is
+ * the drift §1 of the contract exists to prevent; the cost of getting it
+ * wrong in the safe direction is a missing link and a spurious warning, and
+ * in the unsafe direction it is a step that silently does something else.
+ * `tests/section-index-cli-parity.test.ts` fuzzes the unsafe direction
+ * against the real CLI parser.
+ */
+export function stepWrapsAt(
+  lines: string[],
+  classified: ClassifiedLine[],
+  index: number,
+): boolean {
+  let sawBlank = false;
+  for (let i = index + 1; i < classified.length; i++) {
+    const kind = classified[i]!.kind;
+    if (kind === 'blank') {
+      sawBlank = true;
+      continue;
+    }
+    // A new step, or any heading, unambiguously ends the item.
+    if (kind !== 'prose') return false;
+    // Prose directly below continues the item, indented or not (markdown's
+    // "lazy continuation"). After a blank line only an indented line
+    // continues it; an unindented paragraph starts a new block.
+    return !(sawBlank && !/^\s/.test(lines[i] ?? ''));
+  }
+  // End of document: nothing can continue the item.
+  return false;
+}
+
+/**
+ * 1-based lines of every step — main flow **and** section bodies — whose list
+ * item wraps onto following lines.
+ *
+ * The consumer is the run-time pre-flight: a wrapped step cannot be
+ * represented on the wire (the `sections` payload carries one string per
+ * step), so a file containing one executes differently from TestBench than
+ * from the CLI and must be refused rather than silently truncated.
+ *
+ * Wrapped **main-flow** steps have always been truncated by `extractSteps`,
+ * long before sections existed, so those lines are reported for completeness
+ * and callers may choose to tolerate them. Wrapped **body** steps are the new
+ * hazard and the reason this exists: a body step whose first line happens to
+ * equal a section name dispatches into that section on the server path while
+ * the CLI runs the wrapped instruction — a silent change of control flow, not
+ * merely of text.
+ */
+export function findWrappedStepLines(text: string): number[] {
+  const lines = text.split(/\r?\n/);
+  const classified = classifyLines(text);
+  const out: number[] = [];
+  for (let i = 0; i < classified.length; i++) {
+    const kind = classified[i]?.kind;
+    if (kind !== 'step' && kind !== 'section-step') continue;
+    if (stepWrapsAt(lines, classified, i)) out.push(i + 1);
+  }
   return out;
 }
 
@@ -141,8 +360,10 @@ export type ClassifiedStep =
  * Pull out the steps the user wants to run, classifying each one as a normal
  * step, an `[input: var]` placeholder, or an `[interactive]` REPL handoff.
  *
- * If `requestedLines` is empty, every step in the document is returned.
- * Otherwise, only steps whose source line is in the set, preserving order.
+ * If `requestedLines` is empty, every **main-flow** step in the document is
+ * returned. Otherwise, only main-flow steps whose source line is in the set,
+ * preserving order. A requested line that names a section body step matches
+ * nothing here — section bodies run only through their call site.
  */
 export function classifySelectedSteps(
   text: string,
@@ -170,6 +391,13 @@ export function classifySelectedSteps(
  *    the whole section instead of failing with TB021.
  *  - If the fallback finds nothing (selection is past the last step),
  *    return `[]` — caller decides how to surface that.
+ *
+ * "Step" means **main-flow step** throughout: selecting a section body line
+ * resolves to the main-flow steps at or below it, and a selection entirely
+ * below the last main-flow step resolves to `[]`. Callers must distinguish
+ * that empty result from the empty-request case, which means "run
+ * everything" — the condition is `requested.length > 0 && resolved.length
+ * === 0`, never `resolved.length === 0` alone.
  */
 export function resolveRunLines(text: string, requestedLines: number[]): number[] {
   const all = extractSteps(text);
@@ -231,6 +459,8 @@ interface Span {
   start: number;
   /** 0-based index of the last line in the section (inclusive). */
   end: number;
+  /** Hash count of the `Steps` heading itself — 2 for `## Steps`. */
+  headingDepth: number;
 }
 
 /**
@@ -255,9 +485,9 @@ function findStepsSection(lines: string[], from: number): Span | null {
   for (let i = headingIndex + 1; i < lines.length; i++) {
     const m = ANY_HEADING_RE.exec(lines[i] ?? '');
     if (m && m[1]!.length <= headingDepth) {
-      return { start: headingIndex + 1, end: i - 1 };
+      return { start: headingIndex + 1, end: i - 1, headingDepth };
     }
   }
 
-  return { start: headingIndex + 1, end: lines.length - 1 };
+  return { start: headingIndex + 1, end: lines.length - 1, headingDepth };
 }

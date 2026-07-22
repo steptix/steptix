@@ -20,20 +20,31 @@ export type StepStatus = 'passed' | 'failed' | 'error';
  * step-into protocol (added in Phase 1 of the step-into work). Absent on
  * legacy servers — clients must tolerate missing `frame`.
  *
- * A frame is one execution scope: the top-level test, or a `[skill: ...]`
- * invocation. Frames nest when skills call skills. `id` is unique per run
- * and stable for the lifetime of the frame; `parentId` is null for the
- * test frame and the parent's id otherwise.
+ * A frame is one execution scope: the top-level test, a `[skill: ...]`
+ * invocation, or an inline `### Section` call. Frames nest when skills call
+ * skills, when a section calls a section, and in either combination. `id` is
+ * unique per run and stable for the lifetime of the frame; `parentId` is null
+ * for the test frame and the parent's id otherwise.
  */
 export interface FrameInfo {
   id: string;
   parentId: string | null;
-  kind: 'test' | 'skill';
-  /** Absolute path (file:// URI form) of the file this frame's steps live in. */
+  kind: 'test' | 'skill' | 'section';
+  /**
+   * Absolute path (file:// URI form) of the file this frame's steps live in.
+   * For `kind === 'section'` that is the file that **defines** the section:
+   * the test file for a test-file section, the skill file for one declared
+   * inside a skill body.
+   */
   uri: string;
   /** 1-based line of the step in that file. */
   line: number;
-  /** Set when `kind === 'skill'` — the skill name as authored. */
+  /**
+   * Set when `kind === 'skill'` — the skill name as authored — and when
+   * `kind === 'section'`, where it carries the **section** name. For a
+   * section declared inside a skill, the enclosing skill's name is on the
+   * nearest ancestor frame with `kind === 'skill'`, not here.
+   */
   skillName?: string;
 }
 

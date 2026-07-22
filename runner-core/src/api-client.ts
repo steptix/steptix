@@ -87,6 +87,42 @@ export interface StreamStepsRequest {
    */
   skillsDir?: string;
   /**
+   * Inline section definitions from the test file, keyed by `matchText(name)`
+   * (stories/test-script-sections-contract.md §2). Required whenever `steps`
+   * (or `fullSteps`) may contain bare-name section calls — the server cannot
+   * read the file, since the buffer may be unsaved. Line numbers are 1-based
+   * in the same document as `sourceLines`. Requires `testFilePath`: section
+   * frames and cycle keys derive from it, and the server answers 400 without
+   * it.
+   *
+   * Omit when there are no sections. `{}` is truthy in JS and several server
+   * gates read `request.sections` directly, so an empty map sent where the
+   * field could have been omitted risks flipping a sectionless run onto the
+   * expansion path.
+   */
+  sections?: Record<
+    string,
+    {
+      /**
+       * As authored, casing preserved. Display only — never re-derive the
+       * key from it; the server uses the incoming keys verbatim.
+       */
+      name: string;
+      headingLine: number;
+      /**
+       * The raw line with `/^\s*\d+\.\s+/` removed and `.trim()` applied,
+       * with `[no-hooks]` markers preserved **verbatim** — the expander
+       * strips them when it inlines a body, and stripping here as well would
+       * hide a body step's opt-out from the server's hook logic.
+       * Empty-after-strip items are culled, so this never contains a
+       * marker-only entry.
+       */
+      steps: string[];
+      /** Parallel to `steps`. */
+      stepLines: number[];
+    }
+  >;
+  /**
    * Absolute path of the test file the steps were authored in. Used as the
    * URI for the top-level (test) frame when the server emits frame events.
    * Optional; servers without frame support ignore it.

@@ -91,3 +91,51 @@ test("collectVariables: case-insensitive [INPUT:] / [OUTPUT:] markers", () => {
   const got = collectVariables(text, {}, {});
   assert.deepEqual(got.map((v) => v.name), ["x", "y"]);
 });
+
+/**
+ * Inline sections: body-line rows must survive.
+ *
+ * `collectVariables` scans every numbered line in the `## Steps` span via its
+ * own private `findStepsSpan`, so an `[input:]` or `[output:]` inside a
+ * section body is picked up today. Contract §5 lists this under "main + body,
+ * preserve rows": the requirement is only that a section-aware span must not
+ * start dropping them. Without this pin, a later change that reuses
+ * runner-core's main-flow-only step model here would silently empty the
+ * variables panel for every sectioned test.
+ */
+test("collectVariables: picks up [input:] and [output:] inside a section body", () => {
+  const text = [
+    "## Steps",
+    "1. Login",
+    "",
+    "### Login",
+    "1. [input: username] Who is signing in?",
+    "2. Type it",
+    "3. [output: sessionId]",
+  ].join("\n");
+
+  const got = collectVariables(text, {}, { username: "alice" });
+  const byName = Object.fromEntries(got.map((v) => [v.name, v]));
+
+  assert.ok(byName.username, "body [input:] row was dropped");
+  assert.equal(byName.username.line, 5);
+  assert.ok(byName.sessionId, "body [output:] row was dropped");
+  assert.equal(byName.sessionId.line, 7);
+});
+
+test("collectVariables: a section heading does not truncate the scan", () => {
+  // The span must still run to the next depth<=2 heading, not stop at `###`.
+  const text = [
+    "## Steps",
+    "1. [input: first]",
+    "",
+    "### S",
+    "1. [input: second]",
+    "",
+    "## Outputs",
+    "- x",
+  ].join("\n");
+
+  const names = collectVariables(text, {}, {}).map((v) => v.name);
+  assert.deepEqual(names, ["first", "second"]);
+});

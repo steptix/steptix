@@ -9,11 +9,36 @@
  *   - it lives under a `## Steps` (or deeper) heading, before the next
  *     same-or-shallower heading
  *   - it matches `^\s*\d+\.\s+\S` (numbered list item with content)
+ *
+ * `extractStepLineIds` returns main-flow AND inline-section body lines, and
+ * must keep doing so: the webview paints, anchors and filters by these ids,
+ * and a body line is still a line the user can see and click. That is a
+ * PRESERVATION requirement (stories/test-script-sections-contract.md §5,
+ * consumer split) — it already holds, because `findStepsSpan` closes only on
+ * a heading of depth <= the Steps heading's, so a `###` never ends the span —
+ * and it is pinned by tests rather than implemented afresh.
  */
 
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
 const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
 const STEP_LINE_RE = /^\s*\d+\.\s+\S/;
+/**
+ * A heading made of nothing but hashes. `ANY_HEADING_RE` demands a non-space
+ * after them and cannot see these at all.
+ */
+const HASHES_ONLY_RE = /^#{3,}\s*$/;
+/** Sections are recognised only under a depth-2 `## Steps`. */
+const SECTION_HOST_DEPTH = 2;
+const STEP_PREFIX_RE = /^\s*\d+\.\s+/;
+const NO_HOOKS_MARKER = /^\[no-hooks\]\s*/i;
+/**
+ * Deliberately STRICTER than `STEP_LINE_RE` above: runner-core's step regex
+ * rejects indented numbered items, and this mirror must agree with it exactly
+ * or the same file yields different sections in the webview and in the host.
+ * `STEP_LINE_RE` is left alone because `extractStepLineIds` and the variables
+ * panel have shipped on the looser form.
+ */
+const SECTION_STEP_RE = /^\d+\.\s+\S/;
 
 /** 1-based line numbers of every step under ## Steps. */
 export function extractStepLineIds(text) {
@@ -37,10 +62,29 @@ export function filterToStepLines(text, entries) {
   return entries.filter((e) => ids.has(e.id));
 }
 
-function findStepsSpan(lines) {
+/**
+ * 0-based index of the closing `---` of a YAML frontmatter block, or -1.
+ *
+ * Mirrors runner-core's `findFrontmatterEnd`, including its leniency about an
+ * unterminated block. Only `extractSections` consults it: `extractStepLineIds`
+ * has shipped without a frontmatter skip and changing that would move
+ * decorations on real files for no benefit here. The asymmetry is deliberate
+ * and unifying the two belongs to issues/035.
+ */
+function findFrontmatterEnd(lines) {
+  let i = 0;
+  while (i < lines.length && (lines[i] || "").trim() === "") i++;
+  if (i >= lines.length || (lines[i] || "").trim() !== "---") return -1;
+  for (let j = i + 1; j < lines.length; j++) {
+    if ((lines[j] || "").trim() === "---") return j;
+  }
+  return -1;
+}
+
+function findStepsSpan(lines, from = 0) {
   let headingIndex = -1;
   let headingDepth = 0;
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = from; i < lines.length; i++) {
     const m = STEPS_HEADING_RE.exec(lines[i] || "");
     if (m) {
       headingIndex = i;
@@ -52,8 +96,60 @@ function findStepsSpan(lines) {
   for (let i = headingIndex + 1; i < lines.length; i++) {
     const m = ANY_HEADING_RE.exec(lines[i] || "");
     if (m && m[1].length <= headingDepth) {
-      return { start: headingIndex + 1, end: i - 1 };
+      return { start: headingIndex + 1, end: i - 1, headingDepth };
     }
   }
-  return { start: headingIndex + 1, end: lines.length - 1 };
+  return { start: headingIndex + 1, end: lines.length - 1, headingDepth };
+}
+
+/**
+ * The inline sections defined in `text`, in document order, mirroring
+ * runner-core's `extractSections`. Empty-name entries (a hashes-only heading)
+ * ARE emitted — refusing a file the server would mis-execute depends on
+ * seeing them.
+ *
+ * Kept in step with runner-core by the copy-parity test, which asserts this
+ * and runner-core against the same frozen
+ * `fixtures/sections/classification.json`.
+ */
+export function extractSections(text) {
+  const lines = text.split(/\r?\n/);
+  const span = findStepsSpan(lines, findFrontmatterEnd(lines) + 1);
+  if (!span || span.headingDepth !== SECTION_HOST_DEPTH) return [];
+
+  const out = [];
+  for (let i = span.start; i <= span.end; i++) {
+    const raw = lines[i] || "";
+
+    if (HASHES_ONLY_RE.test(raw)) {
+      out.push({ name: "", headingLine: i + 1, steps: [] });
+      continue;
+    }
+
+    const heading = ANY_HEADING_RE.exec(raw);
+    if (heading) {
+      // Depth >= 4 inside the span is inert prose: it neither opens a section
+      // nor closes the body it sits in.
+      if (heading[1].length === SECTION_HOST_DEPTH + 1) {
+        out.push({
+          name: raw.replace(/^#{3,}\s*/, "").trim(),
+          headingLine: i + 1,
+          steps: [],
+        });
+      }
+      continue;
+    }
+
+    // Before the first section heading we are still in the main flow.
+    if (out.length === 0) continue;
+    if (!SECTION_STEP_RE.test(raw)) continue;
+
+    const instruction = raw.replace(STEP_PREFIX_RE, "").trim();
+    // The cull rule: an item empty after the ordinal and the marker strip
+    // carries no instruction and must never reach the wire.
+    if (instruction.replace(NO_HOOKS_MARKER, "").trim() === "") continue;
+    out[out.length - 1].steps.push({ line: i + 1, instruction });
+  }
+
+  return out;
 }

@@ -73,7 +73,32 @@ test('classifyLines: deeper headings inside Steps do not end the section', () =>
   ].join('\n');
   const lines = classifyLines(text);
   assert.equal(lines[1].kind, 'step');
-  assert.equal(lines[3].kind, 'step');
+  // Still inside the Steps span — the `###` does not close it. What changed
+  // with inline sections is the ATTRIBUTION: line 4 now belongs to the
+  // `### Subsection` body rather than to the main flow, so it runs when
+  // something invokes that section rather than inline.
+  //
+  // This is the one deliberate behaviour change of the sections line model,
+  // and it is scoped to files that put a `###` inside `## Steps`. A sweep of
+  // every Markdown file in the repo found no test fixture or template
+  // affected — only the sections fixtures themselves and some design docs
+  // under stories/, which were never runnable. See the regression corpus
+  // suite for the standing guard.
+  assert.equal(lines[2].kind, 'section-heading');
+  assert.equal(lines[3].kind, 'section-step');
+});
+
+test('classifyLines: a deeper heading still does not end the Steps span', () => {
+  // The original intent of the test above, stated so it survives independent
+  // of how body lines are attributed: everything after the `###` is still
+  // inside Steps, and a following `##` is what actually closes it.
+  const text = ['## Steps', '1. Outer', '### Subsection', '2. Body', '## Notes', '1. Not a step'].join(
+    '\n',
+  );
+  const lines = classifyLines(text);
+  assert.equal(lines[3].kind, 'section-step');
+  assert.equal(lines[4].kind, 'heading');
+  assert.equal(lines[5].kind, 'prose');
 });
 
 test('classifyLines: handles YAML frontmatter', () => {

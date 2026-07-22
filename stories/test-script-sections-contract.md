@@ -285,6 +285,36 @@ when inlining a body — the CLI parser strips at parse time, so without the
 expander-side strip the literal marker text would reach the AI on the server
 path only.
 
+**A wrapped list item cannot be represented here, and must be refused.**
+Markdown continues a list item across lines and the CLI executes the item's
+*whole folded text*, but this shape carries one string per step and every
+client-side scanner sees only the item's first physical line:
+
+```markdown
+### Checkout
+1. Sign in
+   using the saved credentials
+2. Pay
+```
+
+The CLI runs `"Sign in\nusing the saved credentials"`. A client following the
+`/^\s*\d+\.\s+/`-then-`trim()` rule above sends `"Sign in"` — which, if a
+`### Sign in` exists, the server then resolves as a **call**. That is not a
+truncated instruction; it is a different control flow, arrived at silently.
+
+Folding the continuation client-side is not the answer: it would put a fourth
+hand-written copy of marked's list semantics in the tree, which is the drift
+§1 exists to prevent. So the rule is **detect and refuse**:
+`runner-core`'s `findWrappedStepLines(text)` reports every wrapped step, and
+the run-time pre-flight refuses a file with a wrapped step **in a section
+body** before a request is built.
+
+Wrapped *main-flow* steps have been truncated by `extractSteps` since long
+before sections existed; that is a pre-existing defect, tracked as
+[issues/036](../issues/036-wrapped-main-flow-steps-truncated-on-the-testbench-path.md),
+and not something this feature's gate is required to fix. `findWrappedStepLines`
+reports those lines too, so widening the gate later needs no new detection.
+
 **Empty means absent.** One predicate, used by every gate:
 
 ```ts
@@ -416,6 +446,13 @@ export function extractSections(
   text: string,
 ): { name: string; headingLine: number; steps: { line: number; instruction: string }[] }[];
 
+// runner-core/src/step-lines.ts — 1-based lines of every step (main flow AND
+// section body) whose markdown list item wraps onto following lines. Such a
+// step is unrepresentable on the wire (§3.2) and a body one must be refused
+// by the pre-flight. Whitelist semantics: inaccuracies are false alarms, never
+// missed ones.
+export function findWrappedStepLines(text: string): number[];
+
 // runner-core/src/section-index.ts
 export function buildSectionIndex(text: string): SectionIndex;
 
@@ -509,7 +546,7 @@ All under `fixtures/sections/`.
 
 | File | Pins | Consumers |
 |---|---|---|
-| `match-table.json` | §2, both derived text and boolean, 19 rows | root parser/expander suite; runner-core; native + monaco copy tests |
+| `match-table.json` | §2, both derived text and boolean, 19 rows | root parser/expander suite; runner-core (`matchText` + end-to-end through `buildSectionIndex`); native + monaco copy tests (the `[no-hooks]` rows only — the mirrors reimplement the marker strip in their cull path but do no name matching, so the casefolding and Turkish-I rows do not apply to them) |
 | `classification.md` + `classification.json` | §5 on the mainstream case; frozen `extractSections` / main-flow output; the dead-section warning | runner-core; root suite (server mirror `extractStepLinesFromRaw`) |
 | `classification-edge.md` | raw-scan vs marked-token divergences; the §3.1 cull rule | runner-core; root parser suite (must throw the equal-lengths assert) |
 | `classification-hashes.md` | bare `###` / `####` / `#######`; empty-name representation | runner-core; native pre-flight; monaco refusal |

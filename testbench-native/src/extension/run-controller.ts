@@ -423,7 +423,22 @@ export class RunController {
 
   /** Record a `step:fail` that occurred inside a skill frame, IF that frame is
    *  a top-level invocation (`parentId === null`). `failedLine` is the step's
-   *  1-based line in the skill file. Called by the run-event router. */
+   *  1-based line in the skill file. Called by the run-event router.
+   *
+   *  UNHANDLED KIND: `FrameInfo.kind` now includes `'section'`, and a section
+   *  invoked from the main flow has `parentId === null` — the same shape as a
+   *  top-level skill. This function gates on `parentId` alone, so such a
+   *  frame would be parked as a `SkillFailure` whose `skillUri` is the *test*
+   *  file, and the Variables panel would offer "re-run this skill step" for
+   *  something that is not a skill.
+   *
+   *  Deliberately not guarded here. No section frame can reach this yet (the
+   *  server has no sections wiring until PR-3), and a blanket
+   *  `kind !== 'skill'` refusal is the wrong fix — it would refuse every
+   *  section re-run, which the sections runtime spec wants to work. The
+   *  decision belongs with `SkillFailure.kind` in the native-runtime PR;
+   *  `call-stack-view.ts`'s `?? 'skill'` label and `symbol-method` icon are
+   *  the same class. */
   recordSkillFailure(frame: FrameInfo, failedLine: number): void {
     if (frame.parentId !== null) return; // v1: top-level skills only
     const root = this.frameRoot.get(frame.id);
