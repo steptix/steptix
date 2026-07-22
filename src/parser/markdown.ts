@@ -3,7 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { marked, type Token, type Tokens } from 'marked';
 import { parseFrontmatter } from './frontmatter.js';
-import type { ParsedSkill, ParsedTest, TestConfig, TestHooks } from './types.js';
+import type { ParsedSection, ParsedSkill, ParsedTest, TestConfig, TestHooks } from './types.js';
+import {
+  NO_HOOKS_MARKER,
+  matchText,
+  validateSectionName,
+} from './section-match.js';
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import type { ToolCall } from '../tools/types.js';
@@ -14,9 +19,6 @@ import {
 } from './interpolate-env-data.js';
 import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
 import { logger } from '../utils/logger.js';
-
-/** Prefix marker on a step that opts out of beforeEach / afterEach hooks. */
-const NO_HOOKS_MARKER = /^\[no-hooks\]\s*/i;
 
 /** Valid `## Hooks` scope prefixes — case-insensitive match, stored lowercase. */
 const HOOK_SCOPES = new Set(['before', 'beforeeach', 'aftereach', 'after']);
@@ -48,16 +50,31 @@ export async function parseTestFile(
   const rawContent = await fs.readFile(absPath, 'utf-8');
   const parsed = parseTestContentRaw(rawContent, absPath);
 
-  if (options.skillsDir) {
+  // Expand when there is a skills directory OR the file defines sections.
+  // The narrower `if (options.skillsDir)` gate would leave a library caller
+  // that omits `skillsDir` with unexpanded bare-name calls shipped to the AI
+  // as prose. The CLI always passes its `./skills` default, so this only
+  // widens behaviour for direct `parseTestFile` consumers.
+  const definesSections = Object.keys(parsed.sections).length > 0;
+  if (options.skillsDir || definesSections) {
     // Thread the run-wide env context (env vars + envName) into skill
     // expansion so a skill's own `dataSources` (declared in the skill's
     // frontmatter) can resolve `${envName}` / `${env.X}` in their paths and
     // load env-appropriate JSON files at parse time.
     const envCtxForSkills = options.envData;
     const preExpansionStepLines = parsed.stepLines;
-    const stepsExp = await expandSkills(parsed.steps, options.skillsDir, envCtxForSkills, absPath);
+    const preExpansionSkipHooks = parsed.skipHooks;
+    const stepsExp = await expandSkills(
+      parsed.steps,
+      options.skillsDir,
+      envCtxForSkills,
+      absPath,
+      preExpansionStepLines,
+      { sections: parsed.sections, rawSteps: parsed.rawSteps },
+    );
     parsed.steps = stepsExp.steps;
     parsed.sourceSkills = stepsExp.sourceSkills;
+    parsed.sourceSections = stepsExp.sourceSections;
     // Re-align stepLines with the now-flattened step list. For inline
     // entries the inputIndex points to themselves; for skill-expanded
     // entries the inputIndex points to the `[skill: ...]` invocation line
@@ -94,12 +111,19 @@ export async function parseTestFile(
       afterEach: parsed.hooks.afterEach.map((s) => parseToolCall(s)),
       after: parsed.hooks.after.map((s) => parseToolCall(s)),
     };
-    while (parsed.skipHooks.length < parsed.steps.length) {
-      parsed.skipHooks.push(false);
-    }
-    if (parsed.skipHooks.length > parsed.steps.length) {
-      parsed.skipHooks.length = parsed.steps.length;
-    }
+    // Re-align skipHooks through the same origin mapping stepLines uses.
+    //
+    // This used to pad with `false` / truncate to the expanded length, which
+    // silently misaligned the array whenever an invocation expanded to
+    // anything other than exactly one step: `[no-hooks] [skill: multi_step]`
+    // applied to roughly the first expanded step and left the rest hooked.
+    // Origin mapping is what makes "`[no-hooks]` on the invocation covers the
+    // whole expanded body" actually true — for sections, where multi-step
+    // expansion is the common case, and for skills, where it was already the
+    // documented intent.
+    parsed.skipHooks = stepsExp.origins.map(
+      (o) => preExpansionSkipHooks[o.inputIndex] ?? false,
+    );
   }
 
   if (options.envData) {
@@ -281,6 +305,19 @@ async function applySkillEnvDataInterpolation(
     parsed.parameters[k] = interpolateEnvData(v, skillCtx);
   }
   parsed.outputs = parsed.outputs.map((o) => interpolateEnvData(o, skillCtx));
+
+  // Section bodies get the same pass as the main body, or a `${env.X}` used
+  // only inside a section would survive as a literal and either fail later
+  // with a wrong-file error or ship raw to the AI.
+  //
+  // `rawSteps` is deliberately NOT interpolated: it is the match side, and
+  // section resolution must stay decidable from the file as authored (the
+  // editor's links and dead-section diagnostic have nothing else to work
+  // with). `applySkillScope` leaves it alone for the same reason. See the
+  // contract §3.1.
+  for (const section of Object.values(parsed.sections)) {
+    section.steps = section.steps.map((s) => interpolateEnvData(s, skillCtx));
+  }
 }
 
 /** Parse test content from a string (steps returned verbatim — no skill expansion) */
@@ -304,6 +341,9 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
     // Pre-skill-expansion: every step is inline (no source skill yet). Will be
     // re-populated by parseTestFile after expandSkills() runs.
     sourceSkills: sections.steps.map(() => null),
+    sourceSections: sections.steps.map(() => null),
+    sections: sections.sectionDefs,
+    rawSteps: sections.rawSteps,
     hooks: sections.hooks,
     hookToolCalls: {
       before: sections.hooks.before.map(() => null),
@@ -330,6 +370,8 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
     outputs: sections.outputs,
     steps: sections.steps,
     stepLines: sections.stepLines,
+    sections: sections.sectionDefs,
+    rawSteps: sections.rawSteps,
     ...(frontmatter.dataSources && { dataSources: frontmatter.dataSources }),
   };
 }
@@ -349,6 +391,13 @@ interface ParsedSections {
    * the step-into protocol so frame events can carry origin file+line.
    */
   stepLines: number[];
+  /** Parallel to `steps` — raw line text (number prefix stripped, trimmed,
+   *  `[no-hooks]` markers preserved). The match side for section calls. */
+  rawSteps: string[];
+  /** Inline sections defined in this file, keyed by `matchText(name)`.
+   *  Named `sectionDefs` rather than `sections` because the enclosing return
+   *  type already uses `sections` for the whole reserved-H2 bundle. */
+  sectionDefs: Record<string, ParsedSection>;
   hooks: TestHooks;
 }
 
@@ -359,14 +408,11 @@ function parseSections(rawContent: string, filePath: string): {
 } {
   const { frontmatter, body } = parseFrontmatter(rawContent);
 
-  // Pre-compute the raw 1-based line number of every `## Steps` item. The
-  // marked AST throws away line positions, so we do a second pass over the
-  // unparsed content. The Nth step line we find here corresponds 1:1 with
-  // the Nth step `extractSteps` pushes into the parallel array below — both
-  // honour the same rules (numbered list, top-level only, inside the Steps
-  // section). Origins for skill-expanded steps fall out of this too: skill
-  // files use the same parser.
-  const rawStepLines = extractStepLinesFromRaw(rawContent);
+  // Pre-compute the structure of the `## Steps` span from the raw text: which
+  // lines are numbered items, and which `### Name` section each belongs to.
+  // The marked AST throws away line positions, so this second pass supplies
+  // them — and now section membership too. Throws on an invalid section name.
+  const scan = scanStepSpans(rawContent, filePath);
 
   const tokens = marked.lexer(body);
 
@@ -445,36 +491,241 @@ function parseSections(rawContent: string, filePath: string): {
     logger.warn(`File ${filePath} has no steps defined in ## Steps section`);
   }
 
-  // Pair each extracted step with its raw source line. The two passes (marked
-  // for text, raw scan for lines) walk the document in the same order, so
-  // alignment by index is correct as long as we trim the line array to the
-  // step count — extractStepLinesFromRaw is permissive on edge cases (blank
-  // numbered lines) where extractSteps already culled.
-  const stepLines: number[] = steps.map((_, i) => rawStepLines[i] ?? 0);
+  // Zip the marked pass (text) against the raw scan (lines + section
+  // membership). Both walk the document in the same order, so entry `i`
+  // describes step `i`.
+  //
+  // For a file that defines sections the correspondence must hold exactly, so
+  // a mismatch throws: once the raw text is the match side, a one-off shift
+  // silently flips which steps are section calls. Perfect replication is
+  // impossible in general — the raw scan sees text where marked sees rendered
+  // tokens, so a numbered line inside a fenced code block diverges — hence
+  // the hard failure rather than a guess.
+  //
+  // Files with no sections keep the historic lenient behaviour (pair by index,
+  // fall back to line 0), so every file written before this feature parses
+  // exactly as it did.
+  // The match side per step: the scanned raw line by default, but the full
+  // step text for a multi-line item (see `classifyReading`).
+  const matchSides: string[] = steps.map((s, i) => scan.entries[i]?.raw ?? s);
+
+  if (scan.heads.length > 0) {
+    const causes =
+      `Usual causes: a numbered line the markdown parser doesn't treat as a ` +
+      `step (inside a fenced code block or an HTML comment), or one the line ` +
+      `scanner doesn't (indented by 1-3 spaces, or using \`1)\` instead of ` +
+      `\`1.\`).`;
+
+    if (scan.entries.length !== steps.length) {
+      throw new Error(
+        `Step/line mismatch in ${filePath}: the markdown parser found ` +
+          `${steps.length} step(s) in \`## Steps\` but the line scanner found ` +
+          `${scan.entries.length}. Because this file defines sections, the two ` +
+          `must agree exactly — a shift would change which steps count as ` +
+          `section calls. ${causes}`,
+      );
+    }
+
+    // Equal counts are NOT enough. Two divergences in opposite directions
+    // cancel out, and the resulting pairing is silently wrong in the worst
+    // possible way: `rawSteps` is the match side, so a step can inherit an
+    // unrelated line's text, resolve to a section the author never called,
+    // and drop the real instruction without a word. Verify per index.
+    for (let i = 0; i < steps.length; i++) {
+      const entry = scan.entries[i]!;
+      const reading = classifyReading(steps[i]!, entry.raw);
+      if (reading === 'drift') {
+        throw new Error(
+          `Step/line mismatch in ${filePath} at step ${i + 1}: the markdown ` +
+            `parser read "${steps[i]}" where the line scanner read ` +
+            `"${entry.raw}" (line ${entry.line}). The two passes have drifted ` +
+            `out of step, so section calls would resolve against the wrong ` +
+            `text. ${causes}`,
+        );
+      }
+      if (reading === 'continued') {
+        // The scanned line is only this item's first physical line. Matching
+        // on it would compare a truncation — so match on the whole step.
+        matchSides[i] = steps[i]!;
+      }
+    }
+  }
+
+  const mainSteps: string[] = [];
+  const mainSkipHooks: boolean[] = [];
+  const mainToolCalls: (ToolCall | null)[] = [];
+  const mainStepLines: number[] = [];
+  const mainRawSteps: string[] = [];
+
+  const sectionAcc: ParsedSection[] = scan.heads.map((h) => ({
+    name: h.name,
+    headingLine: h.headingLine,
+    steps: [],
+    rawSteps: [],
+    stepLines: [],
+  }));
+
+  for (let i = 0; i < steps.length; i++) {
+    const entry = scan.entries[i];
+    const target = entry?.sectionIndex != null ? sectionAcc[entry.sectionIndex] : null;
+    if (target) {
+      // Body steps carry no skipHooks/toolCalls parallel: `[no-hooks]` on a
+      // body line is stripped and ignored (the invocation's marker covers the
+      // whole body, via origin mapping), and toolCalls are re-derived from
+      // the flat list after expansion.
+      target.steps.push(steps[i]!);
+      target.rawSteps.push(matchSides[i]!);
+      target.stepLines.push(entry!.line);
+    } else {
+      mainSteps.push(steps[i]!);
+      mainSkipHooks.push(skipHooks[i] ?? false);
+      mainToolCalls.push(toolCalls[i] ?? null);
+      mainStepLines.push(entry?.line ?? 0);
+      mainRawSteps.push(matchSides[i]!);
+    }
+  }
+
+  const sectionMap: Record<string, ParsedSection> = {};
+  for (const section of sectionAcc) {
+    sectionMap[matchText(section.name)] = section;
+  }
 
   return {
-    sections: { config, parameters, outputs, steps, skipHooks, toolCalls, stepLines, hooks },
+    sections: {
+      config,
+      parameters,
+      outputs,
+      steps: mainSteps,
+      skipHooks: mainSkipHooks,
+      toolCalls: mainToolCalls,
+      stepLines: mainStepLines,
+      rawSteps: mainRawSteps,
+      sectionDefs: sectionMap,
+      hooks,
+    },
     frontmatter,
     title,
   };
 }
 
 /**
- * Find the 1-based source line of every numbered step item inside the `##
- * Steps` (or deeper-level Steps) section of the raw markdown content. Lines
- * are relative to the *raw* content — i.e. they include the YAML frontmatter
- * block — so they match what the user sees in their editor.
+ * True when the marked pass's text for a step is a legitimate reading of the
+ * raw line the scan found at the same index.
  *
- * Mirrors the runner-core step-line classifier so server-side parsing agrees
- * with the client's editor-side line model. Kept here (rather than importing
- * runner-core) because the server isn't a runner-core consumer today.
+ * A raw line has exactly two possible readings, and they are *derived* rather
+ * than approximated:
+ *
+ *  - **tight list** — `extractPlainText` short-circuits on the raw inline
+ *    source, so the text is the line itself (marker stripped, trimmed);
+ *  - **loose list** — marked emits a `paragraph`, `extractPlainText` recurses
+ *    through it and unwraps `strong` / `em` / `codespan`.
+ *
+ * Computing the loose reading with `extractPlainText` itself is the point: an
+ * earlier version approximated it by deleting `*`, `_` and backticks and
+ * collapsing whitespace, which made the tripwire *more* permissive than
+ * `matchText`. Drift landing in that gap — `Login as  admin` against a
+ * `Login as admin` section, or a bold step against a plain one — passed the
+ * check and still resolved to a section the author never called, which is the
+ * whole failure being guarded against. Anything `matchText` would treat as
+ * different must be treated as different here too, so the comparison is
+ * exact and the coupling to `extractPlainText` is structural.
  */
-function extractStepLinesFromRaw(rawContent: string): number[] {
+function classifyReading(
+  stepText: string,
+  rawLine: string,
+): 'exact' | 'continued' | 'drift' {
+  const tight = rawLine.replace(NO_HOOKS_MARKER, '').trim();
+  if (stepText === tight) return 'exact';
+  const loose = extractPlainText(marked.lexer(tight)).trim();
+  if (stepText === loose) return 'exact';
+
+  // A list item may span several physical lines — a wrapped instruction, a
+  // hard line break, a nested bullet list. marked folds the whole item into
+  // one step; the raw scan only ever sees the first line. That is legitimate
+  // markdown and must not be refused.
+  //
+  // But it means `entry.raw` is now a TRUNCATION of the step, and truncations
+  // are dangerous precisely here: a step reading
+  //
+  //     1. Login
+  //        and then confirm the dashboard shows the correct tenant
+  //
+  // truncates to "Login", which would resolve against a `### Login` section
+  // the author never called and drop the real instruction. So the caller
+  // switches the match side to the full step text for these — which can never
+  // equal a bare section name. That is the contract §2.1 fallback
+  // (`rawSteps?.[i] ?? steps[i]`), not a new rule.
+  if (stepText.startsWith(tight)) return 'continued';
+  // `loose` can be empty — a codespan of only whitespace (`` ` ` ``) lexes to
+  // empty text, and `startsWith('')` is true of everything, which would
+  // silently disable the tripwire for that step. `tight` cannot be empty
+  // (`scanStepSpans` culls empty-after-strip items), so only this branch
+  // needs the guard. Such a line IS a genuine divergence — marked culls it,
+  // the scan keeps it — so falling through to `drift` is the right answer.
+  if (loose !== '' && stepText.startsWith(loose)) return 'continued';
+
+  return 'drift';
+}
+
+/** One numbered item found by the raw scan inside the `## Steps` span. */
+export interface StepSpanEntry {
+  /** 1-based line in the *raw* content, frontmatter included — so it matches
+   *  what the user sees in their editor. */
+  line: number;
+  /** Line text with the `N. ` prefix removed and trimmed. `[no-hooks]`
+   *  markers are preserved: this is the match side, and `matchText` strips
+   *  them itself. */
+  raw: string;
+  /** Index into `heads`, or null when the item is a main-flow step. */
+  sectionIndex: number | null;
+}
+
+/** Result of the raw scan: the section structure of a file's `## Steps` span. */
+export interface StepSpanScan {
+  /** Numbered items in document order, main flow and section bodies alike,
+   *  with the same cull rules `extractSteps` applies. */
+  entries: StepSpanEntry[];
+  /** `### Name` headings in document order. */
+  heads: { name: string; headingLine: number }[];
+}
+
+/**
+ * Scan the raw markdown for the structure of its `## Steps` span: which lines
+ * are numbered items, and which section (if any) each belongs to.
+ *
+ * The marked AST throws away line positions, so this is a second pass over
+ * the unparsed content. Its Nth entry corresponds 1:1 with the Nth step
+ * `extractSteps` pushes, which is what lets `parseSections` zip text (from
+ * marked) to lines and section membership (from here). That correspondence is
+ * why this scan replicates `extractSteps`' cull rules rather than collecting
+ * every matching line: once the raw text is the *match* side, a one-off shift
+ * flips call/non-call decisions rather than merely mislabelling a line.
+ *
+ * Also mirrors the runner-core step-line classifier so server-side parsing
+ * agrees with the client's editor-side line model. Kept here (rather than
+ * importing runner-core) because the server isn't a runner-core consumer
+ * today — see issues/035.
+ *
+ * Exported for direct unit testing: the two-pass alignment is the single most
+ * error-prone part of the sections feature, and testing it only through
+ * `parseTestContent` hides which pass disagreed.
+ *
+ * Throws on an invalid section name (reserved / `[`-prefixed / `{{`-containing
+ * / empty / duplicate).
+ */
+export function scanStepSpans(rawContent: string, filePath: string): StepSpanScan {
   const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
   const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
   const STEP_LINE_RE = /^\d+\.\s+\S/;
+  /** A line that is nothing but hashes. Invisible to ANY_HEADING_RE (which
+   *  demands a non-space after them), so without this it would read as prose
+   *  to every parser — the CLI would throw its empty-name error while
+   *  TestBench happily ran the "body" items as main-flow steps. */
+  const HASHES_ONLY_RE = /^#{3,}\s*$/;
 
   const lines = rawContent.split(/\r?\n/);
+  const entries: StepSpanEntry[] = [];
+  const heads: { name: string; headingLine: number }[] = [];
 
   // Skip leading frontmatter (--- ... ---).
   let i = 0;
@@ -494,17 +745,66 @@ function extractStepLinesFromRaw(rawContent: string): number[] {
     const m = STEPS_HEADING_RE.exec(lines[i] ?? '');
     if (m) { headingIndex = i; headingDepth = m[1]!.length; break; }
   }
-  if (headingIndex < 0) return [];
+  if (headingIndex < 0) return { entries, heads };
 
-  // Walk to the next equal-or-shallower heading (or EOF), collecting step lines.
-  const out: number[] = [];
+  // Sections are recognised only under a depth-2 `## Steps`. STEPS_HEADING_RE
+  // accepts `#{2,}`, and the span closes at `depth <= headingDepth` — so under
+  // a `### Steps` heading a `###` line *closes the span* rather than landing
+  // in it, and no section can be defined. That matches the CLI token walk
+  // below, which dispatches on heading depth 1 and 2 only.
+  const sectionsRecognised = headingDepth === 2;
+  const seenNames = new Map<string, number>();
+  let currentSection: number | null = null;
+
   for (let j = headingIndex + 1; j < lines.length; j++) {
     const raw = lines[j] ?? '';
+    const line = j + 1;
+
     const heading = ANY_HEADING_RE.exec(raw);
     if (heading && heading[1]!.length <= headingDepth) break;
-    if (STEP_LINE_RE.test(raw)) out.push(j + 1);
+
+    if (sectionsRecognised && HASHES_ONLY_RE.test(raw)) {
+      // Hashes with no text, at any depth >= 3. Always an error, but raise it
+      // through the same validator so the message matches every other refusal.
+      validateSectionName('', filePath, line);
+    }
+
+    if (heading) {
+      if (sectionsRecognised && heading[1]!.length === 3) {
+        const name = raw.replace(/^#{3}\s*/, '').trim();
+        validateSectionName(name, filePath, line);
+        const key = matchText(name);
+        const prior = seenNames.get(key);
+        if (prior !== undefined) {
+          throw new Error(
+            `Duplicate section "${name}" at ${filePath}:${line} — already ` +
+              `defined at line ${prior}. Section names are matched ` +
+              `case-insensitively, so the two would be indistinguishable at ` +
+              `the call site.`,
+          );
+        }
+        seenNames.set(key, line);
+        heads.push({ name, headingLine: line });
+        currentSection = heads.length - 1;
+      }
+      // Depth >= 4 headings inside the span are inert prose, per the grammar.
+      continue;
+    }
+
+    if (!STEP_LINE_RE.test(raw)) continue;
+
+    // Replicate `extractSteps`' culls so the two passes stay index-aligned by
+    // construction: an item with no text, and a marker-only item, are dropped
+    // from both. (STEP_LINE_RE already requires a non-space after the number,
+    // so the first check only fires defensively.)
+    const text = raw.replace(/^\d+\.\s+/, '').trim();
+    if (!text) continue;
+    if (text.replace(NO_HOOKS_MARKER, '').trim() === '') continue;
+
+    entries.push({ line, raw: text, sectionIndex: currentSection });
   }
-  return out;
+
+  return { entries, heads };
 }
 
 /** Parse a list of "- key: value" items into a key-value map */

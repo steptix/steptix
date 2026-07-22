@@ -98,7 +98,8 @@
       "stepRawText": "   [no-hooks] Login",
       "expectedMatchText": { "name": "login", "step": "[no-hooks] login" },
       "matches": false,
-      "why": "Order is strip-then-trim, and the strip is anchored at ^. Cannot occur on a real document (inputs arrive trimmed); pinned so all six implementations agree on the order rather than each picking one."
+      "documentExpressible": false,
+      "why": "Order is strip-then-trim, and the strip is anchored at ^. Cannot occur on a real document (list parsing consumes the leading whitespace before matchText ever sees the text); pinned so all six implementations agree on the order rather than each picking one."
     },
     {
       "name": "bold step text",
@@ -114,6 +115,7 @@
       "stepRawText": "Login",
       "expectedMatchText": { "name": "login", "step": "login" },
       "matches": true,
+      "documentExpressible": false,
       "why": "matchText is applied to BOTH sides, so the marker strip runs on the heading too. Without this row an implementation could use plain trim()+toLowerCase() for map keys and pass all other rows. Such a name is refused at parse time ('[' prefix, contract §2.5), so this row pins the derivation only — like the leading-whitespace row above."
     },
     {

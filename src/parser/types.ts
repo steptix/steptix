@@ -100,6 +100,38 @@ export interface HookSourceSkills {
   after: (string | null)[];
 }
 
+/**
+ * An inline section: a named block of steps defined by a `### Name` heading
+ * inside `## Steps`, invoked by writing the bare name as a whole step. A
+ * section is a macro, not a function — it shares the scope of the frame that
+ * defines it and declares no parameters or outputs. See
+ * stories/test-script-sections.md and the cross-package contract in
+ * stories/test-script-sections-contract.md.
+ */
+export interface ParsedSection {
+  /** Name from the raw heading line (original casing, trimmed). Map keys are
+   *  `matchText(name)`; this field is for display and diagnostics. */
+  name: string;
+  /** 1-based line of the `### Name` heading in the raw file. */
+  headingLine: number;
+  /** Body steps, cleaned exactly like main-flow steps (for execution). */
+  steps: string[];
+  /**
+   * Raw body-step line text (number prefix stripped, trimmed) — the
+   * match-side input for bare-name calls nested inside this body. Parallel to
+   * `steps`.
+   *
+   * Not redundant with `steps`: the expander recursion runs over
+   * `applySkillScope` output and `extractPlainText`-normalised text, so
+   * without the raw parallel a formatted body line could wrongly resolve to a
+   * section. Match resolution uses `rawSteps?.[i] ?? steps[i]` (contract §2.1)
+   * so the server — which has no raw parallel — stays correct too.
+   */
+  rawSteps: string[];
+  /** 1-based raw-file line per body step, parallel to `steps`. */
+  stepLines: number[];
+}
+
 /** A single parsed test file */
 export interface ParsedTest {
   /** Absolute path to the .md file */
@@ -135,6 +167,31 @@ export interface ParsedTest {
    *  named (outermost) skill. Surfaced by the report so each step row
    *  shows which skill it originated from. */
   sourceSkills: (string | null)[];
+  /**
+   * Parallel to `steps` — when non-null, the step came from inside the named
+   * inline section. Set to the *outermost section that sits outside any skill
+   * frame*, i.e. a section of this file.
+   *
+   * A skill's own internal sections are never surfaced here — the skill badge
+   * already names what the author wrote, and skill-private names are noise in
+   * a test report. But a step inside one still reports the enclosing *test*
+   * section if there is one: for test → `### A` → skill S → S's `### B`, the
+   * answer is "A". Only a skill invoked from the root flow yields null.
+   * Both this and `sourceSkills` can be set at once.
+   */
+  sourceSections: (string | null)[];
+  /**
+   * Inline sections defined in this file, keyed by `matchText(name)`. Empty
+   * for files with no `### Name` heading inside `## Steps` — which is every
+   * file written before this feature.
+   */
+  sections: Record<string, ParsedSection>;
+  /**
+   * Parallel to the *pre-expansion* main-flow steps — the raw line text
+   * (number prefix stripped, trimmed) used as the match side when deciding
+   * whether a step is a section call. See `ParsedSection.rawSteps`.
+   */
+  rawSteps: string[];
   /** Pre/post-step hook instructions (skills already expanded). */
   hooks: TestHooks;
   /** Parallel to `hooks` — tool-call markers per hook instruction. */
@@ -163,6 +220,17 @@ export interface ParsedSkill {
    *  step-into protocol (Phase 1) to attribute each expanded step to its
    *  origin file+line inside the skill .md. */
   stepLines: number[];
+  /**
+   * Inline sections defined in this skill's own `## Steps`, keyed by
+   * `matchText(name)`. A skill body may define and invoke its own sections;
+   * they live inside that skill instance's scope, so `applySkillScope`
+   * transforms fresh copies of these bodies per invocation (never mutate the
+   * cached `ParsedSkill`).
+   */
+  sections: Record<string, ParsedSection>;
+  /** Parallel to `steps` — raw line text used as the match side for bare-name
+   *  calls in this skill's body. See `ParsedSection.rawSteps`. */
+  rawSteps: string[];
   /**
    * Skill-private named data-source files declared in frontmatter. Each
    * entry registers a placeholder namespace `${<name>.X.Y}` resolved locally

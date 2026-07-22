@@ -475,9 +475,11 @@ export async function runTest(
         });
 
         for (const result of branchedResults) {
-          // Tag with originating skill if any (result.index is 1-based).
+          // Tag with originating skill / section if any (result.index is 1-based).
           const branchSourceSkill = test.sourceSkills[result.index - 1] ?? null;
           if (branchSourceSkill) result.sourceSkill = branchSourceSkill;
+          const branchSourceSection = test.sourceSections[result.index - 1] ?? null;
+          if (branchSourceSection) result.sourceSection = branchSourceSection;
           stepResults.push(result);
           const url = session.page.url();
           conversationHistory.push(
@@ -692,6 +694,8 @@ export async function runTest(
       // flattened the call.
       const stepSourceSkill = test.sourceSkills[i] ?? null;
       if (stepSourceSkill) stepResult.sourceSkill = stepSourceSkill;
+      const stepSourceSection = test.sourceSections[i] ?? null;
+      if (stepSourceSection) stepResult.sourceSection = stepSourceSection;
 
       stepResults.push(stepResult);
       if (interactiveStep) {

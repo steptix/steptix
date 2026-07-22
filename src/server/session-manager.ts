@@ -228,7 +228,9 @@ export interface StepRequest {
 export interface FrameInfo {
   id: string;
   parentId: string | null;
-  kind: 'test' | 'skill';
+  /** `'section'` is an inline `### Name` block. `uri` is the file that
+   *  defines it and `skillName` carries the section name. */
+  kind: 'test' | 'skill' | 'section';
   uri: string;
   line: number;
   skillName?: string;

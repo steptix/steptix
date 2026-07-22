@@ -1,8 +1,9 @@
 import path from 'node:path';
 import { parseSkillFile } from '../parser/markdown.js';
 import { interpolate } from '../parser/parameters.js';
-import type { ParsedSkill } from '../parser/types.js';
+import type { ParsedSection, ParsedSkill } from '../parser/types.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
+import { matchInput, matchText, NO_HOOKS_MARKER } from '../parser/section-match.js';
 import { logger } from '../utils/logger.js';
 import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
 
@@ -16,6 +17,28 @@ const STORE_AS_RE = /\[store\s+as:\s*(\w+)\]/g;
 const PLACEHOLDER_RE = /\{\{(\w+)\}\}/g;
 
 const MAX_DEPTH = 10;
+
+/**
+ * Section definitions the expander can resolve bare-name calls against,
+ * keyed by `matchText(name)`.
+ *
+ * Deliberately structural rather than `Record<string, ParsedSection>`:
+ * `rawSteps` is **optional** here because the server's wire shape carries no
+ * such parallel (its steps already arrive raw). Both producers — the parser's
+ * `ParsedSection` and the wire entry — are assignable to this. Resolution
+ * uses `matchInput()`, which falls back to `steps[i]`, so an absent
+ * `rawSteps` is normal rather than degraded. See the contract §3.4.
+ */
+export type SectionDefs = Record<
+  string,
+  {
+    name: string;
+    headingLine: number;
+    steps: string[];
+    stepLines: number[];
+    rawSteps?: string[] | undefined;
+  }
+>;
 
 interface SkillCall {
   name: string;
@@ -40,7 +63,11 @@ interface SkillCall {
 export interface ExpandedFrame {
   id: string;
   parentId: string | null;
-  kind: 'test' | 'skill';
+  /** `'section'` is an inline `### Name` block. Its `uri` is the file that
+   *  DEFINES it (the test file, or the skill file for a skill-internal
+   *  section) and `skillName` carries the section name — the enclosing
+   *  skill, if any, is on the nearest ancestor frame with kind `'skill'`. */
+  kind: 'test' | 'skill' | 'section';
   uri: string;
   invocationLine: number | null;
   skillName?: string;
@@ -105,6 +132,17 @@ export interface ExpandedStepOrigin {
 export interface SkillExpansion {
   steps: string[];
   sourceSkills: (string | null)[];
+  /**
+   * Parallel to `steps` — the inline section each step came from, or null.
+   *
+   * Set to the outermost section frame that sits *outside any skill frame*,
+   * i.e. a section of the root file. A step inside a skill's own internal
+   * section is tagged with the enclosing test-file section (if any), never
+   * with the skill-private section name: the skill badge already names what
+   * the author wrote, and skill-internal names are noise in a test report.
+   * Both this and `sourceSkills` can be set for the same step.
+   */
+  sourceSections: (string | null)[];
   origins: ExpandedStepOrigin[];
   frames: Record<string, ExpandedFrame>;
 }
@@ -120,7 +158,10 @@ export interface SkillExpansion {
  */
 export async function expandSkills(
   steps: string[],
-  skillsDir: string,
+  /** Directory containing `*.md` skill files. Optional: a project may define
+   *  inline sections and no skills at all. A `[skill: ...]` call encountered
+   *  without one throws a clean error naming the missing config. */
+  skillsDir: string | undefined,
   envCtx?: EnvDataContext,
   callerFilePath?: string,
   /** Per-step line numbers parallel to `steps`, pulled from the test
@@ -131,20 +172,51 @@ export async function expandSkills(
    *  `[skill: ...]` row). Optional: legacy callers and tests that don't
    *  care about line attribution can omit it. */
   sourceLines?: number[],
+  /** Inline-sections support. Trailing and optional so every existing
+   *  positional call site compiles unchanged. */
+  opts?: {
+    /** Sections defined in the file `steps` came from. */
+    sections?: SectionDefs | undefined;
+    /** Raw (match-side) text parallel to `steps`. See `matchInput`. */
+    rawSteps?: string[] | undefined;
+    /**
+     * Emit a `logger.warn` for each section defined but never invoked.
+     * Defaults to true. The server passes false on its cache-hash expansion
+     * and derives it from batch shape on the execution one, so a single dead
+     * section doesn't warn once per expansion site per batch.
+     */
+    warnDeadSections?: boolean | undefined;
+  },
 ): Promise<SkillExpansion> {
   const frames: Record<string, ExpandedFrame> = {};
+  const sections = opts?.sections ?? {};
   const ctx: ExpandContext = {
     skillsDir,
     seq: { n: 0 },
     frames,
+    sections,
+    sectionsFilePath: callerFilePath ?? '<inline>',
+    warnDeadSections: opts?.warnDeadSections ?? true,
+    deadScanned: new Set(),
+    insideSkill: false,
     ...(envCtx && { envCtx }),
     ...(callerFilePath && { callerFilePath }),
+    ...(opts?.rawSteps && { rawSteps: opts.rawSteps }),
   };
+
+  reportDeadSections(
+    ctx,
+    ctx.sectionsFilePath,
+    sections,
+    { steps, ...(opts?.rawSteps && { rawSteps: opts.rawSteps }) },
+  );
+
   const result = await expandRecursive(
     steps,
     ctx,
     new Set(),
     0,
+    null,
     null,
     '',
     null,
@@ -153,8 +225,72 @@ export async function expandSkills(
   return { ...result, frames };
 }
 
+/**
+ * Warn once per file about sections that are defined but never invoked.
+ *
+ * "Invoked" is a flat textual scan: any step anywhere in the same file — main
+ * flow or *any* section body, including a body that is itself never invoked —
+ * whose match text equals the name counts as a call site. Hook entries never
+ * count (they are expanded with no sections map at all).
+ *
+ * This is the author's rename-drift tripwire. Renaming a section without
+ * updating its call site is not an error — the orphaned call quietly degrades
+ * into an ordinary AI instruction — so this warning is what surfaces it.
+ *
+ * Lives in the expander rather than in skill parsing because the server clears
+ * the skill cache at the top of every batch, which would re-fire a parse-time
+ * warning once per batch. Deduped per `expandSkills` call via `ctx.deadScanned`.
+ */
+function reportDeadSections(
+  ctx: ExpandContext,
+  filePath: string,
+  sections: SectionDefs,
+  mainList: { steps: string[]; rawSteps?: string[] | undefined },
+): void {
+  if (!ctx.warnDeadSections) return;
+  if (Object.keys(sections).length === 0) return;
+  if (ctx.deadScanned.has(filePath)) return;
+  ctx.deadScanned.add(filePath);
+
+  const invoked = new Set<string>();
+  const collect = (list: { steps: string[]; rawSteps?: string[] | undefined }): void => {
+    for (let i = 0; i < list.steps.length; i++) {
+      invoked.add(matchText(matchInput(list, i)));
+    }
+  };
+  collect(mainList);
+  for (const section of Object.values(sections)) collect(section);
+
+  for (const [key, section] of Object.entries(sections)) {
+    if (!invoked.has(key)) {
+      logger.warn(
+        `Section "${section.name}" in ${filePath} is defined but never ` +
+          `invoked (line ${section.headingLine}). If a step was meant to call ` +
+          `it, the names no longer match — a call site that doesn't resolve ` +
+          `runs as an ordinary instruction instead.`,
+      );
+    }
+  }
+}
+
 interface ExpandContext {
-  skillsDir: string;
+  skillsDir: string | undefined;
+  /** Sections visible to the step list currently being expanded. Swapped for
+   *  the skill's own (scoped) map when recursing into a skill; kept as-is
+   *  when recursing into a section body, so a section can call its siblings. */
+  sections: SectionDefs;
+  /** Absolute path of the file `sections` came from. Namespaces section cycle
+   *  keys so two files' same-named sections never collide in `visited`. */
+  sectionsFilePath: string;
+  /** Match-side text parallel to the step list currently being expanded. */
+  rawSteps?: string[] | undefined;
+  /** See the `opts.warnDeadSections` docstring on `expandSkills`. */
+  warnDeadSections: boolean;
+  /** Files already scanned for dead sections in this `expandSkills` call. */
+  deadScanned: Set<string>;
+  /** True once the recursion is inside any skill frame. Gates the
+   *  `sourceSections` rule: a skill's internal sections never become the tag. */
+  insideSkill: boolean;
   /**
    * Monotonic counter producing unique frame ids and unique prefixes for
    * internal capture names.
@@ -199,6 +335,10 @@ async function expandRecursive(
    *  the outermost skill the caller invoked. `null` at the top level
    *  (inline steps from the test file). */
   sourceSkill: string | null,
+  /** When non-null, every emitted step is tagged with this section name —
+   *  the outermost section frame outside any skill. `null` at the top level
+   *  and for everything inside a skill's own internal sections. */
+  sourceSection: string | null,
   /** Frame id of the calling scope. `''` at the top level (test frame). */
   parentFrameId: string,
   /** Lookup `inputIndex` to attribute every step we emit to a caller-scope
@@ -216,14 +356,94 @@ async function expandRecursive(
 
   const out: string[] = [];
   const sources: (string | null)[] = [];
+  const sourceSecs: (string | null)[] = [];
   const origins: ExpandedStepOrigin[] = [];
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
     const call = parseSkillCall(step);
+
+    // Resolution order: a bracket token is claimed first and is never a
+    // section call, however its text compares. Only plain-text steps reach
+    // the bare-name test below.
     if (!call) {
+      const section = resolveSection(ctx, steps, i);
+      if (section) {
+        const cycleKey = sectionCycleKey(ctx.sectionsFilePath, section.name);
+        if (visited.has(cycleKey)) {
+          throw new Error(
+            `Section cycle detected: ${[...visited]
+              .map(describeCycleKey)
+              .concat(section.name)
+              .join(' -> ')}`,
+          );
+        }
+        if (section.steps.length === 0) {
+          throw new Error(
+            `Section "${section.name}" in ${ctx.sectionsFilePath} is invoked ` +
+              `at line ${stepLines?.[i] ?? '?'} but has no steps.`,
+          );
+        }
+
+        const instanceId = ++ctx.seq.n;
+        const newFrameId = `f${instanceId}`;
+        ctx.frames[newFrameId] = {
+          id: newFrameId,
+          parentId: parentFrameId === '' ? null : parentFrameId,
+          kind: 'section',
+          // The file that DEFINES the section: the test file for a test-file
+          // section, the skill file for a skill-internal one.
+          uri: ctx.sectionsFilePath,
+          invocationLine: stepLines?.[i] ?? null,
+          // Field reused for the section name; the enclosing skill (if any)
+          // is on the nearest ancestor frame with kind 'skill'.
+          skillName: section.name,
+        };
+
+        // A section is a macro: it shares the caller's scope, so there is no
+        // scope pass here and `ctx` carries through unchanged. The body may
+        // call sibling sections, so the sections map stays put — only the
+        // match-side array swaps to this body's own.
+        const bodyCtx: ExpandContext = {
+          ...ctx,
+          ...(section.rawSteps
+            ? { rawSteps: section.rawSteps }
+            : { rawSteps: undefined }),
+        };
+        // Strip a leading `[no-hooks]` from each body step as it is inlined.
+        // The CLI parser already stripped these, but the wire shape carries
+        // markers verbatim (the client can't strip them — they are part of
+        // the match side), so without this the literal marker text would
+        // reach the AI on the server path only. A marker on a body step is
+        // stripped and ignored either way: it is the *invocation's* marker
+        // that opts the whole body out, via origin mapping.
+        const bodySteps = section.steps.map((s) => s.replace(NO_HOOKS_MARKER, ''));
+
+        const recursed = await expandRecursive(
+          bodySteps,
+          bodyCtx,
+          new Set([...visited, cycleKey]),
+          depth + 1,
+          sourceSkill,
+          // Outermost-wins, and only outside a skill: a step in a skill's
+          // internal section keeps the enclosing test-file section's tag
+          // (or null), never the skill-private name.
+          ctx.insideSkill ? sourceSection : (sourceSection ?? section.name),
+          newFrameId,
+          attribInputIndex ?? i,
+          section.stepLines,
+        );
+
+        out.push(...recursed.steps);
+        sources.push(...recursed.sourceSkills);
+        sourceSecs.push(...recursed.sourceSections);
+        origins.push(...recursed.origins);
+        continue;
+      }
+
       out.push(step);
       sources.push(sourceSkill);
+      sourceSecs.push(sourceSection);
       // Inline-emit attribution: at top level the caller is the test
       // (inputIndex = our own index, no skill origin); inside a skill body
       // we record the skill's file + its own per-step line.
@@ -246,6 +466,14 @@ async function expandRecursive(
       );
     }
 
+    if (ctx.skillsDir === undefined) {
+      throw new Error(
+        `Step "${step}" invokes a skill, but no skills directory is ` +
+          `configured. Set \`tests.skillsDir\` in aiui.config.json (or pass ` +
+          `\`skillsDir\`) so \`[skill: ...]\` references can be resolved.`,
+      );
+    }
+
     let skill: ParsedSkill;
     try {
       skill = await loadSkill(ctx.skillsDir, call.name, ctx.envCtx);
@@ -259,8 +487,14 @@ async function expandRecursive(
     }
     validateCall(skill, call);
 
+    // The skill's own dead sections are scanned against its AUTHORED text —
+    // before `applySkillScope` interpolates anything — so this warning and
+    // the editor's "never used" diagnostic can never disagree.
+    reportDeadSections(ctx, skill.filePath, skill.sections, skill);
+
     const instanceId = ++ctx.seq.n;
-    const expandedBody = applySkillScope(skill, call, instanceId);
+    const scoped = applySkillScope(skill, call, instanceId);
+    const expandedBody = scoped.steps;
     const newFrameId = `f${instanceId}`;
 
     // Record this frame's identity for the server to look up on transitions.
@@ -293,6 +527,12 @@ async function expandRecursive(
       ...ctx,
       currentSkillFilePath: skill.filePath,
       currentSkillName: call.name,
+      // Swap in the skill's own sections — scoped for THIS invocation — so a
+      // bare-name step in its body resolves against them and not the caller's.
+      sections: scoped.sections,
+      sectionsFilePath: skill.filePath,
+      rawSteps: scoped.rawSteps,
+      insideSkill: true,
     };
     const recursed = await expandRecursive(
       expandedBody,
@@ -300,6 +540,9 @@ async function expandRecursive(
       new Set([...visited, call.name]),
       depth + 1,
       sourceSkill ?? call.name,
+      // A skill invoked from inside a test-file section keeps that section's
+      // tag, so a step can carry both a skill and a section badge.
+      sourceSection,
       newFrameId,
       // Inside a skill body, every emitted step is attributed to the
       // [skill: ...] invocation at the current level — that's `i` here.
@@ -309,10 +552,43 @@ async function expandRecursive(
 
     out.push(...recursed.steps);
     sources.push(...recursed.sourceSkills);
+    sourceSecs.push(...recursed.sourceSections);
     origins.push(...recursed.origins);
   }
 
-  return { steps: out, sourceSkills: sources, origins };
+  return { steps: out, sourceSkills: sources, sourceSections: sourceSecs, origins };
+}
+
+/** Cycle key for a section. Namespaced by file so two files' same-named
+ *  sections never collide, and prefixed so a section can never collide with
+ *  a skill name in the same `visited` set. */
+function sectionCycleKey(filePath: string, name: string): string {
+  return `section:${filePath}#${matchText(name)}`;
+}
+
+/** Render a cycle key for the error message — skills are bare names. */
+function describeCycleKey(key: string): string {
+  return key.startsWith('section:') ? (key.split('#')[1] ?? key) : key;
+}
+
+/**
+ * Resolve step `i` of `steps` to a section, or null.
+ *
+ * The match side is the raw authored text (`matchInput`), never the step
+ * string on its own: by the time the recursion sees a skill body, `steps[i]`
+ * has been through `extractPlainText` and `applySkillScope`, so a line
+ * authored as `{{target}}` would otherwise resolve against its interpolated
+ * value rather than what is on the page.
+ */
+function resolveSection(
+  ctx: ExpandContext,
+  steps: string[],
+  i: number,
+): SectionDefs[string] | null {
+  const keys = Object.keys(ctx.sections);
+  if (keys.length === 0) return null;
+  const key = matchText(matchInput({ steps, rawSteps: ctx.rawSteps }, i));
+  return ctx.sections[key] ?? null;
 }
 
 /**
@@ -418,26 +694,54 @@ function validateCall(skill: ParsedSkill, call: SkillCall): void {
 
 /**
  * Apply parameter interpolation, output aliasing, and internal-name
- * namespacing to a skill's step list. Returns step strings ready for
- * recursion (they may still contain nested `[skill: ...]` calls).
+ * namespacing to a skill's step list and to its own inline sections. Returns
+ * strings ready for recursion (they may still contain nested `[skill: ...]`
+ * calls or bare-name section calls).
+ *
+ * Section bodies are transformed on **fresh copies**: the `ParsedSkill` comes
+ * from `skillCache` and is shared across every invocation of that skill, so
+ * mutating it in place would let a second invocation inherit the first's
+ * arguments.
+ *
+ * `rawSteps` is deliberately NOT transformed. The match side stays the text
+ * as authored, so section resolution is decidable from the file alone.
+ *
+ * The alternative — matching post-interpolation — would let a step written
+ * `1. {{target}}`, invoked with `target="Login"`, dispatch to `### Login`.
+ * Tempting, but it breaks the editor/runtime agreement this feature is built
+ * on: go-to-definition, document links and the "never used" diagnostic all
+ * work on static text, so that call site would render with no link and its
+ * target would be reported dead — while the runtime called it anyway. Exactly
+ * the silent divergence inline sections exist to remove.
+ *
+ * Renames are safe to omit here for the same reason they cannot matter: they
+ * only ever rewrite `{{X}}` placeholders and `[store as: X]` directives, and
+ * a section name may contain neither (`{{` and a leading `[` are both refused
+ * at parse time), so no rename can create or destroy a match.
  */
 function applySkillScope(
   skill: ParsedSkill,
   call: SkillCall,
   instanceId: number,
-): string[] {
+): { steps: string[]; rawSteps: string[]; sections: SectionDefs } {
   const paramNames = new Set(Object.keys(skill.parameters));
   const outputNames = new Set(skill.outputs);
 
   // Discover every variable name the skill body uses, via {{X}} or [store as: X].
+  // Section bodies are scanned too, or an internal variable used *only* inside
+  // a section would escape namespacing and leak into the caller's scope.
   const usedNames = new Set<string>();
-  for (const step of skill.steps) {
+  const scanForNames = (step: string): void => {
     for (const m of step.matchAll(PLACEHOLDER_RE)) {
       if (m[1]) usedNames.add(m[1]);
     }
     for (const m of step.matchAll(STORE_AS_RE)) {
       if (m[1]) usedNames.add(m[1]);
     }
+  };
+  for (const step of skill.steps) scanForNames(step);
+  for (const section of Object.values(skill.sections)) {
+    for (const step of section.steps) scanForNames(step);
   }
 
   // Names that must be rewritten to a per-instance internal name.
@@ -454,7 +758,7 @@ function applySkillScope(
     if (alias && alias !== output) outputRenames.set(output, alias);
   }
 
-  return skill.steps.map((step) => {
+  const apply = (step: string): string => {
     let s = step;
 
     // 1. Apply output aliases first so subsequent rewrites don't clash.
@@ -471,7 +775,26 @@ function applySkillScope(
     s = interpolate(s, call.args);
 
     return s;
-  });
+  };
+
+  const sections: SectionDefs = {};
+  for (const [key, section] of Object.entries(skill.sections)) {
+    sections[key] = {
+      name: section.name,
+      headingLine: section.headingLine,
+      steps: section.steps.map(apply),
+      // Copied, not transformed — see the docstring. Fresh arrays either way:
+      // the ParsedSkill is shared via skillCache and must never be mutated.
+      rawSteps: [...section.rawSteps],
+      stepLines: [...section.stepLines],
+    };
+  }
+
+  return {
+    steps: skill.steps.map(apply),
+    rawSteps: [...skill.rawSteps],
+    sections,
+  };
 }
 
 /** Rename a variable in both `{{X}}` placeholders and `[store as: X]` directives. */

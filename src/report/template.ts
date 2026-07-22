@@ -177,6 +177,10 @@ export function getReportTemplate(): string {
     /* Source-skill chip — origin of an expanded step */
     .badge-skill { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .badge-skill::before { content: 'skill: '; opacity: 0.6; }
+    /* Inline-section chip — a "### Name" block within the test file. Distinct
+       from .badge-skill because the prefix below is baked into the rule. */
+    .badge-section { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+    .badge-section::before { content: 'section: '; opacity: 0.6; }
 
     /* Tool-step block — surfaces deterministic tool invocation details */
     .tool-block { margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: #f5f3ff; border: 1px solid #ddd6fe; }

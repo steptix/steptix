@@ -211,23 +211,35 @@ culled, from both arrays, by both passes — the section-aware raw scan
 replicates `extractSteps`' cull so the parallel arrays stay aligned by
 construction.
 
-**Skill-section scoping — which transforms touch `rawSteps`.** The two
-transforms that act on a skill's section bodies deliberately differ, and the
-asymmetry is load-bearing:
+**Skill-section scoping — no transform touches `rawSteps`.** Both transforms
+that act on a skill's section bodies map `steps` only:
 
 | Transform | When | `steps` | `rawSteps` |
 |---|---|---|---|
-| `applySkillScope` (aliases, `__skill<N>_` renames, caller-arg interpolation) | per invocation, on **fresh copies** | ✅ | ✅ |
+| `applySkillScope` (aliases, `__skill<N>_` renames, caller-arg interpolation) | per invocation, on **fresh copies** | ✅ | ❌ |
 | `applySkillEnvDataInterpolation` (`${env.X}`, `${source.X}`) | once at parse time | ✅ | ❌ |
 
-`applySkillScope` transforms **both** — this is exactly what the `{{`-in-name
-ban assumes ("heading keys are data, so a `{{`-containing name would silently
-stop matching after interpolation"), and it is what makes the §2.3
-discriminator bite. The parse-time env/data pass maps `steps` only, per the
-language story. Net effect: a `{{param}}` in a call line participates in
-matching after interpolation; a `${env.X}` does not. **Pin both with tests** —
-this asymmetry is the kind of thing that gets "tidied" into consistency by a
-later reader.
+**The match side is always the text as authored.** Section resolution must be
+decidable from the file alone, because the authoring layer — go-to-definition,
+document links, the "never used" diagnostic — has nothing else to work with.
+
+Matching post-interpolation would let `1. {{target}}`, invoked with
+`target="Login"`, dispatch to `### Login`. That call site would render with no
+link and its target would be reported dead, while the runtime called it
+anyway: exactly the editor/runtime divergence this feature exists to remove.
+So it is refused, and the §2.3 discriminator is what pins the refusal.
+
+Renames cannot matter here even in principle: they rewrite only `{{X}}`
+placeholders and `[store as: X]` directives, and a section name may contain
+neither (`{{` and a leading `[` are both refused at parse time), so no rename
+can create or destroy a match.
+
+*Note:* this supersedes the language story's stated rationale for the
+`{{`-in-name ban ("the call would silently stop matching after
+interpolation") — with an untransformed match side, a `{{`-containing name
+would in fact match consistently. Keep the ban anyway: a name that looks like
+it interpolates but doesn't is a trap, and banning it keeps one rule instead
+of an exception.
 
 `usedNames` discovery scans the skill's `steps` **and** every
 `sections[*].steps`, so an internal variable used only inside a section body
@@ -409,9 +421,12 @@ export function buildSectionIndex(text: string): SectionIndex;
 
 // src/server/session-manager.ts — frame-based twin of the expander's
 // sourceSections rule: the outermost section frame that sits OUTSIDE any
-// skill frame. Returns undefined for a skill's internal sections.
-// For test -> section A -> skill S -> section B, a step in B yields
-// undefined: B is inside a skill frame, so the walk stops at S.
+// skill frame. A skill's own internal sections are never the answer.
+// For test -> section A -> skill S -> section B, a step in B yields "A":
+// B is skill-private and skipped, but A sits outside every skill frame and
+// is what the test author actually wrote. (Only a skill invoked from the
+// root flow yields undefined.) This is what keeps the documented
+// both-badges case true — a step can carry skill S and section A at once.
 function outermostSectionName(
   frameId: string,
   frames: Record<string, FrameInfo>,
@@ -565,8 +580,9 @@ Before opening any PR that touches sections:
 - [ ] the wire shape matches §3.2 exactly, including the absence of `rawSteps`
 - [ ] `opts.sections` is typed `SectionDefs` (§3.4), not
       `Record<string, ParsedSection>`
-- [ ] `applySkillScope` transforms section `steps` **and** `rawSteps` on fresh
-      copies; the env/data pass transforms `steps` only (§3.1) — both pinned
+- [ ] `applySkillScope` transforms section `steps` on fresh copies and leaves
+      `rawSteps` untransformed; the env/data pass likewise maps `steps` only
+      (§3.1) — the authored-text match side is pinned by the §2.3 scenario
 - [ ] the §3.1 cull rule drops empty-after-strip items from all three arrays,
       and `extractSections` culls the same way
 

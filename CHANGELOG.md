@@ -6,6 +6,58 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — inline sections (CLI)
+
+A `### Name` heading inside `## Steps` now defines a named block of steps,
+invoked by writing the bare name as a whole step:
+
+```markdown
+## Steps
+1. Login
+2. Buy something
+
+### Login
+1. Go to the login page
+2. Type "{{username}}"
+3. Click Sign in
+```
+
+A section is a macro, not a function: it shares the scope of whatever defines
+it, declares no parameters or outputs, and expands inline at parse time — the
+runner sees a flat step list, exactly as it does for skills. Sections may
+invoke other sections and skills; skill files may define and invoke their own.
+Reports badge section-expanded steps with a `section:` chip, alongside the
+skill chip rather than instead of it.
+
+Matching is on the raw text as authored, case-insensitively: `1. **Login**`
+does *not* invoke `### Login`, and neither does `Login.`. Names that are
+reserved H2 keywords, begin with `[`, contain `{{`, are empty, or duplicate an
+earlier name are refused at parse time. A section that is never invoked
+produces a warning — the tripwire for a call site left behind by a rename.
+
+**This release covers the CLI only.** TestBench does not yet understand
+sections and will mis-run a sectioned file; the syntax stays undocumented
+until the extensions land.
+
+### Changed — `[no-hooks]` on a skill invocation now covers the whole body
+
+`parseTestFile` padded the `skipHooks` array to the expanded step count
+instead of remapping it through expansion origins, so `[no-hooks] [skill:
+multi_step]` applied to roughly the first expanded step and left the rest
+hook-wrapped. It now covers every step the invocation expands to — the
+behaviour the hooks story always described. Sections made this the common case
+rather than an edge one.
+
+### Changed — expansion now runs for files that define sections
+
+`parseTestFile` expanded only when `skillsDir` was set. It now also expands
+when the file defines sections, so a project with no skills directory still
+resolves bare-name calls. Consequence for direct `parseTestFile` consumers: in
+a **sectioned** file parsed without `skillsDir`, a `[skill: ...]` step that
+previously shipped to the AI as raw text now raises a clear error naming the
+missing configuration. Sectionless files without `skillsDir` are unchanged,
+and the CLI always passes its `./skills` default.
+
 ### Fixed — skill frame ids and internal variable namespaces could collide
 
 `expandSkills` minted duplicate instance ids whenever a **nested** skill call

@@ -338,10 +338,17 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ? `<span class="badge badge-skill" title="Step expanded from skill ${escapeHtml(step.sourceSkill)}">${escapeHtml(step.sourceSkill)}</span>`
     : '';
 
+  // Alongside the skill chip, not instead of it: a skill invoked from inside
+  // a section carries both.
+  const sourceSectionBadge = step.sourceSection
+    ? `<span class="badge badge-section" title="Step expanded from inline section ${escapeHtml(step.sourceSection)}">${escapeHtml(step.sourceSection)}</span>`
+    : '';
+
   return `<div class="step${childStepClass}">
   <div class="step-header">
     <span class="step-number">${escapeHtml(stepNumberLabel)}</span>
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
+    ${sourceSectionBadge}
     ${sourceSkillBadge}
     ${retryBadge}
     <span class="step-duration">${duration}</span>

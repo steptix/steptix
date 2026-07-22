@@ -158,6 +158,11 @@ export interface StepResult {
    *  chip in the step header so the report shows skill provenance even after
    *  parse-time expansion has flattened the call away. */
   sourceSkill?: string;
+  /** Name of the inline `### Name` section this step came from, if any.
+   *  Rendered as a chip *alongside* the skill chip, not instead of it — a
+   *  skill invoked from inside a section carries both. Sections private to a
+   *  skill are not surfaced here; see `SkillExpansion.sourceSections`. */
+  sourceSection?: string;
   /** True when this is the step that was in flight when the user STOPPED the run
    *  (issue 021). The report renders it as a distinct "aborted" state — not a red
    *  failure — and it's excluded from the failed-step count. `status` stays a
