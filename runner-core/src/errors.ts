@@ -27,6 +27,8 @@ export type ErrorCode =
   | 'TB024'
   | 'TB025'
   | 'TB026'
+  | 'TB027'
+  | 'TB028'
   | 'TB030'
   | 'TB031';
 
@@ -70,6 +72,14 @@ export interface ErrorContextMap {
   TB024: { detail: string };
   TB025: Record<string, never>;
   TB026: Record<string, never>;
+  /** A foreign service answered SERVER_URL. `service` is what it called
+   *  itself, verbatim — naming it is what turns "the run failed" into "you
+   *  pointed at Grafana". */
+  TB027: { serverUrl: string; service: string };
+  /** Auto-start failed. `reason` distinguishes the two ways it can (spawn
+   *  refused up front vs never became healthy); `logPath` is where to look
+   *  and `logTail` the last few lines when cheaply available. */
+  TB028: { serverUrl: string; reason: string; logPath?: string; logTail?: string };
   TB030: Record<string, never>;
   TB031: Record<string, never>;
 }
@@ -119,7 +129,10 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   }),
   TB010: (ctx) => ({
     diagnosis: `Cannot reach the ai-ui-automation server at ${ctx.serverUrl} (${ctx.reason})`,
-    fix: "Start the server (run 'npx tsx src/index.ts serve' in the ai-ui-automation repo) and confirm it's listening on the host and port in SERVER_URL. If running on another machine, check the firewall.",
+    fix:
+      "Start the server (run 'npx tsx src/index.ts serve' in the ai-ui-automation repo) and confirm it's listening on the host and port in SERVER_URL. " +
+      'If running on another machine, check the firewall. ' +
+      'To have TestBench start it for you, configure "testbench-native.serverAutoStart.command" and ".cwd" in your user settings.',
     actions: [{ label: 'Show Run Log', command: 'testbench.showRunLog' }],
   }),
   TB011: (ctx) => ({
@@ -162,6 +175,22 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   TB026: () => ({
     diagnosis: 'This test uses inline sections, which this editor cannot run',
     fix: 'Run it with the TestBench (Native) extension or the `aiui run` CLI — this variant would send the bare section-call step to the AI instead of expanding it.',
+  }),
+  // TB027 / TB028 carry no `actions`. Neither variant's UI renders that field
+  // today, and these two codes are emitted only by the native variant — a
+  // button no one draws, in the namespace of only one of the two extensions,
+  // would be worse than putting the pointer in `fix`, which IS rendered.
+  TB027: (ctx) => ({
+    diagnosis: `${ctx.serverUrl} responds, but it is not an ai-ui-automation server (it identifies as "${ctx.service}")`,
+    fix: 'Point SERVER_URL at the ai-ui-automation server, or stop the other process holding that port. TestBench will not start a server on top of one it does not recognise.',
+  }),
+  TB028: (ctx) => ({
+    diagnosis:
+      `Could not auto-start the ai-ui-automation server for ${ctx.serverUrl} — ${ctx.reason}` +
+      (ctx.logTail ? `. Last log lines: ${ctx.logTail}` : ''),
+    fix: ctx.logPath
+      ? `Check the server log at ${ctx.logPath} (command "TestBench: Show Server Log"), then fix "testbench-native.serverAutoStart.command" / "testbench-native.serverAutoStart.cwd" in your USER settings — or start the server yourself.`
+      : 'Set "testbench-native.serverAutoStart.command" and "testbench-native.serverAutoStart.cwd" in your USER settings (they are machine-scoped and cannot be set per workspace) — or start the server yourself.',
   }),
   TB030: () => ({
     diagnosis: 'TestBench needs an open folder so it can resolve .env',

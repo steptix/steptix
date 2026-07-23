@@ -31,6 +31,19 @@ import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
 import { buildSectionsPayload, preflightSections, sectionedSkillRefusal } from './sections.js';
+import {
+  decideServerAction,
+  defaultHealthProbe,
+  defaultServerSpawner,
+  isLoopbackUrl,
+  readAutoStartSettings,
+  startServerAndWait,
+  HEALTH_PROBE_TIMEOUT_MS,
+  type AutoStartConfig,
+  type AutoStartGuard,
+  type HealthProbe,
+  type ServerSpawner,
+} from './server-manager.js';
 
 /**
  * Subset of the ApiClient surface we depend on. Defining it lets tests
@@ -78,6 +91,21 @@ export type ApiClientFactory = (config: { serverUrl: string; apiKey: string }) =
 
 /** Default factory — the real one. */
 export const defaultApiClientFactory: ApiClientFactory = (config) => new ApiClient(config);
+
+/**
+ * Keep-alive cadence while paused at a breakpoint (§3). Comfortably under any
+ * sane idle timeout (the suggested one is 60 minutes) while costing one cheap
+ * authenticated GET per interval.
+ */
+const KEEP_ALIVE_INTERVAL_MS = 5 * 60_000;
+
+/** Outcome of the pre-run server phase. `proceed` covers both "it's ours" and
+ *  the legacy/skip paths — from the run's point of view they are the same
+ *  instruction, and only the log line differs. */
+type ServerReadiness =
+  | { kind: 'proceed' }
+  | { kind: 'aborted' }
+  | { kind: 'fail'; payload: ErrorPayload };
 
 /** Outcome reported back to callers — used by tests + commands. */
 export interface RunOutcome {
@@ -249,6 +277,18 @@ export class RunController {
    *  `.env`. Null before the first run, when `resolveClient` falls back to disk. */
   private lastRunServerUrl: string | null = null;
   private lastRunApiKey: string | null = null;
+  /**
+   * `inspector` from the pre-run health probe, run-scoped like
+   * `currentServerUrl`. Three distinct states, and §7 treats each differently:
+   *   - a ws:// URL ⇒ attach there;
+   *   - `null`      ⇒ the server HAS no inspector; do not attach blindly;
+   *   - `undefined` ⇒ no health data at all (legacy server) ⇒ settings fallback.
+   * `undefined` is therefore NOT a synonym for null and must survive as its
+   * own value.
+   */
+  private currentInspectorUrl: string | null | undefined = undefined;
+  /** Timer pinning the server while this run is paused at a breakpoint. */
+  private keepAliveTimer: ReturnType<typeof setInterval> | undefined;
 
   /** Latest variable scope emitted by `frame:scope` per frame id. The
    *  test (root) frame uses key '' to match the server-side convention.
@@ -298,7 +338,48 @@ export class RunController {
      */
     private readonly pollSleep: (ms: number) => Promise<void> = (ms) =>
       new Promise((resolve) => setTimeout(resolve, ms)),
+    /**
+     * Server-lifecycle collaborators (story server-lifecycle §5), grouped
+     * rather than appended as three more positionals — the parameter list was
+     * already long enough that both call sites had to pass `undefined`
+     * placeholders to reach past `pollSleep`.
+     *
+     * `healthProbe`/`spawnServer` are injected rather than called directly
+     * because the electron harness fakes the server through `clientFactory`;
+     * a raw `fetch` or a real spawn in the run path would escape the fake.
+     */
+    private readonly server: {
+      healthProbe?: HealthProbe;
+      spawnServer?: ServerSpawner;
+      /** Absolute path of the rolling log a spawned child writes to
+       *  (`<globalStorage>/server.log`). Absent ⇒ auto-start is unavailable,
+       *  since there would be nowhere to send the child's output — and that
+       *  output is the only diagnosis a failed start leaves behind. */
+      logPath?: () => string;
+      /** Breakpoint-pause keep-alive cadence. Injectable so a test can assert
+       *  the PING, not merely that a timer exists — an empty interval body
+       *  would otherwise pass while the idle shutdown reaped the session the
+       *  user was paused in. */
+      keepAliveIntervalMs?: number;
+      /** Shared across every controller (the registry owns one), so a failed
+       *  auto-start is not retried once per test in a batch run. */
+      autoStartGuard?: AutoStartGuard;
+      /** Cadence of the spawn health poll. Its own knob rather than reusing
+       *  `pollSleep` (the post-stop report backoff): those are unrelated
+       *  concerns, and a test that made the report poll instant — which its
+       *  own doc comment invites — would silently turn this into a
+       *  wall-clock-bounded busy-spin issuing thousands of probes. */
+      pollSleep?: (ms: number) => Promise<void>;
+    } = {},
   ) {}
+
+  private get healthProbe(): HealthProbe {
+    return this.server.healthProbe ?? defaultHealthProbe;
+  }
+
+  private get spawnServer(): ServerSpawner {
+    return this.server.spawnServer ?? defaultServerSpawner;
+  }
 
   get isRunning(): boolean {
     return this.active !== null;
@@ -636,6 +717,241 @@ export class RunController {
     }
   }
 
+  /** `inspector` reported by the pre-run health probe. See the field's doc
+   *  for why `null` and `undefined` are different answers. */
+  get inspectorUrl(): string | null | undefined {
+    return this.currentInspectorUrl;
+  }
+
+  /** Test-only: is the breakpoint-pause keep-alive armed? A leaked timer
+   *  would pin the server open indefinitely, which no assertion on a 5-minute
+   *  interval could catch in a test. */
+  get keepAliveActive(): boolean {
+    return this.keepAliveTimer !== undefined;
+  }
+
+  /**
+   * Pre-run server check + auto-start (story server-lifecycle §5).
+   *
+   * Runs after env resolution has produced SERVER_URL and before any session
+   * is created. The run's AbortController already exists, so Stop cancels a
+   * wedged health wait or spawn poll — and an abort during this phase is an
+   * `aborted` run, never a TB028.
+   *
+   * The full decision tree, in order:
+   *   2. healthy + service matches ⇒ proceed, remember `inspector`.
+   *   3. service mismatch          ⇒ TB027. Never spawn on a foreign port.
+   *   4. reachable, unidentifiable ⇒ proceed on the LEGACY path. An older
+   *      aiui server whose Express 404s /health is indistinguishable from a
+   *      foreign one by this probe, so we neither spawn nor refuse; the
+   *      authenticated calls that follow sort it out via the TB01x mapping.
+   *   5. down, but remote / unconfigured ⇒ proceed and let the existing
+   *      TB010 path report it (with the new settings hint).
+   *   6. down + localhost + configured  ⇒ spawn, then poll until healthy.
+   *
+   * Returns `null` to proceed, or an ErrorPayload the caller fails the run
+   * with. `aborted: true` means the user pressed Stop mid-phase.
+   */
+  private async ensureServerReady(args: {
+    serverUrl: string;
+    signal: AbortSignal;
+    log: (line: string) => void;
+  }): Promise<ServerReadiness> {
+    const { serverUrl, signal, log } = args;
+    this.currentInspectorUrl = undefined;
+
+    const probe = await this.healthProbe(serverUrl, HEALTH_PROBE_TIMEOUT_MS, signal);
+    if (signal.aborted) return { kind: 'aborted' };
+
+    const action = decideServerAction(
+      serverUrl,
+      probe,
+      readAutoStartSettings(vscode.workspace.getConfiguration('testbench-native')),
+    );
+
+    switch (action.kind) {
+      case 'proceed':
+        this.currentInspectorUrl = action.health.inspector;
+        // However it got here — our spawn or the user's own terminal — the
+        // server is up, so a recorded failure is stale. Leaving it would let
+        // a later crash be met with "a previous attempt failed moments ago"
+        // and suppress a spawn that would now succeed.
+        this.server.autoStartGuard?.clear(serverUrl);
+        log(
+          `server healthy at ${serverUrl}` +
+            (action.health.version ? ` (v${action.health.version})` : '') +
+            `, inspector=${action.health.inspector ?? 'none'}`,
+        );
+        return { kind: 'proceed' };
+
+      case 'refuse-foreign':
+        log(`TB027 ${serverUrl} is served by "${action.service}"`);
+        return { kind: 'fail', payload: reportError('TB027', { serverUrl, service: action.service }) };
+
+      case 'legacy':
+        // `currentInspectorUrl` stays undefined, which is what routes tool
+        // step-into to the settings fallback (§7.4).
+        log(
+          `server at ${serverUrl} answered but did not identify itself (${action.detail}) — ` +
+            'proceeding on the legacy path (may be an aiui server predating /health)',
+        );
+        return { kind: 'proceed' };
+
+      case 'skip':
+        // Not ours to start. Let the run proceed so the existing TB010
+        // connect-failure path reports it, with its new settings hint.
+        log(`server down at ${serverUrl} — not auto-starting (${action.reason})`);
+        return { kind: 'proceed' };
+
+      case 'spawn': {
+        // A start that just failed is not retried per-test. In a Test
+        // Explorer batch every test re-runs this phase, so a broken command
+        // would otherwise spawn one detached shell per test and stall the
+        // whole batch for readyTimeoutSeconds each time.
+        if (this.server.autoStartGuard?.isSuppressed(serverUrl)) {
+          log(`server down at ${serverUrl} — auto-start was already tried and failed recently`);
+          return {
+            kind: 'fail',
+            payload: reportError('TB028', {
+              serverUrl,
+              reason:
+                'a previous auto-start attempt failed moments ago, so this run did not retry it. ' +
+                'Fix the command (or start the server yourself) and run again',
+              ...(this.server.logPath && { logPath: this.server.logPath() }),
+            }),
+          };
+        }
+        const outcome = await this.autoStartServer({
+          serverUrl,
+          autoStart: action.config,
+          signal,
+          log,
+        });
+        if (outcome.kind === 'proceed') this.server.autoStartGuard?.clear(serverUrl);
+        return outcome;
+      }
+    }
+  }
+
+  /**
+   * §5.6 — spawn, wait for health, and translate the outcome into the run's
+   * vocabulary. The spawn/poll policy itself lives in `startServerAndWait`
+   * so the Start Server command runs exactly the same sequence.
+   */
+  private async autoStartServer(args: {
+    serverUrl: string;
+    autoStart: AutoStartConfig;
+    signal: AbortSignal;
+    log: (line: string) => void;
+  }): Promise<ServerReadiness> {
+    const { serverUrl, autoStart, signal, log } = args;
+
+    const result = await startServerAndWait({
+      serverUrl,
+      config: autoStart,
+      logPath: this.server.logPath?.(),
+      probe: this.healthProbe,
+      spawn: this.spawnServer,
+      sleep: this.server.pollSleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+      signal,
+      log,
+    });
+
+    switch (result.kind) {
+      case 'ready':
+        this.currentInspectorUrl = result.health.inspector;
+        log(`server came up at ${serverUrl}, inspector=${result.health.inspector ?? 'none'}`);
+        return { kind: 'proceed' };
+      case 'aborted':
+        return { kind: 'aborted' };
+      case 'foreign':
+        // Something else grabbed the port while we were starting.
+        return {
+          kind: 'fail',
+          payload: reportError('TB027', { serverUrl, service: result.service }),
+        };
+      case 'refused':
+        log(`TB028 refusing to spawn — ${result.reason}`);
+        return { kind: 'fail', payload: reportError('TB028', { serverUrl, reason: result.reason }) };
+      case 'timeout':
+        log(`TB028 server did not become healthy within ${result.seconds}s`);
+        // ONLY this arm arms the backoff. The refusals above never spawned
+        // anything and cost nothing to re-evaluate — latching them would mean
+        // a user who fixed a blank `cwd` got told, for the next minute, that
+        // "a previous attempt failed" about a command that never ran.
+        this.server.autoStartGuard?.recordFailure(serverUrl);
+        return {
+          kind: 'fail',
+          payload: reportError('TB028', {
+            serverUrl,
+            reason: `it did not become healthy within ${result.seconds}s`,
+            logPath: result.logPath,
+            ...(result.logTail && { logTail: result.logTail }),
+          }),
+        };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Breakpoint-pause keep-alive (§3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Pin the server while this run sits paused at a breakpoint.
+   *
+   * A breakpoint pause is CLIENT-side: the batch is truncated at the
+   * breakpoint, the server finishes it, and the session sits with no run in
+   * flight — invisible to the server's `runsInFlight` counter, and therefore
+   * to the idle shutdown. A cheap authenticated request every few minutes
+   * bumps the server's activity timestamp, which is the other half of the
+   * idle definition. `/health` deliberately would NOT work here: it is
+   * unauthenticated and never touches the timer.
+   *
+   * Idempotent — a second call while already running is a no-op, so repeated
+   * pauses can't stack timers.
+   */
+  private startKeepAlive(target?: { client: ApiClientLike; sessionId: string }): void {
+    if (this.keepAliveTimer) return;
+    // `target` is for the pause that happens BEFORE the run's client exists
+    // (a breakpoint on the very first step): the session it pins belongs to a
+    // previous run that is still open on the server.
+    const client = target?.client ?? this.currentClient;
+    const sessionId = target?.sessionId ?? this.currentSessionId;
+    if (!client || !sessionId || typeof client.isSessionAlive !== 'function') return;
+
+    this.keepAliveTimer = setInterval(() => {
+      // Best-effort: a failed keep-alive means the session or server is gone,
+      // which the resume will report properly. Nothing to say here.
+      void client.isSessionAlive?.(sessionId).catch(() => undefined);
+    }, this.server.keepAliveIntervalMs ?? KEEP_ALIVE_INTERVAL_MS);
+    this.keepAliveTimer.unref?.();
+  }
+
+  /**
+   * Run `body` with the server pinned, releasing the ping afterwards.
+   *
+   * For pauses that sit INSIDE the run loop (an `[input:]` prompt), where
+   * there is a natural end to the wait — unlike a breakpoint pause, which
+   * ends the run and is released by the next run or a stop.
+   */
+  private async withKeepAlive<T>(body: () => Promise<T>): Promise<T> {
+    const alreadyRunning = this.keepAliveTimer !== undefined;
+    this.startKeepAlive();
+    try {
+      return await body();
+    } finally {
+      // Don't tear down a keep-alive we didn't start.
+      if (!alreadyRunning) this.stopKeepAlive();
+    }
+  }
+
+  /** Stop the keep-alive. Safe to call when none is running. */
+  private stopKeepAlive(): void {
+    if (!this.keepAliveTimer) return;
+    clearInterval(this.keepAliveTimer);
+    this.keepAliveTimer = undefined;
+  }
+
   /**
    * True when the active run's server URL resolves to localhost
    * (127.0.0.1 / ::1 / localhost). Tool step-into requires this — the
@@ -645,13 +961,11 @@ export class RunController {
    * the attach and failing opaquely.
    */
   isLocalServer(): boolean {
-    if (!this.currentServerUrl) return false;
-    try {
-      const host = new URL(this.currentServerUrl).hostname.toLowerCase();
-      return host === '127.0.0.1' || host === 'localhost' || host === '::1';
-    } catch {
-      return false;
-    }
+    // Delegates so there is ONE loopback allowlist. The two used to be
+    // separate and had already diverged on `[::1]` — which is the form
+    // `new URL(...).hostname` actually returns for an IPv6 loopback, so this
+    // method was quietly disabling tool step-into for those URLs.
+    return this.currentServerUrl !== null && isLoopbackUrl(this.currentServerUrl);
   }
 
   /**
@@ -690,6 +1004,10 @@ export class RunController {
   stop(): void {
     this.pauseRequested = false;
     this.cancelPrompt();
+    // Also the disposal path: the registry tears controllers down by calling
+    // stop() (see RunControllerRegistry.setApiClientFactory / dispose), so
+    // this is where a paused run's keep-alive timer must be released.
+    this.stopKeepAlive();
     this.active?.abort();
   }
 
@@ -916,6 +1234,10 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
+
+    // A new run — including a Resume — supersedes any paused state, so the
+    // keep-alive that was pinning the server through the pause is done.
+    this.stopKeepAlive();
 
     // Snapshot the previous run's skill-file URIs BEFORE resetFrameState
     // wipes them — we want to clear those files' statuses too. Without
@@ -1165,7 +1487,18 @@ export class RunController {
       // the server. We *are* immediately at the pause point, so post the
       // indicator now and treat it as a successful "paused at start"
       // outcome.
-      if (pausedAt !== null) this.post({ type: 'breakpointStop', line: pausedAt });
+      if (pausedAt !== null) {
+        this.post({ type: 'breakpointStop', line: pausedAt });
+        // This branch leaves the UI paused just like the two in-loop pause
+        // sites, so it needs the same pin — and it is the one that most
+        // needs it, since a run that sends nothing generates no traffic at
+        // all. The session being kept alive belongs to a PREVIOUS run
+        // (`this.currentClient` isn't built yet), so hand one in explicitly.
+        this.startKeepAlive({
+          client: this.clientFactory({ serverUrl, apiKey }),
+          sessionId: filePath,
+        });
+      }
       this.emitRunEvent({ type: 'done', status: 'aborted' });
       return { ok: true };
     }
@@ -1193,9 +1526,32 @@ export class RunController {
           : ''),
     );
 
-    const client = this.clientFactory({ serverUrl, apiKey });
+    // The AbortController is created BEFORE the server-readiness phase so the
+    // Stop button cancels a wedged health wait or spawn poll. An abort during
+    // that phase is an `aborted` run, not an auto-start error (§5).
     const ac = new AbortController();
     this.active = ac;
+
+    const serverReady = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+    if (serverReady.kind !== 'proceed') {
+      // Same per-run cleanup the main body's `finally` does. This return
+      // happens before that try block, so the state it sets up — notably the
+      // event listener — would otherwise outlive the run.
+      this.active = null;
+      this.currentEventListener = null;
+      this.currentRunIsContinuation = false;
+      this.pauseRequested = false;
+      this.cancelPrompt();
+      if (serverReady.kind === 'aborted') {
+        this.emitRunEvent({ type: 'done', status: 'aborted' });
+        log('run aborted by user while waiting for the server');
+        return { ok: true };
+      }
+      this.emitRunEvent({ type: 'done', status: 'error' });
+      return this.fail(serverReady.payload, log);
+    }
+
+    const client = this.clientFactory({ serverUrl, apiKey });
     // Monotonic run id — a background post-stop report poll (issue 021) uses it
     // to avoid clobbering a newer run's report path if one starts meanwhile.
     const myGeneration = ++this.runGeneration;
@@ -1278,11 +1634,19 @@ export class RunController {
             break;
           }
           log(`prompt input on line ${item.line} → {{${item.varName}}}`);
-          const answer = await this.requestPrompt({
-            mode: 'input',
-            message: item.prompt,
-            varName: item.varName,
-          });
+          // An `[input:]` prompt is a THIRD client-side pause: the previous
+          // batch has completed, so the server has no run in flight and no
+          // traffic while the user types — exactly the blind spot §3's
+          // keep-alive exists for, just a flavour the spec doesn't enumerate.
+          // A user who walks away mid-prompt would otherwise lose the session
+          // and its browser to the idle shutdown.
+          const answer = await this.withKeepAlive(() =>
+            this.requestPrompt({
+              mode: 'input',
+              message: item.prompt,
+              varName: item.varName,
+            }),
+          );
           if (answer === null) {
             log(`input on line ${item.line} canceled — aborting run`);
             break;
@@ -1305,18 +1669,24 @@ export class RunController {
             break;
           }
           log(`interactive on line ${item.line}: ${item.hint}`);
-          const exitedCleanly = await this.runInteractive({
-            hint: item.hint,
-            client,
-            sessionId,
-            env,
-            envName: effectiveEnvName,
-            params,
-            sessionConfig,
-            logging,
-            signal: ac.signal,
-            log,
-          });
+          // Same client-side blind spot as the `[input:]` prompt, and more
+          // exposed: an [interactive] step is the pause flavour designed for
+          // long human-driven exploration, so it is the likeliest of all to
+          // outlive the idle window between its REPL turns.
+          const exitedCleanly = await this.withKeepAlive(() =>
+            this.runInteractive({
+              hint: item.hint,
+              client,
+              sessionId,
+              env,
+              envName: effectiveEnvName,
+              params,
+              sessionConfig,
+              logging,
+              signal: ac.signal,
+              log,
+            }),
+          );
           if (!exitedCleanly) break;
           i++;
           continue;
@@ -1333,6 +1703,9 @@ export class RunController {
       // arrow would be misleading.
       if (status === 'passed' && pausedAt !== null) {
         this.post({ type: 'breakpointStop', line: pausedAt });
+        // The batch is done and the session now sits with no run in flight —
+        // invisible to the server's idle accounting while the user thinks.
+        this.startKeepAlive();
       }
       this.emitRunEvent({ type: 'done', status });
       log(`run ${status}`);
@@ -1367,6 +1740,8 @@ export class RunController {
             : this.lastStepStartLine ?? firstStepLine;
           if (resumeLine != null) {
             this.post({ type: 'breakpointStop', line: resumeLine });
+            // Same as the breakpoint case: paused is invisible to the server.
+            this.startKeepAlive();
             this.emitRunEvent({ type: 'done', status: 'aborted' });
             log(`run paused at line ${resumeLine} — Resume to continue`);
             return { ok: true };
@@ -1403,6 +1778,9 @@ export class RunController {
       this.currentClient = null;
       this.currentSessionId = null;
       this.currentServerUrl = null;
+      // NOT cleared here: `currentInspectorUrl` outlives the run body on
+      // purpose. A tool step-into ack can arrive while the run is unwinding,
+      // and the next run's health probe resets it as its first act.
       // Reset the persistent run id so out-of-band ops when idle (notably an
       // interactive "Close Session"/restartSession) fall back to the stable file
       // path via resolveClient, rather than a stale batch `::run-N` left over

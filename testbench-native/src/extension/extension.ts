@@ -22,6 +22,16 @@ import {
 } from './section-providers.js';
 import { CallStackTreeProvider } from './call-stack-view.js';
 import { VariablesTreeProvider } from './variables-view.js';
+import { resolveInspectorTarget, shouldReuseDebugSession } from './inspector-target.js';
+import { ServerStatusBar } from './server-status-bar.js';
+import { registerServerCommands } from './server-commands.js';
+import {
+  AutoStartGuard,
+  defaultHealthProbe,
+  defaultServerSpawner,
+  type HealthProbe,
+  type ServerSpawner,
+} from './server-manager.js';
 
 const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
 
@@ -70,21 +80,101 @@ class RunControllerRegistry implements vscode.Disposable {
     return this.lastRunningContextValue;
   }
 
+  /** Health probe every controller gets. Swappable for the integration
+   *  harness, which must not let a raw fetch escape to a real socket. */
+  private healthProbe: HealthProbe = defaultHealthProbe;
+  /** Likewise the auto-start spawn — tests substitute a spy. */
+  private spawnServer: ServerSpawner = defaultServerSpawner;
+  /** Test-only override of the breakpoint-pause keep-alive cadence. */
+  private keepAliveIntervalMs: number | undefined;
+  /** ONE guard for every controller: a failed auto-start must not be retried
+   *  once per test in a Test Explorer batch. */
+  private readonly autoStartGuard = new AutoStartGuard();
+
   constructor(
     private readonly view: TestBenchRunnerView,
     private readonly tracker: ActiveFileTracker,
+    /** `<globalStorage>/server.log` — where an auto-started server's output
+     *  goes. Undefined in tests that never spawn. */
+    private readonly serverLogPath?: () => string,
+    /** Refreshed immediately after every run start/end, so the item never
+     *  lags a deliberate action by up to a poll interval (§6). */
+    private readonly serverStatusBar?: {
+      refresh(): Promise<void>;
+      setProbe(probe: HealthProbe): void;
+    },
   ) {}
+
+  /** Probe/spawn as the registry currently has them, so the manual server
+   *  commands go through the same (swappable) collaborators the run path
+   *  does. */
+  probeHealthNow(...args: Parameters<HealthProbe>): ReturnType<HealthProbe> {
+    return this.healthProbe(...args);
+  }
+
+  spawnServerNow(...args: Parameters<ServerSpawner>): ReturnType<ServerSpawner> {
+    return this.spawnServer(...args);
+  }
+
+  /** A successful manual start clears the auto-start backoff, so the next run
+   *  doesn't refuse on a stale failure. */
+  forgetAutoStartFailure(serverUrl: string): void {
+    this.autoStartGuard.clear(serverUrl);
+  }
+
+  /** Drop every recorded auto-start failure — the settings just changed. */
+  forgetAllAutoStartFailures(): void {
+    this.autoStartGuard.clearAll();
+  }
+
+  /** Every live controller, editor-attached and batch alike. Three call sites
+   *  used to walk both maps by hand. */
+  private *allControllers(): Iterable<RunController> {
+    yield* this.controllers.values();
+    yield* this.batchControllers.values();
+  }
+
+  /** Test-only: swap the health probe / spawn used by every controller.
+   *  Discards existing controllers for the same reason the client factory
+   *  does — they capture these at construction. */
+  setServerHooks(hooks: {
+    healthProbe?: HealthProbe;
+    spawnServer?: ServerSpawner;
+    keepAliveIntervalMs?: number;
+  }): void {
+    if (hooks.keepAliveIntervalMs !== undefined) {
+      this.keepAliveIntervalMs = hooks.keepAliveIntervalMs;
+    }
+    if (hooks.healthProbe) {
+      this.healthProbe = hooks.healthProbe;
+      // The status bar polls independently of any run, so it needs the fake
+      // too — otherwise the integration suite keeps issuing real fetches at
+      // the fixture's SERVER_URL for its whole duration.
+      this.serverStatusBar?.setProbe(hooks.healthProbe);
+    }
+    if (hooks.spawnServer) this.spawnServer = hooks.spawnServer;
+    // Swapping the collaborators means the next case starts from scratch —
+    // the auto-start backoff is registry-wide and process-lived, so without
+    // this one test's deliberate start failure would suppress the next
+    // test's spawn.
+    this.autoStartGuard.clearAll();
+    this.discardControllers();
+  }
 
   /** Test-only: swap the ApiClient factory. Existing controllers are
    *  discarded so the next run picks up the new factory. */
   setApiClientFactory(factory: ApiClientFactory): void {
     this.clientFactory = factory;
-    for (const controller of this.controllers.values()) controller.stop();
+    this.discardControllers();
+  }
+
+  /** Drop every cached controller so the next run picks up newly-swapped
+   *  injectables. Detached batch controllers cache them at construction too,
+   *  so they must go as well or a batch run would keep using the old ones
+   *  (the integration suite swaps in a FakeApiClient via this path). */
+  private discardControllers(): void {
+    for (const controller of this.allControllers()) controller.stop();
     this.controllers.clear();
-    // Detached batch controllers cache the factory at construction too, so
-    // they must be discarded as well or a batch run would keep using the old
-    // client (the integration suite swaps in a FakeApiClient via this path).
-    for (const controller of this.batchControllers.values()) controller.stop();
     this.batchControllers.clear();
   }
 
@@ -121,6 +211,8 @@ class RunControllerRegistry implements vscode.Disposable {
       // Fresh-run hook: a full run from the top drops this test's skill-debug
       // context (the banner + "run on stopped session" affordance go stale).
       () => this.clearSkillDebugIfOwnedBy(document.uri.toString()),
+      undefined, // pollSleep — real timer
+      { healthProbe: this.healthProbe, spawnServer: this.spawnServer, logPath: this.serverLogPath, keepAliveIntervalMs: this.keepAliveIntervalMs, autoStartGuard: this.autoStartGuard },
     );
     this.controllers.set(key, controller);
     // Re-fire the controller's frame-stack changes through the registry
@@ -165,6 +257,10 @@ class RunControllerRegistry implements vscode.Disposable {
       () => ({}), // batch ignores breakpoints
       () => {}, // never clear editor statuses
       () => {}, // never disturb the editor's skill-debug context
+      undefined, // pollSleep — real timer
+      // A flask run needs the same server as an editor run, so it gets the
+      // same pre-run check and auto-start.
+      { healthProbe: this.healthProbe, spawnServer: this.spawnServer, logPath: this.serverLogPath, keepAliveIntervalMs: this.keepAliveIntervalMs, autoStartGuard: this.autoStartGuard },
     );
     this.batchControllers.set(key, controller);
     return controller;
@@ -249,6 +345,16 @@ class RunControllerRegistry implements vscode.Disposable {
   anyRunning(): boolean {
     for (const c of this.controllers.values()) {
       if (c.isRunning) return true;
+    }
+    return false;
+  }
+
+  /** Test-only: true while any controller holds a breakpoint-pause
+   *  keep-alive. Batch controllers are included — they take the same
+   *  injectables, so a leak there would pin the server just as hard. */
+  anyKeepAliveActive(): boolean {
+    for (const c of this.allControllers()) {
+      if (c.keepAliveActive) return true;
     }
     return false;
   }
@@ -458,6 +564,7 @@ class RunControllerRegistry implements vscode.Disposable {
           break;
         }
         case 'done':
+          this.lastDoneStatus = ev.status;
           this.refreshRunningContext();
           // The per-controller revealedFrameUris is cleared by
           // resetFrameState() at the START of the next run, so we don't
@@ -618,15 +725,39 @@ class RunControllerRegistry implements vscode.Disposable {
     }
 
     const cfg = vscode.workspace.getConfiguration('testbench-native');
-    const port = cfg.get<number>('inspectorPort', 9229);
-    const host = cfg.get<string>('inspectorHost', '127.0.0.1');
+    // §7: attach to what /health reported, not to a hardcoded setting. The
+    // settings are the fallback for servers whose /health predates this
+    // story. Getting this wrong is silent: if another node process holds the
+    // settings port, the attach succeeds against THAT process, the ack
+    // releases the server, its `debugger;` is a no-op, and the user's
+    // breakpoint never hits with nothing to explain why.
+    const target = resolveInspectorTarget(controller.inspectorUrl, {
+      host: cfg.get<string>('inspectorHost', '127.0.0.1'),
+      port: cfg.get<number>('inspectorPort', 9229),
+    });
+
+    if (target.kind === 'none') {
+      await ackAndExit(
+        `server has no inspector — restart it with --inspect to enable step-into (running "${ev.toolName}" without one)`,
+      );
+      return;
+    }
+
+    const { host, port } = target;
 
     // If our pwa-node session is already attached (a previous tool
     // in this run brought it up), reuse it. Filter to `pwa-node`
     // only — a Chrome devtools (`chrome` / `pwa-chrome`) session is
     // not the inspector we want and treating it as "attached" would
     // skip the real attach call.
-    const alreadyAttached = vscode.debug.activeDebugSession?.type === 'pwa-node';
+    //
+    // The port comparison matters as much as the type: a user debugging some
+    // unrelated node process would otherwise suppress our attach entirely,
+    // and we would ack against a debugger pointed somewhere else.
+    const alreadyAttached = shouldReuseDebugSession(vscode.debug.activeDebugSession, {
+      host,
+      port,
+    });
 
     if (!alreadyAttached) {
       try {
@@ -642,7 +773,10 @@ class RunControllerRegistry implements vscode.Disposable {
         });
         if (!started) {
           await ackAndExit(
-            `Couldn't attach Node debugger on ${host}:${port}. Launch the server with --inspect=${port} to enable tool step-into.`,
+            `Couldn't attach Node debugger on ${host}:${port}` +
+              (target.source === 'health'
+                ? ' (reported by the server\'s /health).'
+                : `. Launch the server with --inspect=${port} to enable tool step-into.`),
           );
           return;
         }
@@ -691,6 +825,9 @@ class RunControllerRegistry implements vscode.Disposable {
     this.notifyRunningHistory.push(running);
     this.view.post({ type: 'running', running });
     this.setRunningContext(running);
+    // A run just started or ended — both change what /health reports, and a
+    // 30s poll would leave the item stale for most of that window (§6).
+    void this.serverStatusBar?.refresh();
   }
 
   private setRunningContext(value: boolean): void {
@@ -702,12 +839,13 @@ class RunControllerRegistry implements vscode.Disposable {
   readonly notifyRunningHistory: boolean[] = [];
   /** Test-only: most recent runError payload posted by any controller. */
   lastRunError: { code: string; diagnosis: string; fix?: string } | null = null;
+  /** Test-only: status of the most recent `done` event. §5 specifies the
+   *  Stop-during-spawn outcome as a STATUS ("aborted"), which no error-code
+   *  assertion can prove. */
+  lastDoneStatus: 'passed' | 'failed' | 'error' | 'aborted' | null = null;
 
   dispose(): void {
-    for (const c of this.controllers.values()) c.stop();
-    this.controllers.clear();
-    for (const c of this.batchControllers.values()) c.stop();
-    this.batchControllers.clear();
+    this.discardControllers();
     for (const sub of this.frameSubs.values()) sub.dispose();
     this.frameSubs.clear();
     for (const sub of this.scopeSubs.values()) sub.dispose();
@@ -724,6 +862,22 @@ class RunControllerRegistry implements vscode.Disposable {
 export interface TestBenchTestHooks {
   tracker: ActiveFileTracker;
   setApiClientFactory: (factory: ApiClientFactory) => void;
+  /** Swap the pre-run health probe, the auto-start spawn, and/or the
+   *  breakpoint keep-alive cadence. A raw fetch in the run path would bypass
+   *  the harness's fake server and hit a real socket, so the probe has to be
+   *  injectable the same way the client is; the cadence is injectable so a
+   *  test can observe the ping rather than only the timer. */
+  setServerHooks: (hooks: {
+    healthProbe?: HealthProbe;
+    spawnServer?: ServerSpawner;
+    keepAliveIntervalMs?: number;
+  }) => void;
+  /** `inspector` the active controller recorded from its pre-run probe.
+   *  `undefined` (no health data) and `null` (server has no inspector) are
+   *  different answers — see §7. */
+  inspectorUrl: () => string | null | undefined;
+  /** True while any controller holds a breakpoint-pause keep-alive timer. */
+  keepAliveActive: () => boolean;
   isRunning: () => boolean;
   /** Last value mirrored to the `testbench-native.running` context key. The
    *  editor title bar's Pause/Stop visibility hinges on this — VS Code
@@ -735,6 +889,12 @@ export interface TestBenchTestHooks {
   notifyRunningHistory: () => boolean[];
   /** Diagnostic: last runError payload, or null if none. */
   lastRunError: () => { code: string; diagnosis: string; fix?: string } | null;
+  /** Reset {@link lastRunError}. It is registry-wide and sticky, so a test
+   *  asserting "this run reported no error" must clear the previous test's
+   *  error first or it reads someone else's failure. */
+  clearRunError: () => void;
+  /** Status of the most recent `done` event, or null. */
+  lastDoneStatus: () => 'passed' | 'failed' | 'error' | 'aborted' | null;
   /** True when any controller has a parked skill-step failure (the Variables
    *  re-run panel would be offered). Used to assert a refused dead-session
    *  re-run does NOT wipe the parked failure. */
@@ -847,10 +1007,18 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   const ts = () => new Date().toISOString().slice(11, 23);
   out.appendLine(`[${ts()}] TestBench activate() — version=${context.extension.packageJSON.version}`);
 
+  // One rolling log for every server this extension starts. globalStorageUri
+  // (not workspaceStorage) because a detached server outlives the window that
+  // spawned it and may be shared by several — a per-workspace log would
+  // scatter the diagnosis of a single process across folders.
+  const serverLogPath = (): string =>
+    vscode.Uri.joinPath(context.globalStorageUri, 'server.log').fsPath;
+
   const tracker = new ActiveFileTracker();
   const decorations = new DecorationManager(context, tracker);
   const view = new TestBenchRunnerView(context, tracker);
-  const registry = new RunControllerRegistry(view, tracker);
+  const serverStatusBar = new ServerStatusBar(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+  const registry = new RunControllerRegistry(view, tracker, serverLogPath, serverStatusBar);
   const discovery = new TestDiscovery();
   const testController = new TestBenchTestController(discovery, registry, {
     // Forward batch progress to the sidebar webview banner. `null` clears
@@ -988,6 +1156,14 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     variablesScopeSub,
     variablesFrameSub,
     new EnvSelector(),
+    // Editing the auto-start settings is the user saying "I fixed it" — drop
+    // the backoff so the very next run retries instead of repeating a stale
+    // "a previous attempt failed moments ago".
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('testbench-native.serverAutoStart')) {
+        registry.forgetAllAutoStartFailures();
+      }
+    }),
     openInEditor,
     // F12 / Ctrl+Click / Peek on `[skill: ...]` / `[tool: ...]` invocations
     // and on bare-name section calls / `### Name` headings.
@@ -1021,6 +1197,18 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       },
     ),
     ...registerCommands(registry, tracker),
+    serverStatusBar,
+    // The probe/spawn are delegated through the registry rather than defaulted
+    // inside the command module, so a `setServerHooks` swap reaches the
+    // commands too — otherwise a test that executed `startServer` would issue
+    // a real fetch and a real detached spawn of whatever the settings held.
+    ...registerServerCommands({
+      statusBar: serverStatusBar,
+      logPath: serverLogPath,
+      probe: (url, timeoutMs, signal) => registry.probeHealthNow(url, timeoutMs, signal),
+      spawn: (spawnArgs) => registry.spawnServerNow(spawnArgs),
+      onStarted: (serverUrl) => registry.forgetAutoStartFailure(serverUrl),
+    }),
   );
 
   out.appendLine(`[${ts()}] activation complete — ${context.subscriptions.length} disposables`);
@@ -1041,11 +1229,19 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     __testHooks: {
       tracker,
       setApiClientFactory: (factory) => registry.setApiClientFactory(factory),
+      setServerHooks: (hooks) => registry.setServerHooks(hooks),
+      inspectorUrl: () => registry.active()?.inspectorUrl,
+      keepAliveActive: () => registry.anyKeepAliveActive(),
       isRunning: () => registry.anyRunning(),
       runningContextValue: () => registry.runningContextValue,
       activeControllerResolves: () => registry.active() !== undefined,
       notifyRunningHistory: () => [...registry.notifyRunningHistory],
       lastRunError: () => registry.lastRunError,
+      clearRunError: () => {
+        registry.lastRunError = null;
+        registry.lastDoneStatus = null;
+      },
+      lastDoneStatus: () => registry.lastDoneStatus,
       skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
       skillDebugActive: () => registry.skillDebug !== null,
       skillDebugContext: () => {

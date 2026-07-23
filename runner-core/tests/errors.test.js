@@ -19,6 +19,13 @@ const SAMPLE_CONTEXTS = {
   TB024: { detail: 'duplicate section "Login" at line 12' },
   TB025: {},
   TB026: {},
+  TB027: { serverUrl: 'http://localhost:3100', service: 'grafana' },
+  TB028: {
+    serverUrl: 'http://localhost:3100',
+    reason: 'the server did not become healthy within 20s',
+    logPath: '/ws/globalStorage/server.log',
+    logTail: 'Error: Cannot find module dist/index.js',
+  },
   TB030: {},
   TB031: {},
 };
@@ -62,7 +69,7 @@ test('errors involving a file path mention the path verbatim', () => {
 });
 
 test('errors involving SERVER_URL mention it verbatim', () => {
-  const cases = ['TB010', 'TB011', 'TB012', 'TB013', 'TB014'];
+  const cases = ['TB010', 'TB011', 'TB012', 'TB013', 'TB014', 'TB027', 'TB028'];
   for (const code of cases) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     assert.ok(
@@ -92,6 +99,41 @@ test('TB006 names the selected env and the expected .env.<name> path', () => {
   // Distinct from expectedPath so this proves baseEnvPath is actually surfaced
   // (not trivially satisfied as a substring of /ws/.env.t2).
   assert.ok(payload.message.includes('/ws/base/.env'), 'mentions the base .env path');
+});
+
+test('TB010 points at the auto-start settings (the §5.5 hint)', () => {
+  // "Down + auto-start unconfigured" lands on TB010, and the whole point of
+  // the hint is that the user learns the feature exists at the moment they
+  // would want it.
+  const payload = reportError('TB010', SAMPLE_CONTEXTS.TB010);
+  assert.ok(payload.message.includes('testbench-native.serverAutoStart.command'));
+});
+
+test('TB027 names the foreign service so the user knows what is on the port', () => {
+  const payload = reportError('TB027', SAMPLE_CONTEXTS.TB027);
+  assert.ok(payload.message.includes('grafana'), 'names the service it identified as');
+  // The refusal must read as deliberate, not as a transient failure — this is
+  // the code that says "we will not spawn on top of someone else's port".
+  assert.ok(/will not start a server/i.test(payload.message), 'explains the refusal');
+});
+
+test('TB028 names the log path and the settings that control auto-start', () => {
+  const payload = reportError('TB028', SAMPLE_CONTEXTS.TB028);
+  assert.ok(payload.message.includes('/ws/globalStorage/server.log'), 'names the log path');
+  assert.ok(payload.message.includes('testbench-native.serverAutoStart.command'), 'names the command setting');
+  assert.ok(payload.message.includes('testbench-native.serverAutoStart.cwd'), 'names the cwd setting');
+  assert.ok(payload.message.includes('Cannot find module'), 'surfaces the log tail when supplied');
+});
+
+test('TB028 still names both settings when no log is available', () => {
+  // The cwd-not-set refusal never spawns, so there is no log to point at —
+  // the message must still say which settings to fix.
+  const payload = reportError('TB028', {
+    serverUrl: 'http://localhost:3100',
+    reason: 'testbench-native.serverAutoStart.cwd is not set',
+  });
+  assert.ok(payload.message.includes('testbench-native.serverAutoStart.cwd'));
+  assert.ok(!payload.message.includes('undefined'), 'no undefined leaks into the message');
 });
 
 test('actions reference real-looking command ids', () => {
