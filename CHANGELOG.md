@@ -6,7 +6,7 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
-### Added — inline sections (CLI)
+### Added — inline sections
 
 A `### Name` heading inside `## Steps` now defines a named block of steps,
 invoked by writing the bare name as a whole step:
@@ -35,9 +35,24 @@ reserved H2 keywords, begin with `[`, contain `{{`, are empty, or duplicate an
 earlier name are refused at parse time. A section that is never invoked
 produces a warning — the tripwire for a call site left behind by a rename.
 
-**This release covers the CLI only.** TestBench does not yet understand
-sections and will mis-run a sectioned file; the syntax stays undocumented
-until the extensions land.
+Sections work everywhere a test runs:
+
+- **CLI** (`aiui run`) — expands and reports them, badging section-expanded
+  steps with a `section:` chip alongside the skill chip.
+- **Server** — expands sectioned files sent by TestBench over HTTP, with
+  section frames, breakpoints on body lines, and re-run anchoring.
+- **TestBench (Native)** — full debug parity: gutter status on body lines,
+  breakpoints inside a body, step-into a section, a call stack that names it,
+  and re-run-with-variables. Plus authoring affordances: go-to-definition and
+  document links between a call and its `### Name` heading, section-name
+  completion after a step number, and diagnostics for duplicates, dead
+  sections, and near-miss typos ("Did you mean section X?").
+- **TestBench (Monaco)**, the legacy variant, has no sections support and
+  **refuses** to run a sectioned file (error `TB026`) rather than mis-run it —
+  use TestBench (Native) or the CLI.
+
+Documented in [SPEC.md](SPEC.md#inline-sections) and the README; a runnable
+example ships in new projects at `tests/sections-demo.md` (`aiui init`).
 
 ### Changed — `[no-hooks]` on a skill invocation now covers the whole body
 

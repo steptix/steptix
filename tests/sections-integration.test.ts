@@ -6,15 +6,20 @@ import { parseTestContent, parseTestFile } from '../src/parser/markdown.js';
 import { clearSkillCache, expandSkills } from '../src/skills/expander.js';
 
 /**
- * End-to-end parse of the shipped demo fixture: a section invoked twice whose
- * body calls a skill. Exercises the whole chain — capture, resolution,
- * expansion, frames, origins and both provenance tags — against a real file
- * on disk rather than an inline string.
+ * End-to-end parse of a section+skill integration fixture: a section invoked
+ * twice whose body itself calls a skill. Exercises the whole chain — capture,
+ * resolution, expansion, frames, origins and both provenance tags — against a
+ * real file on disk rather than an inline string.
+ *
+ * This is the rich internal fixture. The self-contained file that `aiui init`
+ * ships to users is a *different* file (no skill dependency); it is guarded
+ * separately in the final `describe` block below so it can't silently drift.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const skillsDir = path.join(repoRoot, 'fixtures', 'skills');
 const demoFile = path.join(repoRoot, 'fixtures', 'tests', 'sections-demo.md');
+const shippedDemoFile = path.join(repoRoot, 'templates', 'init', 'tests', 'sections-demo.md');
 
 beforeEach(() => {
   clearSkillCache();
@@ -120,5 +125,78 @@ describe('fixtures/tests/sections-demo.md', () => {
     expect(parsed.skipHooks).toHaveLength(parsed.steps.length);
     expect(parsed.skipHooks.every((v) => v === false)).toBe(true);
     expect(parsed.toolCalls).toHaveLength(parsed.steps.length);
+  });
+});
+
+/**
+ * The file `aiui init` scaffolds into every new project. It is self-contained
+ * — a section is defined and called twice, with no skill dependency — so a
+ * fresh project can run it immediately. These assertions pin the exact shape
+ * users receive: if an edit to the template breaks parsing or provenance,
+ * every new project's `aiui run` would break silently, and this catches it.
+ *
+ * Deliberately mirrors nothing from the fixture above: the two files diverge
+ * on purpose (see the header comment), so they need independent guards.
+ */
+describe('templates/init/tests/sections-demo.md (the file `aiui init` ships)', () => {
+  const signInBody = [
+    'Navigate to the login page',
+    'Enter "{{email}}" in the email field',
+    'Enter "{{password}}" in the password field',
+    'Click the Sign In button',
+    'Assert the dashboard is visible',
+  ];
+
+  it('parses self-contained (no skillsDir needed) into one section called twice', async () => {
+    // Pass no skillsDir at all — the demo must resolve without one.
+    const parsed = await parseTestFile(shippedDemoFile, {});
+    expect(Object.keys(parsed.sections)).toEqual(['sign in']);
+    expect(parsed.sections['sign in']!.name).toBe('Sign in');
+    expect(parsed.sections['sign in']!.steps).toHaveLength(5);
+  });
+
+  it('expands the section body at both call sites, leaving no skill tags', async () => {
+    const parsed = await parseTestFile(shippedDemoFile, {});
+    expect(parsed.steps).toEqual([
+      ...signInBody,
+      'Open the account settings page',
+      'Change the display name to "Demo User" and save',
+      'Sign out',
+      ...signInBody,
+      'Assert the display name shows "Demo User"',
+    ]);
+    // Self-contained: nothing came from a skill.
+    expect(parsed.sourceSkills.every((s) => s === null)).toBe(true);
+  });
+
+  it('tags body steps with the section and leaves main-flow steps untagged', async () => {
+    const parsed = await parseTestFile(shippedDemoFile, {});
+    // First five are the body of the first call.
+    expect(parsed.sourceSections.slice(0, 5)).toEqual([
+      'Sign in',
+      'Sign in',
+      'Sign in',
+      'Sign in',
+      'Sign in',
+    ]);
+    // Index 5 is the first main-flow step after the call ('Open the account…').
+    expect(parsed.sourceSections[5]).toBeNull();
+  });
+
+  it('points every expanded step back at its call site in the file', async () => {
+    const parsed = await parseTestFile(shippedDemoFile, {});
+    // Both calls sit on their own line (25 and 29); the body reports the call.
+    const [callA, callB] = [25, 29];
+    expect(parsed.stepLines).toEqual([
+      callA, callA, callA, callA, callA,
+      26,
+      27,
+      28,
+      callB, callB, callB, callB, callB,
+      30,
+    ]);
+    // A clean parse leaves no dead-section or duplicate residue.
+    expect(parsed.skipHooks).toHaveLength(parsed.steps.length);
+    expect(parsed.skipHooks.every((v) => v === false)).toBe(true);
   });
 });

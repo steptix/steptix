@@ -156,6 +156,73 @@ timeout: 60s
 - `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory (see [Skills](#skills))
 - `[tool: name args]` -- run deterministic TypeScript code with full Playwright access (see [Tools](#tools))
 
+## Skills
+
+A skill is a reusable sequence of steps shared **across** tests, kept in its own `.md` file under your project's `skills/` directory. Unlike inline sections (below), a skill has its own parameters and outputs, so it's the right tool when a flow — logging in, seeding data, completing checkout — is used by more than one test.
+
+```markdown
+---
+type: skill
+---
+
+# fill_login_form
+
+## Parameters
+- username: the account to sign in as
+- password: the account's password
+
+## Outputs
+- session_id: the logged-in session identifier
+
+## Steps
+1. Navigate to the login page
+2. Type "{{username}}" into the username field
+3. Type "{{password}}" into the password field
+4. Click Sign in
+5. [output: session_id] Read the session id from the page
+```
+
+Invoke it from any test step, passing arguments and aliasing outputs into the caller's scope:
+
+```markdown
+## Steps
+1. [skill: fill_login_form username="admin@test.com" password="$ADMIN_PW" out.session_id="admin_session"]
+2. Use {{admin_session}} for the next request
+```
+
+Skills expand inline before the run, so the runner and the report see the fully-expanded flow, and TestBench (Native) can step **into** a skill body, set breakpoints in it, and show a call stack. The skills directory defaults to `skills/` and is configurable via `tests.skillsDir` in `aiui.config.json`.
+
+## Inline Sections
+
+An `### Name` heading **inside `## Steps`** defines a reusable block of steps *within a single test* — an inline skill, without the separate file or the parameter declarations. A step invokes it by writing the section's name as its entire text; the bare name **is** the call.
+
+```markdown
+## Steps
+1. Login
+2. Add the first product to the cart
+3. Checkout
+4. Login
+5. Verify the order confirmation shows "Thank you"
+
+### Login
+1. Navigate to the login page
+2. Type "{{username}}" into the username field
+3. Click Sign in and verify the dashboard loads
+
+### Checkout
+1. Open the cart
+2. Click the checkout button
+```
+
+Steps 1 and 4 both call `### Login`; step 3 calls `### Checkout`. Each expands inline before the run.
+
+- **Section or skill?** A section groups steps within one test and shares the test's scope — no parameters, no outputs, no second file. Use a skill when a block is shared across tests or needs its own inputs.
+- **The main flow** is the numbered steps before the first `###`; it can't resume after a section begins.
+- **Matching** is the step's raw text, trimmed and case-insensitive (`Login` = `login` = `LOGIN`). `1. **Login**` is an ordinary AI step, not a call; a typo or trailing period is a near-miss. A `[skill:]`/`[tool:]`/`[input:]`/`[interactive]` step is never a section call.
+- **Names** may contain spaces. Reserved H2 keywords, names starting with `[` or containing `{{`, empty names, and duplicates are rejected.
+
+TestBench (Native) gives sectioned files full debug support — status on body lines, breakpoints, step-into, go-to-definition, completion, and "did you mean?" diagnostics. TestBench (Monaco), the legacy variant, refuses to run a sectioned file rather than mis-run it; use TestBench (Native) or the CLI. See [SPEC.md](SPEC.md#inline-sections) for the full grammar and semantics.
+
 ## Tools
 
 Tools are deterministic TypeScript functions you can call from a test step. They are how you escape natural-language prose into real code when:

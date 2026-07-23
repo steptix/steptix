@@ -42,6 +42,7 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
   const templateFiles: Array<{ src: string; dest: string }> = [
     { src: 'aiui.config.json', dest: 'aiui.config.json' },
     { src: 'tests/example.md', dest: 'tests/example.md' },
+    { src: 'tests/sections-demo.md', dest: 'tests/sections-demo.md' },
     { src: 'context/app.md', dest: 'context/app.md' },
   ];
 

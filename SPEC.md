@@ -192,6 +192,52 @@ REPL commands (all `/`-prefixed):
 
 If any interactive command fails, the overall step is marked as failed. The same REPL is also opened automatically when a step fails after retries — see the `interactiveOnFailure` execution config (env var `INTERACTIVE_ON_FAILURE=true`) for the post-failure handoff. In that mode the REPL banner reads "🛑 Step failed" instead of "🎮 Interactive mode" and the `/resume` menu defaults to the step after the failure.
 
+### Inline Sections
+
+An `### Name` heading **inside `## Steps`** defines a named block of reusable steps — an inline skill, without the separate file or the parameter declarations. A step invokes it by writing the section's name as its **entire text**; the bare name *is* the call.
+
+```markdown
+## Parameters
+- username: $LOGIN_USERNAME
+- password: $LOGIN_PASSWORD
+
+## Steps
+1. Login
+2. Add the first product to the cart
+3. Checkout
+4. Login
+5. Verify the order confirmation shows "Thank you"
+
+### Login
+1. Navigate to {{baseUrl}}/login
+2. Type "{{username}}" into the username field
+3. Type "{{password}}" into the password field
+4. Click Sign in and verify the dashboard loads
+
+### Checkout
+1. Open the cart
+2. Click the checkout button
+```
+
+Here steps 1 and 4 both call `### Login`, and step 3 calls `### Checkout`. Each call expands inline to the section's body before the run, so the runner, the report, and TestBench's debugger see the fully-expanded flow.
+
+**When to use a section instead of a skill:** a section groups steps *within one test* and shares the test's scope — no parameters, no outputs, no second file. Reach for a skill when a block is shared *across* tests or genuinely needs its own inputs.
+
+**Grammar**
+
+- A section's body is every numbered item from its `### Name` heading until the next `###`/`##` heading or end of file. A `####` heading with text inside a body is inert prose; a hashes-only line (`###`, `####`, …) is an error (empty name).
+- The **main flow** is the numbered items *before the first `###`*. It cannot resume after a section begins — once the first `###` appears, every later numbered item belongs to a section.
+- A section may call other sections in the same file, and may call skills. Skill files follow the same grammar, so a skill body may define and invoke its own sections.
+- Sections are macros, not functions: **no per-section `## Parameters`/`## Outputs`**, and a section invoked twice runs twice. A `[store as: X]` inside a test-file section body is visible to every later step of the test.
+
+**Matching** is on the step's raw text (minus the `N. ` prefix), trimmed and **case-insensitive** — `Login`, `login`, and `LOGIN` all call `### Login`. Inline markdown is *not* normalized: `1. **Login**` is an ordinary AI step, not a call. A step that parses as `[skill:]`, `[tool:]`, `[input:]`, or `[interactive]` is never a section call. A trailing period or a typo is a near-miss, not a call — TestBench (Native) squiggles those as "Did you mean…?" while you type.
+
+**Names** may contain spaces (`### Log in as admin`). Refused at parse time: a reserved H2 keyword (`Steps`, `Config`, `Parameters`, `Outputs`, `Hooks`), a name beginning with `[`, a name containing `{{`, an empty name, and a duplicate (case-insensitively) within one file.
+
+**Editor support.** TestBench (Native) runs sectioned files with full debug parity — gutter status on body lines, breakpoints inside a body, step-into a section, and a call stack that names it — plus go-to-definition, links, completion, and the diagnostics above. TestBench (Monaco), the legacy variant, has no sections support and refuses to run a sectioned file (TB026) rather than mis-run it; use TestBench (Native) or the CLI.
+
+Hooks never resolve to sections: a `## Hooks` entry or a project `defaultHooks` entry equal to a section name stays an ordinary AI step.
+
 ---
 
 ## 4. Parameterisation
