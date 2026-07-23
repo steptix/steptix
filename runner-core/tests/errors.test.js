@@ -16,6 +16,8 @@ const SAMPLE_CONTEXTS = {
   TB014: { serverUrl: 'http://localhost:3100', reason: 'ECONNRESET' },
   TB020: { filePath: '/ws/foo.md' },
   TB021: {},
+  TB024: { detail: 'duplicate section "Login" at line 12' },
+  TB025: {},
   TB030: {},
   TB031: {},
 };
