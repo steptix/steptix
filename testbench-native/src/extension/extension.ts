@@ -15,6 +15,11 @@ import { workspaceFolderFor } from './workspace.js';
 import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
 import { InvocationDefinitionProvider } from './definition-provider.js';
+import {
+  SectionLinkProvider,
+  SectionCompletionProvider,
+  SectionDiagnostics,
+} from './section-providers.js';
 import { CallStackTreeProvider } from './call-stack-view.js';
 import { VariablesTreeProvider } from './variables-view.js';
 
@@ -984,11 +989,36 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     variablesFrameSub,
     new EnvSelector(),
     openInEditor,
-    // F12 / Ctrl+Click / Peek on `[skill: ...]` and `[tool: ...]` step
-    // invocations — jumps to the skill `.md` or tool `.ts` file.
+    // F12 / Ctrl+Click / Peek on `[skill: ...]` / `[tool: ...]` invocations
+    // and on bare-name section calls / `### Name` headings.
     vscode.languages.registerDefinitionProvider(
       { language: 'markdown', scheme: 'file' },
       new InvocationDefinitionProvider(),
+    ),
+    // Inline-section authoring: links on resolved calls, completion of
+    // section names after a step number, and diagnostics for typos /
+    // duplicates / dead sections.
+    vscode.languages.registerDocumentLinkProvider(
+      { language: 'markdown', scheme: 'file' },
+      new SectionLinkProvider(),
+    ),
+    vscode.languages.registerCompletionItemProvider(
+      { language: 'markdown', scheme: 'file' },
+      new SectionCompletionProvider(),
+      // Re-offer as the author types the name, and right after the space.
+      ' ',
+    ),
+    new SectionDiagnostics(),
+    // Target of the document links above — reveal a heading line in place.
+    vscode.commands.registerCommand(
+      'testbench-native.revealSectionLine',
+      async (uriStr: string, line: number) => {
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(uriStr));
+        const editor = await vscode.window.showTextDocument(doc, { preview: false });
+        const pos = new vscode.Position(line, 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+      },
     ),
     ...registerCommands(registry, tracker),
   );

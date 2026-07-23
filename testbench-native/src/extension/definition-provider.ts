@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { buildSectionIndex, matchText } from 'ai-ui-automation-runner-core';
 import { resolveProjectDirs } from './aiui-config.js';
 
 /**
@@ -29,7 +30,12 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
   ): vscode.Definition | undefined {
     const line = document.lineAt(position.line).text;
     const invocation = parseInvocationLine(line);
-    if (!invocation) return undefined;
+    // `[skill:]` / `[tool:]` are claimed first — they are never section calls,
+    // mirroring the expander's resolution order. Only when the line is NOT a
+    // bracket invocation do we consider a bare-name section call or a heading.
+    if (!invocation) {
+      return this.sectionDefinition(document, position);
+    }
 
     const token = tokenAt(invocation, position.character);
     if (!token) return undefined;
@@ -53,6 +59,48 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
     return invocation.kind === 'skill'
       ? this.skillOutputTarget(dirs.skillsDir, invocation.name, token.text)
       : this.toolNameTarget(dirs.toolsDir, invocation.name);
+  }
+
+  /**
+   * Section navigation, both directions, within the one file:
+   *
+   *  - cursor on a bare-name CALL → the `### Name` heading.
+   *  - cursor on a `### Name` HEADING → every call site (VS Code renders
+   *    several definitions as a peek list, so this is "find usages" for free).
+   *
+   * Bracket-token lines never reach here — the caller gives `INVOCATION_RE`
+   * first refusal — so `1. [skill: login]` navigates as a skill, never as a
+   * section named "login".
+   */
+  private sectionDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+  ): vscode.Definition | undefined {
+    const index = buildSectionIndex(document.getText());
+    const uri = document.uri;
+    const lineNo = position.line + 1; // buildSectionIndex is 1-based
+
+    // On a heading: return all call sites.
+    for (const [, section] of index.sections) {
+      if (section.headingLine !== lineNo) continue;
+      const key = matchText(section.name);
+      const locations = index.calls
+        .filter((call) => matchText(call.name) === key)
+        .map(
+          (call) =>
+            new vscode.Location(uri, new vscode.Position(call.line - 1, call.nameStart)),
+        );
+      // No call sites is still a valid answer for a heading — return an empty
+      // list rather than falling through to "not a definition".
+      return locations;
+    }
+
+    // On a call site: return the heading.
+    const call = index.calls.find((c) => c.line === lineNo);
+    if (!call) return undefined;
+    const target = index.sections.get(matchText(call.name));
+    if (!target) return undefined;
+    return new vscode.Location(uri, new vscode.Position(target.headingLine - 1, 0));
   }
 
   private skillNameTarget(
