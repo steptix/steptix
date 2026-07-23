@@ -1,6 +1,39 @@
 import * as vscode from 'vscode';
 import type { ActiveFileTracker, FileStateSnapshot } from './active-file-tracker.js';
+import { extractSteps } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
+
+/**
+ * The N/M pass-summary counts for a snapshot.
+ *
+ * Exported and pure so the test hook asserts THIS, not a copy of it — the
+ * whole point of the summary is that M is the author's main-flow step count,
+ * and a body line can run zero times or many, so counting body lines makes M
+ * meaningless and lets N exceed it. A test that reimplemented the rule would
+ * pass while the rendered decoration was wrong.
+ *
+ * `mainFlowLines` is the denominator's source, returned so the render path
+ * can reuse it for the "any steps at all?" gate without re-extracting.
+ */
+export function computeStepsSummary(snap: FileStateSnapshot): {
+  passed: number;
+  passedCached: number;
+  total: number;
+  mainFlowLines: number[];
+} {
+  const mainFlowLines = extractSteps(snap.text).map((s) => s.line);
+  const mainFlowSet = new Set(mainFlowLines);
+  // Both 'pass' and 'pass-cached' count as passed — a cache hit is still a
+  // successful step.
+  const passed = snap.statuses.filter(
+    ([line, status]) =>
+      (status === 'pass' || status === 'pass-cached') && mainFlowSet.has(line),
+  ).length;
+  const passedCached = snap.statuses.filter(
+    ([line, status]) => status === 'pass-cached' && mainFlowSet.has(line),
+  ).length;
+  return { passed, passedCached, total: mainFlowLines.length, mainFlowLines };
+}
 
 /**
  * Paints TestBench decorations on the active TextEditor: breakpoint dot,
@@ -195,23 +228,27 @@ export class DecorationManager implements vscode.Disposable {
       }
     }
 
+    // Paintable lines: main flow AND section bodies, so body steps get the
+    // same ✓ / ✗ / ⚡ / ▶ treatment. This is where sections beat skills
+    // ergonomically — the whole run paints in one editor.
     const stepLines = extractStepLineIds(snap.text);
     const stepLineSet = new Set(stepLines);
+    // The "N/M passed" summary counts MAIN-FLOW steps only. M is the
+    // author's step count, and a body line can be visited zero times (never
+    // invoked) or many (invoked repeatedly), so counting body lines makes M
+    // meaningless and N unbounded. An all-green sectioned run still reads
+    // M/M, because the invocation line itself carries a ✓ from the
+    // frame:pop aggregate.
+    const summary = computeStepsSummary(snap);
+    const summaryLines = summary.mainFlowLines;
     const placeholderRanges = stepLines
       .filter((line) => line !== snap.breakpointStop && !linesWithStatus.has(line))
       .map((line) => range(line));
 
     const errorRanges = snap.errors.map(([line]) => range(line));
     const headingLine = findStepsHeadingLine(snap.text);
-    // Both 'pass' and 'pass-cached' count as passed for the N/M summary —
-    // cache hits are still successful steps.
-    const passed = snap.statuses.filter(
-      ([line, status]) =>
-        (status === 'pass' || status === 'pass-cached') && stepLineSet.has(line),
-    ).length;
-    const passedCached = snap.statuses.filter(
-      ([line, status]) => status === 'pass-cached' && stepLineSet.has(line),
-    ).length;
+    const passed = summary.passed;
+    const passedCached = summary.passedCached;
     // The "N/M passed" summary belongs on the user's actual test file —
     // not on skill `.md`s we surfaced during a descent. A skill running
     // halfway through its own body would otherwise show a misleading
@@ -220,10 +257,10 @@ export class DecorationManager implements vscode.Disposable {
     // all. Phase 2.1 cleanup.
     const summaryText =
       passedCached > 0
-        ? `${passed}/${stepLines.length} passed (${passedCached} cached)`
-        : `${passed}/${stepLines.length} passed`;
+        ? `${passed}/${summaryLines.length} passed (${passedCached} cached)`
+        : `${passed}/${summaryLines.length} passed`;
     const summaryRanges: vscode.DecorationOptions[] =
-      snap.isTestFile && headingLine && stepLines.length > 0
+      snap.isTestFile && headingLine && summaryLines.length > 0
         ? [{
             range: rangeAtLineEnd(headingLine),
             renderOptions: {

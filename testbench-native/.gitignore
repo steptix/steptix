@@ -10,3 +10,7 @@ tests/integration/live-test-output.log
 tests/integration/fixtures/github.md
 integration-out.log
 *.vsix
+
+# Created at runtime by env-overlay.test.cjs; its teardown is best-effort
+# (Windows EBUSY), so it can survive a run.
+tests/integration/fixtures/sub/

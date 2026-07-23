@@ -4,7 +4,7 @@ import {
   type WebviewToHostMsg,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
-import { DecorationManager } from './decorations.js';
+import { DecorationManager, computeStepsSummary } from './decorations.js';
 import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
@@ -531,16 +531,41 @@ class RunControllerRegistry implements vscode.Disposable {
     frame: import('ai-ui-automation-runner-core').FrameInfo,
     line: number,
   ): void {
-    if (frame.kind !== 'skill') return;
+    if (frame.kind !== 'skill' && frame.kind !== 'section') return;
     const controller = this.controllers.get(controllerUri.toString());
-    if (!controller?.shouldRevealFrameUri(frame.uri)) return;
-    const target = vscode.Uri.file(frame.uri);
+    if (!controller) return;
+
+    // A section body lives in the test file the user already has open. The
+    // skill behaviour — open the defining file in a column BESIDE — would
+    // split the editor to show a second copy of the document they are
+    // looking at, and steal the column their other work is in. Reveal in
+    // place instead.
+    //
+    // Compared against the CONTROLLER's document rather than the active
+    // editor: the active editor may be somewhere else entirely (the user
+    // clicked away mid-run), and the question here is which file the frame
+    // belongs to, not what happens to be focused.
+    const isOwnDocument = frame.uri === controller.document.uri.fsPath;
     const revealLine = Math.max(0, line - 1);
-    void vscode.window.showTextDocument(target, {
+    const selection = new vscode.Range(revealLine, 0, revealLine, 0);
+
+    if (isOwnDocument) {
+      void vscode.window.showTextDocument(controller.document, {
+        preserveFocus: true,
+        preview: false,
+        selection,
+      });
+      return;
+    }
+
+    // A section declared inside a SKILL file lands here too, and wants the
+    // skill treatment: its defining file is not the one on screen.
+    if (!controller.shouldRevealFrameUri(frame.uri)) return;
+    void vscode.window.showTextDocument(vscode.Uri.file(frame.uri), {
       preserveFocus: true,
       preview: false,
       viewColumn: vscode.ViewColumn.Beside,
-      selection: new vscode.Range(revealLine, 0, revealLine, 0),
+      selection,
     });
   }
 
@@ -728,6 +753,18 @@ export interface TestBenchTestHooks {
   /** Force a full re-scan of the workspace; useful for tests that write
    *  fixture files synchronously and can't wait on the watcher. */
   discoveryRefresh: () => Promise<void>;
+  /** The Variables view's current description string. Sections and skills
+   *  both carry `skillName`, so the label has to key on `kind` — this hook
+   *  is how a test proves a paused section reads "section:" not "skill:". */
+  /** The N/M pass-summary counts for a document. M must be the author's
+   *  main-flow step count: a section body can run zero times or many, so
+   *  counting body lines makes M meaningless and lets N exceed it. */
+  stepsSummaryForTests: (uri: vscode.Uri) => { passed: number; total: number };
+  variablesDescription: () => string;
+  /** Run-state signature for arbitrary text. Statuses are pinned to line
+   *  numbers and a section heading decides which body a line belongs to, so
+   *  a test needs to prove a heading edit changes the signature. */
+  stepSignatureForText: (text: string) => string;
   /** Result counts of the most recent batch run, or null if none yet. */
   lastBatchRun: () => { passed: number; failed: number; skipped: number } | null;
   /** Lines streamed to the in-flight (or most recent) test's Test Results
@@ -850,9 +887,11 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       if (!controller) return null;
       const top = controller.frameStack[controller.frameStack.length - 1];
       if (!top) return { id: '' };
+      // `kind` travels alongside the name: a section frame carries
+      // `skillName` too, so the view cannot tell the two apart without it.
       return top.skillName !== undefined
-        ? { id: top.id, skillName: top.skillName }
-        : { id: top.id };
+        ? { id: top.id, skillName: top.skillName, kind: top.kind }
+        : { id: top.id, kind: top.kind };
     },
   });
   const variablesScopeSub = registry.onAnyScopeChange(() =>
@@ -1000,6 +1039,15 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         })),
       discoveryReady: () => discovery.ready(),
       discoveryRefresh: () => discovery.refresh(),
+      stepsSummaryForTests: (uri: vscode.Uri) => {
+        // The REAL summary function, not a copy — so a regression in
+        // decorations.ts turns this test red. See computeStepsSummary.
+        const snap = tracker.snapshotFor(uri) ?? tracker.snapshot();
+        const { passed, total } = computeStepsSummary(snap);
+        return { passed, total };
+      },
+      variablesDescription: () => variablesProvider.descriptionForTests(),
+      stepSignatureForText: (text: string) => tracker.stepSignatureForTests(text),
       lastBatchRun: () => testController.lastRun,
       batchOutput: () => [...testController.liveOutput],
       runBatchByUris: (uris) => testController.runByUris(uris),

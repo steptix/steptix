@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { maskIfSecret } from 'ai-ui-automation-runner-core';
+import { maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
 
 /**
  * Read-only TreeView contributed to the TestBench activity-bar container.
@@ -27,10 +27,13 @@ export interface ScopeSource {
    * a skill frame where those names are the actual locals.
    *
    * `null` when no run is in flight. The empty string is the test
-   * (root) frame; any other value is a skill frame's id, with
-   * `skillName` carrying a human-readable label for the view title.
+   * (root) frame; any other value is a skill or section frame's id, with
+   * `skillName` carrying a human-readable label for the view title and
+   * `kind` distinguishing the two — a section frame carries `skillName`
+   * as well (it holds the section name), so the label cannot be derived
+   * from that field's presence alone.
    */
-  currentFrame(): { id: string; skillName?: string } | null;
+  currentFrame(): { id: string; skillName?: string; kind?: FrameInfo['kind'] } | null;
 }
 
 /** Matches the expander's per-instance internal-variable rename scheme.
@@ -107,24 +110,35 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     return names.map((name) => ({ name, rawValue: scope[name] ?? '' }));
   }
 
-  /** Drive the TreeView's title from the active frame: "Variables (test)"
-   *  at the root, "Variables (skill: name)" inside a skill. Gives the
-   *  user an anchor for which scope they're inspecting — without it,
-   *  switching between test and skill frames was a silent re-render. */
+  /** Test-only readback of the description the view would show. Keeps the
+   *  label rule (kind-derived, not skillName-presence) assertable without
+   *  reaching into a live TreeView. */
+  descriptionForTests(): string {
+    return this.computeDescription();
+  }
+
+  /** Drive the TreeView's description from the active frame: "test" at the
+   *  root, "skill: name" / "section: name" inside one. Gives the user an
+   *  anchor for which scope they're inspecting — without it, switching
+   *  between frames was a silent re-render. */
   private updateTitle(): void {
     if (!this.view) return;
-    const frame = this.source.currentFrame();
-    if (!frame) {
-      this.view.title = 'Variables';
-      this.view.description = '';
-      return;
-    }
-    if (frame.id === '') {
-      this.view.title = 'Variables';
-      this.view.description = 'test';
-      return;
-    }
     this.view.title = 'Variables';
-    this.view.description = frame.skillName ? `skill: ${frame.skillName}` : 'frame';
+    this.view.description = this.computeDescription();
+  }
+
+  /**
+   * The description string for the current frame.
+   *
+   * Keyed on `kind`, NOT on `skillName` presence: a section frame carries
+   * `skillName` too (it holds the section name), so a presence check labelled
+   * every paused section "skill: <section name>".
+   */
+  private computeDescription(): string {
+    const frame = this.source.currentFrame();
+    if (!frame) return '';
+    if (frame.id === '') return 'test';
+    if (!frame.skillName) return 'frame';
+    return `${frame.kind === 'section' ? 'section' : 'skill'}: ${frame.skillName}`;
   }
 }

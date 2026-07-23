@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { isTestFile, extractSteps } from 'ai-ui-automation-runner-core';
+import { isTestFile, extractSections, extractSteps } from 'ai-ui-automation-runner-core';
 import type { ErrorPayload } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, shiftAnchorForChanges, changesTouchAnchor } from './step-lines.js';
 
@@ -613,12 +613,26 @@ export class ActiveFileTracker {
     }
   }
 
+  /** Test-only accessor for the run-state signature. */
+  stepSignatureForTests(text: string): string {
+    return this.stepSignature(text);
+  }
+
   /** Hash of the step lines (1-based line number + text) — the surface a
    *  status is pinned to. Two documents with the same steps in the same
    *  places share a signature even if surrounding prose differs. */
   private stepSignature(text: string): string {
     const lines = text.split(/\r?\n/);
     const parts = extractStepLineIds(text).map((id) => `${id}:${lines[id - 1] ?? ''}`);
+    // Section headings join the signature even though they are not steps.
+    // Statuses are pinned to line numbers, and a heading is what decides
+    // WHICH body a line belongs to — rename a section, or move a boundary so
+    // a step falls into a different one, and the same line now means
+    // something else. Without this the persisted ✓ from the old structure
+    // would be restored onto the new one.
+    for (const section of extractSections(text)) {
+      parts.push(`h${section.headingLine}:${section.name}`);
+    }
     return hashString(parts.join('\n'));
   }
 

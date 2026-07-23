@@ -30,6 +30,7 @@ import {
 import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
+import { buildSectionsPayload, preflightSections, sectionedSkillRefusal } from './sections.js';
 
 /**
  * Subset of the ApiClient surface we depend on. Defining it lets tests
@@ -89,9 +90,24 @@ export interface RunOutcome {
 export interface SkillFailure {
   /** Server frame id of the failed (top-level) skill invocation. */
   frameId: string;
-  /** Skill name, for the panel heading. */
+  /**
+   * What kind of frame failed.
+   *
+   * A top-level SECTION frame has `parentId === null` — the same shape as a
+   * top-level skill invocation — so it flows through the capture path
+   * unchanged. But everything downstream assumed "skill": for a section,
+   * `skillUri` is the TEST file, so the skill-file-oriented
+   * debug-after-Stop flow would half-activate against it, and the "does this
+   * skill define sections?" refusal would reject every section re-run (a test
+   * file with a section by definition defines sections).
+   *
+   * Nothing to gate on existed before this field.
+   */
+  kind: 'skill' | 'section';
+  /** Skill or section name, for the panel heading. */
   skillName: string;
-  /** Absolute path of the skill file the failed step lives in. */
+  /** Absolute path of the file the failed step lives in — the skill file for
+   *  a skill, the test file itself for a section. */
   skillUri: string;
   /** The failed step's 1-based line within the skill file. */
   skillLine: number;
@@ -440,12 +456,27 @@ export class RunController {
    *  `call-stack-view.ts`'s `?? 'skill'` label and `symbol-method` icon are
    *  the same class. */
   recordSkillFailure(frame: FrameInfo, failedLine: number): void {
-    if (frame.parentId !== null) return; // v1: top-level skills only
+    // v1: top-level frames only — a nested skill or section is out of re-run
+    // scope, same as before sections existed.
+    if (frame.parentId !== null) return;
+    // The root (test) frame itself is not a re-runnable unit: there is no
+    // enclosing invocation to re-enter, and `skillUri` would be the test file
+    // with no section or skill to name.
+    //
+    // Today the `!root` guard below already refuses it — the root frame's id
+    // is `''`, which is never registered in `frameRoot` (only a `frame:push`
+    // populates it, and the root is synthesized without one). This explicit
+    // kind gate does not depend on that coupling: it states the intent
+    // directly, so a future change to how `frameRoot` is populated can't
+    // silently start parking a root-frame failure with the test file as its
+    // `skillUri`.
+    if (frame.kind !== 'skill' && frame.kind !== 'section') return;
     const root = this.frameRoot.get(frame.id);
     if (!root) return;
     this._lastSkillFailure = {
       frameId: frame.id,
-      skillName: frame.skillName ?? 'skill',
+      kind: frame.kind,
+      skillName: frame.skillName ?? frame.kind,
       skillUri: frame.uri,
       skillLine: failedLine,
       testUri: root.testUri,
@@ -499,6 +530,11 @@ export class RunController {
     const failure = this._lastSkillFailure;
     if (!failure) {
       vscode.window.setStatusBarMessage('TestBench: no failed skill step to re-run', 2500);
+      return { ok: false };
+    }
+    const unsupported = sectionedSkillRefusal(failure);
+    if (unsupported) {
+      vscode.window.setStatusBarMessage(unsupported, 6000);
       return { ok: false };
     }
     // Seed = captured frame scope (minus server-owned __skill* internals) with
@@ -1069,7 +1105,37 @@ export class RunController {
     const apiKey = env['SERVER_API_KEY'].trim();
 
     const text = this.document.getText();
+
+    // Refuse a file whose sections the CLI would reject, before building any
+    // request. The wire format cannot represent a duplicate name — a JSON
+    // object collapses them — so without this the CLI would error on a file
+    // TestBench ran anyway, silently picking a different definition.
+    const sectionProblem = preflightSections(text);
+    if (sectionProblem) {
+      const payload = reportError('TB024', { detail: sectionProblem });
+      return this.fail(payload, log);
+    }
+
     const effectiveLines = resolveRunLines(text, lines);
+
+    // "No lines requested" means run everything, and `resolveRunLines`
+    // returns `[]` for that. It ALSO returns `[]` when specific lines were
+    // requested and none resolve — which is what a cursor on a section body
+    // line produces, since bodies trail the main flow and there is no
+    // main-flow step at or below them. Those two cases are indistinguishable
+    // downstream, so without this guard "run from my cursor" inside a
+    // section silently runs the WHOLE test against the live session.
+    //
+    // Every user gesture funnels through here — the webview run message,
+    // runSelected, runStepHere, Continue and both re-run flows — which is why
+    // the guard lives at this choke point rather than in commands/index.ts.
+    // Legitimate flows can't trip it: batch mode passes `[]`, and
+    // continuations and re-runs pass explicit main-flow lines.
+    if (lines.length > 0 && effectiveLines.length === 0) {
+      const payload = reportError('TB025', {});
+      return this.fail(payload, log);
+    }
+
     const allClassified = classifySelectedSteps(text, effectiveLines);
     if (allClassified.length === 0) {
       const payload = reportError('TB021', {});
@@ -1407,6 +1473,14 @@ export class RunController {
     const fullStepInstructions = extractSteps(this.document.getText())
       .map((s) => s.instruction);
 
+    // Inline section definitions, rebuilt from the LIVE buffer on every
+    // request — initial runs, breakpoint continuations and partial re-runs
+    // alike. The server holds no cross-batch document state, so a
+    // continuation that omitted these would expand differently from the
+    // batch before it and hash differently too. Same reason `fullSteps` is
+    // re-sent, and same reason it reads the buffer rather than disk.
+    const sections = buildSectionsPayload(this.document.getText());
+
     // Resolve the project's skills directory so the server can expand
     // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around
     // their bodies. Without a resolved skillsDir the server falls back to
@@ -1441,6 +1515,10 @@ export class RunController {
         ...(logging && { logging }),
         ...(skillsDir && { skillsDir }),
         ...(toolsDir && { toolsDir }),
+        // Omitted entirely when the file defines none: `{}` is truthy, and
+        // several server gates would read it as "this run has sections",
+        // moving every sectionless run onto the expansion path.
+        ...(sections && { sections }),
         // A re-run forces the cache off (see `rerun` doc) so an edited value
         // re-plans rather than replaying a frozen cached action list.
         ...(cacheEnabled && !rerun && { cacheEnabled: true }),

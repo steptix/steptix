@@ -111,7 +111,18 @@ describe('TestBench env-file overlay (## Parameters honour the selected env)', f
     fs.rmSync(OVERLAY_PATH, { force: true });
     fs.rmSync(OVERLAY_T2B_PATH, { force: true });
     fs.rmSync(SUB_ROOT_OVERLAY, { force: true });
-    fs.rmSync(SUB_DIR, { recursive: true, force: true });
+    // Best-effort: this intermittently throws EBUSY on Windows. The fixtures
+    // directory IS the test workspace, so the extension's own `**/*.md`
+    // discovery watcher can still hold a handle on `sub/` when the hook
+    // runs — `maxRetries` doesn't cover it, since the lock outlives the
+    // retry window. Mocha reports a throwing teardown as a failed test, so
+    // the whole suite went red over a directory that deletes fine on the
+    // next run and whose contents are rewritten by `before` anyway.
+    try {
+      fs.rmSync(SUB_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (err) {
+      console.warn(`[env-overlay] could not remove ${SUB_DIR}: ${err.message}`);
+    }
   });
 
   beforeEach(async () => {

@@ -7,6 +7,7 @@ import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { RunController, SkillDebugContext } from '../run-controller.js';
 import { getOutputChannel } from '../output-channel.js';
 import { cacheDirsForTestAllEnvs } from '../cache-paths.js';
+import { sectionedSkillRefusal } from '../sections.js';
 
 interface Registry {
   active(): RunController | undefined;
@@ -83,7 +84,14 @@ export function registerCommands(
         ? controller
         : registry.controllerWithSkillFailure();
       const f = failed?.lastSkillFailure;
-      if (f) {
+      // Skill failures only. "Debug a skill after Stop" opens the skill file
+      // and runs its body against the stopped session — for a SECTION,
+      // `skillUri` is the test file itself, so that flow would activate
+      // against the wrong thing entirely: it would offer to debug "the skill"
+      // by reopening the test the user is already looking at. Section re-runs
+      // go through the Variables panel path instead, which needs no such
+      // context.
+      if (f && f.kind === 'skill') {
         registry.setSkillDebug({
           testUri: f.testUri,
           testLine: f.testLine,
@@ -199,6 +207,21 @@ export function registerCommands(
         );
         return;
       }
+      // Same anchoring hazard as the Variables-panel re-run: a skill that
+      // defines its own sections cannot be line-anchored safely, because the
+      // server applies exact matching only to the test file and falls back to
+      // nearest-line in a skill — landing inside a body that already ran.
+      // This context is skill-kind by construction (it comes from the Stop
+      // gate, which only captures skill failures).
+      const unsupported = sectionedSkillRefusal({
+        kind: 'skill',
+        skillUri: ctx.skillUri,
+        skillName: ctx.skillName,
+      });
+      if (unsupported) {
+        vscode.window.setStatusBarMessage(unsupported, 6000);
+        return;
+      }
       registry.notifyRunning(true);
       void controller
         .runLines([ctx.testLine], {
@@ -274,6 +297,10 @@ export function registerCommands(
         const resumeLines = extractSteps(editor.document.getText())
           .map((s) => s.line)
           .filter((line) => line >= startLine);
+        if (resumeLines.length === 0) {
+          refuseStaleResume(tracker, controller.document.uri);
+          return;
+        }
         registry.notifyRunning(true);
         await controller
           .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true, isContinuation: true })
@@ -603,6 +630,10 @@ async function dispatchStep(
     const resumeLines = extractSteps(editor.document.getText())
       .map((s) => s.line)
       .filter((line) => line >= startLine);
+    if (resumeLines.length === 0) {
+      refuseStaleResume(tracker, controller.document.uri);
+      return;
+    }
     // Phase 5 — if the breakpoint sat on a `[tool: ...]` line and the
     // command is Step Into, seed the run with `pauseAtNextTool: true`
     // so the server emits `tool:awaiting-debugger` before that step.
@@ -641,4 +672,34 @@ async function dispatchStep(
   await controller
     .runLines(lines, { breakpoints, stepMode: 'into' })
     .finally(() => registry.notifyRunning(false));
+}
+
+/**
+ * Refuse to resume from a pause marker that no longer names a runnable step.
+ *
+ * Both call sites have already cleared the marker by the time they get here —
+ * they clear it before computing `resumeLines`, so a refused resume does not
+ * leave the arrow painted. The clear below is belt-and-braces for a future
+ * caller that doesn't.
+ *
+ * Both resume paths compute `resumeLines` as "every main-flow step at or
+ * after the parked line". For a marker parked on a SECTION BODY line that
+ * list is empty — bodies are defined below the main flow, so no main-flow
+ * step sits at or after them — and passing `[]` to `runLines` is the literal
+ * "run everything" convention. The run-line guard cannot help here: it fires
+ * on a non-empty request that resolves to nothing, and this request is empty
+ * to begin with, indistinguishable from batch mode.
+ *
+ * Body-line markers became possible the moment breakpoints inside sections
+ * started pausing server-side. Nothing clears a marker except Stop, a new
+ * run, or the next `step:start`, so a dropped stream or a restarted server
+ * leaves one behind — and resuming from it would silently re-run the whole
+ * test against a live session.
+ */
+function refuseStaleResume(tracker: ActiveFileTracker, uri: vscode.Uri): void {
+  tracker.setBreakpointStop(uri, null);
+  vscode.window.setStatusBarMessage(
+    'TestBench: the paused step is no longer runnable on its own — use Run All',
+    4000,
+  );
 }
