@@ -1,9 +1,13 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import { url as inspectorUrl } from 'node:inspector';
 import type { Config } from '../config/types.js';
 import { SessionManager, type RunEvent, type StepRequest } from './session-manager.js';
+import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
+import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
 import { matchText } from '../parser/section-match.js';
 import { logger } from '../utils/logger.js';
+import { getPackageVersion } from '../utils/version.js';
 
 /** Write a single SSE frame. */
 function writeSseEvent(res: Response, event: RunEvent): void {
@@ -11,19 +15,82 @@ function writeSseEvent(res: Response, event: RunEvent): void {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+/**
+ * Teardown callbacks the app needs but cannot own: the HTTP `server` handle
+ * and `process.exit` live in `startServer`. The `/admin/shutdown` route does
+ * all the validation (including the 409) and then delegates, so tests can
+ * drive the real route with a spy instead of stubbing `process.exit`.
+ */
+export interface ServerHooks {
+  requestShutdown(force: boolean): void;
+}
+
 // ---------------------------------------------------------------------------
 // App factory
 // ---------------------------------------------------------------------------
 
-export function createApiServer(config: Config): {
+export function createApiServer(
+  config: Config,
+  hooks?: ServerHooks,
+  /** Injectable so tests can drive expiry with a fake clock. */
+  idleMonitor: IdleMonitor = new IdleMonitor(config.server.idleTimeoutMinutes),
+): {
   app: express.Express;
   sessionManager: SessionManager;
+  idleMonitor: IdleMonitor;
+  /** Close the app to new work (§2). Idempotent. */
+  beginShutdown: () => void;
 } {
   const app = express();
   const sessionManager = new SessionManager(config);
+  const version = getPackageVersion();
+  const startedAt = new Date().toISOString();
+  let shuttingDown = false;
 
   // JSON body parsing
   app.use(express.json());
+
+  // GET /health — UNAUTHENTICATED by design, and registered before the auth
+  // middleware so it stays that way. This is a localhost dev server and the
+  // body carries no api key, no config and no session contents — the point is
+  // that a client can ask "is our server there?" without holding a key, which
+  // is what makes the extension's spawn decision and the status bar possible.
+  //
+  // It is also registered before the wildcard-CORS middleware, and that is
+  // load-bearing rather than incidental. Every other route is auth-gated, so
+  // `Access-Control-Allow-Origin: *` on them is harmless — a foreign origin
+  // never gets a readable body. `/health` is the one route that is both
+  // unauthenticated and readable, and it publishes `inspector` — the Node
+  // inspector ws URL whose unguessable UUID is the only thing standing
+  // between a web page and `Runtime.evaluate` on the developer's machine
+  // (browsers can open ws:// to localhost regardless of origin). Handing that
+  // UUID to any http page the developer happens to visit is not a trade this
+  // endpoint should make; the only consumers are Node clients (the CLI and
+  // the extension host), which do not need CORS.
+  //
+  // It deliberately does NOT bump `idleMonitor`: the status bar polls this
+  // every 30 s, so bumping here would keep the server alive forever and make
+  // the idle timeout dead code (story server-lifecycle §3).
+  //
+  // Synchronous, and touches no session state beyond counts.
+  app.get('/health', (_req: Request, res: Response) => {
+    const body: HealthResponse = {
+      ok: true,
+      service: HEALTH_SERVICE_ID,
+      version,
+      pid: process.pid,
+      startedAt,
+      openSessions: sessionManager.countOpenSessions(),
+      runsInFlight: sessionManager.runsInFlight(),
+      // Ground truth from inside the process. null ⇒ step-into cannot work
+      // (started without --inspect, or the requested port was taken — node
+      // only warns in that case, which is the wrong-process-attach bug this
+      // field exists to kill).
+      inspector: inspectorUrl() ?? null,
+      idleTimeoutMinutes: idleMonitor.timeoutMinutes,
+    };
+    res.status(200).json(body);
+  });
 
   // CORS — allow any origin so Tauri / browser clients can reach the API
   app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -37,6 +104,23 @@ export function createApiServer(config: Config): {
     next();
   });
 
+  // "Stop accepting new work" (§2), registered after /health so a client can
+  // still watch the server go away.
+  //
+  // `server.close()` alone is not a work gate: it refuses new *connections*
+  // but a client already holding a keep-alive socket — which TestBench does —
+  // can still send a request during the seconds `closeAll()` spends shutting
+  // browsers down. That request would create a session and launch a browser
+  // after the map was drained, and then be killed mid-run by the exit,
+  // orphaning the browser.
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    if (shuttingDown) {
+      res.status(503).json({ error: 'Server is shutting down' });
+      return;
+    }
+    next();
+  });
+
   // Auth middleware — check x-api-key header
   app.use((req: Request, res: Response, next: NextFunction) => {
     const apiKey = req.headers['x-api-key'];
@@ -44,7 +128,46 @@ export function createApiServer(config: Config): {
       res.status(401).json({ error: 'Unauthorized: missing or invalid x-api-key header' });
       return;
     }
+    // Authenticated traffic is half of the idle definition (§3); the other
+    // half is `runsInFlight`, checked by the reaper in `startServer`.
+    idleMonitor.bump();
     next();
+  });
+
+  // POST /admin/shutdown — graceful stop, behind auth.
+  //
+  // Body: `{ force?: boolean }`. A run in flight refuses with 409 unless
+  // forced. Open-but-idle sessions do NOT block a stop — they are closed as
+  // part of it (story server-lifecycle §2). That asymmetry is the whole
+  // point: TestBench sessions stay open for reuse indefinitely, so blocking
+  // on them would mean `aiui stop` never works.
+  app.post('/admin/shutdown', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const force = body.force === true;
+    const runsInFlight = sessionManager.runsInFlight();
+
+    if (runsInFlight > 0 && !force) {
+      res.status(409).json({
+        error:
+          `Refusing to stop: ${runsInFlight} run(s) executing. ` +
+          'Re-send with {"force": true} to stop anyway.',
+        runsInFlight,
+        openSessions: sessionManager.countOpenSessions(),
+      });
+      return;
+    }
+
+    res.status(200).json({ ok: true, stopping: true });
+    // Teardown + exit belong to the process owner, not the app. `hooks` is
+    // optional (§2) so tests can build the app without them — but an app
+    // serving real traffic with nothing wired would answer "stopping" and
+    // then keep running, which is the one failure mode a caller cannot
+    // detect. Say so rather than going quiet.
+    if (!hooks) {
+      logger.warn('Shutdown requested but no teardown hook is wired — the server will keep running');
+      return;
+    }
+    hooks.requestShutdown(force);
   });
 
   // POST /sessions/:id/steps
@@ -495,31 +618,105 @@ export function createApiServer(config: Config): {
     res.status(500).json({ error: message });
   });
 
-  return { app, sessionManager };
+  return {
+    app,
+    sessionManager,
+    idleMonitor,
+    beginShutdown: () => {
+      shuttingDown = true;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Server startup
 // ---------------------------------------------------------------------------
 
+/** Grace delay before exiting so the shutdown response flushes to the client. */
+const SHUTDOWN_GRACE_MS = 250;
+/** Backstop for a teardown that hangs (a wedged browser, a stuck socket). */
+const SHUTDOWN_HARD_EXIT_MS = 10_000;
+
 export async function startServer(config: Config): Promise<void> {
-  const { app, sessionManager } = createApiServer(config);
+  let shuttingDown = false;
+
+  // `shutdown` is a hoisted function declaration, not a `const` arrow, so the
+  // hook can be handed to `createApiServer` before `server` exists without a
+  // mutable trampoline — a placeholder that has to be swapped in later is a
+  // window in which a stop request gets a 200 and does nothing.
+  const { app, sessionManager, idleMonitor, beginShutdown } = createApiServer(config, {
+    requestShutdown: (force) =>
+      void shutdown(`${force ? 'Forced shutdown' : 'Shutdown'} requested — ${closingSummary()}`),
+  });
   const { host, port } = config.server;
+
+  /** Shared tail of every shutdown log line, so the reason reads as one
+   *  sentence naming what is about to be closed. */
+  const closingSummary = () =>
+    `closing ${sessionManager.countOpenSessions()} session(s) and shutting down`;
 
   const server = app.listen(port, host, () => {
     logger.info(`Sessions API server listening on http://${host}:${port}`);
+    if (idleMonitor.armed) {
+      logger.info(
+        `Idle timeout armed: ${idleMonitor.timeoutMinutes}m with no run in flight ` +
+          'and no authenticated request',
+      );
+    }
     logger.info('Server ready — press Ctrl+C to stop');
   });
 
-  const shutdown = async () => {
-    logger.info('Shutting down — closing all sessions...');
-    await sessionManager.closeAll();
-    server.close();
-    process.exit(0);
-  };
+  const stopIdleReaper = startIdleReaper({
+    monitor: idleMonitor,
+    // The second half of the idle definition (§3): a busy server is never
+    // idle, however quiet the socket has been. An open-but-idle session is
+    // deliberately NOT busy — it is closed on the way out.
+    isBusy: () => sessionManager.runsInFlight() > 0,
+    onExpire: () => void shutdown(`Idle for ${idleMonitor.timeoutMinutes}m — ${closingSummary()}`),
+  });
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  async function shutdown(reason: string): Promise<void> {
+    // Re-entrancy guard: SIGINT twice, or an idle expiry racing an explicit
+    // `aiui stop`, must not run teardown twice.
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopIdleReaper();
+
+    // Nothing can rescue a hung teardown from inside the teardown, so arm the
+    // hard exit first. unref'd so it never itself keeps the process alive.
+    const hardExit = setTimeout(() => {
+      logger.warn('Shutdown did not complete in time — exiting anyway');
+      process.exit(0);
+    }, SHUTDOWN_HARD_EXIT_MS);
+    hardExit.unref();
+
+    logger.info(reason);
+
+    // §2's order exactly: stop accepting new work, close all sessions, then
+    // close the listener.
+    //
+    // The work gate is `beginShutdown()`, not `server.close()`. That matters
+    // twice over: `close()` only refuses new *connections*, so a client on an
+    // already-open keep-alive socket (TestBench holds one) could otherwise
+    // slip a run in while browsers were closing — and closing the listener
+    // early also makes `/health` go dark instantly, so `aiui stop`'s
+    // confirmation poll would report "stopped" while teardown was still
+    // running. Keeping the listener up until sessions are closed is what
+    // makes that confirmation mean anything.
+    beginShutdown();
+    try {
+      await sessionManager.closeAll();
+    } catch (err) {
+      logger.warn(`Error while closing sessions: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    server.close();
+    // Give the in-flight response (the `aiui stop` caller's 200) time to
+    // flush before the socket dies with the process.
+    setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS);
+  }
+
+  process.on('SIGINT', () => void shutdown(`Received SIGINT — ${closingSummary()}`));
+  process.on('SIGTERM', () => void shutdown(`Received SIGTERM — ${closingSummary()}`));
 }
 
 /**

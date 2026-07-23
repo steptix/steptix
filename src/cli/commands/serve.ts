@@ -1,12 +1,14 @@
 import chalk from 'chalk';
 import type { Command } from 'commander';
 import { loadConfig } from '../../config/loader.js';
+import { nonNegativeInt } from '../parse-args.js';
 import { startServer } from '../../server/api-server.js';
 import { setLogLevel, type ConsoleLogLevel } from '../../utils/logger.js';
 import type { LoggingConfig } from '../../config/types.js';
 
 const VALID_LEVELS: readonly ConsoleLogLevel[] = ['silent', 'error', 'warn', 'info', 'debug'];
 const VALID_FILES: readonly LoggingConfig['serverFileLogLevel'][] = ['off', 'compact', 'full'];
+
 
 export function registerServeCommand(program: Command): void {
   program
@@ -23,6 +25,13 @@ export function registerServeCommand(program: Command): void {
       '--server-file-log-level <mode>',
       `Per-run server log file: ${VALID_FILES.join('|')}. Overrides config.logging.serverFileLogLevel`,
     )
+    .option(
+      '--idle-timeout <minutes>',
+      'Shut down after N minutes with no run in flight and no authenticated API request ' +
+        '(open sessions are closed on the way out). Omit or 0 to run forever. ' +
+        'Overrides config.server.idleTimeoutMinutes',
+      nonNegativeInt,
+    )
     .action(async (opts) => {
       if (!process.env['SERVER_API_KEY']) {
         console.error(chalk.red('SERVER_API_KEY is not set — add it to your .env file'));
@@ -31,6 +40,7 @@ export function registerServeCommand(program: Command): void {
       const config = await loadConfig(opts.config);
       if (opts.port !== undefined) config.server.port = opts.port;
       if (opts.host !== undefined) config.server.host = opts.host;
+      if (opts.idleTimeout !== undefined) config.server.idleTimeoutMinutes = opts.idleTimeout;
 
       if (opts.consoleLogLevel !== undefined) {
         if (!VALID_LEVELS.includes(opts.consoleLogLevel)) {

@@ -197,6 +197,21 @@ export interface ServerConfig {
   port: number;
   /** API key for authentication (checked via x-api-key header) */
   apiKey: string;
+  /**
+   * Shut the server down after this many minutes with **no run in flight and
+   * no authenticated API request** — deliberately not "no open sessions",
+   * since TestBench keeps sessions open for reuse indefinitely and a
+   * session-count rule would never fire. `GET /health` is unauthenticated and
+   * never resets the timer, so the status bar's poll can't keep the server
+   * alive. The idle shutdown closes any open sessions (browsers included) on
+   * its way out.
+   *
+   * Absent or 0 ⇒ run forever (today's behaviour for manual launches).
+   * `serve --idle-timeout <minutes>` overrides this. Optional on purpose:
+   * there is no `defaults.ts` entry, so absence stays absence through
+   * `deepMerge`. See stories/server-lifecycle.md §3.
+   */
+  idleTimeoutMinutes?: number;
 }
 
 export interface CacheConfig {

@@ -682,6 +682,9 @@ export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private config: Config;
 
+  /** Backing store for `runsInFlight()`. See `executeSteps`. */
+  private activeRuns = 0;
+
   /**
    * Per-project resolution cache, keyed by `<projectRoot>::<envName>`. Holds the
    * resolved bundle plus the mtimes of every input file (config, `.env`,
@@ -926,6 +929,58 @@ export class SessionManager {
    * StepResponse on completion.
    */
   async executeSteps(
+    sessionId: string,
+    request: StepRequest,
+    onEvent?: RunEventListener,
+    signal?: AbortSignal,
+  ): Promise<StepResponse> {
+    // `runsInFlight` pins the idle-shutdown timer (story server-lifecycle §3).
+    // Incremented at the very entry of a run — before session creation and
+    // before the per-session queue — so every phase counts, including setup
+    // and a run queued behind another. Decremented in a `finally` so a throw
+    // or an abort can never strand the counter above zero, which would
+    // silently disable the idle timeout for the rest of the process's life.
+    this.activeRuns++;
+    try {
+      return await this.executeStepsUncounted(sessionId, request, onEvent, signal);
+    } finally {
+      this.activeRuns--;
+    }
+  }
+
+  /**
+   * Number of runs currently in flight (setup, queued, or executing).
+   *
+   * A maintained counter rather than a scan of per-session state, so
+   * `GET /health` stays a cheap synchronous read. Step-mode and
+   * tool-debugger pauses park *inside* the run, so a paused run still
+   * counts — which is what stops the idle reaper from killing a server the
+   * user is actively stepping through. The extension's *breakpoint* pause is
+   * client-side (the batch is truncated and the run completes), so it is
+   * invisible here by design and is covered by the extension's keep-alive.
+   */
+  runsInFlight(): number {
+    return this.activeRuns;
+  }
+
+  /**
+   * Count of non-closed sessions.
+   *
+   * Separate from `getActiveSessions()` because that one reaches into each
+   * session's Playwright page (`page.url()`) and allocates a
+   * `SessionListItem` per session — fine for `GET /sessions`, wrong for
+   * `GET /health`, which is polled every 30 s per client and is supposed to
+   * touch no session state beyond counts.
+   */
+  countOpenSessions(): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.status !== 'closed') count++;
+    }
+    return count;
+  }
+
+  private async executeStepsUncounted(
     sessionId: string,
     request: StepRequest,
     onEvent?: RunEventListener,

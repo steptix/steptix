@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import type { Express } from 'express';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -126,6 +127,12 @@ vi.mock('../src/utils/logger.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { createApiServer } from '../src/server/api-server.js';
+import { IdleMonitor } from '../src/server/idle-monitor.js';
+import { executeStep as executeStepMock } from '../src/runner/step-executor.js';
+
+/** The mock factory's fast implementation, captured before any test swaps it
+ *  out, so a suite that installs a slow/failing step can put it back. */
+const defaultStepImpl = vi.mocked(executeStepMock).getMockImplementation()!;
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -195,24 +202,30 @@ const testConfig: Config = {
 let server: Server;
 let baseUrl: string;
 
+/** Boot an express app on a random port and return it with its base URL. */
+async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
+  const started = createServer(app);
+  await new Promise<void>((resolve) => {
+    started.listen(0, '127.0.0.1', () => resolve());
+  });
+  const addr = started.address();
+  const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+  return { server: started, baseUrl: `http://127.0.0.1:${port}` };
+}
+
+async function closeServer(target: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    target.close((err) => (err ? reject(err) : resolve()));
+  });
+}
+
 async function startTestServer(): Promise<void> {
   const { app } = createApiServer(testConfig);
-  server = createServer(app);
-
-  await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve());
-  });
-
-  const addr = server.address();
-  if (typeof addr === 'object' && addr !== null) {
-    baseUrl = `http://127.0.0.1:${addr.port}`;
-  }
+  ({ server, baseUrl } = await listenOnRandomPort(app));
 }
 
 async function stopTestServer(): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServer(server);
 }
 
 /** Helper to make requests with common headers */
@@ -806,6 +819,286 @@ describe('API Server', () => {
         env: { AI_API_KEY: 'should-not-leak' },
       });
       expect(process.env['AI_API_KEY']).toBe(before);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Server lifecycle — /health, /admin/shutdown, idle accounting
+// (stories/server-lifecycle.md §1–3)
+//
+// Driven through the real `createApiServer` app, per the house pattern: the
+// 409 rule and the "/health never bumps the idle timer" rule both live in
+// middleware ordering and in a counter that only a real request path
+// increments. A resolver unit test would prove neither.
+// ---------------------------------------------------------------------------
+
+describe('server lifecycle', () => {
+  let lifecycleServer: Server;
+  let lifecycleUrl: string;
+  let idleMonitor: IdleMonitor;
+  let clockNow = 5_000_000;
+  const requestShutdown = vi.fn<(force: boolean) => void>();
+
+  /** Request against the lifecycle server; key included unless `noKey`. */
+  async function call(
+    method: string,
+    path: string,
+    opts: { body?: unknown; noKey?: boolean } = {},
+  ): Promise<{ status: number; body: any }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (!opts.noKey) headers['x-api-key'] = API_KEY;
+    const init: RequestInit = { method, headers };
+    if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
+    const res = await fetch(`${lifecycleUrl}${path}`, init);
+    return { status: res.status, body: await res.json() };
+  }
+
+  beforeAll(async () => {
+    idleMonitor = new IdleMonitor(60, () => clockNow);
+    const { app } = createApiServer(testConfig, { requestShutdown }, idleMonitor);
+    ({ server: lifecycleServer, baseUrl: lifecycleUrl } = await listenOnRandomPort(app));
+  });
+
+  afterAll(async () => {
+    await closeServer(lifecycleServer);
+  });
+
+  describe('GET /health', () => {
+    it('responds without an api key, with the documented shape', async () => {
+      const res = await fetch(`${lifecycleUrl}/health`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      expect(body).toMatchObject({
+        ok: true,
+        service: 'ai-ui-automation',
+        pid: process.pid,
+        idleTimeoutMinutes: 60,
+      });
+      expect(typeof body.version).toBe('string');
+      expect(body.version).not.toBe('');
+      expect(new Date(body.startedAt).toString()).not.toBe('Invalid Date');
+      expect(typeof body.openSessions).toBe('number');
+      expect(typeof body.runsInFlight).toBe('number');
+    });
+
+    it('reports inspector: null when the process has no inspector', async () => {
+      // vitest workers don't run under --inspect, so this is the null branch.
+      // A ws URL here would mean the field is being faked rather than read
+      // from node:inspector.
+      const { body } = await call('GET', '/health');
+      expect(body.inspector).toBeNull();
+    });
+
+    it('is not readable cross-origin, unlike the auth-gated routes', async () => {
+      // /health is the only route that is both unauthenticated and readable,
+      // and it publishes the inspector ws URL — whose UUID is all that stands
+      // between a web page and Runtime.evaluate on the dev machine. Every
+      // other route is auth-gated, so wildcard CORS on them leaks nothing.
+      const health = await fetch(`${lifecycleUrl}/health`);
+      expect(health.headers.get('access-control-allow-origin')).toBeNull();
+
+      const gated = await fetch(`${lifecycleUrl}/sessions`);
+      expect(gated.status).toBe(401);
+      expect(gated.headers.get('access-control-allow-origin')).toBe('*');
+    });
+
+    it('reports the idle timeout the config asked for, and null when unset', async () => {
+      // The only link between `--idle-timeout` / config and an armed reaper
+      // is createApiServer's default IdleMonitor argument. Every other test
+      // injects a monitor, so nothing else would notice if that link broke.
+      const configured = await listenOnRandomPort(
+        createApiServer({ ...testConfig, server: { ...testConfig.server, idleTimeoutMinutes: 45 } }).app,
+      );
+      const off = await listenOnRandomPort(createApiServer(testConfig).app);
+      try {
+        expect((await (await fetch(`${configured.baseUrl}/health`)).json()).idleTimeoutMinutes).toBe(45);
+        expect((await (await fetch(`${off.baseUrl}/health`)).json()).idleTimeoutMinutes).toBeNull();
+      } finally {
+        await closeServer(configured.server);
+        await closeServer(off.server);
+      }
+    });
+
+    it('counts open sessions and idle runs (openSessions up, runsInFlight back to 0)', async () => {
+      const before = (await call('GET', '/health')).body.openSessions;
+
+      await call('POST', '/sessions/health-session/steps', { body: { steps: ['Click'] } });
+
+      const { body } = await call('GET', '/health');
+      expect(body.openSessions).toBe(before + 1);
+      // The run has finished; an open-but-idle session must NOT read as a run
+      // in flight — that distinction is what makes the idle timeout fire at all.
+      expect(body.runsInFlight).toBe(0);
+    });
+
+    it('does not bump the idle timer, while an authenticated request does', async () => {
+      // The status bar polls /health every 30s. If that bumped the timer the
+      // idle shutdown could never fire — this is the regression guard.
+      idleMonitor.bump();
+      clockNow += 10 * 60_000;
+
+      await fetch(`${lifecycleUrl}/health`);
+      expect(idleMonitor.idleFor()).toBe(10 * 60_000);
+
+      await call('GET', '/sessions');
+      expect(idleMonitor.idleFor()).toBe(0);
+    });
+
+    it('an unauthenticated (401) request does not bump the idle timer', async () => {
+      idleMonitor.bump();
+      clockNow += 5 * 60_000;
+
+      const res = await fetch(`${lifecycleUrl}/sessions`);
+      expect(res.status).toBe(401);
+      expect(idleMonitor.idleFor()).toBe(5 * 60_000);
+    });
+  });
+
+  describe('POST /admin/shutdown', () => {
+    /** Hold executeStep open so a real run is genuinely in flight. */
+    function slowStep(): { release: () => void; started: Promise<void> } {
+      let release!: () => void;
+      let markStarted!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const started = new Promise<void>((r) => (markStarted = r));
+      vi.mocked(executeStepMock).mockImplementation(async (idx: number) => {
+        markStarted();
+        await gate;
+        return {
+          index: idx,
+          instruction: `step ${idx}`,
+          status: 'passed' as const,
+          turns: [],
+          durationMs: 1,
+          retried: false,
+        };
+      });
+      return { release, started };
+    }
+
+    beforeEach(() => {
+      requestShutdown.mockClear();
+    });
+
+    afterEach(() => {
+      vi.mocked(executeStepMock).mockReset();
+      vi.mocked(executeStepMock).mockImplementation(defaultStepImpl);
+    });
+
+    it('returns 401 without an api key and never calls the hook', async () => {
+      const res = await fetch(`${lifecycleUrl}/admin/shutdown`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(401);
+      expect(requestShutdown).not.toHaveBeenCalled();
+    });
+
+    it('accepts a stop when sessions are merely open (no run executing)', async () => {
+      await call('POST', '/sessions/shutdown-idle-session/steps', { body: { steps: ['Click'] } });
+      const health = (await call('GET', '/health')).body;
+      expect(health.openSessions).toBeGreaterThan(0);
+
+      const { status, body } = await call('POST', '/admin/shutdown', { body: {} });
+
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ ok: true, stopping: true });
+      expect(requestShutdown).toHaveBeenCalledWith(false);
+    });
+
+    it('refuses with 409 while a run is executing, reporting both counts', async () => {
+      const gate = slowStep();
+      const run = call('POST', '/sessions/shutdown-busy/steps', { body: { steps: ['Click'] } });
+      await gate.started;
+
+      // /health must see the same in-flight run the 409 rule keys off — the
+      // extension's status bar reads this field, not the 409 body.
+      expect((await call('GET', '/health')).body.runsInFlight).toBe(1);
+
+      const { status, body } = await call('POST', '/admin/shutdown', { body: {} });
+
+      expect(status).toBe(409);
+      expect(body.runsInFlight).toBe(1);
+      expect(typeof body.openSessions).toBe('number');
+      expect(String(body.error)).toMatch(/force/);
+      expect(requestShutdown).not.toHaveBeenCalled();
+
+      gate.release();
+      await run;
+    });
+
+    it('accepts a forced stop while a run is executing', async () => {
+      const gate = slowStep();
+      const run = call('POST', '/sessions/shutdown-forced/steps', { body: { steps: ['Click'] } });
+      await gate.started;
+
+      const { status } = await call('POST', '/admin/shutdown', { body: { force: true } });
+
+      expect(status).toBe(200);
+      expect(requestShutdown).toHaveBeenCalledWith(true);
+
+      gate.release();
+      await run;
+    });
+
+    it('beginShutdown() refuses new work with 503 while /health still answers', async () => {
+      // `server.close()` is not a work gate: a client holding a keep-alive
+      // socket can still send a request while sessions are being torn down,
+      // and that request would launch a browser the exit then orphans.
+      // /health stays open so a client can watch the server go away.
+      const monitor = new IdleMonitor(60);
+      const { app, beginShutdown } = createApiServer(testConfig, { requestShutdown }, monitor);
+      const stopping = await listenOnRandomPort(app);
+      try {
+        beginShutdown();
+
+        const run = await fetch(`${stopping.baseUrl}/sessions/late/steps`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+          body: JSON.stringify({ steps: ['Click'] }),
+        });
+        expect(run.status).toBe(503);
+
+        const health = await fetch(`${stopping.baseUrl}/health`);
+        expect(health.status).toBe(200);
+        expect((await health.json()).openSessions).toBe(0);
+      } finally {
+        await closeServer(stopping.server);
+      }
+    });
+
+    it('runsInFlight returns to zero after a run throws', async () => {
+      // A stranded counter would disable the idle timeout for the rest of the
+      // process's life and make every later `aiui stop` answer 409 — so the
+      // decrement has to be in a `finally`, not on the success path.
+      const root = mkdtempSync(path.join(tmpdir(), 'aiui-inflight-'));
+      try {
+        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, '.env.uat'), 'X=1\n');
+        mkdirSync(path.join(root, 'data'), { recursive: true });
+        writeFileSync(path.join(root, 'data', 'uat.json'), JSON.stringify({ url: 'https://example.test/' }));
+
+        const bad = await call('POST', '/sessions/shutdown-throw/steps', {
+          body: {
+            steps: ['Go to ${data.does_not_exist}'],
+            envName: 'uat',
+            testFilePath: path.join(root, 'tests', 't.md'),
+          },
+        });
+        expect(bad.status).toBe(500);
+
+        const { body } = await call('GET', '/health');
+        expect(body.runsInFlight).toBe(0);
+
+        // ...and a stop is still accepted afterwards.
+        const stop = await call('POST', '/admin/shutdown', { body: {} });
+        expect(stop.status).toBe(200);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 });
