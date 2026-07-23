@@ -27,6 +27,7 @@ import {
   type RunEvent,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
+import { usesInlineSections } from './sections.js';
 import { EnvSelector } from './env-selector.js';
 
 /** A run-context is one document opened in one editor. */
@@ -214,6 +215,19 @@ export class RunController {
 
     const filePath = this.ctx.document.uri.fsPath;
     log(`run requested for ${filePath}: lines=[${lines.join(',')}]`);
+
+    // 0. Refuse a file that defines inline sections. This variant has no
+    // sections support — it doesn't send definitions to the server and can't
+    // expand a bare-name call — so running one would ship the call step to the
+    // AI as a literal instruction while the section body never runs. Refuse
+    // outright rather than mis-run; the CLI and testbench-native handle these.
+    // Checked before .env so a sectioned file is refused even in a project
+    // with no environment configured. (This also covers the duplicate-name
+    // case, which is unrunnable everywhere.)
+    if (usesInlineSections(this.ctx.document.getText())) {
+      const payload = reportError('TB026', {});
+      return this.fail(payload, log);
+    }
 
     // 1. Resolve .env (walk-up + fallback)
     const settings = vscode.workspace.getConfiguration('testbench');

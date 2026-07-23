@@ -26,6 +26,7 @@ export type ErrorCode =
   | 'TB021'
   | 'TB024'
   | 'TB025'
+  | 'TB026'
   | 'TB030'
   | 'TB031';
 
@@ -68,6 +69,7 @@ export interface ErrorContextMap {
   TB021: Record<string, never>;
   TB024: { detail: string };
   TB025: Record<string, never>;
+  TB026: Record<string, never>;
   TB030: Record<string, never>;
   TB031: Record<string, never>;
 }
@@ -156,6 +158,10 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   TB025: () => ({
     diagnosis: 'No runnable step at or below the cursor',
     fix: 'Section bodies run only when a step calls them by name — place the cursor on a step in the main flow, or use "TestBench: Run All".',
+  }),
+  TB026: () => ({
+    diagnosis: 'This test uses inline sections, which this editor cannot run',
+    fix: 'Run it with the TestBench (Native) extension or the `aiui run` CLI — this variant would send the bare section-call step to the AI instead of expanding it.',
   }),
   TB030: () => ({
     diagnosis: 'TestBench needs an open folder so it can resolve .env',

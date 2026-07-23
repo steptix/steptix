@@ -18,6 +18,7 @@ const SAMPLE_CONTEXTS = {
   TB021: {},
   TB024: { detail: 'duplicate section "Login" at line 12' },
   TB025: {},
+  TB026: {},
   TB030: {},
   TB031: {},
 };
