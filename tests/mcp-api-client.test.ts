@@ -1,0 +1,280 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import { SseParser, createApiClient } from '../src/mcp/api-client.js';
+import { ApiHttpError } from '../src/mcp/types.js';
+
+// ---------------------------------------------------------------------------
+// The SSE reader is hand-written (taking runner-core as a dependency would put
+// a CommonJS package inside this ESM one), so the framing rules need pinning
+// here rather than being inherited from a tested library. The awkward cases
+// are all real: the server sends `: keep-alive` comment frames every 25s, and
+// a chunk boundary can fall anywhere — including mid-frame.
+// ---------------------------------------------------------------------------
+
+describe('SseParser', () => {
+  it('parses a single frame', () => {
+    const parser = new SseParser();
+    const { events } = parser.push(
+      'event: step:pass\ndata: {"type":"step:pass","line":4}\n\n',
+    );
+
+    expect(events).toEqual([{ type: 'step:pass', line: 4 }]);
+  });
+
+  it('dispatches on the payload type, not the event field', () => {
+    // Both are sent and they agree today, but the payload is the one the type
+    // system knows about — trusting the header would make a mismatch silent.
+    const parser = new SseParser();
+    const { events } = parser.push('event: nonsense\ndata: {"type":"done","status":"passed"}\n\n');
+
+    expect(events).toEqual([{ type: 'done', status: 'passed' }]);
+  });
+
+  it('skips comment frames', () => {
+    const parser = new SseParser();
+    const { events, dropped } = parser.push(': keep-alive\n\n');
+
+    expect(events).toEqual([]);
+    expect(dropped).toEqual([]);
+  });
+
+  it('reassembles a frame split across chunks', () => {
+    const parser = new SseParser();
+    const first = parser.push('data: {"type":"step:');
+    expect(first.events).toEqual([]);
+
+    const second = parser.push('start","line":7}\n\n');
+    expect(second.events).toEqual([{ type: 'step:start', line: 7 }]);
+  });
+
+  it('handles CRLF line endings', () => {
+    const parser = new SseParser();
+    const { events } = parser.push('data: {"type":"done","status":"failed"}\r\n\r\n');
+
+    expect(events).toEqual([{ type: 'done', status: 'failed' }]);
+  });
+
+  it('accepts a data field with or without the conventional space', () => {
+    // One space after the colon is framing, not value. Both spellings are
+    // legal SSE and the server has used both over its life, so neither may
+    // depend on the other.
+    const withSpace = new SseParser().push('data: {"type":"done","status":"passed"}\n\n');
+    const withoutSpace = new SseParser().push('data:{"type":"done","status":"passed"}\n\n');
+
+    expect(withSpace.events).toEqual([{ type: 'done', status: 'passed' }]);
+    expect(withoutSpace.events).toEqual(withSpace.events);
+  });
+
+  it('joins multi-line data fields with newlines', () => {
+    const parser = new SseParser();
+    const { events } = parser.push('data: {"type":"output",\ndata: "msg":"a\\nb","kind":"warn"}\n\n');
+
+    expect(events).toEqual([{ type: 'output', msg: 'a\nb', kind: 'warn' }]);
+  });
+
+  it('records an unparseable frame instead of failing the run', () => {
+    const parser = new SseParser();
+    const { events, dropped } = parser.push('data: {not json\n\n');
+
+    expect(events).toEqual([]);
+    expect(dropped[0]).toContain('unparseable');
+  });
+
+  it('records an unknown event type instead of failing the run', () => {
+    // A server that grows a new event type should not break an older client
+    // in the middle of a run.
+    const parser = new SseParser();
+    const { events, dropped } = parser.push('data: {"type":"step:teleported"}\n\n');
+
+    expect(events).toEqual([]);
+    expect(dropped[0]).toContain('step:teleported');
+  });
+
+  it('delivers several frames from one chunk in order', () => {
+    const parser = new SseParser();
+    const { events } = parser.push(
+      'data: {"type":"step:start","line":1}\n\n' +
+        ': keep-alive\n\n' +
+        'data: {"type":"step:pass","line":1}\n\n' +
+        'data: {"type":"done","status":"passed"}\n\n',
+    );
+
+    expect(events.map((e) => e.type)).toEqual(['step:start', 'step:pass', 'done']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Client behaviour over a real socket. Mocking fetch would only assert about
+// the mock; the interesting cases here — a stream that stops without a `done`,
+// a 400 that arrives as ordinary HTTP despite `?stream=1` — are transport
+// facts.
+// ---------------------------------------------------------------------------
+
+let server: Server | undefined;
+
+afterEach(async () => {
+  if (server) {
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = undefined;
+  }
+});
+
+async function startServer(
+  handler: (url: string, res: import('node:http').ServerResponse) => void,
+): Promise<string> {
+  server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => handler(req.url ?? '', res));
+  });
+  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (typeof address === 'string' || address === null) throw new Error('no port');
+  return `http://127.0.0.1:${address.port}`;
+}
+
+describe('createApiClient.streamSteps', () => {
+  it('reads a complete run', async () => {
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"type":"step:start","line":1}\n\n');
+      res.write('data: {"type":"step:pass","line":1}\n\n');
+      res.write('data: {"type":"done","status":"passed"}\n\n');
+      res.end();
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    const seen: string[] = [];
+    const result = await client.streamSteps('s1', { steps: ['x'] }, undefined, (e) =>
+      seen.push(e.type),
+    );
+
+    expect(result.streamDropped).toBe(false);
+    expect(seen).toEqual(['step:start', 'step:pass', 'done']);
+  });
+
+  it('reports a stream that ends without done', async () => {
+    // The server was killed, force-stopped or reaped mid-run. The run may
+    // still be executing over there, so this is not simply a failure.
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"type":"step:start","line":1}\n\n');
+      res.end();
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    const result = await client.streamSteps('s1', { steps: ['x'] });
+
+    expect(result.streamDropped).toBe(true);
+    expect(result.events.map((e) => e.type)).toEqual(['step:start']);
+  });
+
+  it('surfaces a validation 400, which arrives as plain HTTP even with ?stream=1', async () => {
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Request body must include a "steps" array' }));
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await expect(client.streamSteps('s1', { steps: [] })).rejects.toThrow(ApiHttpError);
+    await expect(client.streamSteps('s1', { steps: [] })).rejects.toThrow(/steps" array/);
+  });
+
+  it('surfaces a 401 with the server message', async () => {
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized: missing or invalid x-api-key header' }));
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'wrong' });
+    await expect(client.streamSteps('s1', { steps: ['x'] })).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+
+  it('rethrows on our own cancellation rather than calling it a dropped stream', async () => {
+    // The distinction matters: a cancelled tool call returns nothing to the
+    // host, while a dropped stream produces a result saying the run may still
+    // be running.
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"type":"step:start","line":1}\n\n');
+      // deliberately never ends
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 30);
+
+    await expect(
+      client.streamSteps('s1', { steps: ['x'] }, controller.signal),
+    ).rejects.toThrow();
+  });
+
+  it('sends the api key and asks for a stream', async () => {
+    let seenUrl = '';
+    let seenKey: string | undefined;
+    server = createServer((req, res) => {
+      seenUrl = req.url ?? '';
+      seenKey = req.headers['x-api-key'] as string;
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"type":"done","status":"passed"}\n\n');
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (typeof address === 'string' || address === null) throw new Error('no port');
+
+    const client = createApiClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      apiKey: 'secret',
+    });
+    await client.streamSteps('mcp:c:/a b/test.md', { steps: ['x'] });
+
+    expect(seenKey).toBe('secret');
+    expect(seenUrl).toContain('stream=1');
+    // Session ids are file paths, so they must survive the URL intact.
+    expect(seenUrl).toContain(encodeURIComponent('mcp:c:/a b/test.md'));
+  });
+});
+
+describe('createApiClient other routes', () => {
+  it('unwraps the sessions list', async () => {
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ sessions: [{ sessionId: 'mcp:a' }] }));
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await expect(client.listSessions()).resolves.toEqual([{ sessionId: 'mcp:a' }]);
+  });
+
+  it('returns last-run info as given', async () => {
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ finalized: false }));
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await expect(client.getLastRun('s1')).resolves.toEqual({ finalized: false });
+  });
+
+  it('closes a session', async () => {
+    let method = '';
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'closed' }));
+    });
+    server!.on('request', (req) => {
+      method = req.method ?? '';
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await client.closeSession('s1');
+    expect(method).toBe('DELETE');
+  });
+});

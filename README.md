@@ -123,6 +123,91 @@ npx aiui ui --config ./custom.config.ts
 | `npm run lint` | Type-check without emitting |
 | `npm run clean` | Remove build artifacts |
 
+## MCP Server
+
+`aiui mcp` exposes this framework to coding agents over the Model Context
+Protocol, so an agent can run steps in a live browser or run a whole test file
+and read structured results back.
+
+It speaks stdio and is spawned by the agent host — you do not run it by hand.
+Under the covers it is an HTTP client of the same Sessions API that TestBench
+uses, so agent sessions and editor sessions share one server, one browser pool
+and one cache. If no server is running it starts one for you.
+
+### Tools
+
+| Tool | What it does |
+|------|--------------|
+| `run_steps` | Run ad-hoc natural-language steps in a browser session |
+| `run_test_file` | Run one `.md` test file end to end |
+| `list_test_files` | List the project's test files |
+| `list_sessions` | List open browser sessions on the server |
+| `close_session` | Close a session and its browser |
+| `get_last_run` | Report path and token totals for a finished run |
+| `server_status` | Health of the Sessions API server |
+
+Successive `run_steps` calls share a browser, so an agent can send a few steps,
+read the result, then send a few more against the same page — with captured
+variables still in scope.
+
+### Host setup
+
+**Claude Code** — [.mcp.json](.mcp.json) is checked in; nothing to do.
+
+**Copilot in VS Code** — [.vscode/mcp.json](.vscode/mcp.json) is checked in.
+
+**Codex CLI** (and the Codex VS Code extension), in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.aiui]
+command = "node"
+args = ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"]
+env = { AIUI_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
+```
+
+**Copilot CLI**, in `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "aiui": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"],
+      "env": { "AIUI_MCP_ROOTS": "c:/Projects/vibe/ai-ui-automation" }
+    }
+  }
+}
+```
+
+### `AIUI_MCP_ROOTS`
+
+The directories the server is allowed to touch, separated by `;` on Windows and
+`:` elsewhere. It defaults to the working directory the host spawned the server
+in — fine for Claude Code and VS Code, which start it inside your project.
+
+It is **required** for Codex CLI and Copilot CLI, whose config is machine-global
+and whose spawn directory is not your project.
+
+This is a real boundary, not a convenience: an agent names the project and test
+paths it wants, and those paths decide which `.env` gets read into steps and
+which directory tool code is loaded from. Anything outside the allowed roots is
+refused.
+
+### Things worth knowing
+
+- Hosts run `dist/`, so **run `npm run build`** after changing the source — and
+  once on a fresh clone, or the configs above point at a file that isn't there.
+- If you let the MCP server auto-start the API server, check on it with
+  `aiui status --url $SERVER_URL`. Plain `aiui status` reads
+  `aiui.config.json`, which can name a different host or port than `SERVER_URL`.
+- The Codex VS Code extension currently has an open bug picking up MCP servers
+  from `config.toml`. Verify with Codex CLI first — a no-show in the extension
+  is not a problem with this server.
+- Windows Codex setups sometimes need `startup_timeout_ms` raised in
+  `config.toml`.
+- `aiui mcp --help` prints the full reference.
+
 ## Test File Format
 
 Tests are Markdown files with YAML frontmatter:

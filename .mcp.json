@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aiui": {
+      "command": "node",
+      "args": ["dist/index.js", "mcp"]
+    }
+  }
+}

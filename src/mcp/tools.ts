@@ -1,0 +1,786 @@
+/**
+ * The seven tools, and the run pipeline behind the two that matter.
+ *
+ * The shape of a run tool is: assemble (which resolves and confines the
+ * project), pick a session, make sure a server is listening, take the session
+ * lock, stream, fold, then report. Pre-flight failures — everything before the
+ * stream opens — come back as `isError:true`; anything that reached the server
+ * comes back as a normal result whose `status` says what happened. That split
+ * is deliberate and load-bearing: `isError` results carry no
+ * `structuredContent`, so using them for a failed run would strip the agent of
+ * `sessionId`, `steps` and `reportPath` exactly when it needs them.
+ */
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createHash } from 'node:crypto';
+import { assembleSteps, assembleTestFile } from './assemble.js';
+import {
+  listSessionsTimedOut,
+  preflightError,
+  unauthorized,
+  type McpToolError,
+} from './errors.js';
+import { allowedRoots, canonicalize, isInsideRoot, resolveTestsGlob } from './project.js';
+import { discoverTestFiles } from '../parser/markdown.js';
+import { foldRun, type FoldedRun } from './run-fold.js';
+import { withSession } from './registry.js';
+import * as schemas from './schemas.js';
+import { probeHealth, normalizeBaseUrl } from '../server/health.js';
+import {
+  ApiHttpError,
+  PreflightFailure,
+  type ApiClient,
+  type AssembledRun,
+  type McpDeps,
+  type RunEvent,
+} from './types.js';
+
+/** The server refuses `config` on an existing session by throwing, and on the
+ *  streaming path that throw arrives as an `output` event rather than a 400 —
+ *  so text is the only handle we have. Pinned by a test against the server's
+ *  own message so a change there breaks loudly rather than silently disabling
+ *  the retry. */
+const CONFIG_REJECTED = 'Config can only be provided on the first request';
+
+/** `page.title()` is awaited per session with no server-side timeout, so one
+ *  hung page can block the whole listing. */
+const LIST_SESSIONS_TIMEOUT_MS = 5_000;
+
+/** Report generation happens *after* the server notices a disconnect, so the
+ *  first read is routinely `{finalized:false}`. TestBench backs off to about
+ *  this long before giving up. */
+const LAST_RUN_POLL_BUDGET_MS = 12_000;
+
+// ---------------------------------------------------------------------------
+// Result plumbing
+// ---------------------------------------------------------------------------
+
+/** The SDK's `CallToolResult` carries an index signature for protocol
+ *  extensions; matching it here keeps every handler assignable without a cast
+ *  at each registration site. */
+type ToolResult = {
+  [key: string]: unknown;
+  content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[];
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
+/** Widen a §7 refusal into the SDK's result shape. */
+function errorResult(error: McpToolError): ToolResult {
+  return { content: [...error.content], isError: true };
+}
+
+/**
+ * Validate our own output before handing it over.
+ *
+ * The SDK validates `structuredContent` against the declared `outputSchema`,
+ * and on a mismatch its handler catches the error and returns
+ * `{content, isError:true}` with no structured content at all — silently
+ * producing the one shape this server promises never to produce for a run that
+ * reached the server. Checking first turns that into a visible, still-valid
+ * error result.
+ */
+function validated<T extends Record<string, unknown>>(
+  schema: { safeParse: (v: unknown) => { success: boolean; error?: unknown } },
+  value: T,
+  summary: string,
+  extra: ToolResult['content'] = [],
+  /** A minimal object known to satisfy `schema`, used when `value` does not.
+   *  Without one there is nothing to degrade *to*. */
+  fallback?: (detail: string) => Record<string, unknown>,
+): ToolResult {
+  const parsed = schema.safeParse(value);
+  if (parsed.success) {
+    return {
+      content: [{ type: 'text', text: summary }, ...extra],
+      structuredContent: value,
+      isError: false,
+    };
+  }
+
+  const detail = String((parsed.error as { message?: string })?.message ?? parsed.error);
+
+  // Returning `value` with a warning bolted on — the obvious move — does not
+  // work: the SDK re-validates, fails again, and answers with
+  // `isError:true` and NO structured content, which is precisely the shape the
+  // locked decision forbids for a run that reached the server. The degrade has
+  // to be to something that actually validates, and we must confirm that it
+  // does before trusting it.
+  const degraded = fallback?.(detail);
+  if (degraded && schema.safeParse(degraded).success) {
+    return {
+      content: [{ type: 'text', text: `${summary}\n\n(result validation failed: ${detail})` }],
+      structuredContent: degraded,
+      isError: false,
+    };
+  }
+
+  // No usable fallback: fail loudly and deliberately rather than letting the
+  // SDK produce the same shape by accident.
+  return errorResult(
+    preflightError(
+      `The tool produced a result that does not match its own schema, and the ` +
+        `fallback did not either. This is a bug in the MCP server.\n\n${detail}`,
+    ),
+  );
+}
+
+/** Turn a thrown pre-flight failure into the tool error it carries. */
+function asToolError(err: unknown, envFiles: readonly string[], baseUrl: string): ToolResult {
+  if (err instanceof PreflightFailure) return errorResult(err.toolError);
+  if (err instanceof ApiHttpError) return errorResult(httpErrorToToolError(err, envFiles, baseUrl));
+  return errorResult(preflightError(err instanceof Error ? err.message : String(err)));
+}
+
+/** The Sessions API's non-2xx answers, each of which means something different
+ *  to whoever is reading. */
+function httpErrorToToolError(
+  err: ApiHttpError,
+  envFiles: readonly string[],
+  baseUrl: string,
+): McpToolError {
+  switch (err.status) {
+    case 401:
+      return unauthorized(envFiles, baseUrl);
+    case 503:
+      return preflightError(
+        `${baseUrl} is shutting down (someone ran \`aiui stop\`). Try again once it has restarted.`,
+      );
+    case 500:
+      // The error middleware hardcodes 500 and ignores `err.status`, so
+      // body-parser's 413 lands here wearing the wrong number. Worth saying,
+      // because "too large" is fixable and "internal error" is not.
+      return preflightError(
+        `${baseUrl} failed: ${err.serverMessage}\n` +
+          (/entity too large/i.test(err.serverMessage)
+            ? 'The request body exceeded the server\'s ~100KB limit — this is a size problem ' +
+              'reported as a 500. Send fewer steps, or split the test.'
+            : ''),
+      );
+    default:
+      return preflightError(`${baseUrl} rejected the request (HTTP ${err.status}): ${err.serverMessage}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 8);
+}
+
+/**
+ * Default session ids.
+ *
+ * `run_test_file` keys on the file, so an agent iterating on one test reuses
+ * one browser. `run_steps` keys on the process *and the project*: one process
+ * may serve several roots, and an unscoped id would reuse one browser across
+ * projects while the second project's `config` silently never applied.
+ */
+function defaultSessionId(kind: 'file' | 'steps', projectRoot: string, testFilePath: string): string {
+  return kind === 'file'
+    ? `mcp:${testFilePath}`
+    : `mcp:steps-${process.pid}-${shortHash(projectRoot)}`;
+}
+
+function checkSessionOwnership(sessionId: string, allowForeign: boolean): void {
+  if (sessionId.startsWith('mcp:') || allowForeign) return;
+  throw new PreflightFailure(
+    preflightError(
+      `Session "${sessionId}" was not created by this MCP server. It may belong to a ` +
+        "developer's open editor, and running steps in it would drive their browser.\n" +
+        'Pass allow_foreign_session: true if that is genuinely what you want.',
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Run pipeline
+// ---------------------------------------------------------------------------
+
+interface RunOutcome extends FoldedRun {
+  sessionId: string;
+  projectRoot: string;
+  sessionCreated: boolean;
+  configApplied: boolean;
+  queuedForMs: number;
+  tokens: { total: number; input: number; output: number } | null;
+}
+
+async function pollLastRun(
+  client: ApiClient,
+  sessionId: string,
+  budgetMs: number,
+  signal?: AbortSignal,
+): Promise<{ reportPath: string | null; tokens: RunOutcome['tokens'] } | null> {
+  const started = Date.now();
+  let delay = 100;
+  for (;;) {
+    if (signal?.aborted) return null;
+    try {
+      const info = await client.getLastRun(sessionId);
+      if (info.finalized) {
+        return { reportPath: info.reportPath ?? null, tokens: info.tokens ?? null };
+      }
+    } catch {
+      // A failed poll is never allowed to change the run's status — the run
+      // already happened, and this is only about the report.
+      return null;
+    }
+    if (Date.now() - started + delay > budgetMs) return null;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 2_000);
+  }
+}
+
+interface RunContext {
+  deps: McpDeps;
+  assembled: AssembledRun;
+  sessionId: string;
+  includeScreenshot: boolean;
+  signal?: AbortSignal | undefined;
+  onProgress?: ((completed: number, text: string) => void) | undefined;
+}
+
+async function executeRun(ctx: RunContext): Promise<RunOutcome> {
+  const { deps, assembled, sessionId } = ctx;
+  const { project, request, sentSteps } = assembled;
+
+  await deps.ensureServerReady(project, ctx.signal);
+
+  const client = deps.createApiClient({ baseUrl: project.serverUrl, apiKey: project.apiKey });
+
+  const outcome = await withSession(project.serverUrl, sessionId, async ({ queuedForMs, isFirstCall, markConfigured }) => {
+    // Progress counts terminal events only. Counting starts as well would
+    // repeat a value, and MCP requires `progress` to increase on every
+    // notification; counting every event would sail past `total`.
+    let completed = 0;
+    const onEvent = (event: RunEvent): void => {
+      if (event.type === 'step:pass' || event.type === 'step:fail') {
+        completed++;
+        // The step's own text where we can recover it — a bare "step 3" tells
+        // a watching human nothing about what is happening. Root-frame events
+        // carry the line we sent, which maps back to the sent array; expanded
+        // steps come from a file the agent never sent, so they fall back.
+        const index = request.sourceLines?.indexOf(event.line) ?? -1;
+        const label = index >= 0 ? (sentSteps[index] ?? null) : null;
+        ctx.onProgress?.(completed, label ?? `step ${completed}`);
+      }
+    };
+
+    const withConfig = { ...request };
+    if (!isFirstCall) delete withConfig.config;
+
+    let stream = await client.streamSteps(sessionId, withConfig, ctx.signal, onEvent);
+    let configApplied = isFirstCall && request.config !== undefined;
+    let sessionCreated = isFirstCall;
+
+    // The session may already exist from an earlier process — `mcp:` ids
+    // outlive us, and the server refuses `config` on an existing session. The
+    // throw happens before the queue and before any step runs, so retrying
+    // cannot double-execute anything.
+    const rejectedConfig = stream.events.some(
+      (e) => e.type === 'output' && e.kind === 'error' && e.msg.includes(CONFIG_REJECTED),
+    );
+    if (rejectedConfig && withConfig.config !== undefined) {
+      const retry = { ...request };
+      delete retry.config;
+      // The counter deliberately keeps running across the retry. The server
+      // raises this error before it enqueues the run, so in practice nothing
+      // has been counted yet — but resetting would send `progress` backwards
+      // if that ever stopped being true, and MCP requires it to increase on
+      // every notification.
+      stream = await client.streamSteps(sessionId, retry, ctx.signal, onEvent);
+      configApplied = false;
+      sessionCreated = false;
+    }
+
+    // Only now is the session known to exist: a connect failure must not burn
+    // the flag, or the next call would skip `config` on a session that was
+    // never created.
+    if (stream.events.length > 0) markConfigured();
+
+    const folded = foldRun({
+      events: stream.events,
+      receivedAt: stream.receivedAt,
+      streamDropped: stream.streamDropped,
+      dropped: stream.dropped,
+      sentSteps,
+      sourceLines: request.sourceLines,
+      testFilePath: request.testFilePath ?? project.projectRoot,
+      expansionPossible: request.skillsDir !== undefined || request.sections !== undefined,
+      includeScreenshot: ctx.includeScreenshot,
+    });
+
+    return {
+      ...folded,
+      warnings: [...assembled.warnings, ...folded.warnings],
+      reportPath: folded.reportPath,
+      tokens: null,
+      sessionId,
+      projectRoot: project.projectRoot,
+      sessionCreated,
+      configApplied,
+      queuedForMs,
+    };
+  });
+
+  // The report poll happens AFTER the session lock is released. It reads a
+  // finished run's metadata and touches no session state, so holding the lock
+  // through up to 12 s of backoff would just make the next caller wait — and
+  // charge them for it in `queuedForMs`. It also honours the caller's signal,
+  // so a cancelled call stops polling instead of running the budget out.
+  const last = await pollLastRun(client, sessionId, LAST_RUN_POLL_BUDGET_MS, ctx.signal);
+  if (!last) {
+    outcome.warnings = [
+      ...outcome.warnings,
+      'Could not read the run report — the run itself is unaffected; ' +
+        'call get_last_run later if you need the report path or token totals.',
+    ];
+  }
+  return {
+    ...outcome,
+    reportPath: outcome.reportPath ?? last?.reportPath ?? null,
+    tokens: last?.tokens ?? null,
+  };
+}
+
+/**
+ * Resolve a project, confirm the server is ours, and hand the body a client.
+ *
+ * Exists so the four non-run tools report failures as well as the run tools
+ * do: with `project` scoped inside each handler's own `try`, a 401 was caught
+ * with no `envFilesConsulted` and no base URL — rendering §7's row as
+ * " rejected our SERVER_API_KEY. Ours came from:  (or the environment)",
+ * which names neither of the two things it exists to name.
+ */
+async function withProject(
+  deps: McpDeps,
+  projectRoot: string | undefined,
+  body: (client: ApiClient, project: Awaited<ReturnType<McpDeps['resolveProject']>>) => Promise<ToolResult>,
+): Promise<ToolResult> {
+  let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
+  try {
+    project = await deps.resolveProject({ projectRoot });
+    // Before the key goes anywhere: these tools never reach
+    // `ensureServerReady`'s identity check, so without this an agent calling
+    // `list_sessions` as a harmless "what's running?" probe would hand the
+    // project's key to whatever holds the port.
+    await deps.assertServerRecognized(project);
+    const client = deps.createApiClient({
+      baseUrl: project.serverUrl,
+      apiKey: project.apiKey,
+    });
+    return await body(client, project);
+  } catch (err) {
+    return asToolError(err, project?.envFilesConsulted ?? [], project?.serverUrl ?? '');
+  }
+}
+
+/** One-line headline plus the first failure — what a host that ignores
+ *  structured output will show, and what a human skimming a transcript reads.
+ *  The SDK synthesizes nothing from `structuredContent`. */
+function summarize(outcome: RunOutcome): string {
+  const counted = outcome.steps.filter((s) => s.status === 'passed').length;
+  const lines = [
+    `${outcome.status.toUpperCase()} — ${counted}/${outcome.steps.length} steps passed ` +
+      `(session ${outcome.sessionId})`,
+  ];
+  if (outcome.error) lines.push(`Error: ${outcome.error}`);
+  if (outcome.reportPath) lines.push(`Report: ${outcome.reportPath}`);
+  if (outcome.warnings.length > 0) lines.push(`Warnings: ${outcome.warnings.length}`);
+  return lines.join('\n');
+}
+
+function outcomeToResult(outcome: RunOutcome): ToolResult {
+  const image: ToolResult['content'] = outcome.screenshotBase64
+    ? [{ type: 'image', data: outcome.screenshotBase64, mimeType: 'image/png' }]
+    : [];
+  const { screenshotBase64: _drop, ...rest } = outcome;
+  return validated(
+    schemas.runResultSchema,
+    rest as unknown as Record<string, unknown>,
+    summarize(outcome),
+    image,
+    // Keeps the three things an agent cannot recover any other way — which
+    // session it was, where the report went, and that something ran — even
+    // when the rest of the payload is unusable.
+    (detail) => ({
+      status: 'error',
+      streamDropped: outcome.streamDropped,
+      sessionId: outcome.sessionId,
+      projectRoot: outcome.projectRoot,
+      sessionCreated: outcome.sessionCreated,
+      configApplied: outcome.configApplied,
+      queuedForMs: outcome.queuedForMs,
+      steps: [],
+      captures: {},
+      messages: [],
+      warnings: [`The run finished, but its result could not be encoded: ${detail}`],
+      reportPath: outcome.reportPath ?? null,
+      tokens: null,
+      error: detail,
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+/** Shared syntax crib. An agent with no reference writes prose that half-works
+ *  — the AI executes it, so the failure is a wrong run rather than an error. */
+const STEP_SYNTAX = `
+Step syntax: plain English, one action per step. Also supported:
+  [skill: name arg=value]   run a reusable skill from the project's skills dir
+  [tool: name arg=value]    call a project tool (JS/TS) directly
+  [input: label]            needs a human — SKIPPED in an unattended run
+  Section Name              call an inline "### Section Name" from the same file
+  \${env.VAR} / \${data.key} substituted from the selected environment
+  {{param}}                 substituted from ## Parameters`.trim();
+
+export function registerTools(server: McpServer, deps: McpDeps): void {
+  // -- run_steps ------------------------------------------------------------
+  server.registerTool(
+    'run_steps',
+    {
+      title: 'Run steps',
+      description:
+        'Run natural-language steps in a real browser session and return per-step results.\n' +
+        'Reuses one browser per project unless you pass a session_id, so successive calls ' +
+        'share page state and captured variables. Calls on one session run one at a time.\n\n' +
+        STEP_SYNTAX,
+      inputSchema: schemas.runStepsInput,
+      outputSchema: schemas.runResultOutput,
+    },
+    async (args, extra) => {
+      const envFiles: string[] = [];
+      let baseUrl = '';
+      try {
+        const assembled = await assembleSteps({
+          resolveProject: deps.resolveProject,
+          steps: args.steps,
+          projectRoot: args.project_root,
+          envName: args.env_name,
+          parameters: args.parameters,
+          config: args.config,
+        });
+        envFiles.push(...assembled.project.envFilesConsulted);
+        baseUrl = assembled.project.serverUrl;
+
+        const sessionId =
+          args.session_id ??
+          defaultSessionId('steps', assembled.project.projectRoot, assembled.request.testFilePath ?? '');
+        checkSessionOwnership(sessionId, args.allow_foreign_session === true);
+
+        const outcome = await executeRun({
+          deps,
+          assembled,
+          sessionId,
+          includeScreenshot: args.include_screenshot === true,
+          signal: extra.signal,
+          onProgress: progressReporter(extra, assembled),
+        });
+        return outcomeToResult(outcome);
+      } catch (err) {
+        if (extra.signal?.aborted) throw err;
+        return asToolError(err, envFiles, baseUrl);
+      }
+    },
+  );
+
+  // -- run_test_file --------------------------------------------------------
+  server.registerTool(
+    'run_test_file',
+    {
+      title: 'Run a test file',
+      description:
+        'Run one .md test file end to end and return per-step results, the report path ' +
+        'and token totals. Frontmatter environments, data sources and inline sections are ' +
+        'all honoured.\n\n' +
+        STEP_SYNTAX,
+      inputSchema: schemas.runTestFileInput,
+      outputSchema: schemas.runResultOutput,
+    },
+    async (args, extra) => {
+      const envFiles: string[] = [];
+      let baseUrl = '';
+      try {
+        const assembled = await assembleTestFile({
+          resolveProject: deps.resolveProject,
+          path: args.path,
+          projectRoot: args.project_root,
+          envName: args.env_name,
+          parameters: args.parameters,
+          config: args.config,
+        });
+        envFiles.push(...assembled.project.envFilesConsulted);
+        baseUrl = assembled.project.serverUrl;
+
+        const sessionId =
+          args.session_id ??
+          defaultSessionId('file', assembled.project.projectRoot, assembled.request.testFilePath ?? args.path);
+        checkSessionOwnership(sessionId, args.allow_foreign_session === true);
+
+        const outcome = await executeRun({
+          deps,
+          assembled,
+          sessionId,
+          includeScreenshot: args.include_screenshot === true,
+          signal: extra.signal,
+          onProgress: progressReporter(extra, assembled),
+        });
+        return outcomeToResult(outcome);
+      } catch (err) {
+        if (extra.signal?.aborted) throw err;
+        return asToolError(err, envFiles, baseUrl);
+      }
+    },
+  );
+
+  // -- list_test_files ------------------------------------------------------
+  server.registerTool(
+    'list_test_files',
+    {
+      title: 'List test files',
+      description:
+        "List the project's test files (absolute paths, sorted). Not filtered by type, so " +
+        'a skill file may appear here; run_test_file refuses those.',
+      inputSchema: schemas.listTestFilesInput,
+      outputSchema: schemas.listTestFilesOutput,
+    },
+    async (args) => {
+      // Not `withProject`: this tool reads the filesystem only, so it neither
+      // needs a client nor should require a reachable server to answer.
+      let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
+      try {
+        project = await deps.resolveProject({ projectRoot: args.project_root });
+        const { dir, pattern } = resolveTestsGlob(project);
+        // `tests.dir` is confined, but the pattern is not and glob honours
+        // `../` inside it — so a hostile or simply wrong `aiui.config.json`
+        // could enumerate .md paths outside every allowed root. Filtering the
+        // results also covers a symlinked tests directory.
+        const roots = allowedRoots();
+        const files = (await discoverTestFiles(dir, pattern)).filter((file) =>
+          roots.some((root) => isInsideRoot(canonicalize(file), root)),
+        );
+        return validated(
+          schemas.listTestFilesSchema,
+          { files, projectRoot: project.projectRoot },
+          `${files.length} test file(s) under ${project.projectRoot}`,
+        );
+      } catch (err) {
+        return asToolError(err, project?.envFilesConsulted ?? [], project?.serverUrl ?? '');
+      }
+    },
+  );
+
+  // -- list_sessions --------------------------------------------------------
+  server.registerTool(
+    'list_sessions',
+    {
+      title: 'List sessions',
+      description:
+        'List open browser sessions on the server. `owner` distinguishes sessions this MCP ' +
+        "server created from another client's (typically a developer's editor).",
+      inputSchema: schemas.listSessionsInput,
+      outputSchema: schemas.listSessionsOutput,
+    },
+    async (args) =>
+      withProject(deps, args.project_root, async (client, project) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), LIST_SESSIONS_TIMEOUT_MS);
+        let raw;
+        try {
+          raw = await client.listSessions(controller.signal);
+        } catch (err) {
+          if (controller.signal.aborted) {
+            return errorResult(listSessionsTimedOut(LIST_SESSIONS_TIMEOUT_MS));
+          }
+          throw err;
+        } finally {
+          clearTimeout(timer);
+        }
+
+        const sessions = raw.map((s) => ({
+          sessionId: s.sessionId,
+          owner: s.sessionId.startsWith('mcp:') ? ('mcp' as const) : ('other' as const),
+          status: s.status ?? null,
+          currentUrl: s.currentUrl ?? null,
+          pageTitle: s.pageTitle ?? null,
+          totalStepsExecuted: s.totalStepsExecuted ?? null,
+        }));
+        return validated(
+          schemas.listSessionsSchema,
+          { sessions },
+          `${sessions.length} open session(s)`,
+        );
+      }),
+  );
+
+  // -- close_session --------------------------------------------------------
+  server.registerTool(
+    'close_session',
+    {
+      title: 'Close a session',
+      description:
+        'Close a session and its browser. Closing an unknown session succeeds. Use this to ' +
+        'reset a session whose config you want to change, since config is only accepted when ' +
+        'a session is first created. Sessions belonging to another client are refused unless ' +
+        'allow_foreign_session is set.',
+      inputSchema: schemas.closeSessionInput,
+      outputSchema: schemas.closeSessionOutput,
+    },
+    async (args) =>
+      withProject(deps, args.project_root, async (client) => {
+        // `list_sessions` hands out ids labelled `owner: 'other'`, so without
+        // this an agent can close a developer's live TestBench browser mid-run
+        // — while the same id would be refused by run_steps. Closing is not
+        // less destructive than running; it is more.
+        checkSessionOwnership(args.session_id, args.allow_foreign_session === true);
+        await client.closeSession(args.session_id);
+        return validated(
+          schemas.closeSessionSchema,
+          { sessionId: args.session_id, closed: true },
+          `Closed ${args.session_id}`,
+        );
+      }),
+  );
+
+  // -- get_last_run ---------------------------------------------------------
+  server.registerTool(
+    'get_last_run',
+    {
+      title: 'Get last run report',
+      description:
+        'Report path and token totals for the last finished run on a session. Polls briefly, ' +
+        'because the report is written after a run ends — this is the way to recover the ' +
+        'report of a run you cancelled.',
+      inputSchema: schemas.getLastRunInput,
+      outputSchema: schemas.getLastRunOutput,
+    },
+    async (args) =>
+      withProject(deps, args.project_root, async (client, project) => {
+        const info = await pollLastRun(client, args.session_id, LAST_RUN_POLL_BUDGET_MS);
+        const value = {
+          finalized: info !== null,
+          reportPath: info?.reportPath ?? null,
+          tokens: info?.tokens ?? null,
+        };
+        return validated(
+          schemas.getLastRunSchema,
+          value,
+          info ? `Report: ${info.reportPath ?? '(none)'}` : 'No finalized run yet',
+        );
+      }),
+  );
+
+  // -- server_status --------------------------------------------------------
+  server.registerTool(
+    'server_status',
+    {
+      title: 'Server status',
+      description:
+        'Health of the Sessions API server. Reports what is there without starting anything — ' +
+        'asking whether a server is running should not cause one to exist.',
+      inputSchema: schemas.serverStatusInput,
+      outputSchema: schemas.serverStatusOutput,
+    },
+    async (args) => {
+      // Not `withProject` either: this tool's whole job is to report what is
+      // there, including "nothing" and "something unrecognised" — so it must
+      // neither start a server nor refuse an unidentified one.
+      let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
+      try {
+        project = await deps.resolveProject({ projectRoot: args.project_root });
+        const baseUrl = normalizeBaseUrl(project.serverUrl);
+        const probe = await probeHealth(baseUrl, 2_000);
+        const value =
+          probe.kind === 'ok'
+            ? {
+                baseUrl,
+                running: true,
+                detail: null,
+                version: probe.health.version,
+                pid: probe.health.pid,
+                startedAt: probe.health.startedAt,
+                openSessions: probe.health.openSessions,
+                runsInFlight: probe.health.runsInFlight,
+                inspector: probe.health.inspector,
+                idleTimeoutMinutes: probe.health.idleTimeoutMinutes,
+              }
+            : {
+                baseUrl,
+                running: false,
+                detail: probe.detail,
+                version: null,
+                pid: null,
+                startedAt: null,
+                openSessions: null,
+                runsInFlight: null,
+                inspector: null,
+                idleTimeoutMinutes: null,
+              };
+        return validated(
+          schemas.serverStatusSchema,
+          value,
+          probe.kind === 'ok'
+            ? `Running at ${baseUrl} (v${probe.health.version}, ${probe.health.openSessions} session(s))`
+            : `Not usable at ${baseUrl}: ${probe.detail}`,
+        );
+      } catch (err) {
+        return asToolError(err, project?.envFilesConsulted ?? [], project?.serverUrl ?? '');
+      }
+    },
+  );
+}
+
+/**
+ * Progress callback, or undefined when the host did not ask for progress.
+ *
+ * No token means no notifications and the call rides the host's fixed timeout —
+ * which is the real risk with long runs, and nothing we can do about from here.
+ */
+interface ProgressNotification {
+  method: 'notifications/progress';
+  params: {
+    progressToken: string | number;
+    progress: number;
+    total?: number;
+    message?: string;
+  };
+}
+
+function progressReporter(
+  extra: {
+    _meta?: { progressToken?: string | number | undefined } | undefined;
+    // Narrower than the SDK's notification union on purpose: a handler that
+    // accepts more is assignable to one that accepts less, so this both
+    // typechecks against the real `extra` and stops anything but a progress
+    // notification being sent from here.
+    sendNotification?: ((n: ProgressNotification) => Promise<void>) | undefined;
+  },
+  assembled: AssembledRun,
+): ((completed: number, text: string) => void) | undefined {
+  const token = extra._meta?.progressToken;
+  if (token === undefined || !extra.sendNotification) return undefined;
+
+  // `total` is only honest while the sent list and the executed list are the
+  // same length. Server-side expansion breaks that, so it is omitted rather
+  // than reported wrong.
+  const expansionPossible =
+    assembled.request.skillsDir !== undefined || assembled.request.sections !== undefined;
+  const total = expansionPossible ? undefined : assembled.sentSteps.length;
+
+  return (completed, message) => {
+    void extra.sendNotification?.({
+      method: 'notifications/progress',
+      params: {
+        progressToken: token,
+        progress: completed,
+        ...(total !== undefined ? { total } : {}),
+        message,
+      },
+    });
+  };
+}

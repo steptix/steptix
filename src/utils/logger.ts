@@ -1,7 +1,31 @@
 import chalk from 'chalk';
+import { Console } from 'node:console';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type ConsoleLogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
+
+/**
+ * Every stdout-bound write in this module goes through `out`, so a single
+ * switch can move the lot to stderr.
+ *
+ * `aiui mcp` speaks JSON-RPC over stdout: one stray log line corrupts the
+ * frame and the host drops the connection. `setLogLevel('silent')` is not
+ * enough, because `step`/`assertion`/`testStart`/`testEnd` write
+ * unconditionally — they predate `shouldEmit` and are the run's headline
+ * output, so silencing them by level was never wanted.
+ *
+ * A private `Console` rather than `stream.write(...)` at each call site:
+ * `Console` keeps `%s`/`%d` substitution and `util.inspect` of the rest
+ * args, which a hand-rolled write would quietly drop.
+ */
+let out: Console = globalThis.console;
+
+export function setLogStream(target: 'stdout' | 'stderr'): void {
+  out =
+    target === 'stderr'
+      ? new Console({ stdout: process.stderr, stderr: process.stderr })
+      : globalThis.console;
+}
 
 /**
  * Severity ordering used to decide whether a message at level `msg` should
@@ -100,21 +124,21 @@ function timestamp(): string {
 export const logger = {
   debug(message: string, ...args: unknown[]): void {
     if (shouldEmit('debug')) {
-      console.log(chalk.gray(`[${timestamp()}] [DEBUG] ${message}`), ...args);
+      out.log(chalk.gray(`[${timestamp()}] [DEBUG] ${message}`), ...args);
     }
     notify('debug', message);
   },
 
   info(message: string, ...args: unknown[]): void {
     if (shouldEmit('info')) {
-      console.log(chalk.cyan(`[${timestamp()}] [INFO]  ${message}`), ...args);
+      out.log(chalk.cyan(`[${timestamp()}] [INFO]  ${message}`), ...args);
     }
     notify('info', message);
   },
 
   success(message: string, ...args: unknown[]): void {
     if (shouldEmit('info')) {
-      console.log(chalk.green(`[${timestamp()}] [PASS]  ${message}`), ...args);
+      out.log(chalk.green(`[${timestamp()}] [PASS]  ${message}`), ...args);
     }
     notify('info', message);
   },
@@ -134,7 +158,7 @@ export const logger = {
   },
 
   step(index: number, total: number, instruction: string): void {
-    console.log(
+    out.log(
       chalk.bold.blue(`\n[${timestamp()}] Step ${index}/${total}:`),
       chalk.white(instruction),
     );
@@ -142,7 +166,7 @@ export const logger = {
 
   subAction(description: string): void {
     if (shouldEmit('info')) {
-      console.log(chalk.dim(`  → ${description}`));
+      out.log(chalk.dim(`  → ${description}`));
     }
     notify('info', `→ ${description}`);
   },
@@ -150,23 +174,23 @@ export const logger = {
   assertion(pass: boolean, actual: string, expected: string): void {
     const icon = pass ? chalk.green('✓') : chalk.red('✗');
     const label = pass ? chalk.green('PASS') : chalk.red('FAIL');
-    console.log(`  ${icon} Assertion [${label}]`);
-    console.log(chalk.dim(`    Expected: ${expected}`));
-    console.log(chalk.dim(`    Actual:   ${actual}`));
+    out.log(`  ${icon} Assertion [${label}]`);
+    out.log(chalk.dim(`    Expected: ${expected}`));
+    out.log(chalk.dim(`    Actual:   ${actual}`));
   },
 
   testStart(name: string): void {
-    console.log(chalk.bold(`\n${'─'.repeat(60)}`));
-    console.log(chalk.bold.white(`  TEST: ${name}`));
-    console.log(chalk.bold(`${'─'.repeat(60)}\n`));
+    out.log(chalk.bold(`\n${'─'.repeat(60)}`));
+    out.log(chalk.bold.white(`  TEST: ${name}`));
+    out.log(chalk.bold(`${'─'.repeat(60)}\n`));
   },
 
   testEnd(name: string, passed: boolean, durationMs: number): void {
     const status = passed ? chalk.green.bold('PASSED') : chalk.red.bold('FAILED');
     const duration = chalk.dim(`(${(durationMs / 1000).toFixed(1)}s)`);
-    console.log(chalk.bold(`\n${'─'.repeat(60)}`));
-    console.log(`  ${name}: ${status} ${duration}`);
-    console.log(chalk.bold(`${'─'.repeat(60)}\n`));
+    out.log(chalk.bold(`\n${'─'.repeat(60)}`));
+    out.log(`  ${name}: ${status} ${duration}`);
+    out.log(chalk.bold(`${'─'.repeat(60)}\n`));
   },
 
   /**
