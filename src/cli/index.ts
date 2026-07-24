@@ -30,5 +30,14 @@ export function createCli(): Command {
   registerStatusCommand(program);
   registerStopCommand(program);
 
+  // Listed so `aiui --help` shows it, but deliberately given no action: the
+  // real `mcp` entry is intercepted in `src/index.ts` before commander is
+  // ever built (see the comment there — it exists to keep playwright out of
+  // the MCP server's module graph). This stub is therefore unreachable in
+  // practice, and points at the canonical help rather than duplicating it.
+  program
+    .command('mcp')
+    .description('Run as an MCP server over stdio (see: aiui mcp --help)');
+
   return program;
 }

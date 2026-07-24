@@ -48,16 +48,35 @@ export function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '');
 }
 
-/** Probe `<baseUrl>/health`. Never throws. */
-export async function probeHealth(baseUrl: string, timeoutMs: number): Promise<HealthProbeResult> {
+/**
+ * Probe `<baseUrl>/health`. Never throws.
+ *
+ * `signal` lets a caller cut a probe short — the MCP server polls this for up
+ * to 20 s while waiting for a server it spawned, and an agent host can cancel
+ * the tool call underneath it.
+ *
+ * CALLER BEWARE: an aborted fetch lands in the `catch` below and is reported
+ * as `down`, exactly like a connection refusal. That is right for the two CLI
+ * callers, which have no signal — but a polling caller MUST check
+ * `signal.aborted` before acting on a `down`, or it will report "the server
+ * never came up" when the truth is "you cancelled".
+ */
+export async function probeHealth(
+  baseUrl: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<HealthProbeResult> {
   let res: Response;
   try {
+    // `exactOptionalPropertyTypes` is on, so the property is built
+    // conditionally rather than passed as a possibly-undefined value.
+    const timeout = AbortSignal.timeout(timeoutMs);
     res = await fetch(`${normalizeBaseUrl(baseUrl)}/health`, {
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
     });
   } catch (err) {
-    // Connection refused, DNS failure, timeout — nothing is listening (or
-    // nothing answered in time), which for every caller means "down".
+    // Connection refused, DNS failure, timeout, abort — nothing answered,
+    // which for every caller without a signal means "down".
     return { kind: 'down', detail: err instanceof Error ? err.message : String(err) };
   }
 
