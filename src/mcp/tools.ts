@@ -398,7 +398,7 @@ function outcomeToResult(outcome: RunOutcome): ToolResult {
     : [];
   const { screenshotBase64: _drop, ...rest } = outcome;
   return validated(
-    schemas.runResultSchema,
+    schemas.runResultOutput,
     rest as unknown as Record<string, unknown>,
     summarize(outcome),
     image,
@@ -565,7 +565,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           roots.some((root) => isInsideRoot(canonicalize(file), root)),
         );
         return validated(
-          schemas.listTestFilesSchema,
+          schemas.listTestFilesOutput,
           { files, projectRoot: project.projectRoot },
           `${files.length} test file(s) under ${project.projectRoot}`,
         );
@@ -611,7 +611,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           totalStepsExecuted: s.totalStepsExecuted ?? null,
         }));
         return validated(
-          schemas.listSessionsSchema,
+          schemas.listSessionsOutput,
           { sessions },
           `${sessions.length} open session(s)`,
         );
@@ -640,7 +640,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         checkSessionOwnership(args.session_id, args.allow_foreign_session === true);
         await client.closeSession(args.session_id);
         return validated(
-          schemas.closeSessionSchema,
+          schemas.closeSessionOutput,
           { sessionId: args.session_id, closed: true },
           `Closed ${args.session_id}`,
         );
@@ -668,7 +668,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           tokens: info?.tokens ?? null,
         };
         return validated(
-          schemas.getLastRunSchema,
+          schemas.getLastRunOutput,
           value,
           info ? `Report: ${info.reportPath ?? '(none)'}` : 'No finalized run yet',
         );
@@ -722,7 +722,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                 idleTimeoutMinutes: null,
               };
         return validated(
-          schemas.serverStatusSchema,
+          schemas.serverStatusOutput,
           value,
           probe.kind === 'ok'
             ? `Running at ${baseUrl} (v${probe.health.version}, ${probe.health.openSessions} session(s))`
