@@ -79,9 +79,31 @@ export interface AssembleArgs {
   /** Tool argument only. A frontmatter `env:` is applied later (§3 step 10). */
   envName?: string | undefined;
   parameters?: Record<string, string> | undefined;
-  /** No `cdp`: that selects a live browser to attach to, which is not an
-   *  agent's decision to make. */
-  config?: { baseUrl?: string | undefined; timeout?: string | undefined } | undefined;
+  /**
+   * `cdp` **is** accepted here now, and it is the one config key that attaches
+   * this framework to an already-open, already-logged-in browser. The rule
+   * that replaced "an agent may never pick a browser" is:
+   *
+   *   **file config is trusted; tool config is gated.**
+   *
+   * A `## Config: cdp:` line in a test file is human-authored and goes through
+   * untouched, exactly as before. A `cdp` arriving as a *tool argument* is a
+   * model's choice, and is only honoured for a browser this project launched —
+   * `assertPortAttachable` in `cdp.ts` enforces that before any run starts,
+   * driven by the `cdpSource` this module reports.
+   *
+   * The two sources stay physically separate in the code rather than being
+   * merged into one map and sorted out later: `cdp` is deliberately kept out
+   * of `mergeDefined`'s string merge, so there is no arrangement of keys that
+   * lets a tool-supplied value be mistaken for a file-declared one.
+   */
+  config?:
+    | {
+        baseUrl?: string | undefined;
+        timeout?: string | undefined;
+        cdp?: { port: number; tab?: string | undefined } | undefined;
+      }
+    | undefined;
 }
 
 export interface AssembleTestFileArgs extends AssembleArgs {
@@ -160,9 +182,15 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
   // The tool argument overrides `## Config` per key — never wholesale, or
   // passing `timeout` alone would drop the test's own `baseUrl`.
   const fileConfig = parsed.config as Record<string, string | undefined>;
-  const config = projectConfig(
-    mergeDefined(fileConfig, args.config),
+  // `cdp` is destructured out before the string merge, not filtered out inside
+  // it: the merge is typed `Record<string, string|undefined>` and `cdp` is an
+  // object, so keeping them apart is enforced by the compiler rather than by
+  // remembering to.
+  const { cdp: toolCdp, ...toolStringConfig } = args.config ?? {};
+  const { config, cdpSource } = projectConfig(
+    mergeDefined(fileConfig, toolStringConfig),
     fileConfig,
+    toolCdp,
     project,
     absPath,
     warnings,
@@ -238,7 +266,7 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     ...projectFields(project, absPath, cacheEnabled(parsed, project)),
   };
 
-  return { request, project, sentSteps: parsed.steps, warnings };
+  return { request, project, sentSteps: parsed.steps, warnings, cdpSource };
 }
 
 /** §3 steps 4–7 and 12 for `run_steps`; the file-only steps are skipped and
@@ -255,8 +283,17 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
   });
   const testFilePath = path.join(project.projectRoot, SYNTHETIC_STEPS_BASENAME);
 
-  // No file, so no file-only config: `run_steps` can never carry a `cdp`.
-  const config = projectConfig(mergeDefined({}, args.config), {}, project, testFilePath, warnings);
+  // No file, so no file-declared `cdp` — any `cdp` on a `run_steps` call is a
+  // tool argument by construction, and therefore always gated.
+  const { cdp: toolCdp, ...toolStringConfig } = args.config ?? {};
+  const { config, cdpSource } = projectConfig(
+    mergeDefined({}, toolStringConfig),
+    {},
+    toolCdp,
+    project,
+    testFilePath,
+    warnings,
+  );
   const parameters = interpolateValues(
     { ...args.parameters },
     project,
@@ -288,7 +325,7 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
     ...projectFields(project, testFilePath, project.cacheEnabled),
   };
 
-  return { request, project, sentSteps: args.steps, warnings };
+  return { request, project, sentSteps: args.steps, warnings, cdpSource };
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +436,10 @@ function confineDataSources(
 
 type WireConfig = NonNullable<McpStepRequest['config']>;
 
+/** Where the `cdp` on the wire came from, or `null` when there is none.
+ *  `'tool'` is the only value that obliges a caller to run §6's gate. */
+type CdpSource = 'file' | 'tool' | null;
+
 /** Per-key override that ignores explicit `undefined`s. A plain spread would
  *  let `{ baseUrl: undefined }` — which is what an omitted optional tool
  *  argument looks like once it has been read off an object — erase the value
@@ -428,12 +469,15 @@ function mergeDefined(
 function projectConfig(
   merged: Record<string, string | undefined>,
   /** The test file's own `## Config`, before the tool argument was merged in.
-   *  `cdp` is read only from here — see below. */
+   *  A file-declared `cdp` is read only from here — see below. */
   fileOnly: Record<string, string | undefined>,
+  /** A `cdp` supplied as a TOOL ARGUMENT. Deliberately a separate parameter,
+   *  not a key in `merged` — see below. */
+  toolCdp: { port: number; tab?: string | undefined } | undefined,
   project: ProjectContext,
   filePath: string,
   warnings: string[],
-): WireConfig {
+): { config: WireConfig; cdpSource: CdpSource } {
   const raw: Record<string, string> = {};
   for (const [key, value] of Object.entries(merged)) {
     if (typeof value === 'string') raw[key] = value;
@@ -444,14 +488,24 @@ function projectConfig(
   if (resolved['baseUrl'] !== undefined) out.baseUrl = resolved['baseUrl'];
   if (resolved['timeout'] !== undefined) out.timeout = resolved['timeout'];
 
-  // Read from the FILE's config, never the merged map. zod strips an
-  // agent-supplied `cdp` today, so the merged map is clean — but this file's
-  // own header warns that widening a type here compiles cleanly and fails at
-  // runtime, and `cdp` is the one config key that attaches the framework to an
-  // already-open, already-logged-in Chrome. Not a decision to leave resting on
-  // a schema default.
+  // A file-declared `cdp` is read from the FILE's config, never the merged
+  // map, and that separation is now doing MORE work than when it was written,
+  // not less.
+  //
+  // It used to mean "an agent can never supply one" — zod stripped `cdp` from
+  // the tool schema, and reading `fileOnly` made sure a future schema change
+  // could not quietly admit one. The rule has changed: an agent may now name a
+  // browser, but only one this project launched, and only after
+  // `assertPortAttachable` has checked it against the live registry.
+  //
+  // So the two sources must stay *distinguishable*, which is exactly what this
+  // split gives us. `cdpSource` below is what tells the caller whether a gate
+  // check is owed — and because a tool-supplied `cdp` never enters `merged`,
+  // there is no key arrangement, interpolation result or schema change that
+  // can make one arrive wearing the other's clothes.
   const declaredCdp = typeof fileOnly['cdp'] === 'string' ? fileOnly['cdp'].trim() : '';
   const cdp = declaredCdp === '' ? '' : (resolved['cdp']?.trim() ?? declaredCdp);
+  let cdpSource: CdpSource = null;
   if (cdp !== '') {
     const port = Number(cdp);
     // The DECLARED text in the message, not the resolved value: `cdp:
@@ -461,6 +515,16 @@ function projectConfig(
     // `cdpTab` without `cdp` is meaningless and dropped in silence — it selects
     // a tab in a browser we are not attaching to.
     out.cdp = tab !== undefined && tab !== '' ? { port, tab } : { port };
+    cdpSource = 'file';
+  } else if (toolCdp !== undefined) {
+    // The file wins when both are present. A test file that names its own
+    // browser was written by a human who knew which one they meant, and an
+    // agent's argument should not silently redirect it somewhere else.
+    const port = toolCdp.port;
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) fail(badCdpPort(String(port)));
+    const tab = toolCdp.tab?.trim();
+    out.cdp = tab !== undefined && tab !== '' ? { port, tab } : { port };
+    cdpSource = 'tool';
   }
 
   // `logging` is a process-global `setLogLevel` on the server, so sending one
@@ -478,7 +542,7 @@ function projectConfig(
     );
   }
 
-  return out;
+  return { config: out, cdpSource };
 }
 
 /**

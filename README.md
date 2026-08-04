@@ -145,10 +145,74 @@ and one cache. If no server is running it starts one for you.
 | `close_session` | Close a session and its browser |
 | `get_last_run` | Report path and token totals for a finished run |
 | `server_status` | Health of the Sessions API server |
+| `start_cdp_browser` | Launch (or return) a persistent browser you can sign into — see below |
+| `list_cdp_browsers` | Which CDP browsers and profiles this project has |
 
 Successive `run_steps` calls share a browser, so an agent can send a few steps,
 read the result, then send a few more against the same page — with captured
 variables still in scope.
+
+### Signed-in browsers over CDP
+
+By default every test gets a fresh, empty browser. That is the right thing for
+most tests and the wrong thing for anything behind a login: re-running an SSO
+or MFA flow on every run is slow, flaky, and sometimes impossible.
+
+The fix is a browser the framework owns and you sign into **once**:
+
+> *"Start an Edge browser over CDP"*
+
+The agent calls `start_cdp_browser` and gets back a port. Sign in by hand in the
+window that opens. From then on, steps sent with that port run in your
+signed-in browser — and the login survives closing the window, restarting the
+server, and restarting your editor, because it lives in a profile directory
+under `.aiui/cdp-profiles/`.
+
+```
+.aiui/cdp-profiles/edge-default/     ← "start an Edge browser"
+.aiui/cdp-profiles/edge-admin/       ← "…with a profile named admin"
+```
+
+**A few things that surprise people:**
+
+- **You cannot attach to your everyday browser.** Chrome 122+ and Edge reject
+  `--remote-debugging-port` on the default profile, so a normally-started
+  browser has no debugging port and cannot be given one. The dedicated profile
+  is not a compromise around that — signing into it once achieves the same
+  thing.
+- **The port changes every launch.** The browser picks its own, so there is no
+  fixed 9222 to rely on. Ask `list_cdp_browsers` (or read the tool result); do
+  not guess. Closing the browser does **not** lose the login — relaunching the
+  same profile gives a new port and the same signed-in state.
+- **The profile name is how you pick a browser.** The same name returns the
+  same browser; a new name starts a separate one, with its own window, port and
+  cookies. That is what makes admin-vs-user and uat-vs-prod testing possible.
+- **A profile never forgets on its own.** Test a sign-in flow once and the
+  profile stays signed in, so the next run skips the login page — and may pass
+  without exercising it. `reset: true` wipes the profile first. It is the only
+  destructive operation here and it is refused while the browser is running.
+- **Tests sharing a browser are not independent.** Running several at once
+  against one profile is supported and often what you want, but they share one
+  set of cookies, and they see each other's tabs — a tab any of them opens is
+  adopted by all of them. A test that signs out affects the others. Every step
+  in the HTML report shows which tab it drove, and flags tabs that appeared
+  from somewhere else, so the interference is at least visible afterwards.
+  Suites that need real isolation should use ordinary launch mode.
+- **Treat a CDP profile as compromised by default.** An agent driving a
+  signed-in browser can reach everything that browser can, and per-step output
+  goes to the model provider. Sign these profiles into test accounts, not your
+  own.
+
+An agent may only drive browsers **this project launched**. Anything else — a
+browser you started yourself, or one another tool left on 9222 — is refused,
+and listing it withholds its tab titles and URLs. To lift that, a human edits
+`aiui.config.json`:
+
+```json
+{ "mcp": { "cdp": { "allowUnowned": true } } }
+```
+
+That gate deliberately lives in a file an agent cannot write.
 
 ### Host setup
 

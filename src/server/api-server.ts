@@ -1,7 +1,16 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { url as inspectorUrl } from 'node:inspector';
+import path from 'node:path';
 import type { Config } from '../config/types.js';
+import {
+  knownProfiles,
+  startCdpBrowser,
+  DEFAULT_PROFILE,
+  type CdpFailureKind,
+  type StartResult,
+} from '../browser/cdp-registry.js';
+import { discoverCdpPorts } from '../browser/cdp-discovery.js';
 import { SessionManager, type RunEvent, type StepRequest } from './session-manager.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
 import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
@@ -611,6 +620,171 @@ export function createApiServer(
     }
   });
 
+  // -------------------------------------------------------------------------
+  // CDP browsers (stories/mcp-cdp-browser.md §4)
+  //
+  // Both routes sit behind the auth middleware, so both bump the idle monitor.
+  // That is fine only because no client polls them: flick refreshes on open
+  // plus a manual button, TestBench does not use them at all, and an MCP tool
+  // call is a user action. A polling client here would silently defeat the
+  // idle timeout — the failure `/health` was deliberately kept pre-auth to
+  // avoid (idle-monitor.ts:10). Worth remembering before adding a caller.
+  //
+  // **The server owns browsers, so the server launches them.** No client
+  // spawns one — not MCP, not flick, not the CLI. That is the existing "one
+  // server owns browsers, sessions, cache and lifecycle" decision applied,
+  // not a new one: a browser spawned from an MCP process would be invisible to
+  // every other client and duplicated across every MCP host.
+  // -------------------------------------------------------------------------
+
+  /**
+   * In-flight launches, keyed by `(projectRoot, engine, profile)`.
+   *
+   * Without this, two clients that both see "nothing alive" both spawn, and
+   * the loser hits Chromium's singleton lock and exits — leaving one caller
+   * holding a successful-looking result for a browser that is not there.
+   *
+   * All three key parts are load-bearing. Dropping `profile` would serialise
+   * two launches that are legitimately concurrent (admin and default are
+   * different processes on different ports); dropping `engine` or
+   * `projectRoot` would let a destructive `reset` run against a profile
+   * another call is mid-launch on.
+   */
+  const cdpLaunchesInFlight = new Map<string, Promise<StartResult>>();
+
+  app.get('/cdp/browsers', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectRoot = typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
+      if (!projectRoot) {
+        res.status(400).json({ error: 'projectRoot query parameter is required' });
+        return;
+      }
+      if (!path.isAbsolute(projectRoot)) {
+        res.status(400).json({ error: `projectRoot must be an absolute path (got "${projectRoot}")` });
+        return;
+      }
+
+      const includeForeign = req.query['includeForeign'] === 'true' || req.query['includeForeign'] === '1';
+      // Whether the caller may see foreign tab titles and URLs. The server
+      // cannot tell an agent from a human — TestBench and flick authenticate
+      // too — so it honours what it is asked. The withholding gate is
+      // MCP-side (§6): the MCP client simply does not ask for these unless
+      // `mcp.cdp.allowUnowned` is set.
+      const includeForeignTabs =
+        req.query['includeForeignTabs'] === 'true' || req.query['includeForeignTabs'] === '1';
+
+      const profiles = await knownProfiles(projectRoot);
+      const running = profiles
+        .filter((p) => p.live && p.port !== null)
+        .map((p) => ({
+          engine: p.engine,
+          profile: p.profile,
+          port: p.port as number,
+          profileDir: p.profileDir,
+          tabs: p.tabs ?? [],
+        }));
+      // No `port` field at all, rather than `port: null`. An `available` entry
+      // is a directory, not a browser; giving it a port-shaped hole invites a
+      // caller to try to attach to it.
+      const available = profiles
+        .filter((p) => !p.live)
+        .map((p) => ({ engine: p.engine, profile: p.profile, profileDir: p.profileDir }));
+
+      const foreign: {
+        engine: string;
+        port: number;
+        tabs: { targetId: string; title: string; url: string }[] | null;
+        tabsWithheld: boolean;
+        error: string | null;
+      }[] = [];
+
+      if (includeForeign) {
+        // The only port scan in the design. Our own browsers are on
+        // OS-assigned ports that nothing can guess, so scanning could never
+        // find them — but a browser someone else started is by definition on
+        // a conventional one.
+        const ourPorts = new Set(running.map((r) => r.port));
+        const scanned = await discoverCdpPorts();
+        for (const probe of scanned) {
+          if (!probe.reachable) continue;
+          // Not an attachable browser. 9229 is in the scan list and is the
+          // Node --inspect default — including this server's own debugger.
+          if (probe.engine === 'node') continue;
+          // An OS-assigned port can legitimately land on 9222: W0 saw ports
+          // as low as 7566. A browser we own is never foreign.
+          if (ourPorts.has(probe.port)) continue;
+          foreign.push({
+            engine: probe.engine,
+            port: probe.port,
+            tabs: includeForeignTabs ? (probe.tabs ?? []) : null,
+            tabsWithheld: !includeForeignTabs,
+            error: probe.error ?? null,
+          });
+        }
+      }
+
+      res.status(200).json({ running, available, foreign });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post('/cdp/browsers', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const projectRoot = typeof body.projectRoot === 'string' ? body.projectRoot : '';
+      if (!projectRoot) {
+        res.status(400).json({ error: 'projectRoot is required' });
+        return;
+      }
+      if (!path.isAbsolute(projectRoot)) {
+        res.status(400).json({ error: `projectRoot must be an absolute path (got "${projectRoot}")` });
+        return;
+      }
+      const engine = body.engine;
+      if (engine !== 'chrome' && engine !== 'edge') {
+        res.status(400).json({ error: 'engine must be "chrome" or "edge"' });
+        return;
+      }
+      if (body.profile !== undefined && typeof body.profile !== 'string') {
+        res.status(400).json({ error: 'profile must be a string' });
+        return;
+      }
+      const profile = (body.profile as string | undefined) ?? DEFAULT_PROFILE;
+      const reset = body.reset === true;
+
+      // Single-flight. The key is built from the validated values so two
+      // spellings of the same request share a slot.
+      const key = `${projectRoot} ${engine} ${profile}`;
+      let pending = cdpLaunchesInFlight.get(key);
+      if (!pending) {
+        pending = startCdpBrowser({ projectRoot, engine, profile, reset }).finally(() => {
+          cdpLaunchesInFlight.delete(key);
+        });
+        cdpLaunchesInFlight.set(key, pending);
+      }
+      const result = await pending;
+
+      if (!result.ok) {
+        res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+        return;
+      }
+
+      res.status(200).json({
+        engine: result.engine,
+        profile: result.profile,
+        port: result.port,
+        profileDir: result.profileDir,
+        binary: result.binary,
+        tabs: result.tabs,
+        outcome: result.outcome,
+        warnings: result.warnings,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Error handling middleware
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const message = err instanceof Error ? err.message : String(err);
@@ -717,6 +891,27 @@ export async function startServer(config: Config): Promise<void> {
 
   process.on('SIGINT', () => void shutdown(`Received SIGINT — ${closingSummary()}`));
   process.on('SIGTERM', () => void shutdown(`Received SIGTERM — ${closingSummary()}`));
+}
+
+/**
+ * Map a registry refusal onto an HTTP status.
+ *
+ * Split out so the classification lives next to the codes rather than inside
+ * a route handler, and so it stays a total function over `CdpFailureKind` —
+ * adding a kind without a code becomes a type error rather than a silent 500.
+ */
+function statusForCdpFailure(kind: CdpFailureKind): number {
+  switch (kind) {
+    case 'invalid_input':
+      return 400;
+    // Well-formed, but the state on disk says no: a live browser on the
+    // profile, a directory we did not create. Retrying verbatim will fail
+    // the same way, which is what 409 tells a client.
+    case 'refused':
+      return 409;
+    case 'launch_failed':
+      return 500;
+  }
 }
 
 /**

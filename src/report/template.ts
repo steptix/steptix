@@ -181,6 +181,21 @@ export function getReportTemplate(): string {
        from .badge-skill because the prefix below is baked into the rule. */
     .badge-section { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .badge-section::before { content: 'section: '; opacity: 0.6; }
+    /* Which tab a step drove. Deliberately quiet — it is on every step, so a
+       loud colour would compete with the pass/fail badge for attention. The
+       unexpected variant is the one meant to catch the eye. */
+    .badge-tab { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+    .badge-tab::before { content: 'tab: '; opacity: 0.6; }
+    .badge-tab-unexpected { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+    .tab-timeline { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; }
+    .tab-timeline h2 { margin: 0 0 4px; font-size: 1rem; }
+    .tab-timeline .tab-timeline-note { color: #64748b; font-size: 0.82rem; margin: 0 0 12px; }
+    .tab-timeline table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .tab-timeline th { text-align: left; color: #64748b; font-weight: 600; padding: 4px 8px 4px 0; border-bottom: 1px solid #e2e8f0; }
+    .tab-timeline td { padding: 5px 8px 5px 0; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+    .tab-timeline .tab-id { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; color: #475569; }
+    .tab-timeline .tab-url { color: #475569; word-break: break-all; }
+    .tab-timeline tr.tab-row-unexpected td { background: #fffbeb; }
 
     /* Tool-step block — surfaces deterministic tool invocation details */
     .tool-block { margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: #f5f3ff; border: 1px solid #ddd6fe; }
@@ -348,6 +363,8 @@ export function getReportTemplate(): string {
   </div>
 
   {{{diagnosisHtml}}}
+
+  {{{tabTimelineHtml}}}
 
   <div class="steps-section">
     <h2>Steps</h2>

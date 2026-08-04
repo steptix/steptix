@@ -185,6 +185,7 @@ export function canonicalTestFilePath(target: string): string {
 interface RawProjectConfig {
   tests?: { dir?: unknown; pattern?: unknown; skillsDir?: unknown; toolsDir?: unknown };
   cache?: { enabled?: unknown };
+  mcp?: { cdp?: { allowUnowned?: unknown; ports?: unknown } };
 }
 
 /**
@@ -278,6 +279,39 @@ function resolveProjectDir(
  * it belongs here: this is the only module that knows how to read the config
  * and where the allowed roots are.
  */
+/**
+ * `mcp.cdp` from `aiui.config.json` — the §6 gate's only input.
+ *
+ * A config file rather than a tool argument on purpose. The existing
+ * `allow_foreign_session` precedent has the right shape but is the wrong gate
+ * here: an agent sets its own boolean, so it stops accidents, not a page that
+ * talks the agent into setting one — and behind this gate sits a browser
+ * holding live logged-in sessions. `aiui.config.json` is the only gate a human
+ * actually holds, and an agent cannot write it.
+ *
+ * Read here rather than through `loadConfig` for the same reason everything
+ * else in this module is: the loader folds `process.env` in, so "the project's
+ * config" would silently include the MCP host's environment.
+ *
+ * Absent, malformed or wrongly-typed values all read as "not permitted".
+ * Widening reach is an explicit act, so anything ambiguous stays closed.
+ */
+function readMcpCdpConfig(config: RawProjectConfig): {
+  allowUnowned: boolean;
+  ports: number[] | null;
+} {
+  const cdp = config.mcp?.cdp;
+  const ports = Array.isArray(cdp?.ports)
+    ? cdp.ports.filter(
+        (p): p is number => typeof p === 'number' && Number.isInteger(p) && p > 0 && p <= 65535,
+      )
+    : null;
+  return {
+    allowUnowned: cdp?.allowUnowned === true,
+    ports: ports && ports.length > 0 ? ports : null,
+  };
+}
+
 export function resolveTestsGlob(project: ProjectContext): { dir: string; pattern: string } {
   const config = readProjectConfig(project.configPath);
   const declaredDir = stringField(config.tests?.dir) ?? DEFAULT_CONFIG.tests.dir;
@@ -493,6 +527,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
     toolsDir,
     cacheEnabled: config.cache?.enabled === true,
     envFilesConsulted: [baseEnvPath],
+    cdpPermissions: readMcpCdpConfig(config),
   };
 
   // Step 10 for a tool-supplied name — before the server URL is read, so an

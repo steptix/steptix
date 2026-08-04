@@ -277,10 +277,29 @@ export interface FrameInfo {
  * The `frame:*` variants are emitted only when the client asks for skill
  * expansion (via `StepRequest.skillsDir`). Legacy clients can ignore them.
  */
+/**
+ * Which tab a step actually ran in (stories/mcp-cdp-browser.md §11).
+ *
+ * Optional and additive: existing consumers validate `line` and `frame` and
+ * ignore extra keys, so TestBench, flick and the MCP client are unaffected.
+ *
+ * `targetId` is the field that matters. Labels are per-session, so two runs
+ * sharing one CDP browser both have a `page:2` and only the target id says
+ * whether that is the same tab — which is exactly the question an author asks
+ * when two parallel tests interfere.
+ */
+export interface TabInfo {
+  label: string;
+  targetId: string | null;
+  url: string;
+  title: string;
+  unexpected: boolean;
+}
+
 export type RunEvent =
-  | { type: 'step:start'; line: number; frame?: FrameInfo }
-  | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo; fromCache?: boolean }
-  | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo }
+  | { type: 'step:start'; line: number; frame?: FrameInfo; tab?: TabInfo }
+  | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo; fromCache?: boolean; tab?: TabInfo }
+  | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo; tab?: TabInfo }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' }
   | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' }
@@ -2604,6 +2623,25 @@ export class SessionManager {
         const frameForStep = frameInfoFor(i);
         const frameSpread: { frame?: FrameInfo } = frameForStep ? { frame: frameForStep } : {};
 
+        /**
+         * Which tab this step is in, resolved at emit time (§11).
+         *
+         * Read fresh for each of `step:start` / `step:pass` / `step:fail`
+         * rather than once per step: a step that switches tabs must report
+         * the tab it *ended* in, which is the whole diagnostic. Cheap after
+         * the first call — the target id is cached on the tracked page, so
+         * this is a URL read plus a bounded `title()`.
+         */
+        const tabSpread = async (): Promise<{ tab?: TabInfo }> => {
+          try {
+            const tab = await session.browserSession?.pageTracker.describeActiveTab();
+            return tab ? { tab } : {};
+          } catch {
+            // Never let a diagnostic field fail a step's event.
+            return {};
+          }
+        };
+
         // ── Server-side breakpoint check ────────────────────────────
         //
         // If the next step's origin (URI + source line) matches a
@@ -2715,7 +2753,7 @@ export class SessionManager {
           stepInstruction,
         );
 
-        emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
+        emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread, ...(await tabSpread()) });
 
         // Tool-step branch — when the step is a `[tool: ...]` invocation
         // AND we have a loaded catalogue, dispatch through `executeToolStep`
@@ -3031,12 +3069,20 @@ export class SessionManager {
           expansionOrigins?.[i]?.frameId,
           expansionFrames,
         );
+        // Resolved once, here, and used for BOTH the report row and the
+        // pass/fail event below — so the tab the report shows and the tab the
+        // client was told are the same tab by construction rather than by two
+        // reads that happen to agree. After the step, deliberately: a step
+        // that switched tabs must report the one it ended in.
+        const tabAfterStep = await tabSpread();
+
         fullStepResults.push({
           ...stepResult,
           index: i + 1,
           instruction: originalStep,
           ...(sourceSkill && { sourceSkill }),
           ...(sourceSection && { sourceSection }),
+          ...tabAfterStep,
         });
 
         // Update conversation history
@@ -3071,6 +3117,7 @@ export class SessionManager {
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
             ...(stepResult.fromCache && { fromCache: true }),
+            ...tabAfterStep,
           });
 
           // ── Frame scope snapshot (Phase 4) ──────────────────────────
@@ -3178,6 +3225,7 @@ export class SessionManager {
             error: stepResult.error ?? 'Step failed',
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
+            ...tabAfterStep,
           });
           // Phase 4 — surface the scope at failure time too. The user
           // wants to see "what were the variables when this step blew

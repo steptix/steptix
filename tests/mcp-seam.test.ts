@@ -32,6 +32,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     toolsDir: null,
     cacheEnabled: false,
     envFilesConsulted: [`${PROJECT_ROOT}/.env`],
+    cdpPermissions: { allowUnowned: false, ports: null },
     ...overrides,
   };
 }
@@ -47,7 +48,13 @@ interface Harness {
   client: Client;
   calls: { sessionId: string; body: Record<string, unknown> }[];
   ensureCalls: number;
+  /** Every `GET /cdp/browsers` the tools made, so a test can assert the gate
+   *  did (or did not) consult the registry, and with what. */
+  cdpListCalls: { projectRoot: string; includeForeign?: boolean; includeForeignTabs?: boolean }[];
+  cdpStartCalls: Record<string, unknown>[];
 }
+
+const emptyBrowsers = { running: [], available: [], foreign: [] };
 
 async function connect(opts: {
   script?: Scripted | Scripted[];
@@ -55,8 +62,17 @@ async function connect(opts: {
   resolveProjectError?: PreflightFailure;
   lastRun?: { finalized: boolean; reportPath?: string | null; tokens?: { total: number; input: number; output: number } | null };
   sessions?: { sessionId: string }[];
+  browsers?: {
+    running?: { engine: string; profile: string; port: number; profileDir: string; tabs: unknown[] }[];
+    available?: { engine: string; profile: string; profileDir: string }[];
+    foreign?: { engine: string; port: number; tabs: unknown; tabsWithheld: boolean; error: string | null }[];
+  };
+  started?: Record<string, unknown>;
+  startError?: Error;
 }): Promise<Harness> {
   const calls: { sessionId: string; body: Record<string, unknown> }[] = [];
+  const cdpListCalls: Harness['cdpListCalls'] = [];
+  const cdpStartCalls: Record<string, unknown>[] = [];
   let ensureCalls = 0;
   const scripts = Array.isArray(opts.script) ? [...opts.script] : opts.script ? [opts.script] : [];
 
@@ -87,6 +103,24 @@ async function connect(opts: {
     async listSessions() {
       return opts.sessions ?? [];
     },
+    async getCdpBrowsers(args) {
+      cdpListCalls.push(args as Harness['cdpListCalls'][number]);
+      return { ...emptyBrowsers, ...opts.browsers } as never;
+    },
+    async startCdpBrowser(body) {
+      cdpStartCalls.push(body as unknown as Record<string, unknown>);
+      if (opts.startError) throw opts.startError;
+      return (opts.started ?? {
+        engine: 'edge',
+        profile: 'default',
+        port: 51000,
+        profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+        binary: 'C:/msedge.exe',
+        tabs: [],
+        outcome: 'launched_into_new_profile',
+        warnings: [],
+      }) as never;
+    },
   };
 
   const deps: McpDeps = {
@@ -112,6 +146,8 @@ async function connect(opts: {
   return {
     client,
     calls,
+    cdpListCalls,
+    cdpStartCalls,
     get ensureCalls() {
       return ensureCalls;
     },
@@ -123,20 +159,26 @@ beforeEach(() => {
 });
 
 describe('tool registration', () => {
-  it('exposes exactly the seven tools, under bare names', async () => {
+  it('exposes exactly the nine tools, under bare names', async () => {
     // Bare because the host prefixes them — an `aiui_` prefix here would
     // render as `mcp__aiui__aiui_run_steps` in Claude Code.
+    //
+    // The two CDP tools carry `cdp` in their own names on purpose: the
+    // framework has two kinds of browser, and a bare `start_browser` would
+    // claim authority over both while handling only the persistent kind.
     const { client } = await connect({});
     const { tools } = await client.listTools();
 
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close_session',
       'get_last_run',
+      'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
       'run_steps',
       'run_test_file',
       'server_status',
+      'start_cdp_browser',
     ]);
   });
 

@@ -109,6 +109,27 @@ export interface StepResult {
   screenshotBase64?: string;
   /** Page URL at the time the end-of-step screenshot was captured */
   pageUrl?: string;
+  /**
+   * Which tab this step ran in (stories/mcp-cdp-browser.md §11).
+   *
+   * Absent on runs from clients that predate it, and on engines that cannot
+   * report a CDP target id — the report degrades to what it showed before.
+   *
+   * `targetId` is what makes this worth carrying. Several tests can share one
+   * CDP browser, every tab any of them opens is visible to all of them, and
+   * labels are per-session — so `page:2` in two reports may or may not be the
+   * same tab, and only the target id answers that.
+   */
+  tab?: {
+    label: string;
+    targetId: string | null;
+    url: string;
+    title: string;
+    /** Adopted mid-run with nothing in this session accounting for it —
+     *  most often another test running against the same browser. Advisory:
+     *  it changes no status and fails no step. */
+    unexpected: boolean;
+  };
   /** DOM snapshot at the start of the step */
   domSnapshot?: string;
   durationMs: number;

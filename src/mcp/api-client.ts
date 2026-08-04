@@ -12,9 +12,11 @@ import {
   ApiHttpError,
   type ApiClient,
   type ApiClientOptions,
+  type CdpBrowsers,
   type LastRunInfo,
   type RunEvent,
   type SessionSummary,
+  type StartedCdpBrowser,
   type StreamResult,
 } from './types.js';
 import { normalizeBaseUrl } from '../server/health.js';
@@ -268,6 +270,39 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       await assertOk(res);
       const body = (await res.json()) as { sessions?: SessionSummary[] };
       return body.sessions ?? [];
+    },
+
+    async getCdpBrowsers(args, signal): Promise<CdpBrowsers> {
+      const params = new URLSearchParams({ projectRoot: args.projectRoot });
+      if (args.includeForeign) params.set('includeForeign', 'true');
+      // Only sent when §6 permits. The server honours whatever it is asked —
+      // it cannot tell an agent from a human, and constraining TestBench or
+      // flick would be wrong — so NOT asking is the withholding.
+      if (args.includeForeignTabs) params.set('includeForeignTabs', 'true');
+      const res = await doFetch(`${base}/cdp/browsers?${params.toString()}`, {
+        headers,
+        ...(signal ? { signal } : {}),
+      });
+      await assertOk(res);
+      const body = (await res.json()) as Partial<CdpBrowsers>;
+      // Defaulted rather than trusted: a missing list must read as empty, not
+      // as `undefined` reaching a `.map` in a tool handler.
+      return {
+        running: body.running ?? [],
+        available: body.available ?? [],
+        foreign: body.foreign ?? [],
+      };
+    },
+
+    async startCdpBrowser(body, signal): Promise<StartedCdpBrowser> {
+      const res = await doFetch(`${base}/cdp/browsers`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
+      });
+      await assertOk(res);
+      return (await res.json()) as StartedCdpBrowser;
     },
   };
 };

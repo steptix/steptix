@@ -247,6 +247,43 @@ export interface LoggingConfig {
   serverFileLogLevel: 'off' | 'compact' | 'full';
 }
 
+/**
+ * How much reach an MCP agent has over CDP browsers.
+ *
+ * Lives in `aiui.config.json` rather than in a tool argument on purpose. The
+ * existing `allow_foreign_session` precedent is the right *shape* but the
+ * wrong *gate* here: an agent sets its own boolean, so it stops accidents, not
+ * a page that talks the agent into setting one — and behind this gate sits a
+ * browser holding live logged-in sessions. A config file is the only gate a
+ * human actually holds.
+ *
+ * See stories/mcp-cdp-browser.md §6.
+ */
+export interface McpCdpConfig {
+  /**
+   * Let an agent attach to a CDP browser this project's framework did not
+   * launch, and stop withholding foreign browsers' tab titles and URLs.
+   *
+   * Default false. This is the only setting that widens an agent's reach, and
+   * a refusal names it precisely so the agent can ask the user for it instead
+   * of silently failing or probing other ports.
+   */
+  allowUnowned?: boolean;
+  /**
+   * Override the port list swept when looking for browsers this project did
+   * not start. Default `[9222, 9223, 9229]`.
+   *
+   * Discovery only — nothing here influences what we launch on. Our own
+   * browsers pick their own ports (§3) and are found through the registry,
+   * never by scanning.
+   */
+  ports?: number[];
+}
+
+export interface McpConfig {
+  cdp?: McpCdpConfig;
+}
+
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
@@ -257,6 +294,15 @@ export interface Config {
   server: ServerConfig;
   cache: CacheConfig;
   logging: LoggingConfig;
+  /**
+   * MCP-only settings. Optional, and deliberately without a `defaults.ts`
+   * entry so absence stays absence through `deepMerge` — the same treatment as
+   * `server.idleTimeoutMinutes`. Declared here for the rest of the framework
+   * and for the generated JSON schema; the MCP path reads the raw parsed
+   * config rather than the loader (stories/mcp-server.md §3), so this
+   * declaration is documentation and schema, not the read path.
+   */
+  mcp?: McpConfig;
 }
 
 /** Deeply partial version of Config for user-provided overrides */

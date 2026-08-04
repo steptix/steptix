@@ -98,10 +98,40 @@ const parameters = z
   .optional()
   .describe('Values for the test\'s ## Parameters, overriding those declared in the file.');
 
+const cdpTarget = z
+  .object({
+    port: z
+      .number()
+      .int()
+      .describe(
+        'Port of a CDP browser from list_cdp_browsers `running`, or from ' +
+          'start_cdp_browser. Ports are assigned by the browser and change on ' +
+          'every launch, so read one rather than assuming 9222.',
+      ),
+    tab: z
+      .string()
+      .optional()
+      .describe(
+        'Which tab to drive: `new` (default, and the safe choice), ' +
+          '`targetId:<id>`, an integer index, `url~<substring>`, ' +
+          '`title~<substring>`, or `active`. Prefer `targetId:` — it is the ' +
+          'only identifier that stays stable as tabs open and close, and ' +
+          'list_cdp_browsers hands them out.',
+      ),
+  })
+  .optional()
+  .describe(
+    'Attach to an already-running CDP browser instead of launching a fresh ' +
+      'one. Only browsers this project started are permitted; anything else ' +
+      'is refused unless a human sets mcp.cdp.allowUnowned in ' +
+      'aiui.config.json.',
+  );
+
 const toolConfig = z
   .object({
     baseUrl: z.string().optional(),
     timeout: z.string().optional(),
+    cdp: cdpTarget,
   })
   .optional()
   .describe(
@@ -171,6 +201,97 @@ export const getLastRunInput = toolSchema({
 });
 
 // ---------------------------------------------------------------------------
+// CDP browsers
+//
+// Both names carry `cdp` deliberately. The framework has two kinds of browser
+// — persistent CDP ones and per-session launch-mode ones — and a bare
+// `start_browser`/`list_browsers` would claim authority over both while
+// handling only the first. The prefix is wordier than a reader who knows the
+// distinction needs, and exactly right for a model that does not.
+// ---------------------------------------------------------------------------
+
+export const listCdpBrowsersInput = toolSchema({ project_root: projectRoot });
+
+export const startCdpBrowserInput = toolSchema({
+  // No `port` argument: the caller cannot choose a port (the browser assigns
+  // its own), a browser we own is found by reuse, and one we do not own is
+  // reached via list_cdp_browsers rather than by launching.
+  //
+  // No `reuse` argument either: reuse is what `profile` selects. The same name
+  // returns the running browser, a new name starts a new one.
+  engine: z.enum(['chrome', 'edge']).describe('Which browser to launch.'),
+  profile: z
+    .string()
+    .optional()
+    .describe(
+      'Named profile, default "default". **This is how you choose between ' +
+        'browsers.** The same name returns the same browser and its saved ' +
+        'logins; a new name starts a genuinely separate browser with its own ' +
+        'window, port and cookies. Use names for the cases one profile cannot ' +
+        'express: admin vs regular user, uat vs prod, or a deliberately ' +
+        'signed-out profile for testing a sign-in flow. Letters, digits, dot, ' +
+        'underscore and hyphen only.',
+    ),
+  reset: z
+    .boolean()
+    .optional()
+    .describe(
+      'Delete the profile before launching, so it starts genuinely signed ' +
+        'out. **Destructive and not undoable** — every saved login in that ' +
+        'profile is gone. This is the only way to test a sign-in flow twice, ' +
+        'because a profile that has signed in once stays signed in. Refused ' +
+        'while a browser is running on the profile.',
+    ),
+  project_root: projectRoot,
+});
+
+const cdpTab = z.object({
+  targetId: z.string(),
+  title: z.string(),
+  url: z.string(),
+});
+
+export const listCdpBrowsersOutput = toolSchema({
+  running: z.array(
+    z.object({
+      engine: z.string(),
+      profile: z.string(),
+      port: z.number(),
+      profileDir: z.string(),
+      tabs: z.array(cdpTab),
+    }),
+  ),
+  available: z.array(
+    z.object({ engine: z.string(), profile: z.string(), profileDir: z.string() }),
+  ),
+  foreign: z.array(
+    z.object({
+      engine: z.string(),
+      port: z.number(),
+      tabs: z.array(cdpTab).nullable(),
+      tabsWithheld: z.boolean(),
+      error: z.string().nullable(),
+    }),
+  ),
+});
+
+export const startCdpBrowserOutput = toolSchema({
+  engine: z.string(),
+  profile: z.string(),
+  port: z.number(),
+  profileDir: z.string(),
+  binary: z.string(),
+  tabs: z.array(cdpTab),
+  outcome: z.enum([
+    'reused_running_browser',
+    'launched_into_existing_profile',
+    'launched_into_new_profile',
+    'launched_after_reset',
+  ]),
+  warnings: z.array(z.string()),
+});
+
+// ---------------------------------------------------------------------------
 // Output shapes
 // ---------------------------------------------------------------------------
 
@@ -187,6 +308,18 @@ const foldedStep = z.object({
   error: z.string().nullable(),
   fromCache: z.boolean(),
   durationMs: z.number().nullable(),
+  // Which tab the step actually drove. `.nullable()` and not optional: a
+  // missing required key is fatal to `validateToolOutput`, where a null is
+  // simply "the server did not report one".
+  tab: z
+    .object({
+      label: z.string(),
+      targetId: z.string().nullable(),
+      url: z.string(),
+      title: z.string(),
+      unexpected: z.boolean(),
+    })
+    .nullable(),
 });
 
 const tokens = z.object({

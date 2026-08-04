@@ -792,6 +792,12 @@ async function executeStepAttempt(
         } else {
           try {
             const newPage = await page.context().newPage();
+            // This session asked for this tab, so it is not an "unexpected"
+            // one in the report. Needed because our own `newPage()` and
+            // another session's are indistinguishable from the
+            // `context.on('page')` handler's side — both arrive with a null
+            // opener — and on a shared CDP browser we see both.
+            pageTracker.markExpected(newPage);
             await newPage.goto(targetUrl, {
               waitUntil: 'domcontentloaded',
               timeout: 30_000,

@@ -60,11 +60,13 @@ describe('tool schemas as they go out on the wire', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close_session',
       'get_last_run',
+      'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
       'run_steps',
       'run_test_file',
       'server_status',
+      'start_cdp_browser',
     ]);
 
     for (const tool of tools) {
@@ -146,12 +148,16 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['closeSessionInput', schemas.closeSessionInput, 'input'],
     ['getLastRunInput', schemas.getLastRunInput, 'input'],
     ['serverStatusInput', schemas.serverStatusInput, 'input'],
+    ['listCdpBrowsersInput', schemas.listCdpBrowsersInput, 'input'],
+    ['startCdpBrowserInput', schemas.startCdpBrowserInput, 'input'],
     ['runResultOutput', schemas.runResultOutput, 'output'],
     ['listTestFilesOutput', schemas.listTestFilesOutput, 'output'],
     ['listSessionsOutput', schemas.listSessionsOutput, 'output'],
     ['closeSessionOutput', schemas.closeSessionOutput, 'output'],
     ['getLastRunOutput', schemas.getLastRunOutput, 'output'],
     ['serverStatusOutput', schemas.serverStatusOutput, 'output'],
+    ['listCdpBrowsersOutput', schemas.listCdpBrowsersOutput, 'output'],
+    ['startCdpBrowserOutput', schemas.startCdpBrowserOutput, 'output'],
   ];
 
   /** The schema minus its dialect declaration — the part that must not differ. */

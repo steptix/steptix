@@ -26,6 +26,21 @@ export interface FoldedStep {
   error: string | null;
   fromCache: boolean;
   durationMs: number | null;
+  /**
+   * Which tab this step ran in, or null when the server did not report one
+   * (an older server, or an engine that cannot answer for a target id).
+   *
+   * Taken from the step's TERMINAL event, not its start: a step that switched
+   * tabs is more usefully described by where it ended than where it began,
+   * and "which tab did that step actually touch?" is asked after a failure.
+   */
+  tab: {
+    label: string;
+    targetId: string | null;
+    url: string;
+    title: string;
+    unexpected: boolean;
+  } | null;
 }
 
 export interface FoldedRun {
@@ -186,6 +201,7 @@ export function foldRun(input: FoldInput): FoldedRun {
       error: null,
       fromCache: false,
       durationMs: null,
+      tab: null,
     };
     return { row, startedAt: at };
   };
@@ -221,12 +237,17 @@ export function foldRun(input: FoldInput): FoldedRun {
         // record it as unknown rather than losing it.
         if (open) closeRow('unknown', null);
         open = beginRow(event.line, event.frame, at);
+        // Seeded from the start event so a step whose stream drops before its
+        // terminal still reports the tab it was running in. Overwritten by
+        // the terminal event when one arrives.
+        open.row.tab = event.tab ?? null;
         break;
 
       case 'step:pass': {
         if (!open) open = beginRow(event.line, event.frame, at);
         open.row.output = event.output ?? null;
         open.row.fromCache = event.fromCache ?? false;
+        open.row.tab = event.tab ?? open.row.tab;
         // `output: 'skipped'` is how the server reports an `[input:]` or
         // `[interactive]` step it declined to run unattended. Calling that
         // "passed" is a false green on work that never happened.
@@ -239,6 +260,7 @@ export function foldRun(input: FoldInput): FoldedRun {
       case 'step:fail': {
         if (!open) open = beginRow(event.line, event.frame, at);
         open.row.error = event.error;
+        open.row.tab = event.tab ?? open.row.tab;
         lastFailError = event.error;
         if (event.screenshot) lastFailScreenshot = event.screenshot;
         closeRow('failed', at);
@@ -439,6 +461,7 @@ function mergeSyntheticRows(args: {
       error: null,
       fromCache: false,
       durationMs: null,
+      tab: null,
     };
 
     // Place it after the last executed row that belongs to an earlier or

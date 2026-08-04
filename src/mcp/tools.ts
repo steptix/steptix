@@ -14,11 +14,13 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHash } from 'node:crypto';
 import { assembleSteps, assembleTestFile } from './assemble.js';
 import {
+  badCdpProfileName,
   listSessionsTimedOut,
   preflightError,
   unauthorized,
   type McpToolError,
 } from './errors.js';
+import { assertPortAttachable, maySeeForeignTabs, summarizeBrowsers } from './cdp.js';
 import { allowedRoots, canonicalize, isInsideRoot, resolveTestsGlob } from './project.js';
 import { discoverTestFiles } from '../parser/markdown.js';
 import { foldRun, type FoldedRun } from './run-fold.js';
@@ -249,6 +251,25 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
   await deps.ensureServerReady(project, ctx.signal);
 
   const client = deps.createApiClient({ baseUrl: project.serverUrl, apiKey: project.apiKey });
+
+  // §6's gate. Only a *tool-supplied* `cdp` is checked: a `## Config: cdp:`
+  // line in a test file is human-authored and already trusted, which is the
+  // distinction `cdpSource` exists to carry.
+  //
+  // Here rather than in `assemble` because the check is a live round-trip to
+  // the registry — a browser that was running when the agent listed may not be
+  // running now, and attaching to a port something else has since taken is the
+  // failure this prevents. Before `streamSteps`, so a refusal is a pre-flight
+  // error and no run happens.
+  if (assembled.cdpSource === 'tool' && request.config?.cdp) {
+    await assertPortAttachable(
+      client,
+      project.projectRoot,
+      request.config.cdp.port,
+      project.cdpPermissions,
+      ctx.signal,
+    );
+  }
 
   const outcome = await withSession(project.serverUrl, sessionId, async ({ queuedForMs, isFirstCall, markConfigured }) => {
     // Progress counts terminal events only. Counting starts as well would
@@ -671,6 +692,105 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           schemas.getLastRunOutput,
           value,
           info ? `Report: ${info.reportPath ?? '(none)'}` : 'No finalized run yet',
+        );
+      }),
+  );
+
+  // -- list_cdp_browsers ----------------------------------------------------
+  server.registerTool(
+    'list_cdp_browsers',
+    {
+      title: 'List CDP browsers',
+      description:
+        'Persistent CDP browsers and profiles for this project.\n\n' +
+        '`running` — live browsers. Pass one of these ports as ' +
+        'config.cdp.port to run steps in it.\n' +
+        '`available` — profiles that exist but have nothing running. **These ' +
+        'are directories, not browsers**; call start_cdp_browser with the ' +
+        'profile name before sending steps to it. A profile keeps its logins ' +
+        'while dormant.\n' +
+        '`foreign` — browsers this project did not start. Reported so you can ' +
+        'see them; you cannot drive them unless a human sets ' +
+        'mcp.cdp.allowUnowned, and their tab titles and URLs are withheld.\n\n' +
+        'This covers CDP browsers only. Tests running in ordinary launch mode ' +
+        'also have browsers, but those are disposable per-session ones with ' +
+        'no CDP port — they appear in **list_sessions**. If the question is ' +
+        'open-ended ("what browsers do I have?"), call both.',
+      inputSchema: schemas.listCdpBrowsersInput,
+      outputSchema: schemas.listCdpBrowsersOutput,
+    },
+    async (args) =>
+      withProject(deps, args.project_root, async (client, project) => {
+        const browsers = await client.getCdpBrowsers({
+          projectRoot: project.projectRoot,
+          includeForeign: true,
+          includeForeignTabs: maySeeForeignTabs(project.cdpPermissions),
+        });
+        return validated(
+          schemas.listCdpBrowsersOutput,
+          browsers as unknown as Record<string, unknown>,
+          summarizeBrowsers(browsers),
+        );
+      }),
+  );
+
+  // -- start_cdp_browser ----------------------------------------------------
+  server.registerTool(
+    'start_cdp_browser',
+    {
+      title: 'Start a CDP browser',
+      description:
+        'Launch a headed Chrome or Edge this project owns, and return the port ' +
+        'to drive it through. Returns the **already-running** browser if that ' +
+        'profile has one — the profile name is what selects between browsers, ' +
+        'so asking twice does not start two.\n\n' +
+        'A profile is a directory that persists. Sign in by hand once and the ' +
+        'login survives closing the browser, restarting the server, and ' +
+        'restarting this agent — that is the point of the feature.\n\n' +
+        'Read `outcome` and tell the user which happened, because they mean ' +
+        'different things:\n' +
+        '- `launched_into_new_profile` — empty browser. **A human must sign ' +
+        'in before tests against a logged-in site will work.**\n' +
+        '- `launched_into_existing_profile` — the profile already existed. ' +
+        '**It may already be signed in, possibly as someone else.** Say so ' +
+        'rather than reporting it as newly created — a permission test can ' +
+        'otherwise run as the wrong user and pass for the wrong reason.\n' +
+        '- `reused_running_browser` — it was already open; tabs are wherever ' +
+        'they were left.\n' +
+        '- `launched_after_reset` — deliberately empty; a sign-in flow will ' +
+        'be exercised.\n\n' +
+        'Asking for a profile that already exists is **not** an error and ' +
+        'does not create anything new. To get a genuinely new browser, pass a ' +
+        'new `profile` name. To get a genuinely empty one, pass `reset: true`.\n\n' +
+        'Several tests can run against one browser at the same time, which is ' +
+        'often what is wanted — but they share one profile and therefore one ' +
+        'set of cookies. A test that signs out, or logs in as someone else, ' +
+        'affects the others. Warn the user before running tests in parallel ' +
+        'when that could matter; suites that need isolation should use ' +
+        'ordinary launch mode, which gives every test a fresh browser.',
+      inputSchema: schemas.startCdpBrowserInput,
+      outputSchema: schemas.startCdpBrowserOutput,
+    },
+    async (args) =>
+      withProject(deps, args.project_root, async (client, project) => {
+        // Refused here rather than at the server so the agent gets §7's prose
+        // instead of an HTTP 400 — same rule, better message, one fewer
+        // round-trip. The server validates independently; this is not the
+        // only check.
+        if (args.profile !== undefined && !/^[A-Za-z0-9._-]+$/.test(args.profile)) {
+          return errorResult(badCdpProfileName(args.profile));
+        }
+        const started = await client.startCdpBrowser({
+          projectRoot: project.projectRoot,
+          engine: args.engine,
+          ...(args.profile !== undefined ? { profile: args.profile } : {}),
+          ...(args.reset === true ? { reset: true } : {}),
+        });
+        return validated(
+          schemas.startCdpBrowserOutput,
+          started as unknown as Record<string, unknown>,
+          `${started.engine} "${started.profile}" on port ${started.port} — ${started.outcome}` +
+            (started.warnings.length > 0 ? `\n${started.warnings.join('\n')}` : ''),
         );
       }),
   );

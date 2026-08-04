@@ -38,6 +38,17 @@ export interface ProjectContext {
   cacheEnabled: boolean;
   /** Env files actually consulted, for error messages that name them. */
   envFilesConsulted: string[];
+  /**
+   * `mcp.cdp` from `aiui.config.json` — how much reach an agent has over CDP
+   * browsers (stories/mcp-cdp-browser.md §6).
+   *
+   * Resolved here, once, rather than re-read at the moment the gate runs. Two
+   * reasons: the gate is on the hot path of every CDP run, and a permission
+   * that is re-read mid-flight could change between the check and the use.
+   * Absent or malformed config reads as "not permitted" — widening reach is an
+   * explicit act, so anything ambiguous stays closed.
+   */
+  cdpPermissions: { allowUnowned: boolean; ports: number[] | null };
 }
 
 /** The body `POST /sessions/:id/steps` accepts. Mirrors the server's explicit
@@ -69,6 +80,16 @@ export interface AssembledRun {
   sentSteps: string[];
   /** Non-fatal problems worth telling the agent about. */
   warnings: string[];
+  /**
+   * Where `request.config.cdp` came from, or `null` when there is none.
+   *
+   * On the wire the two are identical, so this is the only thing that says
+   * which rule applies: a `## Config: cdp:` line is human-authored and trusted,
+   * while a tool argument is a model's choice and must clear §6's gate first.
+   * Losing this distinction would silently make every agent-chosen browser
+   * trusted, which is the failure the whole gate exists to prevent.
+   */
+  cdpSource: 'file' | 'tool' | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +129,79 @@ export interface SessionSummary {
   totalStepsExecuted?: number;
 }
 
+// ---------------------------------------------------------------------------
+// CDP browsers (stories/mcp-cdp-browser.md §4)
+// ---------------------------------------------------------------------------
+
+export interface CdpTab {
+  targetId: string;
+  title: string;
+  url: string;
+}
+
+/**
+ * Three lists, not one, and membership is what carries the meaning. A single
+ * array distinguished by `reachable`/`port: null`/`owner` made a reader — human
+ * or model — join four fields to work out what it was looking at, and the
+ * obvious misreading of "3 browsers" was two directories and someone else's
+ * Chrome. Each list here has exactly one meaning and one permitted action.
+ */
+export interface CdpBrowsers {
+  /** This project's live browsers. Attach by passing `port` as `config.cdp`. */
+  running: {
+    engine: string;
+    profile: string;
+    port: number;
+    profileDir: string;
+    tabs: CdpTab[];
+  }[];
+  /** This project's profiles with nothing running. Launch one by name — these
+   *  are directories, not browsers, and deliberately have no port field. */
+  available: { engine: string; profile: string; profileDir: string }[];
+  /** Browsers this project did not start. Nothing may be done with these
+   *  without the §6 opt-in, and their tabs are withheld by default. */
+  foreign: {
+    engine: string;
+    port: number;
+    tabs: CdpTab[] | null;
+    tabsWithheld: boolean;
+    error: string | null;
+  }[];
+}
+
+export type CdpOutcome =
+  | 'reused_running_browser'
+  | 'launched_into_existing_profile'
+  | 'launched_into_new_profile'
+  | 'launched_after_reset';
+
+export interface StartCdpBrowserBody {
+  projectRoot: string;
+  engine: 'chrome' | 'edge';
+  profile?: string;
+  reset?: boolean;
+}
+
+export interface StartedCdpBrowser {
+  engine: string;
+  profile: string;
+  port: number;
+  profileDir: string;
+  binary: string;
+  tabs: CdpTab[];
+  outcome: CdpOutcome;
+  warnings: string[];
+}
+
+export interface GetCdpBrowsersArgs {
+  projectRoot: string;
+  includeForeign?: boolean;
+  /** Ask the server for foreign tab titles and URLs. Set only when §6's
+   *  `allowUnowned` permits — the server honours whatever it is asked, since
+   *  it cannot tell an agent from a human. */
+  includeForeignTabs?: boolean;
+}
+
 export interface ApiClient {
   streamSteps(
     sessionId: string,
@@ -118,6 +212,8 @@ export interface ApiClient {
   getLastRun(sessionId: string): Promise<LastRunInfo>;
   closeSession(sessionId: string): Promise<void>;
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>;
+  getCdpBrowsers(args: GetCdpBrowsersArgs, signal?: AbortSignal): Promise<CdpBrowsers>;
+  startCdpBrowser(body: StartCdpBrowserBody, signal?: AbortSignal): Promise<StartedCdpBrowser>;
 }
 
 /**

@@ -232,6 +232,75 @@ export function badCdpPort(value: string): McpToolError {
   );
 }
 
+// ---------------------------------------------------------------------------
+// CDP browsers (stories/mcp-cdp-browser.md §7)
+//
+// Every message here states three things: what was refused, why, and the
+// specific next action. The third is part of the contract, not decoration. An
+// agent given "permission denied" retries the same call or invents a
+// workaround; an agent told "port 9222 is foreign — use one from `running`, or
+// set mcp.cdp.allowUnowned" either fixes it or tells the user exactly what it
+// needs from them. A message here without a next action is an incomplete
+// implementation.
+// ---------------------------------------------------------------------------
+
+// Names the setting AND shows the JSON. The dotted name is what a human
+// searches for and what the agent should say out loud when asking for it; the
+// JSON is what they actually have to type.
+const ALLOW_UNOWNED_HINT =
+  'To let this agent drive browsers it did not start, a human must set ' +
+  'mcp.cdp.allowUnowned in aiui.config.json:\n' +
+  '  { "mcp": { "cdp": { "allowUnowned": true } } }\n' +
+  'That file is deliberately outside an agent\'s reach — ask the user for it.';
+
+/** `config.cdp` names a port that is not one of this project's running
+ *  browsers. The middle clause — where it *was* found — is what turns this
+ *  from a wall into a decision. */
+export function cdpPortNotOwned(
+  port: number,
+  foundIn: 'foreign' | 'available' | 'nowhere',
+  detail?: { profile?: string; engine?: string },
+): McpToolError {
+  const where =
+    foundIn === 'foreign'
+      ? `Port ${port} belongs to a browser this project did not start (it is listed under ` +
+        '`foreign`). It could be anyone\'s browser — a developer\'s personal Chrome, ' +
+        'another project\'s.'
+      : foundIn === 'available'
+        ? `Port ${port} is not open. The ${detail?.engine ?? ''} profile ` +
+          `"${detail?.profile ?? 'unknown'}" exists but its browser has since been closed, ` +
+          'and a browser\'s port dies with the process.'
+        : `Port ${port} does not match any browser this project has launched.`;
+
+  const next =
+    foundIn === 'available'
+      ? `Call start_cdp_browser with profile "${detail?.profile ?? ''}". It will return a ` +
+        '**different** port and the profile will **still be signed in** — the login lives ' +
+        'in the profile directory, not in the browser process. A closed browser is not a ' +
+        'lost login.'
+      : 'Call list_cdp_browsers and use a port from `running`; or launch one of the ' +
+        '`available` profiles with start_cdp_browser.\n' +
+        ALLOW_UNOWNED_HINT;
+
+  return preflightError(`${where}\n\n${next}`);
+}
+
+/** A profile name that is not a single safe path component. */
+export function badCdpProfileName(profile: string): McpToolError {
+  return preflightError(
+    `Profile name "${profile}" is not usable. It names a directory under ` +
+      '.aiui/cdp-profiles/, so it may contain only letters, digits, dot, underscore and ' +
+      'hyphen — no slashes and no "..".\n' +
+      'Use a plain name: admin, uat, signup-test.',
+  );
+}
+
+export function badCdpEngine(engine: string): McpToolError {
+  return preflightError(
+    `"${engine}" is not an engine this framework can launch. Use "chrome" or "edge".`,
+  );
+}
+
 export function listSessionsTimedOut(timeoutMs: number): McpToolError {
   return preflightError(
     `Listing sessions took longer than ${timeoutMs}ms. The server reads each ` +

@@ -142,6 +142,29 @@ export interface TrackedPage {
   page: Page;
   label: string;
   openedAt: number;
+  /**
+   * The CDP target id, resolved once and cached.
+   *
+   * **This, not the label, is the load-bearing identifier.** Labels are
+   * per-session: two sessions attached to one browser will both have a
+   * `page:2`, and only the target id says whether they are the same tab. W0
+   * confirmed that every tab any session opens is adopted by every other
+   * session on that browser, so this is the common case, not an edge one.
+   *
+   * `null` until resolved, and permanently null on a browser whose context
+   * cannot make CDP sessions (Firefox, WebKit) — the field is a diagnostic,
+   * so its absence degrades the report rather than failing the run.
+   */
+  targetId: string | null;
+  /**
+   * True when this tab appeared with nothing in this session accounting for
+   * it: no step asked for it, and its opener is not a page we drive.
+   *
+   * Diagnostics only, never enforcement. A wrong guess here is a misleading
+   * note in a report; the same guess used as a guard would break a legitimate
+   * test. See the §11 rejection of opener-based filtering as a gate.
+   */
+  unexpected: boolean;
 }
 
 export interface PageInfo {
@@ -149,6 +172,64 @@ export interface PageInfo {
   url: string;
   title: string;
   isActive: boolean;
+}
+
+/** Per-step tab attribution, carried on `step:*` events and into the report. */
+export interface TabInfo {
+  label: string;
+  targetId: string | null;
+  url: string;
+  title: string;
+  unexpected: boolean;
+}
+
+/** Bound so one hung page cannot stall a run through a diagnostic field.
+ *  `page.title()` has no timeout of its own. */
+const TAB_TITLE_TIMEOUT_MS = 500;
+
+async function briefly<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Ask a page for its CDP target id.
+ *
+ * One CDP round-trip, which is why callers cache the result rather than doing
+ * this per step: on a 40-step run that would be 40 extra round-trips per page,
+ * in launch mode as well as CDP, to populate a diagnostic field.
+ *
+ * Returns null rather than throwing on any engine or state that cannot answer.
+ */
+export async function resolvePageTargetId(page: Page): Promise<string | null> {
+  try {
+    const context = page.context() as unknown as {
+      newCDPSession?: (p: Page) => Promise<{ send: (m: string) => Promise<unknown>; detach: () => Promise<void> }>;
+    };
+    if (typeof context.newCDPSession !== 'function') return null;
+    const session = await context.newCDPSession(page);
+    try {
+      const info = (await session.send('Target.getTargetInfo')) as
+        | { targetInfo?: { targetId?: string } }
+        | undefined;
+      return info?.targetInfo?.targetId ?? null;
+    } finally {
+      await session.detach().catch(() => {});
+    }
+  } catch {
+    return null;
+  }
 }
 
 /** Validation rules for author-supplied custom page labels (the `as` field on
@@ -170,10 +251,25 @@ export class PageTracker {
   /** Pages we should not track. CDP mode pre-populates this with tabs that
    *  existed in the user's Chrome before the test attached. */
   private ignored: Set<Page>;
+  /** In-flight target-id lookups, so a describe that races the constructor's
+   *  head start joins it rather than starting a second round-trip. */
+  private targetIdResolutions = new Map<Page, Promise<string | null>>();
 
   constructor(initialPage: Page, ignoredPages?: Set<Page>) {
-    this.pages.push({ page: initialPage, label: 'main', openedAt: Date.now() });
+    const entry: TrackedPage = {
+      page: initialPage,
+      label: 'main',
+      openedAt: Date.now(),
+      targetId: null,
+      // The page we started on is by definition accounted for.
+      unexpected: false,
+    };
+    this.pages.push(entry);
     this.ignored = ignoredPages ?? new Set();
+    // Started here rather than on first use so the id is usually cached before
+    // the first step needs it; `describeActiveTab` still resolves on demand,
+    // so a slow round-trip degrades to one await rather than a null field.
+    this.beginTargetIdResolution(entry);
   }
 
   /**
@@ -184,7 +280,22 @@ export class PageTracker {
   addPage(page: Page): string | null {
     if (this.ignored.has(page)) return null;
     const label = `page:${this.pages.length + 1}`;
-    this.pages.push({ page, label, openedAt: Date.now() });
+    const entry: TrackedPage = {
+      page,
+      label,
+      openedAt: Date.now(),
+      targetId: null,
+      // Provisionally unexpected, then cleared by whichever of the two things
+      // that legitimately open a tab actually did:
+      //   - a step (`openPage`) calls `markExpected` once newPage resolves;
+      //   - a `window.open` from a page we drive resolves an opener we track.
+      // What is left is a tab this session cannot account for — most often
+      // another session on the same browser, which W0 confirmed we always see.
+      unexpected: true,
+    };
+    this.pages.push(entry);
+    this.beginTargetIdResolution(entry);
+    void this.resolveOpener(entry);
     logger.info(`New page detected: ${label} (${page.url()})`);
 
     page.on('close', () => {
@@ -209,6 +320,92 @@ export class PageTracker {
   /** Get the currently active page. */
   getActive(): Page {
     return this.pages[this.activeIndex]?.page ?? this.pages[0]!.page;
+  }
+
+  /**
+   * Start resolving a page's target id and remember the in-flight promise.
+   *
+   * The promise is kept, not just the eventual value, because `addPage` is
+   * synchronous while resolution is not: a `describeActiveTab` arriving before
+   * the head start lands would otherwise see a null field and fire a *second*
+   * round-trip for the same page. Awaiting the same promise makes it one
+   * round-trip per page however the calls interleave.
+   */
+  private beginTargetIdResolution(entry: TrackedPage): void {
+    const pending = resolvePageTargetId(entry.page)
+      .then((id) => {
+        if (id !== null) entry.targetId = id;
+        return id;
+      })
+      .catch(() => null);
+    this.targetIdResolutions.set(entry.page, pending);
+  }
+
+  /** A tab opened by a page we already drive is accounted for. */
+  private async resolveOpener(entry: TrackedPage): Promise<void> {
+    try {
+      const opener = await entry.page.opener();
+      if (opener && this.pages.some((p) => p.page === opener)) entry.unexpected = false;
+    } catch {
+      // Popup already closed, or an engine without opener tracking. Leaving
+      // the flag set is the honest answer: we still cannot account for it.
+    }
+  }
+
+  /**
+   * Record that this session deliberately opened `page`.
+   *
+   * Called by the `openPage` action after `context.newPage()` resolves.
+   * Necessary because our own `newPage()` and *another session's* produce an
+   * identical signal — both fire `context.on('page')` with a null opener — so
+   * the opener heuristic alone would flag every tab a test opens.
+   */
+  markExpected(page: Page): void {
+    const entry = this.pages.find((p) => p.page === page);
+    if (entry) entry.unexpected = false;
+  }
+
+  /**
+   * Describe the tab a step is running in, for the step event and the report.
+   *
+   * Resolves the target id if the constructor's head start has not landed yet,
+   * then caches it — so this is one CDP round-trip per page for the whole run,
+   * not one per step. The title is raced against a short timeout because
+   * `page.title()` has none of its own and this is a diagnostic field: a hung
+   * page must not stall the run that is trying to report on it.
+   */
+  async describeActiveTab(): Promise<TabInfo | null> {
+    const entry = this.pages[this.activeIndex] ?? this.pages[0];
+    if (!entry) return null;
+    if (entry.targetId === null) {
+      // Join the lookup already in flight where there is one; only start a
+      // fresh one if it has already settled without an answer.
+      const pending = this.targetIdResolutions.get(entry.page);
+      entry.targetId = pending ? await pending : await resolvePageTargetId(entry.page);
+    }
+    let url = '';
+    try {
+      url = entry.page.url();
+    } catch {
+      // Page closed between the step finishing and this call.
+    }
+    const title = await briefly(
+      entry.page.title().catch(() => ''),
+      TAB_TITLE_TIMEOUT_MS,
+      '',
+    );
+    return {
+      label: entry.label,
+      targetId: entry.targetId,
+      url,
+      title,
+      unexpected: entry.unexpected,
+    };
+  }
+
+  /** Every tracked tab, for the report's run-level timeline. */
+  tabs(): readonly TrackedPage[] {
+    return this.pages;
   }
 
   /**
@@ -522,8 +719,10 @@ export class BrowserTracker {
     }
     const { session } = this.sessions[idx]!;
     try {
-      await session.context.close();
-      await session.browser.close();
+      // Same routing as `closeAll`, for the same reason — issues/006 names
+      // both. The initial session can be a CDP one, and `default` is a label
+      // an author can pass here.
+      await closeBrowser(session);
     } catch (err) {
       logger.debug(`Error closing browser "${label}" — ${(err as Error).message}`);
     }
@@ -542,8 +741,21 @@ export class BrowserTracker {
     for (let i = this.sessions.length - 1; i >= 0; i--) {
       const { label, session } = this.sessions[i]!;
       try {
-        await session.context.close();
-        await session.browser.close();
+        // Routed through `closeBrowser` rather than closing context+browser
+        // here, which is issues/006's fix. Its deferral rested on "CDP
+        // sessions never enter the tracker" — true of the CLI test-runner,
+        // which special-cases `initialSession.cdp` in its `finally`, but NOT
+        // of `SessionManager.closeSession`, which calls this unconditionally.
+        // That is the path TestBench, flick and MCP all use.
+        //
+        // Nothing was being destroyed: `context.close()` and `browser.close()`
+        // are both verified no-ops against a `connectOverCDP` connection
+        // (stories/mcp-cdp-browser.md §8). What WAS happening is that the tab
+        // the test opened never got closed, because only `closeBrowser` knows
+        // about `cdpTabOpenedByUs` — so every CDP run left a tab behind in the
+        // user's signed-in browser. Rare when CDP was a hand-written config
+        // line; constant once an agent can drive it.
+        await closeBrowser(session);
       } catch (err) {
         logger.debug(`Error closing browser "${label}" — ${(err as Error).message}`);
       }

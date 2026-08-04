@@ -107,8 +107,92 @@ export function renderReport(report: TestReport): string {
     modelSummary,
     stepsHtml: new Handlebars.SafeString(stepsHtml),
     diagnosisHtml: new Handlebars.SafeString(diagnosisHtml),
+    tabTimelineHtml: new Handlebars.SafeString(renderTabTimeline(report.steps)),
     scriptText,
   });
+}
+
+/**
+ * Which tabs this run touched, when each first appeared, and how.
+ *
+ * Rendered only when there is more than one tab, or when one was adopted
+ * unexpectedly — a single-tab run has nothing to explain, and a section that
+ * says "this run used one tab" on every report trains the reader to skip it.
+ *
+ * The point of the table is the target id column. Several tests can share one
+ * CDP browser and every tab any of them opens is visible to all of them, so
+ * "which `page:2`?" is a real question with a real answer, and the answer is
+ * not the label (stories/mcp-cdp-browser.md §11).
+ */
+function renderTabTimeline(steps: StepResult[]): string {
+  interface TabRow {
+    label: string;
+    targetId: string | null;
+    url: string;
+    title: string;
+    unexpected: boolean;
+    firstStep: number;
+  }
+  const byKey = new Map<string, TabRow>();
+  for (const step of steps) {
+    if (!step.tab) continue;
+    // Keyed on the target id where there is one: two labels can name one tab
+    // across a relabel, and two sessions' labels can collide.
+    const key = step.tab.targetId ?? `label:${step.tab.label}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      // Last-seen URL and title: a tab that navigated is more usefully
+      // described by where it ended up.
+      existing.url = step.tab.url || existing.url;
+      existing.title = step.tab.title || existing.title;
+      existing.unexpected = existing.unexpected || step.tab.unexpected;
+      continue;
+    }
+    byKey.set(key, {
+      label: step.tab.label,
+      targetId: step.tab.targetId,
+      url: step.tab.url,
+      title: step.tab.title,
+      unexpected: step.tab.unexpected,
+      firstStep: step.index,
+    });
+  }
+
+  const rows = [...byKey.values()];
+  if (rows.length === 0) return '';
+  if (rows.length === 1 && !rows[0]!.unexpected) return '';
+
+  const anyUnexpected = rows.some((r) => r.unexpected);
+  const body = rows
+    .map(
+      (r) => `      <tr class="${r.unexpected ? 'tab-row-unexpected' : ''}">
+        <td>${r.unexpected ? '⚠ ' : ''}${escapeHtml(r.label)}</td>
+        <td class="tab-id">${escapeHtml(r.targetId ?? '—')}</td>
+        <td>${r.firstStep === 0 ? 'attached at start' : `first used at step ${r.firstStep}`}${
+          r.unexpected ? ' — <strong>not opened by this test</strong>' : ''
+        }</td>
+        <td>${escapeHtml(r.title || '(untitled)')}</td>
+        <td class="tab-url">${escapeHtml(r.url)}</td>
+      </tr>`,
+    )
+    .join('\n');
+
+  return `<div class="tab-timeline">
+    <h2>Tabs</h2>
+    <p class="tab-timeline-note">${
+      anyUnexpected
+        ? 'A tab marked ⚠ was adopted mid-run with nothing in this test accounting for it — ' +
+          'most often another test running against the same browser. Tests sharing a browser ' +
+          'see each other’s tabs; this is advisory and changed no step’s result.'
+        : 'Tabs this run drove. The target id is what distinguishes tabs across tests sharing one browser.'
+    }</p>
+    <table>
+      <thead><tr><th>Tab</th><th>Target id</th><th>Appeared</th><th>Title</th><th>URL</th></tr></thead>
+      <tbody>
+${body}
+      </tbody>
+    </table>
+  </div>`;
 }
 
 /**
@@ -344,12 +428,30 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ? `<span class="badge badge-section" title="Step expanded from inline section ${escapeHtml(step.sourceSection)}">${escapeHtml(step.sourceSection)}</span>`
     : '';
 
+  // Which tab this step drove (§11). Shown on every step, not only multi-tab
+  // runs: the question "which tab was this?" is asked *after* something has
+  // gone wrong, and a badge that appears only sometimes is one the reader has
+  // to know to look for. The short target id is what distinguishes two
+  // sessions' identically-labelled tabs; the full id is in the tooltip.
+  const tabBadge = step.tab
+    ? `<span class="badge badge-tab${step.tab.unexpected ? ' badge-tab-unexpected' : ''}" title="${escapeHtml(
+        `${step.tab.title || '(untitled)'}\n${step.tab.url}\ntargetId: ${step.tab.targetId ?? '(unavailable)'}` +
+          (step.tab.unexpected
+            ? '\n\nThis tab was adopted mid-run with nothing in this test accounting for it — ' +
+              'most often another test running against the same browser. Advisory only.'
+            : ''),
+      )}">${step.tab.unexpected ? '⚠ ' : ''}${escapeHtml(step.tab.label)}${
+        step.tab.targetId ? ` · ${escapeHtml(step.tab.targetId.slice(0, 6))}` : ''
+      }</span>`
+    : '';
+
   return `<div class="step${childStepClass}">
   <div class="step-header">
     <span class="step-number">${escapeHtml(stepNumberLabel)}</span>
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
     ${sourceSectionBadge}
     ${sourceSkillBadge}
+    ${tabBadge}
     ${retryBadge}
     <span class="step-duration">${duration}</span>
     <span class="badge ${statusClass}">${statusIcon} ${statusLabel}</span>
