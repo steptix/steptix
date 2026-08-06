@@ -22,8 +22,18 @@
  * choosing a browser, so the check lives where that choice is made.
  */
 
-import { cdpPortNotOwned } from './errors.js';
-import { PreflightFailure, type ApiClient, type CdpBrowsers } from './types.js';
+import {
+  cdpPortNotOwned,
+  cdpProfileAmbiguous,
+  cdpProfileNotRunning,
+  cdpTargetAmbiguous,
+} from './errors.js';
+import {
+  PreflightFailure,
+  type ApiClient,
+  type CdpBrowsers,
+  type CdpTarget,
+} from './types.js';
 
 /** What §6 permits for one project, read from `aiui.config.json`. */
 export interface CdpPermissions {
@@ -81,6 +91,66 @@ export async function assertPortAttachable(
   }
 
   throw new PreflightFailure(cdpPortNotOwned(port, 'nowhere'));
+}
+
+/**
+ * Turn a tool-supplied `config.cdp` into a port.
+ *
+ * A profile name is the address we want an agent to use: `chrome/default` is
+ * the same browser and the same logins tomorrow, while a port is reassigned on
+ * every launch — which is why an agent that had *just* started a CDP browser
+ * still ran its next steps in a fresh one. It could not carry the number.
+ *
+ * Resolution happens here rather than on the wire so `session-manager.ts` keeps
+ * receiving `{port, tab?}` unchanged. It also settles the §6 gate for free: a
+ * port read out of this project's own `running` list is by construction one
+ * this project launched, so `assertPortAttachable` has nothing left to check
+ * and is skipped. That is a narrowing, not a loophole — the agent named a
+ * profile, and only our own registry could turn it into a port.
+ *
+ * Returns the port, and whether the caller still owes a gate check.
+ */
+export async function resolveCdpTarget(
+  client: ApiClient,
+  projectRoot: string,
+  target: CdpTarget,
+  signal?: AbortSignal,
+): Promise<{ port: number; gateOwed: boolean }> {
+  const hasProfile = target.profile !== undefined && target.profile.trim() !== '';
+  const hasPort = target.port !== undefined;
+
+  // Both is refused rather than resolved-and-compared. Two addresses that
+  // disagree have no correct winner, and silently picking one is the shape of
+  // the bug this story exists to remove.
+  if (hasProfile === hasPort) throw new PreflightFailure(cdpTargetAmbiguous(hasProfile && hasPort));
+
+  if (!hasProfile) return { port: target.port!, gateOwed: true };
+
+  const profile = target.profile!.trim();
+  const engine = target.engine?.trim() ?? null;
+  const browsers = await client.getCdpBrowsers({ projectRoot, includeForeign: false }, signal);
+
+  const matches = browsers.running.filter(
+    (b) => b.profile === profile && (engine === null || b.engine === engine),
+  );
+
+  if (matches.length === 1) return { port: matches[0]!.port, gateOwed: false };
+
+  // Chrome and Edge can each run a profile called "default". Naming both beats
+  // guessing: the wrong one is a browser signed in as somebody else.
+  if (matches.length > 1) {
+    throw new PreflightFailure(
+      cdpProfileAmbiguous(profile, [...new Set(matches.map((b) => b.engine))]),
+    );
+  }
+
+  throw new PreflightFailure(
+    cdpProfileNotRunning(
+      profile,
+      engine,
+      browsers.running.map((b) => ({ engine: b.engine, profile: b.profile })),
+    ),
+  );
 }
 
 /**

@@ -301,6 +301,53 @@ export function badCdpEngine(engine: string): McpToolError {
   );
 }
 
+/** `config.cdp` gave neither address, or both.
+ *
+ *  Both is refused rather than resolved-and-compared: a port and a profile that
+ *  disagree have no correct winner, and picking one in silence is precisely the
+ *  failure this story exists to remove. */
+export function cdpTargetAmbiguous(both: boolean): McpToolError {
+  return preflightError(
+    both
+      ? 'config.cdp has both `profile` and `port`. They can name different ' +
+        'browsers, so there is no safe way to choose between them.\n' +
+        'Send one. Prefer `profile` — a port is reassigned every launch.'
+      : 'config.cdp needs an address: give `profile` (preferred) or `port`.\n' +
+        'Call list_cdp_browsers to see what this project has running.',
+  );
+}
+
+/** `config.cdp.profile` names a profile with no browser running.
+ *
+ *  Deliberately NOT a launch. Starting a browser is a visible act that belongs
+ *  to `start_cdp_browser`, so this hands the agent the exact call instead —
+ *  including the reassurance about the login, since "not running" reads as
+ *  "signed out" to a model and it is not. */
+export function cdpProfileNotRunning(
+  profile: string,
+  engine: string | null,
+  known: { engine: string; profile: string }[],
+): McpToolError {
+  const name = engine === null ? `"${profile}"` : `${engine} "${profile}"`;
+  return preflightError(
+    `No CDP browser is running for profile ${name}, so there is nothing to attach to.\n\n` +
+      `Call start_cdp_browser with profile "${profile}"${engine === null ? '' : ` and engine "${engine}"`}. ` +
+      'The profile directory still holds its logins — a closed browser is not a lost login.' +
+      (known.length > 0
+        ? `\n\nRunning now: ${known.map((b) => `${b.engine} "${b.profile}"`).join(', ')}.`
+        : ''),
+  );
+}
+
+/** Chrome and Edge are both running the same profile name. */
+export function cdpProfileAmbiguous(profile: string, engines: string[]): McpToolError {
+  return preflightError(
+    `Profile "${profile}" is running under more than one engine ` +
+      `(${engines.join(' and ')}), so it does not identify a browser on its own.\n` +
+      `Add an engine: config.cdp: { profile: "${profile}", engine: "${engines[0]}" }.`,
+  );
+}
+
 export function listSessionsTimedOut(timeoutMs: number): McpToolError {
   return preflightError(
     `Listing sessions took longer than ${timeoutMs}ms. The server reads each ` +

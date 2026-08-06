@@ -90,6 +90,25 @@ export interface AssembledRun {
    * trusted, which is the failure the whole gate exists to prevent.
    */
   cdpSource: 'file' | 'tool' | null;
+  /**
+   * The tool-supplied `config.cdp` exactly as it arrived, unresolved.
+   *
+   * Only set when `cdpSource === 'tool'`. It may address a browser by
+   * `profile` rather than `port`, and resolving that needs a live registry
+   * round-trip `assemble.ts` has no client for — so the raw target travels
+   * here and `tools.ts` turns it into `request.config.cdp`.
+   */
+  cdpTarget: CdpTarget | null;
+}
+
+/** A tool-supplied `config.cdp` before its address has been resolved. Lives
+ *  here rather than in `cdp.ts` so `cdp.ts` can keep value-importing this
+ *  module without a cycle. */
+export interface CdpTarget {
+  profile?: string | undefined;
+  engine?: string | undefined;
+  port?: number | undefined;
+  tab?: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +146,9 @@ export interface SessionSummary {
   currentUrl?: string;
   pageTitle?: string;
   totalStepsExecuted?: number;
+  /** Which CDP browser this session drives. Optional because a server older
+   *  than this field simply omits it. */
+  cdp?: { port: number; profile: string | null } | null;
 }
 
 // ---------------------------------------------------------------------------
