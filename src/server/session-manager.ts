@@ -52,7 +52,7 @@ export interface StepRequest {
   /** `cdp` is passed through to the runner verbatim — same loose pass-through
    *  pattern as `baseUrl`/`timeout` — so the server stays schema-agnostic
    *  about CDP attach. The runner validates the shape on receive. */
-  config?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } };
+  config?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string; profile?: string } };
   steps: string[];
   parameters?: Record<string, string>;
   /**
@@ -350,6 +350,11 @@ export interface SessionListItem {
   currentUrl: string;
   pageTitle: string;
   totalStepsExecuted: number;
+  /** The CDP browser this session is driving, or null for an ordinary
+   *  disposable one. `profile` is the label the caller sent — descriptive
+   *  only, since `port` is what selected the browser — and is null when the
+   *  caller addressed it by port and named no profile. */
+  cdp: { port: number; profile: string | null } | null;
 }
 
 /** Run token totals — a frozen snapshot of the per-run tracker getters. */
@@ -383,6 +388,15 @@ const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
 
 /** Pattern for a single [output: variable_name] prefix */
 const OUTPUT_PREFIX_PATTERN = /\[output:\s*(\w+)\]/gi;
+
+/** `SessionListItem.cdp` for one session. Reads the retained `sessionConfig`
+ *  rather than probing anything — the binding was decided when the session was
+ *  created and cannot change afterwards. */
+function cdpBinding(session: ManagedSession): SessionListItem['cdp'] {
+  const cdp = session.sessionConfig.cdp;
+  if (cdp === undefined) return null;
+  return { port: cdp.port, profile: cdp.profile ?? null };
+}
 
 interface ManagedSession {
   id: string;
@@ -427,7 +441,15 @@ interface ManagedSession {
     passed: boolean;
   };
   status: 'active' | 'executing' | 'closed';
-  sessionConfig: { baseUrl?: string; timeout?: string };
+  /** `cdp` is retained, not just consumed at launch: without it `list_sessions`
+   *  cannot say which session is driving a persistent signed-in browser, and
+   *  the answer is unrecoverable afterwards. It was always assigned here — the
+   *  old type simply hid it. */
+  sessionConfig: {
+    baseUrl?: string;
+    timeout?: string;
+    cdp?: { port: number; tab?: string; profile?: string };
+  };
   configSet: boolean;
   outputs: Record<string, string>;
   /**
@@ -1202,6 +1224,7 @@ export class SessionManager {
         currentUrl,
         pageTitle,
         totalStepsExecuted: session.totalStepsExecuted,
+        cdp: cdpBinding(session),
       });
     }
 
@@ -1234,6 +1257,7 @@ export class SessionManager {
         currentUrl,
         pageTitle,
         totalStepsExecuted: session.totalStepsExecuted,
+        cdp: cdpBinding(session),
       });
     }
 
@@ -1306,7 +1330,7 @@ export class SessionManager {
 
   private async createSession(
     sessionId: string,
-    sessionConfig: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } } | undefined,
+    sessionConfig: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string; profile?: string } } | undefined,
     envOverrides: Record<string, string> | undefined,
     /** Resolved per-project record mode (from the test's `browser.video`). */
     videoMode: VideoMode,

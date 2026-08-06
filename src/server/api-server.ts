@@ -212,7 +212,9 @@ export function createApiServer(
         request.config = body.config as {
           baseUrl?: string;
           timeout?: string;
-          cdp?: { port: number; tab?: string };
+          // `profile` is a descriptive label only — `port` selects the browser.
+          // Retained so `GET /sessions` can say which browser a session drives.
+          cdp?: { port: number; tab?: string; profile?: string };
         };
       }
       if (body.parameters !== undefined) {

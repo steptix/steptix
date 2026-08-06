@@ -192,16 +192,25 @@ export const ensureServerReady: EnsureServerReady = (project, signal) =>
 /**
  * Refuse to talk to whatever holds the port unless it identifies as ours.
  *
- * For the tools that do not run anything — `list_sessions`, `close_session`,
- * `get_last_run`. They still send `SERVER_API_KEY`, and without this they send
- * it to any process that happens to hold the port: an agent calling
- * `list_sessions` as a harmless "what's running?" probe would hand the
- * project's key to a squatter. That is the same hazard §5 arm 2 exists for, and
- * the same one `aiui stop` guards before sending merely the key.
+ * For the tools that only report on what is already there — `list_sessions`,
+ * `close_session`, `get_last_run`, `list_cdp_browsers`. They still send
+ * `SERVER_API_KEY`, and without this they send it to any process that happens
+ * to hold the port: an agent calling `list_sessions` as a harmless "what's
+ * running?" probe would hand the project's key to a squatter. That is the same
+ * hazard §5 arm 2 exists for, and the same one `aiui stop` guards before
+ * sending merely the key.
  *
- * Deliberately NOT `ensureServerReady`: listing sessions must never start a
- * server. A `down` server is allowed through so the caller's own request fails
- * with an ordinary connect error rather than a confusing refusal.
+ * Deliberately NOT `ensureServerReady`: asking what is running must never start
+ * a server. A `down` server is allowed through so the caller's own request
+ * fails with an ordinary connect error rather than a confusing refusal.
+ *
+ * The test is what a tool is FOR, not whether it happens to talk to the server.
+ * One whose purpose is to make something exist belongs on `ensureServerReady`:
+ * `start_cdp_browser` was routed here by the helper it shares with the probes
+ * and inherited this rule, so against a stopped server it died on a bare
+ * ECONNREFUSED while `run_test_file` from the same agent would have started
+ * one. Keep this list in step with `withProject`'s `autoStart` in
+ * [tools.ts](./tools.ts).
  */
 export async function assertServerRecognized(
   project: ProjectContext,

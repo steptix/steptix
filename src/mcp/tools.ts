@@ -20,7 +20,12 @@ import {
   unauthorized,
   type McpToolError,
 } from './errors.js';
-import { assertPortAttachable, maySeeForeignTabs, summarizeBrowsers } from './cdp.js';
+import {
+  assertPortAttachable,
+  maySeeForeignTabs,
+  resolveCdpTarget,
+  summarizeBrowsers,
+} from './cdp.js';
 import { allowedRoots, canonicalize, isInsideRoot, resolveTestsGlob } from './project.js';
 import { discoverTestFiles } from '../parser/markdown.js';
 import { foldRun, type FoldedRun } from './run-fold.js';
@@ -235,6 +240,26 @@ async function pollLastRun(
   }
 }
 
+/**
+ * The project's running CDP browsers, or `[]` if we cannot find out.
+ *
+ * Deliberately swallows everything. This exists to decorate a run that has
+ * already finished, so a registry that is slow, broken or gone must cost the
+ * caller a missing warning and never a changed `status`.
+ */
+async function runningCdpBrowsers(
+  client: ApiClient,
+  projectRoot: string,
+  signal?: AbortSignal,
+): Promise<{ engine: string; profile: string }[]> {
+  try {
+    const browsers = await client.getCdpBrowsers({ projectRoot, includeForeign: false }, signal);
+    return browsers.running.map((b) => ({ engine: b.engine, profile: b.profile }));
+  } catch {
+    return [];
+  }
+}
+
 interface RunContext {
   deps: McpDeps;
   assembled: AssembledRun;
@@ -261,14 +286,39 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
   // running now, and attaching to a port something else has since taken is the
   // failure this prevents. Before `streamSteps`, so a refusal is a pre-flight
   // error and no run happens.
-  if (assembled.cdpSource === 'tool' && request.config?.cdp) {
-    await assertPortAttachable(
+  if (assembled.cdpSource === 'tool' && assembled.cdpTarget !== null) {
+    const target = assembled.cdpTarget;
+    const { port, gateOwed } = await resolveCdpTarget(
       client,
       project.projectRoot,
-      request.config.cdp.port,
-      project.cdpPermissions,
+      target,
       ctx.signal,
     );
+    // A profile was resolved out of this project's own `running` list, so the
+    // port is owned by construction and there is nothing for the gate to check.
+    // A caller-supplied port has cleared no such thing and still owes one.
+    if (gateOwed) {
+      await assertPortAttachable(
+        client,
+        project.projectRoot,
+        port,
+        project.cdpPermissions,
+        ctx.signal,
+      );
+    }
+    const tab = target.tab?.trim();
+    const profile = target.profile?.trim();
+    request.config = {
+      ...request.config,
+      cdp: {
+        port,
+        ...(tab !== undefined && tab !== '' ? { tab } : {}),
+        // Descriptive only — `port` above is what selects the browser. Sent so
+        // `list_sessions` can name what a session is driving instead of
+        // reporting a bare number nobody can map back.
+        ...(profile !== undefined && profile !== '' ? { profile } : {}),
+      },
+    };
   }
 
   const outcome = await withSession(project.serverUrl, sessionId, async ({ queuedForMs, isFirstCall, markConfigured }) => {
@@ -346,6 +396,44 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
     };
   });
 
+  // W1 — the caller named a CDP browser and did not get it.
+  //
+  // `configApplied: false` already says so, but only to something that reads
+  // structured output and knows what that field means. Measured, the run came
+  // back `status: "passed"`, `warnings: []`, and executed in a fresh
+  // signed-out browser. For a feature whose whole point is "use my signed-in
+  // browser", a wrong-browser run that PASSES is the worst available outcome.
+  if (request.config?.cdp !== undefined && !outcome.configApplied) {
+    outcome.warnings = [
+      ...outcome.warnings,
+      `config.cdp was ignored: session "${sessionId}" already existed, and a ` +
+        "session's browser is fixed when the session is created. These steps ran " +
+        "in that session's existing browser, NOT the CDP one. To use the CDP " +
+        `browser: close_session "${sessionId}", then run again.`,
+    ];
+  }
+
+  // W2 — a fresh, signed-out, disposable browser was launched while a
+  // persistent one sat idle.
+  //
+  // Only on session creation: that is the only moment `config` would have been
+  // honoured, so it is the only moment the advice is actionable. Repeating it
+  // on every later call would be noise the agent cannot act on, and a warning
+  // that cries wolf is one nobody reads.
+  if (outcome.sessionCreated && request.config?.cdp === undefined) {
+    const idle = await runningCdpBrowsers(client, project.projectRoot, ctx.signal);
+    if (idle.length > 0) {
+      const named = idle.map((b) => `${b.engine} "${b.profile}"`).join(', ');
+      outcome.warnings = [
+        ...outcome.warnings,
+        `This run launched a fresh, signed-out browser, but this project has ` +
+          `${idle.length} CDP browser(s) running: ${named}. If you meant to use one, ` +
+          `pass config.cdp: { profile: "${idle[0]!.profile}" } — on a NEW session, ` +
+          'since config is only read when a session is created.',
+      ];
+    }
+  }
+
   // The report poll happens AFTER the session lock is released. It reads a
   // finished run's metadata and touches no session state, so holding the lock
   // through up to 12 s of backoff would just make the next caller wait — and
@@ -367,27 +455,46 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
 }
 
 /**
- * Resolve a project, confirm the server is ours, and hand the body a client.
+ * Resolve a project, make the server usable, and hand the body a client.
  *
- * Exists so the four non-run tools report failures as well as the run tools
- * do: with `project` scoped inside each handler's own `try`, a 401 was caught
+ * Exists so the non-run tools report failures as well as the run tools do:
+ * with `project` scoped inside each handler's own `try`, a 401 was caught
  * with no `envFilesConsulted` and no base URL — rendering §7's row as
  * " rejected our SERVER_API_KEY. Ours came from:  (or the environment)",
  * which names neither of the two things it exists to name.
+ *
+ * `autoStart` picks which guarantee the caller needs, and the split is by what
+ * the tool is *for*, not by whether it happens to talk to the server:
+ *
+ *  - **off (the default)** — `assertServerRecognized`. For tools that report
+ *    on what is already there. Asking "what is running?" must not cause a
+ *    server to exist, and a `down` server is deliberately let through so the
+ *    caller's own request fails with an ordinary connect error.
+ *  - **on** — `ensureServerReady`, the same auto-start the run tools get. For
+ *    tools whose whole purpose is to make something exist. `start_cdp_browser`
+ *    reached this helper with the default and inherited a rule written for
+ *    read-only probes: against a stopped server it died on a bare
+ *    ECONNREFUSED, while `run_test_file` from the same agent a second earlier
+ *    would have started the server for itself.
+ *
+ * Turning it on trades nothing away: `ensureServerReady`'s `unrecognized` arm
+ * throws the same refusal, so the key still never reaches a squatter.
  */
 async function withProject(
   deps: McpDeps,
   projectRoot: string | undefined,
   body: (client: ApiClient, project: Awaited<ReturnType<McpDeps['resolveProject']>>) => Promise<ToolResult>,
+  opts: { autoStart?: boolean; signal?: AbortSignal | undefined } = {},
 ): Promise<ToolResult> {
   let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
   try {
     project = await deps.resolveProject({ projectRoot });
-    // Before the key goes anywhere: these tools never reach
-    // `ensureServerReady`'s identity check, so without this an agent calling
+    // Before the key goes anywhere: without one of these an agent calling
     // `list_sessions` as a harmless "what's running?" probe would hand the
     // project's key to whatever holds the port.
-    await deps.assertServerRecognized(project);
+    await (opts.autoStart === true
+      ? deps.ensureServerReady(project, opts.signal)
+      : deps.assertServerRecognized(project, opts.signal));
     const client = deps.createApiClient({
       baseUrl: project.serverUrl,
       apiKey: project.apiKey,
@@ -460,6 +567,24 @@ Step syntax: plain English, one action per step. Also supported:
   \${env.VAR} / \${data.key} substituted from the selected environment
   {{param}}                 substituted from ## Parameters`.trim();
 
+/**
+ * The CDP pointer, on the run tools themselves.
+ *
+ * It already exists on `list_cdp_browsers` and `start_cdp_browser` — and that
+ * turned out to be the wrong place. Measured: an agent that had just started a
+ * CDP browser was asked to "navigate to facebook.com" one turn later and ran it
+ * in a fresh, signed-out, disposable browser, because by then the tool it was
+ * calling said nothing about browsers at all. A tool description is the only
+ * text guaranteed to be in front of the model at the moment of the call.
+ */
+const CDP_NOTE = `
+Browser: steps run in a fresh, signed-out, disposable browser UNLESS you say
+otherwise. This project may also have a persistent CDP browser running that
+holds real logins — to use it, pass config.cdp: {profile: "<name>"} (call
+list_cdp_browsers if unsure which exist). Config is read only when a session is
+CREATED, so pass it on the first call for a session; passing it later is
+ignored.`.trim();
+
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // -- run_steps ------------------------------------------------------------
   server.registerTool(
@@ -470,6 +595,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'Run natural-language steps in a real browser session and return per-step results.\n' +
         'Reuses one browser per project unless you pass a session_id, so successive calls ' +
         'share page state and captured variables. Calls on one session run one at a time.\n\n' +
+        CDP_NOTE +
+        '\n\n' +
         STEP_SYNTAX,
       inputSchema: schemas.runStepsInput,
       outputSchema: schemas.runResultOutput,
@@ -519,6 +646,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'Run one .md test file end to end and return per-step results, the report path ' +
         'and token totals. Frontmatter environments, data sources and inline sections are ' +
         'all honoured.\n\n' +
+        CDP_NOTE +
+        '\n\n' +
         STEP_SYNTAX,
       inputSchema: schemas.runTestFileInput,
       outputSchema: schemas.runResultOutput,
@@ -630,6 +759,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           currentUrl: s.currentUrl ?? null,
           pageTitle: s.pageTitle ?? null,
           totalStepsExecuted: s.totalStepsExecuted ?? null,
+          // `?? null` rather than passed through: an older server omits the
+          // field entirely, and a MISSING key fails `structuredContent`
+          // validation where a null one is fine.
+          cdp: s.cdp ?? null,
         }));
         return validated(
           schemas.listSessionsOutput,
@@ -771,28 +904,35 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       inputSchema: schemas.startCdpBrowserInput,
       outputSchema: schemas.startCdpBrowserOutput,
     },
-    async (args) =>
-      withProject(deps, args.project_root, async (client, project) => {
-        // Refused here rather than at the server so the agent gets §7's prose
-        // instead of an HTTP 400 — same rule, better message, one fewer
-        // round-trip. The server validates independently; this is not the
-        // only check.
-        if (args.profile !== undefined && !/^[A-Za-z0-9._-]+$/.test(args.profile)) {
-          return errorResult(badCdpProfileName(args.profile));
-        }
-        const started = await client.startCdpBrowser({
-          projectRoot: project.projectRoot,
-          engine: args.engine,
-          ...(args.profile !== undefined ? { profile: args.profile } : {}),
-          ...(args.reset === true ? { reset: true } : {}),
-        });
-        return validated(
-          schemas.startCdpBrowserOutput,
-          started as unknown as Record<string, unknown>,
-          `${started.engine} "${started.profile}" on port ${started.port} — ${started.outcome}` +
-            (started.warnings.length > 0 ? `\n${started.warnings.join('\n')}` : ''),
-        );
-      }),
+    async (args, extra) =>
+      withProject(
+        deps,
+        args.project_root,
+        async (client, project) => {
+          // Refused here rather than at the server so the agent gets §7's prose
+          // instead of an HTTP 400 — same rule, better message, one fewer
+          // round-trip. The server validates independently; this is not the
+          // only check.
+          if (args.profile !== undefined && !/^[A-Za-z0-9._-]+$/.test(args.profile)) {
+            return errorResult(badCdpProfileName(args.profile));
+          }
+          const started = await client.startCdpBrowser({
+            projectRoot: project.projectRoot,
+            engine: args.engine,
+            ...(args.profile !== undefined ? { profile: args.profile } : {}),
+            ...(args.reset === true ? { reset: true } : {}),
+          });
+          return validated(
+            schemas.startCdpBrowserOutput,
+            started as unknown as Record<string, unknown>,
+            `${started.engine} "${started.profile}" on port ${started.port} — ${started.outcome}` +
+              (started.warnings.length > 0 ? `\n${started.warnings.join('\n')}` : ''),
+          );
+        },
+        // The one tool here whose job is to make something exist, so it gets
+        // the run tools' auto-start rather than the probes' identity check.
+        { autoStart: true, signal: extra.signal },
+      ),
   );
 
   // -- server_status --------------------------------------------------------

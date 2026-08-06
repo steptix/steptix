@@ -37,7 +37,13 @@ import {
   confinePath,
   fail,
 } from './project.js';
-import type { AssembledRun, McpStepRequest, ProjectContext, ResolveProject } from './types.js';
+import type {
+  AssembledRun,
+  CdpTarget,
+  McpStepRequest,
+  ProjectContext,
+  ResolveProject,
+} from './types.js';
 
 /**
  * `run_steps` has no file, but the server derives the project root, the
@@ -101,7 +107,10 @@ export interface AssembleArgs {
     | {
         baseUrl?: string | undefined;
         timeout?: string | undefined;
-        cdp?: { port: number; tab?: string | undefined } | undefined;
+        // Unresolved: this may address a browser by `profile` instead of
+        // `port`, and only `tools.ts` has the client to turn one into the
+        // other.
+        cdp?: CdpTarget | undefined;
       }
     | undefined;
 }
@@ -266,7 +275,14 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     ...projectFields(project, absPath, cacheEnabled(parsed, project)),
   };
 
-  return { request, project, sentSteps: parsed.steps, warnings, cdpSource };
+  return {
+    request,
+    project,
+    sentSteps: parsed.steps,
+    warnings,
+    cdpSource,
+    cdpTarget: cdpSource === 'tool' ? (toolCdp ?? null) : null,
+  };
 }
 
 /** §3 steps 4–7 and 12 for `run_steps`; the file-only steps are skipped and
@@ -325,7 +341,14 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
     ...projectFields(project, testFilePath, project.cacheEnabled),
   };
 
-  return { request, project, sentSteps: args.steps, warnings, cdpSource };
+  return {
+    request,
+    project,
+    sentSteps: args.steps,
+    warnings,
+    cdpSource,
+    cdpTarget: cdpSource === 'tool' ? (toolCdp ?? null) : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +496,7 @@ function projectConfig(
   fileOnly: Record<string, string | undefined>,
   /** A `cdp` supplied as a TOOL ARGUMENT. Deliberately a separate parameter,
    *  not a key in `merged` — see below. */
-  toolCdp: { port: number; tab?: string | undefined } | undefined,
+  toolCdp: CdpTarget | undefined,
   project: ProjectContext,
   filePath: string,
   warnings: string[],
@@ -520,10 +543,13 @@ function projectConfig(
     // The file wins when both are present. A test file that names its own
     // browser was written by a human who knew which one they meant, and an
     // agent's argument should not silently redirect it somewhere else.
-    const port = toolCdp.port;
-    if (!Number.isInteger(port) || port <= 0 || port > 65535) fail(badCdpPort(String(port)));
-    const tab = toolCdp.tab?.trim();
-    out.cdp = tab !== undefined && tab !== '' ? { port, tab } : { port };
+    //
+    // Deliberately NOT resolved to a port here. A tool-supplied target may name
+    // a *profile*, and turning that into a port takes a live round-trip to the
+    // registry that this module has no client for. So the raw target rides out
+    // on `cdpTarget` and `tools.ts` resolves it, gates it, and writes
+    // `config.cdp` itself — one path for both address forms, so a port cannot
+    // reach the browser by a different route than a profile does.
     cdpSource = 'tool';
   }
 

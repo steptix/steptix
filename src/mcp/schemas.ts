@@ -100,13 +100,32 @@ const parameters = z
 
 const cdpTarget = z
   .object({
+    profile: z
+      .string()
+      .optional()
+      .describe(
+        'Profile name of a CDP browser for this project, e.g. "default". ' +
+          '**Prefer this over `port`** — a profile is the same browser and the ' +
+          'same logins tomorrow, while a port is reassigned on every launch. ' +
+          'The browser must already be running; start it with ' +
+          'start_cdp_browser first.',
+      ),
+    engine: z
+      .enum(['chrome', 'edge'])
+      .optional()
+      .describe(
+        'Disambiguates `profile` when Chrome and Edge are both running the ' +
+          'same profile name. Only meaningful alongside `profile`.',
+      ),
     port: z
       .number()
       .int()
+      .optional()
       .describe(
         'Port of a CDP browser from list_cdp_browsers `running`, or from ' +
           'start_cdp_browser. Ports are assigned by the browser and change on ' +
-          'every launch, so read one rather than assuming 9222.',
+          'every launch, so read one rather than assuming 9222. Pass this OR ' +
+          '`profile`, not both.',
       ),
     tab: z
       .string()
@@ -122,9 +141,9 @@ const cdpTarget = z
   .optional()
   .describe(
     'Attach to an already-running CDP browser instead of launching a fresh ' +
-      'one. Only browsers this project started are permitted; anything else ' +
-      'is refused unless a human sets mcp.cdp.allowUnowned in ' +
-      'aiui.config.json.',
+      'one. Give exactly one of `profile` (preferred) or `port`. Only ' +
+      'browsers this project started are permitted; anything else is refused ' +
+      'unless a human sets mcp.cdp.allowUnowned in aiui.config.json.',
   );
 
 const toolConfig = z
@@ -361,6 +380,13 @@ export const listSessionsOutput = toolSchema({
       currentUrl: z.string().nullable(),
       pageTitle: z.string().nullable(),
       totalStepsExecuted: z.number().nullable(),
+      // Which CDP browser this session is driving, or null for an ordinary
+      // disposable one. `profile` is resolved by the server from its registry
+      // at list time — it never travelled on the wire — so it is null when
+      // that browser has since gone.
+      cdp: z
+        .object({ port: z.number(), profile: z.string().nullable() })
+        .nullable(),
     }),
   ),
 });
