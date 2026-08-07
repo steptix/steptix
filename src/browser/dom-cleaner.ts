@@ -66,6 +66,10 @@ const FRAME_EVALUATE_TIMEOUT_MS = 10_000;
 /** Timeout for resolving an iframe element handle. */
 const IFRAME_HANDLE_TIMEOUT_MS = 5_000;
 
+/** Thrown by evaluateWithTimeout when the race is lost. Typed so callers can
+ *  tell "the page's JS thread is wedged" from "the evaluate itself threw". */
+class EvaluateTimeout extends Error {}
+
 /**
  * Run target.evaluate with a hard timeout. Playwright's evaluate has no built-in
  * timeout — if the page's JS thread is stuck (long task, infinite loop, blocking
@@ -78,12 +82,227 @@ async function evaluateWithTimeout<T>(target: Page | Frame, script: string, ms: 
     return await Promise.race([
       target.evaluate(script) as Promise<T>,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`evaluate timed out after ${ms}ms`)), ms);
+        timer = setTimeout(() => reject(new EvaluateTimeout(`evaluate timed out after ${ms}ms`)), ms);
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Capture failures
+//
+// The runner's capture paths report failure *in band*, as a string that takes
+// the place of the content (`<error>DOM capture timed out…`, `[expand] No
+// element found…`). That is right for the runner: a step that cannot read the
+// DOM should degrade and let the AI try something else, not abort the run.
+//
+// It is wrong for a caller that hands the result to someone else, because
+// "the page has no text" and "we could not read the page" become the same
+// answer — and a reader who cannot tell them apart will confidently report the
+// first. stories/page-content.md turns those strings back into throws at the
+// boundary, without changing what the runner sees.
+// ---------------------------------------------------------------------------
+
+/** Why a capture produced no content. */
+export type PageCaptureFailureKind =
+  /** The page's JS thread did not answer within the evaluate budget. */
+  | 'timeout'
+  /** A selector was given and matched nothing. */
+  | 'selector-miss'
+  /** A selector was given and is not valid CSS — the caller's mistake. */
+  | 'bad-selector'
+  /** The element matched but is not being rendered, so it has no visible text
+   *  to read. Distinct from an empty element, which reads as ''. */
+  | 'not-rendered'
+  /** The element matched but is not an HTML element, so it has no text to read
+   *  (SVG and friends have textContent but no innerText). The caller picked it,
+   *  so it is a 400 — not a server fault. */
+  | 'unreadable-element'
+  /** The page navigated out from under the evaluate — retryable. */
+  | 'navigated'
+  /** Anything else the evaluate threw. */
+  | 'evaluate-failed';
+
+/** A capture that produced no content *because it failed*. */
+export class PageCaptureError extends Error {
+  constructor(
+    readonly kind: PageCaptureFailureKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'PageCaptureError';
+  }
+}
+
+/** Playwright's wording when an evaluate loses its execution context to a
+ *  navigation. Matched on the stable fragment rather than the whole sentence,
+ *  which has changed across versions. */
+const NAVIGATION_RACE_FRAGMENT = 'execution context was destroyed';
+
+/**
+ * Classify a thrown evaluate failure.
+ *
+ * Exported because the paths that swallow their own errors (`expandDomSubtree`)
+ * still let a Playwright-level failure through — the browser script's try/catch
+ * cannot catch a context that was destroyed underneath it — and the caller
+ * needs that classified the same way rather than reinventing the match.
+ */
+export function toPageCaptureError(
+  err: unknown,
+  what: string,
+  selectorInvolved = false,
+): PageCaptureError {
+  if (err instanceof EvaluateTimeout) {
+    return new PageCaptureError('timeout', `${what} timed out: ${err.message}`);
+  }
+  const text = err instanceof Error ? err.message : String(err);
+  return classifyFailureText(text, what, selectorInvolved);
+}
+
+/** Fragments that identify an invalid CSS selector across the two paths that
+ *  can raise one — `querySelector` throwing a DOMException in the page, and
+ *  the same surfacing through Playwright. */
+function isBadSelectorText(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes('is not a valid selector') || lower.includes('syntaxerror');
+}
+
+/**
+ * Shared classification for a failure we only have the *text* of — whether it
+ * arrived as a throw or embedded in an in-band marker.
+ *
+ * `selectorInvolved` gates the bad-selector branch, which matches on a
+ * substring (`syntaxerror`) loose enough to appear in unrelated error text. A
+ * whole-page capture that failed with a `SyntaxError` from the page's own code
+ * was otherwise reported as "not a valid CSS selector" on a request that
+ * supplied no selector — telling the agent to fix an argument it never sent.
+ */
+function classifyFailureText(
+  text: string,
+  what: string,
+  selectorInvolved: boolean,
+): PageCaptureError {
+  // Navigation first: it is the only retryable kind, and its text can also
+  // carry words the later branches match on.
+  if (text.toLowerCase().includes(NAVIGATION_RACE_FRAGMENT)) {
+    return new PageCaptureError(
+      'navigated',
+      `${what} failed because the page navigated while it was being read. Retry once the page has settled.`,
+    );
+  }
+  if (selectorInvolved && isBadSelectorText(text)) {
+    return new PageCaptureError('bad-selector', `${what} failed: not a valid CSS selector (${text})`);
+  }
+  // Only the evaluate-budget message means a timeout. Everything else that the
+  // capture paths absorb is an ordinary failure, and calling it a timeout tells
+  // the caller to wait when it should narrow or give up.
+  if (text.includes('evaluate timed out after')) {
+    return new PageCaptureError('timeout', `${what} timed out: ${text}`);
+  }
+  return new PageCaptureError('evaluate-failed', `${what} failed: ${text}`);
+}
+
+/** Marker that captureDomSnapshot substitutes for content when the *evaluate*
+ *  fails (Node side). */
+const DOM_CAPTURE_ERROR_MARKER = '<error>DOM capture';
+/**
+ * Envelope shared by every in-band DOM failure, including the one raised
+ * *inside* the browser — `capture-dom.js` catches its own walk and returns
+ * `<error>Failed to capture DOM: …</error>`, which is a different prefix from
+ * the Node-side marker above.
+ *
+ * Matching the envelope rather than each prefix is what keeps a third one from
+ * silently reading as page content: a snapshot legitimately begins `<body`,
+ * never `<error>`.
+ */
+const DOM_ERROR_ENVELOPE = '<error>';
+/** Markers expandDomSubtree substitutes for content. */
+const EXPAND_MISS_MARKER = '[expand] No element found for selector: ';
+const EXPAND_ERROR_MARKER = '[expand] Error: ';
+const EXPAND_NOT_RENDERED_MARKER = '[expand] Not rendered: ';
+/** Appended by captureDomSnapshot when it clips at domSnapshotCharLimit. The
+ *  caller has to be able to tell a clipped snapshot from a complete one, or it
+ *  will report a partial page as the whole page. */
+export const DOM_SNAPSHOT_TRUNCATION_MARKER =
+  '\n<!-- DOM snapshot truncated — page content exceeds size limit -->';
+
+/**
+ * Recognise an in-band failure string from `captureDomSnapshot` or
+ * `expandDomSubtree`, so a caller that must not pass it off as content can
+ * throw instead. Returns null for ordinary content.
+ *
+ * A predicate rather than a behaviour change in those two functions: the
+ * runner depends on their current degrade-to-a-string contract, and this story
+ * has no business altering how a step recovers from an unreadable DOM.
+ */
+export function domCaptureFailure(
+  content: string,
+  /**
+   * Which capture produced this string. Load-bearing, not bookkeeping: the two
+   * sources have different in-band vocabularies, and checking for one in the
+   * other's output misreads real pages.
+   *
+   * `snapshot` output always begins `<body` (capture-dom.js), so a leading
+   * `<error>` can only be the failure envelope. `expand` output begins with
+   * whatever tag was asked for — so a page containing an `<error>` element
+   * (measured: `<error class="msg">…</error>`) hit the envelope check and was
+   * reported as a capture failure, and if its text happened to contain
+   * "SyntaxError" it was reported as an invalid selector.
+   */
+  source: 'snapshot' | 'expand',
+): PageCaptureError | null {
+  if (source === 'expand') {
+    if (content.startsWith(EXPAND_MISS_MARKER)) {
+      return new PageCaptureError(
+        'selector-miss',
+        `No element matches selector: ${content.slice(EXPAND_MISS_MARKER.length)}`,
+      );
+    }
+    if (content.startsWith(EXPAND_NOT_RENDERED_MARKER)) {
+      // Matches the text path, so the two formats give the same answer for the
+      // same element instead of one raising and the other returning ''.
+      // Deliberately NOT the text path's wording. `expandDomSubtree`'s filter
+      // is a visibility test (display, visibility AND opacity), which is wider
+      // than the rendered-ness test `captureVisibleText` uses — an `opacity: 0`
+      // element IS rendered and `format=text` returns its text. Claiming "not
+      // rendered" here would be false for exactly that case.
+      return new PageCaptureError(
+        'not-rendered',
+        `Element at "${content.slice(EXPAND_NOT_RENDERED_MARKER.length)}" is not visible ` +
+          '(display:none, visibility:hidden or opacity:0), so the DOM view has nothing to show ' +
+          'for it. This is not an empty element — try format="text" if you want its text anyway.',
+      );
+    }
+    if (content.startsWith(EXPAND_ERROR_MARKER)) {
+      // Through the shared classifier, not a hardcoded kind: this branch is
+      // where an invalid selector lands on the `dom` path, and answering
+      // `evaluate-failed` there made it a 500 — the exact "caller error wearing
+      // a server fault" that was supposedly fixed for `text` only.
+      return classifyFailureText(content.slice(EXPAND_ERROR_MARKER.length), 'DOM capture', true);
+    }
+    return null;
+  }
+
+  // Deliberately the envelope, not `DOM_CAPTURE_ERROR_MARKER`: the browser-side
+  // catch in capture-dom.js emits `<error>Failed to capture DOM: …`, which the
+  // narrower prefix missed entirely — so a page whose DOM walk threw (a deeply
+  // nested tree overflowing the recursive walker is the realistic case) came
+  // back as a 200 carrying the error string as its content.
+  if (content.startsWith(DOM_ERROR_ENVELOPE)) {
+    // The envelope embeds the original `String(err)`, so the navigation race
+    // and a genuine timeout are still recoverable from it. No selector is
+    // involved on this path — it is the whole-page capture.
+    return classifyFailureText(content.replace(/<\/?error>/g, ''), 'DOM capture', false);
+  }
+  return null;
+}
+
+/** True when this snapshot was clipped by `domSnapshotCharLimit` — i.e. the
+ *  page has more content than the string represents. */
+export function domSnapshotWasClipped(content: string): boolean {
+  return content.endsWith(DOM_SNAPSHOT_TRUNCATION_MARKER);
 }
 
 /**
@@ -190,7 +409,9 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
   try {
     snapshot = (await evaluateWithTimeout<string | null>(page, script, PAGE_EVALUATE_TIMEOUT_MS)) ?? '';
   } catch (err) {
-    return `<error>DOM capture timed out: ${String(err)}</error>`;
+    // In-band by design — see the "Capture failures" block above. Callers that
+    // must not pass this off as content run it through `domCaptureFailure`.
+    return `${DOM_CAPTURE_ERROR_MARKER} timed out: ${String(err)}</error>`;
   }
 
   if (snapshot.includes('[iframe:')) {
@@ -199,10 +420,136 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
 
   if (snapshot.length > resolved.domSnapshotCharLimit) {
     snapshot = snapshot.substring(0, resolved.domSnapshotCharLimit)
-      + '\n<!-- DOM snapshot truncated — page content exceeds size limit -->';
+      + DOM_SNAPSHOT_TRUNCATION_MARKER;
   }
 
   return snapshot;
+}
+
+/** Options for captureVisibleText. */
+export interface CaptureTextOptions {
+  /** Restrict the read to the first element matching this CSS selector.
+   *  A selector that matches nothing raises rather than returning ''. */
+  selector?: string | undefined;
+}
+
+/**
+ * Capture the page's visible text — what a person reading the screen would
+ * see, not what the markup contains.
+ *
+ * `innerText` rather than `textContent`, and the difference is the whole point:
+ * `textContent` returns the text of `display: none` subtrees, `<template>`
+ * contents and collapsed accordions, and does not collapse the whitespace the
+ * stylesheet collapses. Substituting it would silently hand back text for
+ * things the user cannot see, contradicting `captureDomSnapshot`, which drops
+ * exactly those subtrees. `innerText` forces layout and is the slower of the
+ * two; the evaluate budget is what keeps that bounded.
+ *
+ * Unlike `captureDomSnapshot`, this **throws** on failure. It has no runner
+ * callers to keep degrading gracefully, and its consumer (stories/page-content.md)
+ * must never report an unreadable page as an empty one.
+ *
+ * Returns the full text — truncation belongs to the caller, which is the layer
+ * that knows the requested budget and has to report what it dropped.
+ */
+export async function captureVisibleText(
+  page: Page,
+  opts: CaptureTextOptions = {},
+): Promise<string> {
+  const selector = opts.selector;
+  // String-based evaluate, and JSON-quoted interpolation, for the same two
+  // reasons as everywhere else in this file: esbuild must not inject helpers
+  // into browser code, and a selector containing a quote must not be able to
+  // terminate the literal.
+  // `checkVisibility()` is the guard against innerText's silent fallback: per
+  // the HTML spec, the getter returns `textContent` when the element "is not
+  // being rendered" — so reading a display:none subtree by selector hands back
+  // hidden text, unspaced and labelled as visible. Measured, not assumed: on a
+  // `display:none` div, `innerText` returned "SSN 123-45-6789nested" while the
+  // whole-page read correctly omitted it.
+  //
+  // checkVisibility() rather than getClientRects(): an empty *rendered* inline
+  // element has no boxes, so a rects check would call it hidden. The default
+  // options test exactly what innerText cares about (display:none on the
+  // element or an ancestor, and content-visibility), not opacity or
+  // visibility:hidden — which do still render text and should still be read.
+  //
+  // `display: contents` is the exception that forced the ancestor walk. Such an
+  // element generates no box of its own, so checkVisibility() reports false —
+  // but its CHILDREN render normally and innerText collects them correctly
+  // (measured: a display:contents wrapper returned "VISIBLE-ONE\n\nVISIBLE-TWO"
+  // with a display:none child properly excluded). Testing the element itself
+  // turned that working read into a 400, and `display: contents` is mainstream:
+  // transparent flex/grid wrappers and `:host { display: contents }` on custom
+  // elements. So we test the nearest ancestor that actually generates a box,
+  // which still catches a display:contents node under a display:none parent.
+  const script = `(() => {
+    var selector = ${selector === undefined ? 'null' : JSON.stringify(selector)};
+    var root;
+    try {
+      root = selector ? document.querySelector(selector) : document.body;
+    } catch (err) {
+      return { error: 'bad-selector', detail: String(err) };
+    }
+    if (!root) return { error: selector ? 'selector-miss' : 'no-body' };
+    if (typeof root.innerText !== 'string') return { error: 'no-inner-text' };
+    if (typeof root.checkVisibility === 'function') {
+      var probe = root;
+      while (probe && getComputedStyle(probe).display === 'contents') {
+        probe = probe.parentElement;
+      }
+      if (probe && !probe.checkVisibility()) return { error: 'not-rendered' };
+    }
+    return { text: root.innerText };
+  })()`;
+
+  let result: { text?: string; error?: string; detail?: string };
+  try {
+    result = await evaluateWithTimeout<{ text?: string; error?: string; detail?: string }>(
+      page,
+      script,
+      PAGE_EVALUATE_TIMEOUT_MS,
+    );
+  } catch (err) {
+    throw toPageCaptureError(err, 'Text capture');
+  }
+
+  switch (result.error) {
+    case undefined:
+      break;
+    case 'selector-miss':
+      throw new PageCaptureError('selector-miss', `No element matches selector: ${String(selector)}`);
+    case 'bad-selector':
+      throw new PageCaptureError(
+        'bad-selector',
+        `Not a valid CSS selector: ${String(selector)} (${result.detail ?? 'rejected by the browser'})`,
+      );
+    case 'not-rendered':
+      throw new PageCaptureError(
+        'not-rendered',
+        selector === undefined
+          ? 'The page body is not rendered (display:none), so it has no visible text.'
+          : `Element at "${selector}" is on the page but not rendered (display:none or an unrendered ` +
+            'ancestor), so it has no visible text. Reading it would return hidden content.',
+      );
+    case 'no-body':
+      throw new PageCaptureError('evaluate-failed', 'The page has no <body> to read.');
+    case 'no-inner-text':
+      // SVG and other non-HTML elements have textContent but no innerText.
+      // Falling back to textContent here would reintroduce exactly the hidden-
+      // content problem this function exists to avoid, so it is an error — but
+      // the caller's own selector chose this element, so it is their error and
+      // must not wear a 500.
+      throw new PageCaptureError(
+        'unreadable-element',
+        `Element at "${String(selector)}" is not an HTML element (SVG or similar), so it has no ` +
+          'visible text to read. Use format="dom" to inspect its structure instead.',
+      );
+    default:
+      throw new PageCaptureError('evaluate-failed', `Text capture failed: ${result.error}`);
+  }
+
+  return result.text ?? '';
 }
 
 /**
@@ -446,7 +793,20 @@ export async function findInDom(
  * inspect a specific item's contents.
  */
 export async function expandDomSubtree(page: Page, selector: string): Promise<string> {
-  const result = await page.evaluate(`(() => {
+  // Bounded like every other capture in this file. It used to call
+  // `page.evaluate` bare, which was survivable while the only caller was a step
+  // with a deadline around it — but it is now reachable from an HTTP GET, where
+  // a page with a wedged JS thread would hold the request open forever.
+  //
+  // The timeout degrades IN BAND rather than throwing, matching what this
+  // function's own browser-side catch already does and what `captureDomSnapshot`
+  // does with the same budget. Throwing here would have made the runner's
+  // `expand` action abort a step that used to survive — same page, same
+  // budget, opposite contract — while the new endpoint gets the same
+  // classification either way via `domCaptureFailure`.
+  let result: string;
+  try {
+    result = await evaluateWithTimeout<string>(page, `(() => {
     const selector = ${JSON.stringify(selector)};
     const SKIP = new Set(['script', 'style', 'noscript', 'svg', 'meta', 'link', 'base', 'title']);
 
@@ -525,11 +885,18 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
     try {
       const el = document.querySelector(selector);
       if (!el) return '[expand] No element found for selector: ' + selector;
+      // processEl filters invisible elements to '', which at the top level is
+      // indistinguishable from "this element is empty" — the exact conflation
+      // the text path raises 'not-rendered' to avoid. Say so instead.
+      if (!isVisible(el)) return '[expand] Not rendered: ' + selector;
       return processEl(el, 0);
     } catch (err) {
       return '[expand] Error: ' + String(err);
     }
-  })()`) as string;
+  })()`, PAGE_EVALUATE_TIMEOUT_MS);
+  } catch (err) {
+    return `${EXPAND_ERROR_MARKER}${String(err)}`;
+  }
 
   return result;
 }

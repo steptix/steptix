@@ -60,6 +60,7 @@ describe('tool schemas as they go out on the wire', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close_session',
       'get_last_run',
+      'get_page_content',
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
@@ -147,6 +148,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['listSessionsInput', schemas.listSessionsInput, 'input'],
     ['closeSessionInput', schemas.closeSessionInput, 'input'],
     ['getLastRunInput', schemas.getLastRunInput, 'input'],
+    ['getPageContentInput', schemas.getPageContentInput, 'input'],
     ['serverStatusInput', schemas.serverStatusInput, 'input'],
     ['listCdpBrowsersInput', schemas.listCdpBrowsersInput, 'input'],
     ['startCdpBrowserInput', schemas.startCdpBrowserInput, 'input'],
@@ -155,6 +157,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['listSessionsOutput', schemas.listSessionsOutput, 'output'],
     ['closeSessionOutput', schemas.closeSessionOutput, 'output'],
     ['getLastRunOutput', schemas.getLastRunOutput, 'output'],
+    ['getPageContentOutput', schemas.getPageContentOutput, 'output'],
     ['serverStatusOutput', schemas.serverStatusOutput, 'output'],
     ['listCdpBrowsersOutput', schemas.listCdpBrowsersOutput, 'output'],
     ['startCdpBrowserOutput', schemas.startCdpBrowserOutput, 'output'],

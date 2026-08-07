@@ -31,6 +31,15 @@ import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import {
+  captureDomSnapshot,
+  captureVisibleText,
+  domCaptureFailure,
+  domSnapshotWasClipped,
+  expandDomSubtree,
+  toPageCaptureError,
+  PageCaptureError,
+} from '../browser/dom-cleaner.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { parseTimeoutMs } from '../runner/test-runner.js';
 import { generateReport, buildReportBaseName } from '../report/generator.js';
@@ -357,6 +366,44 @@ export interface SessionListItem {
   cdp: { port: number; profile: string | null } | null;
 }
 
+/** How to read the page — see stories/page-content.md §1. */
+export interface PageContentOptions {
+  format: PageContentFormat;
+  /** Restrict the read to the first element matching this CSS selector. */
+  selector?: string | undefined;
+  /** Hard cap on returned characters. Over-limit content is truncated and
+   *  flagged, never silently clipped. */
+  maxChars: number;
+}
+
+export type PageContentFormat = 'text' | 'dom';
+
+/** The page as read, plus enough context for the caller to know what it got. */
+export interface PageContent {
+  sessionId: string;
+  url: string;
+  title: string;
+  /** `executing` means a run is in flight and the page may move underneath
+   *  the caller — the read is deliberately not queued behind it. */
+  status: 'active' | 'executing';
+  format: PageContentFormat;
+  selector: string | null;
+  content: string;
+  truncated: boolean;
+  returnedChars: number;
+  /**
+   * Characters the capture produced, before this layer's truncation.
+   *
+   * A floor, not the page's true size: for `format: 'dom'` the capture is
+   * itself bounded by the project's `domSnapshotCharLimit`, so a very large
+   * page reports the limit rather than its real length. When that happened,
+   * `truncated` is true even if `availableChars <= maxChars` — which is the
+   * only signal distinguishing "you got everything" from "you got everything
+   * we were willing to capture".
+   */
+  availableChars: number;
+}
+
 /** Run token totals — a frozen snapshot of the per-run tracker getters. */
 export interface RunTokens {
   total: number;
@@ -379,6 +426,34 @@ export interface LastRunInfo {
 // ---------------------------------------------------------------------------
 // Internal session data
 // ---------------------------------------------------------------------------
+
+/** Settle time before the single retry of a page read that lost to a
+ *  navigation. Long enough for a same-document commit, short enough that a
+ *  caller waiting on a GET does not notice. */
+const NAVIGATION_RETRY_DELAY_MS = 500;
+
+/** One capture's result, plus whether the capture itself already clipped. */
+interface CapturedPage {
+  text: string;
+  /** True when `domSnapshotCharLimit` cut the snapshot before this layer saw
+   *  it, so the caller must be told the page is longer than what it received. */
+  captureClipped: boolean;
+}
+
+/**
+ * Slice to at most `max` UTF-16 units without splitting a surrogate pair.
+ *
+ * `String.prototype.slice` cuts by code unit, so a boundary landing inside an
+ * emoji or any astral character leaves a lone high surrogate — which survives
+ * `JSON.stringify` but decodes to U+FFFD for whoever reads it. Backing off one
+ * unit costs a character and keeps the tail readable.
+ */
+function sliceWholeCodePoints(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const lastUnit = text.charCodeAt(max - 1);
+  const endsOnHighSurrogate = lastUnit >= 0xd800 && lastUnit <= 0xdbff;
+  return text.slice(0, endsOnHighSurrogate ? max - 1 : max);
+}
 
 /** Pattern for [input: variable_name] steps */
 const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
@@ -441,6 +516,29 @@ interface ManagedSession {
     passed: boolean;
   };
   status: 'active' | 'executing' | 'closed';
+  /**
+   * Browser settings from the project bundle of the most recent step batch,
+   * retained so an out-of-band page read uses the dom-cleaner options of the
+   * PROJECT this session last ran against.
+   *
+   * Note this is not the same as what the runner uses: `executeStep` is handed
+   * `this.config` (the server's startup config), so a step currently cleans
+   * with the server's options while a read cleans with the project's. The read
+   * side is the correct one — a session created for project A should be read
+   * with project A's settings — and bringing the runner into line means
+   * threading `projectConfig` into `executeStep`, which is a separate change
+   * with its own blast radius.
+   *
+   * Retained rather than re-resolved because the bundle is keyed on a test
+   * file path (`resolveProjectBundle`), and a content read has no test file —
+   * only a session id. Seeded from the server's startup config so a session
+   * created but never run is still readable; overwritten with the project's
+   * values on the first batch.
+   *
+   * Reading `this.config.browser` here instead would silently apply the
+   * SERVER's cleaner settings to every project but its own.
+   */
+  browserConfig: Config['browser'];
   /** `cdp` is retained, not just consumed at launch: without it `list_sessions`
    *  cannot say which session is driving a persistent signed-in browser, and
    *  the answer is unrecoverable afterwards. It was always assigned here — the
@@ -1165,6 +1263,129 @@ export class SessionManager {
     };
   }
 
+  /**
+   * Read the active page of a session — visible text, or the cleaned DOM.
+   * See stories/page-content.md.
+   *
+   * Returns null for an unknown or closed session (the route answers 404) and
+   * throws `PageCaptureError` when the page could not be read. It deliberately
+   * does NOT return empty content for a failed capture: "the page says
+   * nothing" and "we could not read the page" are different answers, and a
+   * caller that cannot tell them apart will confidently report the first.
+   *
+   * The read is NOT queued behind `queueTail`. A run holds the queue for as
+   * long as it takes, and a read that blocks for minutes is not a GET — so
+   * this reads out of band (as `getSession` already does) and reports
+   * `status` so a caller knows the page may be moving.
+   */
+  async getPageContent(sessionId: string, opts: PageContentOptions): Promise<PageContent | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status === 'closed') {
+      return null;
+    }
+
+    const page = session.browserSession.pageTracker.getActive();
+
+    let captured: CapturedPage;
+    try {
+      captured = await this.capturePage(page, session, opts);
+    } catch (err) {
+      // One retry, for the one failure that is genuinely transient: the read
+      // raced a navigation. Everything else propagates immediately — retrying
+      // a wedged page or a bad selector just doubles the wait.
+      if (!(err instanceof PageCaptureError) || err.kind !== 'navigated') throw err;
+      await new Promise((r) => setTimeout(r, NAVIGATION_RETRY_DELAY_MS));
+      captured = await this.capturePage(page, session, opts);
+    }
+
+    const raw = captured.text;
+    const availableChars = raw.length;
+    // Two independent clips, and BOTH have to reach the caller. `captureClipped`
+    // is the one that bites silently: captureDomSnapshot enforces the project's
+    // domSnapshotCharLimit before this layer ever sees the string, so a page
+    // clipped there arrives looking complete. An agent told `truncated: false`
+    // on a quarter of a page will report that the rest of it does not exist —
+    // and raising `max_chars` past the project limit turns a correct warning
+    // into a confident wrong answer.
+    const truncated = captured.captureClipped || availableChars > opts.maxChars;
+    const content = availableChars > opts.maxChars
+      ? sliceWholeCodePoints(raw, opts.maxChars)
+      : raw;
+
+    // Best-effort, unlike the content itself: an unreadable title is not the
+    // answer to the question that was asked, so it degrades to '' rather than
+    // failing a read that otherwise succeeded.
+    let url = '';
+    let title = '';
+    try {
+      url = page.url();
+      title = await page.title();
+    } catch {
+      // Browser may be in an intermediate state.
+    }
+
+    return {
+      sessionId,
+      url,
+      title,
+      status: session.status === 'executing' ? 'executing' : 'active',
+      format: opts.format,
+      selector: opts.selector ?? null,
+      content,
+      truncated,
+      returnedChars: content.length,
+      availableChars,
+    };
+  }
+
+  /** Dispatch one capture. Failures arrive as `PageCaptureError` whichever
+   *  path produced them — some throw, some report in band. */
+  private async capturePage(
+    page: Page,
+    session: ManagedSession,
+    opts: PageContentOptions,
+  ): Promise<CapturedPage> {
+    if (opts.format === 'text') {
+      const text = await captureVisibleText(page, { selector: opts.selector });
+      return { text, captureClipped: false };
+    }
+
+    // Both DOM paths report failure in band — `expandDomSubtree` catches its
+    // own evaluate, and `captureDomSnapshot` catches all of its except
+    // `injectFrameContent`, which runs outside its try. The try/catch below is
+    // defensive rather than load-bearing for expand today; it stays because an
+    // unclassified throw would bypass the navigation retry and land as a bare
+    // 500, and that contract should not depend on a helper never changing.
+    if (opts.selector !== undefined) {
+      let expanded: string;
+      try {
+        expanded = await expandDomSubtree(page, opts.selector);
+      } catch (err) {
+        throw toPageCaptureError(err, 'DOM capture', true);
+      }
+      const failure = domCaptureFailure(expanded, 'expand');
+      if (failure) throw failure;
+      // No clip flag: expandDomSubtree does not apply domSnapshotCharLimit, so
+      // what it returns is the whole subtree (see stories/page-content.md §2).
+      return { text: expanded, captureClipped: false };
+    }
+
+    // Project settings, not the server's — see `ManagedSession.browserConfig`.
+    let snapshot: string;
+    try {
+      snapshot = await captureDomSnapshot(page, {
+        ...session.browserConfig.domNoiseReduction,
+        maxIframeDepth: session.browserConfig.maxIframeDepth,
+        domSnapshotCharLimit: session.browserConfig.domSnapshotCharLimit,
+      });
+    } catch (err) {
+      throw toPageCaptureError(err, 'DOM capture');
+    }
+    const failure = domCaptureFailure(snapshot, 'snapshot');
+    if (failure) throw failure;
+    return { text: snapshot, captureClipped: domSnapshotWasClipped(snapshot) };
+  }
+
   /** Max distinct sessions we remember finalized-run info for (bounded growth). */
   private static readonly LAST_RUN_INFO_LIMIT = 200;
 
@@ -1396,6 +1617,8 @@ export class SessionManager {
         reportOutputDir,
         videoDir,
         status: 'active',
+        // Startup defaults until the first batch resolves the project's own.
+        browserConfig: this.config.browser,
         sessionConfig: sessionConfig ?? {},
         configSet: sessionConfig !== undefined,
         outputs: {},
@@ -1655,6 +1878,9 @@ export class SessionManager {
       throw err;
     }
     const projectConfig = projectBundle.config;
+    // Retain the project's browser settings for out-of-band reads
+    // (`getPageContent`), which have no test file to re-resolve a bundle from.
+    session.browserConfig = projectConfig.browser;
     let envDataCtx: EnvDataContext | null = projectBundle.envBundle
       ? {
           env: projectBundle.envBundle.env,

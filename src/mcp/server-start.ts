@@ -193,7 +193,8 @@ export const ensureServerReady: EnsureServerReady = (project, signal) =>
  * Refuse to talk to whatever holds the port unless it identifies as ours.
  *
  * For the tools that only report on what is already there — `list_sessions`,
- * `close_session`, `get_last_run`, `list_cdp_browsers`. They still send
+ * `close_session`, `get_last_run`, `get_page_content`, `list_cdp_browsers`.
+ * They still send
  * `SERVER_API_KEY`, and without this they send it to any process that happens
  * to hold the port: an agent calling `list_sessions` as a harmless "what's
  * running?" probe would hand the project's key to a squatter. That is the same

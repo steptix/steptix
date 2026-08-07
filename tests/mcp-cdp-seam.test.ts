@@ -93,6 +93,20 @@ async function connect(
       return { finalized: true, reportPath: null, tokens: null };
     },
     async closeSession() {},
+    async getPageContent(sessionId) {
+      return {
+        sessionId,
+        url: 'https://example.test/',
+        title: 'Example',
+        status: 'active',
+        format: 'text',
+        selector: null,
+        content: 'page text',
+        truncated: false,
+        returnedChars: 9,
+        availableChars: 9,
+      } as never;
+    },
     async listSessions() {
       return [];
     },

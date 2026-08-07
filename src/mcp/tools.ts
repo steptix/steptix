@@ -190,12 +190,20 @@ function defaultSessionId(kind: 'file' | 'steps', projectRoot: string, testFileP
     : `mcp:steps-${process.pid}-${shortHash(projectRoot)}`;
 }
 
-function checkSessionOwnership(sessionId: string, allowForeign: boolean): void {
+function checkSessionOwnership(
+  sessionId: string,
+  allowForeign: boolean,
+  /** What the caller would actually do to the foreign session. Stated in the
+   *  refusal because "would drive their browser" is the wrong warning for a
+   *  read — the hazard there is disclosure, not control, and an agent that is
+   *  told the wrong risk cannot weigh the right one. */
+  consequence = 'running steps in it would drive their browser',
+): void {
   if (sessionId.startsWith('mcp:') || allowForeign) return;
   throw new PreflightFailure(
     preflightError(
       `Session "${sessionId}" was not created by this MCP server. It may belong to a ` +
-        "developer's open editor, and running steps in it would drive their browser.\n" +
+        `developer's open editor, and ${consequence}.\n` +
         'Pass allow_foreign_session: true if that is genuinely what you want.',
     ),
   );
@@ -827,6 +835,100 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           info ? `Report: ${info.reportPath ?? '(none)'}` : 'No finalized run yet',
         );
       }),
+  );
+
+  // -- get_page_content -----------------------------------------------------
+  server.registerTool(
+    'get_page_content',
+    {
+      title: 'Read a session\'s current page',
+      description:
+        'Read the current page of a session: its visible text, or its cleaned ' +
+        'DOM. Returns the page as-is — nothing is summarised or interpreted ' +
+        'for you, so budget for reading it yourself.\n\n' +
+        '`format: "text"` (default) for what the page says. ' +
+        '`format: "dom"` when you need element structure to pick a selector — ' +
+        'it is much larger, so prefer text unless you are about to act on an ' +
+        'element.\n\n' +
+        'Narrow with `selector` rather than raising `max_chars`: a truncated ' +
+        'result tells you it was truncated, and reading a bigger slice of the ' +
+        'wrong part of the page costs context without answering anything.\n\n' +
+        'The two formats differ on `aria-hidden` content: `text` includes it ' +
+        '(it is on screen for a sighted user), and a whole-page `dom` read ' +
+        'drops it as noise.\n\n' +
+        'This reads whatever is on screen right now. It does not wait for the ' +
+        'page to settle, and if a run is in flight `status` comes back ' +
+        '`executing` — the page may move under you.',
+      inputSchema: schemas.getPageContentInput,
+      outputSchema: schemas.getPageContentOutput,
+    },
+    async (args, extra) =>
+      withProject(
+        deps,
+        args.project_root,
+        async (client) => {
+          // A page read is not the harmless end of the foreign-session
+          // question — it is the disclosing one. A developer's session may be
+          // driving a CDP browser holding real logins, and this returns the
+          // full text of whatever tab is open. The repo already withholds
+          // foreign CDP tab titles and URLs by default; handing over the page
+          // body unprompted would undo that policy through a side door.
+          checkSessionOwnership(
+            args.session_id,
+            args.allow_foreign_session === true,
+            'reading its page would disclose whatever they are signed in to',
+          );
+
+          const page = await client.getPageContent(
+            args.session_id,
+            {
+              format: args.format,
+              selector: args.selector,
+              maxChars: args.max_chars,
+            },
+            extra.signal,
+          );
+
+          const scope = page.selector ? ` (${page.selector})` : '';
+          const size = page.truncated
+            ? `${page.returnedChars} of ${page.availableChars}+ chars — narrow with a selector to see the rest`
+            : `${page.returnedChars} chars`;
+          // Normalised the way `list_sessions` normalises: a MISSING key fails
+          // `structuredContent` validation outright, so an older or partial
+          // server response would cost the agent the page it just read
+          // successfully. Nulling/defaulting keeps a good read usable.
+          //
+          // `content` is deliberately NOT defaulted. Substituting '' for a
+          // missing body would tell the agent the page is empty when what
+          // actually happened is that we never received it — the one confusion
+          // this whole feature is built to prevent, and not a trade worth
+          // making to salvage a response that is already malformed.
+          if (typeof page.content !== 'string') {
+            throw new Error(
+              'The Sessions API returned a page-content response with no `content` field. ' +
+                'This is a bug in the server, not a page that is empty.',
+            );
+          }
+          const value = {
+            sessionId: page.sessionId ?? args.session_id,
+            url: page.url ?? '',
+            title: page.title ?? '',
+            status: page.status ?? 'active',
+            format: page.format ?? 'text',
+            selector: page.selector ?? null,
+            content: page.content,
+            truncated: page.truncated ?? false,
+            returnedChars: page.returnedChars ?? 0,
+            availableChars: page.availableChars ?? 0,
+          };
+          return validated(
+            schemas.getPageContentOutput,
+            value,
+            `${page.title || page.url}${scope} — ${page.format}, ${size}`,
+          );
+        },
+        { signal: extra.signal },
+      ),
   );
 
   // -- list_cdp_browsers ----------------------------------------------------

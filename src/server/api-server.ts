@@ -12,11 +12,23 @@ import {
 } from '../browser/cdp-registry.js';
 import { discoverCdpPorts } from '../browser/cdp-discovery.js';
 import { SessionManager, type RunEvent, type StepRequest } from './session-manager.js';
+import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
 import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
 import { matchText } from '../parser/section-match.js';
 import { logger } from '../utils/logger.js';
 import { getPackageVersion } from '../utils/version.js';
+
+/**
+ * Default cap on characters returned by `GET /sessions/:id/content`.
+ *
+ * Much lower than the runner's own `domSnapshotCharLimit` (100 000), and
+ * deliberately so: that limit is sized for a snapshot going into a runner
+ * prompt, whereas this content lands in an agent host's context, where 100 000
+ * characters is roughly 25 000 tokens spent on one call. A caller that needs
+ * more can ask; a caller that blows its context window cannot un-spend it.
+ */
+const DEFAULT_CONTENT_MAX_CHARS = 20_000;
 
 /** Write a single SSE frame. */
 function writeSseEvent(res: Response, event: RunEvent): void {
@@ -585,6 +597,99 @@ export function createApiServer(
 
       res.status(200).json(state);
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /sessions/:id/content — the active page as text or cleaned DOM
+  // (stories/page-content.md).
+  //
+  // Nothing here calls a model. The endpoint hands back the page and stops;
+  // whoever asked does the understanding. That is what keeps a page read free
+  // of AI_API_KEY, free of model latency, and free of paying for the same page
+  // twice — once to summarise it, once to read the summary.
+  //
+  // Behind the auth middleware, so it bumps the idle monitor. Correct here:
+  // this is a client action, not a poll. (The warning at the CDP block below
+  // is about adding a *polled* route behind auth; this is not one.)
+  app.get('/sessions/:id/content', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const sessionId = String(req.params.id);
+
+      // Validate before touching the page, so a bad request never costs a
+      // browser round-trip.
+      const rawFormat = req.query['format'];
+      const format = rawFormat === undefined ? 'text' : String(rawFormat);
+      if (format !== 'text' && format !== 'dom') {
+        // Deliberately not a fallback to 'text'. A caller that asked for
+        // 'html' and silently received prose has no way to notice.
+        res.status(400).json({
+          error: `Unknown format "${format}". Valid formats are "text" (visible text, default) and "dom" (cleaned DOM).`,
+        });
+        return;
+      }
+
+      // Rejected rather than ignored. A repeated `?selector=a&selector=b`
+      // arrives as an array, and silently dropping it would widen the read
+      // from one element to the entire page — the opposite of what the caller
+      // asked for, on the endpoint whose whole size story is "narrow with a
+      // selector". `format` and `max_chars` already 400 on the same input.
+      const rawSelector = req.query['selector'];
+      if (rawSelector !== undefined && typeof rawSelector !== 'string') {
+        res.status(400).json({ error: 'selector must be a single string value.' });
+        return;
+      }
+      // An empty `?selector=` is the same trap in a smaller shape: dropping it
+      // silently reads the whole page when the caller asked for one element.
+      if (rawSelector === '') {
+        res.status(400).json({ error: 'selector must not be empty.' });
+        return;
+      }
+      const selector = typeof rawSelector === 'string' ? rawSelector : undefined;
+
+      const rawMax = req.query['max_chars'];
+      let maxChars = DEFAULT_CONTENT_MAX_CHARS;
+      if (rawMax !== undefined) {
+        maxChars = Number(String(rawMax));
+        if (!Number.isInteger(maxChars) || maxChars <= 0) {
+          res.status(400).json({
+            error: `max_chars must be a positive integer (got "${String(rawMax)}").`,
+          });
+          return;
+        }
+      }
+
+      const content = await sessionManager.getPageContent(sessionId, {
+        format,
+        selector,
+        maxChars,
+      });
+      if (!content) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      res.status(200).json(content);
+    } catch (err) {
+      // A read that lost to a navigation is the caller's to retry — it says
+      // nothing about the session's health, so it must not read as a 500.
+      if (err instanceof PageCaptureError && err.kind === 'navigated') {
+        res.status(409).json({ error: err.message });
+        return;
+      }
+      // Everything the CALLER got wrong is a 400. A bad selector answered 500
+      // tells an agent the server is broken and to try again later, when the
+      // fix is in its own next argument — and `div:has-text(…)` (a Playwright
+      // idiom, not CSS) is a mistake agents make constantly.
+      if (
+        err instanceof PageCaptureError &&
+        (err.kind === 'selector-miss' ||
+          err.kind === 'bad-selector' ||
+          err.kind === 'not-rendered' ||
+          err.kind === 'unreadable-element')
+      ) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
       next(err);
     }
   });
