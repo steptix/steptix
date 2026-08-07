@@ -174,6 +174,11 @@ export function getReportTemplate(): string {
     .aborted-title { font-weight: 700; color: #c2410c; margin-bottom: 6px; }
     .aborted-message { font-size: 0.875rem; color: #9a3412; font-family: monospace; }
 
+    /* Captures block — variables this step extracted (issue 042) */
+    .captures-block { margin-top: 14px; padding: 10px 14px; border-radius: 6px; background: #f0fdf4; border: 1px solid #bbf7d0; }
+    .captures-title { font-weight: 700; color: var(--pass); font-size: 0.8rem; margin-bottom: 6px; }
+    .captures-block .tool-kv-key { color: var(--pass); }
+
     /* Source-skill chip — origin of an expanded step */
     .badge-skill { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .badge-skill::before { content: 'skill: '; opacity: 0.6; }

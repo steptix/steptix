@@ -105,6 +105,13 @@ export interface StepResult {
   turns: TurnResult[];
   /** All assertions evaluated during this step, in execution order */
   assertions?: AssertionResult[];
+  /** Variables this step captured — `as`-tagged read/count actions and
+   *  explicit `[output: X]` declarations alike (issue 042), keyed by
+   *  variable name. Omitted (not empty) when the step captured nothing, so
+   *  the report can skip the section entirely rather than show an empty
+   *  box on every ordinary step. Skill-internal `__skill*` names are never
+   *  included — same invariant as session.outputs. */
+  outputs?: Record<string, string>;
   /** Screenshot captured at the end of the step */
   screenshotBase64?: string;
   /** Page URL at the time the end-of-step screenshot was captured */

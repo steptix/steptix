@@ -391,6 +391,19 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
   const toolHtml = step.toolStep ? renderToolStep(step.toolStep) : '';
 
+  // Skip when this is a tool step: a `[tool: ... out.x="y"]` binding is
+  // already shown in the purple Outputs section above via `toolStep.outputs`
+  // — the only way a tool step's `outputs` is ever non-empty is the same
+  // value reaching resolvedParameters under an `[output:]` alias, so a
+  // second, green, identically-valued box would be pure duplication.
+  const captureRows = step.toolStep ? [] : Object.entries(step.outputs ?? {});
+  const capturesHtml = captureRows.length === 0 ? '' : `<div class="captures-block">
+        <div class="captures-title">◆ Captured</div>
+        <div class="tool-kv">${captureRows
+          .map(([k, v]) => `<div class="tool-kv-row"><span class="tool-kv-key">${escapeHtml(k)}</span><span class="tool-kv-value">${escapeHtml(v)}</span></div>`)
+          .join('')}</div>
+       </div>`;
+
   const domHtml = step.domSnapshot
     ? `<details class="dom-snapshot">
         <summary>DOM Snapshot<button class="copy-btn" type="button" title="Copy DOM"><span class="copy-btn-label">Copy</span></button></summary>
@@ -461,6 +474,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ${domHtml}
     ${toolHtml}
     ${turnsHtml}
+    ${capturesHtml}
     ${assertionHtml}
     ${failureHtml}
     ${endScreenshotHtml}
