@@ -921,10 +921,27 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             returnedChars: page.returnedChars ?? 0,
             availableChars: page.availableChars ?? 0,
           };
+          // The page goes in a CONTENT BLOCK, not only in `structuredContent`.
+          //
+          // Every other tool here can get away with a one-line summary over
+          // structured data, because for them the structure IS the answer — a
+          // run's status, a list of sessions. This tool's entire answer is
+          // verbatim text, and a client that surfaces only the content blocks
+          // (many do) would hand the model `"Invoices — text, 2995 chars"`: a
+          // description of the page instead of the page, with no error and a
+          // plausible count. The model then reports on a page it never saw.
+          // That is the confidently-wrong failure this whole feature exists to
+          // prevent, and it was reintroduced at the last layer.
+          //
+          // The cost is that the page travels twice — once here, once in
+          // `structuredContent`, which cannot be dropped because declaring an
+          // `outputSchema` obliges the SDK to require it. Worth it: a payload
+          // that is twice as large beats one the reader never receives.
           return validated(
             schemas.getPageContentOutput,
             value,
             `${page.title || page.url}${scope} — ${page.format}, ${size}`,
+            [{ type: 'text', text: page.content }],
           );
         },
         { signal: extra.signal },
