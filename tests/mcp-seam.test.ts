@@ -343,6 +343,48 @@ describe('get_page_content', () => {
     });
   });
 
+  // The bug this guards: the page used to live ONLY in structuredContent, so a
+  // client that surfaces just the content blocks handed the model
+  // "Invoices — text, 2995 chars" — a description of the page instead of the
+  // page, with no error and a plausible count to make it look like success.
+  it('puts the page in the content blocks, not only in structuredContent', async () => {
+    const { client } = await connect({
+      pageContent: { content: 'You have 3 unpaid invoices. Invoice #2024-11 is overdue.' },
+    });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    });
+
+    const blocks = (res.content as { type: string; text: string }[]).map((c) => c.text).join('\n');
+    expect(blocks).toContain('You have 3 unpaid invoices.');
+    expect(blocks).toContain('Invoice #2024-11 is overdue.');
+    // The summary stays — it carries the counts and the truncation warning,
+    // which the raw page cannot tell you about itself.
+    expect(blocks).toContain('chars');
+    // And structured output is still there for clients that use it.
+    expect(res.structuredContent).toMatchObject({
+      content: 'You have 3 unpaid invoices. Invoice #2024-11 is overdue.',
+    });
+  });
+
+  it('carries a truncation warning in the content blocks too', async () => {
+    const { client } = await connect({
+      pageContent: { content: 'x'.repeat(50), truncated: true, returnedChars: 50, availableChars: 900 },
+    });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    });
+
+    const blocks = (res.content as { type: string; text: string }[]).map((c) => c.text).join('\n');
+    // A client showing only content blocks must still learn it got a fragment.
+    expect(blocks).toContain('900');
+    expect(blocks).toContain('narrow with a selector');
+  });
+
   it('sends format, selector and max_chars through to the server', async () => {
     const { client, pageContentCalls } = await connect({});
 
