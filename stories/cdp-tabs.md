@@ -562,11 +562,75 @@ guard was proven only against a fake of itself — which is exactly where defect
 
 **Hardening on two unconfirmed risks the reviewer flagged honestly as
 unproven:** `resolvedTargetIds` had no timeout while sitting on two HTTP paths
-that have no deadline of their own (now bounded, returning a partial answer
-rather than hanging a route), and a page whose first target-id lookup failed
-stayed invisible forever, because re-awaiting a settled promise is not a retry
-(now genuinely retried — the first fix for this was wrong and its test caught
-it).
+that have no deadline of their own, and a page whose first target-id lookup
+failed stayed invisible forever, because re-awaiting a settled promise is not a
+retry (now genuinely retried — the first fix for this was wrong and its test
+caught it).
+
+### Round two — attacking the fixes
+
+A second reviewer ran against the fixes. Four held up; four did not, and two of
+those were introduced *by* the first round.
+
+1. **The poll fix over-reached and turned a flaky read into a false
+   `closed: true`.** Making an unreadable tab list satisfy the predicate fixed
+   the exited-browser case and broke a worse one: `listPageTabs` returns null
+   for a single failed fetch or a 1.5 s abort, and the poll runs ~200 times
+   against a tab showing a "Leave site?" dialog — so one bad read reported the
+   tab as closed while the function's own final read could still see it. Now
+   asks the port which of the two it is.
+2. **The `resolvedTargetIds` timeout failed the guard OPEN.** It bounded the
+   whole sweep and returned `[]` on expiry, so one slow lookup made a session's
+   tabs invisible and a tab it was mid-run on became closable — the exact
+   outcome the guard exists to prevent, reintroduced by the fix for a hang.
+   Worse, the comment and this story both claimed it returned partial results,
+   which it could not: a `Promise.all` has none. The budget is now **per page**
+   so the partial answer is real, and the sweep reports `complete`, which the
+   close guard treats as a refusal. *For a guard, "I could not find out" must
+   never read as "nobody is holding it."*
+3. **The unowned-browser stub leaked into advice that is false for someone
+   else's browser.** The last-tab refusal told the agent the profile keeps its
+   logins and `start_cdp_browser` brings it back — untrue of a foreign browser,
+   and it is the sentence that decides whether the agent asks before
+   terminating a human's signed-in Chrome. Both that message and the tool
+   summary now branch on a new `owned` field.
+4. **The close queue was keyed on `(projectRoot, port)`**, but a port is one
+   socket on the machine and identifies the browser by itself; `projectRoot`
+   does not. One browser therefore got a queue per project, and this server is
+   a per-machine singleton — so the concurrency guarantee evaporated exactly
+   where `allowUnowned` makes two projects able to address one browser. Keyed
+   on the port alone.
+
+**Confirmed correct and left alone:** the queue mechanics themselves (attacked
+with a five-deep burst including rejections — strict FIFO, no dropped link, no
+leak), the `allowUnowned` privilege boundary, the 404-is-not-success change,
+and — the reviewer's own biggest suspicion — the inverse of defect 4 above:
+a session holding both a CDP and a launch-mode browser does contribute the
+launch-mode browser's ids to the port's join, but those entries are inert,
+since the guard only ever looks up an id the port's own tab list already
+produced.
+
+One test bug of my own surfaced here too: the timeout sentinel is a symbol, and
+the id filter tested `!== null`, so the sentinel leaked into the id list. The
+test written for the fix caught it before it shipped.
+
+**A browser dialog is a `page` target but not a tab — and it defeated the
+last-tab guard.** Found in live testing *after* review, by re-running the
+suite: Edge reports `edge://sync-confirmation-dialog/` as `type: 'page'`, so
+a browser with one real tab listed two, the guard concluded it was not
+closing the last one, and the browser exited with nobody having passed
+`allow_browser_exit`. That is precisely the failure the guard exists to
+prevent, and no amount of unit testing would have produced the dialog. The
+shared filter now drops `*-dialog` surfaces on the internal schemes.
+
+The asymmetry there is deliberate: only `*-dialog` is dropped, not internal
+pages generally, because `edge://settings` and `chrome://history` are real
+tabs a user opened. **Over-counting risks killing a browser; under-counting
+only produces an unnecessary refusal** — so the heuristic is tuned to fail in
+the second direction. The same finding retired one wording: the tool summary
+said *"that was its last tab, so … closed too"*, which the tab count is not
+entitled to claim once counting and the browser's own idea of what keeps it
+alive can disagree. It now says the browser closed, without saying why.
 
 **Two smaller things worth recording.** `chrome://newtab` is an ordinary
 closable `page` target and is deliberately *kept* by the shared filter:

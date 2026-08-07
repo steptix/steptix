@@ -375,6 +375,20 @@ export interface SessionListItem {
   tab: { targetId: string | null; url: string } | null;
 }
 
+/**
+ * The tab → session join for one CDP browser, and whether it is the whole
+ * truth.
+ *
+ * `complete: false` means at least one session's tabs could not be enumerated
+ * in time. For the listing that is cosmetic; for the close guard it is the
+ * difference between "no session holds this tab" and "I could not find out",
+ * and only the first may permit a close.
+ */
+export interface SessionsByTarget {
+  byTarget: Map<string, string>;
+  complete: boolean;
+}
+
 /** How to read the page — see stories/page-content.md §1. */
 export interface PageContentOptions {
   format: PageContentFormat;
@@ -1520,8 +1534,9 @@ export class SessionManager {
    * from here — consistent with the standing decision that parallel users of
    * one CDP browser own the consequences.
    */
-  async sessionsByTarget(port: number): Promise<Map<string, string>> {
+  async sessionsByTarget(port: number): Promise<SessionsByTarget> {
     const byTarget = new Map<string, string>();
+    let complete = true;
 
     await Promise.all(
       [...this.sessions].map(async ([id, session]) => {
@@ -1538,20 +1553,26 @@ export class SessionManager {
           const perBrowser = await Promise.all(
             session.browserTracker.all().map((b) => b.pageTracker.resolvedTargetIds()),
           );
-          for (const targetId of perBrowser.flat()) {
-            // First writer wins. Two sessions can legitimately hold the same
-            // tab (they share the browser's context), and for both callers —
-            // a listing label and a refusal — naming one is enough.
-            if (!byTarget.has(targetId)) byTarget.set(targetId, id);
+          for (const sweep of perBrowser) {
+            if (!sweep.complete) complete = false;
+            for (const targetId of sweep.ids) {
+              // First writer wins. Two sessions can legitimately hold the same
+              // tab (they share the browser's context), and for both callers —
+              // a listing label and a refusal — naming one is enough.
+              if (!byTarget.has(targetId)) byTarget.set(targetId, id);
+            }
           }
         } catch {
-          // A session whose tabs cannot be enumerated contributes nothing
-          // rather than failing the whole join.
+          // A session whose tabs cannot be enumerated at all contributes
+          // nothing — but the join is then no longer the whole truth, and a
+          // guard reading it must know that rather than seeing a confident
+          // "nobody holds this tab".
+          complete = false;
         }
       }),
     );
 
-    return byTarget;
+    return { byTarget, complete };
   }
 
   /**

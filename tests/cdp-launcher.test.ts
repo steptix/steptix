@@ -150,6 +150,30 @@ describe('toPageTabs — the shared filter', () => {
       .toEqual([{ targetId: 'n1', title: 'New Tab', url: 'chrome://newtab/' }]);
   });
 
+  it('drops a browser dialog, which is a page target but not a tab', async () => {
+    // Measured in live testing: Edge reports edge://sync-confirmation-dialog/
+    // as type:'page'. Counting it turned one real tab into two, so the
+    // last-tab guard let the browser exit with nobody passing
+    // allow_browser_exit — the exact failure that guard exists to prevent.
+    expect(
+      toPageTabs([
+        { id: 'd1', type: 'page', title: '', url: 'edge://sync-confirmation-dialog/' },
+        { id: 't1', type: 'page', title: 'Orders', url: 'https://shop/orders' },
+      ]).map((t) => t.targetId),
+    ).toEqual(['t1']);
+  });
+
+  it('keeps internal pages that ARE real tabs', () => {
+    // Only `*-dialog` surfaces are dropped. Settings and history are tabs a
+    // user opened, and dropping them would fire the last-tab refusal early.
+    expect(
+      toPageTabs([
+        { id: 's1', type: 'page', title: 'Settings', url: 'edge://settings/' },
+        { id: 'h1', type: 'page', title: 'History', url: 'chrome://history/' },
+      ]).map((t) => t.targetId),
+    ).toEqual(['s1', 'h1']);
+  });
+
   it('is the same filter probePort applies', async () => {
     // The drift this export exists to prevent: if the close path counted tabs
     // differently from the listing, a browser could be reported with one tab

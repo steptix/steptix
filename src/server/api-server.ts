@@ -7,6 +7,7 @@ import {
   knownProfiles,
   startCdpBrowser,
   closeCdpTab,
+  UNKNOWN_HOLDER,
   DEFAULT_PROFILE,
   type CdpFailureKind,
   type StartResult,
@@ -770,10 +771,17 @@ export function createApiServer(
    * closing the last tab, and both proceed — and the browser exits with
    * neither caller having asked for that. An MCP host issuing two tool calls
    * in one turn ("close both of those") is enough to trigger it.
+   *
+   * **Keyed on the port alone, deliberately.** A port is one listening socket
+   * on this machine, so it identifies the browser; `projectRoot` does not.
+   * Including the root gave one browser a queue *per project*, and this server
+   * is a per-machine singleton serving many roots — so two projects addressing
+   * the same browser (which `allowUnowned` permits) would each get their own
+   * chain and the guarantee would evaporate exactly where it was needed.
    */
-  const cdpCloseQueues = new Map<string, Promise<unknown>>();
+  const cdpCloseQueues = new Map<number, Promise<unknown>>();
 
-  function queueCdpClose<T>(key: string, work: () => Promise<T>): Promise<T> {
+  function queueCdpClose<T>(key: number, work: () => Promise<T>): Promise<T> {
     const tail = (cdpCloseQueues.get(key) ?? Promise.resolve())
       // `.catch` so one failed close does not poison the chain for the next
       // caller; the failure is still returned to whoever asked for it.
@@ -816,7 +824,7 @@ export function createApiServer(
       // CDP round-trip. It is what makes the close refusal predictable rather
       // than a surprise: the agent can see a tab is spoken for before trying.
       const holders = await Promise.all(
-        live.map(async (p) => sessionManager.sessionsByTarget(p.port as number)),
+        live.map(async (p) => (await sessionManager.sessionsByTarget(p.port as number)).byTarget),
       );
       const running = live.map((p, i) => ({
         engine: p.engine,
@@ -976,7 +984,7 @@ export function createApiServer(
         const allowUnowned =
           req.query['allowUnowned'] === 'true' || req.query['allowUnowned'] === '1';
 
-        const result = await queueCdpClose(`${projectRoot} ${port}`, () =>
+        const result = await queueCdpClose(port, () =>
           closeCdpTab({
             projectRoot,
             port,
@@ -985,8 +993,15 @@ export function createApiServer(
             allowUnowned,
             // Resolved per call, not cached: a session that bound this tab
             // since the caller last listed must still be seen.
-            sessionHolding: async (id) =>
-              (await sessionManager.sessionsByTarget(port)).get(id) ?? null,
+            sessionHolding: async (id) => {
+              const { byTarget, complete } = await sessionManager.sessionsByTarget(port);
+              const holder = byTarget.get(id);
+              if (holder) return holder;
+              // An incomplete join cannot say "nobody holds it". Refusing on a
+              // maybe is the right trade for a guard whose failure closes a
+              // tab out from under a live run.
+              return complete ? null : UNKNOWN_HOLDER;
+            },
           }),
         );
 
@@ -1005,6 +1020,7 @@ export function createApiServer(
           port: result.port,
           remainingTabs: result.remainingTabs,
           browserExited: result.browserExited,
+          owned: result.owned,
           warnings: result.warnings,
         });
       } catch (err) {

@@ -250,6 +250,8 @@ export interface ClosedCdpTab {
   remainingTabs: number;
   /** Observed, not assumed — the port stopped answering. */
   browserExited: boolean;
+  /** Whether this project launched the browser. */
+  owned: boolean;
   warnings: string[];
 }
 

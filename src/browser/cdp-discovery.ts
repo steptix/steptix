@@ -120,6 +120,19 @@ export async function probePort(
  * `devtools://` and `chrome-extension://` pages are excluded; `chrome://newtab`
  * is NOT — W0 confirmed a fresh browser's new-tab page is an ordinary,
  * closable `type: 'page'` target, and a user looking at their window counts it.
+ *
+ * **Browser dialogs are excluded, and that was measured, not predicted.** Edge
+ * reports `edge://sync-confirmation-dialog/` as `type: 'page'`, but it is a
+ * modal, not a tab: it does not appear in the tab strip and it does not keep
+ * the browser alive. Counting it made a two-entry list out of one real tab, so
+ * the last-tab guard concluded it was not closing the last tab and the browser
+ * exited without anyone passing `allow_browser_exit` — the exact failure that
+ * guard exists to prevent, seen in live testing.
+ *
+ * Only `*-dialog` surfaces are dropped, not internal pages generally:
+ * `edge://settings` and `chrome://history` are real tabs a user opened and
+ * must still be counted. The asymmetry is deliberate — over-counting risks
+ * killing a browser, while under-counting only produces an unnecessary refusal.
  */
 export function toPageTabs(listJson: unknown): CdpDiscoveryTab[] {
   if (!Array.isArray(listJson)) return [];
@@ -128,6 +141,7 @@ export function toPageTabs(listJson: unknown): CdpDiscoveryTab[] {
     if (!raw || raw.type !== 'page') continue;
     const url = typeof raw.url === 'string' ? raw.url : '';
     if (url.startsWith('devtools://') || url.startsWith('chrome-extension://')) continue;
+    if (isBrowserDialog(url)) continue;
     const targetId = typeof raw.id === 'string' ? raw.id : '';
     if (!targetId) continue;
     tabs.push({
@@ -137,6 +151,20 @@ export function toPageTabs(listJson: unknown): CdpDiscoveryTab[] {
     });
   }
   return tabs;
+}
+
+/**
+ * A browser-UI modal masquerading as a page target.
+ *
+ * Matched on the `-dialog` path segment of an internal scheme, which is how
+ * Chromium names these surfaces (`sync-confirmation-dialog`,
+ * `signin-email-confirmation-dialog`, …). A heuristic, and stated as one — but
+ * one whose failure mode is an extra refusal rather than a dead browser.
+ */
+function isBrowserDialog(url: string): boolean {
+  if (!url.startsWith('chrome://') && !url.startsWith('edge://')) return false;
+  const host = url.slice(url.indexOf('://') + 3).split('/')[0] ?? '';
+  return host.endsWith('-dialog');
 }
 
 /** Page tabs on a port, or null when the browser could not be reached. Thin

@@ -1162,9 +1162,20 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // openrouter tab" actually wants back: which tab went, and whether
           // the browser went with it.
           const what = closed.title || closed.url || closed.targetId;
+          const browser = closed.owned
+            ? `${closed.engine} "${closed.profile}"`
+            : `the browser on port ${closed.port}`;
           const aftermath = closed.browserExited
-            ? ` — that was its last tab, so ${closed.engine} "${closed.profile}" closed too ` +
-              '(the profile keeps its logins)'
+            // Not "that was its last tab" — the tab count and the browser's own
+            // idea of what keeps it alive can disagree (browser dialogs report
+            // as page targets). What is certainly true is that the browser went.
+            ? ` — ${browser} closed with it` +
+              // True only of a browser we own. Claiming it for someone else's
+              // browser tells the user a terminated session is recoverable
+              // when nothing here can bring it back.
+              (closed.owned
+                ? ' (the profile keeps its logins)'
+                : ' — this project did not start it, so nothing here can reopen it')
             : `; ${closed.remainingTabs} tab${closed.remainingTabs === 1 ? '' : 's'} left`;
           return validated(
             schemas.closeCdpTabOutput,

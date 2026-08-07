@@ -187,10 +187,26 @@ export interface TabInfo {
  *  `page.title()` has no timeout of its own. */
 const TAB_TITLE_TIMEOUT_MS = 500;
 
-/** Bound on sweeping every tracked page for its target id. Larger than the
- *  title budget because it covers N pages, still small enough that a wedged
- *  lookup cannot hold an HTTP request open. */
-const TARGET_ID_SWEEP_TIMEOUT_MS = 2_000;
+/** Bound on ONE page's target-id lookup. Per page rather than per sweep, so a
+ *  single wedged page does not discard the ids resolved beside it. */
+const TARGET_ID_LOOKUP_TIMEOUT_MS = 2_000;
+
+/** A lookup that ran out of time — distinct from `null` ("this page has no
+ *  target id"), because only the first means the answer is incomplete. */
+const TIMED_OUT = Symbol('target-id-timed-out');
+
+/**
+ * Every target id a tracker could resolve, and whether that list is the whole
+ * truth.
+ *
+ * `complete` exists because the consumer is a guard. A caller that cannot tell
+ * "nobody holds this tab" from "I could not find out" will treat the second as
+ * the first and close a tab out from under a running session.
+ */
+export interface TargetIdSweep {
+  ids: string[];
+  complete: boolean;
+}
 
 async function briefly<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -422,39 +438,54 @@ export class PageTracker {
    * holds, so all of them are load-bearing, and a tab whose id never resolved
    * is simply omitted — it cannot match an id the caller is asking about.
    */
-  async resolvedTargetIds(): Promise<string[]> {
-    // Bounded, because both callers sit on an HTTP request: the browser
-    // listing and the close guard. Everything else that reaches into a page
-    // from those paths is timeout-guarded for the same reason, and an
-    // unbounded await here would let one wedged lookup hang a route that has
-    // no deadline of its own. On expiry the ids resolved so far are still
-    // returned — a partial answer degrades the guard, where no answer at all
-    // would hang the request.
-    return briefly(this.resolveAllTargetIds(), TARGET_ID_SWEEP_TIMEOUT_MS, []);
+  async resolvedTargetIds(): Promise<TargetIdSweep> {
+    const ids = await Promise.all(this.pages.map((entry) => this.resolveOne(entry)));
+    return {
+      // Typed rather than `!== null`: the timeout sentinel is a symbol, and a
+      // null-only filter let it through into the id list.
+      ids: ids.filter((id): id is string => typeof id === 'string'),
+      // `complete` is false when any page could not be resolved *in time*, and
+      // it is load-bearing rather than diagnostic: the close guard asks this
+      // question to decide whether a session is driving a tab, and for a guard
+      // "I could not find out" must never read the same as "nobody is". An
+      // earlier version bounded the whole sweep and returned `[]` on expiry,
+      // which failed the guard OPEN — one slow lookup and a tab a session was
+      // mid-run on became closable.
+      complete: !ids.includes(TIMED_OUT),
+    };
   }
 
-  private async resolveAllTargetIds(): Promise<string[]> {
-    const ids = await Promise.all(
-      this.pages.map(async (entry) => {
-        if (entry.targetId !== null) return entry.targetId;
-        // Join a lookup already in flight, so concurrent callers cost one
-        // round-trip between them.
-        const pending = this.targetIdResolutions.get(entry.page);
-        let resolved = pending ? await pending : null;
-        if (resolved === null) {
-          // The head start settled without an answer. Awaiting that same
-          // settled promise again — which is all "join the in-flight lookup"
-          // does once it has finished — would leave the page permanently
-          // invisible after one transient failure. This list is a guard, and
-          // an invisible tab is one that can be closed out from under a
-          // running session, so it is worth a fresh attempt.
-          resolved = await resolvePageTargetId(entry.page);
-        }
-        if (resolved !== null) entry.targetId = resolved;
-        return resolved;
-      }),
+  /**
+   * One page's target id, bounded.
+   *
+   * The budget is **per page**, not over the whole sweep: one wedged lookup
+   * then costs one page rather than every id resolved alongside it, so the
+   * partial answer is real rather than a fallback to empty.
+   */
+  private async resolveOne(entry: TrackedPage): Promise<string | null | typeof TIMED_OUT> {
+    if (entry.targetId !== null) return entry.targetId;
+    return briefly<string | null | typeof TIMED_OUT>(
+      this.resolveOneNow(entry),
+      TARGET_ID_LOOKUP_TIMEOUT_MS,
+      TIMED_OUT,
     );
-    return ids.filter((id): id is string => id !== null);
+  }
+
+  private async resolveOneNow(entry: TrackedPage): Promise<string | null> {
+    // Join a lookup already in flight, so concurrent callers cost one
+    // round-trip between them.
+    const pending = this.targetIdResolutions.get(entry.page);
+    let resolved = pending ? await pending : null;
+    if (resolved === null) {
+      // The head start settled without an answer. Awaiting that same settled
+      // promise again — which is all "join the in-flight lookup" does once it
+      // has finished — would leave the page permanently invisible after one
+      // transient failure. This list is a guard, and an invisible tab is one
+      // that can be closed out from under a running session.
+      resolved = await resolvePageTargetId(entry.page);
+    }
+    if (resolved !== null) entry.targetId = resolved;
+    return resolved;
   }
 
   /**

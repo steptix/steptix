@@ -396,8 +396,15 @@ export const closeCdpTabOutput = toolSchema({
   browserExited: z
     .boolean()
     .describe(
-      'The browser itself closed, because this was its last tab. The profile ' +
-        'is now dormant and appears under `available`.',
+      'The browser itself closed, because this was its last tab. If `owned`, ' +
+        'the profile is now dormant and appears under `available`.',
+    ),
+  owned: z
+    .boolean()
+    .describe(
+      'Whether this project launched the browser. When false (only reachable ' +
+        'with mcp.cdp.allowUnowned) nothing here can reopen it — say so rather ' +
+        'than reassuring the user that the profile can be relaunched.',
     ),
   warnings: z.array(z.string()),
 });

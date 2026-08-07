@@ -390,7 +390,9 @@ describe('PageTracker.resolvedTargetIds', () => {
     tracker.addPage(page('https://b.test', 'BBB') as any);
     tracker.addPage(page('https://c.test', 'CCC') as any);
 
-    expect((await tracker.resolvedTargetIds()).sort()).toEqual(['AAA', 'BBB', 'CCC']);
+    const sweep = await tracker.resolvedTargetIds();
+    expect(sweep.ids.sort()).toEqual(['AAA', 'BBB', 'CCC']);
+    expect(sweep.complete).toBe(true);
   });
 
   it('retries a lookup that settled without an answer', async () => {
@@ -401,18 +403,25 @@ describe('PageTracker.resolvedTargetIds', () => {
     // Let the constructor's head-start lookup fail first.
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(await tracker.resolvedTargetIds()).toEqual(['AAA']);
+    expect((await tracker.resolvedTargetIds()).ids).toEqual(['AAA']);
   });
 
-  it('omits a page whose id cannot be resolved rather than throwing', async () => {
+  it('omits a page with no id, and still reports the sweep as complete', async () => {
+    // "This page has no target id" is an answer; it must not read as "the list
+    // is untrustworthy", or every launch-mode session would refuse closes.
     const tracker = new PageTracker(page('https://a.test', 'AAA') as any);
     tracker.addPage(page('https://b.test', null) as any);
 
-    expect(await tracker.resolvedTargetIds()).toEqual(['AAA']);
+    const sweep = await tracker.resolvedTargetIds();
+    expect(sweep.ids).toEqual(['AAA']);
+    expect(sweep.complete).toBe(true);
   });
 
-  it('does not hang the caller when a lookup never settles', async () => {
-    // Both callers sit on an HTTP request with no deadline of its own.
+  it('reports INCOMPLETE — with the ids it did get — when a lookup wedges', async () => {
+    // The load-bearing one. An earlier version bounded the whole sweep and
+    // returned `[]`, which failed the close guard OPEN: one slow lookup and a
+    // tab a session was mid-run on became closable. Two things must hold: the
+    // resolved ids survive, and the caller is told the answer is partial.
     const wedged = {
       url: () => 'https://slow.test',
       title: async () => '',
@@ -422,14 +431,20 @@ describe('PageTracker.resolvedTargetIds', () => {
         newCDPSession: async () => ({ send: () => new Promise(() => {}), detach: async () => {} }),
       }),
     };
-    const tracker = new PageTracker(wedged as any);
+    const tracker = new PageTracker(page('https://a.test', 'AAA') as any);
+    // Let the good page's head start land, so it is cached and not itself
+    // racing the budget.
+    await new Promise((r) => setTimeout(r, 10));
+    tracker.addPage(wedged as any);
 
-    // Real timers would make this a 2s test; the point is that it resolves.
     vi.useFakeTimers();
     const pending = tracker.resolvedTargetIds();
     await vi.advanceTimersByTimeAsync(2_500);
-    await expect(pending).resolves.toEqual([]);
+    const sweep = await pending;
     vi.useRealTimers();
+
+    expect(sweep.ids).toEqual(['AAA']);
+    expect(sweep.complete).toBe(false);
   });
 });
 

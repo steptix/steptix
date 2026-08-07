@@ -129,6 +129,7 @@ async function connect(
         port: args.port,
         remainingTabs: 7,
         browserExited: false,
+        owned: true,
         warnings: [],
       }) as never;
     },
@@ -739,6 +740,7 @@ describe('close_cdp_tab', () => {
         port: 51000,
         remainingTabs: 0,
         browserExited: true,
+        owned: true,
         warnings: [],
       },
     });
@@ -747,8 +749,11 @@ describe('close_cdp_tab', () => {
       arguments: { profile: 'default', target_id: 'A1B2C3', allow_browser_exit: true },
     });
     expect(structured(result).browserExited).toBe(true);
-    expect(text(result)).toContain('last tab');
-    expect(text(result)).toMatch(/edge "default" closed too/);
+    // Says the browser went, without asserting WHY. The tab count and the
+    // browser's own idea of what keeps it alive can disagree — a dialog
+    // reports as a page target — so "that was its last tab" is a claim the
+    // summary is not entitled to make.
+    expect(text(result)).toMatch(/edge "default" closed with it/);
     // And the reassurance, since "the browser closed" reads as "the login is
     // gone" to a model and it is not.
     expect(text(result)).toContain('logins');

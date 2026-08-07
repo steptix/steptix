@@ -619,6 +619,34 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
     expect(closeCdpTabMock).toHaveBeenCalledTimes(3);
   });
 
+  it('serialises closes on one browser across DIFFERENT project roots', async () => {
+    // Round-two regression. The key was `(projectRoot, port)`, which gave one
+    // browser a queue per project — and this server is a per-machine singleton
+    // serving many roots, with `allowUnowned` explicitly letting one project
+    // address another's browser. A port is one socket on this machine, so the
+    // port alone identifies the browser.
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    closeCdpTabMock.mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return closedTab();
+    });
+
+    const other = path.join('C:', 'other-project');
+    await Promise.all([
+      del(9222, 'T1'),
+      fetch(
+        `${baseUrl}/cdp/browsers/9222/tabs/T2?projectRoot=${encodeURIComponent(other)}`,
+        { method: 'DELETE', headers: auth },
+      ),
+    ]);
+
+    expect(maxConcurrent).toBe(1);
+  });
+
   it('does not serialise closes against DIFFERENT browsers', async () => {
     // The queue is per browser. Two browsers are independent, and sharing one
     // chain would make an unrelated close wait behind a slow one.
@@ -664,9 +692,10 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
     closeCdpTabMock.mockResolvedValue(closedTab());
     await del(51000, 'T1');
     const opts = closeCdpTabMock.mock.calls[0]![0] as {
-      sessionHolding?: (id: string) => Promise<string | null>;
+      sessionHolding?: (id: string) => Promise<string | null | symbol>;
     };
     expect(typeof opts.sessionHolding).toBe('function');
+    // No sessions at all is a COMPLETE answer of "nobody", not an unknown.
     await expect(opts.sessionHolding!('T1')).resolves.toBeNull();
   });
 });

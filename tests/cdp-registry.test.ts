@@ -8,6 +8,7 @@ import {
   knownProfiles,
   startCdpBrowser,
   closeCdpTab,
+  UNKNOWN_HOLDER,
   resetProfile,
   PROFILE_MARKER,
   type RegistryDeps,
@@ -979,6 +980,90 @@ describe('closeCdpTab', () => {
     );
 
     expect(result).toMatchObject({ ok: true, remainingTabs: 0, browserExited: false });
+  });
+
+  it('does not report a close as done because ONE tab-list read failed', async () => {
+    // Round-two regression. The fix for "a browser that exited mid-close can
+    // never satisfy the poll" over-reached: it treated EVERY unreadable list as
+    // an exit. `listPageTabs` returns null for a failed fetch, a non-200, a
+    // parse error or a 1.5s abort — and the poll runs ~200 times against a tab
+    // showing a "Leave site?" dialog, so one flaky read reported `closed: true`
+    // for a tab the function's own final read could still see.
+    const h = liveBrowser(TWO_TABS);
+    let reads = 0;
+    h.deps.close = (async () => ({ ok: true, notFound: false, error: null })) as never;
+    // First poll read fails; every other read succeeds and still has the tab.
+    h.deps.listTabs = (async () => (++reads === 1 ? null : TWO_TABS)) as never;
+    h.deps.alive = (async () => true) as never; // browser is perfectly fine
+    let clock = 0;
+    h.deps.now = (() => (clock += 500)) as never;
+
+    const result = await closeCdpTab(
+      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, kind: 'launch_failed' });
+  });
+
+  it('refuses when it cannot determine whether a session holds the tab', async () => {
+    // A guard must fail CLOSED. "I could not find out" reaching the caller as
+    // "nobody holds it" is how a slow lookup closes a tab out from under a
+    // live run.
+    const h = liveBrowser(TWO_TABS);
+    const result = await closeCdpTab(
+      {
+        projectRoot: ROOT,
+        port: PORT,
+        targetId: 'A1B2C3',
+        sessionHolding: () => UNKNOWN_HOLDER,
+      },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, kind: 'refused' });
+    const error = (result as { error: string }).error;
+    expect(error).toMatch(/could not determine/i);
+    expect(error).toMatch(/nothing was closed/i);
+    expect(h.closeFn).not.toHaveBeenCalled();
+  });
+
+  it('does not promise a foreign browser can be reopened', async () => {
+    // The last-tab reassurance is true only of a profile we own. For someone
+    // else's signed-in Chrome every clause of it is false, and it is the
+    // sentence that decides whether the agent asks before terminating it.
+    const h = liveBrowser(TWO_TABS);
+    h.deps.probe = probeFor({ 9222: 'chrome' }) as never;
+    h.deps.listTabs = (async () => [TWO_TABS[0]!]) as never;
+
+    const result = await closeCdpTab(
+      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      h.deps,
+    );
+
+    const error = (result as { error: string }).error;
+    expect(error).toContain('allow_browser_exit');
+    expect(error).not.toMatch(/keeps its signed-in state/i);
+    expect(error).not.toContain('start_cdp_browser');
+    expect(error).toMatch(/not one this project started/i);
+    // And no empty-quoted profile name leaking into the prose.
+    expect(error).not.toContain('""');
+  });
+
+  it('reports `owned` so the caller can tell whose browser it closed', async () => {
+    const h = liveBrowser(TWO_TABS);
+    const ours = await closeCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    expect(ours).toMatchObject({ ok: true, owned: true, profile: 'default' });
+
+    // Keep the harness's stateful tab list — overriding it with a constant
+    // means the closed tab never disappears and the poll burns its budget.
+    const other = liveBrowser(TWO_TABS);
+    other.deps.probe = probeFor({ 9222: 'chrome' }) as never;
+    const theirs = await closeCdpTab(
+      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      other.deps,
+    );
+    expect(theirs).toMatchObject({ ok: true, owned: false, profile: '' });
   });
 
   it('surfaces a browser that refuses the close outright', async () => {
