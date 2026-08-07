@@ -224,6 +224,28 @@ export interface GetCdpBrowsersArgs {
   includeForeignTabs?: boolean;
 }
 
+/** Query for `GET /sessions/:id/content`. Omitted fields take the server's
+ *  defaults (`text`, whole page, 20 000 chars). */
+export interface GetPageContentArgs {
+  format?: 'text' | 'dom' | undefined;
+  selector?: string | undefined;
+  maxChars?: number | undefined;
+}
+
+/** The page as read — mirrors the Sessions API response body. */
+export interface PageContent {
+  sessionId: string;
+  url: string;
+  title: string;
+  status: 'active' | 'executing';
+  format: 'text' | 'dom';
+  selector: string | null;
+  content: string;
+  truncated: boolean;
+  returnedChars: number;
+  availableChars: number;
+}
+
 export interface ApiClient {
   streamSteps(
     sessionId: string,
@@ -232,6 +254,11 @@ export interface ApiClient {
     onEvent?: (event: RunEvent) => void,
   ): Promise<StreamResult>;
   getLastRun(sessionId: string): Promise<LastRunInfo>;
+  getPageContent(
+    sessionId: string,
+    args: GetPageContentArgs,
+    signal?: AbortSignal,
+  ): Promise<PageContent>;
   closeSession(sessionId: string): Promise<void>;
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>;
   getCdpBrowsers(args: GetCdpBrowsersArgs, signal?: AbortSignal): Promise<CdpBrowsers>;

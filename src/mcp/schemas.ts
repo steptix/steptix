@@ -219,6 +219,64 @@ export const getLastRunInput = toolSchema({
   project_root: projectRoot,
 });
 
+export const getPageContentInput = toolSchema({
+  session_id: z.string().describe('Session whose current page to read.'),
+  project_root: projectRoot,
+  format: z
+    .enum(['text', 'dom'])
+    .optional()
+    .describe(
+      '`text` (default) — the page\'s visible text, for what it says. `dom` — ' +
+        'the cleaned DOM, for picking a selector to act on. `text` is far ' +
+        'smaller; reach for `dom` only when you need element structure.',
+    ),
+  selector: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'CSS selector to read instead of the whole page. **This is the right ' +
+        'way to handle a truncated result** — narrowing beats raising ' +
+        'max_chars. A selector matching nothing is an error, not empty text.',
+    ),
+  max_chars: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      'Cap on returned characters (default 20000). Over-limit content comes ' +
+        'back truncated and flagged, never silently clipped.',
+    ),
+  allow_foreign_session: allowForeignSession,
+});
+
+export const getPageContentOutput = toolSchema({
+  sessionId: z.string(),
+  url: z.string(),
+  title: z.string(),
+  status: z.enum(['active', 'executing']),
+  format: z.enum(['text', 'dom']),
+  selector: z.string().nullable(),
+  content: z.string(),
+  truncated: z
+    .boolean()
+    .describe(
+      'True when you did NOT receive the whole page — either it exceeded ' +
+        'max_chars, or the capture itself hit the project\'s DOM size limit. ' +
+        'Narrow with `selector` to see the rest.',
+    ),
+  returnedChars: z.number(),
+  availableChars: z
+    .number()
+    .describe(
+      'Characters captured before truncation. A FLOOR, not the page\'s true ' +
+        'size: for format "dom" the capture is itself capped by the project\'s ' +
+        'limit, so a large page reports the cap rather than its real length. ' +
+        'Trust `truncated`, not the difference between these two numbers.',
+    ),
+});
+
 // ---------------------------------------------------------------------------
 // CDP browsers
 //

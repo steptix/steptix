@@ -19,6 +19,7 @@ Tools
   list_sessions     list open browser sessions on the server
   close_session     close a session and its browser
   get_last_run      report path and token totals for a finished run
+  get_page_content  read a session's current page as text or cleaned DOM
   server_status     health of the Sessions API server
 
 Environment

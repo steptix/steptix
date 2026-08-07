@@ -52,6 +52,9 @@ interface Harness {
    *  did (or did not) consult the registry, and with what. */
   cdpListCalls: { projectRoot: string; includeForeign?: boolean; includeForeignTabs?: boolean }[];
   cdpStartCalls: Record<string, unknown>[];
+  /** Every page read the tools made, so a test can assert what was actually
+   *  put on the wire rather than only what came back. */
+  pageContentCalls: { sessionId: string; args: Record<string, unknown> }[];
 }
 
 const emptyBrowsers = { running: [], available: [], foreign: [] };
@@ -69,10 +72,13 @@ async function connect(opts: {
   };
   started?: Record<string, unknown>;
   startError?: Error;
+  pageContent?: Record<string, unknown>;
+  pageContentError?: Error;
 }): Promise<Harness> {
   const calls: { sessionId: string; body: Record<string, unknown> }[] = [];
   const cdpListCalls: Harness['cdpListCalls'] = [];
   const cdpStartCalls: Record<string, unknown>[] = [];
+  const pageContentCalls: Harness['pageContentCalls'] = [];
   let ensureCalls = 0;
   const scripts = Array.isArray(opts.script) ? [...opts.script] : opts.script ? [opts.script] : [];
 
@@ -100,6 +106,23 @@ async function connect(opts: {
       return opts.lastRun ?? { finalized: true, reportPath: 'c:/proj/reports/x.html', tokens: { total: 30, input: 20, output: 10 } };
     },
     async closeSession() {},
+    async getPageContent(sessionId, args) {
+      pageContentCalls.push({ sessionId, args: args as Record<string, unknown> });
+      if (opts.pageContentError) throw opts.pageContentError;
+      return {
+        sessionId,
+        url: 'https://app.test/invoices',
+        title: 'Invoices',
+        status: 'active',
+        format: 'text',
+        selector: null,
+        content: 'You have 3 unpaid invoices.',
+        truncated: false,
+        returnedChars: 27,
+        availableChars: 27,
+        ...opts.pageContent,
+      } as never;
+    },
     async listSessions() {
       return opts.sessions ?? [];
     },
@@ -148,6 +171,7 @@ async function connect(opts: {
     calls,
     cdpListCalls,
     cdpStartCalls,
+    pageContentCalls,
     get ensureCalls() {
       return ensureCalls;
     },
@@ -159,7 +183,7 @@ beforeEach(() => {
 });
 
 describe('tool registration', () => {
-  it('exposes exactly the nine tools, under bare names', async () => {
+  it('exposes exactly the ten tools, under bare names', async () => {
     // Bare because the host prefixes them — an `aiui_` prefix here would
     // render as `mcp__aiui__aiui_run_steps` in Claude Code.
     //
@@ -172,6 +196,7 @@ describe('tool registration', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close_session',
       'get_last_run',
+      'get_page_content',
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
@@ -294,6 +319,144 @@ describe('run_steps', () => {
     });
 
     expect(res.isError).toBeFalsy();
+  });
+});
+
+describe('get_page_content', () => {
+  it('returns the page as structured content', async () => {
+    const { client } = await connect({});
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      sessionId: 'mcp:a',
+      url: 'https://app.test/invoices',
+      title: 'Invoices',
+      format: 'text',
+      selector: null,
+      content: 'You have 3 unpaid invoices.',
+      truncated: false,
+    });
+  });
+
+  it('sends format, selector and max_chars through to the server', async () => {
+    const { client, pageContentCalls } = await connect({});
+
+    await client.callTool({
+      name: 'get_page_content',
+      arguments: {
+        session_id: 'mcp:a',
+        project_root: PROJECT_ROOT,
+        format: 'dom',
+        selector: '#invoice-list',
+        max_chars: 5000,
+      },
+    });
+
+    expect(pageContentCalls).toHaveLength(1);
+    expect(pageContentCalls[0]).toMatchObject({
+      sessionId: 'mcp:a',
+      args: { format: 'dom', selector: '#invoice-list', maxChars: 5000 },
+    });
+  });
+
+  // Omitted rather than defaulted client-side: the server owns the defaults,
+  // and a second copy here would drift from it silently.
+  it('sends nothing it was not given', async () => {
+    const { client, pageContentCalls } = await connect({});
+
+    await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    });
+
+    expect(pageContentCalls[0]!.args).toEqual({
+      format: undefined,
+      selector: undefined,
+      maxChars: undefined,
+    });
+  });
+
+  it('tells the agent a truncated result was truncated', async () => {
+    const { client } = await connect({
+      pageContent: { truncated: true, returnedChars: 20_000, availableChars: 91_234 },
+    });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.structuredContent).toMatchObject({ truncated: true, availableChars: 91_234 });
+    // Also in the text summary, which is all a host that ignores structured
+    // content will show.
+    expect(JSON.stringify(res.content)).toContain('20000');
+    expect(JSON.stringify(res.content)).toContain('selector');
+  });
+
+  // The point of this workstream. A developer's session may be driving a CDP
+  // browser holding real logins, and this returns the text of whatever tab is
+  // open — so the read is gated exactly as close_session is.
+  it('refuses a foreign session, and says what would be disclosed', async () => {
+    const { client, pageContentCalls } = await connect({});
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'c:/proj/tests/theirs.md', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBe(true);
+    const text = JSON.stringify(res.content);
+    expect(text).toContain('allow_foreign_session');
+    expect(text).toContain('signed in to');
+    // Refused before the wire, not after.
+    expect(pageContentCalls).toHaveLength(0);
+  });
+
+  it('reads a foreign session when explicitly allowed', async () => {
+    const { client, pageContentCalls } = await connect({});
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: {
+        session_id: 'theirs',
+        project_root: PROJECT_ROOT,
+        allow_foreign_session: true,
+      },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(pageContentCalls).toHaveLength(1);
+  });
+
+  it('turns a server refusal into a readable error', async () => {
+    const { ApiHttpError } = await import('../src/mcp/types.js');
+    const { client } = await connect({
+      pageContentError: new ApiHttpError(404, 'Session not found'),
+    });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:gone', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toContain('Session not found');
+  });
+
+  it('warns that the page may be moving during a run', async () => {
+    const { client } = await connect({ pageContent: { status: 'executing' } });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.structuredContent).toMatchObject({ status: 'executing' });
   });
 });
 

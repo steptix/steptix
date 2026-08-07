@@ -263,6 +263,56 @@ describe('createApiClient other routes', () => {
     await expect(client.getLastRun('s1')).resolves.toEqual({ finalized: false });
   });
 
+  it('builds the page-content query, encoding the selector and session id', async () => {
+    let seen = '';
+    const baseUrl = await startServer((url, res) => {
+      seen = url;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ sessionId: 'mcp:a b', content: 'hi' }));
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await client.getPageContent('mcp:a b', {
+      format: 'dom',
+      selector: 'div > p[data-x="1"]',
+      maxChars: 5000,
+    });
+
+    expect(seen).toContain('/sessions/mcp%3Aa%20b/content?');
+    expect(seen).toContain('format=dom');
+    expect(seen).toContain('max_chars=5000');
+    // Encoded, not raw — a selector carries >, ", # and & routinely, and an
+    // unencoded # would truncate the URL at the fragment.
+    expect(seen).toContain(`selector=${encodeURIComponent('div > p[data-x="1"]').replace(/%20/g, '+')}`);
+  });
+
+  it('sends no query at all when nothing was asked for', async () => {
+    let seen = '';
+    const baseUrl = await startServer((url, res) => {
+      seen = url;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ sessionId: 's1' }));
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await client.getPageContent('s1', {});
+
+    expect(seen).toBe('/sessions/s1/content');
+  });
+
+  it('surfaces the server message on a failed page read', async () => {
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'the page navigated while it was being read' }));
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await expect(client.getPageContent('s1', {})).rejects.toMatchObject({
+      status: 409,
+      serverMessage: 'the page navigated while it was being read',
+    });
+  });
+
   it('closes a session', async () => {
     let method = '';
     const baseUrl = await startServer((_url, res) => {

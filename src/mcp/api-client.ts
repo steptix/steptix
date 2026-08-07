@@ -14,6 +14,7 @@ import {
   type ApiClientOptions,
   type CdpBrowsers,
   type LastRunInfo,
+  type PageContent,
   type RunEvent,
   type SessionSummary,
   type StartedCdpBrowser,
@@ -252,6 +253,24 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       );
       await assertOk(res);
       return (await res.json()) as LastRunInfo;
+    },
+
+    async getPageContent(sessionId, args, signal): Promise<PageContent> {
+      const params = new URLSearchParams();
+      if (args.format !== undefined) params.set('format', args.format);
+      if (args.selector !== undefined) params.set('selector', args.selector);
+      if (args.maxChars !== undefined) params.set('max_chars', String(args.maxChars));
+      const query = params.toString();
+      const res = await doFetch(
+        `${base}/sessions/${encodeURIComponent(sessionId)}/content${query ? `?${query}` : ''}`,
+        { headers, ...(signal ? { signal } : {}) },
+      );
+      // Not defaulted the way `getCdpBrowsers` defaults its lists: a page read
+      // that came back without content has nothing usable to degrade to, and
+      // inventing `''` here would recreate the "unreadable reads as empty"
+      // confusion the server side goes out of its way to prevent.
+      await assertOk(res);
+      return (await res.json()) as PageContent;
     },
 
     async closeSession(sessionId): Promise<void> {
