@@ -72,6 +72,36 @@ function parseOutputStep(instruction: string): { variable: string; enrichedInstr
   };
 }
 
+/**
+ * Captured `as` names from a step's own successful read/count actions,
+ * surfaced in the report the same way the server path does (issues
+ * 042/043). Deliberately NOT special-cased for `[output: X]` — its enriched
+ * instruction (`parseOutputStep`) cues the AI toward `as: <variable>`, so a
+ * successful capture is already covered here; a failed one correctly stays
+ * out rather than risking a stale value from an earlier step under the same
+ * name. Restricted to read/count with no error (the only actions that write
+ * `as` into resolvedParameters — see step-executor.ts) and never
+ * `__skill*`-namespaced (skill-internal names must never reach the report).
+ * Call at every `stepResults.push` site that carries real turns — a hook
+ * step, a resumed-from-interactive step, or a normal step — so the report
+ * doesn't depend on which branch produced the result.
+ */
+function computeStepCaptures(
+  result: StepResult,
+  resolvedParameters: Record<string, string>,
+): Record<string, string> | undefined {
+  const captures = result.turns
+    .flatMap((t) => t.subActions)
+    .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'))
+    .map((sa) => sa.action.as)
+    .filter((name): name is string => !!name && !name.startsWith('__skill'))
+    .reduce<Record<string, string>>((acc, name) => {
+      if (name in resolvedParameters) acc[name] = resolvedParameters[name]!;
+      return acc;
+    }, {});
+  return Object.keys(captures).length > 0 ? captures : undefined;
+}
+
 /** Prompt the user for a value during test execution */
 async function promptUserForInput(promptText: string): Promise<string> {
   const rl = readline.createInterface({ input, output });
@@ -380,6 +410,8 @@ export async function runTest(
 
         result.hookScope = scope;
         if (sourceSkill) result.sourceSkill = sourceSkill;
+        const hookCaptures = computeStepCaptures(result, resolvedParameters);
+        if (hookCaptures) result.outputs = hookCaptures;
         stepResults.push(result);
         tokenTracker.resetStep();
 
@@ -480,6 +512,12 @@ export async function runTest(
           if (branchSourceSkill) result.sourceSkill = branchSourceSkill;
           const branchSourceSection = test.sourceSections[result.index - 1] ?? null;
           if (branchSourceSection) result.sourceSection = branchSourceSection;
+          // Unlike the server path (whose MCP-facing `results` array never
+          // includes branched steps at all — a different surface than this
+          // report), the CLI does render branched steps, so there's no
+          // parity reason to withhold their captures here.
+          const branchCaptures = computeStepCaptures(result, resolvedParameters);
+          if (branchCaptures) result.outputs = branchCaptures;
           stepResults.push(result);
           const url = session.page.url();
           conversationHistory.push(
@@ -583,6 +621,8 @@ export async function runTest(
           if (ad.instruction === '[interactive: screenshot]') continue;
           ad.instruction = `(interactive ${childIdx}) ${ad.instruction}`;
           ad.interactiveChild = true;
+          const childCaptures = computeStepCaptures(ad, resolvedParameters);
+          if (childCaptures) ad.outputs = childCaptures;
           conversationHistory.push(
             formatStepHistoryEntry(
               i + 1,
@@ -622,6 +662,11 @@ export async function runTest(
           bail = true;
         } else if (decision.kind === 'resume') {
           // Push the parent + children before jumping so the report stays in order.
+          // This branch pushes directly and `continue`s below rather than
+          // falling through to the common tail, so it needs its own capture
+          // computation — the common tail's doesn't run for it.
+          const resumeCaptures = computeStepCaptures(stepResult, resolvedParameters);
+          if (resumeCaptures) stepResult.outputs = resumeCaptures;
           stepResults.push(stepResult);
           stepResults.push(...interactiveResults);
           conversationHistory.push(
@@ -697,6 +742,9 @@ export async function runTest(
       const stepSourceSection = test.sourceSections[i] ?? null;
       if (stepSourceSection) stepResult.sourceSection = stepSourceSection;
 
+      const stepCaptures = computeStepCaptures(stepResult, resolvedParameters);
+      if (stepCaptures) stepResult.outputs = stepCaptures;
+
       stepResults.push(stepResult);
       if (interactiveStep) {
         stepResults.push(...interactiveResults);
@@ -720,6 +768,10 @@ export async function runTest(
       if (stepResult.runnerControl) {
         humanIntervened = true;
         if (stepResult.runnerControl.adHocResults) {
+          for (const ad of stepResult.runnerControl.adHocResults) {
+            const adCaptures = computeStepCaptures(ad, resolvedParameters);
+            if (adCaptures) ad.outputs = adCaptures;
+          }
           stepResults.push(...stepResult.runnerControl.adHocResults);
           for (const ad of stepResult.runnerControl.adHocResults) {
             conversationHistory.push(
@@ -781,6 +833,10 @@ export async function runTest(
             adHocResults,
           });
 
+          for (const ad of adHocResults) {
+            const adCaptures = computeStepCaptures(ad, resolvedParameters);
+            if (adCaptures) ad.outputs = adCaptures;
+          }
           stepResults.push(...adHocResults);
           for (const ad of adHocResults) {
             conversationHistory.push(

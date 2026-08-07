@@ -3249,9 +3249,31 @@ export class SessionManager {
           break;
         }
 
-        // Collect per-step output captures from resolvedParameters
+        // Collect per-step output captures from resolvedParameters. Union
+        // explicit `[output: X]` declarations with every `as` name this
+        // step's own successful read/count actions used — auto-surfaced even
+        // with no `[output:]` prefix on the instruction (issue 042).
+        // Restricted to read/count (the only actions that write `as` into
+        // resolvedParameters — see step-executor.ts) with no `.error`, for
+        // two reasons: (1) other `as` uses aren't captures at all — e.g.
+        // openPage's tab-label `as` shares the same namespace but never
+        // writes resolvedParameters, and extract_value's `as` is currently a
+        // documented no-op sub-action; (2) resolvedParameters persists
+        // across steps, so an unfiltered failed action's `as` could still be
+        // `in resolvedParameters` from an *earlier* step and wrongly emit a
+        // stale value attributed to this one. `__skill*`-namespaced names are
+        // always excluded — those are skill-internal (see the `__skill*`
+        // invariant at session-manager.ts ~2063 / expander.ts) and must never
+        // reach session.outputs/captures or leak into the next batch's seed.
+        const autoOutputVars = stepResult.turns
+          .flatMap((t) => t.subActions)
+          .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'))
+          .map((sa) => sa.action.as)
+          .filter((name): name is string => !!name && !name.startsWith('__skill'));
+        const captureVars = new Set([...outputVars, ...autoOutputVars]);
+
         const stepOutputs: Record<string, string> = {};
-        for (const varName of outputVars) {
+        for (const varName of captureVars) {
           if (varName in resolvedParameters) {
             stepOutputs[varName] = resolvedParameters[varName]!;
             // Accumulate into session outputs
@@ -3330,6 +3352,7 @@ export class SessionManager {
           ...stepResult,
           index: i + 1,
           instruction: originalStep,
+          ...(Object.keys(stepOutputs).length > 0 && { outputs: stepOutputs }),
           ...(sourceSkill && { sourceSkill }),
           ...(sourceSection && { sourceSection }),
           ...tabAfterStep,
@@ -3392,12 +3415,16 @@ export class SessionManager {
             scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
           });
 
-          // Persist variables captured via [store as: X] to session scope.
-          // The outputVars loop above only handles [output: X] prefix steps;
-          // [store as: X] writes directly to resolvedParameters via the step
-          // executor and would be lost when a breakpoint splits the run into
-          // separate batch requests (the next batch seeds resolvedParameters
-          // from session.outputs, which never got the value).
+          // Persist every resolvedParameters entry to session scope — a
+          // backstop for cross-batch continuity. The capture loop above now
+          // covers both `[output: X]` steps and any `as`-tagged read/count
+          // capture (issue 042), but it only reaches values written through
+          // that one path; this sweep is unconditional (e.g. it also carries
+          // forward `[tool: ... out.foo="bar"]` bindings, a separate write
+          // path). Without it, values would be lost when a breakpoint splits
+          // the run into separate batch requests (the next batch seeds
+          // resolvedParameters from session.outputs, which never got the
+          // value otherwise).
           for (const [key, value] of Object.entries(resolvedParameters)) {
             if (!key.startsWith('__skill')) {
               session.outputs[key] = value;

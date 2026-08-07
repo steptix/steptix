@@ -880,6 +880,273 @@ describe('SessionManager', () => {
       });
     });
 
+    it('emits a capture event for a read/count `as` capture with no [output:] prefix (issue 042)', async () => {
+      vi.mocked(executeStep).mockClear();
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['total_available'] = '$37.77';
+        }
+        return {
+          index: 1,
+          instruction: 'mocked',
+          status: 'passed',
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [
+                {
+                  index: 1,
+                  action: {
+                    action: 'read',
+                    selector: '[aria-label="Total available credits: $37.77"]',
+                    as: 'total_available',
+                    description: 'Extract the dollar amount next to Total available',
+                  },
+                  durationMs: 10,
+                },
+              ],
+            },
+          ],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const events: { type: string; line?: number; name?: string; value?: string }[] = [];
+      const response = await manager.executeSteps(
+        'session-1',
+        {
+          steps: [
+            'Read the Credits page and identify the dollar amount displayed next to "TOTAL AVAILABLE". Return only the extracted dollar amount.',
+          ],
+        },
+        (event) => events.push(event as any),
+      );
+
+      const captures = events.filter((e) => e.type === 'capture');
+      expect(captures).toHaveLength(1);
+      expect(captures[0]).toEqual({
+        type: 'capture',
+        line: 1,
+        name: 'total_available',
+        value: '$37.77',
+        source: 'capture',
+      });
+      expect(response.results[0]!.outputs).toHaveProperty('total_available', '$37.77');
+      expect(response.outputSources).toMatchObject({ total_available: 'capture' });
+    });
+
+    it('does not double-emit when [output:] and the action `as` name agree', async () => {
+      vi.mocked(executeStep).mockClear();
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['orderId'] = 'ORD-1';
+        }
+        return {
+          index: 1,
+          instruction: 'mocked',
+          status: 'passed',
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [
+                {
+                  index: 1,
+                  action: { action: 'read', selector: '#order', as: 'orderId', description: 'Get the order ID' },
+                  durationMs: 10,
+                },
+              ],
+            },
+          ],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const events: { type: string; name?: string }[] = [];
+      await manager.executeSteps(
+        'session-1',
+        { steps: ['[output: orderId] Get the order ID'] },
+        (event) => events.push(event as any),
+      );
+
+      const captures = events.filter((e) => e.type === 'capture');
+      expect(captures).toHaveLength(1);
+    });
+
+    it('never auto-surfaces a __skill*-namespaced `as` capture (issue 042 review)', async () => {
+      vi.mocked(executeStep).mockClear();
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['__skill1_total'] = '$37.77';
+        }
+        return {
+          index: 1,
+          instruction: 'mocked',
+          status: 'passed',
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [
+                {
+                  index: 1,
+                  action: { action: 'read', selector: '#total', as: '__skill1_total', description: 'internal skill capture' },
+                  durationMs: 10,
+                },
+              ],
+            },
+          ],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      const events: { type: string; name?: string }[] = [];
+      const response = await manager.executeSteps(
+        'session-1',
+        { steps: ['Read the total'] },
+        (event) => events.push(event as any),
+      );
+
+      const captures = events.filter((e) => e.type === 'capture');
+      expect(captures).toHaveLength(0);
+      expect(response.results[0]!.outputs).not.toHaveProperty('__skill1_total');
+      expect(response.outputSources).not.toHaveProperty('__skill1_total');
+    });
+
+    it('does not re-emit a stale value when this step\'s `as` action failed (name captured by an earlier step)', async () => {
+      vi.mocked(executeStep).mockClear();
+      // Step 1: a successful read captures orderId, no [output:] prefix.
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['orderId'] = 'ORD-1';
+        }
+        return {
+          index: 1,
+          instruction: 'mocked',
+          status: 'passed',
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [
+                {
+                  index: 1,
+                  action: { action: 'read', selector: '#order', as: 'orderId', description: 'Get the order ID' },
+                  durationMs: 10,
+                },
+              ],
+            },
+          ],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+      // Step 2: a read reusing the same `as` name FAILS — resolvedParameters
+      // still holds step 1's value (never cleared), but this step must not
+      // re-emit it as if step 2 had captured it.
+      vi.mocked(executeStep).mockImplementationOnce(async () => ({
+        index: 2,
+        instruction: 'mocked',
+        status: 'passed',
+        turns: [
+          {
+            turnNumber: 1,
+            attemptNumber: 1,
+            timestamp: new Date().toISOString(),
+            aiInteractions: [],
+            subActions: [
+              {
+                index: 1,
+                action: { action: 'read', selector: '#order-2', as: 'orderId', description: 'Get the order ID again' },
+                durationMs: 10,
+                error: 'read pattern matched nothing',
+              },
+            ],
+          },
+        ],
+        durationMs: 50,
+        retried: false,
+      }));
+
+      const events: { type: string; name?: string }[] = [];
+      await manager.executeSteps(
+        'session-1',
+        { steps: ['Get the order ID', 'Get the order ID again'] },
+        (event) => events.push(event as any),
+      );
+
+      const captures = events.filter((e) => e.type === 'capture');
+      expect(captures).toHaveLength(1);
+      expect(captures[0]!.line).toBe(1);
+    });
+
+    it('threads a captured `as` value into the report step as `outputs` (issue 042)', async () => {
+      vi.mocked(executeStep).mockClear();
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
+        if (opts.resolvedParameters) {
+          opts.resolvedParameters['total_available'] = '37.76';
+        }
+        return {
+          index: 1,
+          instruction: 'mocked',
+          status: 'passed',
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [
+                {
+                  index: 1,
+                  action: { action: 'read', selector: '#total', as: 'total_available', description: 'Extract the total available' },
+                  durationMs: 10,
+                },
+              ],
+            },
+          ],
+          durationMs: 50,
+          retried: false,
+        };
+      });
+
+      await manager.executeSteps('session-1', {
+        steps: ['Extract the total available in $ amount'],
+      });
+
+      const report = vi.mocked(generateReport).mock.calls.at(-1)?.[0] as TestReport;
+      expect(report.steps[0]!.outputs).toEqual({ total_available: '37.76' });
+    });
+
+    it('omits `outputs` on the report step entirely when nothing was captured', async () => {
+      vi.mocked(executeStep).mockClear();
+      vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction) => ({
+        index: 1,
+        instruction,
+        status: 'passed',
+        turns: [],
+        durationMs: 50,
+        retried: false,
+      }));
+
+      await manager.executeSteps('session-1', { steps: ['Click the login button'] });
+
+      const report = vi.mocked(generateReport).mock.calls.at(-1)?.[0] as TestReport;
+      expect(report.steps[0]!.outputs).toBeUndefined();
+    });
+
     it('emits multiple capture events when a step extracts multiple vars', async () => {
       vi.mocked(executeStep).mockClear();
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
