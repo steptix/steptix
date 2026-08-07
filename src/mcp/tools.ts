@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import { assembleSteps, assembleTestFile } from './assemble.js';
 import {
   badCdpProfileName,
+  cdpTabTargetAmbiguous,
   listSessionsTimedOut,
   preflightError,
   unauthorized,
@@ -591,7 +592,13 @@ otherwise. This project may also have a persistent CDP browser running that
 holds real logins — to use it, pass config.cdp: {profile: "<name>"} (call
 list_cdp_browsers if unsure which exist). Config is read only when a session is
 CREATED, so pass it on the first call for a session; passing it later is
-ignored.`.trim();
+ignored.
+
+Tab: attaching opens a NEW tab by default. To run in a tab that is already
+open — one the user set up by hand — take its targetId from
+list_cdp_browsers and pass config.cdp: {profile: "<name>", tab:
+"targetId:<id>"}. Naming the profile alone leaves their tab untouched and
+runs somewhere else.`.trim();
 
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // -- run_steps ------------------------------------------------------------
@@ -771,6 +778,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // field entirely, and a MISSING key fails `structuredContent`
           // validation where a null one is fine.
           cdp: s.cdp ?? null,
+          tab: s.tab ?? null,
         }));
         return validated(
           schemas.listSessionsOutput,
@@ -1050,6 +1058,103 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         },
         // The one tool here whose job is to make something exist, so it gets
         // the run tools' auto-start rather than the probes' identity check.
+        { autoStart: true, signal: extra.signal },
+      ),
+  );
+
+  // -- close_cdp_tab --------------------------------------------------------
+  server.registerTool(
+    'close_cdp_tab',
+    {
+      title: 'Close a CDP browser tab',
+      description:
+        'Close one tab in a CDP browser this project launched.\n\n' +
+        'Call **list_cdp_browsers** first and match the user\'s words ("the ' +
+        'openrouter tab") against the tab titles and urls **yourself**, then ' +
+        'pass that tab\'s exact `targetId`. There is deliberately no fuzzy ' +
+        'matching here: closing the wrong tab cannot be undone, and you are ' +
+        'better at "which one did they mean" than a substring rule.\n\n' +
+        'This closes a real tab in the user\'s own signed-in browser window, ' +
+        'so relay what was closed rather than only that it worked.\n\n' +
+        'Two refusals, both of which tell you what to do next:\n' +
+        '- **A session is driving that tab.** Close it with close_session ' +
+        'first, or leave the tab alone if the session is still wanted.\n' +
+        '- **It is the browser\'s last tab.** Closing that closes the browser ' +
+        'itself — there is no browser with zero tabs. Pass ' +
+        '`allow_browser_exit: true` if that is what the user wants. Nothing ' +
+        'is lost: the profile keeps its logins on disk, and start_cdp_browser ' +
+        'reopens it still signed in.\n\n' +
+        'To close a whole window, close its tabs one at a time — a window ' +
+        'disappears with its last tab. This tool does not touch ordinary ' +
+        'launch-mode session browsers; those belong to their session and end ' +
+        'with it (see close_session).',
+      inputSchema: schemas.closeCdpTabInput,
+      outputSchema: schemas.closeCdpTabOutput,
+    },
+    async (args, extra) =>
+      withProject(
+        deps,
+        args.project_root,
+        async (client, project) => {
+          // Same exactly-one rule as `config.cdp`, and refused for the same
+          // reason: two addresses that disagree have no correct winner, and
+          // this call closes something.
+          const { port, gateOwed } = await resolveCdpTarget(
+            client,
+            project.projectRoot,
+            {
+              ...(args.profile !== undefined ? { profile: args.profile } : {}),
+              ...(args.engine !== undefined ? { engine: args.engine } : {}),
+              ...(args.port !== undefined ? { port: args.port } : {}),
+            },
+            extra.signal,
+            // The tool's own field names, so the refusal names arguments this
+            // call actually has.
+            cdpTabTargetAmbiguous,
+          );
+          // A port resolved from this project's `running` list is owned by
+          // construction. A caller-supplied one is not, and closing tabs in a
+          // browser is at least as intrusive as driving it — so it clears the
+          // same gate, with the same human-held opt-in behind it.
+          if (gateOwed) {
+            await assertPortAttachable(
+              client,
+              project.projectRoot,
+              port,
+              project.cdpPermissions,
+              extra.signal,
+            );
+          }
+
+          const closed = await client.closeCdpTab(
+            {
+              projectRoot: project.projectRoot,
+              port,
+              targetId: args.target_id,
+              ...(args.allow_browser_exit === true ? { allowBrowserExit: true } : {}),
+            },
+            extra.signal,
+          );
+
+          // The summary is all a host that ignores structured content will
+          // show, so it carries the two things a user asked "close the
+          // openrouter tab" actually wants back: which tab went, and whether
+          // the browser went with it.
+          const what = closed.title || closed.url || closed.targetId;
+          const aftermath = closed.browserExited
+            ? ` — that was its last tab, so ${closed.engine} "${closed.profile}" closed too ` +
+              '(the profile keeps its logins)'
+            : `; ${closed.remainingTabs} tab${closed.remainingTabs === 1 ? '' : 's'} left`;
+          return validated(
+            schemas.closeCdpTabOutput,
+            closed as unknown as Record<string, unknown>,
+            `Closed "${what}"${aftermath}` +
+              (closed.warnings.length > 0 ? `\n${closed.warnings.join('\n')}` : ''),
+          );
+        },
+        // Acts on live browser state, like the run tools — not a read-only
+        // probe. Kept off `ensureServerReady` would mean a close against a
+        // stopped server died on a bare ECONNREFUSED.
         { autoStart: true, signal: extra.signal },
       ),
   );

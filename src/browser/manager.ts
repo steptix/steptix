@@ -409,6 +409,50 @@ export class PageTracker {
   }
 
   /**
+   * Target ids of every tab this session is tracking — not just the active one.
+   *
+   * Awaits any resolution still in flight rather than reading the cached field,
+   * because the caller is a guard: "no target id yet" must not read as "this
+   * session is not on that tab". A session can `switchPage` back to any tab it
+   * holds, so all of them are load-bearing, and a tab whose id never resolved
+   * is simply omitted — it cannot match an id the caller is asking about.
+   */
+  async resolvedTargetIds(): Promise<string[]> {
+    const ids = await Promise.all(
+      this.pages.map(async (entry) => {
+        if (entry.targetId !== null) return entry.targetId;
+        const pending = this.targetIdResolutions.get(entry.page);
+        return pending ? await pending : null;
+      }),
+    );
+    return ids.filter((id): id is string => id !== null);
+  }
+
+  /**
+   * The active tab's id and url, for `list_sessions`.
+   *
+   * Deliberately no title: `page.title()` is a round-trip into the page, and
+   * one wedged page would stall a listing that already carries a timeout for
+   * exactly that reason. `describeActiveTab` is the variant that pays for a
+   * title, and it is called per step, where the cost is already budgeted.
+   */
+  async activeTabRef(): Promise<{ targetId: string | null; url: string } | null> {
+    const entry = this.pages[this.activeIndex] ?? this.pages[0];
+    if (!entry) return null;
+    if (entry.targetId === null) {
+      const pending = this.targetIdResolutions.get(entry.page);
+      entry.targetId = pending ? await pending : null;
+    }
+    let url = '';
+    try {
+      url = entry.page.url();
+    } catch {
+      // Page closed underneath us; the id is still the useful half.
+    }
+    return { targetId: entry.targetId, url };
+  }
+
+  /**
    * Reassign a custom label to an already-tracked page. Used by the openPage
    * action when the test author supplies an `as` field — the auto-handler
    * registered the page as `page:N` first, this lets us replace that label

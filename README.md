@@ -147,7 +147,8 @@ and one cache. If no server is running it starts one for you.
 | `get_page_content` | Read a session's current page — visible text, or the cleaned DOM |
 | `server_status` | Health of the Sessions API server |
 | `start_cdp_browser` | Launch (or return) a persistent browser you can sign into — see below |
-| `list_cdp_browsers` | Which CDP browsers and profiles this project has |
+| `list_cdp_browsers` | Which CDP browsers and profiles this project has, and their open tabs |
+| `close_cdp_tab` | Close one tab in a CDP browser |
 
 Successive `run_steps` calls share a browser, so an agent can send a few steps,
 read the result, then send a few more against the same page — with captured
@@ -192,6 +193,39 @@ under `.aiui/cdp-profiles/`.
   profile stays signed in, so the next run skips the login page — and may pass
   without exercising it. `reset: true` wipes the profile first. It is the only
   destructive operation here and it is refused while the browser is running.
+
+#### Working with its tabs
+
+`list_cdp_browsers` reports each browser's open tabs with a stable `targetId`,
+and which session (if any) is driving each one. That id is the address for both
+things you can do with a tab:
+
+> *"Close the openrouter tab"*
+
+The agent lists the tabs, works out which one you meant from the titles and
+urls, and calls `close_cdp_tab` with that id. Matching is the agent's job on
+purpose — there is no fuzzy matching in the tool, because closing the wrong tab
+cannot be undone.
+
+> *"Run the checkout steps in the tab where I set up the cart"*
+
+Same id, passed as `config.cdp: {profile: "default", tab: "targetId:<id>"}` on a
+**new** session. Without a `tab`, attaching opens a fresh tab and leaves yours
+alone — which is safe, and not what you asked for.
+
+Two refusals worth knowing about:
+
+- **A tab a session is driving cannot be closed.** Close the session first.
+  This is why the tab list names the session — you can see it before you try.
+- **Closing a browser's last tab closes the browser**, so it needs
+  `allow_browser_exit: true`. There is no such thing as a browser with zero
+  tabs, so this is the honest way to say "stop the browser". Nothing is lost:
+  the profile keeps its logins and `start_cdp_browser` reopens it signed in.
+
+To close a **window**, close its tabs — a window disappears with its last one.
+A window is not a separate browser: one browser process holds any number of
+windows, all sharing the profile, the port and the cookies. A separate browser
+is a separate *profile*.
 - **Tests sharing a browser are not independent.** Running several at once
   against one profile is supported and often what you want, but they share one
   set of cookies, and they see each other's tabs — a tab any of them opens is

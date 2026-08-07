@@ -13,6 +13,7 @@ import {
   type ApiClient,
   type ApiClientOptions,
   type CdpBrowsers,
+  type ClosedCdpTab,
   type LastRunInfo,
   type PageContent,
   type RunEvent,
@@ -311,6 +312,21 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
         available: body.available ?? [],
         foreign: body.foreign ?? [],
       };
+    },
+
+    async closeCdpTab(args, signal): Promise<ClosedCdpTab> {
+      const params = new URLSearchParams({ projectRoot: args.projectRoot });
+      if (args.allowBrowserExit) params.set('allowBrowserExit', 'true');
+      // A target id is opaque hex today, but it is a path segment either way —
+      // encoded so a future id containing `/`, `?` or `#` addresses the tab it
+      // names rather than a different route.
+      const res = await doFetch(
+        `${base}/cdp/browsers/${args.port}/tabs/${encodeURIComponent(args.targetId)}` +
+          `?${params.toString()}`,
+        { method: 'DELETE', headers, ...(signal ? { signal } : {}) },
+      );
+      await assertOk(res);
+      return (await res.json()) as ClosedCdpTab;
     },
 
     async startCdpBrowser(body, signal): Promise<StartedCdpBrowser> {

@@ -6,6 +6,7 @@ import type { Config } from '../config/types.js';
 import {
   knownProfiles,
   startCdpBrowser,
+  closeCdpTab,
   DEFAULT_PROFILE,
   type CdpFailureKind,
   type StartResult,
@@ -781,15 +782,25 @@ export function createApiServer(
         req.query['includeForeignTabs'] === 'true' || req.query['includeForeignTabs'] === '1';
 
       const profiles = await knownProfiles(projectRoot);
-      const running = profiles
-        .filter((p) => p.live && p.port !== null)
-        .map((p) => ({
-          engine: p.engine,
-          profile: p.profile,
-          port: p.port as number,
-          profileDir: p.profileDir,
-          tabs: p.tabs ?? [],
-        }));
+      const live = profiles.filter((p) => p.live && p.port !== null);
+      // Which session is on which tab (stories/cdp-tabs.md §1). A map lookup
+      // against sessions this server already holds — the per-page target ids
+      // were resolved and cached when each page was adopted, so this costs no
+      // CDP round-trip. It is what makes the close refusal predictable rather
+      // than a surprise: the agent can see a tab is spoken for before trying.
+      const holders = await Promise.all(
+        live.map(async (p) => sessionManager.sessionsByTarget(p.port as number)),
+      );
+      const running = live.map((p, i) => ({
+        engine: p.engine,
+        profile: p.profile,
+        port: p.port as number,
+        profileDir: p.profileDir,
+        tabs: (p.tabs ?? []).map((t) => ({
+          ...t,
+          sessionId: holders[i]?.get(t.targetId) ?? null,
+        })),
+      }));
       // No `port` field at all, rather than `port: null`. An `available` entry
       // is a directory, not a browser; giving it a port-shaped hole invites a
       // caller to try to attach to it.
@@ -891,6 +902,76 @@ export function createApiServer(
       next(err);
     }
   });
+
+  // DELETE /cdp/browsers/:port/tabs/:targetId (stories/cdp-tabs.md §2)
+  //
+  // The one destructive verb over a live browser. Every guard lives in
+  // `closeCdpTab`; this route validates its inputs, supplies the session join
+  // the registry cannot see, and maps failures onto status codes.
+  app.delete(
+    '/cdp/browsers/:port/tabs/:targetId',
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const projectRoot =
+          typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
+        if (!projectRoot) {
+          res.status(400).json({ error: 'projectRoot query parameter is required' });
+          return;
+        }
+        if (!path.isAbsolute(projectRoot)) {
+          res
+            .status(400)
+            .json({ error: `projectRoot must be an absolute path (got "${projectRoot}")` });
+          return;
+        }
+
+        const port = Number(req.params.port);
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+          res.status(400).json({ error: `port must be a valid TCP port (got "${req.params.port}")` });
+          return;
+        }
+
+        const targetId = String(req.params.targetId ?? '');
+        if (targetId === '') {
+          res.status(400).json({ error: 'targetId is required' });
+          return;
+        }
+
+        const allowBrowserExit =
+          req.query['allowBrowserExit'] === 'true' || req.query['allowBrowserExit'] === '1';
+
+        const result = await closeCdpTab({
+          projectRoot,
+          port,
+          targetId,
+          allowBrowserExit,
+          // Resolved per call, not cached: a session that bound this tab since
+          // the caller last listed must still be seen.
+          sessionHolding: async (id) => (await sessionManager.sessionsByTarget(port)).get(id) ?? null,
+        });
+
+        if (!result.ok) {
+          res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+          return;
+        }
+
+        res.status(200).json({
+          closed: true,
+          targetId: result.targetId,
+          title: result.title,
+          url: result.url,
+          engine: result.engine,
+          profile: result.profile,
+          port: result.port,
+          remainingTabs: result.remainingTabs,
+          browserExited: result.browserExited,
+          warnings: result.warnings,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // Error handling middleware
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -1011,9 +1092,15 @@ function statusForCdpFailure(kind: CdpFailureKind): number {
   switch (kind) {
     case 'invalid_input':
       return 400;
+    // The port is not one of ours, or the browser has no such tab. 404 rather
+    // than 409: nothing about the state needs changing, the caller named
+    // something that is not here.
+    case 'not_found':
+      return 404;
     // Well-formed, but the state on disk says no: a live browser on the
-    // profile, a directory we did not create. Retrying verbatim will fail
-    // the same way, which is what 409 tells a client.
+    // profile, a directory we did not create, a tab a session is driving.
+    // Retrying verbatim will fail the same way, which is what 409 tells a
+    // client.
     case 'refused':
       return 409;
     case 'launch_failed':

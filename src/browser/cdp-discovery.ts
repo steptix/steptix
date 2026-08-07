@@ -104,6 +104,25 @@ export async function probePort(
     return { port, reachable: true, engine, tabs: null, error: 'malformed /json/list' };
   }
 
+  return { port, reachable: true, engine, tabs: toPageTabs(listJson) };
+}
+
+/**
+ * The page-tab filter, shared by every caller that counts or names tabs.
+ *
+ * Exported rather than inlined because two callers must agree exactly:
+ * `probePort` (what a caller is shown) and the close path (what may be closed,
+ * and whether a tab is the *last* one). If they drifted, a browser whose only
+ * other target is an extension page would be listed as having one tab and
+ * refuse the close as "not the last tab" — or worse, permit a close that
+ * silently exits the browser. One filter, one truth.
+ *
+ * `devtools://` and `chrome-extension://` pages are excluded; `chrome://newtab`
+ * is NOT — W0 confirmed a fresh browser's new-tab page is an ordinary,
+ * closable `type: 'page'` target, and a user looking at their window counts it.
+ */
+export function toPageTabs(listJson: unknown): CdpDiscoveryTab[] {
+  if (!Array.isArray(listJson)) return [];
   const tabs: CdpDiscoveryTab[] = [];
   for (const raw of listJson as RawTab[]) {
     if (!raw || raw.type !== 'page') continue;
@@ -117,7 +136,81 @@ export async function probePort(
       url,
     });
   }
-  return { port, reachable: true, engine, tabs };
+  return tabs;
+}
+
+/** Page tabs on a port, or null when the browser could not be reached. Thin
+ *  wrapper over `/json/list` for callers that already know the port is ours
+ *  and do not need the engine re-confirmed. */
+export async function listPageTabs(
+  port: number,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  fetchFn: typeof fetch = fetch,
+): Promise<CdpDiscoveryTab[] | null> {
+  try {
+    return toPageTabs(await fetchJson(`http://127.0.0.1:${port}/json/list`, timeoutMs, fetchFn));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask the browser to close one tab: `GET /json/close/<targetId>`.
+ *
+ * **The acknowledgement is not the outcome, and the gap is real.** W0 measured
+ * the browser answering `200 "Target is closing"` in 1–5 ms while the tab took
+ * 7 ms (Chrome) / 41 ms (Edge) to leave `/json/list`. A caller that reports
+ * success on this return value is reporting an intention. Poll
+ * `listPageTabs` until the id is absent — that is what `closed: true` means.
+ *
+ * An unknown id answers **404 `No such target id: …`**, which is the browser
+ * itself distinguishing "already closed" from "closed just now". Reported as
+ * `notFound` so the caller can say which happened rather than swallowing it as
+ * an idempotent success.
+ *
+ * Both behaviours verified on Chrome 150 and Edge 151; the DevTools HTTP
+ * surface needs no WebSocket, so this stays as cheap as the probe beside it.
+ */
+export async function closeTab(
+  port: number,
+  targetId: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ ok: boolean; notFound: boolean; error: string | null }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchFn(
+      `http://127.0.0.1:${port}/json/close/${encodeURIComponent(targetId)}`,
+      { signal: controller.signal },
+    );
+    if (res.ok) return { ok: true, notFound: false, error: null };
+    return {
+      ok: false,
+      notFound: res.status === 404,
+      error: `HTTP ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, notFound: false, error: errorMessage(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Whether anything still answers `/json/version` on this port. The signal that
+ *  a browser has exited — used to confirm a last-tab close, where the tab list
+ *  cannot be read afterwards because the server serving it is gone. */
+export async function portAnswers(
+  port: number,
+  timeoutMs: number = 500,
+  fetchFn: typeof fetch = fetch,
+): Promise<boolean> {
+  try {
+    await fetchJson(`http://127.0.0.1:${port}/json/version`, timeoutMs, fetchFn);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function fetchJson(url: string, timeoutMs: number, fetchFn: typeof fetch): Promise<unknown> {

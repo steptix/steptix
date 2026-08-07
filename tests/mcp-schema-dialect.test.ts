@@ -58,6 +58,7 @@ describe('tool schemas as they go out on the wire', () => {
 
     // Guards the guard: an empty list would make every assertion below vacuous.
     expect(tools.map((t) => t.name).sort()).toEqual([
+      'close_cdp_tab',
       'close_session',
       'get_last_run',
       'get_page_content',
@@ -152,6 +153,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['serverStatusInput', schemas.serverStatusInput, 'input'],
     ['listCdpBrowsersInput', schemas.listCdpBrowsersInput, 'input'],
     ['startCdpBrowserInput', schemas.startCdpBrowserInput, 'input'],
+    ['closeCdpTabInput', schemas.closeCdpTabInput, 'input'],
     ['runResultOutput', schemas.runResultOutput, 'output'],
     ['listTestFilesOutput', schemas.listTestFilesOutput, 'output'],
     ['listSessionsOutput', schemas.listSessionsOutput, 'output'],
@@ -161,6 +163,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['serverStatusOutput', schemas.serverStatusOutput, 'output'],
     ['listCdpBrowsersOutput', schemas.listCdpBrowsersOutput, 'output'],
     ['startCdpBrowserOutput', schemas.startCdpBrowserOutput, 'output'],
+    ['closeCdpTabOutput', schemas.closeCdpTabOutput, 'output'],
   ];
 
   /** The schema minus its dialect declaration — the part that must not differ. */

@@ -364,6 +364,15 @@ export interface SessionListItem {
    *  only, since `port` is what selected the browser — and is null when the
    *  caller addressed it by port and named no profile. */
   cdp: { port: number; profile: string | null } | null;
+  /**
+   * The tab this session is currently on (stories/cdp-tabs.md §4).
+   *
+   * Answers "which session is driving my cart tab?" without digging through a
+   * previous run's step results. Set for launch-mode sessions too — target ids
+   * are cached in both modes — so the field means "the tab", not "the CDP tab".
+   * No title: see `PageTracker.activeTabRef`.
+   */
+  tab: { targetId: string | null; url: string } | null;
 }
 
 /** How to read the page — see stories/page-content.md §1. */
@@ -1446,6 +1455,10 @@ export class SessionManager {
         pageTitle,
         totalStepsExecuted: session.totalStepsExecuted,
         cdp: cdpBinding(session),
+        // The sync variant cannot await a target-id resolution, so it reports
+        // the url alone rather than blocking. The async list below is what
+        // `GET /sessions` — and therefore `list_sessions` — actually serves.
+        tab: currentUrl === '' ? null : { targetId: null, url: currentUrl },
       });
     }
 
@@ -1472,6 +1485,13 @@ export class SessionManager {
         // ignore
       }
 
+      let tab: SessionListItem['tab'] = null;
+      try {
+        tab = await session.browserSession.pageTracker.activeTabRef();
+      } catch {
+        // A diagnostic field must never be the reason a listing fails.
+      }
+
       items.push({
         sessionId: id,
         status: session.status === 'executing' ? 'executing' : 'active',
@@ -1479,10 +1499,49 @@ export class SessionManager {
         pageTitle,
         totalStepsExecuted: session.totalStepsExecuted,
         cdp: cdpBinding(session),
+        tab,
       });
     }
 
     return items;
+  }
+
+  /**
+   * Which live session, if any, is driving each tab of the CDP browser on
+   * `port` — `targetId` → `sessionId`.
+   *
+   * Serves two callers with one join: the tab listing's `sessionId` field, and
+   * the close guard. Sessions are filtered by port first, so a project running
+   * launch-mode sessions pays nothing — those are on disposable browsers with
+   * no CDP port and can never hold a tab of this one.
+   *
+   * **Only this server's sessions are visible.** A tab driven by another
+   * Sessions API server, or by a human clicking in the window, is unknowable
+   * from here — consistent with the standing decision that parallel users of
+   * one CDP browser own the consequences.
+   */
+  async sessionsByTarget(port: number): Promise<Map<string, string>> {
+    const byTarget = new Map<string, string>();
+
+    await Promise.all(
+      [...this.sessions].map(async ([id, session]) => {
+        if (session.status === 'closed') return;
+        if (session.sessionConfig.cdp?.port !== port) return;
+        try {
+          for (const targetId of await session.browserSession.pageTracker.resolvedTargetIds()) {
+            // First writer wins. Two sessions can legitimately hold the same
+            // tab (they share the browser's context), and for both callers —
+            // a listing label and a refusal — naming one is enough.
+            if (!byTarget.has(targetId)) byTarget.set(targetId, id);
+          }
+        } catch {
+          // A session whose tabs cannot be enumerated contributes nothing
+          // rather than failing the whole join.
+        }
+      }),
+    );
+
+    return byTarget;
   }
 
   /**

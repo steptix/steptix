@@ -20,6 +20,9 @@ Tools
   close_session     close a session and its browser
   get_last_run      report path and token totals for a finished run
   get_page_content  read a session's current page as text or cleaned DOM
+  list_cdp_browsers persistent CDP browsers and profiles for this project
+  start_cdp_browser launch (or return) a CDP browser you can sign into by hand
+  close_cdp_tab     close one tab in a CDP browser
   server_status     health of the Sessions API server
 
 Environment
