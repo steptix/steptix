@@ -255,9 +255,23 @@ Behind the existing auth middleware, beside the two routes of
    excluded) — shared helper, not a re-implementation, so the close can
    never refuse or count tabs the list would not show. Missing → 404 with
    the both-readings message (§Locked).
-3. **If it is the last page tab, require `allowBrowserExit`** — refuse
+3. **Refuse if a live managed session holds it** (409, naming the session).
+4. **If it is the last page tab, require `allowBrowserExit`** — refuse
    (409) without it, naming the flag and that the browser will exit.
-4. **Refuse if a live managed session holds it** (409, naming the session).
+
+   *These two were originally the other way round, on the grounds that the
+   common refusal should be the cheap one. That was wrong: a one-tab browser
+   driven by a session is entirely reachable, and the last-tab refusal then
+   fires first and tells the caller to pass `allow_browser_exit: true` —
+   advice that leads straight into a different refusal. A remedy that does
+   not work costs more than the check it saved.*
+
+   **Concurrent closes against one browser must be serialised by the caller**
+   (the route does, per port). Guard 4 reads a tab list to decide whether
+   this is the last tab; two overlapping closes both read the same pre-close
+   list, both conclude they are not closing the last tab, and the browser
+   exits with neither caller having asked — the one guarantee
+   `allow_browser_exit` exists to give, bypassed.
 5. **Close it, then confirm it is gone.** For an ordinary tab: poll the
    tab list until the id is absent, bounded (~2 s), and report the count
    observed. For a last tab the success signal inverts — the DevTools
@@ -489,6 +503,70 @@ unit test. Both are fixed, with a regression test each.
    separate, much shorter budget (1.5 s) for confirming a process exit —
    which W0 measured at 95–286 ms, and which would otherwise make every
    last-tab close feel broken.
+
+## Found in adversarial review
+
+An independent reviewer ran against the finished branch. Every item below was
+reproduced by execution before being fixed; several were proved by mutating
+the source and showing the suite stayed green.
+
+**Defects that would have shipped:**
+
+1. **`allow_browser_exit` was bypassable by two concurrent closes.** Both read
+   a two-tab list, both concluded they were not closing the last tab, and the
+   browser exited with neither caller having asked — an MCP host issuing two
+   tool calls in one turn is enough. Fixed with a per-browser queue in the
+   route (a *queue*, not the single-flight the launch path uses: two closes of
+   two different tabs must both happen, just not at once).
+2. **The confirm-gone poll could never succeed once the browser was
+   unreachable.** The predicate required a readable tab list, so a browser that
+   exited during the close burned the full budget and then told the agent the
+   tab "was still open", blaming a `beforeunload` dialog — about a browser that
+   no longer existed. It also made the zero-tabs-left branch unreachable in
+   exactly the case it was added for.
+3. **`list_cdp_browsers` hard-failed against a Sessions API server from an
+   older build.** `sessionId` is required-and-nullable, and the handler passed
+   the server's response through unnormalised — so a missing key degraded the
+   whole listing to `isError` with nothing readable in it. Reachable without
+   doing anything wrong: readiness checks verify the server's *identity*, not
+   its version, so a server left running from a previous build is used happily.
+   The first call of this story's own flow was dead. `list_sessions` already
+   normalised its equivalent field; this one was missed.
+4. **The session guard enumerated only the session's *active* browser.**
+   `browserSession` is a snapshot and `openBrowser` auto-promotes, so a session
+   that attached to a CDP tab and then opened a second browser reported the
+   wrong browser's tabs — the tab it was really driving looked unheld, and the
+   guard would have let it be yanked mid-run. Now walks `browserTracker.all()`.
+5. **`mcp.cdp.allowUnowned` granted nothing for a close.** The MCP gate let a
+   foreign port through and the registry then refused it one layer later, since
+   ownership is proved from `knownProfiles`, which only ever holds this
+   project's profiles. The refusal even recommended the setting. Now passed
+   through to the server as `allowUnowned`, the same shape and reasoning as
+   `includeForeignTabs` on the listing.
+6. **A 404 from `/json/close` was absorbed as success**, handing back
+   `closed: true` with a title and url for a tab something else had closed.
+   `notFound` was computed and then unused.
+7. **A resident browser with zero tabs was reported in silence** on the
+   ordinary path — `remainingTabs: 0, browserExited: false, warnings: []` is a
+   contradiction with nothing to act on. The last-tab branch already warned.
+
+**Two test gaps, both proved by mutation.** The shared page filter was never
+exercised through the close path — every close test injected `listTabs`, and
+rewriting `listPageTabs` to skip `toPageTabs` entirely left 169 tests green.
+That is the one test this story's own Tests section named as must-exist-first.
+And the whole session-join half (`sessionsByTarget`, `resolvedTargetIds`,
+`activeTabRef`) had no coverage at all: the route test mocks `closeCdpTab`
+wholesale and the registry tests inject `sessionHolding` as a lambda, so the
+guard was proven only against a fake of itself — which is exactly where defect
+4 was hiding. Both now covered.
+
+**Hardening on two unconfirmed risks the reviewer flagged honestly as
+unproven:** `resolvedTargetIds` had no timeout while sitting on two HTTP paths
+that have no deadline of their own (now bounded, returning a partial answer
+rather than hanging a route), and a page whose first target-id lookup failed
+stayed invisible forever, because re-awaiting a settled promise is not a retry
+(now genuinely retried — the first fix for this was wrong and its test caught
+it).
 
 **Two smaller things worth recording.** `chrome://newtab` is an ordinary
 closable `page` target and is deliberately *kept* by the shared filter:

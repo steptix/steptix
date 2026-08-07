@@ -12,6 +12,7 @@ import {
   PROFILE_MARKER,
   type RegistryDeps,
 } from '../src/browser/cdp-registry.js';
+import { listPageTabs } from '../src/browser/cdp-discovery.js';
 
 const ROOT = path.join('C:', 'proj');
 const PROFILES = cdpProfilesRoot(ROOT);
@@ -762,16 +763,160 @@ describe('closeCdpTab', () => {
     expect(result).toMatchObject({ ok: true, targetId: 'A1B2C3' });
   });
 
-  it('checks the last-tab rule BEFORE asking about sessions', async () => {
-    // Ordering is deliberate: the common refusal should be the cheap one, and
-    // a caller who has not asked for a browser exit learns that first.
+  it('refuses a session-held LAST tab by naming the session, not the exit flag', async () => {
+    // The cheap ordering (last-tab first) produced a remedy that does not
+    // work: the caller is told to pass allow_browser_exit, does so, and hits a
+    // completely different refusal. A one-tab browser driven by a session is
+    // reachable — `cdp.tab: 'targetId:<id>'` binds an existing tab and opens
+    // nothing new — so the session check has to come first.
     const h = liveBrowser([TWO_TABS[0]!]);
-    const holding = vi.fn(() => null);
-    await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3', sessionHolding: holding },
+    const result = await closeCdpTab(
+      {
+        projectRoot: ROOT,
+        port: PORT,
+        targetId: 'A1B2C3',
+        sessionHolding: () => 'mcp:cart',
+      },
       h.deps,
     );
-    expect(holding).not.toHaveBeenCalled();
+    const error = (result as { error: string }).error;
+    expect(error).toContain('mcp:cart');
+    expect(error).toContain('close_session');
+    expect(error).not.toContain('allow_browser_exit');
+  });
+
+  it('reports a tab something else closed first, rather than claiming the close', async () => {
+    // The browser answers 404 for an id it no longer has. Absorbing that as
+    // success would hand back `closed: true` with a title and url for a tab
+    // this call did not close.
+    const h = liveBrowser(TWO_TABS);
+    h.deps.close = (async () => ({ ok: false, notFound: true, error: 'HTTP 404' })) as never;
+
+    const result = await closeCdpTab(
+      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    expect((result as { error: string }).error).toMatch(/something else closed it/i);
+  });
+
+  it('does not report "still open" about a browser that exited mid-close', async () => {
+    // The poll predicate required a READABLE tab list, so a browser that went
+    // away during the close could never satisfy it: the full budget burned,
+    // then a 500 telling the agent the tab was still open and blaming a
+    // "leave site?" dialog — about a browser that no longer existed.
+    const h = liveBrowser(TWO_TABS);
+    let closedYet = false;
+    h.deps.close = (async () => { closedYet = true; return { ok: true, notFound: false, error: null }; }) as never;
+    h.deps.listTabs = (async () => (closedYet ? null : TWO_TABS)) as never;
+    h.deps.alive = (async () => false) as never;
+
+    const result = await closeCdpTab(
+      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ ok: true, browserExited: true, remainingTabs: 0 });
+  });
+
+  it('warns when an ordinary close leaves a running browser with no tabs', async () => {
+    const h = liveBrowser(TWO_TABS);
+    let stage = 0;
+    h.deps.close = (async () => ({ ok: true, notFound: false, error: null })) as never;
+    h.deps.listTabs = (async () => (stage++ === 0 ? TWO_TABS : [])) as never;
+    h.deps.alive = (async () => true) as never;
+    let clock = 0;
+    h.deps.now = (() => (clock += 500)) as never;
+
+    const result = await closeCdpTab(
+      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      h.deps,
+    );
+
+    // Zero tabs and a live browser is a contradiction to a reader; it must not
+    // be reported in silence.
+    expect((result as { warnings: string[] }).warnings.join(' ')).toMatch(/still running/i);
+  });
+
+  it('refuses an unowned port, and closes it when allowUnowned is passed', async () => {
+    // `knownProfiles` only ever holds this project's profiles, so without the
+    // flag a foreign browser can never be closed however the caller is
+    // permitted — which made mcp.cdp.allowUnowned advertise something it could
+    // not deliver.
+    const h = liveBrowser(TWO_TABS);
+    h.deps.probe = probeFor({ 9222: 'chrome' }) as never;
+    h.deps.listTabs = (async () => TWO_TABS.slice(0, 1)) as never;
+
+    const refused = await closeCdpTab(
+      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3' },
+      h.deps,
+    );
+    expect(refused).toMatchObject({ ok: false, kind: 'not_found' });
+
+    const allowed = await closeCdpTab(
+      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true, allowBrowserExit: true },
+      h.deps,
+    );
+    expect(allowed).toMatchObject({ ok: true, targetId: 'A1B2C3' });
+    // No profile of ours stands behind it, and the result says so rather than
+    // inventing a name.
+    expect((allowed as { profile: string }).profile).not.toBe('default');
+  });
+
+  it('still refuses an unowned port with nothing listening on it', async () => {
+    const h = liveBrowser(TWO_TABS);
+    h.deps.probe = probeFor({}) as never;
+    const result = await closeCdpTab(
+      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      h.deps,
+    );
+    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    expect((result as { error: string }).error).toMatch(/nothing is listening/i);
+  });
+
+  it('counts tabs through the SHARED filter, so the last-tab guard cannot drift', async () => {
+    // Story's named must-have test. Every other close test injects `listTabs`,
+    // which leaves the real tab source — and therefore the filter — unexercised
+    // by this path. A mutation removing `toPageTabs` from `listPageTabs` left
+    // 169 tests green.
+    //
+    // This browser has ONE page tab plus an extension page and a devtools
+    // page. If the close path counted raw targets it would see three, decide
+    // this is not the last tab, and silently exit the browser.
+    const { deps } = fakeFs({
+      dirs: [PROFILES, DIR],
+      files: { [path.join(DIR, 'DevToolsActivePort')]: `${PORT}\n/devtools/browser/x` },
+    });
+    const raw = [
+      { id: 'A1B2C3', type: 'page', title: 'Orders', url: 'https://shop/orders' },
+      { id: 'x1', type: 'page', title: 'Ext', url: 'chrome-extension://abc/x.html' },
+      { id: 'x2', type: 'page', title: 'DevTools', url: 'devtools://devtools/y' },
+      { id: 'x3', type: 'service_worker', title: 'sw', url: 'https://shop/sw.js' },
+    ];
+    const fetchFn = (async (url: string | URL | Request) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).endsWith('/json/list') ? raw : { Browser: 'Edg/151.0' }),
+    })) as unknown as typeof fetch;
+
+    const closeSpy = vi.fn(async () => ({ ok: true, notFound: false, error: null }));
+    const result = await closeCdpTab(
+      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      {
+        ...deps,
+        probe: probeFor({ [PORT]: 'edge' }),
+        // The REAL listPageTabs — the whole point of this test.
+        listTabs: ((p: number) => listPageTabs(p, 100, fetchFn)) as never,
+        close: closeSpy as never,
+        alive: (async () => true) as never,
+        sleep: async () => {},
+      },
+    );
+
+    expect(result).toMatchObject({ ok: false, kind: 'refused' });
+    expect((result as { error: string }).error).toContain('allow_browser_exit');
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 
   it('does not report success when the tab never actually goes away', async () => {

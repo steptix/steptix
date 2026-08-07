@@ -187,6 +187,11 @@ export interface TabInfo {
  *  `page.title()` has no timeout of its own. */
 const TAB_TITLE_TIMEOUT_MS = 500;
 
+/** Bound on sweeping every tracked page for its target id. Larger than the
+ *  title budget because it covers N pages, still small enough that a wedged
+ *  lookup cannot hold an HTTP request open. */
+const TARGET_ID_SWEEP_TIMEOUT_MS = 2_000;
+
 async function briefly<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -418,11 +423,35 @@ export class PageTracker {
    * is simply omitted — it cannot match an id the caller is asking about.
    */
   async resolvedTargetIds(): Promise<string[]> {
+    // Bounded, because both callers sit on an HTTP request: the browser
+    // listing and the close guard. Everything else that reaches into a page
+    // from those paths is timeout-guarded for the same reason, and an
+    // unbounded await here would let one wedged lookup hang a route that has
+    // no deadline of its own. On expiry the ids resolved so far are still
+    // returned — a partial answer degrades the guard, where no answer at all
+    // would hang the request.
+    return briefly(this.resolveAllTargetIds(), TARGET_ID_SWEEP_TIMEOUT_MS, []);
+  }
+
+  private async resolveAllTargetIds(): Promise<string[]> {
     const ids = await Promise.all(
       this.pages.map(async (entry) => {
         if (entry.targetId !== null) return entry.targetId;
+        // Join a lookup already in flight, so concurrent callers cost one
+        // round-trip between them.
         const pending = this.targetIdResolutions.get(entry.page);
-        return pending ? await pending : null;
+        let resolved = pending ? await pending : null;
+        if (resolved === null) {
+          // The head start settled without an answer. Awaiting that same
+          // settled promise again — which is all "join the in-flight lookup"
+          // does once it has finished — would leave the page permanently
+          // invisible after one transient failure. This list is a guard, and
+          // an invisible tab is one that can be closed out from under a
+          // running session, so it is worth a fresh attempt.
+          resolved = await resolvePageTargetId(entry.page);
+        }
+        if (resolved !== null) entry.targetId = resolved;
+        return resolved;
       }),
     );
     return ids.filter((id): id is string => id !== null);
@@ -735,6 +764,19 @@ export class BrowserTracker {
 
   has(label: string): boolean {
     return this.sessions.some((s) => s.label === label);
+  }
+
+  /**
+   * Every browser this session owns, not just the active one.
+   *
+   * `getActive()` is the wrong question for anything asking "does this session
+   * hold X", because `add()` auto-promotes: a session that attached to a CDP
+   * tab and then ran `openBrowser` has its CDP browser sitting at index 0 while
+   * the active pointer is on the new one. Callers that guard against closing
+   * something out from under a session must look at all of them.
+   */
+  all(): readonly BrowserSession[] {
+    return this.sessions.map((s) => s.session);
   }
 
   /** Switch to a tracked browser by label. Returns the session, throws on

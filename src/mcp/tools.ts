@@ -986,9 +986,22 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           includeForeign: true,
           includeForeignTabs: maySeeForeignTabs(project.cdpPermissions),
         });
+        // `sessionId` is required-and-nullable in the output schema, so a
+        // server that predates the field would fail validation outright and
+        // degrade the whole listing to `isError` with nothing readable in it —
+        // killing the first call of the tab flow against a Sessions API server
+        // left running from an earlier build. Normalised here for the same
+        // reason `list_sessions` normalises `tab`.
+        const normalized = {
+          ...browsers,
+          running: browsers.running.map((b) => ({
+            ...b,
+            tabs: b.tabs.map((t) => ({ ...t, sessionId: t.sessionId ?? null })),
+          })),
+        };
         return validated(
           schemas.listCdpBrowsersOutput,
-          browsers as unknown as Record<string, unknown>,
+          normalized as unknown as Record<string, unknown>,
           summarizeBrowsers(browsers),
         );
       }),
@@ -1132,6 +1145,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               port,
               targetId: args.target_id,
               ...(args.allow_browser_exit === true ? { allowBrowserExit: true } : {}),
+              // Read directly rather than through `maySeeForeignTabs`, which
+              // asks a different question (may this agent SEE a foreign
+              // browser's tab titles) that happens to consult the same field.
+              // Without this the gate above would let a foreign port through
+              // and the server would refuse it anyway with an unrelated "not a
+              // browser this project has running" — an opt-in that grants
+              // nothing.
+              ...(project.cdpPermissions.allowUnowned ? { allowUnowned: true } : {}),
             },
             extra.signal,
           );

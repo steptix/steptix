@@ -597,6 +597,66 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
     expect(closeCdpTabMock).not.toHaveBeenCalled();
   });
 
+  it('serialises concurrent closes against one browser', async () => {
+    // Without a queue the `allow_browser_exit` flag is bypassable, which is
+    // the one guarantee this route exists to give: two closes against a
+    // two-tab browser both read a list of length two, both conclude they are
+    // not closing the last tab, and the browser exits with neither caller
+    // having asked. An MCP host issuing two tool calls in one turn is enough.
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    closeCdpTabMock.mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return closedTab();
+    });
+
+    await Promise.all([del(51000, 'T1'), del(51000, 'T2'), del(51000, 'T3')]);
+
+    expect(maxConcurrent).toBe(1);
+    expect(closeCdpTabMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not serialise closes against DIFFERENT browsers', async () => {
+    // The queue is per browser. Two browsers are independent, and sharing one
+    // chain would make an unrelated close wait behind a slow one.
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    closeCdpTabMock.mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return closedTab();
+    });
+
+    await Promise.all([del(51000, 'T1'), del(51001, 'T2')]);
+
+    expect(maxConcurrent).toBe(2);
+  });
+
+  it('a failed close does not poison the queue for the next caller', async () => {
+    closeCdpTabMock.mockRejectedValueOnce(new Error('boom'));
+    closeCdpTabMock.mockResolvedValueOnce(closedTab());
+    expect((await del(51000, 'T1')).status).toBe(500);
+    expect((await del(51000, 'T2')).status).toBe(200);
+  });
+
+  it('forwards allowUnowned only when asked', async () => {
+    // Mirrors `includeForeignTabs` on the listing: the server honours what it
+    // is asked and the withholding lives MCP-side. Without the pass-through,
+    // mcp.cdp.allowUnowned would grant nothing for a close.
+    closeCdpTabMock.mockResolvedValue(closedTab());
+    await del(51000, 'T1');
+    expect(closeCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowUnowned: false });
+
+    closeCdpTabMock.mockClear();
+    await del(51000, 'T1', '&allowUnowned=true');
+    expect(closeCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowUnowned: true });
+  });
+
   it('supplies a session lookup the registry can call', async () => {
     // The registry cannot see the server's sessions, so the route injects the
     // join. Without it the "a session is driving that tab" guard silently

@@ -317,6 +317,7 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
     async closeCdpTab(args, signal): Promise<ClosedCdpTab> {
       const params = new URLSearchParams({ projectRoot: args.projectRoot });
       if (args.allowBrowserExit) params.set('allowBrowserExit', 'true');
+      if (args.allowUnowned) params.set('allowUnowned', 'true');
       // A target id is opaque hex today, but it is a path segment either way —
       // encoded so a future id containing `/`, `?` or `#` addresses the tab it
       // names rather than a different route.

@@ -1528,7 +1528,17 @@ export class SessionManager {
         if (session.status === 'closed') return;
         if (session.sessionConfig.cdp?.port !== port) return;
         try {
-          for (const targetId of await session.browserSession.pageTracker.resolvedTargetIds()) {
+          // Every browser the session tracks, NOT `session.browserSession` —
+          // that field is a snapshot of whichever browser is active, and
+          // `openBrowser` auto-promotes the one it launches. A session that
+          // attached to a CDP tab and then opened a second browser would
+          // otherwise report the *launch-mode* browser's tabs, so the tab it
+          // is really driving would look unheld and the close guard would let
+          // it be yanked mid-run.
+          const perBrowser = await Promise.all(
+            session.browserTracker.all().map((b) => b.pageTracker.resolvedTargetIds()),
+          );
+          for (const targetId of perBrowser.flat()) {
             // First writer wins. Two sessions can legitimately hold the same
             // tab (they share the browser's context), and for both callers —
             // a listing label and a refusal — naming one is enough.

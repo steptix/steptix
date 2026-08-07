@@ -194,6 +194,29 @@ under `.aiui/cdp-profiles/`.
   without exercising it. `reset: true` wipes the profile first. It is the only
   destructive operation here and it is refused while the browser is running.
 
+- **Tests sharing a browser are not independent.** Running several at once
+  against one profile is supported and often what you want, but they share one
+  set of cookies, and they see each other's tabs — a tab any of them opens is
+  adopted by all of them. A test that signs out affects the others. Every step
+  in the HTML report shows which tab it drove, and flags tabs that appeared
+  from somewhere else, so the interference is at least visible afterwards.
+  Suites that need real isolation should use ordinary launch mode.
+- **Treat a CDP profile as compromised by default.** An agent driving a
+  signed-in browser can reach everything that browser can, and per-step output
+  goes to the model provider. Sign these profiles into test accounts, not your
+  own.
+
+An agent may only drive browsers **this project launched**. Anything else — a
+browser you started yourself, or one another tool left on 9222 — is refused,
+and listing it withholds its tab titles and URLs. To lift that, a human edits
+`aiui.config.json`:
+
+```json
+{ "mcp": { "cdp": { "allowUnowned": true } } }
+```
+
+That gate deliberately lives in a file an agent cannot write.
+
 #### Working with its tabs
 
 `list_cdp_browsers` reports each browser's open tabs with a stable `targetId`,
@@ -226,28 +249,6 @@ To close a **window**, close its tabs — a window disappears with its last one.
 A window is not a separate browser: one browser process holds any number of
 windows, all sharing the profile, the port and the cookies. A separate browser
 is a separate *profile*.
-- **Tests sharing a browser are not independent.** Running several at once
-  against one profile is supported and often what you want, but they share one
-  set of cookies, and they see each other's tabs — a tab any of them opens is
-  adopted by all of them. A test that signs out affects the others. Every step
-  in the HTML report shows which tab it drove, and flags tabs that appeared
-  from somewhere else, so the interference is at least visible afterwards.
-  Suites that need real isolation should use ordinary launch mode.
-- **Treat a CDP profile as compromised by default.** An agent driving a
-  signed-in browser can reach everything that browser can, and per-step output
-  goes to the model provider. Sign these profiles into test accounts, not your
-  own.
-
-An agent may only drive browsers **this project launched**. Anything else — a
-browser you started yourself, or one another tool left on 9222 — is refused,
-and listing it withholds its tab titles and URLs. To lift that, a human edits
-`aiui.config.json`:
-
-```json
-{ "mcp": { "cdp": { "allowUnowned": true } } }
-```
-
-That gate deliberately lives in a file an agent cannot write.
 
 ### Host setup
 

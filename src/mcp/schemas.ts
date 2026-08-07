@@ -344,6 +344,9 @@ const ownedCdpTab = cdpTab.extend({
 export const closeCdpTabInput = toolSchema({
   target_id: z
     .string()
+    // An empty id would otherwise reach the wire as `/tabs/?projectRoot=…`,
+    // which matches no route and comes back as an unrelated error.
+    .min(1)
     .describe(
       'Exact targetId of the tab to close, from list_cdp_browsers. There is ' +
         'no fuzzy matching — match the user\'s words against the tab titles ' +

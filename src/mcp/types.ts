@@ -233,6 +233,10 @@ export interface CloseCdpTabArgs {
   targetId: string;
   /** Permission to close a browser's last tab, which ends the browser. */
   allowBrowserExit?: boolean;
+  /** Sent only when `mcp.cdp.allowUnowned` permits, exactly like
+   *  `includeForeignTabs` on the listing: the server honours what it is asked,
+   *  and not asking is the withholding. */
+  allowUnowned?: boolean;
 }
 
 export interface ClosedCdpTab {

@@ -760,6 +760,33 @@ export function createApiServer(
    */
   const cdpLaunchesInFlight = new Map<string, Promise<StartResult>>();
 
+  /**
+   * Serialises tab closes per browser. A **queue**, not a single-flight —
+   * two closes of two different tabs must both happen, just not at once.
+   *
+   * Without it the `allow_browser_exit` flag is bypassable, which is the one
+   * guarantee this route exists to give. Two concurrent closes against a
+   * two-tab browser both read a list of length two, both conclude they are not
+   * closing the last tab, and both proceed — and the browser exits with
+   * neither caller having asked for that. An MCP host issuing two tool calls
+   * in one turn ("close both of those") is enough to trigger it.
+   */
+  const cdpCloseQueues = new Map<string, Promise<unknown>>();
+
+  function queueCdpClose<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const tail = (cdpCloseQueues.get(key) ?? Promise.resolve())
+      // `.catch` so one failed close does not poison the chain for the next
+      // caller; the failure is still returned to whoever asked for it.
+      .then(work, work);
+    // Keep the queue keyed only while this link is the tail, so a browser that
+    // goes quiet does not retain its chain forever.
+    cdpCloseQueues.set(key, tail);
+    void tail.catch(() => {}).finally(() => {
+      if (cdpCloseQueues.get(key) === tail) cdpCloseQueues.delete(key);
+    });
+    return tail;
+  }
+
   app.get('/cdp/browsers', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const projectRoot = typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
@@ -939,16 +966,29 @@ export function createApiServer(
 
         const allowBrowserExit =
           req.query['allowBrowserExit'] === 'true' || req.query['allowBrowserExit'] === '1';
+        // Whether a browser this project did NOT launch may be closed. Same
+        // shape and same reasoning as `includeForeignTabs` on the listing: the
+        // server cannot tell an agent from a human, so it honours what it is
+        // asked, and the withholding lives MCP-side where `mcp.cdp.allowUnowned`
+        // is read. Without this the MCP gate would pass a foreign port that the
+        // registry then refuses anyway — an opt-in that says it grants
+        // something it cannot.
+        const allowUnowned =
+          req.query['allowUnowned'] === 'true' || req.query['allowUnowned'] === '1';
 
-        const result = await closeCdpTab({
-          projectRoot,
-          port,
-          targetId,
-          allowBrowserExit,
-          // Resolved per call, not cached: a session that bound this tab since
-          // the caller last listed must still be seen.
-          sessionHolding: async (id) => (await sessionManager.sessionsByTarget(port)).get(id) ?? null,
-        });
+        const result = await queueCdpClose(`${projectRoot} ${port}`, () =>
+          closeCdpTab({
+            projectRoot,
+            port,
+            targetId,
+            allowBrowserExit,
+            allowUnowned,
+            // Resolved per call, not cached: a session that bound this tab
+            // since the caller last listed must still be seen.
+            sessionHolding: async (id) =>
+              (await sessionManager.sessionsByTarget(port)).get(id) ?? null,
+          }),
+        );
 
         if (!result.ok) {
           res.status(statusForCdpFailure(result.kind)).json({ error: result.error });

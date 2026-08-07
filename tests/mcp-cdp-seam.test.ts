@@ -882,6 +882,56 @@ describe('tab and session visibility', () => {
     expect(sessions[0]!.tab).toEqual({ targetId: 'D4E5F6', url: 'https://shop.example/cart' });
   });
 
+  it('survives a server that predates the sessionId field', async () => {
+    // `sessionId` is required-and-nullable, so an unnormalised missing key
+    // fails structuredContent validation and degrades the whole listing to
+    // isError with nothing readable in it. Reachable without doing anything
+    // wrong: pull this branch, restart the MCP server, and the Sessions API
+    // server from the previous build is still holding the port — there is no
+    // version check, only an identity one. That would kill the FIRST call of
+    // the tab flow.
+    const h = await connect({
+      browsers: {
+        running: [
+          {
+            engine: 'edge',
+            profile: 'default',
+            port: 51000,
+            profileDir: 'c:/proj/p/edge-default',
+            tabs: [{ targetId: 'A1B2C3', title: 'Docs', url: 'https://openrouter.ai/docs' }],
+          },
+        ],
+      },
+    });
+    const result = await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
+
+    expect(result.isError).toBeFalsy();
+    const running = structured(result).running as { tabs: { sessionId: string | null }[] }[];
+    expect(running[0]!.tabs[0]!.sessionId).toBeNull();
+  });
+
+  it('sends allowUnowned for a close only when a human permitted it', async () => {
+    // Otherwise the gate lets a foreign port through and the server refuses it
+    // one layer later with an unrelated message — an opt-in that grants
+    // nothing.
+    const plain = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await plain.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(plain.closeCalls[0]).not.toHaveProperty('allowUnowned');
+
+    const permitted = await connect({
+      project: fakeProject({ cdpPermissions: { allowUnowned: true, ports: null } }),
+      browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN },
+    });
+    await permitted.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3' },
+    });
+    expect(permitted.closeCalls[0]).toMatchObject({ allowUnowned: true });
+  });
+
   it('reports a null tab rather than dropping the key on an older server', async () => {
     // A MISSING key fails `structuredContent` validation outright; a null one
     // is simply "not reported". The difference is a usable result versus none.
