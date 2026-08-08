@@ -215,8 +215,13 @@ be *called*).
 
 ### 2. Tool surface
 
-Seven tools, **bare names** — the host prefixes them, so an `aiui_`
-prefix would render as `mcp__aiui__aiui_run_steps`. Each declares a zod
+Eleven tools, **bare names** — the host prefixes them, so an `aiui_`
+prefix would render as `mcp__aiui__aiui_run_steps`. The seven enumerated
+below are this story's; the four added since are specced elsewhere —
+`start_cdp_browser` and `list_cdp_browsers` in
+[mcp-cdp-browser.md](mcp-cdp-browser.md), `close_cdp_tab` in
+[cdp-tabs.md](cdp-tabs.md), `get_page_content` in
+[page-content.md](page-content.md). Each declares a zod
 `outputSchema`; SDK 1.29.0's `registerTool` accepts **either** a raw
 shape or a `z.object({…})` (`ZodRawShapeCompat | AnySchema`), so either
 form is fine. Every tool accepts optional `project_root`, including the
@@ -270,6 +275,45 @@ v1 — every target host gives the agent filesystem access.
 
 `structuredContent` must be a JSON **object**, so the two list tools
 wrap their arrays: `{ files: [...] }` and `{ sessions: [...] }`.
+
+**Every tool's `content[]` carries the summary *and* the data.**
+`content[0]` is a short text summary; `content[1]` is
+`JSON.stringify(structuredContent)`, compact; any tool-specific block (the
+run tools' image) follows. This **reverses** an earlier rule here — *"do
+not duplicate the full JSON as text"* — which assumed `content` was merely
+the fallback channel for hosts that ignore structured output. Measured
+2026-08-08 across two hosts against one server, that assumption is wrong in
+both directions. Claude Code prefers `structuredContent` and, when it is
+present, records **only** that, transcript included. opencode returns
+`content` untouched whenever it is non-empty
+(`packages/opencode/src/mcp/catalog.ts`), so a summary is all its model
+ever sees: `list_cdp_browsers` arrived there as `1 running, 2 available
+(not started)`, carrying none of the `targetId`s that `close_cdp_tab`'s
+own description tells the agent to read out of it. The spec puts the duty
+on the server — *"a tool that returns structured content SHOULD also
+return the serialized JSON in a TextContent block"* — so this is us
+catching up, not a workaround for one host.
+
+Keep the summary: it carries counts, truncation and warning tallies that
+raw JSON does not narrate. Keep the JSON block **unconditional** — a
+per-tool opt-out cannot coexist with §Tests' all-tools guard, so any future
+exception must be added to both in one change or it is not visible.
+`isError` results are untouched: they carry no `structuredContent`, and
+their `content` text is the one thing Claude Code *does* persist, which is
+why refusals still reach the model there.
+
+Two consequences, stated rather than left to be discovered.
+`get_page_content` **drops** its own raw-page block instead of stacking on
+top of the standard one (measured 1.05x the page for replacing, 2.05x for
+stacking), so its content-block copy is now escaped text inside an object;
+no human reader pays for that, since Claude Code records only
+`structuredContent` and opencode's TUI hides tool output by default. And on
+content-only hosts, `captures` and `steps[].output` — values scraped from
+the page — now travel to a model provider that did not previously receive
+them. That is deliberate, and it is a different call from the screenshot
+one below: a screenshot would not exist at all unless opted in, whereas
+captured text is produced on every run and is the data the tool exists to
+return.
 
 **Result shape** for the two run tools:
 
@@ -404,10 +448,10 @@ sent array, or `null`.
   image, no warning.
 - **`content[]`** is never empty: `content[0]` is a short **text
   summary** (status, N/M passed, first error, reportPath) — the SDK
-  synthesizes no text from `structuredContent`, and hosts that ignore
-  structured output, including the Claude Code transcript, show only
-  `content`. Do not duplicate the full JSON as text. The image block,
-  when opted in, is appended.
+  synthesizes no text from `structuredContent`, so without it a
+  content-rendering host has nothing. `content[1]` is the serialized
+  result, per the all-tools rule above. The image block, when opted in,
+  is appended **last**.
 
 **Output validation is self-enforced.** `validateToolOutput` throws when
 `structuredContent` is missing or fails the schema, but the SDK's
@@ -420,7 +464,7 @@ and the SDK returns the original object so extras still reach the host),
 but **missing required keys are fatal** — every nullable field needs an
 explicit `.nullable()`/`.optional()`: `error`, `reportPath`,
 `durationMs`, `frameName`, `output`, `text`, `sentIndex`. **This applies
-to all seven schemas, not just the run result** — `server_status`
+to all 11 schemas, not just the run result** — `server_status`
 carries `inspector: string|null` and `idleTimeoutMinutes: number|null`
 straight from `HealthResponse`, and `get_last_run` has two nullables of
 its own.
@@ -1092,7 +1136,7 @@ does not typecheck them.
   **valid** `status:'error'` result with the diagnostic in `warnings[]`,
   never `isError:true`.
 - **MCP seam** (`InMemoryTransport`, injected client factory): all
-  **seven** tools; progress emitted with a token and `progress`
+  **11** tools; progress emitted with a token and `progress`
   strictly increasing and never exceeding `total`; the no-token case
   driven by calling `callTool` **without** `onprogress` (which is what
   creates the token); cancellation aborts and leaves the session open;
@@ -1101,6 +1145,18 @@ does not typecheck them.
   **`toBeFalsy()`**, because the SDK leaves `isError` **`undefined`**
   on success, not `false`. Use `{ timeout: 30_000 }` on any test that
   exercises `get_last_run`'s ~12 s poll, as existing SSE tests do.
+- **Content blocks carry the data** — a guard over **every registered
+  tool**: call each one successfully and assert some `content` block is
+  exactly `JSON.stringify(structuredContent)` (equality, not
+  `toContain`, so pretty-printing fails it too). The per-tool arguments
+  table this needs is itself the opt-out the guard exists to prevent, so
+  assert **its keys equal `listTools()`** — the trick
+  `mcp-schema-dialect.test.ts` already uses for schemas. Plus one
+  explicit case that `get_page_content` does **not** ship the page twice
+  in `content`. It needs a real project on disk (`list_test_files`
+  confines `tests.dir` against `allowedRoots()`, and `run_test_file`
+  reads a file), so: tmpdir + `aiui.config.json` + `AIUI_MCP_ROOTS`, as
+  the real-app seam does.
 - **Retry-without-config**: first call sends config, second omits; a
   session recreated out-of-process triggers the retry; a connect failure
   does not burn the "configured" flag; the pin test on the server's

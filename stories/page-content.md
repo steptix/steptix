@@ -371,8 +371,9 @@ the loop:
 - `format`/`selector`/`max_chars` reach the wire; **nothing** is sent that the
   caller did not supply, so the server stays the single owner of the defaults.
 - A truncated read reports `truncated` in structured content *and* names the
-  counts and `selector` in the text summary — the summary is all a host that
-  ignores structured content will show.
+  counts and `selector` in the text summary — a content-only host would
+  otherwise have to infer truncation from the serialized result rather than
+  be told.
 - A non-`mcp:` session is refused, the message names `allow_foreign_session`
   and what would be disclosed, and **no request is made**; with the flag it
   proceeds.

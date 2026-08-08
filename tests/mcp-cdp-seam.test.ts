@@ -181,6 +181,12 @@ function text(result: unknown): string {
     .join('\n');
 }
 
+/** `content[0]` alone — the human-readable summary, without the serialized
+ *  `structuredContent` block that follows it. */
+function summary(result: unknown): string {
+  return (result as { content: { type: string; text?: string }[] }).content[0]?.text ?? '';
+}
+
 const RUNNING = [
   { engine: 'edge', profile: 'default', port: 51000, profileDir: 'c:/proj/p/edge-default', tabs: [] },
 ];
@@ -828,8 +834,12 @@ describe('close_cdp_tab', () => {
     expect(structured(result).owned).toBe(false);
     expect(text(result)).not.toMatch(/keeps its logins/i);
     expect(text(result)).toMatch(/nothing here can reopen it/i);
-    // And no `chrome ""` from the empty profile.
-    expect(text(result)).not.toContain('""');
+    // And no `chrome ""` from the empty profile. Against `summary()`, not the
+    // joined blocks: every result now also carries its serialized
+    // `structuredContent`, and `"profile":""` is a legitimate empty string
+    // there — the thing being guarded is the prose, which is where an empty
+    // profile would read as a browser with no name.
+    expect(summary(result)).not.toContain('""');
   });
 
   it('survives an older server that omits `warnings` too', async () => {
