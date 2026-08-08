@@ -14,6 +14,7 @@ import {
   BrowserTracker,
   resolveVideoMode,
   finalizeMainPageVideo,
+  briefly,
   type BrowserSession,
   type VideoMode,
 } from '../browser/manager.js';
@@ -364,6 +365,29 @@ export interface SessionListItem {
    *  only, since `port` is what selected the browser — and is null when the
    *  caller addressed it by port and named no profile. */
   cdp: { port: number; profile: string | null } | null;
+  /**
+   * The tab this session is currently on (stories/cdp-tabs.md §4).
+   *
+   * Answers "which session is driving my cart tab?" without digging through a
+   * previous run's step results. Set for launch-mode sessions too — target ids
+   * are cached in both modes — so the field means "the tab", not "the CDP tab".
+   * No title: see `PageTracker.activeTabRef`.
+   */
+  tab: { targetId: string | null; url: string } | null;
+}
+
+/**
+ * The tab → session join for one CDP browser, and whether it is the whole
+ * truth.
+ *
+ * `complete: false` means at least one session's tabs could not be enumerated
+ * in time. For the listing that is cosmetic; for the close guard it is the
+ * difference between "no session holds this tab" and "I could not find out",
+ * and only the first may permit a close.
+ */
+export interface SessionsByTarget {
+  byTarget: Map<string, string>;
+  complete: boolean;
 }
 
 /** How to read the page — see stories/page-content.md §1. */
@@ -457,6 +481,16 @@ function sliceWholeCodePoints(text: string, max: number): string {
 
 /** Pattern for [input: variable_name] steps */
 const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
+
+/**
+ * Bound on any single page read taken while listing sessions.
+ *
+ * `GET /sessions` has no deadline of its own, and both reads it performs —
+ * `page.title()` and the target-id lookup — can hang on a wedged page. Sized
+ * well under `list_sessions`'s own 5 s abort so the caller gets a listing with
+ * a blank field rather than a timeout with nothing in it.
+ */
+const PAGE_READ_TIMEOUT_MS = 1_500;
 
 /** Pattern for [interactive] steps */
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
@@ -1446,6 +1480,10 @@ export class SessionManager {
         pageTitle,
         totalStepsExecuted: session.totalStepsExecuted,
         cdp: cdpBinding(session),
+        // The sync variant cannot await a target-id resolution, so it reports
+        // the url alone rather than blocking. The async list below is what
+        // `GET /sessions` — and therefore `list_sessions` — actually serves.
+        tab: currentUrl === '' ? null : { targetId: null, url: currentUrl },
       });
     }
 
@@ -1456,33 +1494,122 @@ export class SessionManager {
    * List all active sessions with async page title resolution.
    */
   async getActiveSessionsWithTitles(): Promise<SessionListItem[]> {
-    const items: SessionListItem[] = [];
+    // **Parallel, and every page read bounded.** This route had no deadline of
+    // its own while awaiting two things that can hang: `page.title()`, which
+    // carries no timeout (the runner races it for exactly this reason), and the
+    // target-id lookup. Sequentially, per-session budgets also *sum* — three
+    // sessions on one wedged CDP browser took 6 s against `list_sessions`'s own
+    // 5 s abort, so the caller was told the listing timed out rather than being
+    // given it. Both fixed here: the work fans out, so the cost is the slowest
+    // session rather than their total.
+    const live = [...this.sessions].filter(([, s]) => s.status !== 'closed');
 
-    for (const [id, session] of this.sessions) {
-      if (session.status === 'closed') continue;
+    return Promise.all(
+      live.map(async ([id, session]) => {
+        const page = session.browserSession.pageTracker.getActive();
+        let currentUrl = '';
+        try {
+          currentUrl = page.url();
+        } catch {
+          // ignore — a closed page still has a session row worth reporting
+        }
 
-      const page = session.browserSession.pageTracker.getActive();
-      let currentUrl = '';
-      let pageTitle = '';
+        const [pageTitle, tab] = await Promise.all([
+          briefly(
+            (async () => {
+              try {
+                return await page.title();
+              } catch {
+                return '';
+              }
+            })(),
+            PAGE_READ_TIMEOUT_MS,
+            '',
+          ),
+          briefly(
+            (async () => {
+              try {
+                return await session.browserSession.pageTracker.activeTabRef();
+              } catch {
+                // A diagnostic field must never be the reason a listing fails.
+                return null;
+              }
+            })(),
+            PAGE_READ_TIMEOUT_MS,
+            null,
+          ),
+        ]);
 
-      try {
-        currentUrl = page.url();
-        pageTitle = await page.title();
-      } catch {
-        // ignore
-      }
+        return {
+          sessionId: id,
+          status: (session.status === 'executing' ? 'executing' : 'active') as 'executing' | 'active',
+          currentUrl,
+          pageTitle,
+          totalStepsExecuted: session.totalStepsExecuted,
+          cdp: cdpBinding(session),
+          tab,
+        };
+      }),
+    );
+  }
 
-      items.push({
-        sessionId: id,
-        status: session.status === 'executing' ? 'executing' : 'active',
-        currentUrl,
-        pageTitle,
-        totalStepsExecuted: session.totalStepsExecuted,
-        cdp: cdpBinding(session),
-      });
-    }
+  /**
+   * Which live session, if any, is driving each tab of the CDP browser on
+   * `port` — `targetId` → `sessionId`.
+   *
+   * Serves two callers with one join: the tab listing's `sessionId` field, and
+   * the close guard. Sessions are filtered by port first, so a project running
+   * launch-mode sessions pays nothing — those are on disposable browsers with
+   * no CDP port and can never hold a tab of this one.
+   *
+   * **Only this server's sessions are visible.** A tab driven by another
+   * Sessions API server, or by a human clicking in the window, is unknowable
+   * from here — consistent with the standing decision that parallel users of
+   * one CDP browser own the consequences.
+   */
+  async sessionsByTarget(port: number): Promise<SessionsByTarget> {
+    const byTarget = new Map<string, string>();
+    let complete = true;
 
-    return items;
+    await Promise.all(
+      [...this.sessions].map(async ([id, session]) => {
+        if (session.status === 'closed') return;
+        // `Number(...)` rather than `!==`: `POST /sessions` casts `body.config`
+        // without validating it, so a hand-rolled client sending
+        // `"port": "51000"` gets a working CDP session that a strict compare
+        // would skip — and this is a guard, so skipping it fails open.
+        if (Number(session.sessionConfig.cdp?.port) !== port) return;
+        try {
+          // Every browser the session tracks, NOT `session.browserSession` —
+          // that field is a snapshot of whichever browser is active, and
+          // `openBrowser` auto-promotes the one it launches. A session that
+          // attached to a CDP tab and then opened a second browser would
+          // otherwise report the *launch-mode* browser's tabs, so the tab it
+          // is really driving would look unheld and the close guard would let
+          // it be yanked mid-run.
+          const perBrowser = await Promise.all(
+            session.browserTracker.all().map((b) => b.pageTracker.resolvedTargetIds()),
+          );
+          for (const sweep of perBrowser) {
+            if (!sweep.complete) complete = false;
+            for (const targetId of sweep.ids) {
+              // First writer wins. Two sessions can legitimately hold the same
+              // tab (they share the browser's context), and for both callers —
+              // a listing label and a refusal — naming one is enough.
+              if (!byTarget.has(targetId)) byTarget.set(targetId, id);
+            }
+          }
+        } catch {
+          // A session whose tabs cannot be enumerated at all contributes
+          // nothing — but the join is then no longer the whole truth, and a
+          // guard reading it must know that rather than seeing a confident
+          // "nobody holds this tab".
+          complete = false;
+        }
+      }),
+    );
+
+    return { byTarget, complete };
   }
 
   /**

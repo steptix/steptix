@@ -29,7 +29,14 @@ import {
   type LauncherDeps,
   type LaunchableEngine,
 } from './cdp-launcher.js';
-import { probePort, type CdpDiscoveryTab } from './cdp-discovery.js';
+import {
+  probePort,
+  closeTab,
+  listPageTabs,
+  portAnswers,
+  type CdpDiscoveryTab,
+  type CdpEngine,
+} from './cdp-discovery.js';
 
 export type { LaunchableEngine };
 
@@ -91,13 +98,19 @@ export interface StartOptions {
  * an agent (§7) and will be reworded; the classification will not.
  *
  *   - `invalid_input` — the request itself is wrong (400). Nothing was touched.
- *   - `refused`       — the request is well-formed but the state on disk says
- *                       no: a live browser, a directory we did not create (409).
+ *   - `not_found`     — the thing named does not exist here (404): a port that
+ *                       is not one of ours, a target id this browser does not
+ *                       have.
+ *   - `refused`       — the request is well-formed but the state says no: a
+ *                       live browser on the profile, a directory we did not
+ *                       create, a tab a session is driving (409).
  *   - `launch_failed` — we tried and the machine or the browser let us down
  *                       (500). The engine is missing, the port file never
- *                       appeared, the profile dir is not writable.
+ *                       appeared, the profile dir is not writable, a close was
+ *                       accepted but never took effect. Named for the first
+ *                       caller; it covers any attempted operation.
  */
-export type CdpFailureKind = 'invalid_input' | 'refused' | 'launch_failed';
+export type CdpFailureKind = 'invalid_input' | 'not_found' | 'refused' | 'launch_failed';
 
 export type StartResult =
   | {
@@ -401,6 +414,473 @@ function writeProfileMarker(
     // A profile without a marker still works; it just cannot be `reset`
     // (§12 guard 4 refuses it), which fails loudly and safely later rather
     // than failing the launch the caller actually asked for now.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Close a tab (stories/cdp-tabs.md §2)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long to wait for a closed tab to leave `/json/list`.
+ *
+ * W0 measured 7 ms (Chrome) / 41 ms (Edge) on an idle browser — but that is the
+ * quiet case. **Live testing blew a 2 s budget**: a tab whose session had just
+ * been torn down took longer than that to go, and the caller got "state
+ * unknown" for a close that was working fine. A false alarm here is worse than
+ * a slow answer, because it tells an agent to re-list and retry a close that
+ * already succeeded. 5 s is still bounded, and a tab held open by a
+ * `beforeunload` dialog never leaves the list at all — so exhausting this
+ * budget still means what it says.
+ */
+export const CLOSE_CONFIRM_BUDGET_MS = 5_000;
+
+/**
+ * How long to wait for a browser with no tabs left to actually exit.
+ *
+ * Separate from the tab budget and much shorter, because it is spent on the
+ * rare platform where a process outlives its windows (W0 saw a clean exit on
+ * both engines within 95–286 ms). Waiting the full close budget to confirm
+ * something that normally takes a quarter of a second would make every
+ * last-tab close feel broken.
+ */
+const EXIT_CONFIRM_BUDGET_MS = 1_500;
+const CLOSE_POLL_INTERVAL_MS = 25;
+
+export interface CloseTabOptions {
+  projectRoot: string;
+  port: number;
+  targetId: string;
+  /**
+   * Permission to close a browser's **last** tab, which ends the browser.
+   *
+   * Not a formality. Chromium ties the process's life to its last window, so
+   * there is no zero-tab browser to leave behind — "close the last tab" and
+   * "stop the browser" are the same act, and the flag is where the caller says
+   * they meant the second one. Same shape as `reset` on a launch: destructive
+   * intent is stated in the call, never inferred.
+   */
+  allowBrowserExit?: boolean;
+  /**
+   * Permission to act on a browser this project did not launch.
+   *
+   * Ownership is proved from `knownProfiles`, which by construction only ever
+   * contains this project's own profiles — so without this flag a foreign
+   * browser can never be closed, however the caller is permitted. That made
+   * `mcp.cdp.allowUnowned` advertise something it could not deliver: the MCP
+   * gate let the call through and the registry refused it one layer later,
+   * with an unrelated message. The decision stays where it was (MCP-side,
+   * human-held); this is the flag it needs to actually mean anything.
+   */
+  allowUnowned?: boolean;
+  /**
+   * Which live session, if any, is driving a given tab of this browser.
+   *
+   * Injected because the answer lives in the server's session map, which this
+   * module knows nothing about — and must not, since it is also the module the
+   * CLI and any future client sit on.
+   *
+   * Returns `UNKNOWN_HOLDER` when the answer could not be determined — a
+   * session's tabs took too long to enumerate. That is **not** the same as
+   * `null`, and the difference is the whole point: this is a guard, so
+   * "I could not find out" must refuse, not proceed. A symbol rather than a
+   * sentinel string so it cannot collide with a real session id.
+   */
+  sessionHolding?: (
+    targetId: string,
+  ) => Promise<string | null | typeof UNKNOWN_HOLDER> | string | null | typeof UNKNOWN_HOLDER;
+}
+
+/** See `CloseTabOptions.sessionHolding`. */
+export const UNKNOWN_HOLDER = Symbol('cdp-tab-holder-unknown');
+
+export type CloseTabResult =
+  | {
+      ok: true;
+      targetId: string;
+      title: string;
+      url: string;
+      /** Widened past `LaunchableEngine`: a permitted foreign browser (§8) can
+       *  be a Chromium or an unrecognised build. */
+      engine: CdpEngine;
+      profile: string;
+      port: number;
+      /** Page tabs left, counted from the browser after the close — not
+       *  arithmetic on the before-count. 0 when the browser exited. */
+      remainingTabs: number;
+      /** Observed, never assumed: the port stopped answering. */
+      browserExited: boolean;
+      /** Whether this project launched the browser. False only via
+       *  `allowUnowned`, and it changes what is true about the aftermath —
+       *  nothing here can reopen a browser we do not own. */
+      owned: boolean;
+      warnings: string[];
+    }
+  | { ok: false; kind: CdpFailureKind; error: string };
+
+export interface CloseTabDeps extends RegistryDeps {
+  close?: typeof closeTab;
+  listTabs?: typeof listPageTabs;
+  alive?: typeof portAnswers;
+  /** Injected so tests do not spend the confirm budget in real time. */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/**
+ * Close one tab in a browser this project owns.
+ *
+ * Every guard below closes a different hole, and nothing irreversible happens
+ * until the request has cleared all of them. The ordering that matters is
+ * session-before-last-tab: see guard 3 for why the cheaper order was wrong.
+ *
+ * **Callers must serialise concurrent closes against one browser** (the route
+ * does, via its per-port queue). Guard 4 reads a tab list to decide whether
+ * this is the last tab, and two overlapping closes would both read the same
+ * pre-close list and both conclude they are not.
+ */
+export async function closeCdpTab(
+  opts: CloseTabOptions,
+  deps?: CloseTabDeps,
+): Promise<CloseTabResult> {
+  const close = deps?.close ?? closeTab;
+  const listTabs = deps?.listTabs ?? listPageTabs;
+  const alive = deps?.alive ?? portAnswers;
+  const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = deps?.now ?? Date.now;
+
+  // 1. The port must be one of ours and live. `knownProfiles` is the only
+  //    answer to "ours": our ports are OS-assigned, so nothing about the number
+  //    itself is recognisable.
+  const profiles = await knownProfiles(opts.projectRoot, deps);
+  const known = profiles.find((p) => p.live && p.port === opts.port);
+  // `label` rather than `engineLabel(engine)` at each use: a permitted foreign
+  // browser can be a Chromium or an unrecognised build, which the launchable
+  // engine names cannot express.
+  let owner: { engine: CdpEngine; profile: string; label: string; owned: boolean };
+
+  if (known) {
+    owner = {
+      engine: known.engine,
+      profile: known.profile,
+      label: `${engineLabel(known.engine)} "${known.profile}"`,
+      owned: true,
+    };
+  } else if (opts.allowUnowned === true) {
+    // Permitted by a human, so the only question left is whether anything is
+    // actually there. There is no profile to name — this browser has no
+    // directory of ours behind it — and the response says so rather than
+    // inventing one.
+    const probe = deps?.probe ?? probePort;
+    const probed = await probe(opts.port);
+    if (!probed.reachable) {
+      return {
+        ok: false,
+        kind: 'not_found',
+        error:
+          `Nothing is listening on port ${opts.port}.\n` +
+          'Call list_cdp_browsers to see what is running.',
+      };
+    }
+    owner = {
+      engine: probed.engine,
+      // No profile directory of ours stands behind this browser. Empty rather
+      // than a stand-in sentence: the value gets interpolated into messages and
+      // into the tool's summary, and a phrase there reads as a profile name.
+      profile: '',
+      label: `the browser on port ${opts.port}`,
+      owned: false,
+    };
+  } else {
+    const running = profiles.filter((p) => p.live);
+    return {
+      ok: false,
+      kind: 'not_found',
+      error:
+        `Port ${opts.port} is not a CDP browser this project has running.\n` +
+        (running.length > 0
+          ? `Running now: ${running.map((p) => `${engineLabel(p.engine)} "${p.profile}" on port ${p.port}`).join(', ')}.`
+          : 'This project has no CDP browser running.'),
+    };
+  }
+
+  // 2. Read the tab list through the SHARED filter, so what may be closed and
+  //    what was listed can never disagree.
+  const before = await listTabs(opts.port);
+  if (before === null) {
+    return {
+      ok: false,
+      kind: 'launch_failed',
+      error:
+        `Could not read the tab list from ${owner.label} ` +
+        `on port ${opts.port}. The browser may be shutting down.\n` +
+        'Call list_cdp_browsers to see what is still running.',
+    };
+  }
+
+  const target = before.find((t) => t.targetId === opts.targetId);
+  if (!target) {
+    // Two readings, and the caller cannot tell them apart from here — so say
+    // both rather than picking one. Treating this as an idempotent success
+    // would swallow the second entirely.
+    return {
+      ok: false,
+      kind: 'not_found',
+      error:
+        `No tab with target id ${opts.targetId} is open in ${owner.label} ` +
+        `(port ${opts.port}).\n\n` +
+        'Either it has already been closed, or the id belongs to a different browser.\n' +
+        'Call list_cdp_browsers for the tabs open right now.',
+    };
+  }
+
+  // 3. A tab a live session is driving. Yanking it turns that session's next
+  //    step into a baffling page-closed failure, so the session gets closed
+  //    deliberately first — via the door that exists for it.
+  //
+  //    **Before the last-tab check, deliberately.** The cheaper ordering was
+  //    the other way round, but a one-tab browser being driven by a session is
+  //    entirely reachable (`cdp.tab: 'targetId:<id>'` binds an existing tab and
+  //    opens nothing), and then the last-tab refusal fires first and tells the
+  //    caller to pass `allow_browser_exit: true` — advice that leads straight
+  //    into a *different* refusal. A remedy that does not work is worse than a
+  //    slightly more expensive check.
+  const holder = await opts.sessionHolding?.(opts.targetId);
+  if (holder === UNKNOWN_HOLDER) {
+    // Fails closed. The alternative — treating "could not determine" as
+    // "nobody" — is how a slow lookup turns into a tab closed out from under a
+    // running session, which is exactly the outcome this guard exists to
+    // prevent and is not worth trading for one retry.
+    return {
+      ok: false,
+      kind: 'refused',
+      error:
+        `Could not determine whether a session is driving "${target.title || target.url}" — ` +
+        'one of this server\'s sessions took too long to report its tabs.\n\n' +
+        'Nothing was closed. Retry in a moment — a session mid-step is the usual cause ' +
+        'and it clears on its own. If it persists, call list_sessions to see which ' +
+        'session is running and close_session to end it, then retry.',
+    };
+  }
+  if (holder) {
+    return {
+      ok: false,
+      kind: 'refused',
+      error:
+        `Session "${holder}" is driving that tab ("${target.title || target.url}"). ` +
+        'Closing it would break that session mid-run.\n\n' +
+        `Close the session first — close_session with session_id "${holder}" — then ` +
+        'retry, or leave the tab alone if the session is still wanted.',
+    };
+  }
+
+  // 4. The last tab. Closing it closes the browser — there is no zero-tab
+  //    Chromium — so it needs saying out loud rather than discovering.
+  const isLast = before.length === 1;
+  if (isLast && opts.allowBrowserExit !== true) {
+    return {
+      ok: false,
+      kind: 'refused',
+      error:
+        `"${target.title || target.url}" is the only tab open in ` +
+        `${owner.label}, and closing a browser's last ` +
+        'tab closes the browser itself.\n\n' +
+        // The reassurance is true ONLY of a browser we own: its profile lives
+        // in a directory of ours and relaunches signed in. For a foreign
+        // browser every clause of it is false, and it is the sentence that
+        // decides whether the agent asks before terminating a human's
+        // signed-in Chrome — so the two cases say different things.
+        (owner.owned
+          ? '**Nothing is lost by doing it** — the profile keeps its signed-in state on ' +
+            `disk, and start_cdp_browser with profile "${owner.profile}" brings it back still ` +
+            'signed in.\n'
+          : '**This browser is not one this project started**, so nothing here can reopen ' +
+            'it or restore what it was signed into. Whoever is using it would have to ' +
+            'start it again themselves.\n') +
+        'Pass allow_browser_exit: true if closing the browser is what you want.',
+    };
+  }
+
+  // 5. Close, then confirm. The browser acknowledges before the tab is gone
+  //    (W0: 1-5 ms ack, 7-41 ms actual), so the ack alone is an intention.
+  const requested = await close(opts.port, opts.targetId);
+  if (requested.notFound) {
+    // The tab was in the list we read a moment ago and is not there now, so
+    // something else closed it in between. Reported rather than absorbed: the
+    // caller would otherwise be told `closed: true` with a title and url for a
+    // tab it did not close, and act on the belief that its close is what
+    // removed it.
+    return {
+      ok: false,
+      kind: 'not_found',
+      error:
+        `Tab ${opts.targetId} ("${target.title || target.url}") was open a moment ago but ` +
+        'the browser no longer has it — something else closed it first.\n\n' +
+        'Nothing was closed by this call. Call list_cdp_browsers for the tabs open now.',
+    };
+  }
+  if (!requested.ok) {
+    return {
+      ok: false,
+      kind: 'launch_failed',
+      error:
+        `The browser refused to close that tab: ${requested.error ?? 'unknown error'}.\n` +
+        'Call list_cdp_browsers to check the browser is still running, then retry.',
+    };
+  }
+
+  const warnings: string[] = [];
+
+  // A last-tab close inverts the success signal: the endpoint that would tell
+  // us the tab is gone dies WITH the process, so "the port stopped answering"
+  // is the confirmation. Read it that way rather than treating the unreachable
+  // browser as a failed poll.
+  if (isLast) {
+    const exited = await pollUntil(
+      () => notAlive(alive, opts.port),
+      { sleep, now },
+      EXIT_CONFIRM_BUDGET_MS,
+    );
+    if (!exited) {
+      // Honest rather than convenient: some platforms keep a process without
+      // windows (macOS app semantics, Edge startup-boost style background
+      // modes). W0 saw a clean exit on both engines here, so this is the
+      // surprising branch — say so instead of reporting an exit that did not
+      // happen.
+      const still = await listTabs(opts.port);
+      warnings.push(
+        `The tab was closed but ${owner.label} is still running. It may be configured ` +
+          'to stay resident with no windows open.',
+      );
+      return {
+        ok: true,
+        targetId: opts.targetId,
+        title: target.title,
+        url: target.url,
+        engine: owner.engine,
+        profile: owner.profile,
+        port: opts.port,
+        remainingTabs: still?.length ?? 0,
+        browserExited: false,
+        owned: owner.owned,
+        warnings,
+      };
+    }
+    return {
+      ok: true,
+      targetId: opts.targetId,
+      title: target.title,
+      url: target.url,
+      engine: owner.engine,
+      profile: owner.profile,
+      port: opts.port,
+      remainingTabs: 0,
+      browserExited: true,
+      owned: owner.owned,
+      warnings,
+    };
+  }
+
+  const gone = await pollUntil(async () => {
+    const tabs = await listTabs(opts.port);
+    if (tabs === null) {
+      // An unreadable list is not by itself an answer. A browser that exited
+      // during the close settles the question — the earlier version required a
+      // readable list, so it burned the whole budget and then reported the tab
+      // as "still open", blaming a `beforeunload` dialog, about a browser that
+      // no longer existed. But `listPageTabs` also returns null for a single
+      // failed fetch, a non-200 or a 1.5 s abort, and this predicate runs ~200
+      // times against a browser showing a "Leave site?" dialog — so treating
+      // every null as an exit meant one flaky read reported `closed: true` for
+      // a tab that is still open. Ask the port which of the two it is.
+      return !(await alive(opts.port));
+    }
+    return !tabs.some((t) => t.targetId === opts.targetId);
+  }, { sleep, now });
+
+  if (!gone) {
+    return {
+      ok: false,
+      kind: 'launch_failed',
+      error:
+        `The browser accepted the close for tab ${opts.targetId} but it was still open ` +
+        `${CLOSE_CONFIRM_BUDGET_MS}ms later, so its state is unknown — it may be showing ` +
+        'a "leave site?" dialog, which blocks a close until someone answers it.\n' +
+        'Call list_cdp_browsers before retrying.',
+    };
+  }
+
+  const after = await listTabs(opts.port);
+
+  // A browser with no tabs left is a browser on its way out, even though this
+  // was not *its* last tab when we read the list — another client can close
+  // one concurrently, and `before.length > 1` only ever described one instant.
+  // Observed in live testing: a slow-closing tab finished during our close, the
+  // browser dropped to zero tabs and exited, and this reported
+  // `browserExited: false` to an agent that would have told the user their
+  // browser was still open. So when nothing is left, ask the port directly
+  // rather than inferring from the count we started with.
+  if (after === null || after.length === 0) {
+    const exited = await pollUntil(() => notAlive(alive, opts.port), { sleep, now }, EXIT_CONFIRM_BUDGET_MS);
+    if (exited) {
+      return {
+        ok: true,
+        targetId: opts.targetId,
+        title: target.title,
+        url: target.url,
+        engine: owner.engine,
+        profile: owner.profile,
+        port: opts.port,
+        remainingTabs: 0,
+        browserExited: true,
+        owned: owner.owned,
+        warnings,
+      };
+    }
+    // Still answering with nothing open. Same resident-process case the
+    // last-tab branch warns about, and it needs the same warning here — a
+    // caller told `remainingTabs: 0, browserExited: false` with no explanation
+    // is looking at a contradiction and has nothing to act on.
+    warnings.push(
+      after === null
+        ? `The tab was closed, but the tab list could not be re-read on port ${opts.port}, ` +
+          'so the remaining count may be stale.'
+        : `The tab was closed and ${owner.label} now has no ` +
+          `tabs open, but it is still running on port ${opts.port}. It may be configured to ` +
+          'stay resident with no windows open.',
+    );
+  }
+
+  return {
+    ok: true,
+    targetId: opts.targetId,
+    title: target.title,
+    url: target.url,
+    engine: owner.engine,
+    profile: owner.profile,
+    port: opts.port,
+    remainingTabs: after?.length ?? Math.max(0, before.length - 1),
+    browserExited: false,
+    owned: owner.owned,
+    warnings,
+  };
+}
+
+async function notAlive(alive: typeof portAnswers, port: number): Promise<boolean> {
+  return !(await alive(port));
+}
+
+/** Poll a predicate until true or the budget runs out. */
+async function pollUntil(
+  predicate: () => Promise<boolean>,
+  io: { sleep: (ms: number) => Promise<void>; now: () => number },
+  budgetMs: number = CLOSE_CONFIRM_BUDGET_MS,
+): Promise<boolean> {
+  const started = io.now();
+  for (;;) {
+    if (await predicate()) return true;
+    if (io.now() - started >= budgetMs) return false;
+    await io.sleep(CLOSE_POLL_INTERVAL_MS);
   }
 }
 

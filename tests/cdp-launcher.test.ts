@@ -8,7 +8,14 @@ import {
   manualCommand,
   type LauncherDeps,
 } from '../src/browser/cdp-launcher.js';
-import { classifyEngine, probePort, discoverCdpPorts } from '../src/browser/cdp-discovery.js';
+import {
+  classifyEngine,
+  probePort,
+  discoverCdpPorts,
+  toPageTabs,
+  closeTab,
+  portAnswers,
+} from '../src/browser/cdp-discovery.js';
 
 const WIN_ENV = {
   LOCALAPPDATA: 'C:\\Users\\dev\\AppData\\Local',
@@ -126,6 +133,119 @@ describe('probePort', () => {
       throw new Error('nope');
     }) as unknown as typeof fetch;
     await expect(discoverCdpPorts([9222, 9223], { fetchFn, timeoutMs: 50 })).resolves.toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Closing a tab (stories/cdp-tabs.md §2)
+// ---------------------------------------------------------------------------
+
+describe('toPageTabs — the shared filter', () => {
+  it('keeps a new-tab page', () => {
+    // W0: a fresh browser's chrome://newtab IS an ordinary closable page
+    // target, and a user looking at their window counts it. Excluding it would
+    // make the LAST-tab guard fire one tab early — the browser would look
+    // empty while a real tab was still open.
+    expect(toPageTabs([{ id: 'n1', type: 'page', title: 'New Tab', url: 'chrome://newtab/' }]))
+      .toEqual([{ targetId: 'n1', title: 'New Tab', url: 'chrome://newtab/' }]);
+  });
+
+  it('drops a browser dialog, which is a page target but not a tab', async () => {
+    // Measured in live testing: Edge reports edge://sync-confirmation-dialog/
+    // as type:'page'. Counting it turned one real tab into two, so the
+    // last-tab guard let the browser exit with nobody passing
+    // allow_browser_exit — the exact failure that guard exists to prevent.
+    expect(
+      toPageTabs([
+        { id: 'd1', type: 'page', title: '', url: 'edge://sync-confirmation-dialog/' },
+        { id: 't1', type: 'page', title: 'Orders', url: 'https://shop/orders' },
+      ]).map((t) => t.targetId),
+    ).toEqual(['t1']);
+  });
+
+  it('keeps internal pages that ARE real tabs', () => {
+    // Only `*-dialog` surfaces are dropped. Settings and history are tabs a
+    // user opened, and dropping them would fire the last-tab refusal early.
+    expect(
+      toPageTabs([
+        { id: 's1', type: 'page', title: 'Settings', url: 'edge://settings/' },
+        { id: 'h1', type: 'page', title: 'History', url: 'chrome://history/' },
+      ]).map((t) => t.targetId),
+    ).toEqual(['s1', 'h1']);
+  });
+
+  it('is the same filter probePort applies', async () => {
+    // The drift this export exists to prevent: if the close path counted tabs
+    // differently from the listing, a browser could be reported with one tab
+    // and refuse the close as "not the last" — or permit one that silently
+    // exits the browser.
+    const raw = [
+      { id: 't1', type: 'page', title: 'Orders', url: 'https://shop/orders' },
+      { id: 't2', type: 'page', title: 'DevTools', url: 'devtools://devtools/x' },
+      { id: 't3', type: 'page', title: 'Ext', url: 'chrome-extension://abc/x.html' },
+      { id: 't4', type: 'service_worker', title: 'sw', url: 'https://shop/sw.js' },
+    ];
+    const fetchFn = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith('/json/version')) {
+        return { ok: true, status: 200, json: async () => ({ Browser: 'Chrome/150.0' }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => raw } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const probed = await probePort(9222, 100, fetchFn);
+    expect(probed.tabs).toEqual(toPageTabs(raw));
+  });
+
+  it('survives a malformed list rather than throwing at a caller mid-close', () => {
+    expect(toPageTabs(null)).toEqual([]);
+    expect(toPageTabs({ not: 'an array' })).toEqual([]);
+  });
+});
+
+describe('closeTab', () => {
+  it('asks the browser to close, and reports success', async () => {
+    const fetchFn = vi.fn(async () => ({ ok: true, status: 200 }) as unknown as Response);
+    const result = await closeTab(51000, 'A1B2C3', 100, fetchFn as unknown as typeof fetch);
+    expect(result).toEqual({ ok: true, notFound: false, error: null });
+    expect(String(fetchFn.mock.calls[0]![0])).toBe('http://127.0.0.1:51000/json/close/A1B2C3');
+  });
+
+  it('distinguishes an unknown target id', async () => {
+    // W0: the browser itself answers 404 "No such target id" for an id it does
+    // not have. Surfacing that separately is what lets the caller say "already
+    // closed, or a different browser" instead of swallowing it as success.
+    const fetchFn = vi.fn(async () => ({ ok: false, status: 404 }) as unknown as Response);
+    const result = await closeTab(51000, 'GONE', 100, fetchFn as unknown as typeof fetch);
+    expect(result).toMatchObject({ ok: false, notFound: true });
+  });
+
+  it('encodes the target id into the path', async () => {
+    const fetchFn = vi.fn(async () => ({ ok: true, status: 200 }) as unknown as Response);
+    await closeTab(51000, 'A/B?C', 100, fetchFn as unknown as typeof fetch);
+    expect(String(fetchFn.mock.calls[0]![0])).toBe('http://127.0.0.1:51000/json/close/A%2FB%3FC');
+  });
+
+  it('never throws — a dead browser is a result, not an exception', async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    const result = await closeTab(51000, 'A1B2C3', 100, fetchFn);
+    expect(result).toMatchObject({ ok: false, notFound: false });
+    expect(result.error).toContain('ECONNREFUSED');
+  });
+});
+
+describe('portAnswers', () => {
+  it('is false once the browser has gone — the last-tab success signal', async () => {
+    const dead = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    await expect(portAnswers(51000, 50, dead)).resolves.toBe(false);
+
+    const alive = vi.fn(
+      async () => ({ ok: true, status: 200, json: async () => ({ Browser: 'Chrome/150' }) }) as unknown as Response,
+    ) as unknown as typeof fetch;
+    await expect(portAnswers(51000, 50, alive)).resolves.toBe(true);
   });
 });
 

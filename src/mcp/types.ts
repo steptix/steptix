@@ -149,6 +149,8 @@ export interface SessionSummary {
   /** Which CDP browser this session drives. Optional because a server older
    *  than this field simply omits it. */
   cdp?: { port: number; profile: string | null } | null;
+  /** The tab this session is currently on. Same optionality rule as `cdp`. */
+  tab?: { targetId: string | null; url: string } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,15 @@ export interface CdpTab {
   targetId: string;
   title: string;
   url: string;
+  /**
+   * The live session driving this tab, or null when nothing is.
+   *
+   * Optional on the type because a server older than this field omits it
+   * entirely; the tool layer normalises a missing value to null. Advisory
+   * only — a session that bound the tab after this listing was taken is
+   * caught by the close-time guard, which is the authoritative one.
+   */
+  sessionId?: string | null;
 }
 
 /**
@@ -215,6 +226,43 @@ export interface StartedCdpBrowser {
   warnings: string[];
 }
 
+/** Address of one tab to close (stories/cdp-tabs.md §2). */
+export interface CloseCdpTabArgs {
+  projectRoot: string;
+  port: number;
+  targetId: string;
+  /** Permission to close a browser's last tab, which ends the browser. */
+  allowBrowserExit?: boolean;
+  /** Sent only when `mcp.cdp.allowUnowned` permits, exactly like
+   *  `includeForeignTabs` on the listing: the server honours what it is asked,
+   *  and not asking is the withholding. */
+  allowUnowned?: boolean;
+}
+
+export interface ClosedCdpTab {
+  closed: boolean;
+  targetId: string;
+  title: string;
+  url: string;
+  engine: string;
+  profile: string;
+  port: number;
+  remainingTabs: number;
+  /** Observed, not assumed — the port stopped answering. */
+  browserExited: boolean;
+  /**
+   * Whether this project launched the browser.
+   *
+   * Optional for the same reason `SessionSummary.cdp` and `CdpTab.sessionId`
+   * are: a Sessions API server predating the field omits it, and the type
+   * should say so rather than letting the handler assume otherwise. The tool
+   * derives a safe value when it is missing — it is required in the *output*
+   * schema, so guessing wrong here is a failure after an irreversible act.
+   */
+  owned?: boolean;
+  warnings?: string[];
+}
+
 export interface GetCdpBrowsersArgs {
   projectRoot: string;
   includeForeign?: boolean;
@@ -263,6 +311,7 @@ export interface ApiClient {
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>;
   getCdpBrowsers(args: GetCdpBrowsersArgs, signal?: AbortSignal): Promise<CdpBrowsers>;
   startCdpBrowser(body: StartCdpBrowserBody, signal?: AbortSignal): Promise<StartedCdpBrowser>;
+  closeCdpTab(args: CloseCdpTabArgs, signal?: AbortSignal): Promise<ClosedCdpTab>;
 }
 
 /**

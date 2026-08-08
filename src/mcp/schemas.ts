@@ -328,6 +328,89 @@ const cdpTab = z.object({
   url: z.string(),
 });
 
+/** A tab of a browser we own, which is the only case where we can say whether
+ *  a session is driving it. Foreign tabs keep the plain shape — we have no
+ *  sessions on a browser we did not start. */
+const ownedCdpTab = cdpTab.extend({
+  sessionId: z
+    .string()
+    .nullable()
+    .describe(
+      'The session currently driving this tab, or null. A tab with a session ' +
+        'on it cannot be closed until that session is closed.',
+    ),
+});
+
+export const closeCdpTabInput = toolSchema({
+  target_id: z
+    .string()
+    // An empty id would otherwise reach the wire as `/tabs/?projectRoot=…`,
+    // which matches no route and comes back as an unrelated error.
+    .min(1)
+    .describe(
+      'Exact targetId of the tab to close, from list_cdp_browsers. There is ' +
+        'no fuzzy matching — match the user\'s words against the tab titles ' +
+        'and urls yourself, then pass the id of the one you picked.',
+    ),
+  profile: z
+    .string()
+    .optional()
+    .describe(
+      'Profile name of the browser holding the tab, e.g. "default". Prefer ' +
+        'this over `port`. Give exactly one of `profile` or `port`.',
+    ),
+  engine: z
+    .enum(['chrome', 'edge'])
+    .optional()
+    .describe(
+      'Disambiguates `profile` when Chrome and Edge are both running the ' +
+        'same profile name. Only meaningful alongside `profile`.',
+    ),
+  port: z
+    .number()
+    .int()
+    .optional()
+    .describe('Port of the browser holding the tab. Pass this OR `profile`, not both.'),
+  allow_browser_exit: z
+    .boolean()
+    .optional()
+    .describe(
+      'Permission to close the browser\'s **last** tab, which closes the ' +
+        'browser itself — there is no browser with zero tabs. Without this, ' +
+        'closing the last tab is refused. For a browser this project started ' +
+        'nothing is lost: the profile keeps its logins on disk and ' +
+        'start_cdp_browser brings it back still signed in. For a browser it ' +
+        'did not start, nothing here can reopen it — ask the user before ' +
+        'setting this.',
+    ),
+  project_root: projectRoot,
+});
+
+export const closeCdpTabOutput = toolSchema({
+  closed: z.boolean().describe('True only once the tab has actually gone, never merely accepted.'),
+  targetId: z.string(),
+  title: z.string(),
+  url: z.string(),
+  engine: z.string(),
+  profile: z.string(),
+  port: z.number(),
+  remainingTabs: z.number().describe('Page tabs left in the browser, counted after the close.'),
+  browserExited: z
+    .boolean()
+    .describe(
+      'The browser itself closed, because this was its last tab. If `owned`, ' +
+        'the profile is now dormant and appears under `available`.',
+    ),
+  owned: z
+    .boolean()
+    .describe(
+      'Whether this project launched the browser. When false (only reachable ' +
+        'with mcp.cdp.allowUnowned) nothing here can reopen it — say so rather ' +
+        'than reassuring the user that the profile can be relaunched.',
+    ),
+  warnings: z.array(z.string()),
+});
+
 export const listCdpBrowsersOutput = toolSchema({
   running: z.array(
     z.object({
@@ -335,7 +418,7 @@ export const listCdpBrowsersOutput = toolSchema({
       profile: z.string(),
       port: z.number(),
       profileDir: z.string(),
-      tabs: z.array(cdpTab),
+      tabs: z.array(ownedCdpTab),
     }),
   ),
   available: z.array(
@@ -444,6 +527,12 @@ export const listSessionsOutput = toolSchema({
       // that browser has since gone.
       cdp: z
         .object({ port: z.number(), profile: z.string().nullable() })
+        .nullable(),
+      // Which tab this session is on — the other half of the join
+      // `list_cdp_browsers` reports per tab. Answers "which session is driving
+      // my cart tab?" without replaying a previous run's step results.
+      tab: z
+        .object({ targetId: z.string().nullable(), url: z.string() })
         .nullable(),
     }),
   ),

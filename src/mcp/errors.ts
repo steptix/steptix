@@ -348,6 +348,28 @@ export function cdpProfileAmbiguous(profile: string, engines: string[]): McpTool
   );
 }
 
+/**
+ * `close_cdp_tab` gave neither address, or both.
+ *
+ * Separate from `cdpTargetAmbiguous` only in the field names it quotes: this
+ * tool takes `profile`/`port` at the top level, and a message telling an agent
+ * to fix `config.cdp` when there is no `config` in the call is a message that
+ * cannot be acted on.
+ */
+export function cdpTabTargetAmbiguous(both: boolean): McpToolError {
+  return preflightError(
+    both
+      ? 'Give `profile` or `port`, not both. They can name different browsers, ' +
+        'so there is no safe way to choose between them — and this call closes ' +
+        'a real tab.\n' +
+        'Prefer `profile`: a port is reassigned every launch.'
+      : 'close_cdp_tab needs to know which browser: give `profile` (preferred) ' +
+        'or `port`.\n' +
+        'Call list_cdp_browsers to see what this project has running, and to get ' +
+        'the `targetId` of the tab you mean.',
+  );
+}
+
 export function listSessionsTimedOut(timeoutMs: number): McpToolError {
   return preflightError(
     `Listing sessions took longer than ${timeoutMs}ms. The server reads each ` +

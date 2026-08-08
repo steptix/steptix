@@ -13,6 +13,7 @@ import type { Config } from '../src/config/types.js';
 
 const knownProfilesMock = vi.fn();
 const startCdpBrowserMock = vi.fn();
+const closeCdpTabMock = vi.fn();
 const discoverCdpPortsMock = vi.fn();
 
 vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
@@ -21,6 +22,7 @@ vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
     ...actual,
     knownProfiles: (...args: unknown[]) => knownProfilesMock(...args),
     startCdpBrowser: (...args: unknown[]) => startCdpBrowserMock(...args),
+    closeCdpTab: (...args: unknown[]) => closeCdpTabMock(...args),
   };
 });
 
@@ -41,6 +43,10 @@ vi.mock('../src/browser/manager.js', () => ({
     getActive = vi.fn();
     closeAll = vi.fn(async () => {});
   },
+  // Real behaviour, not a stub: session-manager uses it to bound page reads
+  // while listing, and a mock that resolved instantly would hide a hang.
+  briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
+    Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
   resolveVideoMode: vi.fn(() => 'off'),
   finalizeMainPageVideo: vi.fn(),
 }));
@@ -159,9 +165,30 @@ afterAll(async () => {
 beforeEach(() => {
   knownProfilesMock.mockReset();
   startCdpBrowserMock.mockReset();
+  closeCdpTabMock.mockReset();
   discoverCdpPortsMock.mockReset();
   knownProfilesMock.mockResolvedValue([]);
   discoverCdpPortsMock.mockResolvedValue([]);
+});
+
+function del(port: number | string, targetId: string, qs = '', headers = auth) {
+  const base = `${baseUrl}/cdp/browsers/${port}/tabs/${encodeURIComponent(targetId)}`;
+  const query = `projectRoot=${encodeURIComponent(PROJECT)}${qs}`;
+  return fetch(`${base}?${query}`, { method: 'DELETE', headers });
+}
+
+const closedTab = (over: Record<string, unknown> = {}) => ({
+  ok: true,
+  targetId: 'T1',
+  title: 'Orders',
+  url: 'https://shop/orders',
+  engine: 'edge',
+  profile: 'default',
+  port: 51000,
+  remainingTabs: 2,
+  browserExited: false,
+  warnings: [],
+  ...over,
 });
 
 // ---------------------------------------------------------------------------
@@ -479,5 +506,235 @@ describe('POST /cdp/browsers', () => {
     startCdpBrowserMock.mockResolvedValue(ok('launched_after_reset', { warnings: ['trash left behind'] }));
     const body = await (await post({ projectRoot: PROJECT, engine: 'edge' })).json();
     expect(body.warnings).toEqual(['trash left behind']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /cdp/browsers/:port/tabs/:targetId (stories/cdp-tabs.md §2)
+// ---------------------------------------------------------------------------
+
+describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
+  it('requires the api key', async () => {
+    expect((await del(51000, 'T1', '', {})).status).toBe(401);
+  });
+
+  it('closes a tab and echoes what went', async () => {
+    closeCdpTabMock.mockResolvedValue(closedTab());
+    const res = await del(51000, 'T1');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      closed: true,
+      targetId: 'T1',
+      title: 'Orders',
+      url: 'https://shop/orders',
+      engine: 'edge',
+      profile: 'default',
+      port: 51000,
+      remainingTabs: 2,
+      browserExited: false,
+      warnings: [],
+    });
+  });
+
+  it('passes the target id through undecoded, so an odd id still addresses its tab', async () => {
+    closeCdpTabMock.mockResolvedValue(closedTab({ targetId: 'A/B?C' }));
+    await del(51000, 'A/B?C');
+    expect(closeCdpTabMock).toHaveBeenCalledWith(
+      expect.objectContaining({ port: 51000, targetId: 'A/B?C', projectRoot: PROJECT }),
+    );
+  });
+
+  it('forwards allowBrowserExit only when asked', async () => {
+    closeCdpTabMock.mockResolvedValue(closedTab());
+    await del(51000, 'T1');
+    expect(closeCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowBrowserExit: false });
+
+    closeCdpTabMock.mockClear();
+    await del(51000, 'T1', '&allowBrowserExit=true');
+    expect(closeCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowBrowserExit: true });
+  });
+
+  it('reports a browser that exited with its last tab', async () => {
+    closeCdpTabMock.mockResolvedValue(closedTab({ remainingTabs: 0, browserExited: true }));
+    const body = await (await del(51000, 'T1', '&allowBrowserExit=true')).json();
+    expect(body).toMatchObject({ closed: true, browserExited: true, remainingTabs: 0 });
+  });
+
+  it('maps the four failure kinds onto their status codes', async () => {
+    // The mapping is the route's whole job, and each code means something
+    // different to a client: 404 "not here", 409 "state says no, retrying will
+    // not help", 500 "we tried and it broke".
+    for (const [kind, status] of [
+      ['not_found', 404],
+      ['refused', 409],
+      ['launch_failed', 500],
+      ['invalid_input', 400],
+    ] as const) {
+      closeCdpTabMock.mockResolvedValue({ ok: false, kind, error: `${kind} happened` });
+      const res = await del(51000, 'T1');
+      expect(res.status, kind).toBe(status);
+      expect((await res.json()).error).toContain(kind);
+    }
+  });
+
+  it('rejects a bad port before reaching the registry', async () => {
+    const res = await del('not-a-port', 'T1');
+    expect(res.status).toBe(400);
+    expect(closeCdpTabMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a relative projectRoot', async () => {
+    const res = await fetch(
+      `${baseUrl}/cdp/browsers/51000/tabs/T1?projectRoot=relative`,
+      { method: 'DELETE', headers: auth },
+    );
+    expect(res.status).toBe(400);
+    expect(closeCdpTabMock).not.toHaveBeenCalled();
+  });
+
+  it('requires projectRoot', async () => {
+    const res = await fetch(`${baseUrl}/cdp/browsers/51000/tabs/T1`, {
+      method: 'DELETE',
+      headers: auth,
+    });
+    expect(res.status).toBe(400);
+    expect(closeCdpTabMock).not.toHaveBeenCalled();
+  });
+
+  it('serialises concurrent closes against one browser', async () => {
+    // Without a queue the `allow_browser_exit` flag is bypassable, which is
+    // the one guarantee this route exists to give: two closes against a
+    // two-tab browser both read a list of length two, both conclude they are
+    // not closing the last tab, and the browser exits with neither caller
+    // having asked. An MCP host issuing two tool calls in one turn is enough.
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    closeCdpTabMock.mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return closedTab();
+    });
+
+    await Promise.all([del(51000, 'T1'), del(51000, 'T2'), del(51000, 'T3')]);
+
+    expect(maxConcurrent).toBe(1);
+    expect(closeCdpTabMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('serialises closes on one browser across DIFFERENT project roots', async () => {
+    // Round-two regression. The key was `(projectRoot, port)`, which gave one
+    // browser a queue per project — and this server is a per-machine singleton
+    // serving many roots, with `allowUnowned` explicitly letting one project
+    // address another's browser. A port is one socket on this machine, so the
+    // port alone identifies the browser.
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    closeCdpTabMock.mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return closedTab();
+    });
+
+    const other = path.join('C:', 'other-project');
+    await Promise.all([
+      del(9222, 'T1'),
+      fetch(
+        `${baseUrl}/cdp/browsers/9222/tabs/T2?projectRoot=${encodeURIComponent(other)}`,
+        { method: 'DELETE', headers: auth },
+      ),
+    ]);
+
+    expect(maxConcurrent).toBe(1);
+  });
+
+  it('does not serialise closes against DIFFERENT browsers', async () => {
+    // The queue is per browser. Two browsers are independent, and sharing one
+    // chain would make an unrelated close wait behind a slow one.
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    closeCdpTabMock.mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return closedTab();
+    });
+
+    await Promise.all([del(51000, 'T1'), del(51001, 'T2')]);
+
+    expect(maxConcurrent).toBe(2);
+  });
+
+  it('a failed close does not poison the queue for the next caller', async () => {
+    closeCdpTabMock.mockRejectedValueOnce(new Error('boom'));
+    closeCdpTabMock.mockResolvedValueOnce(closedTab());
+    expect((await del(51000, 'T1')).status).toBe(500);
+    expect((await del(51000, 'T2')).status).toBe(200);
+  });
+
+  it('forwards allowUnowned only when asked', async () => {
+    // Mirrors `includeForeignTabs` on the listing: the server honours what it
+    // is asked and the withholding lives MCP-side. Without the pass-through,
+    // mcp.cdp.allowUnowned would grant nothing for a close.
+    closeCdpTabMock.mockResolvedValue(closedTab());
+    await del(51000, 'T1');
+    expect(closeCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowUnowned: false });
+
+    closeCdpTabMock.mockClear();
+    await del(51000, 'T1', '&allowUnowned=true');
+    expect(closeCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowUnowned: true });
+  });
+
+  it('supplies a session lookup the registry can call', async () => {
+    // The registry cannot see the server's sessions, so the route injects the
+    // join. Without it the "a session is driving that tab" guard silently
+    // never fires — a passing test suite with the guard disconnected.
+    closeCdpTabMock.mockResolvedValue(closedTab());
+    await del(51000, 'T1');
+    const opts = closeCdpTabMock.mock.calls[0]![0] as {
+      sessionHolding?: (id: string) => Promise<string | null | symbol>;
+    };
+    expect(typeof opts.sessionHolding).toBe('function');
+    // No sessions at all is a COMPLETE answer of "nobody", not an unknown.
+    await expect(opts.sessionHolding!('T1')).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab → session join on the listing (stories/cdp-tabs.md §1)
+// ---------------------------------------------------------------------------
+
+describe('GET /cdp/browsers reports which session drives each tab', () => {
+  it('adds sessionId to every owned tab', async () => {
+    knownProfilesMock.mockResolvedValue([liveProfile()]);
+    const body = await (await get(`projectRoot=${encodeURIComponent(PROJECT)}`)).json();
+    // No sessions exist in this suite, so the honest answer is null — but the
+    // KEY must be present either way: a consumer that reads `tab.sessionId`
+    // needs the field, not its absence.
+    expect(body.running[0].tabs[0]).toEqual({
+      targetId: 'T1',
+      title: 'Orders',
+      url: 'https://shop/orders',
+      sessionId: null,
+    });
+  });
+
+  it('leaves foreign tabs alone — we have no sessions on a browser we did not start', async () => {
+    discoverCdpPortsMock.mockResolvedValue([
+      {
+        port: 9222,
+        reachable: true,
+        engine: 'chrome',
+        tabs: [{ targetId: 'F1', title: 'Mail', url: 'https://mail' }],
+      },
+    ]);
+    const body = await (
+      await get(`projectRoot=${encodeURIComponent(PROJECT)}&includeForeign=true&includeForeignTabs=true`)
+    ).json();
+    expect(body.foreign[0].tabs[0]).not.toHaveProperty('sessionId');
   });
 });

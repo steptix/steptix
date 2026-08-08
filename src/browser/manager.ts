@@ -187,7 +187,28 @@ export interface TabInfo {
  *  `page.title()` has no timeout of its own. */
 const TAB_TITLE_TIMEOUT_MS = 500;
 
-async function briefly<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+/** Bound on ONE page's target-id lookup. Per page rather than per sweep, so a
+ *  single wedged page does not discard the ids resolved beside it. */
+const TARGET_ID_LOOKUP_TIMEOUT_MS = 2_000;
+
+/** A lookup that ran out of time — distinct from `null` ("this page has no
+ *  target id"), because only the first means the answer is incomplete. */
+const TIMED_OUT = Symbol('target-id-timed-out');
+
+/**
+ * Every target id a tracker could resolve, and whether that list is the whole
+ * truth.
+ *
+ * `complete` exists because the consumer is a guard. A caller that cannot tell
+ * "nobody holds this tab" from "I could not find out" will treat the second as
+ * the first and close a tab out from under a running session.
+ */
+export interface TargetIdSweep {
+  ids: string[];
+  complete: boolean;
+}
+
+export async function briefly<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
@@ -406,6 +427,96 @@ export class PageTracker {
   /** Every tracked tab, for the report's run-level timeline. */
   tabs(): readonly TrackedPage[] {
     return this.pages;
+  }
+
+  /**
+   * Target ids of every tab this session is tracking — not just the active one.
+   *
+   * Awaits any resolution still in flight rather than reading the cached field,
+   * because the caller is a guard: "no target id yet" must not read as "this
+   * session is not on that tab". A session can `switchPage` back to any tab it
+   * holds, so all of them are load-bearing, and a tab whose id never resolved
+   * is simply omitted — it cannot match an id the caller is asking about.
+   */
+  async resolvedTargetIds(): Promise<TargetIdSweep> {
+    const ids = await Promise.all(this.pages.map((entry) => this.resolveOne(entry)));
+    return {
+      // Typed rather than `!== null`: the timeout sentinel is a symbol, and a
+      // null-only filter let it through into the id list.
+      ids: ids.filter((id): id is string => typeof id === 'string'),
+      // `complete` is false when any page could not be resolved *in time*, and
+      // it is load-bearing rather than diagnostic: the close guard asks this
+      // question to decide whether a session is driving a tab, and for a guard
+      // "I could not find out" must never read the same as "nobody is". An
+      // earlier version bounded the whole sweep and returned `[]` on expiry,
+      // which failed the guard OPEN — one slow lookup and a tab a session was
+      // mid-run on became closable.
+      complete: !ids.includes(TIMED_OUT),
+    };
+  }
+
+  /**
+   * One page's target id, bounded.
+   *
+   * The budget is **per page**, not over the whole sweep: one wedged lookup
+   * then costs one page rather than every id resolved alongside it, so the
+   * partial answer is real rather than a fallback to empty.
+   */
+  private async resolveOne(entry: TrackedPage): Promise<string | null | typeof TIMED_OUT> {
+    if (entry.targetId !== null) return entry.targetId;
+    return briefly<string | null | typeof TIMED_OUT>(
+      this.resolveOneNow(entry),
+      TARGET_ID_LOOKUP_TIMEOUT_MS,
+      TIMED_OUT,
+    );
+  }
+
+  private async resolveOneNow(entry: TrackedPage): Promise<string | null> {
+    // Join a lookup already in flight, so concurrent callers cost one
+    // round-trip between them.
+    const pending = this.targetIdResolutions.get(entry.page);
+    let resolved = pending ? await pending : null;
+    if (resolved === null) {
+      // The head start settled without an answer. Awaiting that same settled
+      // promise again — which is all "join the in-flight lookup" does once it
+      // has finished — would leave the page permanently invisible after one
+      // transient failure. This list is a guard, and an invisible tab is one
+      // that can be closed out from under a running session.
+      resolved = await resolvePageTargetId(entry.page);
+    }
+    if (resolved !== null) entry.targetId = resolved;
+    return resolved;
+  }
+
+  /**
+   * The active tab's id and url, for `list_sessions`.
+   *
+   * Deliberately no title: `page.title()` is a round-trip into the page, and
+   * one wedged page would stall a listing that already carries a timeout for
+   * exactly that reason. `describeActiveTab` is the variant that pays for a
+   * title, and it is called per step, where the cost is already budgeted.
+   */
+  async activeTabRef(): Promise<{ targetId: string | null; url: string } | null> {
+    const entry = this.pages[this.activeIndex] ?? this.pages[0];
+    if (!entry) return null;
+    if (entry.targetId === null) {
+      // Bounded like the sweep. This runs inside `GET /sessions`, which has no
+      // timeout of its own, so an unbounded await here hangs the listing —
+      // and `list_sessions` is exactly what a caller is told to check when a
+      // close is refused for a session that is slow to report its tabs. The
+      // remedy must not be blocked by the condition that produced it.
+      const pending = this.targetIdResolutions.get(entry.page);
+      entry.targetId = pending
+        ? await briefly(pending, TARGET_ID_LOOKUP_TIMEOUT_MS, null)
+        : null;
+    }
+    let url = '';
+    try {
+      url = entry.page.url();
+    } catch {
+      // Page closed underneath us; the id is still the useful half.
+    }
+    return { targetId: entry.targetId, url };
   }
 
   /**
@@ -691,6 +802,19 @@ export class BrowserTracker {
 
   has(label: string): boolean {
     return this.sessions.some((s) => s.label === label);
+  }
+
+  /**
+   * Every browser this session owns, not just the active one.
+   *
+   * `getActive()` is the wrong question for anything asking "does this session
+   * hold X", because `add()` auto-promotes: a session that attached to a CDP
+   * tab and then ran `openBrowser` has its CDP browser sitting at index 0 while
+   * the active pointer is on the new one. Callers that guard against closing
+   * something out from under a session must look at all of them.
+   */
+  all(): readonly BrowserSession[] {
+    return this.sessions.map((s) => s.session);
   }
 
   /** Switch to a tracked browser by label. Returns the session, throws on

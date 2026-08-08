@@ -47,6 +47,9 @@ interface Harness {
   runs: { sessionId: string; body: Record<string, unknown> }[];
   listCalls: { projectRoot: string; includeForeign?: boolean; includeForeignTabs?: boolean }[];
   startCalls: Record<string, unknown>[];
+  /** Every `closeCdpTab` that reached the wire — empty means a refusal fired
+   *  before the request, which is the point of a pre-flight gate. */
+  closeCalls: Record<string, unknown>[];
   /** Which readiness check the tool took — `'ensure'` auto-starts a stopped
    *  server, `'assert'` only refuses a squatter. */
   readiness: ('ensure' | 'assert')[];
@@ -57,6 +60,9 @@ async function connect(
     project?: ProjectContext;
     browsers?: Browsers;
     started?: Record<string, unknown>;
+    closed?: Record<string, unknown>;
+    /** Sessions `list_sessions` should report. */
+    sessions?: Record<string, unknown>[];
     /** Make the registry unreachable, to prove a listing failure cannot change
      *  a finished run's outcome. */
     browsersThrow?: boolean;
@@ -74,6 +80,7 @@ async function connect(
   const runs: Harness['runs'] = [];
   const listCalls: Harness['listCalls'] = [];
   const startCalls: Harness['startCalls'] = [];
+  const closeCalls: Harness['closeCalls'] = [];
   const readiness: Harness['readiness'] = [];
 
   const fakeClient: ApiClient = {
@@ -108,7 +115,23 @@ async function connect(
       } as never;
     },
     async listSessions() {
-      return [];
+      return (opts.sessions ?? []) as never;
+    },
+    async closeCdpTab(args) {
+      closeCalls.push(args as unknown as Record<string, unknown>);
+      return (opts.closed ?? {
+        closed: true,
+        targetId: args.targetId,
+        title: 'OpenRouter — Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: args.port,
+        remainingTabs: 7,
+        browserExited: false,
+        owned: true,
+        warnings: [],
+      }) as never;
     },
     async getCdpBrowsers(args) {
       listCalls.push(args);
@@ -145,7 +168,7 @@ async function connect(
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  return { client, runs, listCalls, startCalls, readiness };
+  return { client, runs, listCalls, startCalls, closeCalls, readiness };
 }
 
 function structured(result: unknown): Record<string, unknown> {
@@ -160,6 +183,31 @@ function text(result: unknown): string {
 
 const RUNNING = [
   { engine: 'edge', profile: 'default', port: 51000, profileDir: 'c:/proj/p/edge-default', tabs: [] },
+];
+
+/** A browser with tabs, one of them driven by a session. The shape the close
+ *  flow actually reads. */
+const RUNNING_WITH_TABS = [
+  {
+    engine: 'edge',
+    profile: 'default',
+    port: 51000,
+    profileDir: 'c:/proj/p/edge-default',
+    tabs: [
+      {
+        targetId: 'A1B2C3',
+        title: 'OpenRouter — Docs',
+        url: 'https://openrouter.ai/docs',
+        sessionId: null,
+      },
+      {
+        targetId: 'D4E5F6',
+        title: 'Cart — Shop',
+        url: 'https://shop.example/cart',
+        sessionId: 'mcp:x',
+      },
+    ],
+  },
 ];
 const FOREIGN = [{ engine: 'chrome', port: 9222, tabs: null, tabsWithheld: true, error: null }];
 
@@ -617,5 +665,418 @@ describe('the gate on an agent-supplied config.cdp', () => {
     });
     expect(h.listCalls).toHaveLength(1);
     expect(h.listCalls[0]).toMatchObject({ projectRoot: PROJECT_ROOT, includeForeign: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// close_cdp_tab (stories/cdp-tabs.md §3)
+//
+// The destructive verb. What these assert is not that a close works — the fake
+// always says it did — but that the agent is stopped before the wire when it
+// should be, and told enough afterwards to relay what happened.
+// ---------------------------------------------------------------------------
+
+describe('close_cdp_tab', () => {
+  it('resolves a profile to a port and closes the named tab', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(h.closeCalls).toHaveLength(1);
+    expect(h.closeCalls[0]).toMatchObject({
+      projectRoot: PROJECT_ROOT,
+      port: 51000,
+      targetId: 'A1B2C3',
+    });
+    // The agent never sent a port; it named the browser the way a user does.
+    expect(h.closeCalls[0]).not.toHaveProperty('allowBrowserExit');
+  });
+
+  it('maps every output field through as structured content', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(structured(result)).toMatchObject({
+      closed: true,
+      targetId: 'A1B2C3',
+      title: 'OpenRouter — Docs',
+      url: 'https://openrouter.ai/docs',
+      engine: 'edge',
+      profile: 'default',
+      port: 51000,
+      remainingTabs: 7,
+      browserExited: false,
+    });
+  });
+
+  it('names the closed tab and the count in text, for a host that shows only that', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(text(result)).toContain('OpenRouter — Docs');
+    expect(text(result)).toContain('7 tabs left');
+  });
+
+  it('says the browser closed too when the last tab went with it', async () => {
+    // The one outcome a user must never learn about by looking at their
+    // taskbar. `browserExited` is in structured content, but the summary is
+    // all some hosts render — so it has to carry it as well.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closed: {
+        closed: true,
+        targetId: 'A1B2C3',
+        title: 'OpenRouter — Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: 51000,
+        remainingTabs: 0,
+        browserExited: true,
+        owned: true,
+        warnings: [],
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3', allow_browser_exit: true },
+    });
+    expect(structured(result).browserExited).toBe(true);
+    // Says the browser went, without asserting WHY. The tab count and the
+    // browser's own idea of what keeps it alive can disagree — a dialog
+    // reports as a page target — so "that was its last tab" is a claim the
+    // summary is not entitled to make.
+    expect(text(result)).toMatch(/edge "default" closed with it/);
+    // And the reassurance, since "the browser closed" reads as "the login is
+    // gone" to a model and it is not.
+    expect(text(result)).toContain('logins');
+  });
+
+  it('does not report a SUCCESSFUL close as a broken tool on an older server', async () => {
+    // The worst version-skew case in the feature, because it lands after an
+    // irreversible act. `owned` is required by the output schema; a Sessions
+    // API server predating it omits the key, validation fails, and the agent
+    // is told the tool is broken with no structured content — for a tab that
+    // is already gone. Its natural retry then hits "something else closed it
+    // first", so the user hears the close failed twice.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closed: {
+        closed: true,
+        targetId: 'A1B2C3',
+        title: 'OpenRouter — Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: 51000,
+        remainingTabs: 7,
+        browserExited: false,
+        // no `owned` — the older server's shape
+        warnings: [],
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    // Derived, not defaulted: this call resolved a PROFILE, so the port came
+    // out of our own `running` list and is owned by construction.
+    expect(structured(result).owned).toBe(true);
+    expect(text(result)).toContain('OpenRouter — Docs');
+  });
+
+  it('does not claim an older server closed OUR browser when it might not have', async () => {
+    // The backfill used to be a flat `true`, justified by "a server without
+    // this field has no unowned path". False: a mid-branch server gained
+    // `allowUnowned` before it gained `owned`. The assumption failed in the
+    // dangerous direction — reporting a human's just-terminated browser as
+    // ours and repeating "the profile keeps its logins" about something
+    // nothing here can reopen.
+    const h = await connect({
+      project: fakeProject({ cdpPermissions: { allowUnowned: true, ports: null } }),
+      browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN },
+      closed: {
+        closed: true,
+        targetId: 'A1B2C3',
+        title: 'Personal banking',
+        url: 'https://bank.example/',
+        engine: 'chrome',
+        profile: '',
+        port: 9222,
+        remainingTabs: 0,
+        browserExited: true,
+        // no `owned` — the mid-branch server's shape
+        warnings: [],
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3', allow_browser_exit: true },
+    });
+
+    expect(result.isError).toBeFalsy();
+    // Unknown resolves to the cautious answer.
+    expect(structured(result).owned).toBe(false);
+    expect(text(result)).not.toMatch(/keeps its logins/i);
+    expect(text(result)).toMatch(/nothing here can reopen it/i);
+    // And no `chrome ""` from the empty profile.
+    expect(text(result)).not.toContain('""');
+  });
+
+  it('survives an older server that omits `warnings` too', async () => {
+    // The other required field read un-normalised, on the same
+    // after-the-tab-is-gone path.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closed: {
+        closed: true,
+        targetId: 'A1B2C3',
+        title: 'Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: 51000,
+        remainingTabs: 7,
+        browserExited: false,
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured(result).warnings).toEqual([]);
+  });
+
+  it('forwards allow_browser_exit only when it was asked for', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3', allow_browser_exit: true },
+    });
+    expect(h.closeCalls[0]).toMatchObject({ allowBrowserExit: true });
+  });
+
+  it('refuses both `profile` and `port`, and never reaches the wire', async () => {
+    // Two addresses that disagree have no correct winner, and this call closes
+    // something. The message must name THIS tool's arguments — a refusal that
+    // talks about config.cdp cannot be acted on here.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', port: 51000, target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).not.toContain('config.cdp');
+    expect(text(result)).toMatch(/not both/i);
+    expect(h.closeCalls).toHaveLength(0);
+  });
+
+  it('refuses neither `profile` nor `port`', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('list_cdp_browsers');
+    expect(h.closeCalls).toHaveLength(0);
+  });
+
+  it('skips the gate for a profile-resolved port', async () => {
+    // Same narrowing as the run path: a port read out of our own `running`
+    // list is owned by construction, so the gate has nothing left to check.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(h.listCalls.filter((c) => c.includeForeign === true)).toHaveLength(0);
+  });
+
+  it('gates a caller-supplied port, and refuses a foreign one', async () => {
+    // Closing tabs in a browser is at least as intrusive as driving one, so it
+    // clears the same gate. A foreign browser could be anyone's.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN } });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('mcp.cdp.allowUnowned');
+    expect(h.closeCalls).toHaveLength(0);
+  });
+
+  it('permits a foreign port once allowUnowned is set', async () => {
+    const h = await connect({
+      project: fakeProject({ cdpPermissions: { allowUnowned: true, ports: null } }),
+      browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(h.closeCalls[0]).toMatchObject({ port: 9222 });
+  });
+
+  it('auto-starts a stopped server, like the other tools that act', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(h.readiness).toEqual(['ensure']);
+  });
+
+  it('tells the agent to match the tab itself, and warns about the last tab', async () => {
+    // The description is the whole interface for both behaviours: an agent
+    // that does not know matching is its job will look for a selector
+    // argument, and one that does not know about the last tab will read the
+    // refusal as a bug.
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    const description = tools.find((t) => t.name === 'close_cdp_tab')!.description!;
+    expect(description).toContain('list_cdp_browsers');
+    expect(description).toMatch(/yourself/);
+    expect(description).toContain('allow_browser_exit');
+    expect(description).toContain('close_session');
+  });
+
+  it('never promises unconditionally that a closed browser can be reopened', async () => {
+    // The static prose is what an agent reads when it decides to set
+    // `allow_browser_exit` pre-emptively — the path where the corrected
+    // runtime refusal never fires. Both the description and the argument's own
+    // description used to say "nothing is lost", which is false for a browser
+    // this project did not start.
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === 'close_cdp_tab')!;
+    const argDescription = JSON.stringify(tool.inputSchema);
+
+    for (const text of [tool.description!, argDescription]) {
+      // Where the reassurance appears it must be qualified by ownership.
+      if (/nothing is lost/i.test(text)) {
+        expect(text).toMatch(/this project started|did not start/i);
+      }
+    }
+    expect(tool.description).toMatch(/did not start it|ask the user first/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab <-> session visibility (stories/cdp-tabs.md §1, §4)
+// ---------------------------------------------------------------------------
+
+describe('tab and session visibility', () => {
+  it('reports which session is driving each tab', async () => {
+    // The half that makes a close refusal predictable rather than a surprise.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
+    const running = structured(result).running as { tabs: { sessionId: string | null }[] }[];
+    expect(running[0]!.tabs.map((t) => t.sessionId)).toEqual([null, 'mcp:x']);
+  });
+
+  it('reports which tab each session is on', async () => {
+    const h = await connect({
+      sessions: [
+        {
+          sessionId: 'mcp:x',
+          status: 'active',
+          currentUrl: 'https://shop.example/cart',
+          pageTitle: 'Cart',
+          totalStepsExecuted: 3,
+          cdp: { port: 51000, profile: 'default' },
+          tab: { targetId: 'D4E5F6', url: 'https://shop.example/cart' },
+        },
+      ],
+    });
+    const result = await h.client.callTool({ name: 'list_sessions', arguments: {} });
+    const sessions = structured(result).sessions as Record<string, unknown>[];
+    expect(sessions[0]!.tab).toEqual({ targetId: 'D4E5F6', url: 'https://shop.example/cart' });
+  });
+
+  it('survives a server that predates the sessionId field', async () => {
+    // `sessionId` is required-and-nullable, so an unnormalised missing key
+    // fails structuredContent validation and degrades the whole listing to
+    // isError with nothing readable in it. Reachable without doing anything
+    // wrong: pull this branch, restart the MCP server, and the Sessions API
+    // server from the previous build is still holding the port — there is no
+    // version check, only an identity one. That would kill the FIRST call of
+    // the tab flow.
+    const h = await connect({
+      browsers: {
+        running: [
+          {
+            engine: 'edge',
+            profile: 'default',
+            port: 51000,
+            profileDir: 'c:/proj/p/edge-default',
+            tabs: [{ targetId: 'A1B2C3', title: 'Docs', url: 'https://openrouter.ai/docs' }],
+          },
+        ],
+      },
+    });
+    const result = await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
+
+    expect(result.isError).toBeFalsy();
+    const running = structured(result).running as { tabs: { sessionId: string | null }[] }[];
+    expect(running[0]!.tabs[0]!.sessionId).toBeNull();
+  });
+
+  it('sends allowUnowned for a close only when a human permitted it', async () => {
+    // Otherwise the gate lets a foreign port through and the server refuses it
+    // one layer later with an unrelated message — an opt-in that grants
+    // nothing.
+    const plain = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await plain.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(plain.closeCalls[0]).not.toHaveProperty('allowUnowned');
+
+    const permitted = await connect({
+      project: fakeProject({ cdpPermissions: { allowUnowned: true, ports: null } }),
+      browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN },
+    });
+    await permitted.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3' },
+    });
+    expect(permitted.closeCalls[0]).toMatchObject({ allowUnowned: true });
+  });
+
+  it('reports a null tab rather than dropping the key on an older server', async () => {
+    // A MISSING key fails `structuredContent` validation outright; a null one
+    // is simply "not reported". The difference is a usable result versus none.
+    const h = await connect({
+      sessions: [{ sessionId: 'mcp:x', status: 'active', currentUrl: '', pageTitle: '' }],
+    });
+    const result = await h.client.callTool({ name: 'list_sessions', arguments: {} });
+    expect(result.isError).toBeFalsy();
+    const sessions = structured(result).sessions as Record<string, unknown>[];
+    expect(sessions[0]!.tab).toBeNull();
+  });
+
+  it('tells the run tools how to target an existing tab', async () => {
+    // The measured trap: an agent that lists tabs, finds the cart, and passes
+    // only the profile gets a NEW tab and leaves the user's alone.
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    for (const name of ['run_steps', 'run_test_file']) {
+      const description = tools.find((t) => t.name === name)!.description!;
+      expect(description).toContain('targetId:');
+      expect(description).toMatch(/NEW tab by default/);
+    }
   });
 });

@@ -349,3 +349,128 @@ describe('PageTracker ignored pages (CDP mode)', () => {
     expect(tracker.count).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Target-id enumeration (stories/cdp-tabs.md §1, §2 guard 3)
+//
+// This feeds the "a session is driving that tab" refusal, so a tab it fails to
+// report is a tab that can be closed out from under a running session.
+// ---------------------------------------------------------------------------
+
+describe('PageTracker.resolvedTargetIds', () => {
+  /** A page whose CDP target-id lookup can be made to fail on demand. */
+  function page(url: string, targetId: string | null, opts: { failFirst?: boolean } = {}) {
+    let calls = 0;
+    return {
+      url: () => url,
+      title: async () => '',
+      on: () => {},
+      opener: async () => null,
+      context: () => ({
+        newCDPSession: async () => ({
+          send: async (method: string) => {
+            if (method !== 'Target.getTargetInfo') throw new Error(`unexpected ${method}`);
+            calls++;
+            if (targetId === null) throw new Error('no target');
+            if (opts.failFirst && calls === 1) throw new Error('transient');
+            return { targetInfo: { targetId } };
+          },
+          // `resolvePageTargetId` detaches in a `finally`; a fake without it
+          // throws there and the whole lookup reads as "no target id".
+          detach: async () => {},
+        }),
+      }),
+    };
+  }
+
+  it('reports every tracked tab, not just the active one', async () => {
+    // A session can switchPage back to any tab it holds, so all of them are
+    // load-bearing for the guard.
+    const tracker = new PageTracker(page('https://a.test', 'AAA') as any);
+    tracker.addPage(page('https://b.test', 'BBB') as any);
+    tracker.addPage(page('https://c.test', 'CCC') as any);
+
+    const sweep = await tracker.resolvedTargetIds();
+    expect(sweep.ids.sort()).toEqual(['AAA', 'BBB', 'CCC']);
+    expect(sweep.complete).toBe(true);
+  });
+
+  it('retries a lookup that settled without an answer', async () => {
+    // Reading only the settled promise would leave a page whose FIRST
+    // resolution failed permanently invisible to the guard — and invisible
+    // means closable out from under a live session.
+    const tracker = new PageTracker(page('https://a.test', 'AAA', { failFirst: true }) as any);
+    // Let the constructor's head-start lookup fail first.
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect((await tracker.resolvedTargetIds()).ids).toEqual(['AAA']);
+  });
+
+  it('omits a page with no id, and still reports the sweep as complete', async () => {
+    // "This page has no target id" is an answer; it must not read as "the list
+    // is untrustworthy", or every launch-mode session would refuse closes.
+    const tracker = new PageTracker(page('https://a.test', 'AAA') as any);
+    tracker.addPage(page('https://b.test', null) as any);
+
+    const sweep = await tracker.resolvedTargetIds();
+    expect(sweep.ids).toEqual(['AAA']);
+    expect(sweep.complete).toBe(true);
+  });
+
+  it('reports INCOMPLETE — with the ids it did get — when a lookup wedges', async () => {
+    // The load-bearing one. An earlier version bounded the whole sweep and
+    // returned `[]`, which failed the close guard OPEN: one slow lookup and a
+    // tab a session was mid-run on became closable. Two things must hold: the
+    // resolved ids survive, and the caller is told the answer is partial.
+    const wedged = {
+      url: () => 'https://slow.test',
+      title: async () => '',
+      on: () => {},
+      opener: async () => null,
+      context: () => ({
+        newCDPSession: async () => ({ send: () => new Promise(() => {}), detach: async () => {} }),
+      }),
+    };
+    const tracker = new PageTracker(page('https://a.test', 'AAA') as any);
+    // Let the good page's head start land, so it is cached and not itself
+    // racing the budget.
+    await new Promise((r) => setTimeout(r, 10));
+    tracker.addPage(wedged as any);
+
+    vi.useFakeTimers();
+    const pending = tracker.resolvedTargetIds();
+    await vi.advanceTimersByTimeAsync(2_500);
+    const sweep = await pending;
+    vi.useRealTimers();
+
+    expect(sweep.ids).toEqual(['AAA']);
+    expect(sweep.complete).toBe(false);
+  });
+});
+
+describe('PageTracker.activeTabRef', () => {
+  function page(url: string, targetId: string) {
+    return {
+      url: () => url,
+      title: async () => 'should not be read',
+      on: () => {},
+      opener: async () => null,
+      context: () => ({
+        newCDPSession: async () => ({
+          send: async () => ({ targetInfo: { targetId } }),
+          detach: async () => {},
+        }),
+      }),
+    };
+  }
+
+  it('reports the active tab and follows a switch', async () => {
+    const tracker = new PageTracker(page('https://a.test', 'AAA') as any);
+    const b = page('https://b.test', 'BBB');
+    tracker.addPage(b as any);
+
+    expect(await tracker.activeTabRef()).toEqual({ targetId: 'AAA', url: 'https://a.test' });
+    await tracker.switchToAsync('https://b.test');
+    expect(await tracker.activeTabRef()).toEqual({ targetId: 'BBB', url: 'https://b.test' });
+  });
+});

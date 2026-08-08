@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import { assembleSteps, assembleTestFile } from './assemble.js';
 import {
   badCdpProfileName,
+  cdpTabTargetAmbiguous,
   listSessionsTimedOut,
   preflightError,
   unauthorized,
@@ -591,7 +592,13 @@ otherwise. This project may also have a persistent CDP browser running that
 holds real logins — to use it, pass config.cdp: {profile: "<name>"} (call
 list_cdp_browsers if unsure which exist). Config is read only when a session is
 CREATED, so pass it on the first call for a session; passing it later is
-ignored.`.trim();
+ignored.
+
+Tab: attaching opens a NEW tab by default. To run in a tab that is already
+open — one the user set up by hand — take its targetId from
+list_cdp_browsers and pass config.cdp: {profile: "<name>", tab:
+"targetId:<id>"}. Naming the profile alone leaves their tab untouched and
+runs somewhere else.`.trim();
 
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // -- run_steps ------------------------------------------------------------
@@ -771,6 +778,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // field entirely, and a MISSING key fails `structuredContent`
           // validation where a null one is fine.
           cdp: s.cdp ?? null,
+          tab: s.tab ?? null,
         }));
         return validated(
           schemas.listSessionsOutput,
@@ -978,9 +986,22 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           includeForeign: true,
           includeForeignTabs: maySeeForeignTabs(project.cdpPermissions),
         });
+        // `sessionId` is required-and-nullable in the output schema, so a
+        // server that predates the field would fail validation outright and
+        // degrade the whole listing to `isError` with nothing readable in it —
+        // killing the first call of the tab flow against a Sessions API server
+        // left running from an earlier build. Normalised here for the same
+        // reason `list_sessions` normalises `tab`.
+        const normalized = {
+          ...browsers,
+          running: browsers.running.map((b) => ({
+            ...b,
+            tabs: b.tabs.map((t) => ({ ...t, sessionId: t.sessionId ?? null })),
+          })),
+        };
         return validated(
           schemas.listCdpBrowsersOutput,
-          browsers as unknown as Record<string, unknown>,
+          normalized as unknown as Record<string, unknown>,
           summarizeBrowsers(browsers),
         );
       }),
@@ -1050,6 +1071,155 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         },
         // The one tool here whose job is to make something exist, so it gets
         // the run tools' auto-start rather than the probes' identity check.
+        { autoStart: true, signal: extra.signal },
+      ),
+  );
+
+  // -- close_cdp_tab --------------------------------------------------------
+  server.registerTool(
+    'close_cdp_tab',
+    {
+      title: 'Close a CDP browser tab',
+      description:
+        'Close one tab in a CDP browser — normally one this project launched.\n\n' +
+        'Call **list_cdp_browsers** first and match the user\'s words ("the ' +
+        'openrouter tab") against the tab titles and urls **yourself**, then ' +
+        'pass that tab\'s exact `targetId`. There is deliberately no fuzzy ' +
+        'matching here: closing the wrong tab cannot be undone, and you are ' +
+        'better at "which one did they mean" than a substring rule.\n\n' +
+        'This closes a real tab in the user\'s own signed-in browser window, ' +
+        'so relay what was closed rather than only that it worked.\n\n' +
+        'Two refusals, both of which tell you what to do next:\n' +
+        '- **A session is driving that tab.** Close it with close_session ' +
+        'first, or leave the tab alone if the session is still wanted.\n' +
+        '- **It is the browser\'s last tab.** Closing that closes the browser ' +
+        'itself — there is no browser with zero tabs. Pass ' +
+        '`allow_browser_exit: true` if that is what the user wants. For a ' +
+        'browser **this project started**, nothing is lost — the profile ' +
+        'keeps its logins on disk and start_cdp_browser reopens it still ' +
+        'signed in. For any other browser (only reachable with ' +
+        'mcp.cdp.allowUnowned) nothing here can reopen it or restore what it ' +
+        'was signed into, so **ask the user first**. The result\'s `owned` ' +
+        'field tells you which case you are in.\n\n' +
+        'To close a whole window, close its tabs one at a time — a window ' +
+        'disappears with its last tab. This tool does not touch ordinary ' +
+        'launch-mode session browsers; those belong to their session and end ' +
+        'with it (see close_session).',
+      inputSchema: schemas.closeCdpTabInput,
+      outputSchema: schemas.closeCdpTabOutput,
+    },
+    async (args, extra) =>
+      withProject(
+        deps,
+        args.project_root,
+        async (client, project) => {
+          // Same exactly-one rule as `config.cdp`, and refused for the same
+          // reason: two addresses that disagree have no correct winner, and
+          // this call closes something.
+          const { port, gateOwed } = await resolveCdpTarget(
+            client,
+            project.projectRoot,
+            {
+              ...(args.profile !== undefined ? { profile: args.profile } : {}),
+              ...(args.engine !== undefined ? { engine: args.engine } : {}),
+              ...(args.port !== undefined ? { port: args.port } : {}),
+            },
+            extra.signal,
+            // The tool's own field names, so the refusal names arguments this
+            // call actually has.
+            cdpTabTargetAmbiguous,
+          );
+          // A port resolved from this project's `running` list is owned by
+          // construction. A caller-supplied one is not, and closing tabs in a
+          // browser is at least as intrusive as driving it — so it clears the
+          // same gate, with the same human-held opt-in behind it.
+          if (gateOwed) {
+            await assertPortAttachable(
+              client,
+              project.projectRoot,
+              port,
+              project.cdpPermissions,
+              extra.signal,
+            );
+          }
+
+          const closed = await client.closeCdpTab(
+            {
+              projectRoot: project.projectRoot,
+              port,
+              targetId: args.target_id,
+              ...(args.allow_browser_exit === true ? { allowBrowserExit: true } : {}),
+              // Read directly rather than through `maySeeForeignTabs`, which
+              // asks a different question (may this agent SEE a foreign
+              // browser's tab titles) that happens to consult the same field.
+              // Without this the gate above would let a foreign port through
+              // and the server would refuse it anyway with an unrelated "not a
+              // browser this project has running" — an opt-in that grants
+              // nothing.
+              ...(project.cdpPermissions.allowUnowned ? { allowUnowned: true } : {}),
+            },
+            extra.signal,
+          );
+
+          // Normalised for the same reason `list_cdp_browsers` normalises
+          // `sessionId`, and it matters more here: this field is required by
+          // the output schema, so a Sessions API server predating it fails
+          // validation — and that lands AFTER the tab has already been closed.
+          // The agent is told the tool is broken, retries, and gets "something
+          // else closed it first", so the user hears the close failed twice
+          // about a tab that is gone.
+          //
+          // **Derived, not defaulted to `true`.** An earlier version assumed a
+          // server without the field could not close an unowned browser; that
+          // is false for a mid-branch server that gained `allowUnowned` before
+          // it gained `owned`, and the assumption failed in the dangerous
+          // direction — reporting a human's just-terminated browser as ours
+          // and repeating the "the profile keeps its logins" reassurance about
+          // something nothing here can reopen. Two things we know locally
+          // settle it without asking the server:
+          //   - a port resolved from a profile came out of this project's own
+          //     `running` list, so it is owned by construction;
+          //   - with `allowUnowned` off, the gate above already proved the port
+          //     is in `running`.
+          // Anything else is genuinely unknown, and unknown resolves to
+          // `false`, whose message is the cautious one.
+          const certainlyOwned = !gateOwed || !project.cdpPermissions.allowUnowned;
+          const result = {
+            ...closed,
+            owned: closed.owned ?? certainlyOwned,
+            warnings: closed.warnings ?? [],
+          };
+
+          // The summary is all a host that ignores structured content will
+          // show, so it carries the two things a user asked "close the
+          // openrouter tab" actually wants back: which tab went, and whether
+          // the browser went with it.
+          const what = closed.title || closed.url || closed.targetId;
+          const browser = result.owned
+            ? `${result.engine} "${result.profile}"`
+            : `the browser on port ${result.port}`;
+          const aftermath = result.browserExited
+            // Not "that was its last tab" — the tab count and the browser's own
+            // idea of what keeps it alive can disagree (browser dialogs report
+            // as page targets). What is certainly true is that the browser went.
+            ? ` — ${browser} closed with it` +
+              // True only of a browser we own. Claiming it for someone else's
+              // browser tells the user a terminated session is recoverable
+              // when nothing here can bring it back.
+              (result.owned
+                ? ' (the profile keeps its logins)'
+                : ' — this project did not start it, so nothing here can reopen it')
+            : `; ${result.remainingTabs} tab${result.remainingTabs === 1 ? '' : 's'} left`;
+          return validated(
+            schemas.closeCdpTabOutput,
+            result as unknown as Record<string, unknown>,
+            `Closed "${what}"${aftermath}` +
+              (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
+          );
+        },
+        // Acts on live browser state, like the run tools — not a read-only
+        // probe. Kept off `ensureServerReady` would mean a close against a
+        // stopped server died on a bare ECONNREFUSED.
         { autoStart: true, signal: extra.signal },
       ),
   );

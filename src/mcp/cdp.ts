@@ -27,6 +27,7 @@ import {
   cdpProfileAmbiguous,
   cdpProfileNotRunning,
   cdpTargetAmbiguous,
+  type McpToolError,
 } from './errors.js';
 import {
   PreflightFailure,
@@ -109,12 +110,19 @@ export async function assertPortAttachable(
  * profile, and only our own registry could turn it into a port.
  *
  * Returns the port, and whether the caller still owes a gate check.
+ *
+ * `ambiguous` lets a caller supply its own both-or-neither message. Two tools
+ * share this resolution but not their argument names — `run_steps` nests the
+ * address under `config.cdp`, `close_cdp_tab` takes it at the top level — and
+ * an error telling an agent to fix `config.cdp` on a call that has no `config`
+ * is one it cannot act on.
  */
 export async function resolveCdpTarget(
   client: ApiClient,
   projectRoot: string,
   target: CdpTarget,
   signal?: AbortSignal,
+  ambiguous: (both: boolean) => McpToolError = cdpTargetAmbiguous,
 ): Promise<{ port: number; gateOwed: boolean }> {
   const hasProfile = target.profile !== undefined && target.profile.trim() !== '';
   const hasPort = target.port !== undefined;
@@ -122,7 +130,7 @@ export async function resolveCdpTarget(
   // Both is refused rather than resolved-and-compared. Two addresses that
   // disagree have no correct winner, and silently picking one is the shape of
   // the bug this story exists to remove.
-  if (hasProfile === hasPort) throw new PreflightFailure(cdpTargetAmbiguous(hasProfile && hasPort));
+  if (hasProfile === hasPort) throw new PreflightFailure(ambiguous(hasProfile && hasPort));
 
   if (!hasProfile) return { port: target.port!, gateOwed: true };
 

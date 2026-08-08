@@ -194,6 +194,7 @@ describe('tool registration', () => {
     const { tools } = await client.listTools();
 
     expect(tools.map((t) => t.name).sort()).toEqual([
+      'close_cdp_tab',
       'close_session',
       'get_last_run',
       'get_page_content',

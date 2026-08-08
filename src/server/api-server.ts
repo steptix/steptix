@@ -6,6 +6,8 @@ import type { Config } from '../config/types.js';
 import {
   knownProfiles,
   startCdpBrowser,
+  closeCdpTab,
+  UNKNOWN_HOLDER,
   DEFAULT_PROFILE,
   type CdpFailureKind,
   type StartResult,
@@ -759,6 +761,40 @@ export function createApiServer(
    */
   const cdpLaunchesInFlight = new Map<string, Promise<StartResult>>();
 
+  /**
+   * Serialises tab closes per browser. A **queue**, not a single-flight —
+   * two closes of two different tabs must both happen, just not at once.
+   *
+   * Without it the `allow_browser_exit` flag is bypassable, which is the one
+   * guarantee this route exists to give. Two concurrent closes against a
+   * two-tab browser both read a list of length two, both conclude they are not
+   * closing the last tab, and both proceed — and the browser exits with
+   * neither caller having asked for that. An MCP host issuing two tool calls
+   * in one turn ("close both of those") is enough to trigger it.
+   *
+   * **Keyed on the port alone, deliberately.** A port is one listening socket
+   * on this machine, so it identifies the browser; `projectRoot` does not.
+   * Including the root gave one browser a queue *per project*, and this server
+   * is a per-machine singleton serving many roots — so two projects addressing
+   * the same browser (which `allowUnowned` permits) would each get their own
+   * chain and the guarantee would evaporate exactly where it was needed.
+   */
+  const cdpCloseQueues = new Map<number, Promise<unknown>>();
+
+  function queueCdpClose<T>(key: number, work: () => Promise<T>): Promise<T> {
+    const tail = (cdpCloseQueues.get(key) ?? Promise.resolve())
+      // `.catch` so one failed close does not poison the chain for the next
+      // caller; the failure is still returned to whoever asked for it.
+      .then(work, work);
+    // Keep the queue keyed only while this link is the tail, so a browser that
+    // goes quiet does not retain its chain forever.
+    cdpCloseQueues.set(key, tail);
+    void tail.catch(() => {}).finally(() => {
+      if (cdpCloseQueues.get(key) === tail) cdpCloseQueues.delete(key);
+    });
+    return tail;
+  }
+
   app.get('/cdp/browsers', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const projectRoot = typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
@@ -781,15 +817,25 @@ export function createApiServer(
         req.query['includeForeignTabs'] === 'true' || req.query['includeForeignTabs'] === '1';
 
       const profiles = await knownProfiles(projectRoot);
-      const running = profiles
-        .filter((p) => p.live && p.port !== null)
-        .map((p) => ({
-          engine: p.engine,
-          profile: p.profile,
-          port: p.port as number,
-          profileDir: p.profileDir,
-          tabs: p.tabs ?? [],
-        }));
+      const live = profiles.filter((p) => p.live && p.port !== null);
+      // Which session is on which tab (stories/cdp-tabs.md §1). A map lookup
+      // against sessions this server already holds — the per-page target ids
+      // were resolved and cached when each page was adopted, so this costs no
+      // CDP round-trip. It is what makes the close refusal predictable rather
+      // than a surprise: the agent can see a tab is spoken for before trying.
+      const holders = await Promise.all(
+        live.map(async (p) => (await sessionManager.sessionsByTarget(p.port as number)).byTarget),
+      );
+      const running = live.map((p, i) => ({
+        engine: p.engine,
+        profile: p.profile,
+        port: p.port as number,
+        profileDir: p.profileDir,
+        tabs: (p.tabs ?? []).map((t) => ({
+          ...t,
+          sessionId: holders[i]?.get(t.targetId) ?? null,
+        })),
+      }));
       // No `port` field at all, rather than `port: null`. An `available` entry
       // is a directory, not a browser; giving it a port-shaped hole invites a
       // caller to try to attach to it.
@@ -891,6 +937,97 @@ export function createApiServer(
       next(err);
     }
   });
+
+  // DELETE /cdp/browsers/:port/tabs/:targetId (stories/cdp-tabs.md §2)
+  //
+  // The one destructive verb over a live browser. Every guard lives in
+  // `closeCdpTab`; this route validates its inputs, supplies the session join
+  // the registry cannot see, and maps failures onto status codes.
+  app.delete(
+    '/cdp/browsers/:port/tabs/:targetId',
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const projectRoot =
+          typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
+        if (!projectRoot) {
+          res.status(400).json({ error: 'projectRoot query parameter is required' });
+          return;
+        }
+        if (!path.isAbsolute(projectRoot)) {
+          res
+            .status(400)
+            .json({ error: `projectRoot must be an absolute path (got "${projectRoot}")` });
+          return;
+        }
+
+        const port = Number(req.params.port);
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+          res.status(400).json({ error: `port must be a valid TCP port (got "${req.params.port}")` });
+          return;
+        }
+
+        const targetId = String(req.params.targetId ?? '');
+        if (targetId === '') {
+          res.status(400).json({ error: 'targetId is required' });
+          return;
+        }
+
+        const allowBrowserExit =
+          req.query['allowBrowserExit'] === 'true' || req.query['allowBrowserExit'] === '1';
+        // Whether a browser this project did NOT launch may be closed. Same
+        // shape and same reasoning as `includeForeignTabs` on the listing: the
+        // server cannot tell an agent from a human, so it honours what it is
+        // asked, and the withholding lives MCP-side where `mcp.cdp.allowUnowned`
+        // is read. Without this the MCP gate would pass a foreign port that the
+        // registry then refuses anyway — an opt-in that says it grants
+        // something it cannot.
+        const allowUnowned =
+          req.query['allowUnowned'] === 'true' || req.query['allowUnowned'] === '1';
+
+        const result = await queueCdpClose(port, () =>
+          closeCdpTab({
+            projectRoot,
+            port,
+            targetId,
+            allowBrowserExit,
+            allowUnowned,
+            // Resolved per call, not cached: a session that bound this tab
+            // since the caller last listed must still be seen.
+            sessionHolding: async (id) => {
+              const { byTarget, complete } = await sessionManager.sessionsByTarget(port);
+              const holder = byTarget.get(id);
+              if (holder) return holder;
+              // An incomplete join cannot say "nobody holds it". Refusing on a
+              // maybe is the right trade for a guard whose failure closes a
+              // tab out from under a live run.
+              return complete ? null : UNKNOWN_HOLDER;
+            },
+          }),
+        );
+
+        if (!result.ok) {
+          res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+          return;
+        }
+
+        res.status(200).json({
+          closed: true,
+          targetId: result.targetId,
+          title: result.title,
+          url: result.url,
+          engine: result.engine,
+          profile: result.profile,
+          port: result.port,
+          remainingTabs: result.remainingTabs,
+          browserExited: result.browserExited,
+          owned: result.owned,
+          warnings: result.warnings,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // Error handling middleware
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -1011,9 +1148,15 @@ function statusForCdpFailure(kind: CdpFailureKind): number {
   switch (kind) {
     case 'invalid_input':
       return 400;
+    // The port is not one of ours, or the browser has no such tab. 404 rather
+    // than 409: nothing about the state needs changing, the caller named
+    // something that is not here.
+    case 'not_found':
+      return 404;
     // Well-formed, but the state on disk says no: a live browser on the
-    // profile, a directory we did not create. Retrying verbatim will fail
-    // the same way, which is what 409 tells a client.
+    // profile, a directory we did not create, a tab a session is driving.
+    // Retrying verbatim will fail the same way, which is what 409 tells a
+    // client.
     case 'refused':
       return 409;
     case 'launch_failed':
