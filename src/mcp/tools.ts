@@ -1167,9 +1167,28 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // validation — and that lands AFTER the tab has already been closed.
           // The agent is told the tool is broken, retries, and gets "something
           // else closed it first", so the user hears the close failed twice
-          // about a tab that is gone. `true` is the right backfill: a server
-          // without this field has no unowned path at all.
-          const result = { ...closed, owned: closed.owned ?? true };
+          // about a tab that is gone.
+          //
+          // **Derived, not defaulted to `true`.** An earlier version assumed a
+          // server without the field could not close an unowned browser; that
+          // is false for a mid-branch server that gained `allowUnowned` before
+          // it gained `owned`, and the assumption failed in the dangerous
+          // direction — reporting a human's just-terminated browser as ours
+          // and repeating the "the profile keeps its logins" reassurance about
+          // something nothing here can reopen. Two things we know locally
+          // settle it without asking the server:
+          //   - a port resolved from a profile came out of this project's own
+          //     `running` list, so it is owned by construction;
+          //   - with `allowUnowned` off, the gate above already proved the port
+          //     is in `running`.
+          // Anything else is genuinely unknown, and unknown resolves to
+          // `false`, whose message is the cautious one.
+          const certainlyOwned = !gateOwed || !project.cdpPermissions.allowUnowned;
+          const result = {
+            ...closed,
+            owned: closed.owned ?? certainlyOwned,
+            warnings: closed.warnings ?? [],
+          };
 
           // The summary is all a host that ignores structured content will
           // show, so it carries the two things a user asked "close the
@@ -1195,7 +1214,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             schemas.closeCdpTabOutput,
             result as unknown as Record<string, unknown>,
             `Closed "${what}"${aftermath}` +
-              (closed.warnings.length > 0 ? `\n${closed.warnings.join('\n')}` : ''),
+              // `?? []` for the same version-skew reason as `owned`: a required
+              // field read un-normalised throws here, and this code runs after
+              // the tab is already closed.
+              ((result.warnings ?? []).length > 0 ? `\n${result.warnings.join('\n')}` : ''),
           );
         },
         // Acts on live browser state, like the run tools — not a read-only

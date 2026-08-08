@@ -50,6 +50,10 @@ vi.mock('../src/browser/manager.js', () => {
     BrowserTracker,
     // Video recording: report 'off' so no recordVideo/finalize path runs under
     // the mock (the mocked BrowserSession has no real page.video()).
+    // Real behaviour, not a stub: session-manager uses it to bound page reads
+    // while listing, and a mock that resolved instantly would hide a hang.
+    briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
+      Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
     resolveVideoMode: vi.fn(() => 'off'),
     finalizeMainPageVideo: vi.fn(async (args: { closeContext: () => Promise<void> }) => {
       await args.closeContext();
@@ -1841,6 +1845,75 @@ type: skill
 
       const state = await manager.getSession('session-1');
       expect(state).not.toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getActiveSessionsWithTitles — GET /sessions has no deadline of its own, so
+  // every page read it takes must carry one.
+  // -------------------------------------------------------------------------
+  describe('listing sessions with a wedged page', () => {
+    function wedgeSession(id: string, opts: { title?: boolean; targetId?: boolean } = {}) {
+      const never = () => new Promise(() => {});
+      (manager as any).sessions.set(id, {
+        id,
+        status: 'active',
+        totalStepsExecuted: 0,
+        sessionConfig: {},
+        browserSession: {
+          pageTracker: {
+            getActive: () => ({
+              url: () => 'https://slow.test',
+              title: opts.title ? never : async () => 'Fine',
+            }),
+            activeTabRef: opts.targetId ? never : async () => ({ targetId: 'T', url: 'https://slow.test' }),
+          },
+        },
+        browserTracker: { all: () => [] },
+      });
+    }
+
+    it('does not hang on a page whose title never resolves', async () => {
+      // `page.title()` carries no timeout of its own — the runner races it for
+      // exactly this reason. Unbounded here, any non-MCP caller (TestBench,
+      // flick, curl) waits forever.
+      wedgeSession('mcp:wedged', { title: true });
+
+      const listed = await manager.getActiveSessionsWithTitles();
+
+      expect(listed).toHaveLength(1);
+      expect(listed[0]!.pageTitle).toBe('');
+      // The row is still useful — the url came from a sync call.
+      expect(listed[0]!.currentUrl).toBe('https://slow.test');
+    });
+
+    it('does not hang on a target-id lookup that never resolves', async () => {
+      wedgeSession('mcp:wedged', { targetId: true });
+
+      const listed = await manager.getActiveSessionsWithTitles();
+
+      expect(listed[0]!.tab).toBeNull();
+      expect(listed[0]!.pageTitle).toBe('Fine');
+    });
+
+    it('does not let per-session budgets SUM across sessions', async () => {
+      // The reason this is parallel. Sequentially, three wedged sessions cost
+      // 3x the per-session budget and blew past list_sessions' own 5s abort —
+      // so the agent was told the listing timed out instead of getting it.
+      // Three sessions on one CDP browser is the arrangement this feature
+      // actively encourages.
+      wedgeSession('mcp:a', { title: true });
+      wedgeSession('mcp:b', { title: true });
+      wedgeSession('mcp:c', { title: true });
+
+      const started = Date.now();
+      const listed = await manager.getActiveSessionsWithTitles();
+      const elapsed = Date.now() - started;
+
+      expect(listed).toHaveLength(3);
+      // One budget's worth, not three. Generous bound so this is not a
+      // timing-flaky test; the sequential version took ~4.5s here.
+      expect(elapsed).toBeLessThan(3_000);
     });
   });
 

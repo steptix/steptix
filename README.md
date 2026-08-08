@@ -242,8 +242,11 @@ Two refusals worth knowing about:
   This is why the tab list names the session — you can see it before you try.
 - **Closing a browser's last tab closes the browser**, so it needs
   `allow_browser_exit: true`. There is no such thing as a browser with zero
-  tabs, so this is the honest way to say "stop the browser". Nothing is lost:
-  the profile keeps its logins and `start_cdp_browser` reopens it signed in.
+  tabs, so this is the honest way to say "stop the browser". For a browser
+  **this project started** nothing is lost — the profile keeps its logins and
+  `start_cdp_browser` reopens it signed in. For anything else (only reachable
+  with `allowUnowned` above) nothing here can reopen it, and the agent is told
+  to ask you first.
 
 To close a **window**, close its tabs — a window disappears with its last one.
 A window is not a separate browser: one browser process holds any number of

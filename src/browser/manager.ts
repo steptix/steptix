@@ -208,7 +208,7 @@ export interface TargetIdSweep {
   complete: boolean;
 }
 
-async function briefly<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+export async function briefly<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([

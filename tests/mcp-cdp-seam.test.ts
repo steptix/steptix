@@ -788,9 +788,74 @@ describe('close_cdp_tab', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    // Backfilled true: a server without the field has no unowned path at all.
+    // Derived, not defaulted: this call resolved a PROFILE, so the port came
+    // out of our own `running` list and is owned by construction.
     expect(structured(result).owned).toBe(true);
     expect(text(result)).toContain('OpenRouter — Docs');
+  });
+
+  it('does not claim an older server closed OUR browser when it might not have', async () => {
+    // The backfill used to be a flat `true`, justified by "a server without
+    // this field has no unowned path". False: a mid-branch server gained
+    // `allowUnowned` before it gained `owned`. The assumption failed in the
+    // dangerous direction — reporting a human's just-terminated browser as
+    // ours and repeating "the profile keeps its logins" about something
+    // nothing here can reopen.
+    const h = await connect({
+      project: fakeProject({ cdpPermissions: { allowUnowned: true, ports: null } }),
+      browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN },
+      closed: {
+        closed: true,
+        targetId: 'A1B2C3',
+        title: 'Personal banking',
+        url: 'https://bank.example/',
+        engine: 'chrome',
+        profile: '',
+        port: 9222,
+        remainingTabs: 0,
+        browserExited: true,
+        // no `owned` — the mid-branch server's shape
+        warnings: [],
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3', allow_browser_exit: true },
+    });
+
+    expect(result.isError).toBeFalsy();
+    // Unknown resolves to the cautious answer.
+    expect(structured(result).owned).toBe(false);
+    expect(text(result)).not.toMatch(/keeps its logins/i);
+    expect(text(result)).toMatch(/nothing here can reopen it/i);
+    // And no `chrome ""` from the empty profile.
+    expect(text(result)).not.toContain('""');
+  });
+
+  it('survives an older server that omits `warnings` too', async () => {
+    // The other required field read un-normalised, on the same
+    // after-the-tab-is-gone path.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closed: {
+        closed: true,
+        targetId: 'A1B2C3',
+        title: 'Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: 51000,
+        remainingTabs: 7,
+        browserExited: false,
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured(result).warnings).toEqual([]);
   });
 
   it('forwards allow_browser_exit only when it was asked for', async () => {

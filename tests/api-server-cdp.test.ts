@@ -43,6 +43,10 @@ vi.mock('../src/browser/manager.js', () => ({
     getActive = vi.fn();
     closeAll = vi.fn(async () => {});
   },
+  // Real behaviour, not a stub: session-manager uses it to bound page reads
+  // while listing, and a mock that resolved instantly would hide a hang.
+  briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
+    Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
   resolveVideoMode: vi.fn(() => 'off'),
   finalizeMainPageVideo: vi.fn(),
 }));

@@ -658,8 +658,8 @@ export async function closeCdpTab(
         `Could not determine whether a session is driving "${target.title || target.url}" — ` +
         'one of this server\'s sessions took too long to report its tabs.\n\n' +
         'Nothing was closed. Retry in a moment — a session mid-step is the usual cause ' +
-        'and it clears on its own. If it persists, close the session that is running ' +
-        '(close_session) and try again.',
+        'and it clears on its own. If it persists, call list_sessions to see which ' +
+        'session is running and close_session to end it, then retry.',
     };
   }
   if (holder) {

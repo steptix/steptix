@@ -53,6 +53,10 @@ vi.mock('../src/browser/manager.js', () => {
     BrowserTracker,
     // Video recording: report 'off' so no recordVideo/finalize path runs under
     // the mock (the mocked BrowserSession has no real page.video()).
+    // Real behaviour, not a stub: session-manager uses it to bound page reads
+    // while listing, and a mock that resolved instantly would hide a hang.
+    briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
+      Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
     resolveVideoMode: vi.fn(() => 'off'),
     finalizeMainPageVideo: vi.fn(async (args: { closeContext: () => Promise<void> }) => {
       await args.closeContext();

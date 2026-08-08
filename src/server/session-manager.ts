@@ -14,6 +14,7 @@ import {
   BrowserTracker,
   resolveVideoMode,
   finalizeMainPageVideo,
+  briefly,
   type BrowserSession,
   type VideoMode,
 } from '../browser/manager.js';
@@ -480,6 +481,16 @@ function sliceWholeCodePoints(text: string, max: number): string {
 
 /** Pattern for [input: variable_name] steps */
 const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
+
+/**
+ * Bound on any single page read taken while listing sessions.
+ *
+ * `GET /sessions` has no deadline of its own, and both reads it performs —
+ * `page.title()` and the target-id lookup — can hang on a wedged page. Sized
+ * well under `list_sessions`'s own 5 s abort so the caller gets a listing with
+ * a blank field rather than a timeout with nothing in it.
+ */
+const PAGE_READ_TIMEOUT_MS = 1_500;
 
 /** Pattern for [interactive] steps */
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
@@ -1483,41 +1494,63 @@ export class SessionManager {
    * List all active sessions with async page title resolution.
    */
   async getActiveSessionsWithTitles(): Promise<SessionListItem[]> {
-    const items: SessionListItem[] = [];
+    // **Parallel, and every page read bounded.** This route had no deadline of
+    // its own while awaiting two things that can hang: `page.title()`, which
+    // carries no timeout (the runner races it for exactly this reason), and the
+    // target-id lookup. Sequentially, per-session budgets also *sum* — three
+    // sessions on one wedged CDP browser took 6 s against `list_sessions`'s own
+    // 5 s abort, so the caller was told the listing timed out rather than being
+    // given it. Both fixed here: the work fans out, so the cost is the slowest
+    // session rather than their total.
+    const live = [...this.sessions].filter(([, s]) => s.status !== 'closed');
 
-    for (const [id, session] of this.sessions) {
-      if (session.status === 'closed') continue;
+    return Promise.all(
+      live.map(async ([id, session]) => {
+        const page = session.browserSession.pageTracker.getActive();
+        let currentUrl = '';
+        try {
+          currentUrl = page.url();
+        } catch {
+          // ignore — a closed page still has a session row worth reporting
+        }
 
-      const page = session.browserSession.pageTracker.getActive();
-      let currentUrl = '';
-      let pageTitle = '';
+        const [pageTitle, tab] = await Promise.all([
+          briefly(
+            (async () => {
+              try {
+                return await page.title();
+              } catch {
+                return '';
+              }
+            })(),
+            PAGE_READ_TIMEOUT_MS,
+            '',
+          ),
+          briefly(
+            (async () => {
+              try {
+                return await session.browserSession.pageTracker.activeTabRef();
+              } catch {
+                // A diagnostic field must never be the reason a listing fails.
+                return null;
+              }
+            })(),
+            PAGE_READ_TIMEOUT_MS,
+            null,
+          ),
+        ]);
 
-      try {
-        currentUrl = page.url();
-        pageTitle = await page.title();
-      } catch {
-        // ignore
-      }
-
-      let tab: SessionListItem['tab'] = null;
-      try {
-        tab = await session.browserSession.pageTracker.activeTabRef();
-      } catch {
-        // A diagnostic field must never be the reason a listing fails.
-      }
-
-      items.push({
-        sessionId: id,
-        status: session.status === 'executing' ? 'executing' : 'active',
-        currentUrl,
-        pageTitle,
-        totalStepsExecuted: session.totalStepsExecuted,
-        cdp: cdpBinding(session),
-        tab,
-      });
-    }
-
-    return items;
+        return {
+          sessionId: id,
+          status: (session.status === 'executing' ? 'executing' : 'active') as 'executing' | 'active',
+          currentUrl,
+          pageTitle,
+          totalStepsExecuted: session.totalStepsExecuted,
+          cdp: cdpBinding(session),
+          tab,
+        };
+      }),
+    );
   }
 
   /**

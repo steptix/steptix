@@ -653,7 +653,39 @@ sending a string port got a working CDP session invisible to the guard; the
 comparison now coerces, because this guard failing open is the expensive
 direction.
 
-**Confirmed correct on this pass:** the poll predicate in both directions
+### Round four — convergence
+
+The first round to introduce **no new defect**. What it found instead was three
+*incomplete* fixes, which is a different and more encouraging failure mode:
+
+1. **The `owned` backfill was a lie in the dangerous direction, and the comment
+   justifying it was provably false.** Round three defaulted a missing `owned`
+   to `true` on the reasoning that "a server without this field has no unowned
+   path at all". Not true for exactly one commit — the one that added
+   `allowUnowned` before `owned` existed — so a mid-branch server can close a
+   browser this project did not start *and* omit the field. The agent would
+   then be handed `owned: true` for a human's just-terminated browser, plus the
+   "profile keeps its logins" reassurance about something nothing here can
+   reopen. Now **derived** from what the tool knows locally: a profile-resolved
+   port is owned by construction, and with `allowUnowned` off the gate already
+   proved the port is in `running`. Anything else is unknown, and unknown
+   resolves to `false` — the cautious message. `warnings` got the same
+   treatment, being the other required field read un-normalised on the
+   after-the-tab-is-gone path.
+2. **The README still carried the unqualified promise.** Round three fixed
+   three of the four places and missed the one a human reads, sitting directly
+   after the paragraph explaining the `allowUnowned` gate.
+3. **The `activeTabRef` bound did not achieve its stated purpose.** It was
+   added so `list_sessions` could answer when a close is refused for a slow
+   session — but `page.title()`, seven lines above it in the same loop, is
+   equally unbounded, so any non-MCP caller still hung forever; and the loop was
+   sequential, so per-session budgets *summed* and three sessions on one wedged
+   browser took 6 s against `list_sessions`'s own 5 s abort. The listing now
+   fans out, and both page reads are bounded — so the cost is the slowest
+   session rather than their total. The refusal also points at `list_sessions`
+   again, which is now safe to recommend.
+
+**Confirmed correct on the round-three pass:** the poll predicate in both directions
 (with no extra HTTP on the happy path), the whole `complete` chain — no
 spurious refusals reachable, no symbol leaking to the wire, the listing
 unaffected — `owned` at all four return sites, the port-keyed queue (cross-
