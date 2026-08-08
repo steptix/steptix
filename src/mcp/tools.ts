@@ -1214,10 +1214,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             schemas.closeCdpTabOutput,
             result as unknown as Record<string, unknown>,
             `Closed "${what}"${aftermath}` +
-              // `?? []` for the same version-skew reason as `owned`: a required
-              // field read un-normalised throws here, and this code runs after
-              // the tab is already closed.
-              ((result.warnings ?? []).length > 0 ? `\n${result.warnings.join('\n')}` : ''),
+              (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
           );
         },
         // Acts on live browser state, like the run tools — not a read-only

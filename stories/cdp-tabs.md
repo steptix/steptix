@@ -685,6 +685,29 @@ The first round to introduce **no new defect**. What it found instead was three
    session rather than their total. The refusal also points at `list_sessions`
    again, which is now safe to recommend.
 
+### Round five — converged
+
+Nothing found. The parallel listing rewrite was attacked on every axis that
+mattered — order preservation, the closed-session filter, field/type identity,
+whether a throw now fails the whole listing where it used to skip one row (it
+does not; the old loop had the same throws outside its `try`), and the fallback
+values — and held. The `owned` derivation was enumerated across all eleven
+combinations of addressing × opt-in × server version and is correct or safely
+cautious in each.
+
+The result worth keeping is the **mutation evidence** for the new hang tests,
+because "the mock made them pass vacuously" was the real risk: reverting the
+production code to sequential-and-unbounded fails all three, stripping only the
+bounds fails all three, and keeping the bounds while removing the parallelism
+fails *only* the budgets-must-not-sum test. Each test kills exactly the mutant
+it was written for.
+
+Two consistency items were taken from this round: `ClosedCdpTab.owned` and
+`warnings` are now optional in the client type, matching `SessionSummary.cdp`
+and `CdpTab.sessionId` — the type should model the version skew the handler
+already defends against, rather than asserting a shape the wire does not
+guarantee.
+
 **Confirmed correct on the round-three pass:** the poll predicate in both directions
 (with no extra HTTP on the happy path), the whole `complete` chain — no
 spurious refusals reachable, no symbol leaking to the wire, the listing

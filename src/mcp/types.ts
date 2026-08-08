@@ -250,9 +250,17 @@ export interface ClosedCdpTab {
   remainingTabs: number;
   /** Observed, not assumed — the port stopped answering. */
   browserExited: boolean;
-  /** Whether this project launched the browser. */
-  owned: boolean;
-  warnings: string[];
+  /**
+   * Whether this project launched the browser.
+   *
+   * Optional for the same reason `SessionSummary.cdp` and `CdpTab.sessionId`
+   * are: a Sessions API server predating the field omits it, and the type
+   * should say so rather than letting the handler assume otherwise. The tool
+   * derives a safe value when it is missing — it is required in the *output*
+   * schema, so guessing wrong here is a failure after an irreversible act.
+   */
+  owned?: boolean;
+  warnings?: string[];
 }
 
 export interface GetCdpBrowsersArgs {
