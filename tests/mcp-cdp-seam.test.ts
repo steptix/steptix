@@ -759,6 +759,40 @@ describe('close_cdp_tab', () => {
     expect(text(result)).toContain('logins');
   });
 
+  it('does not report a SUCCESSFUL close as a broken tool on an older server', async () => {
+    // The worst version-skew case in the feature, because it lands after an
+    // irreversible act. `owned` is required by the output schema; a Sessions
+    // API server predating it omits the key, validation fails, and the agent
+    // is told the tool is broken with no structured content — for a tab that
+    // is already gone. Its natural retry then hits "something else closed it
+    // first", so the user hears the close failed twice.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closed: {
+        closed: true,
+        targetId: 'A1B2C3',
+        title: 'OpenRouter — Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: 51000,
+        remainingTabs: 7,
+        browserExited: false,
+        // no `owned` — the older server's shape
+        warnings: [],
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    // Backfilled true: a server without the field has no unowned path at all.
+    expect(structured(result).owned).toBe(true);
+    expect(text(result)).toContain('OpenRouter — Docs');
+  });
+
   it('forwards allow_browser_exit only when it was asked for', async () => {
     const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
     await h.client.callTool({
@@ -852,6 +886,26 @@ describe('close_cdp_tab', () => {
     expect(description).toMatch(/yourself/);
     expect(description).toContain('allow_browser_exit');
     expect(description).toContain('close_session');
+  });
+
+  it('never promises unconditionally that a closed browser can be reopened', async () => {
+    // The static prose is what an agent reads when it decides to set
+    // `allow_browser_exit` pre-emptively — the path where the corrected
+    // runtime refusal never fires. Both the description and the argument's own
+    // description used to say "nothing is lost", which is false for a browser
+    // this project did not start.
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === 'close_cdp_tab')!;
+    const argDescription = JSON.stringify(tool.inputSchema);
+
+    for (const text of [tool.description!, argDescription]) {
+      // Where the reassurance appears it must be qualified by ownership.
+      if (/nothing is lost/i.test(text)) {
+        expect(text).toMatch(/this project started|did not start/i);
+      }
+    }
+    expect(tool.description).toMatch(/did not start it|ask the user first/i);
   });
 });
 

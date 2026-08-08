@@ -1081,7 +1081,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'Close a CDP browser tab',
       description:
-        'Close one tab in a CDP browser this project launched.\n\n' +
+        'Close one tab in a CDP browser — normally one this project launched.\n\n' +
         'Call **list_cdp_browsers** first and match the user\'s words ("the ' +
         'openrouter tab") against the tab titles and urls **yourself**, then ' +
         'pass that tab\'s exact `targetId`. There is deliberately no fuzzy ' +
@@ -1094,9 +1094,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'first, or leave the tab alone if the session is still wanted.\n' +
         '- **It is the browser\'s last tab.** Closing that closes the browser ' +
         'itself — there is no browser with zero tabs. Pass ' +
-        '`allow_browser_exit: true` if that is what the user wants. Nothing ' +
-        'is lost: the profile keeps its logins on disk, and start_cdp_browser ' +
-        'reopens it still signed in.\n\n' +
+        '`allow_browser_exit: true` if that is what the user wants. For a ' +
+        'browser **this project started**, nothing is lost — the profile ' +
+        'keeps its logins on disk and start_cdp_browser reopens it still ' +
+        'signed in. For any other browser (only reachable with ' +
+        'mcp.cdp.allowUnowned) nothing here can reopen it or restore what it ' +
+        'was signed into, so **ask the user first**. The result\'s `owned` ' +
+        'field tells you which case you are in.\n\n' +
         'To close a whole window, close its tabs one at a time — a window ' +
         'disappears with its last tab. This tool does not touch ordinary ' +
         'launch-mode session browsers; those belong to their session and end ' +
@@ -1157,15 +1161,25 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             extra.signal,
           );
 
+          // Normalised for the same reason `list_cdp_browsers` normalises
+          // `sessionId`, and it matters more here: this field is required by
+          // the output schema, so a Sessions API server predating it fails
+          // validation — and that lands AFTER the tab has already been closed.
+          // The agent is told the tool is broken, retries, and gets "something
+          // else closed it first", so the user hears the close failed twice
+          // about a tab that is gone. `true` is the right backfill: a server
+          // without this field has no unowned path at all.
+          const result = { ...closed, owned: closed.owned ?? true };
+
           // The summary is all a host that ignores structured content will
           // show, so it carries the two things a user asked "close the
           // openrouter tab" actually wants back: which tab went, and whether
           // the browser went with it.
           const what = closed.title || closed.url || closed.targetId;
-          const browser = closed.owned
-            ? `${closed.engine} "${closed.profile}"`
-            : `the browser on port ${closed.port}`;
-          const aftermath = closed.browserExited
+          const browser = result.owned
+            ? `${result.engine} "${result.profile}"`
+            : `the browser on port ${result.port}`;
+          const aftermath = result.browserExited
             // Not "that was its last tab" — the tab count and the browser's own
             // idea of what keeps it alive can disagree (browser dialogs report
             // as page targets). What is certainly true is that the browser went.
@@ -1173,13 +1187,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               // True only of a browser we own. Claiming it for someone else's
               // browser tells the user a terminated session is recoverable
               // when nothing here can bring it back.
-              (closed.owned
+              (result.owned
                 ? ' (the profile keeps its logins)'
                 : ' — this project did not start it, so nothing here can reopen it')
-            : `; ${closed.remainingTabs} tab${closed.remainingTabs === 1 ? '' : 's'} left`;
+            : `; ${result.remainingTabs} tab${result.remainingTabs === 1 ? '' : 's'} left`;
           return validated(
             schemas.closeCdpTabOutput,
-            closed as unknown as Record<string, unknown>,
+            result as unknown as Record<string, unknown>,
             `Closed "${what}"${aftermath}` +
               (closed.warnings.length > 0 ? `\n${closed.warnings.join('\n')}` : ''),
           );

@@ -500,8 +500,15 @@ export class PageTracker {
     const entry = this.pages[this.activeIndex] ?? this.pages[0];
     if (!entry) return null;
     if (entry.targetId === null) {
+      // Bounded like the sweep. This runs inside `GET /sessions`, which has no
+      // timeout of its own, so an unbounded await here hangs the listing —
+      // and `list_sessions` is exactly what a caller is told to check when a
+      // close is refused for a session that is slow to report its tabs. The
+      // remedy must not be blocked by the condition that produced it.
       const pending = this.targetIdResolutions.get(entry.page);
-      entry.targetId = pending ? await pending : null;
+      entry.targetId = pending
+        ? await briefly(pending, TARGET_ID_LOOKUP_TIMEOUT_MS, null)
+        : null;
     }
     let url = '';
     try {

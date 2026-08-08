@@ -1843,4 +1843,101 @@ type: skill
       expect(state).not.toBeNull();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // sessionsByTarget (stories/cdp-tabs.md §1) — the tab → session join.
+  //
+  // The middle link of the close guard: `PageTracker` is tested in
+  // browser-manager-cdp and the refusal in cdp-registry, but nothing held this
+  // aggregation in place, which is where a defect (enumerating only the active
+  // browser) hid through two review rounds.
+  // -------------------------------------------------------------------------
+  describe('sessionsByTarget', () => {
+    /** Inject a session straight into the manager's map — the shapes the join
+     *  actually reads, without driving a whole run to produce them. */
+    function addSession(
+      id: string,
+      opts: {
+        port?: number | string;
+        browsers: { ids: string[]; complete?: boolean }[];
+        status?: string;
+      },
+    ) {
+      const browsers = opts.browsers.map((b) => ({
+        pageTracker: {
+          resolvedTargetIds: async () => ({ ids: b.ids, complete: b.complete ?? true }),
+        },
+      }));
+      (manager as any).sessions.set(id, {
+        id,
+        status: opts.status ?? 'active',
+        sessionConfig: opts.port === undefined ? {} : { cdp: { port: opts.port } },
+        browserSession: browsers[0],
+        browserTracker: { all: () => browsers },
+      });
+    }
+
+    it('maps every tab of every browser a session tracks', async () => {
+      // Two browsers on one session: the CDP one it attached to, and a
+      // launch-mode one `openBrowser` promoted to active. Reading only the
+      // ACTIVE one is the defect this pins.
+      addSession('mcp:a', { port: 51000, browsers: [{ ids: ['CDPTAB'] }, { ids: ['LAUNCHTAB'] }] });
+
+      const { byTarget, complete } = await manager.sessionsByTarget(51000);
+      expect(byTarget.get('CDPTAB')).toBe('mcp:a');
+      expect(byTarget.get('LAUNCHTAB')).toBe('mcp:a');
+      expect(complete).toBe(true);
+    });
+
+    it('ignores sessions on another port, closed sessions, and non-CDP ones', async () => {
+      addSession('mcp:other-port', { port: 51001, browsers: [{ ids: ['X'] }] });
+      addSession('mcp:closed', { port: 51000, browsers: [{ ids: ['Y'] }], status: 'closed' });
+      addSession('mcp:launch-only', { browsers: [{ ids: ['Z'] }] });
+
+      const { byTarget, complete } = await manager.sessionsByTarget(51000);
+      expect(byTarget.size).toBe(0);
+      // None of them were even consulted, so the answer is a confident "nobody".
+      expect(complete).toBe(true);
+    });
+
+    it('reports incomplete when a session cannot enumerate its tabs in time', async () => {
+      // The load-bearing one: this is what makes the close guard refuse rather
+      // than conclude nobody holds the tab.
+      addSession('mcp:slow', { port: 51000, browsers: [{ ids: ['A'], complete: false }] });
+
+      const { byTarget, complete } = await manager.sessionsByTarget(51000);
+      expect(byTarget.get('A')).toBe('mcp:slow');
+      expect(complete).toBe(false);
+    });
+
+    it('reports incomplete when a session throws rather than pretending nobody holds it', async () => {
+      (manager as any).sessions.set('mcp:broken', {
+        id: 'mcp:broken',
+        status: 'active',
+        sessionConfig: { cdp: { port: 51000 } },
+        browserTracker: {
+          all: () => [{ pageTracker: { resolvedTargetIds: async () => { throw new Error('boom'); } } }],
+        },
+      });
+
+      expect((await manager.sessionsByTarget(51000)).complete).toBe(false);
+    });
+
+    it('matches a port sent as a string, since the server does not validate it', async () => {
+      // `POST /sessions` casts `body.config` unchecked, so a hand-rolled client
+      // can create a working CDP session with a string port. A strict compare
+      // would skip it — and skipping fails this guard open.
+      addSession('mcp:stringy', { port: '51000', browsers: [{ ids: ['S'] }] });
+
+      expect((await manager.sessionsByTarget(51000)).byTarget.get('S')).toBe('mcp:stringy');
+    });
+
+    it('names one session when two hold the same tab', async () => {
+      addSession('mcp:one', { port: 51000, browsers: [{ ids: ['SHARED'] }] });
+      addSession('mcp:two', { port: 51000, browsers: [{ ids: ['SHARED'] }] });
+
+      const { byTarget } = await manager.sessionsByTarget(51000);
+      expect(['mcp:one', 'mcp:two']).toContain(byTarget.get('SHARED'));
+    });
+  });
 });

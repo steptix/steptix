@@ -657,8 +657,9 @@ export async function closeCdpTab(
       error:
         `Could not determine whether a session is driving "${target.title || target.url}" — ` +
         'one of this server\'s sessions took too long to report its tabs.\n\n' +
-        'Nothing was closed. Retry in a moment; if it persists, list_sessions will show ' +
-        'which session is busy.',
+        'Nothing was closed. Retry in a moment — a session mid-step is the usual cause ' +
+        'and it clears on its own. If it persists, close the session that is running ' +
+        '(close_session) and try again.',
     };
   }
   if (holder) {
@@ -748,9 +749,8 @@ export async function closeCdpTab(
       // happen.
       const still = await listTabs(opts.port);
       warnings.push(
-        `The tab was closed but ${owner.label} is still ` +
-          `running on port ${opts.port}. It may be configured to stay resident with no ` +
-          'windows open.',
+        `The tab was closed but ${owner.label} is still running. It may be configured ` +
+          'to stay resident with no windows open.',
       );
       return {
         ok: true,

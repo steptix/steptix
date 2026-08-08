@@ -1541,7 +1541,11 @@ export class SessionManager {
     await Promise.all(
       [...this.sessions].map(async ([id, session]) => {
         if (session.status === 'closed') return;
-        if (session.sessionConfig.cdp?.port !== port) return;
+        // `Number(...)` rather than `!==`: `POST /sessions` casts `body.config`
+        // without validating it, so a hand-rolled client sending
+        // `"port": "51000"` gets a working CDP session that a strict compare
+        // would skip — and this is a guard, so skipping it fails open.
+        if (Number(session.sessionConfig.cdp?.port) !== port) return;
         try {
           // Every browser the session tracks, NOT `session.browserSession` —
           // that field is a snapshot of whichever browser is active, and

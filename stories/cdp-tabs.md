@@ -614,6 +614,54 @@ One test bug of my own surfaced here too: the timeout sentinel is a symbol, and
 the id filter tested `!== null`, so the sentinel leaked into the id list. The
 test written for the fix caught it before it shipped.
 
+### Round three — attacking round two's fixes
+
+Run because rounds one and two had each introduced defects. It found three
+more, one of them the worst version-skew case in the feature.
+
+1. **A successful, irreversible close was reported to the agent as a broken
+   tool.** Round two added `owned` as a required output field and skipped the
+   normalisation its own neighbour already does — so against a Sessions API
+   server predating it, validation fails *after* the tab has been closed. The
+   agent is told the tool is broken with no structured content, retries, and
+   gets "something else closed it first". The user hears the close failed
+   twice, about a tab that is gone. Reachable without doing anything wrong:
+   readiness checks compare identity, never version, and the server is a
+   per-machine singleton. `owned` is now backfilled `true` — a server without
+   the field has no unowned path at all.
+2. **The tool's static prose still made the promise round two removed
+   everywhere else.** The description and `allow_browser_exit`'s own
+   description still said *"Nothing is lost: the profile keeps its logins…"*.
+   Round two fixed the runtime refusal and the summary and missed the two
+   places that are in the model's context at *every* call — and which are what
+   an agent reads when it sets the flag pre-emptively, the path where the
+   corrected refusal never fires. Both now qualify the reassurance by
+   ownership, and the description no longer claims the tool only touches
+   browsers this project launched.
+3. **The new refusal recommended a call that hangs under the same
+   condition.** It pointed at `list_sessions` to find the busy session — but
+   `activeTabRef` awaited the same unbounded lookup, so the listing stalls
+   exactly when the refusal fires. `activeTabRef` is now bounded like the
+   sweep, and the remedy no longer sends the caller somewhere that cannot
+   answer.
+
+**Also closed:** `sessionsByTarget` had no tests — both ends of the guard chain
+were covered and the middle link was not, which is where the browser-tracker
+defect hid through two rounds. And the join compared `cdp.port` strictly while
+`POST /sessions` casts `body.config` unvalidated, so a hand-rolled client
+sending a string port got a working CDP session invisible to the guard; the
+comparison now coerces, because this guard failing open is the expensive
+direction.
+
+**Confirmed correct on this pass:** the poll predicate in both directions
+(with no extra HTTP on the happy path), the whole `complete` chain — no
+spurious refusals reachable, no symbol leaking to the wire, the listing
+unaffected — `owned` at all four return sites, the port-keyed queue (cross-
+project blocking is bounded by the existing timeouts, not indefinite), and
+`isBrowserDialog` against real Chrome in both directions: `chrome://settings`
+survives query and fragment canonicalisation, and WebUI bubbles report
+`type: 'browser_ui'` so they never reach the heuristic.
+
 **A browser dialog is a `page` target but not a tab — and it defeated the
 last-tab guard.** Found in live testing *after* review, by re-running the
 suite: Edge reports `edge://sync-confirmation-dialog/` as `type: 'page'`, so

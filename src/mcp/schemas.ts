@@ -377,9 +377,11 @@ export const closeCdpTabInput = toolSchema({
     .describe(
       'Permission to close the browser\'s **last** tab, which closes the ' +
         'browser itself — there is no browser with zero tabs. Without this, ' +
-        'closing the last tab is refused. Nothing is lost either way: the ' +
-        'profile keeps its logins on disk and start_cdp_browser brings the ' +
-        'browser back still signed in.',
+        'closing the last tab is refused. For a browser this project started ' +
+        'nothing is lost: the profile keeps its logins on disk and ' +
+        'start_cdp_browser brings it back still signed in. For a browser it ' +
+        'did not start, nothing here can reopen it — ask the user before ' +
+        'setting this.',
     ),
   project_root: projectRoot,
 });
