@@ -1,12 +1,51 @@
 # 045 — tool results put their data only in `structuredContent`, so hosts that render `content` show the model a summary sentence
 
-**Status:** open
-**Area:** [src/mcp/tools.ts](../src/mcp/tools.ts) — `validated()`, which every one
+**Status:** ✅ **RESOLVED — implemented + tested (2026-08-08).**
+**Area:** [src/mcp/tools.ts](../../src/mcp/tools.ts) — `validated()`, which every one
 of the 11 tools routes through; only `get_page_content`'s handler also changes.
-Plus a §2 amendment in [stories/mcp-server.md](../stories/mcp-server.md).
+Plus a §2 amendment in [stories/mcp-server.md](../../stories/mcp-server.md).
 **Opened:** 2026-08-08
+**Resolved:** 2026-08-08
 
-> **This reverses a locked decision.** [stories/mcp-server.md](../stories/mcp-server.md) §2
+## Resolution
+
+Implemented as specified below, with no departures from the plan.
+
+- **[src/mcp/tools.ts](../../src/mcp/tools.ts)** — a `serialized()` helper, and
+  `validated()` now returns `[summary, serialized(value), ...extra]`. The
+  degrade branch serializes `degraded`, not `value`, so the two halves cannot
+  describe different results. Unconditional: no opt-out parameter.
+- **`get_page_content`** — dropped its bespoke raw-page `extra` block rather
+  than stacking on top of the new one, and its comment now records the
+  replace-vs-stack measurement and who pays for the escaping.
+- **[stories/mcp-server.md](../../stories/mcp-server.md) §2** — the
+  prohibition is gone. The all-tools content contract landed in the paragraph
+  after the `structuredContent`-must-be-an-object one, with the run-tool
+  folding bullet amended to point at it, and the captures/screenshot
+  asymmetry stated where a reader will hit it. The three stale "seven" counts
+  are fixed, and the tool-surface sentence now says which stories spec the
+  four newer tools.
+- **[tests/mcp-content-blocks.test.ts](../../tests/mcp-content-blocks.test.ts)**
+  (new, 14 tests) — the all-tools guard, its arguments table pinned to
+  `listTools()`, the get_page_content not-twice case, and the degrade branch.
+  Needs a real project on disk (tmpdir + `aiui.config.json` +
+  `AIUI_MCP_ROOTS`), because `list_test_files` confines `tests.dir` against
+  `allowedRoots()` and `run_test_file` reads the file it is given.
+- **[tests/mcp-cdp-seam.test.ts](../../tests/mcp-cdp-seam.test.ts)** — the one
+  predicted failure, fixed as predicted: the `not.toContain('""')` assertion
+  now runs against `content[0]` via a new `summary()` helper instead of the
+  joined blocks.
+
+Verified: `tsc --noEmit` clean; full suite green at **108 files / 1989 tests**
+(from 107 / 1975). Mutation-checked — deleting `serialized(value)` from
+`validated()` fails 12 of the new file's 14 tests, and the two survivors are
+the coverage assertion and the degrade branch, which is a separate code path
+with its own case. `npm run build` run, so `dist/` carries it.
+
+One thing this does **not** do: `it.each(...)(name, fn, {timeout})` was removed
+in Vitest 4, so options go in the **second** position.
+
+> **This reverses a locked decision.** [stories/mcp-server.md](../../stories/mcp-server.md) §2
 > says, verbatim: *"Do not duplicate the full JSON as text."* Read §Reversal
 > below before implementing — amending that line is part of this change, not an
 > afterthought.
@@ -14,7 +53,7 @@ Plus a §2 amendment in [stories/mcp-server.md](../stories/mcp-server.md).
 ## Summary
 
 Every *successful* tool result is built by `validated()`
-([tools.ts:90](../src/mcp/tools.ts)), which puts a one-line human summary in
+([tools.ts:90](../../src/mcp/tools.ts)), which puts a one-line human summary in
 `content` and the actual data in `structuredContent`:
 
 ```js
@@ -56,7 +95,7 @@ model has not been given the data for. Same shape for `list_sessions` (session
 ids, `cdp` binding, `tab` — the summary is only `"N open session(s)"`),
 `get_last_run` (`tokens`; `reportPath` is one of the few fields that *does*
 reach `content`, via that tool's summary at
-[tools.ts:843](../src/mcp/tools.ts)), and the run tools (per-step results,
+[tools.ts:843](../../src/mcp/tools.ts)), and the run tools (per-step results,
 `captures`, `tokens` — their summary carries status, counts, first error,
 `reportPath`, `sessionId` and a warnings count, so an agent there can still
 continue or close the session, just not see what any step did).
@@ -108,7 +147,7 @@ Two warnings for whoever picks this up:
 
 ## Reversal: what mcp-server.md §2 says, and why it is now wrong
 
-[stories/mcp-server.md](../stories/mcp-server.md) §2 currently reads:
+[stories/mcp-server.md](../../stories/mcp-server.md) §2 currently reads:
 
 > **`content[]`** is never empty: `content[0]` is a short **text summary** …
 > the SDK synthesizes no text from `structuredContent`, and hosts that ignore
@@ -149,17 +188,17 @@ paragraph earlier in §2 (the one beginning "`structuredContent` must be a JSON
 amended to match.
 
 While you are there, three stale counts say "seven" against 11 registered tools:
-"**Seven tools**" ([mcp-server.md:218](../stories/mcp-server.md)), "this applies
-to all seven schemas" ([:423](../stories/mcp-server.md)), and — in §Tests, the
+"**Seven tools**" ([mcp-server.md:218](../../stories/mcp-server.md)), "this applies
+to all seven schemas" ([:423](../../stories/mcp-server.md)), and — in §Tests, the
 section this issue's new all-11 guard lands in — "**MCP seam** … all **seven**
-tools" ([:1095](../stories/mcp-server.md)). Leaving the last one ships a story
+tools" ([:1095](../../stories/mcp-server.md)). Leaving the last one ships a story
 describing a seam test over seven tools next to a new guard over 11. (`:1157`'s
 "all seven `vi.mock(...)` blocks" counts mocks, not tools — leave it.) Note
 that a bare `Seven`→`11` leaves the section claiming 11 while its bullet list
 still enumerates the original seven; the four newer tools are specced in
-[mcp-cdp-browser.md](../stories/mcp-cdp-browser.md) (`start_cdp_browser`,
-`list_cdp_browsers`), [cdp-tabs.md](../stories/cdp-tabs.md) (`close_cdp_tab`)
-and [page-content.md](../stories/page-content.md) (`get_page_content`).
+[mcp-cdp-browser.md](../../stories/mcp-cdp-browser.md) (`start_cdp_browser`,
+`list_cdp_browsers`), [cdp-tabs.md](../../stories/cdp-tabs.md) (`close_cdp_tab`)
+and [page-content.md](../../stories/page-content.md) (`get_page_content`).
 Half a sentence saying so covers both.
 
 ## Fix
@@ -194,7 +233,7 @@ tools and should stay last.
 ### `get_page_content` needs replacing, not stacking
 
 Its handler passes the raw page text as `extra`
-([tools.ts:952](../src/mcp/tools.ts)), which is why it is the only tool whose
+([tools.ts:952](../../src/mcp/tools.ts)), which is why it is the only tool whose
 **data** reaches a content-rendering host today. **Do not add the JSON block on
 top of it:** `structuredContent.content` *is* the page, so the page would ship
 twice in `content` plus once in `structuredContent`.
@@ -243,11 +282,11 @@ of asserting something about a host's rendering that nobody measured.
 ### Two concerns that turn out not to apply
 
 - **No base64 is duplicated.** `screenshotBase64` is destructured out before
-  `validated()` ([tools.ts:536](../src/mcp/tools.ts)) and is absent from
+  `validated()` ([tools.ts:536](../../src/mcp/tools.ts)) and is absent from
   `runResultOutput`; it travels only as a native `image` block. Serializing
   `structuredContent` duplicates no image data, for any tool.
 - **The `isError` path is a no-op.** Every non-`validated()` return goes through
-  `errorResult()` ([tools.ts:76](../src/mcp/tools.ts)), which carries no
+  `errorResult()` ([tools.ts:76](../../src/mcp/tools.ts)), which carries no
   `structuredContent`. Nothing to serialize.
 
 ### One concern that does apply: captures reach the model context
@@ -274,7 +313,7 @@ leaving a reader to find the inconsistency.
 ## Tests
 
 **One existing test fails**, and it is not an obvious one. Prototyped against
-HEAD and run: [tests/mcp-cdp-seam.test.ts:832](../tests/mcp-cdp-seam.test.ts)
+HEAD and run: [tests/mcp-cdp-seam.test.ts:832](../../tests/mcp-cdp-seam.test.ts)
 asserts `expect(text(result)).not.toContain('""')` over the *joined* content
 blocks (guarding against a bare `chrome ""` in the summary when `profile` is
 empty). The serialized JSON contains `"profile":""`, so it fails — under compact
@@ -297,12 +336,12 @@ that is pre-existing flake, not you.
 **Add a guard driven off the registered tool list**, so a new tool cannot
 quietly opt out: for every tool, a successful result's `content` must contain
 its serialized `structuredContent`. The existing guards only *list* tools —
-`listToolsOverTheWire()` ([tests/mcp-schema-dialect.test.ts:46](../tests/mcp-schema-dialect.test.ts))
+`listToolsOverTheWire()` ([tests/mcp-schema-dialect.test.ts:46](../../tests/mcp-schema-dialect.test.ts))
 runs on deps whose every method throws — so actually calling all 11 needs a fake
 client and a per-tool arguments table.
 
 The fake already exists: `const fakeClient: ApiClient` at
-[tests/mcp-cdp-seam.test.ts:86](../tests/mcp-cdp-seam.test.ts) implements all
+[tests/mcp-cdp-seam.test.ts:86](../../tests/mcp-cdp-seam.test.ts) implements all
 eight `ApiClient` methods including `closeCdpTab`. Start from that one, not
 `mcp-seam`'s — which has a `fakeClient` at its own line 85 and no `closeCdpTab`.
 
@@ -315,11 +354,11 @@ Worth one explicit test that `get_page_content` does not ship the page twice in
 
 ## Related
 
-- [stories/cdp-tabs.md](../stories/cdp-tabs.md) — `close_cdp_tab`, the tool this
+- [stories/cdp-tabs.md](../../stories/cdp-tabs.md) — `close_cdp_tab`, the tool this
   breaks worst.
-- [stories/mcp-server.md](../stories/mcp-server.md) §2 — the decision being
+- [stories/mcp-server.md](../../stories/mcp-server.md) §2 — the decision being
   reversed; amend it here.
 - The "page travels twice" trade-off is recorded in the code comment at
-  [tools.ts:944](../src/mcp/tools.ts), not in
-  [stories/page-content.md](../stories/page-content.md); this generalises it to
+  [tools.ts:944](../../src/mcp/tools.ts), not in
+  [stories/page-content.md](../../stories/page-content.md); this generalises it to
   every tool.

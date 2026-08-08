@@ -78,6 +78,30 @@ function errorResult(error: McpToolError): ToolResult {
 }
 
 /**
+ * The structured half, repeated verbatim as text.
+ *
+ * A tool result has two halves and **hosts disagree about which one the model
+ * sees**. Claude Code shows the model `structuredContent`; opencode's MCP
+ * catalogue returns `content` untouched whenever it is non-empty
+ * (`mcp/catalog.ts`), so a summary there is *all* the model gets. Measured
+ * 2026-08-08 on the same server: `list_cdp_browsers` handed Claude Code the
+ * full listing and opencode `"1 running, 2 available (not started)"` — and
+ * `close_cdp_tab`'s documented flow is "read the targetIds out of that listing",
+ * which no `targetId` survives to. This is the spec's own remedy: *"a tool that
+ * returns structured content SHOULD also return the serialized JSON in a
+ * TextContent block."*
+ *
+ * Compact, not indented — measured at +45% on a 25-step run result for
+ * whitespace no model needs. It reverses "do not duplicate the full JSON as
+ * text" in stories/mcp-server.md §2, which is amended to match; the summary
+ * stays because it carries counts, truncation and warnings that raw JSON does
+ * not narrate.
+ */
+function serialized(value: Record<string, unknown>): { type: 'text'; text: string } {
+  return { type: 'text', text: JSON.stringify(value) };
+}
+
+/**
  * Validate our own output before handing it over.
  *
  * The SDK validates `structuredContent` against the declared `outputSchema`,
@@ -98,8 +122,9 @@ function validated<T extends Record<string, unknown>>(
 ): ToolResult {
   const parsed = schema.safeParse(value);
   if (parsed.success) {
+    // Summary, then the data, then `extra` — the image block stays last.
     return {
-      content: [{ type: 'text', text: summary }, ...extra],
+      content: [{ type: 'text', text: summary }, serialized(value), ...extra],
       structuredContent: value,
       isError: false,
     };
@@ -115,8 +140,13 @@ function validated<T extends Record<string, unknown>>(
   // does before trusting it.
   const degraded = fallback?.(detail);
   if (degraded && schema.safeParse(degraded).success) {
+    // `degraded`, not `value` — the two halves must never describe different
+    // results, and this is the one path where they could.
     return {
-      content: [{ type: 'text', text: `${summary}\n\n(result validation failed: ${detail})` }],
+      content: [
+        { type: 'text', text: `${summary}\n\n(result validation failed: ${detail})` },
+        serialized(degraded),
+      ],
       structuredContent: degraded,
       isError: false,
     };
@@ -929,27 +959,30 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             returnedChars: page.returnedChars ?? 0,
             availableChars: page.availableChars ?? 0,
           };
-          // The page goes in a CONTENT BLOCK, not only in `structuredContent`.
+          // No `extra` block holding the raw page. This tool used to append one
+          // itself, because a host that surfaces only content blocks would
+          // otherwise get `"Invoices — text, 2995 chars"` — a description of
+          // the page instead of the page, with no error and a plausible count,
+          // and the model then reports on a page it never saw. That reasoning
+          // still stands; `validated()` now does it for all 11 tools, so the
+          // page arrives inside the serialized `structuredContent` block.
           //
-          // Every other tool here can get away with a one-line summary over
-          // structured data, because for them the structure IS the answer — a
-          // run's status, a list of sessions. This tool's entire answer is
-          // verbatim text, and a client that surfaces only the content blocks
-          // (many do) would hand the model `"Invoices — text, 2995 chars"`: a
-          // description of the page instead of the page, with no error and a
-          // plausible count. The model then reports on a page it never saw.
-          // That is the confidently-wrong failure this whole feature exists to
-          // prevent, and it was reintroduced at the last layer.
+          // Adding one on top would ship the page three times (raw, again
+          // inside the JSON, and once more in `structuredContent`) — measured
+          // at 2.05x the page against 1.05x for letting the standard block
+          // carry it. The 5% is JSON escaping and keys.
           //
-          // The cost is that the page travels twice — once here, once in
-          // `structuredContent`, which cannot be dropped because declaring an
-          // `outputSchema` obliges the SDK to require it. Worth it: a payload
-          // that is twice as large beats one the reader never receives.
+          // It still travels twice and still must: declaring an `outputSchema`
+          // obliges the SDK to require `structuredContent`. What changed is
+          // that the content-block copy is now escaped text inside an object.
+          // No human reader pays for that — Claude Code records only
+          // `structuredContent`, and opencode's TUI hides tool output by
+          // default — so the copy that changes is the model's, on
+          // content-only hosts, and a model reads escaped JSON fine.
           return validated(
             schemas.getPageContentOutput,
             value,
             `${page.title || page.url}${scope} — ${page.format}, ${size}`,
-            [{ type: 'text', text: page.content }],
           );
         },
         { signal: extra.signal },
