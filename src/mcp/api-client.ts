@@ -185,10 +185,15 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
    *  which is usually more specific than anything we could invent. */
   async function assertOk(res: Response): Promise<void> {
     if (res.ok) return;
-    let message = res.statusText;
+    // `statusText` is empty over HTTP/2, and from any server that sends a bare
+    // reason phrase — so seeding from it alone yields an ApiHttpError with
+    // nothing in it, which §7's default arm then renders as "rejected the
+    // request (HTTP 404): " with a dangling colon and no cause. The status is
+    // always worth something; say it rather than going quiet.
+    let message = res.statusText || `HTTP ${res.status}`;
     try {
       const body = (await res.json()) as { error?: unknown };
-      if (typeof body.error === 'string') message = body.error;
+      if (typeof body.error === 'string' && body.error !== '') message = body.error;
     } catch {
       // Non-JSON error body; the status alone will have to do.
     }
@@ -399,23 +404,35 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       // the route is not there.
       if (res.status === 404) {
         const raw = await res.text();
-        let envelope: { error?: unknown } | null = null;
+        // **Whether it PARSED is a separate fact from what it parsed to**, and
+        // conflating the two reopens the hole this whole branch exists to
+        // close. A body of `null`, a bare JSON scalar, or an empty string all
+        // yield a falsy/non-object value while still being a deliberate answer
+        // from something — an empty-body 404 from a load balancer is the
+        // realistic case — and reporting those as a missing route is the same
+        // confident lie in a new costume.
+        let parsed = false;
+        let envelope: unknown;
         try {
-          envelope = JSON.parse(raw) as { error?: unknown };
+          envelope = JSON.parse(raw);
+          parsed = true;
         } catch {
-          // Not JSON at all — Express's own 404 page.
+          // Not JSON at all — Express's own 404 page. THIS is a missing route.
         }
-        if (envelope === null || typeof envelope !== 'object') {
-          throw new ApiRouteNotFoundError(path);
-        }
-        // JSON, so something answered deliberately. Prefer its `error`, and
-        // fall back to the status text rather than to silence — an empty
-        // message here would read as "the route is missing", which this is not.
+        if (!parsed) throw new ApiRouteNotFoundError(path);
+
+        const error =
+          envelope !== null && typeof envelope === 'object'
+            ? (envelope as { error?: unknown }).error
+            : undefined;
+        // Prefer the server's own prose, and fall back to the status rather
+        // than to silence — an empty message reads as "the route is missing",
+        // which this is not.
         throw new ApiHttpError(
           404,
-          typeof envelope.error === 'string' && envelope.error !== ''
-            ? envelope.error
-            : res.statusText || 'Not Found',
+          typeof error === 'string' && error !== ''
+            ? error
+            : res.statusText || `HTTP ${res.status}`,
         );
       }
 

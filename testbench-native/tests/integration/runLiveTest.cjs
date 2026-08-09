@@ -86,7 +86,13 @@ async function main() {
         console.log(`  ${tag} ${r.suite} > ${r.title}`);
         if (r.state === 'fail' && r.err) console.log(r.err);
       }
-      console.log(`\n${report.results.length} tests, ${report.failures} failures`);
+      const skipped = report.results.filter((r) => r.state === 'pending').length;
+      console.log(
+        `\n${report.results.length} tests, ${report.failures} failures` +
+          // Counted out loud: a skipped scenario is one nobody checked, and a
+          // silent one reads as a scenario that passed.
+          (skipped > 0 ? `, ${skipped} skipped` : ''),
+      );
     } catch (err) {
       console.error('No live test report written:', err.message);
     }

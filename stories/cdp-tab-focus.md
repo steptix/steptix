@@ -478,6 +478,25 @@ The parts no automated test can reach, and the reason rule (1) names a human:
   louder mechanism to escalate to** — §1 establishes that `/json/activate`
   and `Page.bringToFront` issue the same `window_->Activate()`, so this is
   the ceiling, not a first attempt.
+- **An occluded window loses its screenshots — measured, and the answer to the
+  question §Tests said nobody had asked.** *"Does `Page.captureScreenshot`
+  render a backgrounded tab of a headful browser identically"* now has an
+  answer, on Chrome 150, and it is in two halves. With the browser window
+  **visible**, yes: a repaint made while the tab sat behind another tab reached
+  the capture in ~940ms, and an unchanged tab photographed byte-identically.
+  With the window **fully covered by another application**, Chromium produces
+  no frames for it at all, and a capture that needs a fresh one blocks until it
+  times out — the run completes normally, on the right tab, and carries no
+  pictures.
+
+  So verification rule (5) holds where it matters and needs one word of
+  qualification: focusing another tab costs a run nothing *except* evidence,
+  and only while the whole window is buried. Nothing above the renderer is
+  affected — the steps are target-addressed and provably unmoved. This is not
+  caused by focusing (any occluded window behaves this way) but focusing is how
+  a user most easily arrives at it, so the live suite grades on it rather than
+  failing, and says which case it saw.
+
 - **Multi-monitor and virtual desktops.** A raised window on another monitor
   or another desktop is "visible" by every check we can make and invisible to
   the user. Nothing to do about it; worth saying in the tool description if
