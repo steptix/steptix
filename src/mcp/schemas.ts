@@ -72,7 +72,21 @@ const projectRoot = z
   .describe(
     'Absolute path of the project (the directory containing aiui.config.json). ' +
       'Optional when the server was started inside the project, or when ' +
-      'AIUI_MCP_ROOTS names exactly one directory.',
+      'AIUI_MCP_ROOTS names exactly one directory. With no project anywhere, ' +
+      'most tools fall back to the machine-wide user root and say so via ' +
+      'scope: "user" in their results.',
+  );
+
+/** The two roots a browser or run can belong to (stories/mcp-no-project.md). */
+const rootScope = z.enum(['project', 'user']);
+
+const cdpScopeArg = rootScope
+  .optional()
+  .describe(
+    'Which root the profile name refers to: "project" — this project\'s browser; ' +
+      '"user" — the machine-wide one, reachable from any directory. Needed only ' +
+      'when the same profile name exists in both, which is refused as ambiguous ' +
+      'until you say which. Irrelevant when addressing by `port`.',
   );
 
 const sessionId = z
@@ -117,6 +131,7 @@ const cdpTarget = z
         'Disambiguates `profile` when Chrome and Edge are both running the ' +
           'same profile name. Only meaningful alongside `profile`.',
       ),
+    scope: cdpScopeArg,
     port: z
       .number()
       .int()
@@ -316,6 +331,9 @@ export const getRunSettingsOutput = toolSchema({
     ),
   detail: z.string().nullable().describe('Why `running` is false.'),
   projectRoot: z.string(),
+  scope: z
+    .enum(['project', 'user'])
+    .describe('Which root resolved: a project, or the machine-wide user root.'),
   sessionId: z.string().nullable(),
   // What the next run on this session would use — the session's values when one
   // was named, the server defaults otherwise.
@@ -486,6 +504,15 @@ export const startCdpBrowserInput = toolSchema({
         'because a profile that has signed in once stays signed in. Refused ' +
         'while a browser is running on the profile.',
     ),
+  scope: rootScope
+    .optional()
+    .describe(
+      'Where the browser lives. "project" (the default inside a project) — ' +
+        'under this project, addressable only here. "user" — under the ' +
+        'machine-wide user root, reachable from any directory forever; this ' +
+        'is the default (and only option) when no project resolved. Pass ' +
+        '"user" from inside a project for a personal browser that outlives it.',
+    ),
   project_root: projectRoot,
 });
 
@@ -533,6 +560,7 @@ export const closeCdpTabInput = toolSchema({
       'Disambiguates `profile` when Chrome and Edge are both running the ' +
         'same profile name. Only meaningful alongside `profile`.',
     ),
+  scope: cdpScopeArg,
   port: z
     .number()
     .int()
@@ -571,9 +599,16 @@ export const closeCdpTabOutput = toolSchema({
   owned: z
     .boolean()
     .describe(
-      'Whether this project launched the browser. When false (only reachable ' +
-        'with mcp.cdp.allowUnowned) nothing here can reopen it — say so rather ' +
-        'than reassuring the user that the profile can be relaunched.',
+      'Whether a root this call can see launched the browser. When false ' +
+        '(only reachable with mcp.cdp.allowUnowned) nothing here can reopen ' +
+        'it — say so rather than reassuring the user that the profile can be ' +
+        'relaunched.',
+    ),
+  scope: rootScope
+    .nullable()
+    .describe(
+      'Which root owned the browser — "project" or "user" (machine-wide). ' +
+        'Null for a foreign browser, or when an older server did not say.',
     ),
   warnings: z.array(z.string()),
 });
@@ -605,6 +640,7 @@ export const focusCdpTabInput = toolSchema({
       'Disambiguates `profile` when Chrome and Edge are both running the ' +
         'same profile name. Only meaningful alongside `profile`.',
     ),
+  scope: cdpScopeArg,
   port: z
     .number()
     .int()
@@ -630,21 +666,49 @@ export const focusCdpTabOutput = toolSchema({
   engine: z.string(),
   profile: z.string(),
   port: z.number(),
+  scope: rootScope
+    .nullable()
+    .describe(
+      'Which root owned the browser — "project" or "user" (machine-wide). ' +
+        'Null for a foreign browser, or when an older server did not say.',
+    ),
   warnings: z.array(z.string()),
 });
 
 export const listCdpBrowsersOutput = toolSchema({
+  // Which root this call resolved against — 'user' means no project was found
+  // and the sweep covered only the user root (stories/mcp-no-project.md rule
+  // 7). Without it, a typo'd config filename silently drops the project's
+  // browsers from the listing with no trace: the exact "mysteriously absent"
+  // failure the fallback-must-be-reported rule exists to prevent.
+  scope: z
+    .enum(['project', 'user'])
+    .describe(
+      'Which root this call resolved against. "user" means no project resolved ' +
+        'and only the machine-wide user root was swept — if you expected a ' +
+        "project's browsers and they are missing, its aiui.config.json did not " +
+        'resolve.',
+    ),
   running: z.array(
     z.object({
       engine: z.string(),
       profile: z.string(),
       port: z.number(),
       profileDir: z.string(),
+      scope: rootScope.describe(
+        '"project" — this project\'s browser. "user" — the machine-wide one, ' +
+          'reachable from any directory.',
+      ),
       tabs: z.array(ownedCdpTab),
     }),
   ),
   available: z.array(
-    z.object({ engine: z.string(), profile: z.string(), profileDir: z.string() }),
+    z.object({
+      engine: z.string(),
+      profile: z.string(),
+      profileDir: z.string(),
+      scope: rootScope,
+    }),
   ),
   foreign: z.array(
     z.object({
@@ -671,6 +735,10 @@ export const startCdpBrowserOutput = toolSchema({
     'launched_after_reset',
   ]),
   warnings: z.array(z.string()),
+  scope: rootScope.describe(
+    'Which root the browser lives under. "user" means it is reachable from ' +
+      'any directory on this machine, project or not.',
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -746,6 +814,14 @@ export const runResultOutput = toolSchema({
   streamDropped: z.boolean(),
   sessionId: z.string(),
   projectRoot: z.string(),
+  scope: z
+    .enum(['project', 'user'])
+    .describe(
+      'Which root the run resolved against. "user" means no project was found ' +
+        'and the run went project-less against the machine-wide user root — if ' +
+        'you expected a project, its aiui.config.json did not resolve; say so ' +
+        'rather than reporting a normal run.',
+    ),
   sessionCreated: z.boolean(),
   configApplied: z.boolean(),
   queuedForMs: z.number(),

@@ -29,11 +29,12 @@ import {
   interpolationFailed,
   notATestFile,
   parseFailed,
+  projectlessCodeSteps,
 } from './errors.js';
 import {
-  allowedRoots,
   applyEnvName,
   canonicalTestFilePath,
+  configuredRoots,
   confinePath,
   fail,
 } from './project.js';
@@ -59,6 +60,16 @@ const SYNTHETIC_STEPS_BASENAME = '.aiui-mcp-steps.md';
  *  decline to run unattended. */
 const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
+
+/**
+ * A `[skill:` / `[tool:` invocation token anywhere in a step — anywhere, not
+ * anchored, because the invocation grammar allows a prose label before the
+ * token on the same line ("Log in [skill: login]"). The token itself is
+ * matched tight (no space after `[`), mirroring the tokenizers'
+ * `prefix: '[skill:'`, so prose that merely *mentions* the bracket syntax
+ * with different spacing is not swept in.
+ */
+const CODE_STEP_PATTERN = /\[(?:skill|tool):/i;
 
 /** Any `${...}` reference, for the "nothing will interpolate this" warning. */
 const ANY_PLACEHOLDER = /\$\{[^}]*\}/g;
@@ -153,11 +164,15 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
   // frontmatter fallback skips because it is not `undefined`. The run then
   // proceeds against the wrong environment entirely.
   const toolEnvName = args.envName?.trim() || undefined;
-  // Steps 3–7, plus step 10 when the tool supplied `env_name`.
+  // Steps 3–7, plus step 10 when the tool supplied `env_name`. A test file
+  // has no user-scope meaning — tests are project-shaped — so this is one of
+  // the two tools that refuses rather than falling back to the user root
+  // (stories/mcp-no-project.md).
   let project = await args.resolveProject({
     testFilePath: absPath,
     projectRoot: args.projectRoot,
     envName: toolEnvName,
+    requireProject: true,
   });
 
   // Step 8.
@@ -316,6 +331,18 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
   });
   const testFilePath = path.join(project.projectRoot, SYNTHETIC_STEPS_BASENAME);
 
+  // Rule 6 of stories/mcp-no-project.md. In user scope `skillsDir`/`toolsDir`
+  // are null by construction, and the server's behaviour for a `[skill:]` or
+  // `[tool:]` line with no directory on the wire is to hand it to the AI as
+  // prose — a silent, expensive wrong answer three layers down. Refused here,
+  // before any session exists, with the reason and the fix.
+  if (project.scope === 'user') {
+    const offending = args.steps.filter((step) => CODE_STEP_PATTERN.test(step));
+    if (offending.length > 0) {
+      fail(projectlessCodeSteps(offending, project.configSearch));
+    }
+  }
+
   // No file, so no file-declared `cdp` — any `cdp` on a `run_steps` call is a
   // tool argument by construction, and therefore always gated.
   const { cdp: toolCdp, ...toolStringConfig } = args.config ?? {};
@@ -467,7 +494,13 @@ function confineDataSources(
   testDir: string,
 ): Record<string, string> | null {
   if (declared === undefined || Object.keys(declared).length === 0) return null;
-  const roots = allowedRoots();
+  // Confined against the CONFIGURED roots, not `allowedRoots()`. This only
+  // runs for `run_test_file` (project scope), and a project's frontmatter
+  // `dataSources` — with `~` expansion, so no symlink even needed — must not
+  // be allowed to read out of the user root that joined the addressing
+  // allow-list. `~/AppData/Local/aiui/...` is refused here rather than shipped
+  // to the server, which confines nothing of its own.
+  const roots = configuredRoots();
   for (const [name, declaredPath] of Object.entries(declared)) {
     confinePath(resolveDataSourcePath(declaredPath, testDir), roots, `${name}: ${declaredPath}`);
   }

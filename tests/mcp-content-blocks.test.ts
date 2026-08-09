@@ -80,6 +80,8 @@ beforeEach(() => {
 
 function fakeProject(): ProjectContext {
   return {
+    scope: 'project',
+    configSearch: [],
     projectRoot: tmpDir,
     configPath: path.join(tmpDir, 'aiui.config.json'),
     env: {},

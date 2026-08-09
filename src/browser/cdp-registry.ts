@@ -86,6 +86,28 @@ export interface KnownProfile {
   tabs: CdpDiscoveryTab[] | null;
 }
 
+/**
+ * Which root a profile lives under (stories/mcp-no-project.md).
+ *
+ * `project` — the project root a request named. `user` — the machine-wide
+ * user root, swept on every request alongside it. The literal union is
+ * duplicated from `src/mcp/types.ts` rather than imported: this module also
+ * serves the CLI and the Sessions API server, and must not depend on the MCP
+ * package.
+ */
+export type ProfileScope = 'project' | 'user';
+
+/** A root to sweep, tagged with what it is. The registry never computes the
+ *  user root itself — callers (the API server's routes) resolve it and pass
+ *  it in, so this module stays a pure function of the paths it is handed. */
+export interface ScopedRoot {
+  root: string;
+  scope: ProfileScope;
+}
+
+/** A profile found by a multi-root sweep, tagged with the root that owns it. */
+export type ScopedProfile = KnownProfile & { scope: ProfileScope };
+
 export interface StartOptions {
   projectRoot: string;
   engine: LaunchableEngine;
@@ -281,6 +303,30 @@ export async function knownProfiles(
   );
 }
 
+/**
+ * `knownProfiles` over several roots at once, each result tagged with the
+ * root's scope (stories/mcp-no-project.md: "both roots are always swept").
+ *
+ * A plain concatenation, deliberately: the same `(engine, profile)` name in
+ * two roots is two different browsers with two different profile directories,
+ * and both belong in the answer. Ambiguity is the *caller's* to refuse at
+ * name-resolution time — deduplicating here would be resolving it by
+ * precedence, which is the locked decision this story reverses.
+ *
+ * Callers pass distinct roots; a root listed twice would double every entry.
+ */
+export async function knownProfilesAcross(
+  roots: readonly ScopedRoot[],
+  deps?: RegistryDeps,
+): Promise<ScopedProfile[]> {
+  const perRoot = await Promise.all(
+    roots.map(async ({ root, scope }) =>
+      (await knownProfiles(root, deps)).map((profile) => ({ ...profile, scope })),
+    ),
+  );
+  return perRoot.flat();
+}
+
 /** The one profile, or null when the directory does not exist. */
 export async function findProfile(
   projectRoot: string,
@@ -449,7 +495,10 @@ const EXIT_CONFIRM_BUDGET_MS = 1_500;
 const CLOSE_POLL_INTERVAL_MS = 25;
 
 export interface CloseTabOptions {
-  projectRoot: string;
+  /** Roots the browser may trace back to — the project root (when the caller
+   *  has one) plus the user root, resolved by the route and passed in. The
+   *  registry never computes the user root itself. */
+  roots: readonly ScopedRoot[];
   port: number;
   targetId: string;
   /**
@@ -463,11 +512,11 @@ export interface CloseTabOptions {
    */
   allowBrowserExit?: boolean;
   /**
-   * Permission to act on a browser this project did not launch.
+   * Permission to act on a browser NEITHER root launched.
    *
-   * Ownership is proved from `knownProfiles`, which by construction only ever
-   * contains this project's own profiles — so without this flag a foreign
-   * browser can never be closed, however the caller is permitted. That made
+   * Ownership is proved from the sweep of `roots`, which by construction only
+   * ever contains their own profiles — so without this flag a foreign browser
+   * can never be closed, however the caller is permitted. That made
    * `mcp.cdp.allowUnowned` advertise something it could not deliver: the MCP
    * gate let the call through and the registry refused it one layer later,
    * with an unrelated message. The decision stays where it was (MCP-side,
@@ -511,10 +560,12 @@ export type CloseTabResult =
       remainingTabs: number;
       /** Observed, never assumed: the port stopped answering. */
       browserExited: boolean;
-      /** Whether this project launched the browser. False only via
+      /** Whether a swept root launched the browser. False only via
        *  `allowUnowned`, and it changes what is true about the aftermath —
        *  nothing here can reopen a browser we do not own. */
       owned: boolean;
+      /** Which root owned it, or null for a permitted foreign browser. */
+      scope: ProfileScope | null;
       warnings: string[];
     }
   | { ok: false; kind: CdpFailureKind; error: string };
@@ -542,26 +593,39 @@ interface CdpOwner {
    *  express a Chromium or an unrecognised build. */
   label: string;
   owned: boolean;
+  /** Which root stands behind the browser, or null for a foreign one. */
+  scope: ProfileScope | null;
+}
+
+/** How a message names one browser of a sweep, scope tag included. */
+function describeRunning(p: ScopedProfile): string {
+  return (
+    `${engineLabel(p.engine)} "${p.profile}"` +
+    `${p.scope === 'user' ? ' (user root)' : ''} on port ${p.port}`
+  );
 }
 
 /**
- * Settle which browser a port is, and whether this project may act on it.
+ * Settle which browser a port is, and whether this caller may act on it.
  *
  * Shared by every verb that reaches into a live browser — closing a tab and
  * focusing one — because they must agree exactly on what "ours" means and on
  * what `allowUnowned` opens up. Two copies would eventually let one verb act on
  * a browser the other refused, with no reading of the rules that explains it.
  *
- * `knownProfiles` is the only answer to "ours": our ports are OS-assigned, so
- * nothing about the number itself is recognisable.
+ * "Ours" now spans BOTH roots (stories/mcp-no-project.md): the sweep is the
+ * project root plus the user root, and a browser tracing back to either is
+ * owned — carrying `scope` to say which. `foreign` keeps its true meaning: a
+ * browser tracing back to *neither*. Our ports are OS-assigned, so nothing
+ * about the number itself is recognisable; the sweep is the only answer.
  */
 async function resolveCdpOwner(
-  projectRoot: string,
+  roots: readonly ScopedRoot[],
   port: number,
   allowUnowned: boolean,
   deps?: RegistryDeps,
 ): Promise<{ ok: true; owner: CdpOwner } | { ok: false; kind: CdpFailureKind; error: string }> {
-  const profiles = await knownProfiles(projectRoot, deps);
+  const profiles = await knownProfilesAcross(roots, deps);
   const known = profiles.find((p) => p.live && p.port === port);
 
   if (known) {
@@ -570,8 +634,12 @@ async function resolveCdpOwner(
       owner: {
         engine: known.engine,
         profile: known.profile,
-        label: `${engineLabel(known.engine)} "${known.profile}"`,
+        label:
+          known.scope === 'user'
+            ? `the user-root ${engineLabel(known.engine)} "${known.profile}"`
+            : `${engineLabel(known.engine)} "${known.profile}"`,
         owned: true,
+        scope: known.scope,
       },
     };
   }
@@ -597,19 +665,30 @@ async function resolveCdpOwner(
         profile: '',
         label: `the browser on port ${port}`,
         owned: false,
+        scope: null,
       },
     };
   }
 
   const running = profiles.filter((p) => p.live);
+  // Name what was actually swept: a project-less call has no project root,
+  // and telling it about one would send the reader looking for a project that
+  // was never in play.
+  const scopes = new Set(roots.map((r) => r.scope));
+  const whose =
+    scopes.size > 1
+      ? 'it traces back to neither the project root nor the user root'
+      : scopes.has('user')
+        ? 'it does not trace back to the user root'
+        : 'it is not one this project has running';
   return {
     ok: false,
     kind: 'not_found',
     error:
-      `Port ${port} is not a CDP browser this project has running.\n` +
+      `Port ${port} is not a CDP browser this call can act on — ${whose}.\n` +
       (running.length > 0
-        ? `Running now: ${running.map((p) => `${engineLabel(p.engine)} "${p.profile}" on port ${p.port}`).join(', ')}.`
-        : 'This project has no CDP browser running.'),
+        ? `Running now: ${running.map(describeRunning).join(', ')}.`
+        : 'No CDP browser is running in the swept root(s).'),
   };
 }
 
@@ -635,10 +714,11 @@ export async function closeCdpTab(
   const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps?.now ?? Date.now;
 
-  // 1. The port must be one of ours and live. Shared with the focus path, so
-  //    the two verbs can never disagree about which browsers a project may act
-  //    on — including which one `allowUnowned` opens up.
-  const resolved = await resolveCdpOwner(opts.projectRoot, opts.port, opts.allowUnowned === true, deps);
+  // 1. The port must be one of ours — from either swept root — and live.
+  //    Shared with the focus path, so the two verbs can never disagree about
+  //    which browsers a caller may act on, including which one `allowUnowned`
+  //    opens up.
+  const resolved = await resolveCdpOwner(opts.roots, opts.port, opts.allowUnowned === true, deps);
   if (!resolved.ok) return resolved;
   const owner = resolved.owner;
 
@@ -801,6 +881,7 @@ export async function closeCdpTab(
         remainingTabs: still?.length ?? 0,
         browserExited: false,
         owned: owner.owned,
+        scope: owner.scope,
         warnings,
       };
     }
@@ -815,6 +896,7 @@ export async function closeCdpTab(
       remainingTabs: 0,
       browserExited: true,
       owned: owner.owned,
+      scope: owner.scope,
       warnings,
     };
   }
@@ -872,6 +954,7 @@ export async function closeCdpTab(
         remainingTabs: 0,
         browserExited: true,
         owned: owner.owned,
+        scope: owner.scope,
         warnings,
       };
     }
@@ -900,6 +983,7 @@ export async function closeCdpTab(
     remainingTabs: after?.length ?? Math.max(0, before.length - 1),
     browserExited: false,
     owned: owner.owned,
+    scope: owner.scope,
     warnings,
   };
 }
@@ -927,10 +1011,12 @@ async function pollUntil(
 // ---------------------------------------------------------------------------
 
 export interface FocusTabOptions {
-  projectRoot: string;
+  /** Same contract as `CloseTabOptions.roots`: the project root (when there
+   *  is one) plus the user root, resolved by the route. */
+  roots: readonly ScopedRoot[];
   port: number;
   targetId: string;
-  /** Permission to act on a browser this project did not launch. Same flag,
+  /** Permission to act on a browser neither root launched. Same flag,
    *  same human-held opt-in behind it, and the same reasoning as closing:
    *  focusing a tab in someone else's browser yanks their screen and reveals
    *  which tab they are being shown. Non-destructive is not unobtrusive. */
@@ -947,6 +1033,8 @@ export type FocusTabResult =
       profile: string;
       port: number;
       owned: boolean;
+      /** Which root owned it, or null for a permitted foreign browser. */
+      scope: ProfileScope | null;
       warnings: string[];
     }
   | { ok: false; kind: CdpFailureKind; error: string };
@@ -994,7 +1082,7 @@ export async function focusCdpTab(
   // 1. Ownership — the same resolution, and therefore the same answer, as a
   //    close against this port.
   const resolved = await resolveCdpOwner(
-    opts.projectRoot,
+    opts.roots,
     opts.port,
     opts.allowUnowned === true,
     deps,
@@ -1068,6 +1156,7 @@ export async function focusCdpTab(
     profile: owner.profile,
     port: opts.port,
     owned: owner.owned,
+    scope: owner.scope,
     warnings: [],
   };
 }

@@ -6,6 +6,7 @@ import {
   validateProfileName,
   parseProfileDirName,
   knownProfiles,
+  knownProfilesAcross,
   startCdpBrowser,
   closeCdpTab,
   focusCdpTab,
@@ -18,6 +19,9 @@ import { listPageTabs } from '../src/browser/cdp-discovery.js';
 
 const ROOT = path.join('C:', 'proj');
 const PROFILES = cdpProfilesRoot(ROOT);
+/** The close/focus verbs take the swept roots pre-resolved; a bare project
+ *  sweep is the old single-root behaviour. */
+const PROJECT_ROOTS = [{ root: ROOT, scope: 'project' }] as const;
 
 /**
  * A tiny in-memory filesystem. Paths are exact strings; directories are
@@ -622,7 +626,7 @@ describe('closeCdpTab', () => {
   it('closes an ordinary tab and reports it gone, with a real remaining count', async () => {
     const h = liveBrowser(TWO_TABS);
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -642,7 +646,7 @@ describe('closeCdpTab', () => {
   it('refuses a port that is not one of ours, and closes nothing', async () => {
     const h = liveBrowser(TWO_TABS);
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -657,7 +661,7 @@ describe('closeCdpTab', () => {
     // treating the pair as an idempotent success would swallow the second.
     const h = liveBrowser(TWO_TABS);
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'NOPE' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'NOPE' },
       h.deps,
     );
 
@@ -672,7 +676,7 @@ describe('closeCdpTab', () => {
   it('refuses the last tab without allowBrowserExit, and says why', async () => {
     const h = liveBrowser([TWO_TABS[0]!]);
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -689,7 +693,7 @@ describe('closeCdpTab', () => {
   it('closes the last tab with allowBrowserExit, and reports the browser exited', async () => {
     const h = liveBrowser([TWO_TABS[0]!]);
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3', allowBrowserExit: true },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3', allowBrowserExit: true },
       h.deps,
     );
 
@@ -721,7 +725,7 @@ describe('closeCdpTab', () => {
     h.deps.alive = (async () => true) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3', allowBrowserExit: true },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3', allowBrowserExit: true },
       h.deps,
     );
 
@@ -733,7 +737,7 @@ describe('closeCdpTab', () => {
     const h = liveBrowser(TWO_TABS);
     const result = await closeCdpTab(
       {
-        projectRoot: ROOT,
+        roots: PROJECT_ROOTS,
         port: PORT,
         targetId: 'D4E5F6',
         sessionHolding: (id) => (id === 'D4E5F6' ? 'mcp:x' : null),
@@ -754,7 +758,7 @@ describe('closeCdpTab', () => {
     const h = liveBrowser(TWO_TABS);
     const result = await closeCdpTab(
       {
-        projectRoot: ROOT,
+        roots: PROJECT_ROOTS,
         port: PORT,
         targetId: 'A1B2C3',
         sessionHolding: (id) => (id === 'D4E5F6' ? 'mcp:x' : null),
@@ -774,7 +778,7 @@ describe('closeCdpTab', () => {
     const h = liveBrowser([TWO_TABS[0]!]);
     const result = await closeCdpTab(
       {
-        projectRoot: ROOT,
+        roots: PROJECT_ROOTS,
         port: PORT,
         targetId: 'A1B2C3',
         sessionHolding: () => 'mcp:cart',
@@ -795,7 +799,7 @@ describe('closeCdpTab', () => {
     h.deps.close = (async () => ({ ok: false, notFound: true, error: 'HTTP 404' })) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -815,7 +819,7 @@ describe('closeCdpTab', () => {
     h.deps.alive = (async () => false) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -832,7 +836,7 @@ describe('closeCdpTab', () => {
     h.deps.now = (() => (clock += 500)) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -851,13 +855,13 @@ describe('closeCdpTab', () => {
     h.deps.listTabs = (async () => TWO_TABS.slice(0, 1)) as never;
 
     const refused = await closeCdpTab(
-      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3' },
       h.deps,
     );
     expect(refused).toMatchObject({ ok: false, kind: 'not_found' });
 
     const allowed = await closeCdpTab(
-      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true, allowBrowserExit: true },
+      { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3', allowUnowned: true, allowBrowserExit: true },
       h.deps,
     );
     expect(allowed).toMatchObject({ ok: true, targetId: 'A1B2C3' });
@@ -870,7 +874,7 @@ describe('closeCdpTab', () => {
     const h = liveBrowser(TWO_TABS);
     h.deps.probe = probeFor({}) as never;
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
       h.deps,
     );
     expect(result).toMatchObject({ ok: false, kind: 'not_found' });
@@ -904,7 +908,7 @@ describe('closeCdpTab', () => {
 
     const closeSpy = vi.fn(async () => ({ ok: true, notFound: false, error: null }));
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       {
         ...deps,
         probe: probeFor({ [PORT]: 'edge' }),
@@ -932,7 +936,7 @@ describe('closeCdpTab', () => {
     h.deps.now = (() => (clock += 500)) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -956,7 +960,7 @@ describe('closeCdpTab', () => {
     h.deps.alive = (async () => false) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -976,7 +980,7 @@ describe('closeCdpTab', () => {
     h.deps.now = (() => (clock += 500)) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -1000,7 +1004,7 @@ describe('closeCdpTab', () => {
     h.deps.now = (() => (clock += 500)) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -1014,7 +1018,7 @@ describe('closeCdpTab', () => {
     const h = liveBrowser(TWO_TABS);
     const result = await closeCdpTab(
       {
-        projectRoot: ROOT,
+        roots: PROJECT_ROOTS,
         port: PORT,
         targetId: 'A1B2C3',
         sessionHolding: () => UNKNOWN_HOLDER,
@@ -1038,7 +1042,7 @@ describe('closeCdpTab', () => {
     h.deps.listTabs = (async () => [TWO_TABS[0]!]) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
       h.deps,
     );
 
@@ -1053,7 +1057,7 @@ describe('closeCdpTab', () => {
 
   it('reports `owned` so the caller can tell whose browser it closed', async () => {
     const h = liveBrowser(TWO_TABS);
-    const ours = await closeCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    const ours = await closeCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' }, h.deps);
     expect(ours).toMatchObject({ ok: true, owned: true, profile: 'default' });
 
     // Keep the harness's stateful tab list — overriding it with a constant
@@ -1061,7 +1065,7 @@ describe('closeCdpTab', () => {
     const other = liveBrowser(TWO_TABS);
     other.deps.probe = probeFor({ 9222: 'chrome' }) as never;
     const theirs = await closeCdpTab(
-      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
       other.deps,
     );
     expect(theirs).toMatchObject({ ok: true, owned: false, profile: '' });
@@ -1072,7 +1076,7 @@ describe('closeCdpTab', () => {
     h.deps.close = (async () => ({ ok: false, notFound: false, error: 'HTTP 500' })) as never;
 
     const result = await closeCdpTab(
-      { projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' },
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
       h.deps,
     );
 
@@ -1118,7 +1122,7 @@ describe('focusCdpTab', () => {
 
   it('activates the named tab and echoes what it brought forward', async () => {
     const h = liveBrowser();
-    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' }, h.deps);
 
     expect(result).toMatchObject({
       ok: true,
@@ -1141,7 +1145,7 @@ describe('focusCdpTab', () => {
     // for a real tab. `listTabs` here is the shared filter's output, so an id
     // that is not in it is one the agent was never shown.
     const h = liveBrowser();
-    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'IFRAME1' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'IFRAME1' }, h.deps);
 
     expect(result).toMatchObject({ ok: false, kind: 'not_found' });
     const error = (result as { error: string }).error;
@@ -1153,7 +1157,7 @@ describe('focusCdpTab', () => {
 
   it('refuses a port that is not one of ours, and activates nothing', async () => {
     const h = liveBrowser();
-    const result = await focusCdpTab({ projectRoot: ROOT, port: 9222, targetId: 'A1B2C3' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3' }, h.deps);
 
     expect(result).toMatchObject({ ok: false, kind: 'not_found' });
     expect((result as { error: string }).error).toContain('51000');
@@ -1165,7 +1169,7 @@ describe('focusCdpTab', () => {
     h.deps.probe = probeFor({ 9222: 'chrome' }) as never;
 
     const result = await focusCdpTab(
-      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
       h.deps,
     );
 
@@ -1179,14 +1183,14 @@ describe('focusCdpTab', () => {
     // session lookup here at all, which is what this asserts by there being no
     // hook to inject one.
     const h = liveBrowser();
-    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'D4E5F6' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'D4E5F6' }, h.deps);
     expect(result).toMatchObject({ ok: true, targetId: 'D4E5F6' });
   });
 
   it('does NOT refuse a browser\'s only tab', async () => {
     // Nothing closes, so there is no last-tab hazard to guard against.
     const h = liveBrowser([TWO_TABS[0]!]);
-    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' }, h.deps);
     expect(result).toMatchObject({ ok: true });
   });
 
@@ -1197,7 +1201,7 @@ describe('focusCdpTab', () => {
     const h = liveBrowser();
     h.deps.activate = (async () => ({ ok: false, notFound: true, error: 'HTTP 404' })) as never;
 
-    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' }, h.deps);
     expect(result).toMatchObject({ ok: false, kind: 'not_found' });
     expect((result as { error: string }).error).toMatch(/something else closed it first/i);
   });
@@ -1206,14 +1210,14 @@ describe('focusCdpTab', () => {
     const h = liveBrowser();
     h.deps.activate = (async () => ({ ok: false, notFound: false, error: 'HTTP 500' })) as never;
 
-    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' }, h.deps);
     expect(result).toMatchObject({ ok: false, kind: 'launch_failed' });
     expect((result as { error: string }).error).toContain('HTTP 500');
   });
 
   it('reports an unreadable tab list rather than activating blind', async () => {
     const h = liveBrowser(null);
-    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' }, h.deps);
     expect(result).toMatchObject({ ok: false, kind: 'launch_failed' });
     expect(h.activateFn).not.toHaveBeenCalled();
   });
@@ -1244,14 +1248,147 @@ describe('focusCdpTab', () => {
     h.deps.listTabs = ((port: number) => listPageTabs(port, 100, fetchFn)) as never;
 
     for (const hidden of ['IFRAME1', 'UI1', 'DIALOG1', 'EXT1', 'WORKER1']) {
-      const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: hidden }, h.deps);
+      const result = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: hidden }, h.deps);
       expect(result, hidden).toMatchObject({ ok: false, kind: 'not_found' });
     }
     expect(h.activateFn).not.toHaveBeenCalled();
 
     // And the real tab in the same payload still works, so the filter is
     // rejecting by type rather than rejecting everything.
-    const ok = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'PAGE1' }, h.deps);
+    const ok = await focusCdpTab({ roots: PROJECT_ROOTS, port: PORT, targetId: 'PAGE1' }, h.deps);
     expect(ok).toMatchObject({ ok: true, title: 'Orders' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two-root sweep (stories/mcp-no-project.md)
+// ---------------------------------------------------------------------------
+
+describe('knownProfilesAcross', () => {
+  const USER = path.join('C:', 'users', 'x', 'aiui');
+  const PROJ_PROFILES = cdpProfilesRoot(ROOT);
+  const USER_PROFILES = cdpProfilesRoot(USER);
+  const portFile = (dir: string) => path.join(dir, 'DevToolsActivePort');
+
+  it('tags each profile with the root it came from', async () => {
+    const projDir = path.join(PROJ_PROFILES, 'edge-default');
+    const userDir = path.join(USER_PROFILES, 'chrome-default');
+    const { deps } = fakeFs({
+      dirs: [PROJ_PROFILES, projDir, USER_PROFILES, userDir],
+      files: {
+        [portFile(projDir)]: '51000\n/x',
+        [portFile(userDir)]: '52000\n/x',
+      },
+    });
+    const probe = probeFor({ 51000: 'edge', 52000: 'chrome' });
+
+    const all = await knownProfilesAcross(
+      [
+        { root: ROOT, scope: 'project' },
+        { root: USER, scope: 'user' },
+      ],
+      { ...deps, probe },
+    );
+
+    expect(all).toHaveLength(2);
+    expect(all.find((p) => p.port === 51000)).toMatchObject({ scope: 'project', engine: 'edge' });
+    expect(all.find((p) => p.port === 52000)).toMatchObject({ scope: 'user', engine: 'chrome' });
+  });
+
+  it('keeps BOTH when the same name exists in both roots — dedup would be precedence', async () => {
+    const projDir = path.join(PROJ_PROFILES, 'edge-default');
+    const userDir = path.join(USER_PROFILES, 'edge-default');
+    const { deps } = fakeFs({
+      dirs: [PROJ_PROFILES, projDir, USER_PROFILES, userDir],
+      files: {
+        [portFile(projDir)]: '51000\n/x',
+        [portFile(userDir)]: '52000\n/x',
+      },
+    });
+    const probe = probeFor({ 51000: 'edge', 52000: 'edge' });
+
+    const all = await knownProfilesAcross(
+      [
+        { root: ROOT, scope: 'project' },
+        { root: USER, scope: 'user' },
+      ],
+      { ...deps, probe },
+    );
+
+    // Two entries, one per scope — same (engine, profile) name, different
+    // browsers. The caller refuses the ambiguity; the sweep must not resolve it.
+    expect(all.map((p) => p.scope).sort()).toEqual(['project', 'user']);
+    expect(all.map((p) => p.port).sort()).toEqual([51000, 52000]);
+  });
+});
+
+describe('close/focus over a user-scoped sweep', () => {
+  const USER = path.join('C:', 'users', 'x', 'aiui');
+  const USER_PROFILES = cdpProfilesRoot(USER);
+  const USER_DIR = path.join(USER_PROFILES, 'edge-default');
+  const PORT = 52000;
+
+  function liveUserBrowser(tabs: { targetId: string; title: string; url: string }[]) {
+    const { deps } = fakeFs({
+      dirs: [USER_PROFILES, USER_DIR],
+      files: { [path.join(USER_DIR, 'DevToolsActivePort')]: `${PORT}\n/x` },
+    });
+    let open = [...tabs];
+    let alivePort = true;
+    return {
+      deps: {
+        ...deps,
+        probe: probeFor({ [PORT]: 'edge' }),
+        close: (async (_p: number, id: string) => {
+          open = open.filter((t) => t.targetId !== id);
+          if (open.length === 0) alivePort = false;
+          return { ok: true, notFound: false, error: null };
+        }) as never,
+        activate: (async () => ({ ok: true, notFound: false, error: null })) as never,
+        listTabs: (async () => (alivePort ? open : null)) as never,
+        alive: (async () => alivePort) as never,
+        sleep: async () => {},
+      },
+    };
+  }
+
+  const USER_ROOTS = [
+    { root: ROOT, scope: 'project' },
+    { root: USER, scope: 'user' },
+  ] as const;
+
+  it('closeCdpTab reaches a user-root browser owned:true, scope:user, no allowUnowned', async () => {
+    const h = liveUserBrowser([
+      { targetId: 'U1', title: 'Mail', url: 'https://mail' },
+      { targetId: 'U2', title: 'Docs', url: 'https://docs' },
+    ]);
+    const result = await closeCdpTab(
+      { roots: USER_ROOTS, port: PORT, targetId: 'U1' },
+      h.deps,
+    );
+    expect(result).toMatchObject({ ok: true, owned: true, scope: 'user', targetId: 'U1' });
+  });
+
+  it('focusCdpTab does the same and labels the browser as user-root', async () => {
+    const h = liveUserBrowser([{ targetId: 'U1', title: 'Mail', url: 'https://mail' }]);
+    const result = await focusCdpTab(
+      { roots: USER_ROOTS, port: PORT, targetId: 'U1' },
+      h.deps,
+    );
+    expect(result).toMatchObject({ ok: true, owned: true, scope: 'user' });
+  });
+
+  it('a not-found refusal names only the roots actually swept', async () => {
+    const h = liveUserBrowser([{ targetId: 'U1', title: 'Mail', url: 'https://mail' }]);
+    // User-scope-only sweep (project-less): the message must not mention a
+    // project root that was never in play.
+    const result = await closeCdpTab(
+      { roots: [{ root: USER, scope: 'user' }], port: 9222, targetId: 'X' },
+      h.deps,
+    );
+    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    const err = (result as { error: string }).error;
+    expect(err).toContain('user root');
+    expect(err).not.toContain('project root');
   });
 });

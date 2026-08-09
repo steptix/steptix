@@ -19,6 +19,10 @@
  * tests. Spread across project/assemble/server-start they drift.
  */
 
+// Type-only, so the value-level dependency stays one-directional
+// (`types.ts` → `errors.ts`) and no runtime cycle exists.
+import type { RootScope } from './types.js';
+
 export interface McpToolError {
   content: { type: 'text'; text: string }[];
   isError: true;
@@ -85,6 +89,48 @@ export function noProjectConfig(searched: readonly string[]): McpToolError {
  *  project than the one the caller is looking at. */
 export function badProjectConfig(configPath: string, detail: string): McpToolError {
   return preflightError(`${configPath} could not be read as JSON: ${detail}`);
+}
+
+/** `run_test_file` / `list_test_files` resolved to the user root. Test files
+ *  are project-shaped and the user root deliberately holds none
+ *  (stories/mcp-no-project.md) — so this is a refusal, not a fallback. */
+export function testsNeedProject(userRoot: string): McpToolError {
+  return preflightError(
+    `Test files belong to a project, and ${userRoot} is the machine-wide user ` +
+      'root, not a project — it holds your browsers and machine defaults, ' +
+      'never tests.\n' +
+      'Run against a directory whose aiui.config.json defines the tests, or ' +
+      'pass project_root pointing at one.',
+  );
+}
+
+/**
+ * `run_steps` in project-less mode with `[skill:]` / `[tool:]` steps.
+ *
+ * Refused up front rather than sent: without a `skillsDir`/`toolsDir` on the
+ * wire the server ships these lines to the AI as prose — a silent, expensive
+ * wrong answer three layers down. And they cannot be given a directory,
+ * deliberately: a machine-global skills or tools directory would mean any
+ * conversation, in any directory, executes code from a path no repo owns and
+ * no review covers (stories/mcp-no-project.md, locked).
+ */
+export function projectlessCodeSteps(
+  offending: readonly string[],
+  searched: readonly string[],
+): McpToolError {
+  const where =
+    searched.length > 0
+      ? `No aiui.config.json was found (searched: ${searched.join(', ')}).`
+      : 'This call resolved to the machine-wide user root, which never holds skills or tools.';
+  return preflightError(
+    `${offending.length} step(s) invoke a skill or tool, but no project resolved — ` +
+      'and skills and tools are code, code belongs to a project, so ' +
+      'project-less runs refuse them rather than sending them to the AI as prose.\n' +
+      `${where}\n` +
+      `Steps: ${offending.map((step) => JSON.stringify(step)).join(', ')}\n` +
+      'Run from inside the project (or pass project_root) to use its skills ' +
+      'and tools. Plain-English steps work fine without a project.',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -258,33 +304,49 @@ export function badCdpPort(value: string): McpToolError {
 // implementation.
 // ---------------------------------------------------------------------------
 
-// Names the setting AND shows the JSON. The dotted name is what a human
-// searches for and what the agent should say out loud when asking for it; the
-// JSON is what they actually have to type.
-const ALLOW_UNOWNED_HINT =
-  'To let this agent drive browsers it did not start, a human must set ' +
-  'mcp.cdp.allowUnowned in aiui.config.json:\n' +
-  '  { "mcp": { "cdp": { "allowUnowned": true } } }\n' +
-  'That file is deliberately outside an agent\'s reach — ask the user for it.';
+/**
+ * Names the setting AND shows the JSON. The dotted name is what a human
+ * searches for and what the agent should say out loud when asking for it; the
+ * JSON is what they actually have to type.
+ *
+ * Takes the resolved config path rather than hardcoding "aiui.config.json"
+ * because the answer differs by scope: for a project it is the project's own
+ * file, and for a project-less call it is `<user root>/aiui.config.json` — a
+ * file that may not exist yet, since nothing machine-writes it. This message
+ * is the only discovery path there is for that file
+ * (stories/mcp-no-project.md, open question resolved), so it must name the
+ * exact path.
+ */
+function allowUnownedHint(configPath: string): string {
+  return (
+    'To let this agent drive browsers it did not start, a human must set ' +
+    `mcp.cdp.allowUnowned in ${configPath} (creating the file if it does not ` +
+    'exist yet):\n' +
+    '  { "mcp": { "cdp": { "allowUnowned": true } } }\n' +
+    'That file is deliberately outside an agent\'s reach — ask the user for it.'
+  );
+}
 
-/** `config.cdp` names a port that is not one of this project's running
- *  browsers. The middle clause — where it *was* found — is what turns this
- *  from a wall into a decision. */
+/** `config.cdp` names a port that is not one of the running browsers of
+ *  either root this call can see. The middle clause — where it *was* found —
+ *  is what turns this from a wall into a decision. */
 export function cdpPortNotOwned(
   port: number,
   foundIn: 'foreign' | 'available' | 'nowhere',
+  configPath: string,
   detail?: { profile?: string; engine?: string },
 ): McpToolError {
   const where =
     foundIn === 'foreign'
-      ? `Port ${port} belongs to a browser this project did not start (it is listed under ` +
-        '`foreign`). It could be anyone\'s browser — a developer\'s personal Chrome, ' +
-        'another project\'s.'
+      ? `Port ${port} belongs to a browser this framework did not start here (it is listed ` +
+        'under `foreign`) — it traces back to neither this call\'s project nor the user ' +
+        'root. It could be anyone\'s browser — a developer\'s personal Chrome, another ' +
+        'machine account\'s.'
       : foundIn === 'available'
         ? `Port ${port} is not open. The ${detail?.engine ?? ''} profile ` +
           `"${detail?.profile ?? 'unknown'}" exists but its browser has since been closed, ` +
           'and a browser\'s port dies with the process.'
-        : `Port ${port} does not match any browser this project has launched.`;
+        : `Port ${port} does not match any browser this call can see.`;
 
   const next =
     foundIn === 'available'
@@ -294,7 +356,7 @@ export function cdpPortNotOwned(
         'lost login.'
       : 'Call list_cdp_browsers and use a port from `running`; or launch one of the ' +
         '`available` profiles with start_cdp_browser.\n' +
-        ALLOW_UNOWNED_HINT;
+        allowUnownedHint(configPath);
 
   return preflightError(`${where}\n\n${next}`);
 }
@@ -331,6 +393,18 @@ export function cdpTargetAmbiguous(both: boolean): McpToolError {
   );
 }
 
+/** `chrome "default" (user root)` — one spelling for every message that lists
+ *  browsers, so a reader can compare across refusals. The scope tag appears
+ *  only for the user root: a bare name has always meant the project's own
+ *  browser, and re-labelling those would make every old message read as new. */
+export function describeBrowser(b: {
+  engine: string;
+  profile: string;
+  scope?: RootScope | undefined;
+}): string {
+  return `${b.engine} "${b.profile}"${b.scope === 'user' ? ' (user root)' : ''}`;
+}
+
 /** `config.cdp.profile` names a profile with no browser running.
  *
  *  Deliberately NOT a launch. Starting a browser is a visible act that belongs
@@ -340,7 +414,7 @@ export function cdpTargetAmbiguous(both: boolean): McpToolError {
 export function cdpProfileNotRunning(
   profile: string,
   engine: string | null,
-  known: { engine: string; profile: string }[],
+  known: { engine: string; profile: string; scope?: RootScope }[],
 ): McpToolError {
   const name = engine === null ? `"${profile}"` : `${engine} "${profile}"`;
   return preflightError(
@@ -348,17 +422,47 @@ export function cdpProfileNotRunning(
       `Call start_cdp_browser with profile "${profile}"${engine === null ? '' : ` and engine "${engine}"`}. ` +
       'The profile directory still holds its logins — a closed browser is not a lost login.' +
       (known.length > 0
-        ? `\n\nRunning now: ${known.map((b) => `${b.engine} "${b.profile}"`).join(', ')}.`
+        ? `\n\nRunning now: ${known.map((b) => describeBrowser(b)).join(', ')}.`
         : ''),
   );
 }
 
-/** Chrome and Edge are both running the same profile name. */
-export function cdpProfileAmbiguous(profile: string, engines: string[]): McpToolError {
+/**
+ * One profile name, more than one running browser — Chrome and Edge sharing a
+ * name, the project and the user root sharing one, or both at once.
+ *
+ * Refused rather than resolved by precedence (stories/mcp-no-project.md,
+ * locked): the same words must mean the same browser from every directory,
+ * and the wrong pick is a browser signed in as somebody else.
+ */
+export function cdpProfileAmbiguous(
+  profile: string,
+  matches: { engine: string; scope?: RootScope }[],
+): McpToolError {
+  const named = matches
+    .map((m) => `${m.engine} "${profile}"${m.scope === 'user' ? ' (user root)' : ' (project)'}`)
+    .join(', ');
+  const enginesDiffer = new Set(matches.map((m) => m.engine)).size > 1;
+  const scopesDiffer = new Set(matches.map((m) => m.scope ?? 'project')).size > 1;
+  // The example carries ONLY the field(s) that actually disambiguate this
+  // case: adding `scope` to an engine-only clash (both project) would match
+  // nothing, and copying the example verbatim would then fail. `matches[0]`
+  // is a real running browser, so the example resolves to it.
+  const first = matches[0]!;
+  const fields = [
+    ...(enginesDiffer ? [`engine: "${first.engine}"`] : []),
+    ...(scopesDiffer ? [`scope: "${first.scope ?? 'project'}"`] : []),
+  ];
+  const which = [
+    ...(enginesDiffer ? ['engine'] : []),
+    ...(scopesDiffer ? ['scope'] : []),
+  ].join(' and/or ');
   return preflightError(
-    `Profile "${profile}" is running under more than one engine ` +
-      `(${engines.join(' and ')}), so it does not identify a browser on its own.\n` +
-      `Add an engine: config.cdp: { profile: "${profile}", engine: "${engines[0]}" }.`,
+    `Profile "${profile}" is running more than once (${named}), so the name does ` +
+      'not identify a browser on its own — and nothing is picked for you, because ' +
+      'the wrong pick is a browser signed in as somebody else.\n' +
+      `Say which you mean by adding ${which || 'engine and/or scope'}: e.g. ` +
+      `{ profile: "${profile}"${fields.length > 0 ? ', ' + fields.join(', ') : ''} }.`,
   );
 }
 

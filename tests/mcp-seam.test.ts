@@ -22,6 +22,8 @@ const TEST_FILE = 'c:/proj/tests/checkout.md';
 
 function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
   return {
+    scope: 'project',
+    configSearch: [],
     projectRoot: PROJECT_ROOT,
     configPath: `${PROJECT_ROOT}/aiui.config.json`,
     env: { AI_API_KEY: 'project-key' },
@@ -59,6 +61,8 @@ interface Harness {
   sessionStateCalls: string[];
   /** `GET /config` calls, with the session id each asked about or null. */
   configCalls: (string | null)[];
+  /** Every argument bag `resolveProject` received. */
+  resolveArgs: unknown[];
 }
 
 const emptyBrowsers = { running: [], available: [], foreign: [] };
@@ -89,6 +93,9 @@ async function connect(opts: {
   const pageContentCalls: Harness['pageContentCalls'] = [];
   const sessionStateCalls: string[] = [];
   const configCalls: (string | null)[] = [];
+  /** Every argument bag `resolveProject` received — how a test pins
+   *  per-tool resolver flags like `requireProject`. */
+  const resolveArgs: unknown[] = [];
   let ensureCalls = 0;
   const scripts = Array.isArray(opts.script) ? [...opts.script] : opts.script ? [opts.script] : [];
 
@@ -198,7 +205,8 @@ async function connect(opts: {
     // client the suite would still fire live requests at 127.0.0.1:3100 and
     // fail on any machine with something else listening there.
     assertServerRecognized: async () => {},
-    resolveProject: async () => {
+    resolveProject: async (args) => {
+      resolveArgs.push(args);
       if (opts.resolveProjectError) throw opts.resolveProjectError;
       return opts.project ?? fakeProject();
     },
@@ -217,6 +225,7 @@ async function connect(opts: {
     pageContentCalls,
     sessionStateCalls,
     configCalls,
+    resolveArgs,
     get ensureCalls() {
       return ensureCalls;
     },
@@ -1280,5 +1289,110 @@ describe('the other tools', () => {
     });
 
     expect(harness.ensureCalls).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Project-less runs (stories/mcp-no-project.md rules 6 and 7)
+// ---------------------------------------------------------------------------
+
+describe('project-less run_steps', () => {
+  const userScope = () =>
+    fakeProject({
+      scope: 'user',
+      projectRoot: 'c:/users/x/aiui',
+      configPath: 'c:/users/x/aiui/aiui.config.json',
+      configSearch: ['c:/somewhere', 'c:/'],
+      skillsDir: null,
+      toolsDir: null,
+    });
+
+  it('rule 7: the result and the summary both say which root the run used', async () => {
+    const { client } = await connect({
+      project: userScope(),
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['open example.com'] },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as Record<string, unknown>;
+    expect(structured.scope).toBe('user');
+    expect(structured.projectRoot).toBe('c:/users/x/aiui');
+    const first = (res.content as { text?: string }[])[0]?.text ?? '';
+    expect(first).toContain('user root');
+  });
+
+  it('a project run reports scope: "project" and keeps its summary quiet about it', async () => {
+    const { client } = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+    });
+
+    expect((res.structuredContent as Record<string, unknown>).scope).toBe('project');
+    expect((res.content as { text?: string }[])[0]?.text ?? '').not.toContain('user root');
+  });
+
+  it('rule 6: refuses [skill:] and [tool:] steps before anything reaches the wire', async () => {
+    const harness = await connect({ project: userScope() });
+
+    const res = await harness.client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['open the site', 'Log in [skill: login user=bob]', '[tool: fetchOrders]'],
+      },
+    });
+
+    expect(res.isError).toBe(true);
+    const text = (res.content as { text?: string }[]).map((c) => c.text ?? '').join('\n');
+    expect(text).toContain('no project resolved');
+    expect(text).toContain('code belongs to a project');
+    // Both offenders named; the innocent step is not.
+    expect(text).toContain('[skill: login user=bob]');
+    expect(text).toContain('[tool: fetchOrders]');
+    expect(text).not.toContain('"open the site"');
+    // The walk that found no project is in the message, so a typo'd config
+    // filename is diagnosable from the refusal alone.
+    expect(text).toContain('c:/somewhere');
+    // Refused pre-flight: no session, no run.
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  it('the same steps run fine inside a project', async () => {
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    const res = await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['Log in [skill: login user=bob]'], project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(harness.calls).toHaveLength(1);
+  });
+
+  it('run_test_file and list_test_files ask the resolver for a real project', async () => {
+    // The two project-shaped tools must pass requireProject — the flag that
+    // keeps them refusing instead of falling back to the user root. Pinned at
+    // the resolver seam; what the flag *does* is tests/mcp-project.test.ts's
+    // job. The other tools must NOT pass it, or project-less mode dies.
+    const harness = await connect({});
+
+    await harness.client.callTool({ name: 'list_test_files', arguments: {} });
+    expect(harness.resolveArgs.at(-1)).toMatchObject({ requireProject: true });
+
+    await harness.client.callTool({ name: 'server_status', arguments: {} });
+    expect(harness.resolveArgs.at(-1)).not.toMatchObject({ requireProject: true });
+
+    await harness.client.callTool({ name: 'run_steps', arguments: { steps: ['x'] } });
+    expect(harness.resolveArgs.at(-1)).not.toMatchObject({ requireProject: true });
   });
 });

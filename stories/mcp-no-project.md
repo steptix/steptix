@@ -118,16 +118,22 @@ A directory outside any project, holding the same things a project root holds:
 $XDG_CONFIG_HOME/aiui/  or  ~/.aiui/     (everywhere else)
 ├── aiui.config.json
 ├── .env
-└── cdp-profiles/
-    └── chrome-default/
-        ├── .aiui-profile
-        └── DevToolsActivePort
+└── .aiui/
+    └── cdp-profiles/
+        └── chrome-default/
+            ├── .aiui-profile
+            └── DevToolsActivePort
 ```
 
 Identical layout on purpose — `cdpProfilesRoot()` and `knownProfiles()` work
 against it unchanged, and the ownership proof stays exactly what it is today:
 a port that traces back to a profile directory we made. No new trust model,
-no marker-scanning of arbitrary paths, no registry in memory.
+no marker-scanning of arbitrary paths, no registry in memory. Note the nested
+`.aiui/cdp-profiles/` — the user root is a *real* project root, so it carries
+the same `.aiui/` subdirectory a project does (the browsers live at
+`%LOCALAPPDATA%\aiui\.aiui\cdp-profiles\`, and the auto-start log at
+`%LOCALAPPDATA%\aiui\.aiui\mcp-server.log`). "Same layout" is the whole point:
+one `cdpProfilesRoot(root)` serves both.
 
 Created on first use, not on install. A machine that never runs a project-less
 call never grows the directory.
@@ -261,14 +267,32 @@ What this story does add:
   *picture* of the openrouter tab" still costs a `run_steps` call and a
   model turn.
 
-## Open questions
+## Open questions — resolved in the build
 
-- An absent user-root `aiui.config.json` has to read as "all defaults", since
-  nothing may create it (§Locked). So when a user wants `allowUnowned`, what
-  tells them the file to write and where? A refusal message naming the exact
-  path is probably enough, but it is the only discovery path there is.
+- **Discovering the `allowUnowned` file.** An absent user-root
+  `aiui.config.json` reads as "all defaults", since nothing may create it
+  (§Locked). Resolved: the reach-refusal message names the exact config path
+  for the *resolved scope* — a project's own file, or
+  `%LOCALAPPDATA%\aiui\aiui.config.json` for a project-less call — and says
+  "creating the file if it does not exist yet". That refusal is the discovery
+  path.
 
-- Should `AIUI_MCP_ROOTS` naming exactly one directory continue to imply
-  "that's the project", or should the user root always be appended? Appending
-  is more consistent; not appending keeps the machine-global hosts (Codex CLI,
-  Copilot CLI) behaving exactly as configured.
+- **`AIUI_MCP_ROOTS` with one entry.** Resolved: it still means "that's the
+  project". The split is `configuredRoots()` (project *candidates* — the env
+  var, or cwd) versus `allowedRoots()` (`configuredRoots()` **plus** the user
+  root — the confinement/addressing allow-list). A project is only ever
+  selected from `configuredRoots()`, so a single entry keeps behaving exactly
+  as the machine-global hosts (Codex CLI, Copilot CLI) configure it; the user
+  root joins only the allow-list, so it can be *addressed* (`scope: "user"`,
+  `project_root: <userRoot>`) and is where resolution *lands* when no project
+  does — never a project that competes for selection.
+
+  A corollary the build had to get right: project *file-loading* (skills,
+  tools, `.env`, `.env.<name>`, `tests.dir`, `dataSources`) is confined
+  against `configuredRoots()`, **not** the wider allow-list. The user root
+  joining the allow-list is for addressing only; letting a project's own
+  untrusted `aiui.config.json` reach into `%LOCALAPPDATA%\aiui` through it
+  would hand that config the machine key and a skills/tools directory no repo
+  owns. The wide list confines only the two things that legitimately name the
+  user root — the resolution arguments and a user-*scope* resolution's own
+  files.

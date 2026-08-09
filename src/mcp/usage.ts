@@ -7,20 +7,27 @@
  * string literal in the entry would drift from the README.
  */
 export const MCP_USAGE = `
-aiui mcp — run this project's tests from an MCP client over stdio
+aiui mcp — drive browsers and run tests from an MCP client over stdio
 
   Speaks the Model Context Protocol on stdin/stdout. Agent hosts spawn it;
   you do not normally run it by hand.
 
+  A project is optional. Inside one (a directory with aiui.config.json), you
+  get its tests, skills, tools and environments. From anywhere else, the
+  browser verbs and run_steps still work against the machine-wide user root
+  (%LOCALAPPDATA%\\aiui, ~/.aiui elsewhere) — your own signed-in CDP browsers,
+  reachable from any directory. Results say which via a "scope" field;
+  [skill:]/[tool:] steps and the two test-file tools still need a project.
+
 Tools
   run_steps         run ad-hoc natural-language steps in a browser session
-  run_test_file     run a .md test file end to end
-  list_test_files   list the project's test files
+  run_test_file     run a .md test file end to end (needs a project)
+  list_test_files   list the project's test files (needs a project)
   list_sessions     list open browser sessions on the server
   close_session     close a session and its browser
   get_last_run      report path and token totals for a finished run
   get_page_content  read a session's current page as text or cleaned DOM
-  list_cdp_browsers persistent CDP browsers and profiles for this project
+  list_cdp_browsers persistent CDP browsers — the project's and the user root's
   start_cdp_browser launch (or return) a CDP browser you can sign into by hand
   close_cdp_tab     close one tab in a CDP browser
   focus_cdp_tab     bring one tab of a CDP browser to the front
@@ -31,9 +38,13 @@ Environment
                     touch. Defaults to the process working directory.
                     REQUIRED for hosts whose config is machine-global
                     (Codex CLI, Copilot CLI), whose spawn directory is not
-                    your project.
+                    your project. The user root is always allowed on top,
+                    and never counts as a project candidate.
   SERVER_URL        Sessions API base URL. Normally read from the project's
                     .env / .env.<name>; this is a lowest-precedence fallback.
+                    Project-less calls default to http://127.0.0.1:3141 —
+                    a distinct port, so they never collide with a project
+                    server on 3100.
   AIUI_SERVER_API_KEY    Sessions API key. Chain: project .env, then this
                     variable, then the machine key at %LOCALAPPDATA%\aiui\.env
                     (~/.aiui elsewhere) — which is generated on first need,

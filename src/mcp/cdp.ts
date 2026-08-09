@@ -48,7 +48,13 @@ export interface CdpPermissions {
  * Resolves against the live registry rather than anything cached: a browser
  * that was running when the agent listed is not necessarily running now, and
  * attaching to a port that has since been taken by something else is the
- * failure this exists to prevent.
+ * failure this exists to prevent. The listing spans both roots — the
+ * project's and the user root's — so a user-scope browser passes the gate
+ * from anywhere without `allowUnowned` (stories/mcp-no-project.md rule 4).
+ *
+ * `configPath` is the file a human would edit to widen reach; the refusal
+ * names it, and it differs by scope — the project's own config, or the user
+ * root's (which may not exist yet).
  *
  * Throws `PreflightFailure` carrying a §7 message. Refusals happen before any
  * run starts, which is why they are `isError` results rather than run results.
@@ -58,6 +64,7 @@ export async function assertPortAttachable(
   projectRoot: string,
   port: number,
   permissions: CdpPermissions,
+  configPath: string,
   signal?: AbortSignal,
 ): Promise<void> {
   // `allowUnowned` short-circuits the whole check, including the round-trip. A
@@ -76,7 +83,7 @@ export async function assertPortAttachable(
   // of the two answers is the difference between relaunching a signed-in
   // profile and concluding the login is gone.
   if (browsers.foreign.some((b) => b.port === port)) {
-    throw new PreflightFailure(cdpPortNotOwned(port, 'foreign'));
+    throw new PreflightFailure(cdpPortNotOwned(port, 'foreign', configPath));
   }
 
   // A profile in `available` has no port to offer, so the port cannot be
@@ -87,11 +94,14 @@ export async function assertPortAttachable(
   if (browsers.available.length === 1) {
     const only = browsers.available[0]!;
     throw new PreflightFailure(
-      cdpPortNotOwned(port, 'available', { profile: only.profile, engine: only.engine }),
+      cdpPortNotOwned(port, 'available', configPath, {
+        profile: only.profile,
+        engine: only.engine,
+      }),
     );
   }
 
-  throw new PreflightFailure(cdpPortNotOwned(port, 'nowhere'));
+  throw new PreflightFailure(cdpPortNotOwned(port, 'nowhere', configPath));
 }
 
 /**
@@ -125,7 +135,7 @@ export async function resolveCdpTarget(
   target: CdpTarget,
   signal?: AbortSignal,
   ambiguous: (both: boolean) => McpToolError = cdpTargetAmbiguous,
-): Promise<{ port: number; gateOwed: boolean }> {
+): Promise<{ port: number; gateOwed: boolean; scope?: 'project' | 'user' }> {
   const hasProfile = target.profile !== undefined && target.profile.trim() !== '';
   const hasPort = target.port !== undefined;
 
@@ -138,19 +148,39 @@ export async function resolveCdpTarget(
 
   const profile = target.profile!.trim();
   const engine = target.engine?.trim() ?? null;
+  // `scope` narrows the same way `engine` does — a name may exist in both the
+  // project and the user root, and those are different browsers with
+  // different logins (stories/mcp-no-project.md). A server predating the
+  // field reports no scope; those entries read as `project`, the only scope
+  // such a server can have swept.
+  const scope = target.scope ?? null;
   const browsers = await client.getCdpBrowsers({ projectRoot, includeForeign: false }, signal);
 
-  const matches = browsers.running.filter(
-    (b) => b.profile === profile && (engine === null || b.engine === engine),
+  const running = browsers.running.map((b) => ({ ...b, scope: b.scope ?? ('project' as const) }));
+  const matches = running.filter(
+    (b) =>
+      b.profile === profile &&
+      (engine === null || b.engine === engine) &&
+      (scope === null || b.scope === scope),
   );
 
-  if (matches.length === 1) return { port: matches[0]!.port, gateOwed: false };
+  // The matched entry's scope rides back for the callers' result summaries —
+  // a profile-resolved port already knows which root it came from, and the
+  // server echo may be missing on an older build.
+  if (matches.length === 1) {
+    return { port: matches[0]!.port, gateOwed: false, scope: matches[0]!.scope };
+  }
 
-  // Chrome and Edge can each run a profile called "default". Naming both beats
-  // guessing: the wrong one is a browser signed in as somebody else.
+  // One name, several browsers — engines sharing it, roots sharing it, or
+  // both. Naming every match beats guessing: the wrong one is a browser
+  // signed in as somebody else, and refusing (never precedence) is the
+  // story's locked decision.
   if (matches.length > 1) {
     throw new PreflightFailure(
-      cdpProfileAmbiguous(profile, [...new Set(matches.map((b) => b.engine))]),
+      cdpProfileAmbiguous(
+        profile,
+        matches.map((b) => ({ engine: b.engine, scope: b.scope })),
+      ),
     );
   }
 
@@ -158,7 +188,7 @@ export async function resolveCdpTarget(
     cdpProfileNotRunning(
       profile,
       engine,
-      browsers.running.map((b) => ({ engine: b.engine, profile: b.profile })),
+      running.map((b) => ({ engine: b.engine, profile: b.profile, scope: b.scope })),
     ),
   );
 }
@@ -175,10 +205,14 @@ export function maySeeForeignTabs(permissions: CdpPermissions): boolean {
   return permissions.allowUnowned;
 }
 
-/** A short human summary of a listing, for `content[0]`. */
+/** A short human summary of a listing, for `content[0]`. The user-root count
+ *  is called out because it is the one a reader will not expect from a
+ *  project-scoped call — those browsers are theirs from anywhere. */
 export function summarizeBrowsers(browsers: CdpBrowsers): string {
+  const userRunning = browsers.running.filter((b) => b.scope === 'user').length;
   const parts = [
-    `${browsers.running.length} running`,
+    `${browsers.running.length} running` +
+      (userRunning > 0 ? ` (${userRunning} user-root)` : ''),
     `${browsers.available.length} available (not started)`,
   ];
   if (browsers.foreign.length > 0) parts.push(`${browsers.foreign.length} foreign`);
