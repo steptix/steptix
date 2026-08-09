@@ -21,6 +21,11 @@ function fold(partial: Partial<FoldInput> & { events: RunEvent[] }) {
     sourceLines: [10, 11, 12],
     testFilePath: TEST_FILE,
     expansionPossible: false,
+    // The fold has no default of its own — `readRunSettings` resolves the tool
+    // argument, so a second fallback here would be a second default to drift.
+    // These cases are about the fold's mechanics, so `'none'` keeps the image
+    // out of the way unless a case asks for one.
+    screenshotsReturn: 'none',
     ...partial,
   });
 }
@@ -431,13 +436,14 @@ describe('run-level reporting', () => {
 describe('screenshots', () => {
   const png = `data:image/png;base64,${'A'.repeat(100)}`;
 
-  it('is omitted unless asked for', () => {
+  it('is omitted under none, even with one available', () => {
     const result = fold({
       events: [
         { type: 'step:start', line: 10 },
         { type: 'step:fail', line: 10, error: 'x', screenshot: png },
         { type: 'done', status: 'failed' },
       ],
+      screenshotsReturn: 'none',
     });
 
     expect(result.screenshotBase64).toBeNull();
@@ -450,7 +456,7 @@ describe('screenshots', () => {
         { type: 'step:fail', line: 10, error: 'x', screenshot: png },
         { type: 'done', status: 'failed' },
       ],
-      includeScreenshot: true,
+      screenshotsReturn: 'on-failure',
     });
 
     expect(result.screenshotBase64).toBe('A'.repeat(100));
@@ -464,23 +470,160 @@ describe('screenshots', () => {
         { type: 'step:fail', line: 10, error: 'x', screenshot: huge },
         { type: 'done', status: 'failed' },
       ],
-      includeScreenshot: true,
+      screenshotsReturn: 'on-failure',
     });
 
     expect(result.screenshotBase64).toBeNull();
-    expect(result.warnings.join(' ')).toContain('screenshot dropped');
+    expect(result.warnings.join(' ')).toContain('Screenshot dropped');
   });
 
-  it('ignores a passing step screenshot', () => {
+  it('ignores a passing step screenshot under on-failure', () => {
     const result = fold({
       events: [
         { type: 'step:start', line: 10 },
         { type: 'step:pass', line: 10, screenshot: png },
         { type: 'done', status: 'passed' },
       ],
-      includeScreenshot: true,
+      screenshotsReturn: 'on-failure',
     });
 
     expect(result.screenshotBase64).toBeNull();
+    // And says nothing about it: asking for the failure shot on a run that
+    // never failed is the happy path, not a problem to report.
+    expect(result.warnings.join(' ')).not.toMatch(/screenshot/i);
+  });
+
+  // `final` is the mode that needs the capture setting, so these three cover
+  // the coupling the tool description warns about.
+  it('returns a passing run\'s last screenshot under final', () => {
+    const later = `data:image/png;base64,${'B'.repeat(100)}`;
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:pass', line: 10, screenshot: png },
+        { type: 'step:start', line: 11 },
+        { type: 'step:pass', line: 11, screenshot: later },
+        { type: 'done', status: 'passed' },
+      ],
+      screenshotsReturn: 'final',
+    });
+
+    // The LAST one seen, not the first: "how did the run leave the page?"
+    expect(result.screenshotBase64).toBe('B'.repeat(100));
+  });
+
+  it('returns the failure shot under final when the run ended on a failure', () => {
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:fail', line: 10, error: 'x', screenshot: png },
+        { type: 'done', status: 'failed' },
+      ],
+      screenshotsReturn: 'final',
+    });
+
+    expect(result.screenshotBase64).toBe('A'.repeat(100));
+  });
+
+  it('warns, naming capture, when final has nothing to return', () => {
+    // A passing step carries no screenshot at all unless per-action capture is
+    // on. Returning nothing in silence would leave the caller to work that out.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:pass', line: 10 },
+        {
+          type: 'done',
+          status: 'passed',
+          effectiveSettings: {
+            model: 'test-model',
+            capture: 'none',
+            fullPage: false,
+            sendScreenshots: false,
+            sources: { model: 'server', capture: 'session', fullPage: 'server', sendScreenshots: 'server' },
+          },
+        },
+      ],
+      screenshotsReturn: 'final',
+    });
+
+    expect(result.screenshotBase64).toBeNull();
+    expect(result.warnings.join(' ')).toContain('capture');
+    expect(result.warnings.join(' ')).toContain('"none"');
+  });
+
+  it('warns when a failure produced no screenshot', () => {
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:fail', line: 10, error: 'x' },
+        { type: 'done', status: 'failed' },
+      ],
+      screenshotsReturn: 'on-failure',
+    });
+
+    expect(result.screenshotBase64).toBeNull();
+    expect(result.warnings.join(' ')).toContain('capture');
+  });
+});
+
+describe('effectiveSettings on the done event', () => {
+  const settings = {
+    model: 'aibroker/google/gemini-3-flash',
+    capture: 'every-step' as const,
+    fullPage: true,
+    sendScreenshots: false,
+    sources: {
+      model: 'session' as const,
+      capture: 'session' as const,
+      fullPage: 'project' as const,
+      sendScreenshots: 'server' as const,
+    },
+  };
+
+  it('passes the server\'s report through, with the return mode added', () => {
+    const result = fold({
+      events: [{ type: 'done', status: 'passed', effectiveSettings: settings }],
+      screenshotsReturn: 'final',
+    });
+
+    expect(result.effectiveSettings).toEqual({ ...settings, screenshotsReturn: 'final' });
+  });
+
+  it('nulls the server half when an older server omits it', () => {
+    // The regression this guards: a missing key fails `structuredContent`
+    // validation outright, which would degrade the whole run result to an error
+    // with nothing readable in it — at the end of a run that worked.
+    const result = fold({
+      events: [{ type: 'done', status: 'passed' }],
+      screenshotsReturn: 'on-failure',
+    });
+
+    expect(result.effectiveSettings).toEqual({
+      model: null,
+      capture: null,
+      fullPage: null,
+      sendScreenshots: null,
+      sources: null,
+      // Never null: this side always knows what it was told, whatever the
+      // server did or did not report.
+      screenshotsReturn: 'on-failure',
+    });
+  });
+
+  it('treats a malformed report as not reported', () => {
+    const result = fold({
+      events: [
+        {
+          type: 'done',
+          status: 'passed',
+          // `sources` half-filled — exactly what a mid-branch server would send.
+          effectiveSettings: { ...settings, sources: { model: 'session' } },
+        } as unknown as RunEvent,
+      ],
+    });
+
+    expect(result.effectiveSettings?.model).toBeNull();
+    expect(result.effectiveSettings?.sources).toBeNull();
   });
 });

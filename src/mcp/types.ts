@@ -8,12 +8,69 @@
  * a real client at an ephemeral port.
  */
 import type { RunEvent } from '../server/session-manager.js';
+import type {
+  CaptureMode,
+  EffectiveSettings,
+  RunSettings,
+  SettingSource,
+} from '../config/types.js';
 
 // Type-only: `RunEvent` lives in session-manager, which value-imports
 // playwright. `import type` erases at compile time, so nothing in this graph
 // pulls a browser stack into the MCP process. Re-exported so the rest of
 // src/mcp/ never has to reach into the server package itself.
 export type { RunEvent };
+
+// Re-exported rather than re-declared. These travel the wire in both directions
+// — `runSettings` out on the request, `effectiveSettings` back on `done` and on
+// `GET /config` — and two hand-kept copies of a wire shape drift, silently, in
+// the direction of the half that gets edited.
+export type { CaptureMode, EffectiveSettings, RunSettings, SettingSource };
+
+/**
+ * What comes back to the CALLER, as distinct from what gets captured into the
+ * report (stories/run-settings.md §4).
+ *
+ * MCP-only — it never reaches the server. The fold already sees every step's
+ * screenshot; this decides which of them, if any, ends up as an image block in
+ * the tool result. Deliberately no `every-step`: a 30-step run is 30 PNGs, and a
+ * warning about that arrives after the images are already in the context window.
+ */
+export type ScreenshotsReturn = 'none' | 'on-failure' | 'final';
+
+/**
+ * What `screenshots_return` means when the caller says nothing (and what
+ * `'default'` resolves to).
+ *
+ * `on-failure` because a failure is the one moment a picture says something the
+ * text cannot: "could not find the Submit button" is not a diagnosis, and the
+ * screenshot showing a cookie banner on top of it is. It costs nothing on a
+ * passing run, which is most runs.
+ *
+ * The cost is real and deliberate rather than overlooked: an image is charged to
+ * the caller's context, and it is a photograph of a live signed-in session. Both
+ * are stated in the tool description so `none` is an informed choice, and the
+ * existing size cap still drops anything oversized rather than shipping it.
+ *
+ * One constant, so the tool default and the meaning of `'default'` cannot drift
+ * apart. `foldRun` takes the mode explicitly rather than defaulting again — a
+ * second fallback is how two defaults start disagreeing.
+ */
+export const DEFAULT_SCREENSHOTS_RETURN: ScreenshotsReturn = 'on-failure';
+
+/** `GET /config` — the effective server config plus the run settings in force. */
+export interface ServerConfigReport {
+  /** The server's own config with both api keys redacted to `apiKeySet`
+   *  booleans. Shape deliberately loose: this is for reporting, and pinning it
+   *  to `Config` would make every config addition a change here too. */
+  config: Record<string, unknown>;
+  server: EffectiveSettings;
+  session: {
+    sessionId: string;
+    overrides: RunSettings;
+    effective: EffectiveSettings;
+  } | null;
+}
 
 // ---------------------------------------------------------------------------
 // Project resolution (W2)
@@ -69,6 +126,15 @@ export interface McpStepRequest {
   toolsDir?: string;
   cacheEnabled?: boolean;
   testFilePath?: string;
+  /**
+   * Per-session run settings (stories/run-settings.md §1).
+   *
+   * A new field on the wire, NOT part of the `## Config` string merge — those
+   * are per-key strings projected onto `config`, and this is an object with its
+   * own retention and clearing semantics. Keeping them apart is why a tool
+   * argument here cannot be mistaken for something a test file declared.
+   */
+  runSettings?: RunSettings;
 }
 
 /** An assembled request plus everything the fold and the result need that is
@@ -280,6 +346,31 @@ export interface GetPageContentArgs {
   maxChars?: number | undefined;
 }
 
+/**
+ * `GET /sessions/:id` — session state, including a screenshot of the active
+ * page (stories/run-settings.md §7).
+ *
+ * The screenshot is what this is here for: the endpoint has always returned one
+ * and the MCP simply did not expose it, so "show me what the page looks like
+ * now" needs no new capture code on the server.
+ */
+export interface SessionStateSnapshot {
+  sessionId: string;
+  status: 'active' | 'executing' | 'queued';
+  currentUrl: string;
+  pageTitle: string;
+  /**
+   * `data:image/png;base64,…` — or the EMPTY STRING when the capture failed.
+   *
+   * The server swallows capture errors into `''`, so an empty value here means
+   * "we could not photograph the page", never "the page is blank". Callers must
+   * treat it as an error; reporting a blank page is the one answer that cannot
+   * be corrected by whoever reads it.
+   */
+  screenshot: string;
+  totalStepsExecuted: number;
+}
+
 /** The page as read — mirrors the Sessions API response body. */
 export interface PageContent {
   sessionId: string;
@@ -307,6 +398,11 @@ export interface ApiClient {
     args: GetPageContentArgs,
     signal?: AbortSignal,
   ): Promise<PageContent>;
+  /** `GET /sessions/:id`, for the screenshot it already carries (§7). */
+  getSessionState(sessionId: string, signal?: AbortSignal): Promise<SessionStateSnapshot>;
+  /** `GET /config`. `sessionId` adds that session's retained overrides; an
+   *  unknown one answers 404, which surfaces as an `ApiHttpError`. */
+  getConfig(sessionId?: string, signal?: AbortSignal): Promise<ServerConfigReport>;
   closeSession(sessionId: string): Promise<void>;
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>;
   getCdpBrowsers(args: GetCdpBrowsersArgs, signal?: AbortSignal): Promise<CdpBrowsers>;

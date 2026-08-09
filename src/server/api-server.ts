@@ -2,7 +2,8 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { url as inspectorUrl } from 'node:inspector';
 import path from 'node:path';
-import type { Config } from '../config/types.js';
+import type { CaptureMode, Config, RunSettings } from '../config/types.js';
+import { CAPTURE_MODES, RUN_SETTING_KEYS } from '../config/run-settings.js';
 import {
   knownProfiles,
   startCdpBrowser,
@@ -449,6 +450,24 @@ export function createApiServer(
         }
         if (out.consoleLogLevel || out.serverFileLogLevel) request.logging = out;
       }
+      // Per-session run settings (stories/run-settings.md §1). This branch is
+      // load-bearing for the same reason the `sections` one is: `StepRequest` is
+      // built from an explicit per-field allow-list, so widening the TYPE alone
+      // compiles cleanly and drops the field at runtime — which is exactly how
+      // `envName` was lost once.
+      //
+      // Every refusal here is a 400 naming what is valid. NOT a fallback: an
+      // agent that asked for `capture: "all"` and quietly got the server default
+      // has no way to notice, and the whole point of the feature is that the
+      // caller controls what happens.
+      if (body.runSettings !== undefined && body.runSettings !== null) {
+        const parsed = parseRunSettings(body.runSettings);
+        if (typeof parsed === 'string') {
+          res.status(400).json({ error: parsed });
+          return;
+        }
+        request.runSettings = parsed;
+      }
 
       if (streaming) {
         // Open SSE stream. Headers must be set before any res.write().
@@ -706,6 +725,45 @@ export function createApiServer(
   app.get('/sessions/:id/last-run', (req: Request, res: Response) => {
     const sessionId = String(req.params.id);
     res.status(200).json(sessionManager.getLastRun(sessionId));
+  });
+
+  // GET /config — the effective server config and the run settings in force
+  // (stories/run-settings.md §6).
+  //
+  // Behind auth, unlike `/health`. `/health` is unauthenticated because its body
+  // carries nothing but counts; this one reports project paths and the resolved
+  // model, which is a different disclosure and belongs behind the key.
+  //
+  // `?sessionId=` adds that session's retained overrides. An unknown id is a 404
+  // rather than the base config: answering a question about session X with
+  // "here is what nobody in particular is doing" is the confusion this endpoint
+  // exists to remove.
+  //
+  // Behind auth also means it bumps the idle monitor, which is correct for a
+  // client action and wrong for a poll. Worth remembering if a status bar ever
+  // wants to display the effective settings — a polled route here would keep the
+  // server alive forever and make the idle timeout dead code, which is the
+  // failure `/health` was deliberately kept pre-auth to avoid.
+  app.get('/config', (req: Request, res: Response) => {
+    const rawSessionId = req.query['sessionId'];
+    if (rawSessionId !== undefined && typeof rawSessionId !== 'string') {
+      res.status(400).json({ error: 'sessionId must be a single string value.' });
+      return;
+    }
+    // An empty `?sessionId=` is a caller who meant to name one and did not.
+    // Treating it as absent would silently answer a different question.
+    if (rawSessionId === '') {
+      res.status(400).json({ error: 'sessionId must not be empty.' });
+      return;
+    }
+
+    const settings = sessionManager.getRunSettings(rawSessionId);
+    if (!settings) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    res.status(200).json({ config: redactConfig(config), ...settings });
   });
 
   // DELETE /sessions/:id
@@ -1162,6 +1220,93 @@ function statusForCdpFailure(kind: CdpFailureKind): number {
     case 'launch_failed':
       return 500;
   }
+}
+
+/**
+ * The server's config with both secrets replaced by whether they are set.
+ *
+ * Removed and replaced with a sibling boolean rather than blanked to `"***"`:
+ * a redacted-looking string is still a string, and a client that echoes config
+ * into a log, a tool result or an editor panel would carry it around as though
+ * it were a value. `apiKeySet` cannot be mistaken for a key.
+ */
+function redactConfig(config: Config): Record<string, unknown> {
+  const { apiKey: aiKey, ...ai } = config.ai;
+  const { apiKey: serverKey, ...server } = config.server;
+  return {
+    ...config,
+    ai: { ...ai, apiKeySet: typeof aiKey === 'string' && aiKey.length > 0 },
+    server: { ...server, apiKeySet: typeof serverKey === 'string' && serverKey.length > 0 },
+  };
+}
+
+/**
+ * Parse `runSettings` off a request body, or return the 400 message.
+ *
+ * Split out so the validation reads as one table rather than fifteen lines
+ * inside an already-long route handler, and so the tests can cover the refusals
+ * without an HTTP round-trip per case.
+ *
+ * The clearing values (`null` on the model and the booleans, `'default'` on the
+ * enum) are PRESERVED here rather than dropped: `mergeRunSettings` distinguishes
+ * an absent key ("leave what the session has") from a clearing one ("stop
+ * overriding"), and dropping them here would collapse the two.
+ */
+function parseRunSettings(raw: unknown): RunSettings | string {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return '"runSettings" must be an object';
+  }
+  const input = raw as Record<string, unknown>;
+
+  const unknown = Object.keys(input).filter((key) => !RUN_SETTING_KEYS.includes(key));
+  if (unknown.length > 0) {
+    return (
+      `Unknown runSettings key(s) ${unknown.map((k) => `"${k}"`).join(', ')}. ` +
+      `Valid keys are ${RUN_SETTING_KEYS.join(', ')}.`
+    );
+  }
+
+  const out: RunSettings = {};
+
+  if ('capture' in input) {
+    const capture = input.capture;
+    if (typeof capture !== 'string' || !CAPTURE_MODES.includes(capture as CaptureMode)) {
+      return (
+        `Invalid runSettings.capture ${JSON.stringify(capture)}. ` +
+        `Valid values are ${CAPTURE_MODES.map((m) => `"${m}"`).join(', ')}.`
+      );
+    }
+    out.capture = capture as CaptureMode;
+  }
+
+  if ('model' in input) {
+    const model = input.model;
+    if (model === null) {
+      // Explicit "stop overriding the model".
+      out.model = null;
+    } else if (typeof model !== 'string' || model.trim() === '') {
+      // The gateway is the authority on which models exist — a client-side
+      // allow-list would go stale — so anything non-empty passes through. Only
+      // "nothing at all" is refused, because it cannot be what was meant.
+      return 'runSettings.model must be a non-empty string, or null to clear the override.';
+    } else {
+      out.model = model.trim();
+    }
+  }
+
+  for (const key of ['fullPage', 'sendScreenshots'] as const) {
+    if (!(key in input)) continue;
+    const value = input[key];
+    if (value === null) {
+      out[key] = null;
+    } else if (typeof value === 'boolean') {
+      out[key] = value;
+    } else {
+      return `runSettings.${key} must be a boolean, or null to clear the override.`;
+    }
+  }
+
+  return out;
 }
 
 /**

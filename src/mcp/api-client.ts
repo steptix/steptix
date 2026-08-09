@@ -17,6 +17,8 @@ import {
   type LastRunInfo,
   type PageContent,
   type RunEvent,
+  type ServerConfigReport,
+  type SessionStateSnapshot,
   type SessionSummary,
   type StartedCdpBrowser,
   type StreamResult,
@@ -272,6 +274,40 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       // confusion the server side goes out of its way to prevent.
       await assertOk(res);
       return (await res.json()) as PageContent;
+    },
+
+    async getSessionState(sessionId, signal): Promise<SessionStateSnapshot> {
+      const res = await doFetch(`${base}/sessions/${encodeURIComponent(sessionId)}`, {
+        headers,
+        ...(signal ? { signal } : {}),
+      });
+      // Not defaulted, for the same reason `getPageContent` is not: a missing
+      // `screenshot` and an empty one both mean "no picture", and inventing one
+      // here would hand the caller something it cannot tell apart from a real
+      // capture. The tool layer decides what an empty value means.
+      await assertOk(res);
+      return (await res.json()) as SessionStateSnapshot;
+    },
+
+    async getConfig(sessionId, signal): Promise<ServerConfigReport> {
+      const query = sessionId === undefined ? '' : `?sessionId=${encodeURIComponent(sessionId)}`;
+      const res = await doFetch(`${base}/config${query}`, {
+        headers,
+        ...(signal ? { signal } : {}),
+      });
+      // A 404 here means the named session is not on the server, which is the
+      // caller's mistake and worth its own message — so it propagates as an
+      // `ApiHttpError` rather than being smoothed into an empty report.
+      await assertOk(res);
+      const body = (await res.json()) as Partial<ServerConfigReport>;
+      return {
+        config: body.config ?? {},
+        // `server` is the one field with nothing safe to default to, so a server
+        // that did not send it fails loudly here rather than reporting invented
+        // settings as though they were in force.
+        server: body.server as ServerConfigReport['server'],
+        session: body.session ?? null,
+      };
     },
 
     async closeSession(sessionId): Promise<void> {

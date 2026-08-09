@@ -4,7 +4,8 @@ import { StepCache, frameScopedStepKey, cacheDirName, envCacheSegment } from '..
 import { resolveProjectRoot } from './project-root.js';
 import { arraysEqual, chooseCacheHashSource } from './cache-hash-source.js';
 import { loadConfig } from '../config/loader.js';
-import type { Config } from '../config/types.js';
+import type { Config, EffectiveSettings, RunSettings } from '../config/types.js';
+import { mergeRunSettings, resolveRunSettings } from '../config/run-settings.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
@@ -207,6 +208,22 @@ export interface StepRequest {
     serverFileLogLevel?: 'off' | 'compact' | 'full';
   };
   /**
+   * Per-session run settings — the model and the screenshot knobs
+   * (stories/run-settings.md §1).
+   *
+   * Same shape as `logging` above (a per-request override of a server-level
+   * setting) with one difference that is the whole point: these are RETAINED.
+   * A request carrying settings merges them over the session's; a request
+   * carrying none reuses what the session already has. That is what makes a
+   * forgotten re-send benign instead of a silent revert to the server default,
+   * and it means the preference survives the MCP process restarting.
+   *
+   * Deliberately NOT part of the write-once `config` block: settings you can
+   * only choose when a session is born would mean throwing the browser away to
+   * turn capture on mid-debug.
+   */
+  runSettings?: RunSettings;
+  /**
    * Enable / disable the per-step AI response cache for this request. When
    * true (and `testFilePath` is present so a project root can be resolved),
    * the server reads cached AI plans from `<project-root>/.cache/<test>/`
@@ -312,7 +329,28 @@ export type RunEvent =
   | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo; tab?: TabInfo }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' }
-  | { type: 'done'; status: 'passed' | 'failed' | 'error' | 'aborted' }
+  | {
+      type: 'done';
+      status: 'passed' | 'failed' | 'error' | 'aborted';
+      /** Absolute path of the HTML report, when one was written. Always been on
+       *  the wire (spread onto the event by the emitter); declared here now
+       *  that `effectiveSettings` sits beside it. */
+      reportPath?: string;
+      /**
+       * What this run actually ran under, and where each value came from
+       * (stories/run-settings.md §5).
+       *
+       * A preference held in a conversation degrades silently — the context is
+       * compacted, the flag stops being sent, and you find out when you want a
+       * screenshot and there isn't one. Retention prevents the revert; this is
+       * what makes the state visible without asking.
+       *
+       * Optional so an older client is unaffected — and consumers must treat
+       * it as absent-able for the mirror-image reason, since an older SERVER
+       * omits it entirely.
+       */
+      effectiveSettings?: EffectiveSettings;
+    }
   | { type: 'frame:push'; frame: FrameInfo }
   | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
   | { type: 'frame:scope'; frameId: string; scope: Record<string, string> }
@@ -445,6 +483,28 @@ export interface LastRunInfo {
   finalized: boolean;
   tokens: RunTokens;
   reportPath?: string;
+}
+
+/**
+ * Answer to "what settings are in force?" — delivered via `GET /config`
+ * (stories/run-settings.md §6).
+ *
+ * Both halves, because either alone misleads: the server base alone hides an
+ * override the agent set two turns ago, and the session's effective values alone
+ * give nothing to compare them against, so "is this a default or did someone
+ * change it?" stays unanswered.
+ */
+export interface RunSettingsReport {
+  /** What a run with no project config and no overrides would use. */
+  server: EffectiveSettings;
+  /** Present only when a session was named. */
+  session: {
+    sessionId: string;
+    /** Retained overrides, exactly as they stand — the empty object when the
+     *  session has never been given any. */
+    overrides: RunSettings;
+    effective: EffectiveSettings;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +643,23 @@ interface ManagedSession {
     cdp?: { port: number; tab?: string; profile?: string };
   };
   configSet: boolean;
+  /**
+   * Retained run-setting overrides (stories/run-settings.md §2). Seeded empty;
+   * each batch that carries `runSettings` merges over this, and each batch that
+   * carries none reuses it.
+   *
+   * Session-scoped and never process-wide: the same server also serves
+   * TestBench, and a global setting would let an agent's choice change the cost
+   * and speed of a human's concurrent run.
+   */
+  runSettings: RunSettings;
+  /**
+   * What the LAST batch resolved, retained so `GET /config?sessionId=` can
+   * answer without a test file to re-resolve a project bundle from — the same
+   * problem, and the same answer, as `browserConfig` above. Absent until the
+   * session has run once.
+   */
+  lastEffectiveSettings?: EffectiveSettings;
   outputs: Record<string, string>;
   /**
    * Provenance label for each key in `outputs`. Written at each variable
@@ -725,13 +802,23 @@ function isSkippableStep(instruction: string): boolean {
  * config: overrides apply only on non-empty values, so basing on the fixed
  * server config lets a removed `.env` line revert cleanly instead of sticking
  * on the prior override. Server process.env is never mutated.
+ *
+ * **Always returns a fresh object, even with nothing to apply.** It used to
+ * return `baseConfig` itself on the no-overrides path, which handed
+ * `new AiClient(...)` a reference to the SERVER's `config.ai` — and `syncAuth`
+ * mutates its config in place, so a model change on one session rewrote the
+ * server's startup model for every session created afterwards. Caught live: a
+ * `runSettings.model` override on one session moved `GET /config`'s reported
+ * server base with it, which is exactly the process-wide leak the whole feature
+ * is scoped to avoid. Copying is what keeps the sessions isolated; nothing here
+ * relies on the identity.
  */
 function applyEnvToAiConfig(
   baseConfig: import('../config/types.js').AiConfig,
   envOverrides: Record<string, string> | undefined,
 ): import('../config/types.js').AiConfig {
-  if (!envOverrides) return baseConfig;
   const next = { ...baseConfig };
+  if (!envOverrides) return next;
   const apiKey = envOverrides['AI_API_KEY'];
   if (typeof apiKey === 'string' && apiKey.length > 0) {
     next.apiKey = apiKey;
@@ -1454,6 +1541,46 @@ export class SessionManager {
   }
 
   /**
+   * The run settings in force — server-wide, and for one session
+   * (stories/run-settings.md §6).
+   *
+   * Returns `null` when `sessionId` names a session that is not here, so the
+   * route can 404. Answering with the base config instead would tell a caller
+   * asking about session X what session Y-or-nobody is doing, which is the
+   * confusion this whole report exists to remove.
+   *
+   * Reads only retained state — no page, no browser, no project bundle — so it
+   * is safe on a GET and costs nothing.
+   */
+  getRunSettings(sessionId?: string): RunSettingsReport | null {
+    // The server base: no project config in play (so the comparison inside
+    // `resolveRunSettings` reports everything as `'server'`) and no overrides.
+    const serverBase = resolveRunSettings(this.config, this.config, this.config.ai.model, {})
+      .effective;
+    if (sessionId === undefined) return { server: serverBase, session: null };
+
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status === 'closed') return null;
+
+    // The last run's resolution is the truthful answer for a session that has
+    // run: it reflects that batch's PROJECT config, which nothing here can
+    // re-resolve without a test file path. A session that has not run yet has
+    // no project config to reflect, so its overrides fold over the server base.
+    const effective =
+      session.lastEffectiveSettings ??
+      resolveRunSettings(this.config, this.config, this.config.ai.model, session.runSettings)
+        .effective;
+    return {
+      server: serverBase,
+      session: {
+        sessionId,
+        overrides: { ...session.runSettings },
+        effective,
+      },
+    };
+  }
+
+  /**
    * List all active (non-closed) sessions.
    */
   getActiveSessions(): SessionListItem[] {
@@ -1748,6 +1875,10 @@ export class SessionManager {
         browserConfig: this.config.browser,
         sessionConfig: sessionConfig ?? {},
         configSet: sessionConfig !== undefined,
+        // Empty, not seeded from the server config: an override means "the
+        // caller asked for this", and pre-filling it would report every value
+        // as session-sourced from the first run onward.
+        runSettings: {},
         outputs: {},
         outputSources: {},
         totalStepsExecuted: 0,
@@ -1797,8 +1928,27 @@ export class SessionManager {
     // which resolves the session before queuing) so it can never mutate the
     // shared AiClient config out from under a concurrent in-flight batch.
     const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
-    const aiChange = session.aiClient.syncAuth(desiredAi.model, desiredAi.apiKey);
-    if (aiChange) logger.info(`Session "${sessionId}": ${aiChange} (from .env)`);
+    // Run settings merge FIRST, so the model override below sees this batch's
+    // value and every later read in this function sees the same session state.
+    // Per key (see `mergeRunSettings`) — a request carrying only `capture` must
+    // not wipe a model set two batches ago.
+    session.runSettings = mergeRunSettings(session.runSettings, request.runSettings);
+    // The model override is applied AFTER `applyEnvToAiConfig` and beats it, so
+    // "the agent asked for this" wins over "the project's .env says this" —
+    // while `syncAuth` stays the single place the client is re-pointed, which
+    // is what makes a model change take effect with no browser restart.
+    const overrideModel = session.runSettings.model;
+    const desiredModel =
+      typeof overrideModel === 'string' && overrideModel.trim() !== ''
+        ? overrideModel.trim()
+        : desiredAi.model;
+    const aiChange = session.aiClient.syncAuth(desiredModel, desiredAi.apiKey);
+    if (aiChange) {
+      logger.info(
+        `Session "${sessionId}": ${aiChange} ` +
+          `(${desiredModel === desiredAi.model ? 'from .env' : 'run setting'})`,
+      );
+    }
 
     const runStartTime = Date.now();
     // The session's TokenTracker lives for the whole session, accumulating
@@ -2008,6 +2158,29 @@ export class SessionManager {
     // Retain the project's browser settings for out-of-band reads
     // (`getPageContent`), which have no test file to re-resolve a bundle from.
     session.browserConfig = projectConfig.browser;
+
+    // This batch's run settings: server base → project bundle → the session's
+    // retained overrides (stories/run-settings.md §2).
+    //
+    // `runConfig` is what both executor call sites are handed in place of
+    // `this.config`. It is a COMPLETE Config — spread from `this.config` with
+    // only the four values this story owns re-sourced — because those call sites
+    // take the whole object, and a partial one would blank out every setting
+    // nobody asked to change.
+    //
+    // `desiredAi.model` — the PRE-override model — not `desiredModel`. The
+    // resolver applies the override itself, and giving it the post-override
+    // value would leave it unable to tell "the project's .env chose this" from
+    // "the agent asked for this", which is the provenance the whole
+    // first-class-field decision exists to keep.
+    const resolvedSettings = resolveRunSettings(
+      this.config,
+      projectConfig,
+      desiredAi.model,
+      session.runSettings,
+    );
+    const runConfig = resolvedSettings.config;
+    session.lastEffectiveSettings = resolvedSettings.effective;
     let envDataCtx: EnvDataContext | null = projectBundle.envBundle
       ? {
           env: projectBundle.envBundle.env,
@@ -2081,7 +2254,7 @@ export class SessionManager {
         const message = err instanceof Error ? err.message : String(err);
         logger.error(`Session "${sessionId}": failed to load tool catalogue "${request.toolsDir}": ${message}`);
         emit({ type: 'output', msg: `Tool catalogue load failed: ${message}`, kind: 'error' });
-        emit({ type: 'done', status: 'error' });
+        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
           status: 'error',
@@ -2209,7 +2382,7 @@ export class SessionManager {
         const message = err instanceof Error ? err.message : String(err);
         logger.error(`Session "${sessionId}": skill expansion failed: ${message}`);
         emit({ type: 'output', msg: `Skill expansion failed: ${message}`, kind: 'error' });
-        emit({ type: 'done', status: 'error' });
+        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
           status: 'error',
@@ -2664,7 +2837,7 @@ export class SessionManager {
           `The skill may have changed since the failed run.`;
         logger.error(`Session "${sessionId}": ${message}`);
         emit({ type: 'output', msg: message, kind: 'error' });
-        emit({ type: 'done', status: 'error' });
+        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
           status: 'error',
@@ -2791,7 +2964,7 @@ export class SessionManager {
           `line ${endLine} in ${endUri}. The skill may have changed since the run was stopped.`;
         logger.error(`Session "${sessionId}": ${message}`);
         emit({ type: 'output', msg: message, kind: 'error' });
-        emit({ type: 'done', status: 'error' });
+        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
           status: 'error',
@@ -2870,7 +3043,7 @@ export class SessionManager {
             error: message,
             ...(frame && { frame }),
           });
-          emit({ type: 'done', status: 'error' });
+          emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
           return {
             sessionId,
             status: 'error',
@@ -2893,7 +3066,8 @@ export class SessionManager {
           try {
             branchedResults = await executeBranchedStep(group, stepsTotal, {
               page: session.browserSession.pageTracker.getActive(),
-              config: this.config,
+              // `runConfig`, not `this.config` — see the resolution above.
+              config: runConfig,
               aiClient: session.aiClient,
               contextContent: session.contextContent,
               testName: `session:${sessionId}`,
@@ -3270,7 +3444,8 @@ export class SessionManager {
               stepInstruction,
               {
                 page: session.browserSession.pageTracker.getActive(),
-                config: this.config,
+                // `runConfig`, not `this.config` — see the resolution above.
+                config: runConfig,
                 aiClient: session.aiClient,
                 contextContent: session.contextContent,
                 testName: `session:${sessionId}`,
@@ -3788,7 +3963,12 @@ export class SessionManager {
     // call-stack model consistent.
     transitionToFrame('');
 
-    emit({ type: 'done', status: overallStatus, ...(reportPath && { reportPath }) });
+    emit({
+      type: 'done',
+      status: overallStatus,
+      ...(reportPath && { reportPath }),
+      effectiveSettings: resolvedSettings.effective,
+    });
 
     return {
       sessionId,

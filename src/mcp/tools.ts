@@ -1,5 +1,5 @@
 /**
- * The seven tools, and the run pipeline behind the two that matter.
+ * The tools, and the run pipeline behind the two that matter.
  *
  * The shape of a run tool is: assemble (which resolves and confines the
  * project), pick a session, make sure a server is listening, take the session
@@ -29,17 +29,21 @@ import {
 } from './cdp.js';
 import { allowedRoots, canonicalize, isInsideRoot, resolveTestsGlob } from './project.js';
 import { discoverTestFiles } from '../parser/markdown.js';
-import { foldRun, type FoldedRun } from './run-fold.js';
+import { DATA_URI_PREFIX, MAX_SCREENSHOT_BASE64, foldRun, type FoldedRun } from './run-fold.js';
 import { withSession } from './registry.js';
 import * as schemas from './schemas.js';
 import { probeHealth, normalizeBaseUrl } from '../server/health.js';
 import {
   ApiHttpError,
+  DEFAULT_SCREENSHOTS_RETURN,
   PreflightFailure,
   type ApiClient,
   type AssembledRun,
+  type CaptureMode,
   type McpDeps,
   type RunEvent,
+  type RunSettings,
+  type ScreenshotsReturn,
 } from './types.js';
 
 /** The server refuses `config` on an existing session by throwing, and on the
@@ -253,6 +257,44 @@ interface RunOutcome extends FoldedRun {
   tokens: { total: number; input: number; output: number } | null;
 }
 
+/**
+ * Read the five run-setting arguments off a tool call.
+ *
+ * `runSettings` is the retained half and goes on the wire; `screenshotsReturn`
+ * never leaves this process — it decides what the fold puts in the tool result.
+ *
+ * A key is only included when the caller actually named it. That distinction is
+ * the retention contract: an absent key means "leave what the session has",
+ * while `null` / `"default"` means "stop overriding", and collapsing the two
+ * would make every ordinary run silently reset the session's settings.
+ */
+function readRunSettings(args: {
+  model?: string | null | undefined;
+  capture?: CaptureMode | undefined;
+  full_page?: boolean | null | undefined;
+  send_screenshots?: boolean | null | undefined;
+  screenshots_return?: ScreenshotsReturn | 'default' | undefined;
+}): { runSettings: RunSettings; screenshotsReturn: ScreenshotsReturn } {
+  const runSettings: RunSettings = {};
+  if (args.model !== undefined) runSettings.model = args.model;
+  if (args.capture !== undefined) runSettings.capture = args.capture;
+  if (args.full_page !== undefined) runSettings.fullPage = args.full_page;
+  if (args.send_screenshots !== undefined) runSettings.sendScreenshots = args.send_screenshots;
+  // `default` is `none`: no image comes back unless it was asked for. A
+  // screenshot is a picture of a live signed-in session, and it is charged to
+  // the caller's context — neither is a cost to incur by default.
+  // `'default'` and an absent argument are the same thing here — unlike the four
+  // above, this one is not retained, so there is no override to clear. It exists
+  // for symmetry, so a model that has learned `default` on `capture` is not
+  // surprised by one setting rejecting the word.
+  const requested = args.screenshots_return;
+  const screenshotsReturn: ScreenshotsReturn =
+    requested === undefined || requested === 'default'
+      ? DEFAULT_SCREENSHOTS_RETURN
+      : requested;
+  return { runSettings, screenshotsReturn };
+}
+
 async function pollLastRun(
   client: ApiClient,
   sessionId: string,
@@ -303,7 +345,7 @@ interface RunContext {
   deps: McpDeps;
   assembled: AssembledRun;
   sessionId: string;
-  includeScreenshot: boolean;
+  screenshotsReturn: ScreenshotsReturn;
   signal?: AbortSignal | undefined;
   onProgress?: ((completed: number, text: string) => void) | undefined;
 }
@@ -419,7 +461,7 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
       sourceLines: request.sourceLines,
       testFilePath: request.testFilePath ?? project.projectRoot,
       expansionPossible: request.skillsDir !== undefined || request.sections !== undefined,
-      includeScreenshot: ctx.includeScreenshot,
+      screenshotsReturn: ctx.screenshotsReturn,
     });
 
     return {
@@ -449,6 +491,23 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
         "session's browser is fixed when the session is created. These steps ran " +
         "in that session's existing browser, NOT the CDP one. To use the CDP " +
         `browser: close_session "${sessionId}", then run again.`,
+    ];
+  }
+
+  // A model override running against a live step cache.
+  //
+  // The cache keys on step text and identity, NOT the model, so a switched model
+  // can be served plans the previous one produced — which bites hardest in the
+  // case you would switch for, comparing models. Warned rather than solved:
+  // adding the model to the key would invalidate every cached entry in every
+  // project for that one case.
+  if (request.runSettings?.model !== undefined && request.cacheEnabled === true) {
+    outcome.warnings = [
+      ...outcome.warnings,
+      'A model override ran with the step cache on. The cache does not key on ' +
+        'the model, so some steps may have replayed plans made by the previous ' +
+        'model rather than asking this one. Turn caching off for this project (or ' +
+        'set `cache: off` in the test) if you are evaluating the model itself.',
     ];
   }
 
@@ -491,6 +550,72 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
     reportPath: outcome.reportPath ?? last?.reportPath ?? null,
     tokens: last?.tokens ?? null,
   };
+}
+
+/**
+ * "Show me what the page looks like now" — the viewport, as an image
+ * (stories/run-settings.md §7).
+ *
+ * Two limits are honest to state rather than paper over. It is a VIEWPORT shot:
+ * `GET /sessions/:id` calls `captureScreenshot(page)` with no full-page
+ * argument, so `full_page` does not reach it. And the server swallows capture
+ * failures into an empty string, so an empty value is an error here — reporting
+ * a blank page would be a claim about the page that nobody downstream can
+ * correct.
+ */
+async function screenshotResult(
+  client: ApiClient,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<ToolResult> {
+  const state = await client.getSessionState(sessionId, signal);
+  const raw = typeof state.screenshot === 'string' ? state.screenshot : '';
+  const base64 = raw.replace(DATA_URI_PREFIX, '');
+  if (base64 === '') {
+    return errorResult(
+      preflightError(
+        `Could not photograph the page of session "${sessionId}". The session is ` +
+          'there but the capture failed — the browser may be mid-navigation or ' +
+          'wedged. This is NOT a blank page. Try again, or read it with ' +
+          'format: "text".',
+      ),
+    );
+  }
+  if (base64.length > MAX_SCREENSHOT_BASE64) {
+    // An error, not a warning: unlike a run result, there is nothing else in
+    // this response worth having once the image is gone.
+    return errorResult(
+      preflightError(
+        `The screenshot is ${Math.round(base64.length / 1024)}KB of base64, over ` +
+          'the size cap for an image in a tool result. Read the page with ' +
+          'format: "text" instead, or narrow what is on screen.',
+      ),
+    );
+  }
+
+  const value = {
+    sessionId: state.sessionId ?? sessionId,
+    url: state.currentUrl ?? '',
+    title: state.pageTitle ?? '',
+    // 'queued' means a run is waiting behind another one, which for a read is
+    // the same caveat as 'executing': the page may move under the caller.
+    status: state.status === 'active' ? ('active' as const) : ('executing' as const),
+    format: 'screenshot' as const,
+    selector: null,
+    // Empty on purpose — the picture is in the image block. `format` says which
+    // half of this response carries the payload.
+    content: '',
+    truncated: false,
+    returnedChars: base64.length,
+    availableChars: base64.length,
+  };
+  return validated(
+    schemas.getPageContentOutput,
+    value,
+    `${state.pageTitle || state.currentUrl} — viewport screenshot, ` +
+      `${Math.round(base64.length / 1024)}KB`,
+    [{ type: 'image', data: base64, mimeType: 'image/png' }],
+  );
 }
 
 /**
@@ -556,6 +681,17 @@ function summarize(outcome: RunOutcome): string {
   if (outcome.error) lines.push(`Error: ${outcome.error}`);
   if (outcome.reportPath) lines.push(`Report: ${outcome.reportPath}`);
   if (outcome.warnings.length > 0) lines.push(`Warnings: ${outcome.warnings.length}`);
+  // The echo, on the line a host that ignores structured output will show. A
+  // retained setting is invisible otherwise — and "why is there no screenshot?"
+  // is answered here rather than several turns later.
+  const settings = outcome.effectiveSettings;
+  if (settings) {
+    lines.push(
+      `Settings: model ${settings.model ?? '(not reported)'}, capture ` +
+        `${settings.capture ?? '(not reported)'}, return ${settings.screenshotsReturn}` +
+        (settings.sendScreenshots ? ', model sees screenshots' : ''),
+    );
+  }
   return lines.join('\n');
 }
 
@@ -587,6 +723,7 @@ function outcomeToResult(outcome: RunOutcome): ToolResult {
       reportPath: outcome.reportPath ?? null,
       tokens: null,
       error: detail,
+      effectiveSettings: null,
     }),
   );
 }
@@ -630,6 +767,32 @@ list_cdp_browsers and pass config.cdp: {profile: "<name>", tab:
 "targetId:<id>"}. Naming the profile alone leaves their tab untouched and
 runs somewhere else.`.trim();
 
+/**
+ * The two couplings between the settings, on the tools themselves.
+ *
+ * A tool description is the only text guaranteed to be in front of the model at
+ * the moment it calls, and both of these are the kind of thing that otherwise
+ * produces a confident wrong report: asking for an image nobody captured, or
+ * being surprised that `capture: "none"` still took pictures.
+ */
+const SETTINGS_NOTE = `
+Settings: model, capture, full_page and send_screenshots stick to the session
+until changed — set one once and later calls inherit it. Each run tells you what
+it actually used in effectiveSettings; read that rather than assuming, since a
+preference set earlier in a conversation is easy to lose track of.
+
+Screenshots come back to you on a FAILURE by default — a picture of the page as
+it broke, which is usually the fastest way to see why. Nothing comes back on a
+passing run. Pass screenshots_return: "none" to suppress it, and do so when the
+page under test holds something the user would not want in this conversation.
+
+Two settings interact, and both surprise people:
+  - capture happens BEFORE return. screenshots_return can only hand you a
+    picture something took, so "final" needs capture: "every-step" on a passing
+    run, and "on-failure" needs capture to include failures.
+  - send_screenshots: true forces a capture on every model turn regardless of
+    capture, because the model's own request needs the image.`.trim();
+
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // -- run_steps ------------------------------------------------------------
   server.registerTool(
@@ -642,6 +805,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'share page state and captured variables. Calls on one session run one at a time.\n\n' +
         CDP_NOTE +
         '\n\n' +
+        SETTINGS_NOTE +
+        '\n\n' +
         STEP_SYNTAX,
       inputSchema: schemas.runStepsInput,
       outputSchema: schemas.runResultOutput,
@@ -650,6 +815,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       const envFiles: string[] = [];
       let baseUrl = '';
       try {
+        const { runSettings, screenshotsReturn } = readRunSettings(args);
         const assembled = await assembleSteps({
           resolveProject: deps.resolveProject,
           steps: args.steps,
@@ -657,6 +823,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           envName: args.env_name,
           parameters: args.parameters,
           config: args.config,
+          runSettings,
         });
         envFiles.push(...assembled.project.envFilesConsulted);
         baseUrl = assembled.project.serverUrl;
@@ -670,7 +837,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           deps,
           assembled,
           sessionId,
-          includeScreenshot: args.include_screenshot === true,
+          screenshotsReturn,
           signal: extra.signal,
           onProgress: progressReporter(extra, assembled),
         });
@@ -693,6 +860,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'all honoured.\n\n' +
         CDP_NOTE +
         '\n\n' +
+        SETTINGS_NOTE +
+        '\n\n' +
         STEP_SYNTAX,
       inputSchema: schemas.runTestFileInput,
       outputSchema: schemas.runResultOutput,
@@ -701,6 +870,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       const envFiles: string[] = [];
       let baseUrl = '';
       try {
+        const { runSettings, screenshotsReturn } = readRunSettings(args);
         const assembled = await assembleTestFile({
           resolveProject: deps.resolveProject,
           path: args.path,
@@ -708,6 +878,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           envName: args.env_name,
           parameters: args.parameters,
           config: args.config,
+          runSettings,
         });
         envFiles.push(...assembled.project.envFilesConsulted);
         baseUrl = assembled.project.serverUrl;
@@ -721,7 +892,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           deps,
           assembled,
           sessionId,
-          includeScreenshot: args.include_screenshot === true,
+          screenshotsReturn,
           signal: extra.signal,
           onProgress: progressReporter(extra, assembled),
         });
@@ -875,6 +1046,150 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       }),
   );
 
+  // -- get_run_settings -----------------------------------------------------
+  server.registerTool(
+    'get_run_settings',
+    {
+      title: 'Get run settings',
+      description:
+        'What the next run will use: the model, what gets photographed, and ' +
+        'whether the model sees screenshots — plus where each value came from ' +
+        '(the server, this project, or something set on this session).\n\n' +
+        'Pass session_id to ask about one session. Settings are per session, so ' +
+        'the answer for the session you have been running in is the one that ' +
+        'matters; without an id you get the server-wide defaults.\n\n' +
+        'Reports what is there without starting anything — asking which model is ' +
+        'in play should not cause a server to exist. If nothing is running you ' +
+        'get running: false rather than an error.\n\n' +
+        'Change any of these by passing model / capture / full_page / ' +
+        'send_screenshots to run_steps or run_test_file; they stick to the ' +
+        'session from then on.',
+      inputSchema: schemas.getRunSettingsInput,
+      outputSchema: schemas.getRunSettingsOutput,
+    },
+    async (args, extra) => {
+      // Not `withProject`, and for `server_status`'s reason rather than its own:
+      // this tool must report "nothing is running" as an ANSWER, not fail on a
+      // bare ECONNREFUSED. `withProject`'s identity check would let a down
+      // server through and then the fetch below would throw.
+      let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
+      try {
+        project = await deps.resolveProject({ projectRoot: args.project_root });
+        const baseUrl = normalizeBaseUrl(project.serverUrl);
+        // Keeps the key away from a squatter — it refuses an unidentified
+        // service — while letting a stopped server through, which is the case
+        // this tool has to ANSWER rather than fail on. And it never starts one.
+        await deps.assertServerRecognized(project, extra.signal);
+
+        const client = deps.createApiClient({ baseUrl: project.serverUrl, apiKey: project.apiKey });
+        let report;
+        try {
+          report = await client.getConfig(args.session_id, extra.signal);
+        } catch (err) {
+          // A cancelled call is the caller's own doing and must not be reported
+          // as a server that is down.
+          if (extra.signal?.aborted) throw err;
+          // A 404 has two causes and they need different advice, so the one
+          // thing that cannot be done is to assume. `GET /config` answers 404
+          // for a session it does not hold — but a Sessions API server that
+          // PREDATES the endpoint 404s the route itself, and reporting that as
+          // "no such session" sends the reader looking for a session when the
+          // fix is to restart the server. Measured against a server left running
+          // from an earlier build, which is the normal case after a rebuild.
+          //
+          // Without a session_id a 404 cannot mean "session not found", which
+          // settles that case outright; with one, both are named.
+          if (err instanceof ApiHttpError && err.status === 404) {
+            const olderServer =
+              `${baseUrl} has no GET /config, so it predates per-session run ` +
+              'settings. The server runs compiled dist/ — rebuild and restart it ' +
+              '(`aiui stop`, then start it again).';
+            return errorResult(
+              preflightError(
+                args.session_id === undefined
+                  ? olderServer
+                  : `Either there is no open session "${args.session_id}" on ${baseUrl} — ` +
+                      'call list_sessions to see what is open — or ' +
+                      olderServer.charAt(0).toLowerCase() + olderServer.slice(1) +
+                      '\nCall this again without session_id to tell the two apart: if that ' +
+                      'works, the session is the problem.',
+              ),
+            );
+          }
+          // An HTTP answer of any status means a server is there and replied, so
+          // it goes to the normal error path. A TRANSPORT failure is the "not
+          // running" answer — and reporting it as an answer rather than an error
+          // is the point: `running: false` with nothing started.
+          if (err instanceof ApiHttpError) throw err;
+          const detail = err instanceof Error ? err.message : String(err);
+          return validated(
+            schemas.getRunSettingsOutput,
+            {
+              baseUrl,
+              running: false,
+              detail,
+              projectRoot: project.projectRoot,
+              sessionId: args.session_id ?? null,
+              model: null,
+              capture: null,
+              fullPage: null,
+              sendScreenshots: null,
+              sources: null,
+              overrides: null,
+              serverDefaults: null,
+            },
+            `No server answered at ${baseUrl} (${detail}). Nothing was started to find out.`,
+          );
+        }
+
+        // The session's values when one was named, the server's otherwise. Both
+        // are reported so "is this a default or did someone change it?" is
+        // answerable from one call.
+        const effective = report.session?.effective ?? report.server;
+        const overrides = report.session?.overrides;
+        const value = {
+          baseUrl,
+          running: true,
+          detail: null,
+          projectRoot: project.projectRoot,
+          sessionId: report.session?.sessionId ?? null,
+          model: effective.model,
+          capture: effective.capture,
+          fullPage: effective.fullPage,
+          sendScreenshots: effective.sendScreenshots,
+          sources: effective.sources,
+          overrides:
+            overrides === undefined
+              ? null
+              : {
+                  // `?? null` per key: an absent key means "not overridden",
+                  // and a missing one would fail output validation outright.
+                  model: overrides.model ?? null,
+                  capture: overrides.capture === 'default' ? null : (overrides.capture ?? null),
+                  fullPage: overrides.fullPage ?? null,
+                  sendScreenshots: overrides.sendScreenshots ?? null,
+                },
+          serverDefaults: {
+            model: report.server.model,
+            capture: report.server.capture,
+            fullPage: report.server.fullPage,
+            sendScreenshots: report.server.sendScreenshots,
+          },
+        };
+        return validated(
+          schemas.getRunSettingsOutput,
+          value,
+          `${report.session ? `Session ${report.session.sessionId}` : 'Server defaults'}: ` +
+            `model ${effective.model} (${effective.sources.model}), capture ` +
+            `${effective.capture} (${effective.sources.capture}), model sees ` +
+            `screenshots: ${effective.sendScreenshots ? 'yes' : 'no'}`,
+        );
+      } catch (err) {
+        return asToolError(err, project?.envFilesConsulted ?? [], project?.serverUrl ?? '');
+      }
+    },
+  );
+
   // -- get_page_content -----------------------------------------------------
   server.registerTool(
     'get_page_content',
@@ -916,6 +1231,26 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             args.allow_foreign_session === true,
             'reading its page would disclose whatever they are signed in to',
           );
+
+          // A screenshot needs no new capture code: `GET /sessions/:id` has
+          // always carried one, and the MCP simply did not expose it
+          // (stories/run-settings.md §7). Handled before the text path because
+          // it is a different endpoint, not a different query parameter.
+          if (args.format === 'screenshot') {
+            // Refused rather than ignored. A selector says "read this element",
+            // and a viewport shot is the whole screen — silently widening the
+            // read is exactly what the text path 400s on for the same argument.
+            if (args.selector !== undefined) {
+              return errorResult(
+                preflightError(
+                  'selector does not apply to format: "screenshot" — a screenshot is ' +
+                    'always of the whole viewport. Drop the selector, or use ' +
+                    'format: "text"/"dom" to read one element.',
+                ),
+              );
+            }
+            return await screenshotResult(client, args.session_id, extra.signal);
+          }
 
           const page = await client.getPageContent(
             args.session_id,
@@ -964,7 +1299,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // otherwise get `"Invoices — text, 2995 chars"` — a description of
           // the page instead of the page, with no error and a plausible count,
           // and the model then reports on a page it never saw. That reasoning
-          // still stands; `validated()` now does it for all 11 tools, so the
+          // still stands; `validated()` now does it for every tool, so the
           // page arrives inside the serialized `structuredContent` block.
           //
           // Adding one on top would ship the page three times (raw, again

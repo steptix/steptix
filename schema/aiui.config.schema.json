@@ -90,10 +90,10 @@
           "description": "Show browser window (false = headless)"
         },
         "viewport": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-3022-3056-src_config_types.ts-2964-3057-src_config_types.ts-2863-5780-src_config_types.ts-0-13387449752545%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-3022-3056-src_config_types.ts-2964-3057-src_config_types.ts-2863-5780-src_config_types.ts-0-16091449752545%3E"
         },
         "windowSize": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-3113-3147-src_config_types.ts-3057-3148-src_config_types.ts-2863-5780-src_config_types.ts-0-133871327565221%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-3113-3147-src_config_types.ts-3057-3148-src_config_types.ts-2863-5780-src_config_types.ts-0-160911327565221%3E"
         },
         "slowMo": {
           "type": "number",
@@ -160,7 +160,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-3022-3056-src_config_types.ts-2964-3057-src_config_types.ts-2863-5780-src_config_types.ts-0-13387449752545>": {
+    "DeepPartial<structure-src_config_types.ts-3022-3056-src_config_types.ts-2964-3057-src_config_types.ts-2863-5780-src_config_types.ts-0-16091449752545>": {
       "type": "object",
       "properties": {
         "width": {
@@ -173,7 +173,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-3113-3147-src_config_types.ts-3057-3148-src_config_types.ts-2863-5780-src_config_types.ts-0-133871327565221>": {
+    "DeepPartial<structure-src_config_types.ts-3113-3147-src_config_types.ts-3057-3148-src_config_types.ts-2863-5780-src_config_types.ts-0-160911327565221>": {
       "type": "object",
       "properties": {
         "width": {
