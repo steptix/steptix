@@ -28,7 +28,7 @@ answers
  "inspector": null, "idleTimeoutMinutes": null}
 ```
 
-is treated as ours, and the next request hands it `SERVER_API_KEY` **and the
+is treated as ours, and the next request hands it `AIUI_SERVER_API_KEY` **and the
 project's entire composed `.env`** as the request's `env` field. For this repo
 that means the AI gateway key plus the banking and GitHub credentials in
 `.env`.
@@ -83,7 +83,7 @@ have to work for the CLI, both TestBench variants and the MCP server at once.
    removes the "spawn on top of a foreign process" failure the check was
    written for, but does not by itself authenticate an existing server.
 3. **Prove possession of the key without disclosing it.** Have `/health`
-   accept a nonce and return an HMAC over it under `SERVER_API_KEY`. A
+   accept a nonce and return an HMAC over it under `AIUI_SERVER_API_KEY`. A
    squatter without the key cannot answer, and we never send the key to an
    unproven server. This is the actual fix; it needs a server change and a
    version-negotiation story for older servers.

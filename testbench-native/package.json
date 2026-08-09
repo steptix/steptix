@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.68",
+  "version": "0.5.70",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -124,7 +124,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Shell command TestBench runs to start the ai-ui-automation server when a run finds nothing listening on a **localhost** `SERVER_URL`. Empty disables auto-start entirely.\n\nSuggested value:\n\n`node --inspect=0 --env-file=templates/.env dist/index.js serve --idle-timeout 60`\n\n`--inspect=0` lets Node pick a free inspector port, which the extension discovers via `/health` (so port conflicts cannot silently break step-into). `--idle-timeout 60` makes the server stop itself after an hour with no run in flight and no API traffic.\n\nNote: the `SERVER_API_KEY` the server loads (here, from `templates/.env`) must match the one in the project's `.env` that TestBench sends, or runs will fail with a 401.\n\n**This setting is machine-scoped: it can only be set in User settings, never by a workspace.** The extension executes it verbatim, so a workspace-settable value would let any cloned repo run arbitrary code the moment you pressed Run."
+          "markdownDescription": "Shell command TestBench runs to start the ai-ui-automation server when a run finds nothing listening on a **localhost** `SERVER_URL`. Empty disables auto-start entirely.\n\nSuggested value:\n\n`node --inspect=0 dist/index.js serve --idle-timeout 60`\n\nNo `--env-file` is needed: `serve` reads the machine key from `%LOCALAPPDATA%\\aiui\\.env` (`~/.aiui/.env` elsewhere) and generates one there on first start — the same file TestBench reads, so the two always agree. Pass `--env-file` only to pin a different key or AI settings for this server.\n\n`--inspect=0` lets Node pick a free inspector port, which the extension discovers via `/health` (so port conflicts cannot silently break step-into). `--idle-timeout 60` makes the server stop itself after an hour with no run in flight and no API traffic.\n\n**This setting is machine-scoped: it can only be set in User settings, never by a workspace.** The extension executes it verbatim, so a workspace-settable value would let any cloned repo run arbitrary code the moment you pressed Run."
         },
         "testbench-native.serverAutoStart.cwd": {
           "type": "string",

@@ -16,6 +16,40 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_KEYS = ['INTERACTIVE_ON_FAILURE'] as const;
 const preserved: Record<string, string | undefined> = {};
 
+// ---------------------------------------------------------------------------
+// Hermetic user root
+//
+// `loadConfig` now ends in the machine-AI floor, which reads the user root's
+// `.env` off the real machine. Every test in this file redirects that root
+// into a per-test tmp dir — without this, whatever AI_MODEL the developer has
+// in their real %LOCALAPPDATA%\aiui\.env would leak into assertions here.
+// ---------------------------------------------------------------------------
+
+let userRootTmp: string;
+const preservedUserRoot: Record<string, string | undefined> = {};
+
+beforeEach(async () => {
+  userRootTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-user-root-'));
+  for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
+    preservedUserRoot[key] = process.env[key];
+    process.env[key] = userRootTmp;
+  }
+});
+
+afterEach(async () => {
+  for (const [key, value] of Object.entries(preservedUserRoot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  await fs.rm(userRootTmp, { recursive: true, force: true });
+});
+
+async function writeUserRootEnv(content: string): Promise<void> {
+  const dir = path.join(userRootTmp, 'aiui');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, '.env'), content, 'utf8');
+}
+
 describe('loadConfig — INTERACTIVE_ON_FAILURE env handling', () => {
   beforeEach(() => {
     for (const key of ENV_KEYS) {
@@ -182,6 +216,80 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
     } finally {
       process.chdir(cwd);
     }
+  });
+});
+
+describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
+  let tmpDir: string;
+  const AI_KEYS = ['AI_API_KEY', 'AI_MODEL'] as const;
+  const preservedAi: Record<string, string | undefined> = {};
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-floor-'));
+    for (const key of AI_KEYS) {
+      preservedAi[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(async () => {
+    for (const key of AI_KEYS) {
+      if (preservedAi[key] === undefined) delete process.env[key];
+      else process.env[key] = preservedAi[key];
+    }
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  async function writeConfig(obj: unknown): Promise<string> {
+    const file = path.join(tmpDir, 'aiui.config.json');
+    await fs.writeFile(file, JSON.stringify(obj), 'utf8');
+    return file;
+  }
+
+  it('fills ai.apiKey and ai.model when nothing else set them', async () => {
+    await writeUserRootEnv('AI_API_KEY=machine-ai-key\nAI_MODEL=machine/model\n');
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.apiKey).toBe('machine-ai-key');
+    expect(config.ai.model).toBe('machine/model');
+  });
+
+  it('is a floor, never an override: the project config file wins', async () => {
+    // Verification rule (9) — this is the case a naive process.env preload
+    // gets backwards, because env AI_MODEL overrides the config file.
+    await writeUserRootEnv('AI_API_KEY=machine-ai-key\nAI_MODEL=machine/model\n');
+    const config = await loadConfig(
+      await writeConfig({ ai: { apiKey: 'project-ai-key', model: 'project/model' } }),
+    );
+
+    expect(config.ai.apiKey).toBe('project-ai-key');
+    expect(config.ai.model).toBe('project/model');
+  });
+
+  it('the environment also beats the machine value', async () => {
+    await writeUserRootEnv('AI_API_KEY=machine-ai-key\nAI_MODEL=machine/model\n');
+    process.env['AI_API_KEY'] = 'env-ai-key';
+    process.env['AI_MODEL'] = 'env/model';
+
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.apiKey).toBe('env-ai-key');
+    expect(config.ai.model).toBe('env/model');
+  });
+
+  it('no machine values leaves the built-in default model untouched', async () => {
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.model).toBe('openai/gpt-5.4-mini');
+    expect(config.ai.apiKey).toBeUndefined();
+  });
+
+  it('blank machine values read as absent', async () => {
+    await writeUserRootEnv('AI_API_KEY=\nAI_MODEL=   \n');
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.apiKey).toBeUndefined();
+    expect(config.ai.model).toBe('openai/gpt-5.4-mini');
   });
 });
 

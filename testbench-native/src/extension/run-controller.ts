@@ -17,9 +17,11 @@ import {
   parseParameters,
   readEnvFile,
   readEnvOverlayFile,
+  readMachineKey,
   reportError,
   resolveEnvFile,
   resolveSection,
+  userRootEnvPath,
   type ClassifiedStep,
   type ErrorPayload,
   type FrameInfo,
@@ -273,7 +275,7 @@ export class RunController {
    *  `currentServerUrl` (run-scoped, nulled at run end), these PERSIST past the
    *  run so out-of-band lifecycle ops (closeSession, the re-run liveness probe,
    *  getLastRun) follow the same server the run used — critical once a selected
-   *  env's `.env.<name>` can override SERVER_URL/SERVER_API_KEY away from base
+   *  env's `.env.<name>` can override SERVER_URL/AIUI_SERVER_API_KEY away from base
    *  `.env`. Null before the first run, when `resolveClient` falls back to disk. */
   private lastRunServerUrl: string | null = null;
   private lastRunApiKey: string | null = null;
@@ -1093,7 +1095,7 @@ export class RunController {
       return null;
     }
     const serverUrl = env['SERVER_URL']?.trim();
-    const apiKey = env['SERVER_API_KEY']?.trim();
+    const apiKey = env['AIUI_SERVER_API_KEY']?.trim();
     if (!serverUrl || !apiKey) return null;
     return { client: this.clientFactory({ serverUrl, apiKey }), sessionId };
   }
@@ -1369,7 +1371,7 @@ export class RunController {
         .trim() || null;
 
     // Overlay the selected `.env.<name>` on top of base `.env` so $VAR
-    // references in ## Parameters / ## Config — and SERVER_URL/SERVER_API_KEY —
+    // references in ## Parameters / ## Config — and SERVER_URL/AIUI_SERVER_API_KEY —
     // honour the active environment (matching the server's ${env.X} map and the
     // CLI). A selected env with no matching file is a hard error (TB006); a
     // malformed overlay reuses TB005 with the overlay's path.
@@ -1420,11 +1422,19 @@ export class RunController {
       const payload = reportError('TB004', { envPath: envResolution.path, value: serverUrl });
       return this.fail(payload, log);
     }
-    if (!env['SERVER_API_KEY'] || env['SERVER_API_KEY'].trim() === '') {
-      const payload = reportError('TB003', { envPath: envResolution.path });
+    // The client chain of stories/machine-key.md: the project's walk-up .env,
+    // then the extension host's environment, then the machine key. Most
+    // machines only ever have the last one — `aiui serve` generates it.
+    const projectKey = env['AIUI_SERVER_API_KEY']?.trim();
+    const processKey = process.env['AIUI_SERVER_API_KEY']?.trim();
+    const apiKey = projectKey || processKey || readMachineKey() || '';
+    if (apiKey === '') {
+      const payload = reportError('TB003', {
+        envPath: envResolution.path,
+        machineEnvPath: userRootEnvPath(),
+      });
       return this.fail(payload, log);
     }
-    const apiKey = env['SERVER_API_KEY'].trim();
 
     const text = this.document.getText();
 

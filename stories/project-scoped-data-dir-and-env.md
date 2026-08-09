@@ -244,7 +244,7 @@ are all in this set **[R]**).
 ([config/loader.ts:70-101](../src/config/loader.ts#L70-L101)), folding env vars
 into config. Under per-project loading it re-runs per project against the global
 — same contamination. Split by ownership:
-- **Server-global, read once at startup:** `SERVER_API_KEY` (the server's own
+- **Server-global, read once at startup:** `AIUI_SERVER_API_KEY` (the server's own
   auth — exactly one, must not be per-project).
 - **Project-scoped, from the project's env map:** `AI_API_KEY`, `AI_MODEL`,
   `INTERACTIVE_ON_FAILURE`, `OPEN_REPORT_IN_BROWSER_AFTER_RUN`,
@@ -441,10 +441,10 @@ Every project-scoped `process.env` read, classified for the pure-load refactor.
 | **[R]** [parser/parameters.ts:55](../src/parser/parameters.ts#L55) | `## Parameters` `$VAR` resolution | **Move** (CLI/data-driven path); server resolves params client-side, but the runner can still hit this |
 | [resolve-bundle.ts:46](../src/env/resolve-bundle.ts#L46) | snapshot of the (mutated) global into bundle `env` | **Move** — compose from baseline + `.env` + `.env.<env>` |
 | [loader.ts:32-34,58-61](../src/env/loader.ts#L32-L34) | `loadEnvFile`/`loadDefaultEnvFileSync` **write** the global | **Move** — root of the hazard; return maps |
-| [config/loader.ts:70-101](../src/config/loader.ts#L70-L101) | `withEnvDefaults` config-from-env | **Split** — `SERVER_API_KEY` global; rest project-scoped |
+| [config/loader.ts:70-101](../src/config/loader.ts#L70-L101) | `withEnvDefaults` config-from-env | **Split** — `AIUI_SERVER_API_KEY` global; rest project-scoped |
 | [data-loader.ts:33](../src/env/data-loader.ts#L33) | `AIUI_DATA_DIR` | **Removed** by this story |
 | **[R]** [context/loader.ts:70](../src/context/loader.ts#L70) | `ADDITIONAL_CONTEXT_DIR` | Project-scoped in principle; low priority — confirm during build |
-| [serve.ts:27](../src/cli/commands/serve.ts#L27) | `SERVER_API_KEY` check | Stay global (server startup) |
+| [serve.ts:27](../src/cli/commands/serve.ts#L27) | `AIUI_SERVER_API_KEY` check | Stay global (server startup) |
 | [test-runner.ts:941](../src/runner/test-runner.ts#L941) | `CI` | Stay global |
 | [browser/manager.ts:64-66](../src/browser/manager.ts#L64-L66) | `ProgramFiles` / `LOCALAPPDATA` | Stay global (OS paths) |
 | [run.ts:53](../src/cli/commands/run.ts#L53) | `AUTOMATION_ENV` | Stay global (CLI-only) |

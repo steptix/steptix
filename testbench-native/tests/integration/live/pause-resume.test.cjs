@@ -12,7 +12,7 @@
  *   node tests/integration/runLiveTest.cjs
  *
  * Required env (from templates/.env, picked up via walkup):
- *   SERVER_URL, SERVER_API_KEY, AI_API_KEY,
+ *   SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY,
  *   GITHUB_USERNAME, GITHUB_PASSWORD
  */
 const assert = require('node:assert/strict');

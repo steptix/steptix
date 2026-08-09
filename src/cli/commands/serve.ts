@@ -1,6 +1,8 @@
 import chalk from 'chalk';
 import type { Command } from 'commander';
 import { loadConfig } from '../../config/loader.js';
+import { DEFAULT_CONFIG } from '../../config/defaults.js';
+import { ensureMachineKey, readMachineKey } from '../../env/user-root.js';
 import { nonNegativeInt } from '../parse-args.js';
 import { startServer } from '../../server/api-server.js';
 import { setLogLevel, type ConsoleLogLevel } from '../../utils/logger.js';
@@ -33,11 +35,34 @@ export function registerServeCommand(program: Command): void {
       nonNegativeInt,
     )
     .action(async (opts) => {
-      if (!process.env['SERVER_API_KEY']) {
-        console.error(chalk.red('SERVER_API_KEY is not set — add it to your .env file'));
-        process.exit(1);
-      }
       const config = await loadConfig(opts.config);
+
+      // The key chain (stories/machine-key.md): process.env (incl. --env-file,
+      // which lands there before this code runs) → the config file → the user
+      // root's .env → generate. The loader already applied the first two; what
+      // is left here is the machine floor and, below it, self-provisioning.
+      //
+      // `dev-api-key` is DEFAULT_CONFIG's placeholder, not a source: the old
+      // hard-exit guard existed precisely so it could never become the
+      // operative key, and generation now serves the same purpose without
+      // refusing. (Its message was also wrong — it said "add it to your .env
+      // file", a file this command never reads.)
+      if (config.server.apiKey === DEFAULT_CONFIG.server.apiKey) {
+        const fromUserRoot = readMachineKey();
+        if (fromUserRoot !== null) {
+          config.server.apiKey = fromUserRoot;
+        } else {
+          // Bare `serve` binds the port itself, so generating here can never
+          // disagree with an already-running server the way the MCP side
+          // could — see stories/machine-key.md.
+          const generated = ensureMachineKey();
+          config.server.apiKey = generated.key;
+          console.log(
+            chalk.green('Generated a machine key') +
+              ` and wrote it to ${generated.path} — every local client reads it from there.`,
+          );
+        }
+      }
       if (opts.port !== undefined) config.server.port = opts.port;
       if (opts.host !== undefined) config.server.host = opts.host;
       if (opts.idleTimeout !== undefined) config.server.idleTimeoutMinutes = opts.idleTimeout;

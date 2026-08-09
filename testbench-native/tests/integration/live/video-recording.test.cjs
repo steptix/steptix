@@ -26,7 +26,7 @@
  * templates/video-record/reports/ — the other live fixtures keep video off.
  *
  * Prereq: the api-server running on $LIVE_SERVER_URL (default
- * http://localhost:3100), with templates/.env providing SERVER_API_KEY +
+ * http://localhost:3100), with templates/.env providing AIUI_SERVER_API_KEY +
  * AI_API_KEY. (Report location is now per-project, so the server's cwd no longer
  * matters for where this test's report lands.)
  */

@@ -12,7 +12,7 @@
  *   3. With no env selected, the `.env.t2`-only var falls through literally —
  *      proving the overlay is what makes (1) work.
  *
- * Fixtures: `fixtures/.env` (base — SERVER_URL/SERVER_API_KEY only),
+ * Fixtures: `fixtures/.env` (base — SERVER_URL/AIUI_SERVER_API_KEY only),
  * `fixtures/.env.t2` (T2_ONLY + SHARED), `fixtures/env-overlay.md` (a test with
  * a `## Parameters` block referencing both).
  */
@@ -30,7 +30,7 @@ const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));
 // write the overlay file at runtime rather than committing it. `.env.ghost`
 // is deliberately NEVER created — that's the TB006 case.
 const OVERLAY_PATH = path.join(FIXTURES_DIR, '.env.t2');
-// A second overlay that overrides SERVER_URL/SERVER_API_KEY away from base —
+// A second overlay that overrides SERVER_URL/AIUI_SERVER_API_KEY away from base —
 // exercises option B (the lifecycle client follows the run's server).
 const OVERLAY_T2B_PATH = path.join(FIXTURES_DIR, '.env.t2b');
 const T2B_SERVER_URL = 'http://127.0.0.1:48484';
@@ -85,20 +85,20 @@ describe('TestBench env-file overlay (## Parameters honour the selected env)', f
     assert.ok(hooks, '__testHooks not exposed — did activate() forget to return them?');
 
     // SHARED is in both base .env and the overlay (overlay wins); T2_ONLY is
-    // overlay-only. Base fixtures/.env holds just SERVER_URL/SERVER_API_KEY.
+    // overlay-only. Base fixtures/.env holds just SERVER_URL/AIUI_SERVER_API_KEY.
     fs.writeFileSync(OVERLAY_PATH, 'T2_ONLY=from-t2\nSHARED=from-t2-shared\n');
     // t2b additionally retargets the server, so a close/liveness client built
     // for it is distinguishable from one built for base .env.
     fs.writeFileSync(
       OVERLAY_T2B_PATH,
-      `SERVER_URL=${T2B_SERVER_URL}\nSERVER_API_KEY=${T2B_API_KEY}\n`,
+      `SERVER_URL=${T2B_SERVER_URL}\nAIUI_SERVER_API_KEY=${T2B_API_KEY}\n`,
     );
     // Nested fixture: base `.env` sits in sub/ (walk-up finds it before the
     // root .env), while its overlay .env.subenv sits at the workspace root.
     fs.mkdirSync(SUB_DIR, { recursive: true });
     fs.writeFileSync(
       SUB_BASE_ENV,
-      'SERVER_URL=http://127.0.0.1:39917\nSERVER_API_KEY=integration-test-key\n',
+      'SERVER_URL=http://127.0.0.1:39917\nAIUI_SERVER_API_KEY=integration-test-key\n',
     );
     fs.writeFileSync(
       SUB_MD,
@@ -221,7 +221,7 @@ describe('TestBench env-file overlay (## Parameters honour the selected env)', f
     // The run client itself was built for the overridden server.
     const runArgs = fake.factoryArgs.at(-1);
     assert.equal(runArgs?.serverUrl, T2B_SERVER_URL, 'run must target the overlay SERVER_URL');
-    assert.equal(runArgs?.apiKey, T2B_API_KEY, 'run must use the overlay SERVER_API_KEY');
+    assert.equal(runArgs?.apiKey, T2B_API_KEY, 'run must use the overlay AIUI_SERVER_API_KEY');
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());

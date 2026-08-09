@@ -27,7 +27,7 @@ import {
 } from '../src/mcp/project.js';
 import { PreflightFailure } from '../src/mcp/types.js';
 
-const BASE_ENV = { SERVER_URL: 'http://127.0.0.1:3100', SERVER_API_KEY: 'project-key' };
+const BASE_ENV = { SERVER_URL: 'http://127.0.0.1:3100', AIUI_SERVER_API_KEY: 'project-key' };
 
 interface ProjectSpec {
   /** `null` writes no aiui.config.json at all. */
@@ -103,7 +103,13 @@ beforeEach(() => {
   // A developer shell with SERVER_URL set would silently satisfy the
   // discovery-fallback tests that are meant to fail.
   delete process.env['SERVER_URL'];
-  delete process.env['SERVER_API_KEY'];
+  delete process.env['AIUI_SERVER_API_KEY'];
+  // The key chain ends at the machine key file — redirect the user root into
+  // an empty per-test dir so this machine's real key never leaks in. The
+  // generic afterEach env restore puts both variables back.
+  const userRootTmp = makeTmp();
+  process.env['LOCALAPPDATA'] = userRootTmp;
+  process.env['XDG_CONFIG_HOME'] = userRootTmp;
 });
 
 afterEach(() => {
@@ -426,11 +432,11 @@ describe('environment composition (§4)', () => {
     expect(project.env['HOST_ONLY_SECRET']).toBeUndefined();
   });
 
-  it('falls back to process.env for SERVER_URL/SERVER_API_KEY without putting them in the map', async () => {
+  it('falls back to process.env for SERVER_URL/AIUI_SERVER_API_KEY without putting them in the map', async () => {
     const root = seedProject(makeTmp(), { env: { OTHER: 'x' } });
     process.env['AIUI_MCP_ROOTS'] = root;
     process.env['SERVER_URL'] = 'http://127.0.0.1:4100';
-    process.env['SERVER_API_KEY'] = 'host-key';
+    process.env['AIUI_SERVER_API_KEY'] = 'host-key';
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.serverUrl).toBe('http://127.0.0.1:4100');
@@ -450,7 +456,7 @@ describe('environment composition (§4)', () => {
 
   it('names both env files and the variable when SERVER_URL is nowhere', async () => {
     const root = seedProject(makeTmp(), {
-      env: { SERVER_API_KEY: 'k' },
+      env: { AIUI_SERVER_API_KEY: 'k' },
       envFiles: { uat: { X: '1' } },
     });
     process.env['AIUI_MCP_ROOTS'] = root;
@@ -462,13 +468,49 @@ describe('environment composition (§4)', () => {
     expect(text).toContain('SERVER_URL environment variable');
   });
 
-  it('has its own error for a missing SERVER_API_KEY', async () => {
+  it('defers a missing AIUI_SERVER_API_KEY as null rather than refusing', async () => {
+    // stories/machine-key.md: only server-start.ts can decide what a missing
+    // key means — down + loopback generates one, a running server refuses.
     const root = seedProject(makeTmp(), { env: { SERVER_URL: 'http://127.0.0.1:3100' } });
     process.env['AIUI_MCP_ROOTS'] = root;
 
-    const text = await refusalText(() => resolveProject({ projectRoot: root }));
-    expect(text).toContain('No SERVER_API_KEY');
-    expect(text).toContain('`aiui serve` exits rather than start without one');
+    const project = await resolveProject({ projectRoot: root });
+    expect(project.apiKey).toBe(null);
+  });
+
+  it('falls back to the machine key file when project and process.env have none', async () => {
+    const root = seedProject(makeTmp(), { env: { SERVER_URL: 'http://127.0.0.1:3100' } });
+    process.env['AIUI_MCP_ROOTS'] = root;
+    const aiuiDir = path.join(process.env['LOCALAPPDATA']!, 'aiui');
+    mkdirSync(aiuiDir, { recursive: true });
+    writeFileSync(path.join(aiuiDir, '.env'), 'AIUI_SERVER_API_KEY=machine-key\n');
+
+    const project = await resolveProject({ projectRoot: root });
+    expect(project.apiKey).toBe('machine-key');
+    // The machine key rides the discovery fallback, never the project map —
+    // same rule as the process.env fallback above it.
+    expect(project.env['AIUI_SERVER_API_KEY']).toBeUndefined();
+  });
+
+  it('prefers the project .env and process.env over the machine key', async () => {
+    const aiuiDir = path.join(process.env['LOCALAPPDATA']!, 'aiui');
+    mkdirSync(aiuiDir, { recursive: true });
+    writeFileSync(path.join(aiuiDir, '.env'), 'AIUI_SERVER_API_KEY=machine-key\n');
+
+    const withProjectKey = seedProject(makeTmp());
+    process.env['AIUI_MCP_ROOTS'] = withProjectKey;
+    await expect(resolveProject({ projectRoot: withProjectKey })).resolves.toMatchObject({
+      apiKey: 'project-key',
+    });
+
+    const withoutProjectKey = seedProject(makeTmp(), {
+      env: { SERVER_URL: 'http://127.0.0.1:3100' },
+    });
+    process.env['AIUI_MCP_ROOTS'] = withoutProjectKey;
+    process.env['AIUI_SERVER_API_KEY'] = 'host-key';
+    await expect(resolveProject({ projectRoot: withoutProjectKey })).resolves.toMatchObject({
+      apiKey: 'host-key',
+    });
   });
 
   it('refuses an env_name containing a separator or a traversal (rule 6)', async () => {

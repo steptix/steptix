@@ -117,7 +117,7 @@ function makeProject(overrides: Record<string, unknown> = {}): any {
     configPath: path.join(root, 'aiui.config.json'),
     env: {
       SERVER_URL: 'http://localhost:3100',
-      SERVER_API_KEY: 'project-key',
+      AIUI_SERVER_API_KEY: 'project-key',
       AI_API_KEY: 'ai-secret',
     },
     envName: null,
@@ -137,6 +137,15 @@ function text(err: unknown): string {
   return (err as PreflightFailure).toolError.content[0]!.text;
 }
 
+/** File content, or null when it does not exist. */
+function readFileSyncOptional(p: string): string | null {
+  try {
+    return readFileSync(p, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
 async function failure(promise: Promise<unknown>): Promise<unknown> {
   return promise.then(
     () => {
@@ -152,6 +161,9 @@ async function drain(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
+let userRootTmp: string;
+const savedUserRoot: Record<string, string | undefined> = {};
+
 beforeEach(() => {
   resetRegistry();
   root = mkdtempSync(path.join(tmpdir(), 'aiui-mcp-start-'));
@@ -159,11 +171,23 @@ beforeEach(() => {
   writeFileSync(distEntry, '// stand-in for dist/index.js\n');
   logPath = path.join(root, '.aiui', 'mcp-server.log');
   process.env['AIUI_TEST_INHERITED'] = 'from-parent';
+  // The arm-4 fill writes a generated machine key to the user root — point
+  // it into this test's tmp dir, never the real %LOCALAPPDATA%\aiui.
+  userRootTmp = mkdtempSync(path.join(tmpdir(), 'aiui-user-root-'));
+  for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
+    savedUserRoot[key] = process.env[key];
+    process.env[key] = userRootTmp;
+  }
 });
 
 afterEach(() => {
   delete process.env['AIUI_TEST_INHERITED'];
+  for (const [key, value] of Object.entries(savedUserRoot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   rmSync(root, { recursive: true, force: true });
+  rmSync(userRootTmp, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -188,7 +212,7 @@ describe('ensureServerReady — probe arms', () => {
     expect(text(err)).toContain('3100');
     expect(text(err)).toContain('grafana');
     // Arm 2 exists precisely so the next request — which carries
-    // SERVER_API_KEY and the whole composed .env — is never sent.
+    // AIUI_SERVER_API_KEY and the whole composed .env — is never sent.
     expect(h.deps.spawn).not.toHaveBeenCalled();
     expect(text(err)).not.toContain('project-key');
     expect(text(err)).not.toContain('ai-secret');
@@ -203,6 +227,41 @@ describe('ensureServerReady — probe arms', () => {
     expect(text(err)).toContain('192.168.1.50:3100');
     expect(text(err)).toContain('loopback');
     expect(h.deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a healthy server when no source had a key — never generates for it', async () => {
+    // stories/machine-key.md: a running server holds whatever key it was
+    // started with; a generated one would just manufacture a 401.
+    const h = makeHarness();
+    h.up = true;
+    const project = makeProject({ apiKey: null });
+
+    const err = await failure(ensureServerReadyWith(project, undefined, h.deps));
+
+    expect(text(err)).toContain('already');
+    expect(text(err)).toMatch(/aiui[\\/]\.env/); // names the file to write
+    expect(h.deps.spawn).not.toHaveBeenCalled();
+    // No key was invented behind the refusal's back.
+    expect(readFileSyncOptional(path.join(userRootTmp, 'aiui', '.env'))).toBe(null);
+  });
+
+  it('arm 4 with no key generates one, persists it, and spawns the child with it', async () => {
+    const h = makeHarness();
+    const project = makeProject({ apiKey: null });
+
+    const ready = ensureServerReadyWith(project, undefined, h.deps);
+    await h.spawned;
+    h.up = true;
+    await ready;
+
+    // The generated key is persisted where every other client will read it…
+    const written = readFileSyncOptional(path.join(userRootTmp, 'aiui', '.env'));
+    expect(written).toMatch(/AIUI_SERVER_API_KEY=aiui_[0-9a-f]{64}/);
+    // …the project now carries it for the requests that follow…
+    expect(project.apiKey).toMatch(/^aiui_[0-9a-f]{64}$/);
+    // …and the child was spawned with the SAME key, so both sides agree.
+    const env = h.spawns[0]!.options.env as Record<string, string>;
+    expect(env['AIUI_SERVER_API_KEY']).toBe(project.apiKey);
   });
 
   it('does not spawn for an aborted call, even though an aborted probe reads as down', async () => {
@@ -347,24 +406,24 @@ describe('ensureServerReady — the spawn', () => {
     const h = await coldStart();
     const env = h.spawns[0]!.options.env as Record<string, string>;
 
-    expect(env['SERVER_API_KEY']).toBe('project-key');
+    expect(env['AIUI_SERVER_API_KEY']).toBe('project-key');
     expect(env['AI_API_KEY']).toBe('ai-secret');
     expect(env['AIUI_TEST_INHERITED']).toBe('from-parent');
   });
 
   const winIt = process.platform === 'win32' ? it : it.skip;
   winIt('collapses a case-differing parent key rather than sending both', async () => {
-    delete process.env['SERVER_API_KEY'];
-    process.env['Server_Api_Key'] = 'stale-parent-key';
+    delete process.env['AIUI_SERVER_API_KEY'];
+    process.env['Aiui_Server_Api_Key'] = 'stale-parent-key';
     try {
       const h = await coldStart();
       const env = h.spawns[0]!.options.env as Record<string, string>;
-      const keys = Object.keys(env).filter((k) => k.toLowerCase() === 'server_api_key');
+      const keys = Object.keys(env).filter((k) => k.toLowerCase() === 'aiui_server_api_key');
 
       expect(keys).toHaveLength(1);
       expect(env[keys[0]!]).toBe('project-key');
     } finally {
-      delete process.env['Server_Api_Key'];
+      delete process.env['Aiui_Server_Api_Key'];
     }
   });
 

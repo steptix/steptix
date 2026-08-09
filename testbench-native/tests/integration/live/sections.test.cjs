@@ -29,7 +29,7 @@
  * step has had a chance to fail for unrelated reasons.
  *
  * Prereq: the API server running on $LIVE_SERVER_URL (default :3100) with
- * templates/.env providing SERVER_API_KEY + AI_API_KEY.
+ * templates/.env providing AIUI_SERVER_API_KEY + AI_API_KEY.
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');

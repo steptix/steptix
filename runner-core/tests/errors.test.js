@@ -5,7 +5,7 @@ import { ALL_ERROR_CODES, reportError } from '../dist/errors.js';
 const SAMPLE_CONTEXTS = {
   TB001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
   TB002: { envPath: '/ws/.env' },
-  TB003: { envPath: '/ws/.env' },
+  TB003: { envPath: '/ws/.env', machineEnvPath: '/home/x/.aiui/.env' },
   TB004: { envPath: '/ws/.env', value: 'not-a-url' },
   TB005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
   TB006: { envName: 't2', expectedPath: '/ws/.env.t2', baseEnvPath: '/ws/base/.env' },

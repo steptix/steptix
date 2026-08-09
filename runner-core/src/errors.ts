@@ -58,7 +58,7 @@ export interface ErrorPayload {
 export interface ErrorContextMap {
   TB001: { searchedDirs: string[]; fallbackSetting: string };
   TB002: { envPath: string };
-  TB003: { envPath: string };
+  TB003: { envPath: string; machineEnvPath: string };
   TB004: { envPath: string; value: string };
   TB005: { envPath: string; lineNumber: number; line: string };
   TB006: { envName: string; expectedPath: string; baseEnvPath: string };
@@ -97,7 +97,7 @@ type Builder<C extends ErrorCode> = (ctx: ErrorContextMap[C]) => {
 const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   TB001: (ctx) => ({
     diagnosis: `No .env file found for this test. Searched: ${ctx.searchedDirs.join(', ')}, then fallback setting "testbench.defaultEnvFile" (=${ctx.fallbackSetting || 'unset'})`,
-    fix: 'Create a .env next to this test (or any ancestor folder up to workspace root) with SERVER_URL and SERVER_API_KEY, or set "testbench.defaultEnvFile" in Settings.',
+    fix: 'Create a .env next to this test (or any ancestor folder up to workspace root) with SERVER_URL, or set "testbench.defaultEnvFile" in Settings. AIUI_SERVER_API_KEY is optional — it falls back to the machine key.',
     actions: [
       { label: 'Open Settings', command: 'workbench.action.openSettings', args: ['testbench.defaultEnvFile'] },
     ],
@@ -108,8 +108,8 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     actions: [{ label: 'Reveal .env', command: 'testbench.revealEnvFile' }],
   }),
   TB003: (ctx) => ({
-    diagnosis: `SERVER_API_KEY is missing from ${ctx.envPath}`,
-    fix: 'Add SERVER_API_KEY=<your-key>. The key must match what the ai-ui-automation server was started with.',
+    diagnosis: `AIUI_SERVER_API_KEY is nowhere: not in ${ctx.envPath}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
+    fix: 'Start the server once (`aiui serve` generates the machine key and writes it there), or add AIUI_SERVER_API_KEY=<key> to the machine key file or this project\'s .env.',
     actions: [{ label: 'Reveal .env', command: 'testbench.revealEnvFile' }],
   }),
   TB004: (ctx) => ({
@@ -137,7 +137,9 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   }),
   TB011: (ctx) => ({
     diagnosis: `Server at ${ctx.serverUrl} rejected the API key (HTTP 401)`,
-    fix: `SERVER_API_KEY in ${ctx.envPath} must match the SERVER_API_KEY the server was started with.`,
+    fix:
+      `The AIUI_SERVER_API_KEY TestBench sent (from ${ctx.envPath}, the process environment, ` +
+      'or the machine key file) must match the key the server was started with.',
     actions: [{ label: 'Reveal .env', command: 'testbench.revealEnvFile' }],
   }),
   TB012: (ctx) => ({

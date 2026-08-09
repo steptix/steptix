@@ -174,7 +174,12 @@ function shapeProblem(type: string, event: Record<string, unknown>): string | nu
 export const createApiClient = (opts: ApiClientOptions): ApiClient => {
   const base = normalizeBaseUrl(opts.baseUrl);
   const doFetch = opts.fetchImpl ?? fetch;
-  const headers = { 'x-api-key': opts.apiKey };
+  // A null key reaches here only on `assertServerRecognized`'s down path,
+  // where the request dies on connect before any header is read. Omitting the
+  // header beats sending the string "null", which a live server would 401
+  // with a misleading "wrong key" instead of "no key".
+  const headers: Record<string, string> =
+    opts.apiKey === null ? {} : { 'x-api-key': opts.apiKey };
 
   /** Turn a non-2xx into an `ApiHttpError` carrying the server's own message,
    *  which is usually more specific than anything we could invent. */

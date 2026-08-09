@@ -28,7 +28,7 @@
  * NOT part of the fast suite. Run via: node tests/integration/runLiveTest.cjs
  * (auto-discovered by the glob).
  *
- * Required env (from templates/.env, via walk-up): SERVER_URL, SERVER_API_KEY,
+ * Required env (from templates/.env, via walk-up): SERVER_URL, AIUI_SERVER_API_KEY,
  * AI_API_KEY.
  */
 const assert = require('node:assert/strict');

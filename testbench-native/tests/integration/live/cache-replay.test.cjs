@@ -19,7 +19,7 @@
  *
  * Prereq: `npm run dev` (or `aiui serve`) running on $LIVE_SERVER_URL
  * (default http://localhost:3100), and templates/.env with
- * SERVER_API_KEY + AI_API_KEY present.
+ * AIUI_SERVER_API_KEY + AI_API_KEY present.
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');

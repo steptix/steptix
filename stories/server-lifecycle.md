@@ -20,7 +20,7 @@
 ## Context
 
 Today the TestBench native extension is a pure HTTP client: it reads
-`SERVER_URL` + `SERVER_API_KEY` from the project's `.env.<name>` fixture and
+`SERVER_URL` + `AIUI_SERVER_API_KEY` from the project's `.env.<name>` fixture and
 calls the Sessions API. If the server isn't running, the run fails with
 TB010 (connect-failed, mapped in
 [run-controller.ts §mapApiErrorToPayload](../testbench-native/src/extension/run-controller.ts))
@@ -186,7 +186,7 @@ loaded config (same discovery as `serve`).
   - `--json` emits the raw health body (plus `{ running: false }` when
     down) for scripting.
 - **`aiui stop [--url] [--force]`** — POST `/admin/shutdown` with
-  `SERVER_API_KEY` from the environment (same sourcing as `serve`; error
+  `AIUI_SERVER_API_KEY` from the environment (same sourcing as `serve`; error
   out if unset). On 409, print runs-in-flight and open-session counts and
   suggest `--force`; the message explains that open TestBench sessions
   alone don't block a stop, only an executing run does. On 401, say the
@@ -436,7 +436,7 @@ units:
   "child died early" detection in §5.6 — detect via health-poll timeout
   rather than child `exit` events if the latter proves unreliable.
 - **`--env-file` in the command**: the api key the *server* loads must
-  match the `SERVER_API_KEY` in the *project's* `.env.<name>` the
+  match the `AIUI_SERVER_API_KEY` in the *project's* `.env.<name>` the
   extension sends. Mismatch ⇒ server starts healthy but the run gets 401
   (existing TB011 path). Same hazard CLI-side: `aiui stop` sources its key
   from cwd `./.env`, which can differ from the server's `templates/.env` —
@@ -553,7 +553,7 @@ for stop; post-200 confirm poll). Plain `fetch` with
 `0.5` became `0` and silently disarmed the timeout). `stop` probes
 `/health` and checks `service` BEFORE sending the key: §1's "clients MUST
 check it" applies to it too, and a foreign process on the configured port
-should not be handed `SERVER_API_KEY`. Both commands export a
+should not be handed `AIUI_SERVER_API_KEY`. Both commands export a
 `Promise<number>` exit code rather than calling `process.exit`, so the
 contract is testable against a stub server.
 

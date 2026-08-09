@@ -88,7 +88,18 @@ export interface ProjectContext {
   envName: string | null;
   /** Base URL of the Sessions API. */
   serverUrl: string;
-  apiKey: string;
+  /**
+   * The key sent with every request, or null when no source had one — the
+   * project `.env`, `process.env` and the machine key file all came up empty
+   * (stories/machine-key.md).
+   *
+   * Null is a *deferral*, not an error: only `server-start.ts` can decide
+   * what a missing key means, because the answer depends on the server's
+   * state. Down + loopback → generate one and spawn with it. Already running
+   * → refuse, naming the file to write; a generated key would just be
+   * rejected by a server that already holds a different one.
+   */
+  apiKey: string | null;
   /** Absolute, confined, and known to exist — or null to omit from the wire. */
   skillsDir: string | null;
   toolsDir: string | null;
@@ -492,7 +503,10 @@ export class ApiRouteNotFoundError extends ApiHttpError {
 
 export interface ApiClientOptions {
   baseUrl: string;
-  apiKey: string;
+  /** Null only on `assertServerRecognized`'s down path, where the request is
+   *  about to fail on connect before any header matters. Every healthy path
+   *  resolves a real key before a client is built. */
+  apiKey: string | null;
   /** Injected by tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
 }

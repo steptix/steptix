@@ -2,7 +2,7 @@
   "name": "testbench",
   "displayName": "TestBench",
   "publisher": "pkent",
-  "version": "0.1.62",
+  "version": "0.1.64",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code",
   "private": true,
   "engines": {
@@ -157,6 +157,7 @@
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
+    "mocha": "^10.8.2",
     "@types/node": "^20.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",

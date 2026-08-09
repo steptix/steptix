@@ -749,7 +749,7 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | --- | --- |
 | `AI_API_KEY` | API key for the aiapi gateway. Required. The runner now uses aiapi v2 endpoints. |
 | `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. |
-| `SERVER_API_KEY` | Shared secret between the API server and Flick. Required. |
+| `AIUI_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `aiui serve` generates a machine key at `%LOCALAPPDATA%\aiui\.env` (`~/.aiui/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
 | `APPEND_RUN_HISTORY_TO_TEST_FILE` | `true`/`false`. Append a "Latest runs" section at the bottom of each test `.md` file after it runs, linking to its HTML report (keeps the most recent 10). Default `false`. |

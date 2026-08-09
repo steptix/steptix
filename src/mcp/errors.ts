@@ -98,11 +98,25 @@ export function noServerUrl(envFiles: readonly string[]): McpToolError {
   );
 }
 
-export function noServerApiKey(envFiles: readonly string[]): McpToolError {
+/**
+ * A Sessions API server is up, and we have no key to talk to it with.
+ *
+ * The one missing-key case that stays a refusal (stories/machine-key.md): a
+ * running server holds whatever key *it* was started with, so generating a
+ * fresh one here would only manufacture a 401. Against a *down* server the
+ * key is generated instead, which is why this error names a live server.
+ */
+export function noKeyForRunningServer(
+  baseUrl: string,
+  userRootEnvPath: string,
+): McpToolError {
   return preflightError(
-    'No SERVER_API_KEY: the Sessions API rejects unauthenticated requests, ' +
-      'and `aiui serve` exits rather than start without one.\n' +
-      `Looked in: ${envFiles.join(', ')}, then the SERVER_API_KEY environment variable.`,
+    `A Sessions API server is running at ${baseUrl}, but no AIUI_SERVER_API_KEY is ` +
+      'available to authenticate with it — none in the project `.env`, the ' +
+      `environment, or ${userRootEnvPath}.\n` +
+      'A key cannot be generated for a server that already holds one. Write ' +
+      `the key that server was started with to ${userRootEnvPath}, or stop the ` +
+      'server and let the next call start one on the machine key.',
   );
 }
 
@@ -113,7 +127,7 @@ export function badServerUrl(serverUrl: string, reason: string): McpToolError {
 export function unrecognizedService(baseUrl: string, detail: string): McpToolError {
   return preflightError(
     `${baseUrl} answered, but is not an ai-ui-automation server (${quoteForeign(detail)}).\n` +
-      'Refusing to continue: the next request would send SERVER_API_KEY and the ' +
+      'Refusing to continue: the next request would send AIUI_SERVER_API_KEY and the ' +
       "project's whole .env to whatever is listening there.",
   );
 }
@@ -176,7 +190,7 @@ export function autoStartSuppressed(
 
 export function unauthorized(projectEnvFiles: readonly string[], baseUrl: string): McpToolError {
   return preflightError(
-    `${baseUrl} rejected our SERVER_API_KEY.\n` +
+    `${baseUrl} rejected our AIUI_SERVER_API_KEY.\n` +
       `Ours came from: ${projectEnvFiles.join(', ')} (or the environment).\n` +
       "The server's came from whatever env file it was started with — if it was " +
       'started by hand, that is likely a different file.',
