@@ -14,6 +14,7 @@ import type { Config } from '../src/config/types.js';
 const knownProfilesMock = vi.fn();
 const startCdpBrowserMock = vi.fn();
 const closeCdpTabMock = vi.fn();
+const focusCdpTabMock = vi.fn();
 const discoverCdpPortsMock = vi.fn();
 
 vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
@@ -23,6 +24,7 @@ vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
     knownProfiles: (...args: unknown[]) => knownProfilesMock(...args),
     startCdpBrowser: (...args: unknown[]) => startCdpBrowserMock(...args),
     closeCdpTab: (...args: unknown[]) => closeCdpTabMock(...args),
+    focusCdpTab: (...args: unknown[]) => focusCdpTabMock(...args),
   };
 });
 
@@ -166,6 +168,7 @@ beforeEach(() => {
   knownProfilesMock.mockReset();
   startCdpBrowserMock.mockReset();
   closeCdpTabMock.mockReset();
+  focusCdpTabMock.mockReset();
   discoverCdpPortsMock.mockReset();
   knownProfilesMock.mockResolvedValue([]);
   discoverCdpPortsMock.mockResolvedValue([]);
@@ -176,6 +179,25 @@ function del(port: number | string, targetId: string, qs = '', headers = auth) {
   const query = `projectRoot=${encodeURIComponent(PROJECT)}${qs}`;
   return fetch(`${base}?${query}`, { method: 'DELETE', headers });
 }
+
+function focus(port: number | string, targetId: string, qs = '', headers = auth) {
+  const base = `${baseUrl}/cdp/browsers/${port}/tabs/${encodeURIComponent(targetId)}/focus`;
+  const query = `projectRoot=${encodeURIComponent(PROJECT)}${qs}`;
+  return fetch(`${base}?${query}`, { method: 'POST', headers });
+}
+
+const focusedTab = (over: Record<string, unknown> = {}) => ({
+  ok: true,
+  targetId: 'T1',
+  title: 'Orders',
+  url: 'https://shop/orders',
+  engine: 'edge',
+  profile: 'default',
+  port: 51000,
+  owned: true,
+  warnings: [],
+  ...over,
+});
 
 const closedTab = (over: Record<string, unknown> = {}) => ({
   ok: true,
@@ -701,6 +723,138 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
     expect(typeof opts.sessionHolding).toBe('function');
     // No sessions at all is a COMPLETE answer of "nobody", not an unknown.
     await expect(opts.sessionHolding!('T1')).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /cdp/browsers/:port/tabs/:targetId/focus (stories/cdp-tab-focus.md §2)
+// ---------------------------------------------------------------------------
+
+describe('POST /cdp/browsers/:port/tabs/:targetId/focus', () => {
+  it('requires the api key', async () => {
+    expect((await focus(51000, 'T1', '', {})).status).toBe(401);
+  });
+
+  it('an authenticated focus bumps the idle monitor', async () => {
+    // Same reasoning as the listing's: these routes sit behind auth, so they
+    // count as activity. Safe only because nothing polls them.
+    const { app, idleMonitor } = createApiServer(testConfig);
+    const local = await listenOnRandomPort(app);
+    try {
+      const QUIET_MS = 250;
+      await new Promise((r) => setTimeout(r, QUIET_MS));
+      expect(idleMonitor.idleFor()).toBeGreaterThanOrEqual(QUIET_MS);
+
+      focusCdpTabMock.mockResolvedValue(focusedTab());
+      await fetch(
+        `${local.baseUrl}/cdp/browsers/51000/tabs/T1/focus?projectRoot=${encodeURIComponent(PROJECT)}`,
+        { method: 'POST', headers: auth },
+      );
+
+      expect(idleMonitor.idleFor()).toBeLessThan(QUIET_MS);
+    } finally {
+      await new Promise<void>((res, rej) => local.server.close((e) => (e ? rej(e) : res())));
+    }
+  });
+
+  it('focuses a tab and echoes the title and url it brought forward', async () => {
+    focusCdpTabMock.mockResolvedValue(focusedTab());
+    const res = await focus(51000, 'T1');
+    expect(res.status).toBe(200);
+    // Exactly this shape — `focused`, not `closed`, and no `remainingTabs` or
+    // `browserExited`, because nothing was closed.
+    expect(await res.json()).toEqual({
+      focused: true,
+      targetId: 'T1',
+      title: 'Orders',
+      url: 'https://shop/orders',
+      engine: 'edge',
+      profile: 'default',
+      port: 51000,
+      warnings: [],
+    });
+  });
+
+  it('passes the target id through undecoded, so an odd id still addresses its tab', async () => {
+    focusCdpTabMock.mockResolvedValue(focusedTab({ targetId: 'A/B?C' }));
+    await focus(51000, 'A/B?C');
+    expect(focusCdpTabMock).toHaveBeenCalledWith(
+      expect.objectContaining({ port: 51000, targetId: 'A/B?C', projectRoot: PROJECT }),
+    );
+  });
+
+  it('forwards allowUnowned only when asked', async () => {
+    focusCdpTabMock.mockResolvedValue(focusedTab());
+    await focus(51000, 'T1');
+    expect(focusCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowUnowned: false });
+
+    focusCdpTabMock.mockClear();
+    await focus(51000, 'T1', '&allowUnowned=true');
+    expect(focusCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowUnowned: true });
+  });
+
+  it('maps the four failure kinds onto their status codes', async () => {
+    for (const [kind, status] of [
+      ['not_found', 404],
+      ['refused', 409],
+      ['launch_failed', 500],
+      ['invalid_input', 400],
+    ] as const) {
+      focusCdpTabMock.mockResolvedValue({ ok: false, kind, error: `${kind} happened` });
+      const res = await focus(51000, 'T1');
+      expect(res.status, kind).toBe(status);
+      expect((await res.json()).error).toContain(kind);
+    }
+  });
+
+  it('validates its inputs before reaching the registry', async () => {
+    expect((await focus('not-a-port', 'T1')).status).toBe(400);
+    expect(
+      (
+        await fetch(`${baseUrl}/cdp/browsers/51000/tabs/T1/focus?projectRoot=relative`, {
+          method: 'POST',
+          headers: auth,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${baseUrl}/cdp/browsers/51000/tabs/T1/focus`, {
+          method: 'POST',
+          headers: auth,
+        })
+      ).status,
+    ).toBe(400);
+    expect(focusCdpTabMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT serialise concurrent focuses', async () => {
+    // The close route queues per port because two concurrent closes can defeat
+    // the last-tab guard. Focus has no guard to defeat and no irreversible
+    // outcome — two at once simply mean the second wins, which is what "focus"
+    // means. Copying the neighbour's queue would be cargo-culting, and this is
+    // the assertion that says so out loud.
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    focusCdpTabMock.mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return focusedTab();
+    });
+
+    await Promise.all([focus(51000, 'T1'), focus(51000, 'T2'), focus(51000, 'T3')]);
+
+    expect(maxConcurrent).toBe(3);
+  });
+
+  it('does not close anything, or create a session', async () => {
+    // Verification rule (5), at the layer this suite can reach: the focus route
+    // must not touch the close path at all.
+    focusCdpTabMock.mockResolvedValue(focusedTab());
+    await focus(51000, 'T1');
+    expect(closeCdpTabMock).not.toHaveBeenCalled();
   });
 });
 

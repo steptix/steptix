@@ -14,6 +14,7 @@ import {
   discoverCdpPorts,
   toPageTabs,
   closeTab,
+  activateTab,
   portAnswers,
 } from '../src/browser/cdp-discovery.js';
 
@@ -230,6 +231,45 @@ describe('closeTab', () => {
       throw new Error('ECONNREFUSED');
     }) as unknown as typeof fetch;
     const result = await closeTab(51000, 'A1B2C3', 100, fetchFn);
+    expect(result).toMatchObject({ ok: false, notFound: false });
+    expect(result.error).toContain('ECONNREFUSED');
+  });
+});
+
+describe('activateTab', () => {
+  it('asks the browser to bring the tab forward, and reports success', async () => {
+    const fetchFn = vi.fn(async () => ({ ok: true, status: 200 }) as unknown as Response);
+    const result = await activateTab(51000, 'A1B2C3', 100, fetchFn as unknown as typeof fetch);
+    expect(result).toEqual({ ok: true, notFound: false, error: null });
+    expect(String(fetchFn.mock.calls[0]![0])).toBe('http://127.0.0.1:51000/json/activate/A1B2C3');
+  });
+
+  it('distinguishes an unknown target id', async () => {
+    const fetchFn = vi.fn(async () => ({ ok: false, status: 404 }) as unknown as Response);
+    const result = await activateTab(51000, 'GONE', 100, fetchFn as unknown as typeof fetch);
+    expect(result).toMatchObject({ ok: false, notFound: true });
+  });
+
+  it('does not treat a 500 as success', async () => {
+    // Reachable, and measured: a `worker` target id answers
+    // `500 Could not activate target id`. Falling through to "ok" would report
+    // a focus that did not happen.
+    const fetchFn = vi.fn(async () => ({ ok: false, status: 500 }) as unknown as Response);
+    const result = await activateTab(51000, 'W1', 100, fetchFn as unknown as typeof fetch);
+    expect(result).toMatchObject({ ok: false, notFound: false, error: 'HTTP 500' });
+  });
+
+  it('encodes the target id into the path', async () => {
+    const fetchFn = vi.fn(async () => ({ ok: true, status: 200 }) as unknown as Response);
+    await activateTab(51000, 'A/B?C', 100, fetchFn as unknown as typeof fetch);
+    expect(String(fetchFn.mock.calls[0]![0])).toBe('http://127.0.0.1:51000/json/activate/A%2FB%3FC');
+  });
+
+  it('never throws — a dead browser is a result, not an exception', async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    const result = await activateTab(51000, 'A1B2C3', 100, fetchFn);
     expect(result).toMatchObject({ ok: false, notFound: false });
     expect(result.error).toContain('ECONNREFUSED');
   });

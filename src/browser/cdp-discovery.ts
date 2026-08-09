@@ -225,6 +225,57 @@ export async function closeTab(
   }
 }
 
+/**
+ * Ask the browser to bring one tab to the front: `GET /json/activate/<targetId>`.
+ *
+ * A drop-in sibling of `closeTab` above — same host, same port, same 404 shape,
+ * same `encodeURIComponent` treatment of the id — and like it, plain HTTP with
+ * no WebSocket, so it reaches tabs no session owns.
+ *
+ * **`ok` means the browser accepted it, and that is weaker than "the user can
+ * see it".** Unlike a close there is nothing to poll: the DevTools HTTP surface
+ * offers no read of "is this tab frontmost, and is its window in front of every
+ * other application". `/json/activate` reaches `WebContents::Activate()` →
+ * `Browser::ActivateContents`, which selects the tab and then asks the window
+ * manager to raise the window — and on Windows the OS may decline a raise
+ * requested by a background process. That is the same call `Page.bringToFront`
+ * makes, so there is no louder alternative to escalate to.
+ *
+ * **The caller must reject anything it did not list.** Measured on Chrome
+ * 150.0.7871.187: `iframe` and `browser_ui` target ids both answer
+ * `200 "Target activated"` as readily as a real tab, so this function cannot be
+ * the thing that decides an id is a tab. Look it up through `toPageTabs` first
+ * — that is why the focus route reads the list before calling this.
+ *
+ * `500 Could not activate target id` is reachable (a `worker` id), so a non-404
+ * failure must not fall through to "ok".
+ */
+export async function activateTab(
+  port: number,
+  targetId: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ ok: boolean; notFound: boolean; error: string | null }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchFn(
+      `http://127.0.0.1:${port}/json/activate/${encodeURIComponent(targetId)}`,
+      { signal: controller.signal },
+    );
+    if (res.ok) return { ok: true, notFound: false, error: null };
+    return {
+      ok: false,
+      notFound: res.status === 404,
+      error: `HTTP ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, notFound: false, error: errorMessage(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Whether anything still answers `/json/version` on this port. The signal that
  *  a browser has exited — used to confirm a last-tab close, where the tab list
  *  cannot be read afterwards because the server serving it is gone. */

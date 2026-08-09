@@ -724,3 +724,141 @@ describe('executeStep — multi-turn integration', () => {
   });
 
 });
+
+// ─── switchPage / openPage bring the tab forward (cdp-tab-focus.md §4) ───────
+
+import { PageTracker } from '../src/browser/manager.js';
+import type { BrowserSession, BrowserTracker } from '../src/browser/manager.js';
+
+/**
+ * A page that records `bringToFront` calls and reports a fixed url/title, so
+ * `PageTracker.switchToAsync` can find it by either.
+ */
+function makeSwitchablePage(url: string, title: string) {
+  const page = makeMockPage(url) as unknown as Record<string, unknown>;
+  page['title'] = vi.fn().mockResolvedValue(title);
+  page['bringToFront'] = vi.fn().mockResolvedValue(undefined);
+  page['context'] = vi.fn().mockReturnValue({ newPage: vi.fn() });
+  return page as unknown as Page & { bringToFront: ReturnType<typeof vi.fn> };
+}
+
+/** A tracker holding one session whose `headed` is whatever the test needs.
+ *  Mirrors what `launchBrowser` records per browser — `openBrowser` can
+ *  override `headed`, so the gate reads the session, not the shared config. */
+function trackerWith(session: Partial<BrowserSession>): BrowserTracker {
+  return {
+    getActive: () => session as BrowserSession,
+    // Single-browser shape: `count <= 1` is what keeps the prompt's
+    // multi-browser block empty, so `list()` is never reached.
+    count: 1,
+    list: () => [],
+  } as unknown as BrowserTracker;
+}
+
+describe('executeStep — a switched-to tab is brought to the front (§4)', () => {
+  const SWITCH_RESPONSE = JSON.stringify({
+    actions: [{ action: 'switchPage', page: 'cart', description: 'Switch to the cart tab' }],
+    reasoning: 'The step names another tab.',
+    needs_reeval: false,
+  });
+
+  /** Two tracked pages; the second is the one `switchPage: "cart"` resolves to. */
+  function twoTabs() {
+    const main = makeSwitchablePage('https://shop.example/', 'Shop');
+    const cart = makeSwitchablePage('https://shop.example/cart', 'Cart');
+    const pageTracker = new PageTracker(main);
+    pageTracker.addPage(cart);
+    return { main, cart, pageTracker };
+  }
+
+  it('raises the tab in a HEADED launch-mode run', async () => {
+    // Launch mode, not CDP — `headed` defaults to true, a launch-mode run's
+    // pages open as tabs in one visible window, and a human watching has the
+    // identical complaint. This is the assertion that would silently regress
+    // into CDP-only.
+    const { cart, pageTracker } = twoTabs();
+    const config = makeConfig();
+    config.browser.headed = true;
+
+    const result = await executeStep(1, 1, 'switch to the cart tab', {
+      page: pageTracker.getActive(),
+      config,
+      aiClient: makeAiClient([SWITCH_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+    });
+
+    expect(result.status).toBe('passed');
+    expect(cart.bringToFront).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not bother in a headless run', async () => {
+    const { cart, pageTracker } = twoTabs();
+    const config = makeConfig();
+    config.browser.headed = false;
+
+    await executeStep(1, 1, 'switch to the cart tab', {
+      page: pageTracker.getActive(),
+      config,
+      aiClient: makeAiClient([SWITCH_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+    });
+
+    expect(cart.bringToFront).not.toHaveBeenCalled();
+  });
+
+  it('reads headedness off the ACTIVE browser, not the shared config', async () => {
+    // `openBrowser` can override `headed` per browser, so one run can hold a
+    // headed browser and a headless one at once. Reading the global config
+    // would raise a window for a browser that has none, or skip the raise for
+    // the one the user is actually watching.
+    const { cart, pageTracker } = twoTabs();
+    const config = makeConfig();
+    config.browser.headed = false; // global says headless…
+
+    await executeStep(1, 1, 'switch to the cart tab', {
+      page: pageTracker.getActive(),
+      config,
+      aiClient: makeAiClient([SWITCH_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+      // …but the browser this step is driving is headed.
+      browserTracker: trackerWith({ headed: true }),
+    });
+
+    expect(cart.bringToFront).toHaveBeenCalledTimes(1);
+  });
+
+  it('a browser that refuses to raise its window does not fail the step', async () => {
+    // Windows can decline a foreground request from a background process. A
+    // step that otherwise worked must not fail on it.
+    const { cart, pageTracker } = twoTabs();
+    const config = makeConfig();
+    config.browser.headed = true;
+    (cart.bringToFront as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('not permitted'));
+
+    const result = await executeStep(1, 1, 'switch to the cart tab', {
+      page: pageTracker.getActive(),
+      config,
+      aiClient: makeAiClient([SWITCH_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+    });
+
+    expect(result.status).toBe('passed');
+    expect(cart.bringToFront).toHaveBeenCalled();
+  });
+});

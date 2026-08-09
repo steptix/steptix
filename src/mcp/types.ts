@@ -329,6 +329,41 @@ export interface ClosedCdpTab {
   warnings?: string[];
 }
 
+/** Address of one tab to bring to the front (stories/cdp-tab-focus.md §2).
+ *
+ *  No `allowBrowserExit` sibling and no session flag: focusing closes nothing
+ *  and re-binds nothing, so ownership is the only permission in play. */
+export interface FocusCdpTabArgs {
+  projectRoot: string;
+  port: number;
+  targetId: string;
+  /** Sent only when `mcp.cdp.allowUnowned` permits — the same gate as attaching
+   *  and closing. Focusing a tab in someone else's browser yanks a human's
+   *  screen and reveals which tab they are being shown. */
+  allowUnowned?: boolean;
+}
+
+export interface FocusedCdpTab {
+  /**
+   * The browser accepted the request.
+   *
+   * Deliberately weaker than `ClosedCdpTab.closed`, and the asymmetry is honest
+   * rather than lazy: a closed tab has an observable absence to poll for, while
+   * "is this tab frontmost, and is its window in front of every other
+   * application" has no reliable read over the DevTools HTTP surface.
+   */
+  focused: boolean;
+  targetId: string;
+  title: string;
+  url: string;
+  engine: string;
+  profile: string;
+  port: number;
+  /** Optional for the same reason `ClosedCdpTab.warnings` is: an older Sessions
+   *  API server may omit it, and it is required in the output schema. */
+  warnings?: string[];
+}
+
 export interface GetCdpBrowsersArgs {
   projectRoot: string;
   includeForeign?: boolean;
@@ -408,6 +443,7 @@ export interface ApiClient {
   getCdpBrowsers(args: GetCdpBrowsersArgs, signal?: AbortSignal): Promise<CdpBrowsers>;
   startCdpBrowser(body: StartCdpBrowserBody, signal?: AbortSignal): Promise<StartedCdpBrowser>;
   closeCdpTab(args: CloseCdpTabArgs, signal?: AbortSignal): Promise<ClosedCdpTab>;
+  focusCdpTab(args: FocusCdpTabArgs, signal?: AbortSignal): Promise<FocusedCdpTab>;
 }
 
 /**

@@ -111,11 +111,13 @@ export async function assertPortAttachable(
  *
  * Returns the port, and whether the caller still owes a gate check.
  *
- * `ambiguous` lets a caller supply its own both-or-neither message. Two tools
- * share this resolution but not their argument names — `run_steps` nests the
- * address under `config.cdp`, `close_cdp_tab` takes it at the top level — and
- * an error telling an agent to fix `config.cdp` on a call that has no `config`
- * is one it cannot act on.
+ * `ambiguous` lets a caller supply its own both-or-neither message. Several
+ * tools share this resolution but not their argument names — `run_steps` nests
+ * the address under `config.cdp`, while `close_cdp_tab` and `focus_cdp_tab`
+ * take it at the top level — and an error telling an agent to fix `config.cdp`
+ * on a call that has no `config` is one it cannot act on. The message also
+ * carries the stakes, which differ: closing the wrong tab cannot be undone,
+ * focusing the wrong one is a nuisance.
  */
 export async function resolveCdpTarget(
   client: ApiClient,

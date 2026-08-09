@@ -149,6 +149,7 @@ and one cache. If no server is running it starts one for you.
 | `start_cdp_browser` | Launch (or return) a persistent browser you can sign into — see below |
 | `list_cdp_browsers` | Which CDP browsers and profiles this project has, and their open tabs |
 | `close_cdp_tab` | Close one tab in a CDP browser |
+| `focus_cdp_tab` | Bring one tab of a CDP browser to the front, so you can see it |
 
 Successive `run_steps` calls share a browser, so an agent can send a few steps,
 read the result, then send a few more against the same page — with captured
@@ -220,8 +221,8 @@ That gate deliberately lives in a file an agent cannot write.
 #### Working with its tabs
 
 `list_cdp_browsers` reports each browser's open tabs with a stable `targetId`,
-and which session (if any) is driving each one. That id is the address for both
-things you can do with a tab:
+and which session (if any) is driving each one. That id is the address for
+everything you can do with a tab:
 
 > *"Close the openrouter tab"*
 
@@ -230,11 +231,26 @@ urls, and calls `close_cdp_tab` with that id. Matching is the agent's job on
 purpose — there is no fuzzy matching in the tool, because closing the wrong tab
 cannot be undone.
 
+> *"Show me the openrouter tab"*
+
+Same shape, `focus_cdp_tab`, and the tab comes to the front of the window so you
+can look at it. It changes nothing else: nothing is closed, no session is
+created, and a run happening in another tab keeps running — automation drives a
+tab whether or not it is the visible one. So it is safe to use to watch a test
+while it works, which is the usual reason to want it.
+
+What it cannot promise is that the *window* comes forward. The browser is asked
+to raise it, and Windows sometimes answers a background application's request
+with a flashing taskbar button instead. If nothing appears, click the browser in
+your taskbar — the right tab will be the one showing.
+
 > *"Run the checkout steps in the tab where I set up the cart"*
 
 Same id, passed as `config.cdp: {profile: "default", tab: "targetId:<id>"}` on a
 **new** session. Without a `tab`, attaching opens a fresh tab and leaves yours
-alone — which is safe, and not what you asked for.
+alone — which is safe, and not what you asked for. Attaching to a tab you named
+brings it forward, so you watch the steps run instead of hunting for the right
+tab in the strip. So does a `switchTab` step mid-run, in any headed run.
 
 Two refusals worth knowing about:
 

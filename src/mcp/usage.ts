@@ -23,6 +23,7 @@ Tools
   list_cdp_browsers persistent CDP browsers and profiles for this project
   start_cdp_browser launch (or return) a CDP browser you can sign into by hand
   close_cdp_tab     close one tab in a CDP browser
+  focus_cdp_tab     bring one tab of a CDP browser to the front
   server_status     health of the Sessions API server
 
 Environment

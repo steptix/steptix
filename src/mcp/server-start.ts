@@ -210,9 +210,9 @@ export const ensureServerReady: EnsureServerReady = (project, signal) =>
  * `start_cdp_browser` was routed here by the helper it shares with the probes
  * and inherited this rule, so against a stopped server it died on a bare
  * ECONNREFUSED while `run_test_file` from the same agent would have started
- * one. `close_cdp_tab` is on `ensureServerReady` for the same reason: it acts
- * on live browser state rather than reporting on it. Keep this list in step
- * with `withProject`'s `autoStart` in [tools.ts](./tools.ts).
+ * one. `close_cdp_tab` and `focus_cdp_tab` are on `ensureServerReady` for the
+ * same reason: they act on live browser state rather than reporting on it. Keep
+ * this list in step with `withProject`'s `autoStart` in [tools.ts](./tools.ts).
  */
 export async function assertServerRecognized(
   project: ProjectContext,

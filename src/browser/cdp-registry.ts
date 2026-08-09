@@ -31,6 +31,7 @@ import {
 } from './cdp-launcher.js';
 import {
   probePort,
+  activateTab,
   closeTab,
   listPageTabs,
   portAnswers,
@@ -527,6 +528,91 @@ export interface CloseTabDeps extends RegistryDeps {
   now?: () => number;
 }
 
+/** Who a port belongs to, once ownership has been settled. */
+interface CdpOwner {
+  /** Widened past `LaunchableEngine`: a permitted foreign browser (§8) can be a
+   *  Chromium or an unrecognised build. */
+  engine: CdpEngine;
+  /** Empty for a foreign browser — no profile directory of ours stands behind
+   *  it, and a stand-in phrase here would read as a profile name where this
+   *  gets interpolated into messages. */
+  profile: string;
+  /** `engineLabel(engine) "profile"` for one of ours, and a port phrase for a
+   *  foreign one. A separate field because the launchable engine names cannot
+   *  express a Chromium or an unrecognised build. */
+  label: string;
+  owned: boolean;
+}
+
+/**
+ * Settle which browser a port is, and whether this project may act on it.
+ *
+ * Shared by every verb that reaches into a live browser — closing a tab and
+ * focusing one — because they must agree exactly on what "ours" means and on
+ * what `allowUnowned` opens up. Two copies would eventually let one verb act on
+ * a browser the other refused, with no reading of the rules that explains it.
+ *
+ * `knownProfiles` is the only answer to "ours": our ports are OS-assigned, so
+ * nothing about the number itself is recognisable.
+ */
+async function resolveCdpOwner(
+  projectRoot: string,
+  port: number,
+  allowUnowned: boolean,
+  deps?: RegistryDeps,
+): Promise<{ ok: true; owner: CdpOwner } | { ok: false; kind: CdpFailureKind; error: string }> {
+  const profiles = await knownProfiles(projectRoot, deps);
+  const known = profiles.find((p) => p.live && p.port === port);
+
+  if (known) {
+    return {
+      ok: true,
+      owner: {
+        engine: known.engine,
+        profile: known.profile,
+        label: `${engineLabel(known.engine)} "${known.profile}"`,
+        owned: true,
+      },
+    };
+  }
+
+  if (allowUnowned) {
+    // Permitted by a human, so the only question left is whether anything is
+    // actually there.
+    const probe = deps?.probe ?? probePort;
+    const probed = await probe(port);
+    if (!probed.reachable) {
+      return {
+        ok: false,
+        kind: 'not_found',
+        error:
+          `Nothing is listening on port ${port}.\n` +
+          'Call list_cdp_browsers to see what is running.',
+      };
+    }
+    return {
+      ok: true,
+      owner: {
+        engine: probed.engine,
+        profile: '',
+        label: `the browser on port ${port}`,
+        owned: false,
+      },
+    };
+  }
+
+  const running = profiles.filter((p) => p.live);
+  return {
+    ok: false,
+    kind: 'not_found',
+    error:
+      `Port ${port} is not a CDP browser this project has running.\n` +
+      (running.length > 0
+        ? `Running now: ${running.map((p) => `${engineLabel(p.engine)} "${p.profile}" on port ${p.port}`).join(', ')}.`
+        : 'This project has no CDP browser running.'),
+  };
+}
+
 /**
  * Close one tab in a browser this project owns.
  *
@@ -549,60 +635,12 @@ export async function closeCdpTab(
   const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps?.now ?? Date.now;
 
-  // 1. The port must be one of ours and live. `knownProfiles` is the only
-  //    answer to "ours": our ports are OS-assigned, so nothing about the number
-  //    itself is recognisable.
-  const profiles = await knownProfiles(opts.projectRoot, deps);
-  const known = profiles.find((p) => p.live && p.port === opts.port);
-  // `label` rather than `engineLabel(engine)` at each use: a permitted foreign
-  // browser can be a Chromium or an unrecognised build, which the launchable
-  // engine names cannot express.
-  let owner: { engine: CdpEngine; profile: string; label: string; owned: boolean };
-
-  if (known) {
-    owner = {
-      engine: known.engine,
-      profile: known.profile,
-      label: `${engineLabel(known.engine)} "${known.profile}"`,
-      owned: true,
-    };
-  } else if (opts.allowUnowned === true) {
-    // Permitted by a human, so the only question left is whether anything is
-    // actually there. There is no profile to name — this browser has no
-    // directory of ours behind it — and the response says so rather than
-    // inventing one.
-    const probe = deps?.probe ?? probePort;
-    const probed = await probe(opts.port);
-    if (!probed.reachable) {
-      return {
-        ok: false,
-        kind: 'not_found',
-        error:
-          `Nothing is listening on port ${opts.port}.\n` +
-          'Call list_cdp_browsers to see what is running.',
-      };
-    }
-    owner = {
-      engine: probed.engine,
-      // No profile directory of ours stands behind this browser. Empty rather
-      // than a stand-in sentence: the value gets interpolated into messages and
-      // into the tool's summary, and a phrase there reads as a profile name.
-      profile: '',
-      label: `the browser on port ${opts.port}`,
-      owned: false,
-    };
-  } else {
-    const running = profiles.filter((p) => p.live);
-    return {
-      ok: false,
-      kind: 'not_found',
-      error:
-        `Port ${opts.port} is not a CDP browser this project has running.\n` +
-        (running.length > 0
-          ? `Running now: ${running.map((p) => `${engineLabel(p.engine)} "${p.profile}" on port ${p.port}`).join(', ')}.`
-          : 'This project has no CDP browser running.'),
-    };
-  }
+  // 1. The port must be one of ours and live. Shared with the focus path, so
+  //    the two verbs can never disagree about which browsers a project may act
+  //    on — including which one `allowUnowned` opens up.
+  const resolved = await resolveCdpOwner(opts.projectRoot, opts.port, opts.allowUnowned === true, deps);
+  if (!resolved.ok) return resolved;
+  const owner = resolved.owner;
 
   // 2. Read the tab list through the SHARED filter, so what may be closed and
   //    what was listed can never disagree.
@@ -882,6 +920,156 @@ async function pollUntil(
     if (io.now() - started >= budgetMs) return false;
     await io.sleep(CLOSE_POLL_INTERVAL_MS);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Focus a tab (stories/cdp-tab-focus.md §2)
+// ---------------------------------------------------------------------------
+
+export interface FocusTabOptions {
+  projectRoot: string;
+  port: number;
+  targetId: string;
+  /** Permission to act on a browser this project did not launch. Same flag,
+   *  same human-held opt-in behind it, and the same reasoning as closing:
+   *  focusing a tab in someone else's browser yanks their screen and reveals
+   *  which tab they are being shown. Non-destructive is not unobtrusive. */
+  allowUnowned?: boolean;
+}
+
+export type FocusTabResult =
+  | {
+      ok: true;
+      targetId: string;
+      title: string;
+      url: string;
+      engine: CdpEngine;
+      profile: string;
+      port: number;
+      owned: boolean;
+      warnings: string[];
+    }
+  | { ok: false; kind: CdpFailureKind; error: string };
+
+export interface FocusTabDeps extends RegistryDeps {
+  activate?: typeof activateTab;
+  listTabs?: typeof listPageTabs;
+}
+
+/**
+ * Bring one tab of a browser this project owns to the front.
+ *
+ * Deliberately shorter than `closeCdpTab`, and each thing it does *not* do is a
+ * decision:
+ *
+ *   - **No session guard.** `closeCdpTab` refuses a tab a live session is
+ *     driving; this must not. "Show me what the test is doing" is the single
+ *     most likely reason to call it, and the tab a session holds is exactly the
+ *     tab the user wants to see. Focusing changes no automation state —
+ *     Playwright drives a page by target, not by which tab is frontmost.
+ *   - **No last-tab guard.** Nothing here closes anything.
+ *   - **No queue, and callers need not serialise.** The close route serialises
+ *     per port because two concurrent closes can defeat the last-tab guard.
+ *     There is no guard here to defeat: two concurrent focuses mean the second
+ *     wins, which is what "focus" means.
+ *   - **No confirm poll.** A closed tab has an observable absence to poll for;
+ *     "is this window in front of every other application" has no read over the
+ *     DevTools HTTP surface. So `ok` means the browser accepted it — see
+ *     `activateTab`.
+ *
+ * The one guard it keeps beyond ownership is the **shared page-type filter**,
+ * and that is load-bearing rather than tidy: the browser answers
+ * `200 "Target activated"` for `iframe` and `browser_ui` ids as readily as for
+ * real tabs, so without looking the id up in `toPageTabs`'s output first this
+ * would report success for having "focused" an omnibox. Anything the agent was
+ * never shown in the listing is rejected by us, not by the browser.
+ */
+export async function focusCdpTab(
+  opts: FocusTabOptions,
+  deps?: FocusTabDeps,
+): Promise<FocusTabResult> {
+  const activate = deps?.activate ?? activateTab;
+  const listTabs = deps?.listTabs ?? listPageTabs;
+
+  // 1. Ownership — the same resolution, and therefore the same answer, as a
+  //    close against this port.
+  const resolved = await resolveCdpOwner(
+    opts.projectRoot,
+    opts.port,
+    opts.allowUnowned === true,
+    deps,
+  );
+  if (!resolved.ok) return resolved;
+  const owner = resolved.owner;
+
+  // 2. The tab must be one the caller was shown. See the doc comment: the
+  //    browser will happily activate things that are not tabs.
+  const tabs = await listTabs(opts.port);
+  if (tabs === null) {
+    return {
+      ok: false,
+      kind: 'launch_failed',
+      error:
+        `Could not read the tab list from ${owner.label} on port ${opts.port}. ` +
+        'The browser may be shutting down.\n' +
+        'Call list_cdp_browsers to see what is still running.',
+    };
+  }
+
+  const target = tabs.find((t) => t.targetId === opts.targetId);
+  if (!target) {
+    // Both readings, because the caller cannot tell them apart from here — the
+    // same contract `close_cdp_tab` holds, and for the same reason: picking one
+    // would be a guess presented as a fact.
+    return {
+      ok: false,
+      kind: 'not_found',
+      error:
+        `No tab with target id ${opts.targetId} is open in ${owner.label} ` +
+        `(port ${opts.port}).\n\n` +
+        'Either it has already been closed, or the id belongs to a different browser.\n' +
+        'Call list_cdp_browsers for the tabs open right now.',
+    };
+  }
+
+  // 3. Activate, and echo what was read in step 2 so the caller can name what it
+  //    brought forward.
+  const requested = await activate(opts.port, opts.targetId);
+  if (requested.notFound) {
+    // In the list a moment ago and gone now — something else closed it in
+    // between. Reported rather than absorbed: a caller told `focused: true`
+    // with a title and url would tell the user it is looking at a tab that no
+    // longer exists.
+    return {
+      ok: false,
+      kind: 'not_found',
+      error:
+        `Tab ${opts.targetId} ("${target.title || target.url}") was open a moment ago but ` +
+        'the browser no longer has it — something else closed it first.\n\n' +
+        'Call list_cdp_browsers for the tabs open now.',
+    };
+  }
+  if (!requested.ok) {
+    return {
+      ok: false,
+      kind: 'launch_failed',
+      error:
+        `The browser refused to bring that tab forward: ${requested.error ?? 'unknown error'}.\n` +
+        'Call list_cdp_browsers to check the browser is still running, then retry.',
+    };
+  }
+
+  return {
+    ok: true,
+    targetId: opts.targetId,
+    title: target.title,
+    url: target.url,
+    engine: owner.engine,
+    profile: owner.profile,
+    port: opts.port,
+    owned: owner.owned,
+    warnings: [],
+  };
 }
 
 // ---------------------------------------------------------------------------

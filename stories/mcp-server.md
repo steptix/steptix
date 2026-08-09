@@ -215,13 +215,15 @@ be *called*).
 
 ### 2. Tool surface
 
-Eleven tools, **bare names** — the host prefixes them, so an `aiui_`
+Thirteen tools, **bare names** — the host prefixes them, so an `aiui_`
 prefix would render as `mcp__aiui__aiui_run_steps`. The seven enumerated
-below are this story's; the four added since are specced elsewhere —
+below are this story's; the six added since are specced elsewhere —
 `start_cdp_browser` and `list_cdp_browsers` in
 [mcp-cdp-browser.md](mcp-cdp-browser.md), `close_cdp_tab` in
-[cdp-tabs.md](cdp-tabs.md), `get_page_content` in
-[page-content.md](page-content.md). Each declares a zod
+[cdp-tabs.md](cdp-tabs.md), `focus_cdp_tab` in
+[cdp-tab-focus.md](cdp-tab-focus.md), `get_page_content` in
+[page-content.md](page-content.md), `get_run_settings` in
+[run-settings.md](run-settings.md). Each declares a zod
 `outputSchema`; SDK 1.29.0's `registerTool` accepts **either** a raw
 shape or a `z.object({…})` (`ZodRawShapeCompat | AnySchema`), so either
 form is fine. Every tool accepts optional `project_root`, including the
@@ -464,7 +466,7 @@ and the SDK returns the original object so extras still reach the host),
 but **missing required keys are fatal** — every nullable field needs an
 explicit `.nullable()`/`.optional()`: `error`, `reportPath`,
 `durationMs`, `frameName`, `output`, `text`, `sentIndex`. **This applies
-to all 11 schemas, not just the run result** — `server_status`
+to all 13 schemas, not just the run result** — `server_status`
 carries `inspector: string|null` and `idleTimeoutMinutes: number|null`
 straight from `HealthResponse`, and `get_last_run` has two nullables of
 its own.
@@ -1136,7 +1138,7 @@ does not typecheck them.
   **valid** `status:'error'` result with the diagnostic in `warnings[]`,
   never `isError:true`.
 - **MCP seam** (`InMemoryTransport`, injected client factory): all
-  **11** tools; progress emitted with a token and `progress`
+  **13** tools; progress emitted with a token and `progress`
   strictly increasing and never exceeding `total`; the no-token case
   driven by calling `callTool` **without** `onprogress` (which is what
   creates the token); cancellation aborts and leaves the session open;

@@ -327,4 +327,66 @@ describe('createApiClient other routes', () => {
     await client.closeSession('s1');
     expect(method).toBe('DELETE');
   });
+
+  it('POSTs a tab focus, encoding the target id and sending allowUnowned only when asked', async () => {
+    let seen = '';
+    let method = '';
+    const baseUrl = await startServer((url, res) => {
+      seen = url;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ focused: true, targetId: 'A/B', title: 'Docs' }));
+    });
+    server!.on('request', (req) => {
+      method = req.method ?? '';
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await client.focusCdpTab({ projectRoot: 'C:\\proj', port: 51000, targetId: 'A/B' });
+
+    expect(method).toBe('POST');
+    // Encoded, so an id carrying `/`, `?` or `#` addresses the tab it names
+    // rather than a different route.
+    expect(seen).toContain('/cdp/browsers/51000/tabs/A%2FB/focus?');
+    expect(seen).not.toContain('allowUnowned');
+
+    await client.focusCdpTab({
+      projectRoot: 'C:\\proj',
+      port: 51000,
+      targetId: 'A/B',
+      allowUnowned: true,
+    });
+    expect(seen).toContain('allowUnowned=true');
+  });
+
+  it('distinguishes "no such tab" from "no such route" on a 404', async () => {
+    // Both are 404s and they mean opposite things. Our route answers with a
+    // JSON `error`; a server from a build that predates the route has Express
+    // answer its own 404 with HTML, and flattening that into the status text
+    // would tell the agent the user's tab is gone.
+    const ours = await startServer((_url, res) => {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No tab with target id GONE is open' }));
+    });
+    await expect(
+      createApiClient({ baseUrl: ours, apiKey: 'k' }).focusCdpTab({
+        projectRoot: 'C:\\proj',
+        port: 51000,
+        targetId: 'GONE',
+      }),
+    ).rejects.toMatchObject({ status: 404, serverMessage: 'No tab with target id GONE is open' });
+
+    await new Promise<void>((r) => server!.close(() => r()));
+
+    const older = await startServer((_url, res) => {
+      res.writeHead(404, { 'Content-Type': 'text/html' });
+      res.end('<!DOCTYPE html><html><body>Cannot POST /cdp/browsers/51000/tabs/T1/focus</body></html>');
+    });
+    await expect(
+      createApiClient({ baseUrl: older, apiKey: 'k' }).focusCdpTab({
+        projectRoot: 'C:\\proj',
+        port: 51000,
+        targetId: 'T1',
+      }),
+    ).rejects.toMatchObject({ status: 404, serverMessage: '' });
+  });
 });

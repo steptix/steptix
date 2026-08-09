@@ -14,6 +14,7 @@ import {
   type ApiClientOptions,
   type CdpBrowsers,
   type ClosedCdpTab,
+  type FocusedCdpTab,
   type LastRunInfo,
   type PageContent,
   type RunEvent,
@@ -364,6 +365,37 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       );
       await assertOk(res);
       return (await res.json()) as ClosedCdpTab;
+    },
+
+    async focusCdpTab(args, signal): Promise<FocusedCdpTab> {
+      const params = new URLSearchParams({ projectRoot: args.projectRoot });
+      if (args.allowUnowned) params.set('allowUnowned', 'true');
+      const res = await doFetch(
+        `${base}/cdp/browsers/${args.port}/tabs/${encodeURIComponent(args.targetId)}/focus` +
+          `?${params.toString()}`,
+        { method: 'POST', headers, ...(signal ? { signal } : {}) },
+      );
+
+      // A 404 has two readings here and only one of them is about the tab. Our
+      // route answers with a JSON `error`; a Sessions API server from a build
+      // that predates the route has no such route at all, so Express answers
+      // its own 404 with an HTML body — which `assertOk` would flatten into the
+      // status text, telling the agent its tab is gone when the truth is that
+      // the server needs rebuilding. An empty `serverMessage` is how the tool
+      // tells the two apart.
+      if (res.status === 404) {
+        let serverMessage = '';
+        try {
+          const body = (await res.json()) as { error?: unknown };
+          if (typeof body.error === 'string') serverMessage = body.error;
+        } catch {
+          // Not our JSON — the route is missing.
+        }
+        throw new ApiHttpError(404, serverMessage);
+      }
+
+      await assertOk(res);
+      return (await res.json()) as FocusedCdpTab;
     },
 
     async startCdpBrowser(body, signal): Promise<StartedCdpBrowser> {
