@@ -730,27 +730,44 @@ describe('executeStep — multi-turn integration', () => {
 import { PageTracker } from '../src/browser/manager.js';
 import type { BrowserSession, BrowserTracker } from '../src/browser/manager.js';
 
+/** A stand-in `BrowserContext`. Identity is all that matters — the gate finds
+ *  a page's browser by comparing `page.context()` against each tracked
+ *  session's `context`. */
+function makeContext(opened: Page[] = []) {
+  const context: Record<string, unknown> = {};
+  context['newPage'] = vi.fn(async () => {
+    const p = makeSwitchablePage('https://shop.example/new', 'New');
+    (p as unknown as Record<string, unknown>)['context'] = () => context;
+    opened.push(p);
+    return p;
+  });
+  return context;
+}
+
 /**
  * A page that records `bringToFront` calls and reports a fixed url/title, so
- * `PageTracker.switchToAsync` can find it by either.
+ * `PageTracker.switchToAsync` can find it by either, and belongs to `context`
+ * so the §4 gate can work out which browser it is part of.
  */
-function makeSwitchablePage(url: string, title: string) {
+function makeSwitchablePage(url: string, title: string, context: object = {}) {
   const page = makeMockPage(url) as unknown as Record<string, unknown>;
   page['title'] = vi.fn().mockResolvedValue(title);
   page['bringToFront'] = vi.fn().mockResolvedValue(undefined);
-  page['context'] = vi.fn().mockReturnValue({ newPage: vi.fn() });
+  page['context'] = () => context;
   return page as unknown as Page & { bringToFront: ReturnType<typeof vi.fn> };
 }
 
-/** A tracker holding one session whose `headed` is whatever the test needs.
- *  Mirrors what `launchBrowser` records per browser — `openBrowser` can
- *  override `headed`, so the gate reads the session, not the shared config. */
-function trackerWith(session: Partial<BrowserSession>): BrowserTracker {
+/**
+ * A tracker holding real-ish sessions, each with its own context and its own
+ * `headed`. Sessions are listed in creation order and the LAST one is active,
+ * mirroring `BrowserTracker.add()`, which auto-promotes whatever `openBrowser`
+ * opened most recently.
+ */
+function trackerOf(...sessions: Partial<BrowserSession>[]): BrowserTracker {
   return {
-    getActive: () => session as BrowserSession,
-    // Single-browser shape: `count <= 1` is what keeps the prompt's
-    // multi-browser block empty, so `list()` is never reached.
-    count: 1,
+    all: () => sessions as BrowserSession[],
+    getActive: () => sessions[sessions.length - 1] as BrowserSession,
+    count: sessions.length,
     list: () => [],
   } as unknown as BrowserTracker;
 }
@@ -762,13 +779,15 @@ describe('executeStep — a switched-to tab is brought to the front (§4)', () =
     needs_reeval: false,
   });
 
-  /** Two tracked pages; the second is the one `switchPage: "cart"` resolves to. */
+  /** Two tracked pages in one browser context; the second is the one
+   *  `switchPage: "cart"` resolves to. */
   function twoTabs() {
-    const main = makeSwitchablePage('https://shop.example/', 'Shop');
-    const cart = makeSwitchablePage('https://shop.example/cart', 'Cart');
+    const context = makeContext();
+    const main = makeSwitchablePage('https://shop.example/', 'Shop', context);
+    const cart = makeSwitchablePage('https://shop.example/cart', 'Cart', context);
     const pageTracker = new PageTracker(main);
     pageTracker.addPage(cart);
-    return { main, cart, pageTracker };
+    return { main, cart, pageTracker, context };
   }
 
   it('raises the tab in a HEADED launch-mode run', async () => {
@@ -814,12 +833,12 @@ describe('executeStep — a switched-to tab is brought to the front (§4)', () =
     expect(cart.bringToFront).not.toHaveBeenCalled();
   });
 
-  it('reads headedness off the ACTIVE browser, not the shared config', async () => {
+  it('reads headedness off THE PAGE\'S OWN browser, not the shared config', async () => {
     // `openBrowser` can override `headed` per browser, so one run can hold a
     // headed browser and a headless one at once. Reading the global config
     // would raise a window for a browser that has none, or skip the raise for
     // the one the user is actually watching.
-    const { cart, pageTracker } = twoTabs();
+    const { cart, pageTracker, context } = twoTabs();
     const config = makeConfig();
     config.browser.headed = false; // global says headless…
 
@@ -832,8 +851,69 @@ describe('executeStep — a switched-to tab is brought to the front (§4)', () =
       conversationHistory: [],
       csrfTokens: {},
       pageTracker,
-      // …but the browser this step is driving is headed.
-      browserTracker: trackerWith({ headed: true }),
+      // …but the browser this tab belongs to is headed.
+      browserTracker: trackerOf({ context: context as never, headed: true }),
+    });
+
+    expect(cart.bringToFront).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT raise a page whose own browser is headless, whatever the config says', async () => {
+    // The inverse of the case above, and the half that catches an inverted
+    // gate. A gate that read the config here would call `bringToFront` on a
+    // browser with no window at all.
+    const { cart, pageTracker, context } = twoTabs();
+    const config = makeConfig();
+    config.browser.headed = true; // global says headed…
+
+    await executeStep(1, 1, 'switch to the cart tab', {
+      page: pageTracker.getActive(),
+      config,
+      aiClient: makeAiClient([SWITCH_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+      // …but this tab lives in a headless one.
+      browserTracker: trackerOf({ context: context as never, headed: false }),
+    });
+
+    expect(cart.bringToFront).not.toHaveBeenCalled();
+  });
+
+  it('asks about the browser holding the TAB, not whichever browser is active', async () => {
+    // Round-two regression, and the bug a review caught after this shipped.
+    //
+    // `switchPage` always resolves through `opts.pageTracker` — the tracker the
+    // step executor was handed, which belongs to the run's FIRST browser —
+    // while `BrowserTracker.add()` auto-promotes the active pointer to whatever
+    // `openBrowser` opened last. So: a headed run that opens a headless worker
+    // browser and then runs `switchTab` was asking the worker whether to raise
+    // a tab in the headed browser, concluding headless, and leaving the tab
+    // unraised on the one window the human was actually watching.
+    //
+    // Reachable from ordinary authoring: `openBrowser as "worker" headed:
+    // false`, then `switchTab "cart"`.
+    const { cart, pageTracker, context } = twoTabs();
+    const config = makeConfig();
+    config.browser.headed = true;
+
+    await executeStep(1, 1, 'switch to the cart tab', {
+      page: pageTracker.getActive(),
+      config,
+      aiClient: makeAiClient([SWITCH_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+      browserTracker: trackerOf(
+        // The browser the tab is in — headed, and NOT active.
+        { context: context as never, headed: true },
+        // The one `openBrowser` opened last, which `getActive()` returns.
+        { context: makeContext() as never, headed: false },
+      ),
     });
 
     expect(cart.bringToFront).toHaveBeenCalledTimes(1);
@@ -860,5 +940,69 @@ describe('executeStep — a switched-to tab is brought to the front (§4)', () =
 
     expect(result.status).toBe('passed');
     expect(cart.bringToFront).toHaveBeenCalled();
+  });
+
+  // ── openPage, the other half of §4 ────────────────────────────────────────
+
+  const OPEN_RESPONSE = JSON.stringify({
+    actions: [
+      { action: 'openPage', url: 'https://shop.example/new', description: 'Open the docs tab' },
+    ],
+    reasoning: 'The step asks for a new tab.',
+    needs_reeval: false,
+  });
+
+  it('raises a tab it just OPENED in a headed run', async () => {
+    // Same argument as `switchPage`, and it was untested: a newly opened tab
+    // the run is about to drive should be the one on screen, or the automation
+    // carries on behind whatever the user was looking at.
+    const opened: Page[] = [];
+    const context = makeContext(opened);
+    const main = makeSwitchablePage('https://shop.example/', 'Shop', context);
+    const pageTracker = new PageTracker(main);
+    const config = makeConfig();
+    config.browser.headed = true;
+
+    const result = await executeStep(1, 1, 'open the docs in a new tab', {
+      page: main,
+      config,
+      aiClient: makeAiClient([OPEN_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+    });
+
+    expect(result.status).toBe('passed');
+    expect(opened).toHaveLength(1);
+    expect(
+      (opened[0] as unknown as { bringToFront: ReturnType<typeof vi.fn> }).bringToFront,
+    ).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not raise an opened tab in a headless run', async () => {
+    const opened: Page[] = [];
+    const context = makeContext(opened);
+    const main = makeSwitchablePage('https://shop.example/', 'Shop', context);
+    const pageTracker = new PageTracker(main);
+    const config = makeConfig();
+    config.browser.headed = false;
+
+    await executeStep(1, 1, 'open the docs in a new tab', {
+      page: main,
+      config,
+      aiClient: makeAiClient([OPEN_RESPONSE]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+    });
+
+    expect(opened).toHaveLength(1);
+    expect(
+      (opened[0] as unknown as { bringToFront: ReturnType<typeof vi.fn> }).bringToFront,
+    ).not.toHaveBeenCalled();
   });
 });

@@ -139,21 +139,38 @@ class StepFailureError extends Error {
 
 
 /**
- * Whether the browser this step is driving has a window a human can watch.
+ * Whether **this page** belongs to a browser with a window a human can watch.
  *
- * Read off the **active browser session** rather than the shared config
- * because `openBrowser` can override `headed` per browser, so one run can hold
- * a headed browser and a headless one at the same time. Falls back to the
- * config for the single-browser paths (and older tests) that synthesize a
- * session without going through `launchBrowser`.
+ * Asked of the page rather than of the run, because `openBrowser` can override
+ * `headed` per browser: one run can hold a headed browser and a headless one at
+ * the same time, and "should this window be raised" is a question about the
+ * window, not about the run.
+ *
+ * **Identified by context, and that is the point.** An earlier version read
+ * `browserTracker.getActive()`, which is a *different browser* from the one
+ * whose tab is being raised: `switchPage` and `openPage` resolve through
+ * `opts.pageTracker` — the tracker the step executor was handed — while
+ * `add()` auto-promotes the active pointer to whatever `openBrowser` opened
+ * last. So a headed run that opened a headless worker browser and then ran
+ * `switchTab` consulted the worker, concluded headless, and left the tab
+ * unraised on the browser the human was actually watching. A page belongs to
+ * exactly one `BrowserContext`, so comparing contexts asks about the right
+ * browser however the pointers happen to sit.
+ *
+ * Falls back to the shared config for the single-browser paths (and the tests)
+ * that synthesize a session without going through `launchBrowser`, and for the
+ * case where nothing tracked owns this page.
  */
-function isHeadedRun(opts: StepExecutorOptions): boolean {
+function isPageHeaded(page: Page, opts: StepExecutorOptions): boolean {
   try {
-    const active = opts.browserTracker?.getActive();
-    if (active?.headed !== undefined) return active.headed;
+    const context = page.context();
+    for (const session of opts.browserTracker?.all() ?? []) {
+      if (session.context === context && session.headed !== undefined) return session.headed;
+    }
   } catch {
-    // `getActive()` throws once `closeBrowser` has left nothing tracked. The
-    // config is the right answer then, not a crash in a focus call.
+    // `page.context()` throws on a closed page, and `all()` is absent on the
+    // hand-built trackers older tests pass. The config is the right answer
+    // then, not a crash inside a focus call.
   }
   return opts.config.browser.headed;
 }
@@ -176,13 +193,13 @@ function isHeadedRun(opts: StepExecutorOptions): boolean {
  * Lives here rather than inside `switchToAsync` for layering: `PageTracker`'s
  * constructor takes `(page, ignoredPages)` and knows nothing about headedness
  * or CDP, while the step executor already holds the config and can reach the
- * active browser.
+ * browsers.
  *
  * Non-fatal, like every other `bringToFront` in the codebase: an OS that
  * declines to raise a window must not fail a step that otherwise worked.
  */
 async function showTab(page: Page, opts: StepExecutorOptions): Promise<void> {
-  if (!isHeadedRun(opts)) return;
+  if (!isPageHeaded(page, opts)) return;
   try {
     await page.bringToFront();
   } catch {
