@@ -43,6 +43,7 @@ import type {
   McpStepRequest,
   ProjectContext,
   ResolveProject,
+  RunSettings,
 } from './types.js';
 
 /**
@@ -113,6 +114,18 @@ export interface AssembleArgs {
         cdp?: CdpTarget | undefined;
       }
     | undefined;
+  /**
+   * Per-session run settings from the tool arguments
+   * (stories/run-settings.md §1).
+   *
+   * A NEW wire field, deliberately outside the `## Config` string merge above.
+   * Two reasons, both structural rather than stylistic: that merge is typed
+   * `Record<string, string|undefined>` and these are enums, booleans and nulls;
+   * and `## Config` values are per-run text from a test file, while these are
+   * retained on the session and have their own clearing semantics. A test file
+   * cannot declare them and a tool argument cannot be mistaken for one.
+   */
+  runSettings?: RunSettings | undefined;
 }
 
 export interface AssembleTestFileArgs extends AssembleArgs {
@@ -272,6 +285,10 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     ...(dataSources !== null && { dataSources }),
     ...(Object.keys(config).length > 0 && { config }),
     ...(Object.keys(parameters).length > 0 && { parameters }),
+    // Omitted when the caller set nothing, so a plain run does not look like a
+    // request to clear the session's retained settings.
+    ...(args.runSettings !== undefined &&
+      Object.keys(args.runSettings).length > 0 && { runSettings: args.runSettings }),
     ...projectFields(project, absPath, cacheEnabled(parsed, project)),
   };
 
@@ -338,6 +355,10 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
     sourceLines: args.steps.map((_step, index) => index + 1),
     ...(Object.keys(config).length > 0 && { config }),
     ...(Object.keys(parameters).length > 0 && { parameters }),
+    // See the note in `assembleTestFile`: absent means "leave the session's
+    // settings alone", so an empty object must not be sent.
+    ...(args.runSettings !== undefined &&
+      Object.keys(args.runSettings).length > 0 && { runSettings: args.runSettings }),
     ...projectFields(project, testFilePath, project.cacheEnabled),
   };
 

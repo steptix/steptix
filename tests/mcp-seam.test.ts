@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
 import { resetRegistry } from '../src/mcp/registry.js';
-import { PreflightFailure, type ApiClient, type McpDeps, type ProjectContext, type RunEvent, type StreamResult } from '../src/mcp/types.js';
+import { ApiHttpError, PreflightFailure, type ApiClient, type McpDeps, type ProjectContext, type RunEvent, type StreamResult } from '../src/mcp/types.js';
 import { preflightError } from '../src/mcp/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -55,6 +55,10 @@ interface Harness {
   /** Every page read the tools made, so a test can assert what was actually
    *  put on the wire rather than only what came back. */
   pageContentCalls: { sessionId: string; args: Record<string, unknown> }[];
+  /** Sessions whose state (and so screenshot) was fetched. */
+  sessionStateCalls: string[];
+  /** `GET /config` calls, with the session id each asked about or null. */
+  configCalls: (string | null)[];
 }
 
 const emptyBrowsers = { running: [], available: [], foreign: [] };
@@ -74,11 +78,17 @@ async function connect(opts: {
   startError?: Error;
   pageContent?: Record<string, unknown>;
   pageContentError?: Error;
+  sessionState?: Record<string, unknown>;
+  sessionStateError?: Error;
+  serverConfig?: Record<string, unknown>;
+  configError?: Error;
 }): Promise<Harness> {
   const calls: { sessionId: string; body: Record<string, unknown> }[] = [];
   const cdpListCalls: Harness['cdpListCalls'] = [];
   const cdpStartCalls: Record<string, unknown>[] = [];
   const pageContentCalls: Harness['pageContentCalls'] = [];
+  const sessionStateCalls: string[] = [];
+  const configCalls: (string | null)[] = [];
   let ensureCalls = 0;
   const scripts = Array.isArray(opts.script) ? [...opts.script] : opts.script ? [opts.script] : [];
 
@@ -122,6 +132,39 @@ async function connect(opts: {
         availableChars: 27,
         ...opts.pageContent,
       } as never;
+    },
+    async getSessionState(sessionId) {
+      sessionStateCalls.push(sessionId);
+      if (opts.sessionStateError) throw opts.sessionStateError;
+      return {
+        sessionId,
+        status: 'active',
+        currentUrl: 'https://app.test/invoices',
+        pageTitle: 'Invoices',
+        screenshot: `data:image/png;base64,${'A'.repeat(64)}`,
+        totalStepsExecuted: 1,
+        ...opts.sessionState,
+      } as never;
+    },
+    async getConfig(sessionId) {
+      configCalls.push(sessionId ?? null);
+      if (opts.configError) throw opts.configError;
+      return (opts.serverConfig ?? {
+        config: {},
+        server: {
+          model: 'server-model',
+          capture: 'on-failure',
+          fullPage: false,
+          sendScreenshots: false,
+          sources: {
+            model: 'server',
+            capture: 'server',
+            fullPage: 'server',
+            sendScreenshots: 'server',
+          },
+        },
+        session: null,
+      }) as never;
     },
     async listSessions() {
       return opts.sessions ?? [];
@@ -172,6 +215,8 @@ async function connect(opts: {
     cdpListCalls,
     cdpStartCalls,
     pageContentCalls,
+    sessionStateCalls,
+    configCalls,
     get ensureCalls() {
       return ensureCalls;
     },
@@ -183,7 +228,7 @@ beforeEach(() => {
 });
 
 describe('tool registration', () => {
-  it('exposes exactly the ten tools, under bare names', async () => {
+  it('exposes exactly the registered tools, under bare names', async () => {
     // Bare because the host prefixes them — an `aiui_` prefix here would
     // render as `mcp__aiui__aiui_run_steps` in Claude Code.
     //
@@ -198,6 +243,7 @@ describe('tool registration', () => {
       'close_session',
       'get_last_run',
       'get_page_content',
+      'get_run_settings',
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
@@ -500,6 +546,447 @@ describe('get_page_content', () => {
     });
 
     expect(res.structuredContent).toMatchObject({ status: 'executing' });
+  });
+});
+
+describe('run settings on the wire', () => {
+  const effective = {
+    model: 'override/model',
+    capture: 'every-step' as const,
+    fullPage: false,
+    sendScreenshots: false,
+    sources: {
+      model: 'session' as const,
+      capture: 'session' as const,
+      fullPage: 'server' as const,
+      sendScreenshots: 'server' as const,
+    },
+  };
+
+  it('sends the four retained settings, and only the ones it was given', async () => {
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['do a thing'],
+        project_root: PROJECT_ROOT,
+        capture: 'every-step',
+        model: 'override/model',
+      },
+    });
+
+    // An ABSENT key means "leave what the session has"; sending `undefined`
+    // for the two nobody named would make every ordinary run a request to
+    // clear them.
+    expect(harness.calls[0]?.body.runSettings).toEqual({
+      capture: 'every-step',
+      model: 'override/model',
+    });
+  });
+
+  it('omits runSettings entirely when the caller set none', async () => {
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+    });
+
+    expect('runSettings' in (harness.calls[0]?.body ?? {})).toBe(false);
+  });
+
+  it('keeps screenshots_return off the wire — it is an MCP-only concern', async () => {
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['do a thing'],
+        project_root: PROJECT_ROOT,
+        screenshots_return: 'final',
+      },
+    });
+
+    expect('runSettings' in (harness.calls[0]?.body ?? {})).toBe(false);
+    expect(JSON.stringify(harness.calls[0]?.body)).not.toContain('final');
+  });
+
+  it('reports the settings the run used, with the return mode added', async () => {
+    const { client } = await connect({
+      script: { events: [{ type: 'done', status: 'passed', effectiveSettings: effective }] },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['do a thing'],
+        project_root: PROJECT_ROOT,
+        capture: 'every-step',
+        model: 'override/model',
+      },
+    });
+
+    expect((res.structuredContent as Record<string, unknown>).effectiveSettings).toEqual({
+      ...effective,
+      // Nothing was asked for, so this is the tool's default.
+      screenshotsReturn: 'on-failure',
+    });
+  });
+
+  it('names the settings in the summary line, for a host that shows only text', async () => {
+    const { client } = await connect({
+      script: { events: [{ type: 'done', status: 'passed', effectiveSettings: effective }] },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+    });
+
+    const summary = (res.content as { text?: string }[])[0]?.text ?? '';
+    expect(summary).toContain('override/model');
+    expect(summary).toContain('every-step');
+  });
+
+  it('validates against the output schema when an older server omits the echo', async () => {
+    // The regression this guards: `effectiveSettings` is a REQUIRED key in
+    // `runResultOutput`, so a missing one would fail `validateToolOutput` and
+    // strip the whole run result to `isError` with no structured content — at
+    // the end of a run that worked.
+    const { client } = await connect({
+      script: {
+        events: [
+          { type: 'step:start', line: 1 },
+          { type: 'step:pass', line: 1 },
+          { type: 'done', status: 'passed' },
+        ],
+      },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const settings = (res.structuredContent as Record<string, unknown>)
+      .effectiveSettings as Record<string, unknown>;
+    expect(settings.model).toBeNull();
+    expect(settings.capture).toBeNull();
+    expect(settings.screenshotsReturn).toBe('on-failure');
+  });
+
+  it('returns the failure image by default, as an image block', async () => {
+    // A failure is the one moment a picture says something the text cannot, so
+    // it comes back without being asked for.
+    const png = `data:image/png;base64,${'A'.repeat(80)}`;
+    const { client } = await connect({
+      script: {
+        events: [
+          { type: 'step:start', line: 1 },
+          { type: 'step:fail', line: 1, error: 'boom', screenshot: png },
+          { type: 'done', status: 'failed' },
+        ],
+      },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+    });
+
+    const image = (res.content as { type: string; data?: string }[]).find(
+      (b) => b.type === 'image',
+    );
+    expect(image?.data).toBe('A'.repeat(80));
+  });
+
+  it('sends no image on a passing run, and none at all under "none"', async () => {
+    const png = `data:image/png;base64,${'A'.repeat(80)}`;
+
+    // Nothing failed, so the default is silent even though a screenshot exists.
+    const passing = await connect({
+      script: {
+        events: [
+          { type: 'step:start', line: 1 },
+          { type: 'step:pass', line: 1, screenshot: png },
+          { type: 'done', status: 'passed' },
+        ],
+      },
+    });
+    const passed = await passing.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+    });
+    expect((passed.content as { type: string }[]).some((b) => b.type === 'image')).toBe(false);
+
+    // And `none` suppresses it on a failure — the opt-out for a page holding
+    // something the user would not want in the conversation.
+    const quiet = await connect({
+      script: {
+        events: [
+          { type: 'step:start', line: 1 },
+          { type: 'step:fail', line: 1, error: 'boom', screenshot: png },
+          { type: 'done', status: 'failed' },
+        ],
+      },
+    });
+    const suppressed = await quiet.client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['do a thing'],
+        project_root: PROJECT_ROOT,
+        screenshots_return: 'none',
+      },
+    });
+    expect((suppressed.content as { type: string }[]).some((b) => b.type === 'image')).toBe(false);
+    const settings = (suppressed.structuredContent as Record<string, any>).effectiveSettings;
+    expect(settings.screenshotsReturn).toBe('none');
+  });
+
+  it('warns when a model override runs against the step cache', async () => {
+    // The cache keys on step text, not the model, so a switched model can be
+    // served the previous one's plans — worst exactly when you switched to
+    // compare them.
+    const { client } = await connect({
+      project: fakeProject({ cacheEnabled: true }),
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['do a thing'],
+        project_root: PROJECT_ROOT,
+        model: 'override/model',
+      },
+    });
+
+    const warnings = (res.structuredContent as { warnings: string[] }).warnings.join(' ');
+    expect(warnings).toContain('cache');
+    expect(warnings).toContain('model');
+  });
+});
+
+describe('get_run_settings', () => {
+  const report = {
+    config: {},
+    server: {
+      model: 'server-model',
+      capture: 'on-failure',
+      fullPage: false,
+      sendScreenshots: false,
+      sources: {
+        model: 'server',
+        capture: 'server',
+        fullPage: 'server',
+        sendScreenshots: 'server',
+      },
+    },
+    session: {
+      sessionId: 'mcp:x',
+      overrides: { capture: 'every-step', model: 'session/model' },
+      effective: {
+        model: 'session/model',
+        capture: 'every-step',
+        fullPage: true,
+        sendScreenshots: false,
+        sources: {
+          model: 'session',
+          capture: 'session',
+          fullPage: 'project',
+          sendScreenshots: 'server',
+        },
+      },
+    },
+  };
+
+  it('reports a session\'s effective values, its overrides and the server defaults', async () => {
+    const harness = await connect({ serverConfig: report });
+
+    const res = await harness.client.callTool({
+      name: 'get_run_settings',
+      arguments: { session_id: 'mcp:x', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as Record<string, any>;
+    expect(structured.running).toBe(true);
+    expect(structured.sessionId).toBe('mcp:x');
+    expect(structured.model).toBe('session/model');
+    expect(structured.capture).toBe('every-step');
+    expect(structured.sources.fullPage).toBe('project');
+    expect(structured.overrides).toEqual({
+      model: 'session/model',
+      capture: 'every-step',
+      fullPage: null,
+      sendScreenshots: null,
+    });
+    expect(structured.serverDefaults.capture).toBe('on-failure');
+    expect(harness.configCalls).toEqual(['mcp:x']);
+  });
+
+  it('reports the server defaults when no session is named', async () => {
+    const harness = await connect({ serverConfig: { ...report, session: null } });
+
+    const res = await harness.client.callTool({
+      name: 'get_run_settings',
+      arguments: { project_root: PROJECT_ROOT },
+    });
+
+    const structured = res.structuredContent as Record<string, any>;
+    expect(structured.sessionId).toBeNull();
+    expect(structured.model).toBe('server-model');
+    expect(structured.overrides).toBeNull();
+    expect(harness.configCalls).toEqual([null]);
+  });
+
+  it('starts no server to answer', async () => {
+    // Asking which model is in play must not cause a server to exist — the same
+    // rule `list_sessions` and `server_status` already follow.
+    const harness = await connect({ serverConfig: report });
+
+    await harness.client.callTool({
+      name: 'get_run_settings',
+      arguments: { project_root: PROJECT_ROOT },
+    });
+
+    expect(harness.ensureCalls).toBe(0);
+  });
+
+  it('reports a stopped server as an answer, not an error', async () => {
+    // A transport failure IS the answer here. An `isError` result would make an
+    // agent think the tool is broken, when what it learned is that nothing is
+    // running — and this tool is not allowed to start one to find out.
+    const { client } = await connect({ configError: new TypeError('fetch failed') });
+
+    const res = await client.callTool({
+      name: 'get_run_settings',
+      arguments: { project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as Record<string, any>;
+    expect(structured.running).toBe(false);
+    expect(structured.detail).toContain('fetch failed');
+    expect(structured.model).toBeNull();
+    expect(structured.serverDefaults).toBeNull();
+  });
+
+  it('says an unknown session is not open rather than reporting the defaults', async () => {
+    const { client } = await connect({
+      configError: new ApiHttpError(404, 'Session not found'),
+    });
+
+    const res = await client.callTool({
+      name: 'get_run_settings',
+      arguments: { session_id: 'mcp:gone', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBe(true);
+    const text = JSON.stringify(res.content);
+    expect(text).toContain('mcp:gone');
+    expect(text).toContain('list_sessions');
+    // Both causes are named, because a 404 with a session id is genuinely
+    // ambiguous — see below.
+    expect(text).toContain('predates');
+  });
+
+  it('reads a route-miss 404 as an older server, not a missing session', async () => {
+    // Measured against a Sessions API server left running from an earlier build:
+    // Express 404s the ROUTE, and reporting that as "no such session" sends the
+    // reader hunting for a session when the fix is to restart the server. With
+    // no session_id a 404 cannot mean "session not found", which settles it.
+    const { client } = await connect({
+      configError: new ApiHttpError(404, 'Not Found'),
+    });
+
+    const res = await client.callTool({
+      name: 'get_run_settings',
+      arguments: { project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBe(true);
+    const text = JSON.stringify(res.content);
+    expect(text).toContain('predates');
+    expect(text).not.toContain('list_sessions');
+    expect(text).not.toContain('undefined');
+  });
+});
+
+describe('get_page_content format: screenshot', () => {
+  it('returns the viewport as an image block, with empty text content', async () => {
+    const harness = await connect({});
+
+    const res = await harness.client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:x', project_root: PROJECT_ROOT, format: 'screenshot' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    // Over `GET /sessions/:id`, which already carried a screenshot — not the
+    // content endpoint.
+    expect(harness.sessionStateCalls).toEqual(['mcp:x']);
+    expect(harness.pageContentCalls).toHaveLength(0);
+
+    const image = (res.content as { type: string; data?: string }[]).find(
+      (b) => b.type === 'image',
+    );
+    expect(image?.data).toBe('A'.repeat(64));
+    const structured = res.structuredContent as Record<string, unknown>;
+    expect(structured.format).toBe('screenshot');
+    expect(structured.content).toBe('');
+    expect(structured.returnedChars).toBe(64);
+  });
+
+  it('treats an empty capture as an error, not a blank page', async () => {
+    // The server swallows capture failures into '' — reporting that as a blank
+    // page would be a claim about the page nobody downstream can correct.
+    const { client } = await connect({ sessionState: { screenshot: '' } });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:x', project_root: PROJECT_ROOT, format: 'screenshot' },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toContain('NOT a blank page');
+  });
+
+  it('refuses a selector rather than silently widening the read', async () => {
+    const { client } = await connect({});
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: {
+        session_id: 'mcp:x',
+        project_root: PROJECT_ROOT,
+        format: 'screenshot',
+        selector: '#total',
+      },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toContain('selector');
+  });
+
+  it('refuses a foreign session, like every other read of that page', async () => {
+    const { client } = await connect({});
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'testbench:1', project_root: PROJECT_ROOT, format: 'screenshot' },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toContain('disclose');
   });
 });
 

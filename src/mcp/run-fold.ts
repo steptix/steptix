@@ -8,7 +8,7 @@
  * lists different lengths.
  */
 import type { FrameInfo } from '../server/session-manager.js';
-import type { RunEvent } from './types.js';
+import type { EffectiveSettings, RunEvent, ScreenshotsReturn } from './types.js';
 
 export type StepStatus = 'passed' | 'failed' | 'skipped' | 'not-run' | 'unknown';
 export type RunStatus = 'passed' | 'failed' | 'error' | 'aborted';
@@ -53,9 +53,36 @@ export interface FoldedRun {
   /** Present when the `done` event carried it; otherwise the caller polls. */
   reportPath: string | null;
   error: string | null;
-  /** Raw base64 PNG of the final failure, if one was requested and small
-   *  enough. Prefix already stripped. */
+  /** Raw base64 PNG the caller asked for — the failure under `on-failure`, the
+   *  last one seen under `final` — if one was available and small enough. Prefix
+   *  already stripped. */
   screenshotBase64: string | null;
+  /**
+   * What the run ran under (stories/run-settings.md §5), or null when the server
+   * did not report it.
+   *
+   * The server half comes off the `done` event; `screenshotsReturn` is added
+   * here, because the server never learns it — the return mode is decided
+   * entirely on this side of the wire.
+   */
+  effectiveSettings: FoldedEffectiveSettings | null;
+}
+
+/**
+ * `EffectiveSettings` plus the return mode, with the server's half nullable.
+ *
+ * Every server-supplied field is nullable rather than absent so that an older
+ * Sessions API server — which omits `effectiveSettings` entirely — still
+ * produces a valid result. `screenshotsReturn` is never null: this side always
+ * knows it.
+ */
+export interface FoldedEffectiveSettings {
+  model: string | null;
+  capture: EffectiveSettings['capture'] | null;
+  fullPage: boolean | null;
+  sendScreenshots: boolean | null;
+  sources: EffectiveSettings['sources'] | null;
+  screenshotsReturn: ScreenshotsReturn;
 }
 
 export interface FoldInput {
@@ -74,7 +101,16 @@ export interface FoldInput {
   /** True when `skillsDir` or `sections` were sent, so the server may have
    *  expanded steps and the sent list is not the executed list. */
   expansionPossible: boolean;
-  includeScreenshot?: boolean;
+  /**
+   * Which screenshot, if any, to return to the caller.
+   *
+   * Required, and deliberately not defaulted here. `readRunSettings` resolves
+   * the tool argument (including `'default'`) against
+   * `DEFAULT_SCREENSHOTS_RETURN`, and a second fallback in this file is exactly
+   * how two defaults start disagreeing — the fold would keep answering `'none'`
+   * long after the product default had moved.
+   */
+  screenshotsReturn: ScreenshotsReturn;
 }
 
 const MAX_MESSAGES = 50;
@@ -84,9 +120,12 @@ const MAX_MESSAGE_CHARS = 500;
 const MAX_CAPTURE_CHARS = 4_000;
 /** Above this, an image is more cost than signal — a full-page PNG can run to
  *  several MB of base64, which is real money in image tokens and near some
- *  hosts' payload limits. */
-const MAX_SCREENSHOT_BASE64 = 1_500_000;
-const DATA_URI_PREFIX = /^data:image\/png;base64,/;
+ *  hosts' payload limits. Exported so the on-demand screenshot
+ *  (`get_page_content` with `format: "screenshot"`) is bounded by the same
+ *  number: one cap for images leaving this process, wherever they came from. */
+export const MAX_SCREENSHOT_BASE64 = 1_500_000;
+/** Exported for the same reason. */
+export const DATA_URI_PREFIX = /^data:image\/png;base64,/;
 
 /** Root frames are synthesized by the server whenever expansion ran, so
  *  "has a frame" does NOT mean "came from a skill". And `frame` is absent
@@ -125,6 +164,12 @@ export function foldRun(input: FoldInput): FoldedRun {
   let lastFailError: string | null = null;
   let lastOutputError: string | null = null;
   let lastFailScreenshot: string | null = null;
+  /** The most recent screenshot on ANY terminal event — what `final` returns.
+   *  A passing step carries one only when per-action capture is on, which is
+   *  what makes `final` depend on the capture setting. */
+  let lastScreenshot: string | null = null;
+  let sawFailure = false;
+  let serverSettings: EffectiveSettings | null = null;
   let sawSkipped = false;
 
   /** Sent-array position for a line the server reported, or null. */
@@ -248,6 +293,7 @@ export function foldRun(input: FoldInput): FoldedRun {
         open.row.output = event.output ?? null;
         open.row.fromCache = event.fromCache ?? false;
         open.row.tab = event.tab ?? open.row.tab;
+        if (event.screenshot) lastScreenshot = event.screenshot;
         // `output: 'skipped'` is how the server reports an `[input:]` or
         // `[interactive]` step it declined to run unattended. Calling that
         // "passed" is a false green on work that never happened.
@@ -262,7 +308,11 @@ export function foldRun(input: FoldInput): FoldedRun {
         open.row.error = event.error;
         open.row.tab = event.tab ?? open.row.tab;
         lastFailError = event.error;
-        if (event.screenshot) lastFailScreenshot = event.screenshot;
+        sawFailure = true;
+        if (event.screenshot) {
+          lastFailScreenshot = event.screenshot;
+          lastScreenshot = event.screenshot;
+        }
         closeRow('failed', at);
         break;
       }
@@ -293,11 +343,13 @@ export function foldRun(input: FoldInput): FoldedRun {
 
       case 'done': {
         doneStatus = event.status;
-        // `reportPath` is spread onto the event by the emitter, which slips
-        // past the excess-property check — so it is on the wire even though
-        // `RunEvent` does not declare it.
+        // Both fields are declared on the event and both are still checked at
+        // runtime, because this is wire data: an older server omits
+        // `effectiveSettings` altogether, and a malformed frame must degrade to
+        // "not reported" rather than to a shape the output schema will reject.
         const maybe = (event as { reportPath?: unknown }).reportPath;
         if (typeof maybe === 'string') reportPath = maybe;
+        serverSettings = readEffectiveSettings(event.effectiveSettings);
         break;
       }
 
@@ -354,16 +406,31 @@ export function foldRun(input: FoldInput): FoldedRun {
     );
   }
 
+  const screenshotsReturn = input.screenshotsReturn;
   let screenshotBase64: string | null = null;
-  if (input.includeScreenshot && lastFailScreenshot) {
-    const stripped = lastFailScreenshot.replace(DATA_URI_PREFIX, '');
-    if (stripped.length > MAX_SCREENSHOT_BASE64) {
-      warnings.push(
-        `Failure screenshot dropped: ${Math.round(stripped.length / 1024)}KB of ` +
-          'base64 exceeds the size cap.',
-      );
+  if (screenshotsReturn !== 'none') {
+    const wanted = screenshotsReturn === 'final' ? lastScreenshot : lastFailScreenshot;
+    if (wanted) {
+      const stripped = wanted.replace(DATA_URI_PREFIX, '');
+      if (stripped.length > MAX_SCREENSHOT_BASE64) {
+        // The run result matters more than the picture, so the image is dropped
+        // and the run stands. Expect this more often with `fullPage` on — a
+        // full-page PNG of a long page runs to several MB of base64.
+        warnings.push(
+          `Screenshot dropped: ${Math.round(stripped.length / 1024)}KB of base64 ` +
+            'exceeds the size cap. Turn off fullPage, or read the report instead.',
+        );
+      } else {
+        screenshotBase64 = stripped;
+      }
     } else {
-      screenshotBase64 = stripped;
+      // Nothing to return, and the cause is almost always the capture setting
+      // rather than anything about this run: a passing step carries no
+      // screenshot unless per-action capture is on, and a failing one carries
+      // none when failure capture is off. Naming that beats an empty result the
+      // caller has to diagnose.
+      const explain = missingScreenshotReason(screenshotsReturn, sawFailure, serverSettings);
+      if (explain) warnings.push(explain);
     }
   }
 
@@ -385,7 +452,89 @@ export function foldRun(input: FoldInput): FoldedRun {
     // transient text is still in `messages[]` for anyone who wants it.
     error: status === 'passed' ? null : (lastFailError ?? lastOutputError),
     screenshotBase64,
+    effectiveSettings: {
+      model: serverSettings?.model ?? null,
+      capture: serverSettings?.capture ?? null,
+      fullPage: serverSettings?.fullPage ?? null,
+      sendScreenshots: serverSettings?.sendScreenshots ?? null,
+      sources: serverSettings?.sources ?? null,
+      screenshotsReturn,
+    },
   };
+}
+
+/** Sources, validated as a set so a partial one degrades to "not reported"
+ *  rather than to an object the output schema rejects. */
+function readSources(value: unknown): EffectiveSettings['sources'] | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const valid = new Set(['server', 'project', 'session']);
+  const out: Record<string, string> = {};
+  for (const key of ['model', 'capture', 'fullPage', 'sendScreenshots']) {
+    const from = record[key];
+    if (typeof from !== 'string' || !valid.has(from)) return null;
+    out[key] = from;
+  }
+  return out as unknown as EffectiveSettings['sources'];
+}
+
+/**
+ * Read the server's `effectiveSettings` off a `done` frame.
+ *
+ * Field-by-field rather than cast-and-hope: an older server omits this
+ * entirely, and a mismatch anywhere has to read as "the server did not report
+ * it" — the alternative is a `structuredContent` validation failure that strips
+ * the whole run result at the very end of a run that worked.
+ */
+function readEffectiveSettings(value: unknown): EffectiveSettings | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const captureModes = new Set(['every-step', 'on-failure', 'none', 'custom']);
+  if (typeof record.model !== 'string') return null;
+  if (typeof record.capture !== 'string' || !captureModes.has(record.capture)) return null;
+  if (typeof record.fullPage !== 'boolean') return null;
+  if (typeof record.sendScreenshots !== 'boolean') return null;
+  const sources = readSources(record.sources);
+  if (!sources) return null;
+  return {
+    model: record.model,
+    capture: record.capture as EffectiveSettings['capture'],
+    fullPage: record.fullPage,
+    sendScreenshots: record.sendScreenshots,
+    sources,
+  };
+}
+
+/**
+ * Why the requested screenshot is not here — naming the setting to change.
+ *
+ * Returns null when there is nothing useful to say: asking for the failure shot
+ * on a run that never failed is not a problem, it is the happy path.
+ */
+function missingScreenshotReason(
+  mode: Exclude<ScreenshotsReturn, 'none'>,
+  sawFailure: boolean,
+  settings: EffectiveSettings | null,
+): string | null {
+  const capture = settings?.capture;
+  const captureSays =
+    capture === undefined
+      ? ''
+      : ` This run's capture setting was "${capture}".`;
+
+  if (mode === 'on-failure') {
+    if (!sawFailure) return null;
+    return (
+      'No failure screenshot was available, because nothing captured one. Pass ' +
+      `capture: "on-failure" (or "every-step") to photograph failures.${captureSays}`
+    );
+  }
+  // 'final'
+  return (
+    'No screenshot was available to return. A passing step is only photographed ' +
+    'when capture is "every-step", so pass that alongside screenshots_return: ' +
+    `"final" — or use get_page_content with format: "screenshot" to photograph the page now.${captureSays}`
+  );
 }
 
 /**

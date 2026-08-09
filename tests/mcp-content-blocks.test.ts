@@ -122,6 +122,29 @@ async function connect(): Promise<Client> {
         availableChars: PAGE_TEXT.length,
       } as never;
     },
+    async getSessionState(sessionId) {
+      return {
+        sessionId,
+        status: 'active',
+        currentUrl: 'https://app.test/invoices',
+        pageTitle: 'Invoices',
+        screenshot: `data:image/png;base64,${'A'.repeat(64)}`,
+        totalStepsExecuted: 1,
+      } as never;
+    },
+    async getConfig() {
+      return {
+        config: {},
+        server: {
+          model: 'test-model',
+          capture: 'on-failure',
+          fullPage: false,
+          sendScreenshots: false,
+          sources: { model: 'server', capture: 'server', fullPage: 'server', sendScreenshots: 'server' },
+        },
+        session: null,
+      } as never;
+    },
     async listSessions() {
       return [{ sessionId: 'mcp:a' }] as never;
     },
@@ -183,6 +206,10 @@ function argumentsFor(): Record<string, Record<string, unknown>> {
     close_session: { session_id: 'mcp:a', project_root: tmpDir },
     get_last_run: { session_id: 'mcp:a', project_root: tmpDir },
     get_page_content: { session_id: 'mcp:a', project_root: tmpDir },
+    // Against DEAD_SERVER this takes the `running: false` arm — which is a real
+    // answer with real structured content, and the arm the live check exercises
+    // ("reports it is not running and starts nothing").
+    get_run_settings: { project_root: tmpDir },
     server_status: { project_root: tmpDir },
     list_cdp_browsers: { project_root: tmpDir },
     start_cdp_browser: { engine: 'edge', profile: 'default', project_root: tmpDir },
@@ -281,6 +308,12 @@ describe('every tool serializes its structured content into a content block', ()
         },
         async closeSession() {},
         async getPageContent() {
+          throw new Error('not reached');
+        },
+        async getSessionState() {
+          throw new Error('not reached');
+        },
+        async getConfig() {
           throw new Error('not reached');
         },
         async listSessions() {

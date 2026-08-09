@@ -284,6 +284,70 @@ export interface McpConfig {
   cdp?: McpCdpConfig;
 }
 
+/**
+ * What gets photographed during a run — the TOOL's vocabulary, not a config
+ * key (stories/run-settings.md §3).
+ *
+ * `captureScreenshotsPerAction` and `screenshotOnFailure` describe a four-cell
+ * matrix with three meaningful cells, so this enum names those three and the
+ * server maps it back onto the two booleans. `default` means "stop overriding
+ * and use the project/server value" — without it, restoring the base would
+ * require the caller to already know what it is.
+ */
+export type CaptureMode = 'every-step' | 'on-failure' | 'none' | 'default';
+
+/**
+ * Per-session overrides for how a run behaves, applied per request and
+ * RETAINED on the session (stories/run-settings.md §1–§2).
+ *
+ * Deliberately not part of `Config`: nothing here is a config-file key, and
+ * nothing here is ever written to `aiui.config.json`. Every field is
+ * independently optional — a request carrying `{capture}` changes capture and
+ * leaves the model alone. `null` on the model and the booleans, and `'default'`
+ * on the enum, clear that one override and fall back to the project/server
+ * value; an ABSENT key means "leave whatever this session already has".
+ */
+export interface RunSettings {
+  /** Model for the next batch onward. Passed through to the gateway verbatim —
+   *  it is the authority on which models exist. `null` clears the override. */
+  model?: string | null;
+  capture?: CaptureMode;
+  /** `browser.fullPageScreenshots`. */
+  fullPage?: boolean | null;
+  /** `ai.sendScreenshots` — whether the MODEL sees the image while it works,
+   *  which is the main cost lever on a run. */
+  sendScreenshots?: boolean | null;
+}
+
+/** Which layer decided a setting's value. */
+export type SettingSource = 'server' | 'project' | 'session';
+
+/**
+ * What a run actually ran under, and where each value came from
+ * (stories/run-settings.md §5).
+ *
+ * The server is the only party that can report this: the MCP client does not
+ * know the server's defaults, and reading the project file itself would answer
+ * a different question ("what does the file say", not "what did this run use").
+ *
+ * `capture` carries a fourth value the tool enum does not: `'custom'`, for the
+ * one boolean pair the enum cannot express (per-action capture on, failure
+ * capture off). It is only reachable from a hand-written `aiui.config.json`,
+ * and naming it is more honest than rounding it to `'every-step'`.
+ */
+export interface EffectiveSettings {
+  model: string;
+  capture: 'every-step' | 'on-failure' | 'none' | 'custom';
+  fullPage: boolean;
+  sendScreenshots: boolean;
+  sources: {
+    model: SettingSource;
+    capture: SettingSource;
+    fullPage: SettingSource;
+    sendScreenshots: SettingSource;
+  };
+}
+
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;

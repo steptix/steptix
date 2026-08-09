@@ -167,12 +167,86 @@ const allowForeignSession = z
       "developer's open editor, and running steps in it drives their browser.",
   );
 
-const includeScreenshot = z
-  .boolean()
+// ---------------------------------------------------------------------------
+// Run settings (stories/run-settings.md §1, §4)
+//
+// Five flat arguments rather than one nested object: these are the words a model
+// has to get right at the moment of the call, and a nested `run_settings: {...}`
+// buys nothing but a level of indirection to mis-key.
+//
+// `capture` and `return` are deliberately separate settings. Capturing every
+// step into the HTML report is cheap; returning every step's screenshot into the
+// conversation is 30 PNGs on a 30-step run. Conflating them would make
+// "screenshot every step" quietly mean "fill my context with images".
+// ---------------------------------------------------------------------------
+
+const settingsNote =
+  'Sticks to this session until changed — you do not need to re-send it on the ' +
+  'next call. Pass "default" to stop overriding and go back to the project config.';
+
+const model = z
+  .string()
+  .min(1)
+  .nullable()
   .optional()
   .describe(
-    'Attach a screenshot of the failing page. Off by default: it is a picture ' +
-      'of whatever was on screen, which for a logged-in test is a live session.',
+    'Model for this run onward, e.g. "aibroker/google/gemini-3-flash". Takes ' +
+      'effect on the very next run with no browser restart — same page, same ' +
+      'captured variables. Passed through as given; the gateway decides what ' +
+      'exists. null clears the override and goes back to the project/server ' +
+      'model. Note that the step cache does NOT key on the model, so with caching ' +
+      'on a switched model can be served the previous one\'s cached plans — turn ' +
+      'the cache off if you are comparing models.',
+  );
+
+const capture = z
+  .enum(['every-step', 'on-failure', 'none', 'default'])
+  .optional()
+  .describe(
+    'What gets photographed into the HTML report. `every-step` — a screenshot ' +
+      'per step, which is what you want while debugging. `on-failure` — only ' +
+      'the step that broke. `none` — nothing. This is cheap: the images go to ' +
+      'the report on disk, not into this conversation. **Read this before ' +
+      'setting screenshots_return**: you cannot be handed a picture nobody took, ' +
+      `so \`return: "final"\` needs \`capture: "every-step"\`. ${settingsNote}`,
+  );
+
+const fullPage = z
+  .boolean()
+  .nullable()
+  .optional()
+  .describe(
+    'Capture the whole scrollable page instead of just the viewport. Makes ' +
+      'every screenshot much larger — a long page can exceed the size cap for ' +
+      `returning one to you, which drops the image and keeps the run. ${settingsNote}`,
+  );
+
+const sendScreenshots = z
+  .boolean()
+  .nullable()
+  .optional()
+  .describe(
+    'Whether the model driving the steps sees a screenshot on each of its ' +
+      'turns. **This is the main cost lever on a run** — leaving it off is much ' +
+      'cheaper, and most steps do not need it. Turning it ON also forces a ' +
+      'capture per turn regardless of `capture`, because the model\'s request ' +
+      `needs the image. ${settingsNote}`,
+  );
+
+const screenshotsReturn = z
+  .enum(['none', 'on-failure', 'final', 'default'])
+  .optional()
+  .describe(
+    'Which screenshot comes back to YOU as an image. `on-failure` is the ' +
+      'DEFAULT (and what `default` means): if a step fails you get a picture of ' +
+      'the page as it broke, and nothing at all on a passing run. `none` — no ' +
+      'image ever; pass this when you are running a suite and only need the ' +
+      'verdict, or when the page holds something you would rather not put in ' +
+      'this conversation. `final` — the page as the run left it, pass or fail, ' +
+      'which needs `capture: "every-step"` on a passing run. There is ' +
+      'deliberately no every-step option. Bear in mind an image costs real ' +
+      'context and is a photograph of a live signed-in session. Per call — ' +
+      'unlike the settings above, this one is not retained.',
   );
 
 export const runStepsInput = toolSchema({
@@ -190,7 +264,11 @@ export const runStepsInput = toolSchema({
   parameters,
   config: toolConfig,
   allow_foreign_session: allowForeignSession,
-  include_screenshot: includeScreenshot,
+  model,
+  capture,
+  full_page: fullPage,
+  send_screenshots: sendScreenshots,
+  screenshots_return: screenshotsReturn,
 });
 
 export const runTestFileInput = toolSchema({
@@ -201,7 +279,79 @@ export const runTestFileInput = toolSchema({
   parameters,
   config: toolConfig,
   allow_foreign_session: allowForeignSession,
-  include_screenshot: includeScreenshot,
+  model,
+  capture,
+  full_page: fullPage,
+  send_screenshots: sendScreenshots,
+  screenshots_return: screenshotsReturn,
+});
+
+export const getRunSettingsInput = toolSchema({
+  project_root: projectRoot,
+  session_id: z
+    .string()
+    .optional()
+    .describe(
+      'Report this session\'s retained settings as well as the server-wide ' +
+        'defaults. Omit for the defaults alone. An unknown session is an error, ' +
+        'not a silent fall back to the defaults.',
+    ),
+});
+
+const settingSource = z
+  .enum(['server', 'project', 'session'])
+  .describe(
+    '`server` — the server\'s startup config. `project` — this project\'s ' +
+      'aiui.config.json or .env. `session` — set on this session by a tool call.',
+  );
+
+export const getRunSettingsOutput = toolSchema({
+  baseUrl: z.string(),
+  running: z
+    .boolean()
+    .describe(
+      'Whether a usable server answered. False means nothing was reachable — ' +
+        'this tool never starts one to find out, so the settings fields are null ' +
+        'rather than guessed.',
+    ),
+  detail: z.string().nullable().describe('Why `running` is false.'),
+  projectRoot: z.string(),
+  sessionId: z.string().nullable(),
+  // What the next run on this session would use — the session's values when one
+  // was named, the server defaults otherwise.
+  model: z.string().nullable(),
+  capture: z.enum(['every-step', 'on-failure', 'none', 'custom']).nullable(),
+  fullPage: z.boolean().nullable(),
+  sendScreenshots: z.boolean().nullable(),
+  sources: z
+    .object({
+      model: settingSource,
+      capture: settingSource,
+      fullPage: settingSource,
+      sendScreenshots: settingSource,
+    })
+    .nullable(),
+  overrides: z
+    .object({
+      model: z.string().nullable(),
+      capture: z.enum(['every-step', 'on-failure', 'none']).nullable(),
+      fullPage: z.boolean().nullable(),
+      sendScreenshots: z.boolean().nullable(),
+    })
+    .nullable()
+    .describe(
+      'Just the values set on this session, with null for anything not ' +
+        'overridden. Null as a whole when no session was named.',
+    ),
+  serverDefaults: z
+    .object({
+      model: z.string(),
+      capture: z.enum(['every-step', 'on-failure', 'none', 'custom']),
+      fullPage: z.boolean(),
+      sendScreenshots: z.boolean(),
+    })
+    .nullable()
+    .describe('What a run with no project config and no overrides would use.'),
 });
 
 export const listTestFilesInput = toolSchema({ project_root: projectRoot });
@@ -223,12 +373,15 @@ export const getPageContentInput = toolSchema({
   session_id: z.string().describe('Session whose current page to read.'),
   project_root: projectRoot,
   format: z
-    .enum(['text', 'dom'])
+    .enum(['text', 'dom', 'screenshot'])
     .optional()
     .describe(
       '`text` (default) — the page\'s visible text, for what it says. `dom` — ' +
         'the cleaned DOM, for picking a selector to act on. `text` is far ' +
-        'smaller; reach for `dom` only when you need element structure.',
+        'smaller; reach for `dom` only when you need element structure. ' +
+        '`screenshot` — a PNG of the viewport right now, returned as an image; ' +
+        'use it when the question is about layout or what something looks like, ' +
+        'and remember it costs far more context than text.',
     ),
   selector: z
     .string()
@@ -237,7 +390,9 @@ export const getPageContentInput = toolSchema({
     .describe(
       'CSS selector to read instead of the whole page. **This is the right ' +
         'way to handle a truncated result** — narrowing beats raising ' +
-        'max_chars. A selector matching nothing is an error, not empty text.',
+        'max_chars. A selector matching nothing is an error, not empty text. ' +
+        'Not available with `format: "screenshot"`, which always photographs ' +
+        'the whole viewport.',
     ),
   max_chars: z
     .number()
@@ -246,7 +401,8 @@ export const getPageContentInput = toolSchema({
     .optional()
     .describe(
       'Cap on returned characters (default 20000). Over-limit content comes ' +
-        'back truncated and flagged, never silently clipped.',
+        'back truncated and flagged, never silently clipped. Does not apply to ' +
+        '`format: "screenshot"`, which has its own size cap.',
     ),
   allow_foreign_session: allowForeignSession,
 });
@@ -256,9 +412,15 @@ export const getPageContentOutput = toolSchema({
   url: z.string(),
   title: z.string(),
   status: z.enum(['active', 'executing']),
-  format: z.enum(['text', 'dom']),
+  format: z.enum(['text', 'dom', 'screenshot']),
   selector: z.string().nullable(),
-  content: z.string(),
+  content: z
+    .string()
+    .describe(
+      'The page text or DOM. EMPTY for `format: "screenshot"` — the picture is ' +
+        'in the image block alongside this, not in here. An empty value never ' +
+        'means "the read failed": that is an error instead.',
+    ),
   truncated: z
     .boolean()
     .describe(
@@ -266,7 +428,12 @@ export const getPageContentOutput = toolSchema({
         'max_chars, or the capture itself hit the project\'s DOM size limit. ' +
         'Narrow with `selector` to see the rest.',
     ),
-  returnedChars: z.number(),
+  returnedChars: z
+    .number()
+    .describe(
+      'Characters returned. For `format: "screenshot"` this is the size of the ' +
+        'base64 image, which is what the read actually cost you.',
+    ),
   availableChars: z
     .number()
     .describe(
@@ -488,6 +655,37 @@ const tokens = z.object({
   output: z.number(),
 });
 
+/**
+ * What the run ran under (stories/run-settings.md §5).
+ *
+ * Every server-supplied field is `.nullable()` — an older Sessions API server
+ * omits the whole object, and a missing key is fatal to `validateToolOutput`
+ * where a null one is merely "not reported". `screenshotsReturn` is never null:
+ * the MCP side always knows it, since the server never sees it.
+ */
+const effectiveSettings = z
+  .object({
+    model: z.string().nullable(),
+    capture: z.enum(['every-step', 'on-failure', 'none', 'custom']).nullable(),
+    fullPage: z.boolean().nullable(),
+    sendScreenshots: z.boolean().nullable(),
+    sources: z
+      .object({
+        model: settingSource,
+        capture: settingSource,
+        fullPage: settingSource,
+        sendScreenshots: settingSource,
+      })
+      .nullable(),
+    screenshotsReturn: z.enum(['none', 'on-failure', 'final']),
+  })
+  .nullable()
+  .describe(
+    'The settings this run actually used. Worth reading rather than assuming: a ' +
+      'preference set earlier in a conversation is easy to lose track of, and ' +
+      'these are the values that were really in force.',
+  );
+
 export const runResultOutput = toolSchema({
   status: z.enum(['passed', 'failed', 'error', 'aborted']),
   streamDropped: z.boolean(),
@@ -503,6 +701,7 @@ export const runResultOutput = toolSchema({
   reportPath: z.string().nullable(),
   tokens: tokens.nullable(),
   error: z.string().nullable(),
+  effectiveSettings,
 });
 
 export const listTestFilesOutput = toolSchema({
