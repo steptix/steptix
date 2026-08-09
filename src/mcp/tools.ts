@@ -203,7 +203,15 @@ function httpErrorToToolError(
             : ''),
       );
     default:
-      return preflightError(`${baseUrl} rejected the request (HTTP ${err.status}): ${err.serverMessage}`);
+      // The `: <cause>` tail is dropped when there is no cause. A server that
+      // sends an empty reason phrase — anything over HTTP/2, or behind a proxy
+      // — otherwise renders as "rejected the request (HTTP 404): ", a dangling
+      // colon with nothing after it, which reads like the message got lost
+      // rather than like there never was one.
+      return preflightError(
+        `${baseUrl} rejected the request (HTTP ${err.status})` +
+          (err.serverMessage ? `: ${err.serverMessage}` : ''),
+      );
   }
 }
 
@@ -1103,6 +1111,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           //
           // Without a session_id a 404 cannot mean "session not found", which
           // settles that case outright; with one, both are named.
+          //
+          // **If `getConfig` ever grows the `ApiRouteNotFoundError` treatment
+          // `focusCdpTab` has, its narrow check goes ABOVE this one.** That
+          // class extends `ApiHttpError`, so this arm would swallow it first
+          // and emit the ambiguous both-causes message below in place of the
+          // crisp route-missing one it would by then have the information to
+          // give — a silent downgrade that still looks like it is working.
           if (err instanceof ApiHttpError && err.status === 404) {
             const olderServer =
               `${baseUrl} has no GET /config, so it predates per-session run ` +

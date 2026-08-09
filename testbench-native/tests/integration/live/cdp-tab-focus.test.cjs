@@ -27,6 +27,18 @@
  * thing it was designed not to test. Run it with the browser not buried, and
  * read a failure here as "look at the screen", not as "the route is broken".
  *
+ * **Run this with the Chrome window visible.** Measured 2026-08-09 on Chrome
+ * 150, both ways: with the window on screen, a repaint made while the tab was
+ * backgrounded reached `Page.captureScreenshot` in ~940ms and the bytes
+ * changed. With the window fully covered — which is the normal state here,
+ * since the suite runs under a VS Code host that owns the foreground —
+ * Chromium produces no frames for it and the same capture times out. Two
+ * scenarios below therefore grade their outcome: a wrong or stale picture
+ * fails, no picture at all is recorded as a skip and reported as one. This is
+ * a real property of the feature (stories/cdp-tab-focus.md §Risks), not a
+ * flake — a run whose browser is buried keeps working and loses its
+ * screenshots.
+ *
  * MRU ordering is documented for Chrome and unverified for Edge, so this
  * launches Chrome explicitly rather than whatever is around.
  *
@@ -46,11 +58,14 @@
  * (auto-discovered by the glob), or scope it with
  * TESTBENCH_LIVE_GREP="CDP tab focus".
  *
- * Required env: AIUI_SERVER_API_KEY in templates/.env. No AI key needed.
+ * Required env: `AIUI_SERVER_API_KEY`, resolved the way the framework resolves
+ * it (project `.env` → environment → the machine key file). Only the run-in-
+ * flight scenario needs an AI key; the rest need none.
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const http = require('node:http');
 const vscode = require('vscode');
 
@@ -81,14 +96,47 @@ async function readJson(res) {
   return { status: res.status, body, raw };
 }
 
-/** Read one key out of templates/.env without pulling in a dotenv dependency. */
+/** Read one key out of an env file without pulling in a dotenv dependency.
+ *  Missing file or missing key both read as absent — every caller here sits at
+ *  one rung of a resolution chain and only asks "is there a value". */
 function readEnvValue(envPath, key) {
-  const line = fs
-    .readFileSync(envPath, 'utf8')
-    .split(/\r?\n/)
-    .find((l) => l.trim().startsWith(`${key}=`));
+  let content;
+  try {
+    content = fs.readFileSync(envPath, 'utf8');
+  } catch {
+    return '';
+  }
+  const line = content.split(/\r?\n/).find((l) => l.trim().startsWith(`${key}=`));
   if (!line) return '';
   return line.slice(line.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '');
+}
+
+/** `%LOCALAPPDATA%\aiui\.env` / `$XDG_CONFIG_HOME/aiui/.env` / `~/.aiui/.env`,
+ *  mirroring `src/env/user-root.ts`. */
+function userRootEnvPath() {
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'aiui', '.env');
+  }
+  const xdg = process.env.XDG_CONFIG_HOME;
+  return xdg ? path.join(xdg, 'aiui', '.env') : path.join(os.homedir(), '.aiui', '.env');
+}
+
+/**
+ * Resolve a credential the way the framework does: project `.env`, then the
+ * environment, then the machine-wide file.
+ *
+ * The chain is not optional politeness. stories/machine-key.md moved
+ * `AIUI_SERVER_API_KEY` out of per-project `.env` files and into one
+ * self-provisioned machine key, so a test that reads only `templates/.env`
+ * finds nothing and takes the whole suite down in `before()`.
+ */
+function resolveCredential(projectEnvPath, key) {
+  return (
+    readEnvValue(projectEnvPath, key) ||
+    (process.env[key] ?? '') ||
+    readEnvValue(userRootEnvPath(), key)
+  );
 }
 
 describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function () {
@@ -139,23 +187,33 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
    * that has nothing to do with focus.
    *
    * And it does not sleep a fixed amount and then assert. Activation is
-   * asynchronous, so a single settle is a bet on a machine's timing; polling
-   * to a budget passes instantly on a quick machine and still gives a loaded
-   * one room. Exhausting the budget means what it says.
+   * asynchronous, so a single settle is a bet on a machine's timing.
+   *
+   * **The budget alone was not enough, because each attempt is expensive.**
+   * `GET /cdp/browsers` walks every profile directory under
+   * `.aiui/cdp-profiles/` and probes each one with a 1500 ms timeout — and
+   * stale profile dirs are the normal state, since `DevToolsActivePort` is
+   * never deleted. On a machine carrying a couple of those, a 5 s wall-clock
+   * budget buys two or three attempts; if one listing runs long it buys
+   * exactly one, which is the fixed-sleep-and-assert-once shape this was
+   * written to replace. So a minimum number of attempts is guaranteed
+   * regardless of the clock, and the budget only ever ends a poll that has
+   * already had a fair go.
    */
-  async function waitForHeadTab(targetId, label, budgetMs = 5_000) {
+  async function waitForHeadTab(targetId, label, budgetMs = 5_000, minAttempts = 8) {
     const deadline = Date.now() + budgetMs;
     let head;
-    for (;;) {
+    for (let attempt = 0; ; attempt++) {
       const tabs = await ourTabs();
       head = tabs[0];
       if (head && head.targetId === targetId) return;
-      if (Date.now() >= deadline) break;
+      if (attempt + 1 >= minAttempts && Date.now() >= deadline) break;
       await sleep(100);
     }
     assert.fail(
       `after focusing ${label} the browser's most-recently-used tab is still ` +
-        `${JSON.stringify(head ? head.title : '(none)')} after ${budgetMs}ms.\n` +
+        `${JSON.stringify(head ? head.title : '(none)')} after ${minAttempts}+ attempts ` +
+        `over ${budgetMs}ms.\n` +
         'Chrome serves /json/list most-recently-used first, so the focused tab should ' +
         'head it. If the browser window is buried behind another application, see this ' +
         "file's header — the ordering can depend on the raise the OS may have declined.",
@@ -202,20 +260,25 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       `no aiui.config.json under ${projectRoot}`,
     );
 
-    apiKey = readEnvValue(path.join(workspaceRoot, '.env'), 'AIUI_SERVER_API_KEY');
-    assert.ok(apiKey, 'AIUI_SERVER_API_KEY missing from templates/.env');
+    const projectEnv = path.join(workspaceRoot, '.env');
+    apiKey = resolveCredential(projectEnv, 'AIUI_SERVER_API_KEY');
+    assert.ok(
+      apiKey,
+      'No AIUI_SERVER_API_KEY in templates/.env, the environment, or the machine key ' +
+        `file (${userRootEnvPath()}). Start the server once and it provisions one.`,
+    );
 
-    // AI credentials come from the REPO ROOT `.env` in preference to
-    // `templates/.env`, and the difference is the model rather than the key.
-    // The two files carry the same `AI_API_KEY`, but templates names a bare
-    // `openrouter/…` model, which routes direct/BYOK — so the gateway key is
-    // sent to a provider that has never heard of it and the first step dies on
-    // `401 Missing Authentication header`. The root file's `aibroker/…` prefix
-    // routes through the gateway the key actually belongs to.
+    // AI credentials prefer the REPO ROOT `.env` over `templates/.env`, and the
+    // difference is the MODEL rather than the key. Both files carry the same
+    // `AI_API_KEY`, but templates names a bare `openrouter/…` model, which
+    // routes direct/BYOK — so the gateway key is sent to a provider that has
+    // never heard of it and the first step dies on `401 Missing Authentication
+    // header`. The root file's `aibroker/…` prefix routes through the gateway
+    // the key actually belongs to.
     const repoRootEnv = path.resolve(workspaceRoot, '..', '.env');
-    const preferred = fs.existsSync(repoRootEnv) ? repoRootEnv : path.join(workspaceRoot, '.env');
-    aiKey = readEnvValue(preferred, 'AI_API_KEY') || readEnvValue(path.join(workspaceRoot, '.env'), 'AI_API_KEY');
-    aiModel = readEnvValue(preferred, 'AI_MODEL') || readEnvValue(path.join(workspaceRoot, '.env'), 'AI_MODEL');
+    const preferred = fs.existsSync(repoRootEnv) ? repoRootEnv : projectEnv;
+    aiKey = resolveCredential(preferred, 'AI_API_KEY') || resolveCredential(projectEnv, 'AI_API_KEY');
+    aiModel = readEnvValue(preferred, 'AI_MODEL') || readEnvValue(projectEnv, 'AI_MODEL');
 
     serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
     try {
@@ -257,8 +320,22 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     for (const route of ['/alpha', '/beta', '/gamma']) {
       await openTab(`${fixtureBase}${route}`);
     }
-    // Titles arrive with the document, and the echo assertions read them.
-    await sleep(1_500);
+
+    // Wait for the titles rather than sleeping for them — the same reasoning as
+    // `waitForHeadTab`, and this one runs first, so a fixed settle's failure
+    // mode on a cold machine is every test in the file reporting "fixture tabs
+    // missing".
+    const wanted = ['Alpha Tab', 'Beta Tab', 'Gamma Tab'];
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const titles = (await ourTabs()).map((t) => t.title);
+      if (wanted.every((w) => titles.includes(w))) break;
+      assert.ok(
+        Date.now() < deadline,
+        `fixture tabs never appeared — wanted ${JSON.stringify(wanted)}, got ${JSON.stringify(titles)}`,
+      );
+      await sleep(150);
+    }
   });
 
   after(async () => {
@@ -382,7 +459,7 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     );
   });
 
-  it('photographs a backgrounded tab identically — the rendering half of rule (5)', async function () {
+  it('photographs a backgrounded tab CURRENTLY — the rendering half of rule (5)', async function () {
     // The part of verification rule (5) the story says nobody had measured:
     // "does `Page.captureScreenshot` render a backgrounded tab of a headful
     // browser identically". Everything above the renderer is target-addressed
@@ -390,9 +467,17 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     // plausibly have differed, because a compositor is entitled to stop
     // producing frames for a tab nobody is looking at.
     //
-    // Measured here rather than reasoned about, and deliberately WITHOUT the
-    // AI: shoot the tab while it is in front, focus a different one through the
-    // real route, shoot it again, and compare the bytes.
+    // **The obvious assertion is the wrong one, and it took a review to see
+    // it.** An earlier version shot the tab in front, focused another, shot it
+    // again and asserted the bytes were EQUAL. Against a static fixture page
+    // that proves nothing about the failure it exists to exclude: if the
+    // compositor had handed back the last frame from when the tab was visible,
+    // the bytes would be identical too. Stale and current are the same picture.
+    //
+    // So the tab is CHANGED while it is backgrounded, and the assertion is that
+    // the capture moved with it. That proves the frame is current — which the
+    // equality never did — and it survives an antialiasing or device-pixel
+    // difference, which the equality would not have.
     let chromium;
     try {
       ({ chromium } = require('playwright'));
@@ -419,18 +504,80 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
 
       await focusTab(gammaTab.targetId);
       await waitForHeadTab(gammaTab.targetId, 'Gamma Tab');
-      const backgrounded = await alpha.screenshot({ timeout: 20_000 });
 
-      assert.ok(backgrounded.length > 2_000, `backgrounded frame is only ${backgrounded.length} bytes`);
+      // Unchanged, and behind another tab: the observation the story wanted,
+      // kept as a log line rather than an assertion. "Renders identically" is a
+      // nice measured fact, not an invariant the feature depends on — asserting
+      // it buys nothing the currency check below does not, and costs a red run
+      // the day a GPU-process restart flips rasterisation between two captures.
+      const unchanged = await alpha.screenshot({ timeout: 20_000 });
+      console.log(
+        `[live] backgrounded, unchanged: ${unchanged.length} bytes, ` +
+          `byte-identical to frontmost: ${Buffer.compare(frontmost, unchanged) === 0}`,
+      );
+
+      // Now change something visible WHILE the tab is behind another one. A
+      // compositor that had stopped producing frames for it would keep handing
+      // back the old picture.
+      await alpha.evaluate(() => {
+        document.body.style.background = 'rgb(0, 128, 0)';
+        document.title = 'Alpha Tab';
+      });
+
+      // **A timeout here is a measured limitation, not a regression** — see the
+      // header. Chromium produces no new frames for a window the compositor
+      // considers occluded, so a capture that needs a fresh one waits for
+      // something that never arrives. Measured 2026-08-09 both ways on Chrome
+      // 150: with the browser window visible, a repaint made while the tab was
+      // backgrounded reached the capture in ~940ms and the bytes changed; with
+      // the window fully covered (this suite runs under a VS Code host that
+      // owns the foreground) the same capture times out.
+      //
+      // So the outcome is graded rather than binary: a picture must be a
+      // CURRENT picture, but no picture at all is the documented case and is
+      // recorded as a skip — which the runner now reports, rather than
+      // swallowing it the way it used to.
+      let afterMutation;
+      try {
+        afterMutation = await alpha.screenshot({ timeout: 20_000 });
+      } catch (err) {
+        if (!/Timeout .* exceeded/i.test(String(err))) throw err;
+        console.log(
+          '[live] the backgrounded capture timed out — the browser window is occluded, so ' +
+            'Chromium is producing no frames for it. This is the documented limitation ' +
+            '(stories/cdp-tab-focus.md §Risks), not a focus regression. Re-run with the ' +
+            'Chrome window visible to exercise the currency check.',
+        );
+        this.skip();
+        return;
+      }
+
       assert.equal(
-        Buffer.compare(frontmost, backgrounded),
+        afterMutation.subarray(0, 8).toString('hex'),
+        '89504e470d0a1a0a',
+        'the backgrounded capture is not a PNG',
+      );
+      assert.ok(
+        afterMutation.length > 2_000,
+        `backgrounded frame is only ${afterMutation.length} bytes — likely blank`,
+      );
+      // Same dimensions, so this is the same tab and not a differently-sized
+      // surface: bytes 16-24 of a PNG are IHDR's width and height.
+      assert.deepEqual(
+        afterMutation.subarray(16, 24),
+        frontmost.subarray(16, 24),
+        'the backgrounded capture has different dimensions',
+      );
+      assert.notEqual(
+        Buffer.compare(unchanged, afterMutation),
         0,
-        `a backgrounded tab photographed differently: ${frontmost.length} bytes in front, ` +
-          `${backgrounded.length} behind. Rule (5) claims focus changes nothing observable — ` +
-          'if this ever fails, the tool description has to stop saying so.',
+        'a repaint made while the tab was backgrounded did not reach the capture — ' +
+          '`Page.captureScreenshot` returned a STALE frame. Rule (5) claims a run keeps ' +
+          'working normally when another tab is focused; if this fails, screenshots taken ' +
+          'after a focus cannot be trusted and the tool description has to say so.',
       );
       console.log(
-        `[live] backgrounded screenshot is byte-identical (${backgrounded.length} bytes)`,
+        `[live] a repaint made while backgrounded reached the capture (${afterMutation.length} bytes)`,
       );
     } finally {
       // `close()` over CDP is a no-op on the browser itself — it detaches.
@@ -454,11 +601,18 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     // identically" is the part of the claim nobody had measured — so this
     // asserts the steps taken *after* the focus still come back with real,
     // decodable PNG frames rather than blank or stale ones.
-    // The only scenario here that spends an AI call. Skipped rather than failed
-    // without a key, so the rest of this file stays runnable on a machine that
-    // has none.
+    // The only scenario here that spends an AI call.
+    //
+    // A genuinely ABSENT credential skips, decided before anything runs, so it
+    // cannot mask a result. A credential that is present but rejected does NOT
+    // skip — it fails, like every other AI-driven test in this directory would.
+    // An earlier version tried to be clever and skipped when the run failed
+    // *and* the log mentioned a 401; that hatch could swallow a genuine "the
+    // run did not survive the focus" failure, because `output` events come from
+    // a process-global log bridge and another session's 401 on the same server
+    // lands in this stream.
     if (!aiKey) {
-      console.log('[live] AI_API_KEY missing from templates/.env — skipping rule (5)');
+      console.log('[live] no AI_API_KEY — skipping rule (5)');
       this.skip();
       return;
     }
@@ -474,6 +628,14 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
 
     // Two navigations rather than assertions: deterministic, cheap, and each
     // one produces a step:pass carrying a frame.
+    //
+    // **This mutates the fixture set for everything after it**: the alpha tab
+    // ends on /gamma, so two tabs then share the title "Gamma Tab" and the same
+    // url. Harmless for the tests below, which address tabs by `targetId` — but
+    // do NOT add `this.retries(...)` to this suite without re-opening the tabs
+    // first. A retried pass of this test would match "Gamma Tab" against the
+    // ex-alpha tab and drive the very tab a session holds, then pass while
+    // proving nothing.
     const body = {
       steps: [`Navigate to ${fixtureBase}/beta`, `Navigate to ${fixtureBase}/gamma`],
       testFilePath: path.join(projectRoot, '.aiui-live-focus.md'),
@@ -550,26 +712,6 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       headers: auth(),
     });
 
-    // ── The half that needs the model to have answered ────────────────────
-    //
-    // A dead AI credential is an environment problem, not a focus regression,
-    // and every other AI-driven test in this directory is failing the same way
-    // when it happens. Narrowed to authentication specifically so a genuine
-    // failure — a step that broke because of the focus — still fails here.
-    const authFailed = events.some(
-      (e) =>
-        e.type === 'output' &&
-        /\b401\b|missing authentication|unauthor/i.test(String(e.msg ?? '')),
-    );
-    if (done.status !== 'passed' && authFailed) {
-      console.log(
-        '[live] the run could not reach the model (auth) — the tab invariant above still ' +
-          'held; skipping the screenshot half. Check AI_API_KEY in templates/.env.',
-      );
-      this.skip();
-      return;
-    }
-
     assert.equal(
       done.status,
       'passed',
@@ -578,22 +720,46 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       )}`,
     );
 
-    // Steps that ran while another tab was in front still photographed their
-    // own backgrounded tab. The pixel-level version of this is the test above,
-    // which needs no AI; this is the same claim through the whole runner.
+    // Steps that ran while another tab was in front. Whatever frames came back
+    // must be real ones — a blank or truncated capture attached to a report is
+    // worse than none, because it looks like evidence.
     const shots = events.filter((e) => e.type === 'step:pass' && e.screenshot);
-    assert.ok(
-      shots.length > 0,
-      'no step:pass carried a screenshot — capture: every-step should have produced one per step',
-    );
     for (const shot of shots) {
       const base64 = String(shot.screenshot).replace(/^data:image\/png;base64,/, '');
       const buf = Buffer.from(base64, 'base64');
-      // A real PNG, not a blank or truncated frame: magic bytes plus enough
-      // bytes that an empty capture would not pass.
       assert.equal(buf.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'not a PNG');
       assert.ok(buf.length > 2_000, `screenshot is only ${buf.length} bytes — likely blank`);
     }
+
+    // **Whether there are any is a separate question, and the answer is
+    // environmental.** The same occlusion limitation the pixel test measures
+    // reaches the runner here: with the browser window covered, Chromium
+    // produces no frames for it and `captureScreenshot` times out, so the run
+    // completes normally — right tab, right steps, `passed` — carrying no
+    // pictures. The automation is unaffected; only the evidence is. The runner
+    // logs each miss, so this looks for that rather than guessing.
+    const shotTimedOut = events.some(
+      (e) =>
+        e.type === 'output' &&
+        /screenshot capture failed/i.test(String(e.msg ?? '')) &&
+        /timeout/i.test(String(e.msg ?? '')),
+    );
+    if (shots.length === 0) {
+      assert.ok(
+        shotTimedOut,
+        'capture: every-step produced no screenshots and the runner never reported a ' +
+          'capture timeout — so they went missing for some reason other than the ' +
+          'documented occlusion case.',
+      );
+      console.log(
+        `[live] run survived the focus (${withTab.length} events on tab ${alpha.targetId}), ` +
+          'but its screenshots timed out — the browser window is occluded ' +
+          '(stories/cdp-tab-focus.md §Risks). Re-run with it visible to cover the frames.',
+      );
+      this.skip();
+      return;
+    }
+
     console.log(
       `[live] run survived the focus: ${withTab.length} events on tab ${alpha.targetId}, ` +
         `${shots.length} screenshots`,

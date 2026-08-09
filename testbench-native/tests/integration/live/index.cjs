@@ -65,6 +65,19 @@ async function run() {
           err: err?.stack || err?.message || String(err),
         });
       });
+      // Skips were recorded nowhere, and mocha's exit code ignores them — so a
+      // test that called `this.skip()` produced no row and no signal at all.
+      // "Ran and passed" and "never ran" then look identical in the report,
+      // which is how a scenario quietly stops being checked. The runner already
+      // prints an `o` marker for this state; it just never had anything to
+      // print it for.
+      runner.on('pending', (test) => {
+        results.push({
+          suite: test.parent?.fullTitle?.() ?? '',
+          title: test.title,
+          state: 'pending',
+        });
+      });
     } catch (err) {
       reject(err);
     }

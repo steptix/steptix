@@ -390,6 +390,60 @@ describe('createApiClient other routes', () => {
     expect(routeGone).toBeInstanceOf(ApiRouteNotFoundError);
   });
 
+  it('does not call a JSON 404 a stale server just because it parsed to nothing useful', async () => {
+    // Round two of the same hole. `envelope === null` was doing double duty as
+    // "did not parse" and "parsed to JSON null", and a bare scalar or an empty
+    // body fell through the same crack — all reported as a missing route, which
+    // is the confident lie this branch exists to prevent. An empty-body 404
+    // from a load balancer is the realistic trigger.
+    for (const [label, raw, contentType] of [
+      ['JSON null', 'null', 'application/json'],
+      ['bare string', '"not found"', 'application/json'],
+      ['bare number', '404', 'application/json'],
+      ['empty body', '', 'application/json'],
+    ] as const) {
+      const proxy = await startServer((_url, res) => {
+        res.writeHead(404, { 'Content-Type': contentType });
+        res.end(raw);
+      });
+      const err = await createApiClient({ baseUrl: proxy, apiKey: 'k' })
+        .focusCdpTab({ projectRoot: 'C:\\proj', port: 51000, targetId: 'T1' })
+        .catch((e: unknown) => e);
+
+      // An empty body does not parse, so it IS a missing route by this rule;
+      // the other three are deliberate answers and must not be.
+      if (label === 'empty body') {
+        expect(err, label).toBeInstanceOf(ApiRouteNotFoundError);
+      } else {
+        expect(err, label).toBeInstanceOf(ApiHttpError);
+        expect(err, label).not.toBeInstanceOf(ApiRouteNotFoundError);
+        expect((err as ApiHttpError).serverMessage, label).not.toBe('');
+      }
+
+      await new Promise<void>((r) => server!.close(() => r()));
+    }
+  });
+
+  it('never leaves an ApiHttpError with an empty message, even over an empty status text', async () => {
+    // `statusText` is empty over HTTP/2 and from servers that send a bare
+    // reason phrase. Seeded from it alone, the error carries nothing, and the
+    // tool layer renders "rejected the request (HTTP 404): " — a dangling
+    // colon that reads like the message was lost rather than never sent.
+    const baseUrl = await startServer((_url, res) => {
+      // Node lets an empty reason phrase through, which is what a proxy or an
+      // HTTP/2 hop produces.
+      res.writeHead(503, '', { 'Content-Type': 'text/plain' });
+      res.end('');
+    });
+
+    const err = await createApiClient({ baseUrl, apiKey: 'k' })
+      .listSessions()
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiHttpError);
+    expect((err as ApiHttpError).serverMessage).not.toBe('');
+    expect((err as ApiHttpError).serverMessage).toContain('503');
+  });
+
   it('does not call a JSON 404 a stale server just because it has no `error` string', async () => {
     // The hole in inferring route-missing from an absent message. Any
     // intermediary that answers 404 with JSON carrying a non-string `error` —
