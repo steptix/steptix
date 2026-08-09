@@ -1290,6 +1290,26 @@ describe('the other tools', () => {
 
     expect(harness.ensureCalls).toBe(0);
   });
+
+  // The read/act tools now auto-start (stories/mcp-no-project.md follow-up):
+  // whichever aiui tool an agent reaches for first should bring the server up
+  // rather than fail on a bare connect error. Only server_status and
+  // get_run_settings (above) keep the report-only path, because their contract
+  // is to be able to answer "nothing is running".
+  it.each([
+    ['list_sessions', {}],
+    ['get_last_run', { session_id: 'mcp:x' }],
+    ['close_session', { session_id: 'mcp:x' }],
+  ] as const)('%s auto-starts a stopped server', async (name, extra) => {
+    const harness = await connect({ lastRun: { finalized: true } });
+
+    await harness.client.callTool({
+      name,
+      arguments: { project_root: PROJECT_ROOT, ...extra },
+    });
+
+    expect(harness.ensureCalls).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

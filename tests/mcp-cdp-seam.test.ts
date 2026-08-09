@@ -296,15 +296,19 @@ describe('list_cdp_browsers', () => {
     expect(text(result)).toContain('0 available');
   });
 
-  it('never starts a server — it only reports what is already there', async () => {
-    // The other half of the `start_cdp_browser` regression: this one is a
-    // genuine probe and belongs with `list_sessions`. "What browsers do I
-    // have?" must not launch a Sessions API server as a side effect.
+  it('auto-starts the server so a first "what browsers do I have?" answers', async () => {
+    // Reversed from the original design (stories/mcp-no-project.md follow-up):
+    // "what browsers do I have?" is often an agent's FIRST call, and against a
+    // stopped server the old report-only path failed on a bare connect error.
+    // Listing browsers needs the server, so bringing it up to answer is the
+    // right move — the same auto-start every non-probe tool now gets.
+    // (server_status / get_run_settings keep the report-only path and can still
+    // answer "nothing running".)
     const h = await connect();
 
     await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
 
-    expect(h.readiness).toEqual(['assert']);
+    expect(h.readiness).toEqual(['ensure']);
   });
 
   it('does NOT ask for foreign tabs without the opt-in', async () => {

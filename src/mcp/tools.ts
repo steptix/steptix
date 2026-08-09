@@ -648,22 +648,23 @@ async function screenshotResult(
  * " rejected our AIUI_SERVER_API_KEY. Ours came from:  (or the environment)",
  * which names neither of the two things it exists to name.
  *
- * `autoStart` picks which guarantee the caller needs, and the split is by what
- * the tool is *for*, not by whether it happens to talk to the server:
+ * **`autoStart` defaults to ON** — every tool that reaches through this helper
+ * starts the Sessions API server if it is down and loopback, then proceeds.
+ * That is what the user expects: whichever aiui tool an agent reaches for first
+ * — `list_cdp_browsers`, `list_sessions`, a run — should bring the server up
+ * rather than fail on a bare ECONNREFUSED. A caller passes `autoStart: false`
+ * only for a genuine "is it there?" probe that must be able to answer "no", and
+ * the two tools with that contract (`server_status`, `get_run_settings`) do not
+ * use this helper at all — they probe directly and report `running: false`.
  *
- *  - **off (the default)** — `assertServerRecognized`. For tools that report
- *    on what is already there. Asking "what is running?" must not cause a
- *    server to exist, and a `down` server is deliberately let through so the
- *    caller's own request fails with an ordinary connect error.
- *  - **on** — `ensureServerReady`, the same auto-start the run tools get. For
- *    tools whose whole purpose is to make something exist. `start_cdp_browser`
- *    reached this helper with the default and inherited a rule written for
- *    read-only probes: against a stopped server it died on a bare
- *    ECONNREFUSED, while `run_test_file` from the same agent a second earlier
- *    would have started the server for itself.
- *
- * Turning it on trades nothing away: `ensureServerReady`'s `unrecognized` arm
- * throws the same refusal, so the key still never reaches a squatter.
+ * The earlier design defaulted to OFF for the "report on what's there" tools,
+ * on the theory that "what browsers do I have?" must not create a server. In
+ * practice that just made the first call fail confusingly; listing browsers or
+ * sessions legitimately needs the server, and starting it to answer is the
+ * right move. Nothing is traded away by starting: `ensureServerReady`'s
+ * `unrecognized` arm throws the same refusal `assertServerRecognized` does, so
+ * the key still never reaches a squatter — the only difference is a *down*
+ * loopback server gets started instead of the request failing on connect.
  */
 async function withProject(
   deps: McpDeps,
@@ -674,12 +675,14 @@ async function withProject(
   let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
   try {
     project = await deps.resolveProject({ projectRoot });
-    // Before the key goes anywhere: without one of these an agent calling
-    // `list_sessions` as a harmless "what's running?" probe would hand the
-    // project's key to whatever holds the port.
-    await (opts.autoStart === true
-      ? deps.ensureServerReady(project, opts.signal)
-      : deps.assertServerRecognized(project, opts.signal));
+    // Before the key goes anywhere: both arms refuse an unrecognized service,
+    // so an agent calling `list_sessions` as a "what's running?" probe never
+    // hands the project's key to whatever holds the port. The only difference
+    // is whether a DOWN loopback server is started (default) or let through as
+    // a connect error (`autoStart: false`).
+    await (opts.autoStart === false
+      ? deps.assertServerRecognized(project, opts.signal)
+      : deps.ensureServerReady(project, opts.signal));
     const client = deps.createApiClient({
       baseUrl: project.serverUrl,
       apiKey: project.apiKey,
@@ -1549,9 +1552,9 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
           );
         },
-        // The one tool here whose job is to make something exist, so it gets
-        // the run tools' auto-start rather than the probes' identity check.
-        { autoStart: true, signal: extra.signal },
+        // Auto-start is the default; a down loopback server is brought up
+        // rather than failing this launch on connect.
+        { signal: extra.signal },
       ),
   );
 
@@ -1703,10 +1706,9 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
           );
         },
-        // Acts on live browser state, like the run tools — not a read-only
-        // probe. Kept off `ensureServerReady` would mean a close against a
-        // stopped server died on a bare ECONNREFUSED.
-        { autoStart: true, signal: extra.signal },
+        // Auto-start is the default; a close against a stopped server brings
+        // it up rather than dying on a bare ECONNREFUSED.
+        { signal: extra.signal },
       ),
   );
 
@@ -1820,10 +1822,9 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
           );
         },
-        // Acts on live browser state rather than reporting on it, like
-        // `close_cdp_tab` — so a stopped server is started rather than
-        // surfaced as a bare ECONNREFUSED.
-        { autoStart: true, signal: extra.signal },
+        // Auto-start is the default; a stopped server is brought up rather
+        // than surfaced as a bare ECONNREFUSED.
+        { signal: extra.signal },
       ),
   );
 
