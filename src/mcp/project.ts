@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_CONFIG } from '../config/defaults.js';
 import { readDefaultEnvVars, readEnvFileVars } from '../env/loader.js';
-import { readMachineKey } from '../env/user-root.js';
+import { readMachineKey, readUserRootEnv, userRootDir } from '../env/user-root.js';
 import {
   badEnvName,
   badProjectConfig,
@@ -33,11 +33,25 @@ import {
   pathOutsideRoots,
   projectRootUnresolvable,
   testFileMissing,
+  testsNeedProject,
   type McpToolError,
 } from './errors.js';
 import { PreflightFailure, type ProjectContext, type ResolveProjectArgs } from './types.js';
 
 const CONFIG_FILENAME = 'aiui.config.json';
+
+/**
+ * Where a project-less call looks for its Sessions API server when neither the
+ * user root's `.env` nor the process environment names one
+ * (stories/mcp-no-project.md).
+ *
+ * Loopback because it must be — auto-start only ever spawns on a loopback host
+ * (§5 arm 4) — and a port that is distinctive rather than 3100 because people
+ * already run the *project* server there: a project-less call colliding with it
+ * would find a server whose key it may not hold, and auto-start would refuse a
+ * port that answers with someone else's service.
+ */
+export const USER_SCOPE_SERVER_URL = 'http://127.0.0.1:3141';
 
 /**
  * §4a rule 6. No separators and no `..`, because `readEnvFileVars` does
@@ -58,18 +72,25 @@ export function fail(error: McpToolError): never {
 // ---------------------------------------------------------------------------
 
 /**
- * The directories this server may touch, canonicalised.
+ * The roots a *project* may be selected from, canonicalised.
  *
  * `AIUI_MCP_ROOTS` split on `path.delimiter`, else the process cwd. The env
  * var is required for the machine-global hosts (Codex CLI, Copilot CLI),
  * whose spawn cwd is not the project — for them the host config's `env` block
  * is the only per-server configuration surface there is.
  *
- * Read on every call rather than cached at import: `resolveProject` is the
- * only consumer, it is not hot, and a cached copy would make the value
- * untestable without module resets.
+ * Read on every call rather than cached at import: it is not hot, and a
+ * cached copy would make the value untestable without module resets.
+ *
+ * Deliberately does NOT include the user root, and the split against
+ * `allowedRoots` is the answer to a question stories/mcp-no-project.md left
+ * open: an `AIUI_MCP_ROOTS` naming exactly one directory keeps implying
+ * "that's the project" (the machine-global hosts depend on it), because the
+ * user root joins the *allow-list*, never the candidate list. It is the
+ * fallback when the configured world has no config, not a project that
+ * competes with them.
  */
-export function allowedRoots(): string[] {
+export function configuredRoots(): string[] {
   const configured = process.env['AIUI_MCP_ROOTS'];
   const entries =
     configured !== undefined && configured.trim() !== ''
@@ -98,6 +119,32 @@ export function allowedRoots(): string[] {
       fail(badRootEntry(entry, (err as Error).message));
     }
   });
+}
+
+/** The user root, canonicalised the missing-tolerant way. `canonicalize`
+ *  rather than the realpath+stat the configured entries get: the directory is
+ *  created on first use, and a machine that has never made a project-less
+ *  call must not fail every *project* call over its absence. */
+function canonicalUserRoot(): string {
+  return canonicalize(userRootDir());
+}
+
+/**
+ * The directories this server may touch: the configured roots plus —
+ * implicitly, always — the user root.
+ *
+ * The implicit entry is not optional plumbing (stories/mcp-no-project.md):
+ * `confinePath` is the security boundary of this server, and a user root
+ * outside the allowed set would be refused by the very next call after any
+ * user-scope resolution.
+ */
+export function allowedRoots(): string[] {
+  const configured = configuredRoots();
+  const userRoot = canonicalUserRoot();
+  if (configured.some((root) => comparable(root) === comparable(userRoot))) {
+    return configured;
+  }
+  return [...configured, userRoot];
 }
 
 /** win32 compares case-insensitively; every other platform does not. */
@@ -317,7 +364,11 @@ export function resolveTestsGlob(project: ProjectContext): { dir: string; patter
   const declaredDir = stringField(config.tests?.dir) ?? DEFAULT_CONFIG.tests.dir;
   const pattern = stringField(config.tests?.pattern) ?? DEFAULT_CONFIG.tests.pattern;
   return {
-    dir: confinePath(path.resolve(project.projectRoot, declaredDir), allowedRoots()),
+    // Confined against the CONFIGURED roots, not `allowedRoots()`: this only
+    // runs for `list_test_files`, which requires a project, and a project's
+    // `tests.dir` must not be allowed to point into the user root that joined
+    // the addressing allow-list.
+    dir: confinePath(path.resolve(project.projectRoot, declaredDir), configuredRoots()),
     pattern,
   };
 }
@@ -355,9 +406,17 @@ function firstNonEmpty(...values: (string | undefined)[]): string | null {
  * map: for Codex CLI and Copilot CLI the host config's `env` block is the only
  * per-server configuration surface a user has, and `AIUI_MCP_ROOTS` is already
  * read from exactly that channel.
+ *
+ * User scope gets one extra rung: a missing `SERVER_URL` defaults to
+ * {@link USER_SCOPE_SERVER_URL} instead of failing. A project must say which
+ * server it means — its `.env` is a file someone wrote — but project-less mode
+ * exists precisely for the directory with no files in it, so "nothing
+ * configured" has to resolve to something startable.
  */
 function withServerDiscovery(fields: ProjectDraft): ProjectContext {
-  const serverUrl = firstNonEmpty(fields.env['SERVER_URL'], process.env['SERVER_URL']);
+  const serverUrl =
+    firstNonEmpty(fields.env['SERVER_URL'], process.env['SERVER_URL']) ??
+    (fields.scope === 'user' ? USER_SCOPE_SERVER_URL : null);
   if (serverUrl === null) fail(noServerUrl(fields.envFilesConsulted));
 
   // The client chain of stories/machine-key.md: project `.env` → environment
@@ -387,7 +446,10 @@ function withServerDiscovery(fields: ProjectDraft): ProjectContext {
 export async function applyEnvName(
   project: ProjectContext,
   envName: string,
-  roots: readonly string[] = allowedRoots(),
+  // Defaults to the project confinement boundary. This is reached only for a
+  // frontmatter-declared env on a test file, which is always project scope —
+  // the user root, on the addressing allow-list, is deliberately not here.
+  roots: readonly string[] = configuredRoots(),
 ): Promise<ProjectContext> {
   return withServerDiscovery(await layerEnvFile(project, envName, roots));
 }
@@ -418,6 +480,59 @@ async function layerEnvFile(
     envName,
     envFilesConsulted: [...project.envFilesConsulted, envFilePath],
   };
+}
+
+// ---------------------------------------------------------------------------
+// User scope (stories/mcp-no-project.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve against the user root instead of a project.
+ *
+ * The user root is a real root, not a special case: same config filename, same
+ * malformed-config refusal, same `.env.<name>` overlay mechanics. The
+ * deliberate differences are exactly the story's locked decisions:
+ *
+ *  - `skillsDir`/`toolsDir` are null even if directories by those names exist
+ *    there. A machine-global tools directory would mean any conversation, in
+ *    any directory, can execute code from a path no repo owns and no review
+ *    covers — so it is never consulted, not merely defaulted away.
+ *  - The `.env` is read directly (`readUserRootEnv`), never by the project
+ *    walk-up read: walking up from `%LOCALAPPDATA%\aiui` would adopt stray
+ *    `.env` files in `%LOCALAPPDATA%` or the home directory as ours.
+ *  - An absent `aiui.config.json` reads as all-defaults, because nothing may
+ *    create it. The resolved path is still recorded: it is the file a human
+ *    would have to write to set `mcp.cdp.allowUnowned`, and refusals name it.
+ */
+async function resolveUserScope(
+  args: ResolveProjectArgs,
+  searched: readonly string[],
+): Promise<ProjectContext> {
+  const userRoot = canonicalUserRoot();
+  const configPath = path.join(userRoot, CONFIG_FILENAME);
+  const config = fs.existsSync(configPath) ? readProjectConfig(configPath) : {};
+
+  let draft: ProjectDraft = {
+    scope: 'user',
+    configSearch: searched,
+    projectRoot: userRoot,
+    configPath,
+    env: readUserRootEnv(),
+    envName: null,
+    skillsDir: null,
+    toolsDir: null,
+    cacheEnabled: config.cache?.enabled === true,
+    envFilesConsulted: [path.join(userRoot, '.env')],
+    cdpPermissions: readMcpCdpConfig(config),
+  };
+
+  if (args.envName !== undefined && args.envName !== '') {
+    // Confined against the user root alone. A user-scope `.env.<name>` lives
+    // under the user root by definition, and confining against anything wider
+    // would let a symlinked overlay reach off it.
+    draft = await layerEnvFile(draft, args.envName, [userRoot]);
+  }
+  return withServerDiscovery(draft);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,9 +578,18 @@ function selectStartDirectory(
  * Order is pinned by the spec and is not cosmetic: the naive version reads
  * files before it is allowed to, and resolves the environment before it knows
  * which environment to use.
+ *
+ * Two root lists are in play and they answer different questions.
+ * `allowedRoots()` — which includes the user root — is what every path is
+ * confined against. `configuredRoots()` is what a *project* may be selected
+ * from: the user root never implies a project, it is where resolution lands
+ * when no project does (stories/mcp-no-project.md). Selecting from the wider
+ * list would break the machine-global hosts, whose single `AIUI_MCP_ROOTS`
+ * entry must keep meaning "that's the project".
  */
 export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectContext> {
   const roots = allowedRoots();
+  const selection = configuredRoots();
 
   // Steps 1–3. `canonicalTestFilePath` refuses a relative path and turns a
   // missing one into §7's row before anything reads a byte.
@@ -482,33 +606,72 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
     fail(pathOutsideProjectRoot(args.testFilePath!, explicitRoot));
   }
 
-  const startDir = selectStartDirectory(testFile, explicitRoot, roots);
-  if (startDir === null) fail(projectRootUnresolvable(roots));
+  const startDir = selectStartDirectory(testFile, explicitRoot, selection);
+  if (startDir === null) {
+    // Several configured roots and nothing to choose between them. A tool that
+    // *needs* a project keeps today's refusal; everything else resolves
+    // project-less — the caller was not talking about any of those projects,
+    // which is exactly the situation the user root exists for. The result
+    // carries `scope: 'user'`, so the landing is reported, never silent.
+    if (args.requireProject === true) fail(projectRootUnresolvable(selection));
+    return resolveUserScope(args, []);
+  }
 
   // Step 4. An explicit `project_root` bounds the walk itself: the caller said
   // where their project is, and quietly adopting a *different* root one level
   // up would be a worse answer than the "no config here" error.
-  const bound = explicitRoot ?? deepestContainingRoot(startDir, roots) ?? startDir;
+  const bound = explicitRoot ?? deepestContainingRoot(startDir, selection) ?? startDir;
   const { configPath, searched } = findConfigUpward(startDir, bound);
-  if (configPath === null) fail(noProjectConfig(searched));
+  if (configPath === null) {
+    // No project. For the project-shaped tools that is still a refusal —
+    // test files, skills and tools have no user-scope meaning. For everything
+    // else it is the fallback the story exists for, with `searched` carried so
+    // messages can say why there was no project.
+    if (args.requireProject === true) fail(noProjectConfig(searched));
+    return resolveUserScope(args, searched);
+  }
 
-  // Steps 5–6. Confined even though the walk was bounded: `fs.existsSync`
-  // follows symlinks, so a symlinked `aiui.config.json` inside a root can name
-  // a project directory outside it — and everything below (skills, tools,
-  // `.env`) is resolved relative to that directory.
-  const projectRoot = confinePath(path.dirname(configPath), roots);
+  // Where the config sits, canonicalised — `fs.existsSync` follows symlinks,
+  // so a symlinked `aiui.config.json` inside a root can name a directory
+  // outside it, and everything below (skills, tools, `.env`) is resolved
+  // relative to this.
+  const projectRootReal = canonicalize(path.dirname(configPath));
+
+  // The walk can legitimately land ON the user root — the host's cwd may be
+  // inside it, or the caller may pass it as `project_root` (which is how
+  // `scope: "user"` addressing arrives here). It then takes the user-scope
+  // path REGARDLESS of what the directory contains: someone dropping a
+  // `skills/` directory into the user root must not turn every project-less
+  // conversation into one that executes it. Checked BEFORE the project
+  // confinement below, because the user root is on the addressing allow-list
+  // but not among the configured roots that project files load from.
+  if (comparable(projectRootReal) === comparable(canonicalUserRoot())) {
+    if (args.requireProject === true) fail(testsNeedProject(projectRootReal));
+    return resolveUserScope(args, []);
+  }
+
+  // A real project. Confine — and load every project file — against the
+  // CONFIGURED roots, NOT `allowedRoots()`. The user root joined the
+  // addressing allow-list so `project_root: <userRoot>` could route to user
+  // scope (above); letting it also widen where a project's own untrusted
+  // `aiui.config.json`, `.env` symlink or `dataSources` may reach would hand
+  // that config a path into `%LOCALAPPDATA%\aiui` — the machine key, and a
+  // skills/tools directory no repo owns. `selection` restores the pre-story
+  // boundary exactly. A planted config in a user-root SUBDIRECTORY named via
+  // `project_root` fails here rather than loading as a project.
+  const projectRoot = confinePath(path.dirname(configPath), selection);
   const config = readProjectConfig(configPath);
   const skillsDir = resolveProjectDir(
     config.tests?.skillsDir,
     DEFAULT_CONFIG.tests.skillsDir,
     projectRoot,
-    roots,
+    selection,
   );
   const toolsDir = resolveProjectDir(
     config.tests?.toolsDir,
     DEFAULT_CONFIG.tests.toolsDir,
     projectRoot,
-    roots,
+    selection,
   );
 
   // Step 7 — the base `.env` only.
@@ -521,8 +684,10 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
   // the request's `env`, interpolated into step text, and written into the
   // report. Only checked when it exists — an absent `.env` is legal.
   const baseEnvPath = path.join(projectRoot, '.env');
-  if (fs.existsSync(baseEnvPath)) confinePath(baseEnvPath, roots);
+  if (fs.existsSync(baseEnvPath)) confinePath(baseEnvPath, selection);
   const draft: ProjectDraft = {
+    scope: 'project',
+    configSearch: [],
     projectRoot,
     configPath,
     env: await readDefaultEnvVars(projectRoot),
@@ -540,7 +705,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
   // through `applyEnvName`.
   return withServerDiscovery(
     args.envName !== undefined && args.envName !== ''
-      ? await layerEnvFile(draft, args.envName, roots)
+      ? await layerEnvFile(draft, args.envName, selection)
       : draft,
   );
 }

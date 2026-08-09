@@ -76,11 +76,43 @@ export interface ServerConfigReport {
 // Project resolution (W2)
 // ---------------------------------------------------------------------------
 
+/**
+ * Which root a call resolved against (stories/mcp-no-project.md).
+ *
+ * `project` — a directory whose `aiui.config.json` the config walk found.
+ * `user` — the machine-wide user root (`%LOCALAPPDATA%\aiui` / `~/.aiui`),
+ * used when no project resolved or when the caller addressed it explicitly.
+ * The two are peers, not a hierarchy: browsers resolve against both, and a
+ * name that exists in both is refused rather than decided by precedence.
+ */
+export type RootScope = 'project' | 'user';
+
 /** Everything derived from a confined project root, before any request. */
 export interface ProjectContext {
+  /**
+   * Which root this is. Carried on every run result (rule 7 of
+   * stories/mcp-no-project.md): a typo'd config filename now produces a
+   * *working* run against the user root, and the only thing that keeps that
+   * from being a silent wrong answer is saying which root it was.
+   */
+  scope: RootScope;
+  /**
+   * Directories the config walk examined before falling back to the user
+   * root. Empty for `scope: 'project'` and for a user root addressed
+   * explicitly — non-empty only on the fallback path, where messages use it
+   * to explain *why* there was no project.
+   */
+  configSearch: readonly string[];
   /** Absolute, realpath'd, confined to an allowed root. */
   projectRoot: string;
-  /** Absolute path of the `aiui.config.json` that defined this root. */
+  /**
+   * Absolute path of the `aiui.config.json` that defined this root.
+   *
+   * For `scope: 'user'` the file may not exist — nothing machine-writes it
+   * (stories/mcp-no-project.md, locked) — but the path is still resolved,
+   * because it is the file a human would have to create to widen
+   * permissions, and refusal messages must be able to name it.
+   */
   configPath: string;
   /** `.env` composed with `.env.<envName>`. Never includes `process.env`. */
   env: Record<string, string>;
@@ -184,6 +216,10 @@ export interface AssembledRun {
 export interface CdpTarget {
   profile?: string | undefined;
   engine?: string | undefined;
+  /** Settles a profile name that exists in both roots. A separate field, not
+   *  a prefix on the name — `PROFILE_NAME_PATTERN` refuses `/` because the
+   *  name is a path component that later feeds a recursive delete. */
+  scope?: RootScope | undefined;
   port?: number | undefined;
   tab?: string | undefined;
 }
@@ -257,18 +293,25 @@ export interface CdpTab {
  * Chrome. Each list here has exactly one meaning and one permitted action.
  */
 export interface CdpBrowsers {
-  /** This project's live browsers. Attach by passing `port` as `config.cdp`. */
+  /** Live browsers from BOTH roots — the project's and the user root's, each
+   *  entry tagged with which (stories/mcp-no-project.md). Attach by passing
+   *  `port` as `config.cdp`. `scope` is optional on the wire because a
+   *  Sessions API server predating it omits the field; the tool layer
+   *  normalises a missing value to `'project'`, the only scope such a server
+   *  can have swept. */
   running: {
     engine: string;
     profile: string;
     port: number;
     profileDir: string;
     tabs: CdpTab[];
+    scope?: RootScope;
   }[];
-  /** This project's profiles with nothing running. Launch one by name — these
-   *  are directories, not browsers, and deliberately have no port field. */
-  available: { engine: string; profile: string; profileDir: string }[];
-  /** Browsers this project did not start. Nothing may be done with these
+  /** Profiles (from both roots) with nothing running. Launch one by name —
+   *  these are directories, not browsers, and deliberately have no port
+   *  field. */
+  available: { engine: string; profile: string; profileDir: string; scope?: RootScope }[];
+  /** Browsers tracing back to NEITHER root. Nothing may be done with these
    *  without the §6 opt-in, and their tabs are withheld by default. */
   foreign: {
     engine: string;
@@ -301,6 +344,10 @@ export interface StartedCdpBrowser {
   tabs: CdpTab[];
   outcome: CdpOutcome;
   warnings: string[];
+  /** Which root the browser lives under. Optional for the usual reason: an
+   *  older Sessions API server omits it, and the tool layer normalises to the
+   *  scope it asked the launch into. */
+  scope?: RootScope;
 }
 
 /** Address of one tab to close (stories/cdp-tabs.md §2). */
@@ -338,6 +385,9 @@ export interface ClosedCdpTab {
    */
   owned?: boolean;
   warnings?: string[];
+  /** Which root owned the browser, or absent for a foreign one (and from a
+   *  Sessions API server predating the field). */
+  scope?: RootScope;
 }
 
 /** Address of one tab to bring to the front (stories/cdp-tab-focus.md §2).
@@ -373,6 +423,9 @@ export interface FocusedCdpTab {
   /** Optional for the same reason `ClosedCdpTab.warnings` is: an older Sessions
    *  API server may omit it, and it is required in the output schema. */
   warnings?: string[];
+  /** Which root owned the browser, or absent for a foreign one (and from a
+   *  Sessions API server predating the field). */
+  scope?: RootScope;
 }
 
 export interface GetCdpBrowsersArgs {
@@ -547,6 +600,15 @@ export interface ResolveProjectArgs {
   /** Absolute test file path, when the caller has one; anchors the root walk. */
   testFilePath?: string | undefined;
   envName?: string | undefined;
+  /**
+   * Refuse rather than fall back to the user root when no project resolves.
+   *
+   * For `run_test_file` and `list_test_files`: test files, skills and tools
+   * are project-shaped, and the user root deliberately has none
+   * (stories/mcp-no-project.md). Every other tool leaves this unset and gets
+   * the user-scope fallback.
+   */
+  requireProject?: boolean | undefined;
 }
 
 export type ResolveProject = (args: ResolveProjectArgs) => Promise<ProjectContext>;

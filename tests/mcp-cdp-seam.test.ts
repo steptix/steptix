@@ -21,6 +21,8 @@ const PROJECT_ROOT = 'c:/proj';
 
 function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
   return {
+    scope: 'project',
+    configSearch: [],
     projectRoot: PROJECT_ROOT,
     configPath: `${PROJECT_ROOT}/aiui.config.json`,
     env: {},
@@ -1069,6 +1071,9 @@ describe('focus_cdp_tab', () => {
       engine: 'edge',
       profile: 'default',
       port: 51000,
+      // The fake server predates `scope`, so the tool backfills it from the
+      // profile resolution — an unlabelled entry can only be project scope.
+      scope: 'project',
       warnings: [],
     });
   });
@@ -1433,5 +1438,145 @@ describe('tab and session visibility', () => {
       expect(description).toContain('targetId:');
       expect(description).toMatch(/NEW tab by default/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Two scopes (stories/mcp-no-project.md)
+//
+// The registry sweeps the project root AND the user root, so one profile name
+// can now mean two browsers. These pin the three behaviours that keep that
+// safe: ambiguity is refused (never precedence), `scope` settles it, and the
+// launch verb routes to the root the caller named.
+// ---------------------------------------------------------------------------
+
+const RUNNING_BOTH_SCOPES = [
+  {
+    engine: 'edge',
+    profile: 'default',
+    port: 51000,
+    profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+    tabs: [{ targetId: 'P1', title: 'Project tab', url: 'https://proj.test', sessionId: null }],
+    scope: 'project',
+  },
+  {
+    engine: 'edge',
+    profile: 'default',
+    port: 52000,
+    profileDir: 'c:/users/x/aiui/.aiui/cdp-profiles/edge-default',
+    tabs: [{ targetId: 'U1', title: 'User tab', url: 'https://user.test', sessionId: null }],
+    scope: 'user',
+  },
+];
+
+describe('scope resolution (rule 5)', () => {
+  it('refuses a profile name that exists in both roots, naming both, picking neither', async () => {
+    const h = await connect({ browsers: { running: RUNNING_BOTH_SCOPES } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'U1' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('(project)');
+    expect(text(result)).toContain('(user root)');
+    expect(text(result)).toContain('scope');
+    // Refused BEFORE the wire: nothing was focused in either browser.
+    expect(h.focusCalls).toHaveLength(0);
+  });
+
+  it('scope settles the tie — "user" reaches the user-root browser', async () => {
+    const h = await connect({ browsers: { running: RUNNING_BOTH_SCOPES } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', scope: 'user', target_id: 'U1' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(h.focusCalls[0]).toMatchObject({ port: 52000, targetId: 'U1' });
+    expect(summary(result)).toContain('(user root)');
+  });
+
+  it('scope narrows run_steps config.cdp the same way', async () => {
+    const h = await connect({ browsers: { running: RUNNING_BOTH_SCOPES }, emitEvents: true });
+    const result = await h.client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['open the orders page'],
+        config: { cdp: { profile: 'default', scope: 'user' } },
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(h.runs).toHaveLength(1);
+    expect((h.runs[0]!.body['config'] as { cdp: { port: number } }).cdp.port).toBe(52000);
+  });
+
+  it('list_cdp_browsers backfills scope for a server that predates it', async () => {
+    const h = await connect({ browsers: { running: RUNNING, available: [
+      { engine: 'chrome', profile: 'admin', profileDir: 'c:/proj/p/chrome-admin' },
+    ] } });
+    const result = await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
+
+    const body = structured(result) as {
+      running: { scope: string }[];
+      available: { scope: string }[];
+    };
+    expect(body.running[0]!.scope).toBe('project');
+    expect(body.available[0]!.scope).toBe('project');
+  });
+
+  it('summarises the user-root share of the running list', async () => {
+    const h = await connect({ browsers: { running: RUNNING_BOTH_SCOPES } });
+    const result = await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
+    expect(summary(result)).toContain('2 running (1 user-root)');
+  });
+});
+
+describe('start_cdp_browser scope routing', () => {
+  it('launches into the user root when scope: "user" is asked from a project', async () => {
+    const { userRootDir } = await import('../src/env/user-root.js');
+    const h = await connect({});
+    const result = await h.client.callTool({
+      name: 'start_cdp_browser',
+      arguments: { engine: 'edge', scope: 'user' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(h.startCalls[0]).toMatchObject({ projectRoot: userRootDir() });
+    // The fake server predates the scope echo; the tool reports the scope it
+    // asked the launch into.
+    expect((structured(result) as { scope: string }).scope).toBe('user');
+    expect(summary(result)).toContain('(user root)');
+  });
+
+  it('refuses scope: "project" when no project resolved', async () => {
+    const h = await connect({
+      project: fakeProject({ scope: 'user', projectRoot: 'c:/users/x/aiui' }),
+    });
+    const result = await h.client.callTool({
+      name: 'start_cdp_browser',
+      arguments: { engine: 'edge', scope: 'project' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('no project resolved');
+    expect(h.startCalls).toHaveLength(0);
+  });
+
+  it('a project-less start defaults to the user root', async () => {
+    const h = await connect({
+      project: fakeProject({ scope: 'user', projectRoot: 'c:/users/x/aiui' }),
+    });
+    const result = await h.client.callTool({
+      name: 'start_cdp_browser',
+      arguments: { engine: 'edge' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    // project.projectRoot IS the user root on a project-less resolution, so
+    // the launch lands there without the caller saying anything.
+    expect(h.startCalls[0]).toMatchObject({ projectRoot: 'c:/users/x/aiui' });
+    expect((structured(result) as { scope: string }).scope).toBe('user');
   });
 });

@@ -5,16 +5,19 @@ import path from 'node:path';
 import type { CaptureMode, Config, RunSettings } from '../config/types.js';
 import { CAPTURE_MODES, RUN_SETTING_KEYS } from '../config/run-settings.js';
 import {
-  knownProfiles,
+  knownProfilesAcross,
   startCdpBrowser,
   closeCdpTab,
   focusCdpTab,
   UNKNOWN_HOLDER,
   DEFAULT_PROFILE,
   type CdpFailureKind,
+  type ScopedRoot,
   type StartResult,
 } from '../browser/cdp-registry.js';
 import { discoverCdpPorts } from '../browser/cdp-discovery.js';
+import { userRootDir } from '../env/user-root.js';
+import fs from 'node:fs';
 import { SessionManager, type RunEvent, type StepRequest } from './session-manager.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
@@ -854,6 +857,45 @@ export function createApiServer(
     return tail;
   }
 
+  /**
+   * The roots a CDP request sweeps: the named project root plus — always —
+   * the machine-wide user root (stories/mcp-no-project.md, "both roots are
+   * always swept"). The server computes the user root itself: every client is
+   * loopback on this machine, so the two processes share one `%LOCALAPPDATA%`.
+   *
+   * A project-less caller passes the user root AS its projectRoot, so the two
+   * entries collapse to one — compared canonically (realpath when it exists,
+   * case-folded on win32) so an alias of the same directory cannot double
+   * every entry in the sweep.
+   */
+  const canonicalRoot = (target: string): string => {
+    let resolved = path.resolve(target);
+    try {
+      resolved = fs.realpathSync.native(resolved);
+    } catch {
+      // Not existing yet is fine — a fresh machine has no user root until
+      // the first launch creates it, and an absent directory still needs a
+      // stable identity for the comparison below.
+    }
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+
+  /** Whether a request's projectRoot IS the user root — which is how a
+   *  project-less caller addresses it, and how a launch decides which scope
+   *  to report back. */
+  const isUserRoot = (projectRoot: string): boolean =>
+    canonicalRoot(projectRoot) === canonicalRoot(userRootDir());
+
+  function cdpRoots(projectRoot: string): ScopedRoot[] {
+    if (isUserRoot(projectRoot)) {
+      return [{ root: userRootDir(), scope: 'user' }];
+    }
+    return [
+      { root: projectRoot, scope: 'project' },
+      { root: userRootDir(), scope: 'user' },
+    ];
+  }
+
   app.get('/cdp/browsers', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const projectRoot = typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
@@ -875,7 +917,7 @@ export function createApiServer(
       const includeForeignTabs =
         req.query['includeForeignTabs'] === 'true' || req.query['includeForeignTabs'] === '1';
 
-      const profiles = await knownProfiles(projectRoot);
+      const profiles = await knownProfilesAcross(cdpRoots(projectRoot));
       const live = profiles.filter((p) => p.live && p.port !== null);
       // Which session is on which tab (stories/cdp-tabs.md §1). A map lookup
       // against sessions this server already holds — the per-page target ids
@@ -890,6 +932,7 @@ export function createApiServer(
         profile: p.profile,
         port: p.port as number,
         profileDir: p.profileDir,
+        scope: p.scope,
         tabs: (p.tabs ?? []).map((t) => ({
           ...t,
           sessionId: holders[i]?.get(t.targetId) ?? null,
@@ -900,7 +943,12 @@ export function createApiServer(
       // caller to try to attach to it.
       const available = profiles
         .filter((p) => !p.live)
-        .map((p) => ({ engine: p.engine, profile: p.profile, profileDir: p.profileDir }));
+        .map((p) => ({
+          engine: p.engine,
+          profile: p.profile,
+          profileDir: p.profileDir,
+          scope: p.scope,
+        }));
 
       const foreign: {
         engine: string;
@@ -991,6 +1039,10 @@ export function createApiServer(
         tabs: result.tabs,
         outcome: result.outcome,
         warnings: result.warnings,
+        // Which root the launch went into — the client chose it by which
+        // projectRoot it sent, and echoing it back keeps the answer on the
+        // result rather than re-derived by every consumer.
+        scope: isUserRoot(projectRoot) ? 'user' : 'project',
       });
     } catch (err) {
       next(err);
@@ -1064,7 +1116,7 @@ export function createApiServer(
 
         const result = await queueCdpClose(port, () =>
           closeCdpTab({
-            projectRoot,
+            roots: cdpRoots(projectRoot),
             port,
             targetId,
             allowBrowserExit,
@@ -1099,6 +1151,8 @@ export function createApiServer(
           remainingTabs: result.remainingTabs,
           browserExited: result.browserExited,
           owned: result.owned,
+          // Null for a permitted foreign browser — no root stands behind it.
+          scope: result.scope,
           warnings: result.warnings,
         });
       } catch (err) {
@@ -1123,7 +1177,7 @@ export function createApiServer(
         const { projectRoot, port, targetId } = params;
 
         const result = await focusCdpTab({
-          projectRoot,
+          roots: cdpRoots(projectRoot),
           port,
           targetId,
           allowUnowned: readAllowUnowned(req),
@@ -1145,6 +1199,8 @@ export function createApiServer(
           engine: result.engine,
           profile: result.profile,
           port: result.port,
+          // Null for a permitted foreign browser — no root stands behind it.
+          scope: result.scope,
           warnings: result.warnings,
         });
       } catch (err) {

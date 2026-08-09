@@ -21,7 +21,9 @@ vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/cdp-registry.js')>();
   return {
     ...actual,
-    knownProfiles: (...args: unknown[]) => knownProfilesMock(...args),
+    // The routes sweep via `knownProfilesAcross` (stories/mcp-no-project.md);
+    // the mock stands in for the whole sweep, so fixtures carry `scope`.
+    knownProfilesAcross: (...args: unknown[]) => knownProfilesMock(...args),
     startCdpBrowser: (...args: unknown[]) => startCdpBrowserMock(...args),
     closeCdpTab: (...args: unknown[]) => closeCdpTabMock(...args),
     focusCdpTab: (...args: unknown[]) => focusCdpTabMock(...args),
@@ -54,6 +56,7 @@ vi.mock('../src/browser/manager.js', () => ({
 }));
 
 const { createApiServer } = await import('../src/server/api-server.js');
+const { userRootDir } = await import('../src/env/user-root.js');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -142,6 +145,7 @@ const liveProfile = (over: Record<string, unknown> = {}) => ({
   live: true,
   port: 51000,
   tabs: [{ targetId: 'T1', title: 'Orders', url: 'https://shop/orders' }],
+  scope: 'project',
   ...over,
 });
 
@@ -152,6 +156,7 @@ const dormantProfile = (over: Record<string, unknown> = {}) => ({
   live: false,
   port: null,
   tabs: null,
+  scope: 'project',
   ...over,
 });
 
@@ -195,6 +200,7 @@ const focusedTab = (over: Record<string, unknown> = {}) => ({
   profile: 'default',
   port: 51000,
   owned: true,
+  scope: 'project',
   warnings: [],
   ...over,
 });
@@ -209,6 +215,7 @@ const closedTab = (over: Record<string, unknown> = {}) => ({
   port: 51000,
   remainingTabs: 2,
   browserExited: false,
+  scope: 'project',
   warnings: [],
   ...over,
 });
@@ -277,6 +284,7 @@ describe('GET /cdp/browsers', () => {
       engine: 'edge',
       profile: 'admin',
       profileDir: path.join(PROJECT, '.aiui', 'cdp-profiles', 'edge-admin'),
+      scope: 'project',
     });
     // Not `port: null` — a port-shaped hole invites a caller to try it.
     expect('port' in body.available[0]).toBe(false);
@@ -365,6 +373,77 @@ describe('GET /cdp/browsers', () => {
     ).json();
     expect(body.running).toEqual([]);
     expect(body.foreign).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two-root sweep (stories/mcp-no-project.md)
+// ---------------------------------------------------------------------------
+
+describe('user-root sweep', () => {
+  const userRoot = () => userRootDir();
+
+  it('sweeps the user root alongside the project, tagging every entry', async () => {
+    knownProfilesMock.mockResolvedValue([
+      liveProfile(),
+      liveProfile({ scope: 'user', port: 52000, engine: 'chrome' }),
+    ]);
+    const body = await (await get(`projectRoot=${encodeURIComponent(PROJECT)}`)).json();
+
+    expect(knownProfilesMock).toHaveBeenCalledWith([
+      { root: PROJECT, scope: 'project' },
+      { root: userRoot(), scope: 'user' },
+    ]);
+    expect(body.running.map((r: { scope: string }) => r.scope)).toEqual(['project', 'user']);
+  });
+
+  it('projectRoot naming the user root collapses to a single user-scope sweep', async () => {
+    knownProfilesMock.mockResolvedValue([liveProfile({ scope: 'user' })]);
+    const body = await (await get(`projectRoot=${encodeURIComponent(userRoot())}`)).json();
+
+    // One entry, not the same directory swept twice with every browser
+    // listed double.
+    expect(knownProfilesMock).toHaveBeenCalledWith([{ root: userRoot(), scope: 'user' }]);
+    expect(body.running[0].scope).toBe('user');
+  });
+
+  it('a user-root browser on a scanned port is never foreign (rule 4)', async () => {
+    knownProfilesMock.mockResolvedValue([
+      liveProfile({ scope: 'user', port: 9222, engine: 'chrome' }),
+    ]);
+    discoverCdpPortsMock.mockResolvedValue([
+      { port: 9222, reachable: true, engine: 'chrome', tabs: [] },
+    ]);
+    const body = await (
+      await get(`projectRoot=${encodeURIComponent(PROJECT)}&includeForeign=true`)
+    ).json();
+    expect(body.running).toHaveLength(1);
+    expect(body.foreign).toEqual([]);
+  });
+
+  it('POST echoes which scope the launch went into', async () => {
+    startCdpBrowserMock.mockResolvedValue({
+      ok: true,
+      engine: 'chrome',
+      profile: 'default',
+      profileDir: path.join(userRoot(), '.aiui', 'cdp-profiles', 'chrome-default'),
+      port: 52000,
+      binary: 'C:\\chrome.exe',
+      tabs: [],
+      outcome: 'launched_into_new_profile',
+      warnings: [],
+    });
+
+    const asUser = await (await post({ projectRoot: userRoot(), engine: 'chrome' })).json();
+    expect(asUser.scope).toBe('user');
+    // The launch itself went to the root the client named — the server adds
+    // nothing behind its back.
+    expect(startCdpBrowserMock).toHaveBeenCalledWith(
+      expect.objectContaining({ projectRoot: userRoot() }),
+    );
+
+    const asProject = await (await post({ projectRoot: PROJECT, engine: 'chrome' })).json();
+    expect(asProject.scope).toBe('project');
   });
 });
 
@@ -554,6 +633,7 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
       port: 51000,
       remainingTabs: 2,
       browserExited: false,
+      scope: 'project',
       warnings: [],
     });
   });
@@ -562,7 +642,13 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
     closeCdpTabMock.mockResolvedValue(closedTab({ targetId: 'A/B?C' }));
     await del(51000, 'A/B?C');
     expect(closeCdpTabMock).toHaveBeenCalledWith(
-      expect.objectContaining({ port: 51000, targetId: 'A/B?C', projectRoot: PROJECT }),
+      expect.objectContaining({
+        port: 51000,
+        targetId: 'A/B?C',
+        roots: expect.arrayContaining([
+          expect.objectContaining({ root: PROJECT, scope: 'project' }),
+        ]),
+      }),
     );
   });
 
@@ -771,6 +857,7 @@ describe('POST /cdp/browsers/:port/tabs/:targetId/focus', () => {
       engine: 'edge',
       profile: 'default',
       port: 51000,
+      scope: 'project',
       warnings: [],
     });
   });
@@ -779,7 +866,13 @@ describe('POST /cdp/browsers/:port/tabs/:targetId/focus', () => {
     focusCdpTabMock.mockResolvedValue(focusedTab({ targetId: 'A/B?C' }));
     await focus(51000, 'A/B?C');
     expect(focusCdpTabMock).toHaveBeenCalledWith(
-      expect.objectContaining({ port: 51000, targetId: 'A/B?C', projectRoot: PROJECT }),
+      expect.objectContaining({
+        port: 51000,
+        targetId: 'A/B?C',
+        roots: expect.arrayContaining([
+          expect.objectContaining({ root: PROJECT, scope: 'project' }),
+        ]),
+      }),
     );
   });
 

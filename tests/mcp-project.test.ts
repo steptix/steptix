@@ -86,6 +86,25 @@ async function refusalText(fn: () => Promise<unknown>): Promise<string> {
   throw new Error('expected a PreflightFailure, but the call succeeded');
 }
 
+/** Where the redirected user root lands. The beforeEach points both
+ *  LOCALAPPDATA (win32) and XDG_CONFIG_HOME (elsewhere) at one tmp, so the
+ *  answer is the same join on every platform. */
+function testUserRoot(): string {
+  return path.join((process.env['LOCALAPPDATA'] ?? process.env['XDG_CONFIG_HOME'])!, 'aiui');
+}
+
+/** Seed the user root itself — config and/or `.env` — without the project
+ *  defaults `seedProject` assumes. */
+function seedUserRoot(spec: { config?: Record<string, unknown>; env?: Record<string, string> }): string {
+  const root = testUserRoot();
+  mkdirSync(root, { recursive: true });
+  if (spec.config !== undefined) {
+    writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify(spec.config, null, 2));
+  }
+  if (spec.env !== undefined) writeEnvFile(path.join(root, '.env'), spec.env);
+  return root;
+}
+
 /** Directory symlinks need a junction on win32 and are outright unavailable
  *  in some sandboxes; a test that cannot create one has nothing to assert. */
 function trySymlink(target: string, link: string, type: 'dir' | 'file'): boolean {
@@ -127,8 +146,13 @@ describe('allowed roots (§4a)', () => {
     delete process.env['AIUI_MCP_ROOTS'];
     vi.spyOn(process, 'cwd').mockReturnValue(root);
 
-    expect(allowedRoots()).toEqual([root]);
-    await expect(resolveProject({})).resolves.toMatchObject({ projectRoot: root });
+    // The user root rides along implicitly (stories/mcp-no-project.md): it is
+    // part of the confinement allow-list on every call, configured or not.
+    expect(allowedRoots()).toEqual([root, testUserRoot()]);
+    await expect(resolveProject({})).resolves.toMatchObject({
+      projectRoot: root,
+      scope: 'project',
+    });
   });
 
   it('splits AIUI_MCP_ROOTS on path.delimiter and honours every entry', async () => {
@@ -136,9 +160,10 @@ describe('allowed roots (§4a)', () => {
     const second = seedProject(makeTmp());
     process.env['AIUI_MCP_ROOTS'] = [first, second].join(path.delimiter);
 
-    expect(allowedRoots()).toEqual([first, second]);
+    expect(allowedRoots()).toEqual([first, second, testUserRoot()]);
     await expect(resolveProject({ projectRoot: second })).resolves.toMatchObject({
       projectRoot: second,
+      scope: 'project',
     });
   });
 
@@ -250,13 +275,28 @@ describe('project_root selection (§4a)', () => {
     await expect(resolveProject({})).resolves.toMatchObject({ projectRoot: root });
   });
 
-  it('branch 5: refuses when several roots are configured and the cwd is in none', async () => {
+  it('branch 5: several roots, cwd in none — falls back to the user root, reported via scope', async () => {
     const first = seedProject(makeTmp());
     const second = seedProject(makeTmp());
     process.env['AIUI_MCP_ROOTS'] = [first, second].join(path.delimiter);
     vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
 
-    const text = await refusalText(() => resolveProject({}));
+    // The caller was not talking about either configured project, which is
+    // exactly the situation project-less mode exists for. The landing is
+    // reported (`scope: 'user'`), never silent.
+    await expect(resolveProject({})).resolves.toMatchObject({
+      scope: 'user',
+      projectRoot: testUserRoot(),
+    });
+  });
+
+  it('branch 5 with requireProject keeps the refusal for the project-shaped tools', async () => {
+    const first = seedProject(makeTmp());
+    const second = seedProject(makeTmp());
+    process.env['AIUI_MCP_ROOTS'] = [first, second].join(path.delimiter);
+    vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
+
+    const text = await refusalText(() => resolveProject({ requireProject: true }));
     expect(text).toContain('Could not decide which project to use');
     expect(text).toContain(first);
     expect(text).toContain(second);
@@ -283,12 +323,30 @@ describe('project_root selection (§4a)', () => {
     writeFileSync(path.join(root, 'tests', 'x.md'), '# x\n');
     process.env['AIUI_MCP_ROOTS'] = root;
 
+    // requireProject keeps the walk's refusal observable; the message still
+    // names what was searched and must not have reached `outer`.
     const text = await refusalText(() =>
-      resolveProject({ testFilePath: path.join(root, 'tests', 'x.md') }),
+      resolveProject({ testFilePath: path.join(root, 'tests', 'x.md'), requireProject: true }),
     );
     expect(text).toContain('No aiui.config.json found');
     expect(text).toContain(path.join(root, 'tests'));
     expect(text).not.toContain(`${outer}${path.sep}aiui.config.json`);
+  });
+
+  it('the user-scope fallback keeps the walk bound too — the outer config is never adopted', async () => {
+    const outer = seedProject(makeTmp());
+    const root = path.join(outer, 'child');
+    mkdirSync(path.join(root, 'tests'), { recursive: true });
+    process.env['AIUI_MCP_ROOTS'] = root;
+    vi.spyOn(process, 'cwd').mockReturnValue(path.join(root, 'tests'));
+
+    const project = await resolveProject({});
+    // Landed on the user root — NOT on `outer`, whose config sits outside
+    // confinement. The searched list proves the walk stopped at the bound.
+    expect(project.scope).toBe('user');
+    expect(project.projectRoot).toBe(testUserRoot());
+    expect(project.configSearch).toContain(path.join(root, 'tests'));
+    expect(project.configSearch).not.toContain(outer);
   });
 
   it('refuses a relative path before touching the filesystem', async () => {
@@ -554,5 +612,240 @@ describe('environment composition (§4)', () => {
 
     const text = await refusalText(() => applyEnvName(project, '../../etc/passwd'));
     expect(text).toContain('is not a valid environment name');
+  });
+});
+
+describe('user scope (stories/mcp-no-project.md)', () => {
+  /** A configured root with no aiui.config.json anywhere in it, adopted as
+   *  the cwd — the canonical "no project" starting position. */
+  function noProjectCwd(): string {
+    const root = makeTmp();
+    process.env['AIUI_MCP_ROOTS'] = root;
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+    return root;
+  }
+
+  it('rule 1: no config anywhere resolves to the user root instead of refusing', async () => {
+    const root = noProjectCwd();
+
+    const project = await resolveProject({});
+    expect(project.scope).toBe('user');
+    expect(project.projectRoot).toBe(testUserRoot());
+    expect(project.configPath).toBe(path.join(testUserRoot(), 'aiui.config.json'));
+    // Rule 7's raw material: the walk that found nothing is on the result.
+    expect(project.configSearch).toContain(root);
+    // Rule 6's floor: never a skills or tools directory, and nothing to cache.
+    expect(project.skillsDir).toBeNull();
+    expect(project.toolsDir).toBeNull();
+  });
+
+  it('defaults SERVER_URL to the distinctive loopback port, below both env layers', async () => {
+    noProjectCwd();
+    expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:3141');
+
+    // The user root's own .env beats the default…
+    seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:4444' } });
+    expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:4444');
+
+    // …and process.env sits between the two.
+    rmSync(path.join(testUserRoot(), '.env'));
+    process.env['SERVER_URL'] = 'http://127.0.0.1:5555';
+    expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:5555');
+  });
+
+  it('reads the user root .env directly — no walk-up past the root', async () => {
+    noProjectCwd();
+    // A stray .env one level ABOVE the user root (i.e. in LOCALAPPDATA
+    // itself). The project walk-up read would adopt it; the direct read must
+    // not.
+    writeEnvFile(path.join(path.dirname(testUserRoot()), '.env'), { STRAY: 'adopted' });
+    seedUserRoot({ env: { MINE: 'yes' } });
+
+    const project = await resolveProject({});
+    expect(project.env['MINE']).toBe('yes');
+    expect(project.env['STRAY']).toBeUndefined();
+    expect(project.envFilesConsulted).toEqual([path.join(testUserRoot(), '.env')]);
+  });
+
+  it('honours the user root aiui.config.json when present, defaults when absent', async () => {
+    noProjectCwd();
+    expect((await resolveProject({})).cdpPermissions.allowUnowned).toBe(false);
+    expect((await resolveProject({})).cacheEnabled).toBe(false);
+
+    seedUserRoot({
+      config: { mcp: { cdp: { allowUnowned: true } }, cache: { enabled: true } },
+    });
+    const project = await resolveProject({});
+    expect(project.cdpPermissions.allowUnowned).toBe(true);
+    expect(project.cacheEnabled).toBe(true);
+  });
+
+  it('rule 8: allowUnowned in a project does not widen project-less calls, and vice versa', async () => {
+    // A project that widened its own reach…
+    const widened = seedProject(makeTmp(), {
+      config: { mcp: { cdp: { allowUnowned: true } } },
+    });
+    process.env['AIUI_MCP_ROOTS'] = widened;
+    expect((await resolveProject({ projectRoot: widened })).cdpPermissions.allowUnowned).toBe(
+      true,
+    );
+
+    // …grants nothing to a project-less call on the same machine…
+    vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
+    process.env['AIUI_MCP_ROOTS'] = makeTmp();
+    expect((await resolveProject({})).cdpPermissions.allowUnowned).toBe(false);
+
+    // …and the reverse: a user root that widened project-less reach grants
+    // nothing to a project that did not.
+    seedUserRoot({ config: { mcp: { cdp: { allowUnowned: true } } } });
+    expect((await resolveProject({})).cdpPermissions.allowUnowned).toBe(true);
+    const plain = seedProject(makeTmp());
+    process.env['AIUI_MCP_ROOTS'] = plain;
+    expect((await resolveProject({ projectRoot: plain })).cdpPermissions.allowUnowned).toBe(
+      false,
+    );
+  });
+
+  it('an explicit project_root naming the user root is user scope, whatever it contains', async () => {
+    const userRoot = seedUserRoot({
+      config: { tests: { skillsDir: './skills' } },
+      env: { SERVER_URL: 'http://127.0.0.1:4444' },
+    });
+    mkdirSync(path.join(userRoot, 'skills'), { recursive: true });
+    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+
+    const project = await resolveProject({ projectRoot: userRoot });
+    expect(project.scope).toBe('user');
+    // Someone dropping a skills/ directory into the user root must not turn
+    // project-less conversations into ones that execute it (rule 6).
+    expect(project.skillsDir).toBeNull();
+    expect(project.toolsDir).toBeNull();
+    expect(project.serverUrl).toBe('http://127.0.0.1:4444');
+  });
+
+  it('requireProject refuses the user root by name, and the fallback path with the walk', async () => {
+    const userRoot = seedUserRoot({ config: {} });
+    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+
+    const explicit = await refusalText(() =>
+      resolveProject({ projectRoot: userRoot, requireProject: true }),
+    );
+    expect(explicit).toContain('not a project');
+    expect(explicit).toContain(userRoot);
+
+    const root = noProjectCwd();
+    const fallback = await refusalText(() => resolveProject({ requireProject: true }));
+    expect(fallback).toContain('No aiui.config.json found');
+    expect(fallback).toContain(root);
+  });
+
+  it('layers .env.<name> under the user root exactly like a project', async () => {
+    noProjectCwd();
+    const userRoot = seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:4444' } });
+    writeEnvFile(path.join(userRoot, '.env.uat'), { SERVER_URL: 'http://127.0.0.1:4555' });
+
+    const project = await resolveProject({ envName: 'uat' });
+    expect(project.scope).toBe('user');
+    expect(project.envName).toBe('uat');
+    expect(project.serverUrl).toBe('http://127.0.0.1:4555');
+    expect(project.envFilesConsulted).toEqual([
+      path.join(userRoot, '.env'),
+      path.join(userRoot, '.env.uat'),
+    ]);
+  });
+
+  it('keeps the single-configured-root implication for machine-global hosts', async () => {
+    // The Codex/Copilot CLI shape: one AIUI_MCP_ROOTS entry, cwd nowhere near
+    // it. The user root joining the allow-list must NOT break "that one entry
+    // is the project".
+    const only = seedProject(makeTmp());
+    process.env['AIUI_MCP_ROOTS'] = only;
+    vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
+
+    await expect(resolveProject({})).resolves.toMatchObject({
+      projectRoot: only,
+      scope: 'project',
+    });
+  });
+
+  it('the machine key still resolves for user scope, and null defers when absent', async () => {
+    noProjectCwd();
+    expect((await resolveProject({})).apiKey).toBeNull();
+
+    seedUserRoot({ env: { AIUI_SERVER_API_KEY: 'machine-key' } });
+    expect((await resolveProject({})).apiKey).toBe('machine-key');
+  });
+});
+
+describe('user root joins the allow-list for ADDRESSING only, never project file-loading', () => {
+  // The user root is on `allowedRoots()` so `project_root: <userRoot>` can
+  // route to user scope — but a PROJECT's own untrusted config, .env symlink
+  // or dataSources must not be able to reach into it. These pin that the
+  // pre-story confinement boundary (configured roots only) still holds for
+  // project scope. Regression guard for the two reviewers' shared finding.
+
+  it('a project tests.dir pointing into the user root is refused', async () => {
+    const root = seedProject(makeTmp(), { config: { tests: { dir: testUserRoot() } } });
+    mkdirSync(testUserRoot(), { recursive: true });
+    process.env['AIUI_MCP_ROOTS'] = root;
+
+    const project = await resolveProject({ projectRoot: root });
+    expect(() => resolveTestsGlob(project)).toThrow(PreflightFailure);
+  });
+
+  it('a project skillsDir/toolsDir pointing into the user root is dropped, not loaded', async () => {
+    // resolveProjectDir confines against the configured roots and returns null
+    // for anything outside them — so a config aiming skills at the user root
+    // gets no skills directory rather than one that executes user-root code.
+    const parent = makeTmp();
+    const root = seedProject(path.join(parent, 'proj'), {
+      config: { tests: { skillsDir: '../../aiui-evil-skills' } },
+    });
+    // Even if such a directory exists, it is outside the configured root.
+    mkdirSync(path.join(parent, 'aiui-evil-skills'), { recursive: true });
+    process.env['AIUI_MCP_ROOTS'] = root;
+
+    const text = await refusalText(() => resolveProject({ projectRoot: root }));
+    expect(text).toContain('outside every allowed root');
+  });
+
+  it('a base .env symlinked into the user root is refused (machine-key exfil channel)', async () => {
+    const root = seedProject(makeTmp(), { env: null });
+    mkdirSync(testUserRoot(), { recursive: true });
+    writeFileSync(path.join(testUserRoot(), '.env'), 'AIUI_SERVER_API_KEY=machine-secret\n');
+    process.env['AIUI_MCP_ROOTS'] = root;
+    if (!trySymlink(path.join(testUserRoot(), '.env'), path.join(root, '.env'), 'file')) return;
+
+    const text = await refusalText(() => resolveProject({ projectRoot: root }));
+    expect(text).toContain('outside every allowed root');
+  });
+
+  it('a planted config in a user-root SUBDIRECTORY does not load as a project', async () => {
+    // The ===userRoot guard catches the root itself; this covers a child of
+    // it, named explicitly. It must not become a real project loading code
+    // from under %LOCALAPPDATA%\aiui.
+    const sub = path.join(testUserRoot(), 'planted');
+    mkdirSync(path.join(sub, 'skills'), { recursive: true });
+    writeFileSync(
+      path.join(sub, 'aiui.config.json'),
+      JSON.stringify({ tests: { skillsDir: './skills' } }),
+    );
+    writeEnvFile(path.join(sub, '.env'), { SERVER_URL: 'http://127.0.0.1:3100' });
+    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+
+    const text = await refusalText(() => resolveProject({ projectRoot: sub }));
+    expect(text).toContain('outside every allowed root');
+  });
+
+  it('but the user root ITSELF as project_root still routes to user scope', async () => {
+    // The addressing path the wide allow-list exists to serve — unaffected by
+    // the loading-boundary tightening.
+    seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:4444' } });
+    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+
+    await expect(resolveProject({ projectRoot: testUserRoot() })).resolves.toMatchObject({
+      scope: 'user',
+      skillsDir: null,
+    });
   });
 });

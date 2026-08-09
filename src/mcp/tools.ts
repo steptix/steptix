@@ -30,7 +30,8 @@ import {
   resolveCdpTarget,
   summarizeBrowsers,
 } from './cdp.js';
-import { allowedRoots, canonicalize, isInsideRoot, resolveTestsGlob } from './project.js';
+import { configuredRoots, canonicalize, isInsideRoot, resolveTestsGlob } from './project.js';
+import { userRootDir } from '../env/user-root.js';
 import { discoverTestFiles } from '../parser/markdown.js';
 import { DATA_URI_PREFIX, MAX_SCREENSHOT_BASE64, foldRun, type FoldedRun } from './run-fold.js';
 import { withSession } from './registry.js';
@@ -263,6 +264,10 @@ function checkSessionOwnership(
 interface RunOutcome extends FoldedRun {
   sessionId: string;
   projectRoot: string;
+  /** Which root the run resolved against (stories/mcp-no-project.md rule 7).
+   *  A typo'd config filename now yields a *working* run against the user
+   *  root, and this field is what keeps that visible instead of mysterious. */
+  scope: 'project' | 'user';
   sessionCreated: boolean;
   configApplied: boolean;
   queuedForMs: number;
@@ -344,10 +349,10 @@ async function runningCdpBrowsers(
   client: ApiClient,
   projectRoot: string,
   signal?: AbortSignal,
-): Promise<{ engine: string; profile: string }[]> {
+): Promise<{ engine: string; profile: string; scope?: 'project' | 'user' | undefined }[]> {
   try {
     const browsers = await client.getCdpBrowsers({ projectRoot, includeForeign: false }, signal);
-    return browsers.running.map((b) => ({ engine: b.engine, profile: b.profile }));
+    return browsers.running.map((b) => ({ engine: b.engine, profile: b.profile, scope: b.scope }));
   } catch {
     return [];
   }
@@ -387,7 +392,7 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
       target,
       ctx.signal,
     );
-    // A profile was resolved out of this project's own `running` list, so the
+    // A profile was resolved out of the caller's own `running` list, so the
     // port is owned by construction and there is nothing for the gate to check.
     // A caller-supplied port has cleared no such thing and still owes one.
     if (gateOwed) {
@@ -396,6 +401,7 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
         project.projectRoot,
         port,
         project.cdpPermissions,
+        project.configPath,
         ctx.signal,
       );
     }
@@ -483,6 +489,7 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
       tokens: null,
       sessionId,
       projectRoot: project.projectRoot,
+      scope: project.scope,
       sessionCreated,
       configApplied,
       queuedForMs,
@@ -533,10 +540,12 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
   if (outcome.sessionCreated && request.config?.cdp === undefined) {
     const idle = await runningCdpBrowsers(client, project.projectRoot, ctx.signal);
     if (idle.length > 0) {
-      const named = idle.map((b) => `${b.engine} "${b.profile}"`).join(', ');
+      const named = idle
+        .map((b) => `${b.engine} "${b.profile}"${b.scope === 'user' ? ' (user root)' : ''}`)
+        .join(', ');
       outcome.warnings = [
         ...outcome.warnings,
-        `This run launched a fresh, signed-out browser, but this project has ` +
+        `This run launched a fresh, signed-out browser, but there are ` +
           `${idle.length} CDP browser(s) running: ${named}. If you meant to use one, ` +
           `pass config.cdp: { profile: "${idle[0]!.profile}" } — on a NEW session, ` +
           'since config is only read when a session is created.',
@@ -690,6 +699,13 @@ function summarize(outcome: RunOutcome): string {
     `${outcome.status.toUpperCase()} — ${counted}/${outcome.steps.length} steps passed ` +
       `(session ${outcome.sessionId})`,
   ];
+  // Rule 7 of stories/mcp-no-project.md, on the line a host that ignores
+  // structured output will show: a run that landed on the user root because
+  // no project resolved must say so, or a typo'd config filename becomes a
+  // working run with the project's skills mysteriously absent.
+  if (outcome.scope === 'user') {
+    lines.push(`Ran project-less against the user root (${outcome.projectRoot}).`);
+  }
   if (outcome.error) lines.push(`Error: ${outcome.error}`);
   if (outcome.reportPath) lines.push(`Report: ${outcome.reportPath}`);
   if (outcome.warnings.length > 0) lines.push(`Warnings: ${outcome.warnings.length}`);
@@ -725,6 +741,7 @@ function outcomeToResult(outcome: RunOutcome): ToolResult {
       streamDropped: outcome.streamDropped,
       sessionId: outcome.sessionId,
       projectRoot: outcome.projectRoot,
+      scope: outcome.scope,
       sessionCreated: outcome.sessionCreated,
       configApplied: outcome.configApplied,
       queuedForMs: outcome.queuedForMs,
@@ -767,9 +784,11 @@ Step syntax: plain English, one action per step. Also supported:
  */
 const CDP_NOTE = `
 Browser: steps run in a fresh, signed-out, disposable browser UNLESS you say
-otherwise. This project may also have a persistent CDP browser running that
-holds real logins — to use it, pass config.cdp: {profile: "<name>"} (call
-list_cdp_browsers if unsure which exist). Config is read only when a session is
+otherwise. Persistent CDP browsers holding real logins may also be running —
+the project's, and the user's machine-wide ones (scope "user", reachable from
+any directory, project or not). To use one, pass config.cdp:
+{profile: "<name>"} (call list_cdp_browsers if unsure which exist; add
+scope/engine if the name is ambiguous). Config is read only when a session is
 CREATED, so pass it on the first call for a session; passing it later is
 ignored.
 
@@ -814,7 +833,11 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       description:
         'Run natural-language steps in a real browser session and return per-step results.\n' +
         'Reuses one browser per project unless you pass a session_id, so successive calls ' +
-        'share page state and captured variables. Calls on one session run one at a time.\n\n' +
+        'share page state and captured variables. Calls on one session run one at a time.\n' +
+        'Works without a project too: from a directory with no aiui.config.json, steps run ' +
+        'against the machine-wide user root (the result says scope: "user") — but ' +
+        '[skill:]/[tool:] steps are refused there, since skills and tools belong to a ' +
+        'project.\n\n' +
         CDP_NOTE +
         '\n\n' +
         SETTINGS_NOTE +
@@ -932,13 +955,22 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       // needs a client nor should require a reachable server to answer.
       let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
       try {
-        project = await deps.resolveProject({ projectRoot: args.project_root });
+        // Test files are project-shaped, so this is one of the two tools that
+        // refuses rather than falling back to the user root
+        // (stories/mcp-no-project.md).
+        project = await deps.resolveProject({
+          projectRoot: args.project_root,
+          requireProject: true,
+        });
         const { dir, pattern } = resolveTestsGlob(project);
         // `tests.dir` is confined, but the pattern is not and glob honours
         // `../` inside it — so a hostile or simply wrong `aiui.config.json`
         // could enumerate .md paths outside every allowed root. Filtering the
-        // results also covers a symlinked tests directory.
-        const roots = allowedRoots();
+        // results also covers a symlinked tests directory. Against the
+        // CONFIGURED roots, not `allowedRoots()`: this tool requires a project,
+        // and its results must stay inside the project boundary rather than the
+        // user root that joined the addressing allow-list.
+        const roots = configuredRoots();
         const files = (await discoverTestFiles(dir, pattern)).filter((file) =>
           roots.some((root) => isInsideRoot(canonicalize(file), root)),
         );
@@ -996,7 +1028,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         return validated(
           schemas.listSessionsOutput,
           { sessions },
-          `${sessions.length} open session(s)`,
+          `${sessions.length} open session(s)` +
+            // Reported, never silent (stories/mcp-no-project.md): a project-less
+            // resolution talks to the user-root server (127.0.0.1:3141), and a
+            // caller who expected their project's sessions should see why the
+            // list looks unfamiliar rather than read "0 open" off the wrong one.
+            (project.scope === 'user'
+              ? ` on the user-root server at ${normalizeBaseUrl(project.serverUrl)} (project-less)`
+              : ''),
         );
       }),
   );
@@ -1148,6 +1187,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               running: false,
               detail,
               projectRoot: project.projectRoot,
+              scope: project.scope,
               sessionId: args.session_id ?? null,
               model: null,
               capture: null,
@@ -1171,6 +1211,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           running: true,
           detail: null,
           projectRoot: project.projectRoot,
+          scope: project.scope,
           sessionId: report.session?.sessionId ?? null,
           model: effective.model,
           capture: effective.capture,
@@ -1349,15 +1390,18 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'List CDP browsers',
       description:
-        'Persistent CDP browsers and profiles for this project.\n\n' +
+        'Persistent CDP browsers and profiles — the project\'s AND the ' +
+        'user\'s machine-wide ones, every entry tagged with `scope`. Works ' +
+        'with no project at all: user-root browsers (scope "user") are ' +
+        'reachable from any directory, forever.\n\n' +
         '`running` — live browsers. Pass one of these ports as ' +
         'config.cdp.port to run steps in it.\n' +
         '`available` — profiles that exist but have nothing running. **These ' +
         'are directories, not browsers**; call start_cdp_browser with the ' +
         'profile name before sending steps to it. A profile keeps its logins ' +
         'while dormant.\n' +
-        '`foreign` — browsers this project did not start. Reported so you can ' +
-        'see them; you cannot drive them unless a human sets ' +
+        '`foreign` — browsers tracing back to neither root. Reported so you ' +
+        'can see them; you cannot drive them unless a human sets ' +
         'mcp.cdp.allowUnowned, and their tab titles and URLs are withheld.\n\n' +
         'This covers CDP browsers only. Tests running in ordinary launch mode ' +
         'also have browsers, but those are disposable per-session ones with ' +
@@ -1378,18 +1422,28 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         // degrade the whole listing to `isError` with nothing readable in it —
         // killing the first call of the tab flow against a Sessions API server
         // left running from an earlier build. Normalised here for the same
-        // reason `list_sessions` normalises `tab`.
+        // reason `list_sessions` normalises `tab`. `scope` gets the same
+        // treatment: a server that predates the two-root sweep can only have
+        // swept the project root, so its unlabelled entries read `project`.
         const normalized = {
+          scope: project.scope,
           ...browsers,
           running: browsers.running.map((b) => ({
             ...b,
+            scope: b.scope ?? 'project',
             tabs: b.tabs.map((t) => ({ ...t, sessionId: t.sessionId ?? null })),
           })),
+          available: browsers.available.map((b) => ({ ...b, scope: b.scope ?? 'project' })),
         };
+        const summary =
+          summarizeBrowsers(normalized) +
+          (project.scope === 'user'
+            ? ` — project-less, so only the user root at ${project.projectRoot} was swept`
+            : '');
         return validated(
           schemas.listCdpBrowsersOutput,
           normalized as unknown as Record<string, unknown>,
-          summarizeBrowsers(browsers),
+          summary,
         );
       }),
   );
@@ -1400,10 +1454,12 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'Start a CDP browser',
       description:
-        'Launch a headed Chrome or Edge this project owns, and return the port ' +
-        'to drive it through. Returns the **already-running** browser if that ' +
-        'profile has one — the profile name is what selects between browsers, ' +
-        'so asking twice does not start two.\n\n' +
+        'Launch a headed Chrome or Edge and return the port to drive it ' +
+        'through. It belongs to this project by default, or to the ' +
+        'machine-wide user root with scope: "user" (the only option, and the ' +
+        'default, when no project resolved). Returns the **already-running** ' +
+        'browser if that profile has one — the profile name is what selects ' +
+        'between browsers, so asking twice does not start two.\n\n' +
         'A profile is a directory that persists. Sign in by hand once and the ' +
         'login survives closing the browser, restarting the server, and ' +
         'restarting this agent — that is the point of the feature.\n\n' +
@@ -1443,17 +1499,50 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           if (args.profile !== undefined && !/^[A-Za-z0-9._-]+$/.test(args.profile)) {
             return errorResult(badCdpProfileName(args.profile));
           }
+          // Which root the browser lives under (stories/mcp-no-project.md).
+          // Unstated keeps today's behaviour — the resolved root, which for a
+          // project-less call IS the user root. `scope: "user"` from inside a
+          // project reaches the machine-wide browser; `scope: "project"` with
+          // no project resolved is a contradiction to refuse, not to shrug at
+          // — silently landing it in the user root would put "the project's
+          // admin browser" somewhere no project can claim it.
+          const scope = args.scope ?? project.scope;
+          if (scope === 'project' && project.scope === 'user') {
+            return errorResult(
+              preflightError(
+                'scope: "project" was asked for, but no project resolved — this ' +
+                  'call is running project-less, and only the machine-wide user ' +
+                  'root is available.\n' +
+                  'Run from inside a project (or pass project_root) for a ' +
+                  'project-scoped browser, or drop scope to use the user root.',
+              ),
+            );
+          }
+          // When the resolution itself is user scope, its projectRoot IS the
+          // canonicalized user root — prefer it over re-deriving, so there is
+          // exactly one place that decides what that path is. `userRootDir()`
+          // is only for the crossing case: a project-scoped call asking for
+          // the machine-wide browser.
+          const launchRoot =
+            scope === 'project' || project.scope === 'user'
+              ? project.projectRoot
+              : userRootDir();
           const started = await client.startCdpBrowser({
-            projectRoot: project.projectRoot,
+            projectRoot: launchRoot,
             engine: args.engine,
             ...(args.profile !== undefined ? { profile: args.profile } : {}),
             ...(args.reset === true ? { reset: true } : {}),
           });
+          // A Sessions API server predating the field cannot have honoured a
+          // user-scope launch root any differently — the root IS the scope —
+          // so the ask is the truth when the echo is missing.
+          const result = { ...started, scope: started.scope ?? scope };
           return validated(
             schemas.startCdpBrowserOutput,
-            started as unknown as Record<string, unknown>,
-            `${started.engine} "${started.profile}" on port ${started.port} — ${started.outcome}` +
-              (started.warnings.length > 0 ? `\n${started.warnings.join('\n')}` : ''),
+            result as unknown as Record<string, unknown>,
+            `${result.engine} "${result.profile}"${result.scope === 'user' ? ' (user root)' : ''} ` +
+              `on port ${result.port} — ${result.outcome}` +
+              (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
           );
         },
         // The one tool here whose job is to make something exist, so it gets
@@ -1503,12 +1592,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // Same exactly-one rule as `config.cdp`, and refused for the same
           // reason: two addresses that disagree have no correct winner, and
           // this call closes something.
-          const { port, gateOwed } = await resolveCdpTarget(
+          const { port, gateOwed, scope: resolvedScope } = await resolveCdpTarget(
             client,
             project.projectRoot,
             {
               ...(args.profile !== undefined ? { profile: args.profile } : {}),
               ...(args.engine !== undefined ? { engine: args.engine } : {}),
+              ...(args.scope !== undefined ? { scope: args.scope } : {}),
               ...(args.port !== undefined ? { port: args.port } : {}),
             },
             extra.signal,
@@ -1516,7 +1606,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             // call actually has.
             cdpTabTargetAmbiguous,
           );
-          // A port resolved from this project's `running` list is owned by
+          // A port resolved from the caller's own `running` list is owned by
           // construction. A caller-supplied one is not, and closing tabs in a
           // browser is at least as intrusive as driving it — so it clears the
           // same gate, with the same human-held opt-in behind it.
@@ -1526,6 +1616,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               project.projectRoot,
               port,
               project.cdpPermissions,
+              project.configPath,
               extra.signal,
             );
           }
@@ -1574,6 +1665,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           const result = {
             ...closed,
             owned: closed.owned ?? certainlyOwned,
+            // The server's echo when it sent one; else the scope the profile
+            // resolution matched; else null — "unknown" and "foreign" both
+            // land there, and the summary already distinguishes via `owned`.
+            scope: closed.scope ?? resolvedScope ?? null,
             warnings: closed.warnings ?? [],
           };
 
@@ -1583,7 +1678,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // the browser went with it.
           const what = closed.title || closed.url || closed.targetId;
           const browser = result.owned
-            ? `${result.engine} "${result.profile}"`
+            ? `${result.engine} "${result.profile}"${result.scope === 'user' ? ' (user root)' : ''}`
             : `the browser on port ${result.port}`;
           const aftermath = result.browserExited
             // Not "that was its last tab" — the tab count and the browser's own
@@ -1644,12 +1739,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         deps,
         args.project_root,
         async (client, project) => {
-          const { port, gateOwed } = await resolveCdpTarget(
+          const { port, gateOwed, scope: resolvedScope } = await resolveCdpTarget(
             client,
             project.projectRoot,
             {
               ...(args.profile !== undefined ? { profile: args.profile } : {}),
               ...(args.engine !== undefined ? { engine: args.engine } : {}),
+              ...(args.scope !== undefined ? { scope: args.scope } : {}),
               ...(args.port !== undefined ? { port: args.port } : {}),
             },
             extra.signal,
@@ -1664,6 +1760,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               project.projectRoot,
               port,
               project.cdpPermissions,
+              project.configPath,
               extra.signal,
             );
           }
@@ -1702,11 +1799,15 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // `warnings` is required by the output schema, so a Sessions API
           // server that omits it would fail validation and degrade a working
           // result to `isError` with nothing readable in it.
-          const result = { ...focused, warnings: focused.warnings ?? [] };
+          const result = {
+            ...focused,
+            scope: focused.scope ?? resolvedScope ?? null,
+            warnings: focused.warnings ?? [],
+          };
 
           const what = result.title || result.url || result.targetId;
           const browser = result.profile
-            ? `${result.engine} "${result.profile}"`
+            ? `${result.engine} "${result.profile}"${result.scope === 'user' ? ' (user root)' : ''}`
             : `the browser on port ${result.port}`;
           return validated(
             schemas.focusCdpTabOutput,

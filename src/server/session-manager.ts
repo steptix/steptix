@@ -2282,6 +2282,18 @@ export class SessionManager {
         );
       }
     }
+    // A batch that omits `toolsDir` deliberately KEEPS a catalogue an earlier
+    // batch loaded — `session.toolCatalogue` is sticky, matching the
+    // `envBundle`/`sessionConfig` precedent, so TestBench's Continue (which
+    // re-sends steps without re-sending `toolsDir`) still dispatches tools.
+    //
+    // stories/mcp-no-project.md's "no tools project-less" guarantee is enforced
+    // MCP-side instead (`CODE_STEP_PATTERN` in assemble.ts refuses `[skill:]`/
+    // `[tool:]` before a user-scope run reaches here), not by dropping the
+    // catalogue on a bare batch — that would regress Continue to close a hole
+    // the client scan already closes. The scan was reviewed to be a strict
+    // superset of this server's own tokenizer, so nothing project-less that
+    // would dispatch here survives it.
     const toolCatalogue = session.toolCatalogue;
 
     // Skill expansion — when the caller supplies `skillsDir`, flatten
