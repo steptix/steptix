@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { SseParser, createApiClient } from '../src/mcp/api-client.js';
-import { ApiHttpError } from '../src/mcp/types.js';
+import { ApiHttpError, ApiRouteNotFoundError } from '../src/mcp/types.js';
 
 // ---------------------------------------------------------------------------
 // The SSE reader is hand-written (taking runner-core as a dependency would put
@@ -367,13 +367,15 @@ describe('createApiClient other routes', () => {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'No tab with target id GONE is open' }));
     });
-    await expect(
-      createApiClient({ baseUrl: ours, apiKey: 'k' }).focusCdpTab({
-        projectRoot: 'C:\\proj',
-        port: 51000,
-        targetId: 'GONE',
-      }),
-    ).rejects.toMatchObject({ status: 404, serverMessage: 'No tab with target id GONE is open' });
+    const tabGone = await createApiClient({ baseUrl: ours, apiKey: 'k' })
+      .focusCdpTab({ projectRoot: 'C:\\proj', port: 51000, targetId: 'GONE' })
+      .catch((e: unknown) => e);
+    expect(tabGone).toBeInstanceOf(ApiHttpError);
+    expect(tabGone).not.toBeInstanceOf(ApiRouteNotFoundError);
+    expect(tabGone).toMatchObject({
+      status: 404,
+      serverMessage: 'No tab with target id GONE is open',
+    });
 
     await new Promise<void>((r) => server!.close(() => r()));
 
@@ -381,12 +383,40 @@ describe('createApiClient other routes', () => {
       res.writeHead(404, { 'Content-Type': 'text/html' });
       res.end('<!DOCTYPE html><html><body>Cannot POST /cdp/browsers/51000/tabs/T1/focus</body></html>');
     });
-    await expect(
-      createApiClient({ baseUrl: older, apiKey: 'k' }).focusCdpTab({
-        projectRoot: 'C:\\proj',
-        port: 51000,
-        targetId: 'T1',
-      }),
-    ).rejects.toMatchObject({ status: 404, serverMessage: '' });
+    const routeGone = await createApiClient({ baseUrl: older, apiKey: 'k' })
+      .focusCdpTab({ projectRoot: 'C:\\proj', port: 51000, targetId: 'T1' })
+      .catch((e: unknown) => e);
+    // A distinct TYPE, not an empty message — see the next test for why.
+    expect(routeGone).toBeInstanceOf(ApiRouteNotFoundError);
+  });
+
+  it('does not call a JSON 404 a stale server just because it has no `error` string', async () => {
+    // The hole in inferring route-missing from an absent message. Any
+    // intermediary that answers 404 with JSON carrying a non-string `error` —
+    // an error object, a `message` key, a proxy's own envelope — parses fine
+    // and leaves nothing to quote. Reported as "your server predates this
+    // route, run npm run build" it is a confident lie about a server that may
+    // be perfectly current.
+    for (const body of [
+      { error: { code: 'ENOTFOUND' } },
+      { message: 'not found' },
+      { error: 42 },
+      {},
+    ]) {
+      const gateway = await startServer((_url, res) => {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      });
+      const err = await createApiClient({ baseUrl: gateway, apiKey: 'k' })
+        .focusCdpTab({ projectRoot: 'C:\\proj', port: 51000, targetId: 'T1' })
+        .catch((e: unknown) => e);
+
+      expect(err, JSON.stringify(body)).toBeInstanceOf(ApiHttpError);
+      expect(err, JSON.stringify(body)).not.toBeInstanceOf(ApiRouteNotFoundError);
+      // And it still says *something* rather than going quiet.
+      expect((err as ApiHttpError).serverMessage).not.toBe('');
+
+      await new Promise<void>((r) => server!.close(() => r()));
+    }
   });
 });

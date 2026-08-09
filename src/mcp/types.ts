@@ -466,6 +466,30 @@ export class ApiHttpError extends Error {
   }
 }
 
+/**
+ * A 404 whose body was **not this server's JSON error envelope** — so the
+ * *route* is absent, not the thing the route addresses.
+ *
+ * The two readings of a 404 mean opposite things to whoever is reading. Our
+ * routes answer `{ error: "<prose>" }`; a Sessions API server from a build that
+ * predates a route has no such route, so Express answers its own 404 with an
+ * HTML document. Telling an agent its tab was closed when the truth is "rebuild
+ * the server" sends the user looking for a window that is still sitting there.
+ *
+ * **A distinct type rather than an empty `serverMessage`.** Inferring
+ * route-missing from an absent message was one substitution away from being
+ * wrong: any body that parses as JSON but carries a non-string `error` (or an
+ * error object, or `message`) would leave the message empty and be reported as
+ * a stale server. The client knows which of the two it saw; it should say so
+ * rather than leave the next layer to guess from a hole.
+ */
+export class ApiRouteNotFoundError extends ApiHttpError {
+  constructor(readonly url: string) {
+    super(404, '');
+    this.name = 'ApiRouteNotFoundError';
+  }
+}
+
 export interface ApiClientOptions {
   baseUrl: string;
   apiKey: string;

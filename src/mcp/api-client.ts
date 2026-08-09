@@ -10,6 +10,7 @@
  */
 import {
   ApiHttpError,
+  ApiRouteNotFoundError,
   type ApiClient,
   type ApiClientOptions,
   type CdpBrowsers,
@@ -370,28 +371,47 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
     async focusCdpTab(args, signal): Promise<FocusedCdpTab> {
       const params = new URLSearchParams({ projectRoot: args.projectRoot });
       if (args.allowUnowned) params.set('allowUnowned', 'true');
-      const res = await doFetch(
-        `${base}/cdp/browsers/${args.port}/tabs/${encodeURIComponent(args.targetId)}/focus` +
-          `?${params.toString()}`,
-        { method: 'POST', headers, ...(signal ? { signal } : {}) },
-      );
+      const path =
+        `/cdp/browsers/${args.port}/tabs/${encodeURIComponent(args.targetId)}/focus` +
+        `?${params.toString()}`;
+      const res = await doFetch(`${base}${path}`, {
+        method: 'POST',
+        headers,
+        ...(signal ? { signal } : {}),
+      });
 
       // A 404 has two readings here and only one of them is about the tab. Our
       // route answers with a JSON `error`; a Sessions API server from a build
       // that predates the route has no such route at all, so Express answers
       // its own 404 with an HTML body — which `assertOk` would flatten into the
       // status text, telling the agent its tab is gone when the truth is that
-      // the server needs rebuilding. An empty `serverMessage` is how the tool
-      // tells the two apart.
+      // the server needs rebuilding.
+      //
+      // The distinction is carried by the error TYPE, not by an empty message:
+      // a body that parses as JSON but carries a non-string `error` is a
+      // response from something, and reporting it as a stale build would be a
+      // confident lie. Only a body we could not read as our own envelope means
+      // the route is not there.
       if (res.status === 404) {
-        let serverMessage = '';
+        const raw = await res.text();
+        let envelope: { error?: unknown } | null = null;
         try {
-          const body = (await res.json()) as { error?: unknown };
-          if (typeof body.error === 'string') serverMessage = body.error;
+          envelope = JSON.parse(raw) as { error?: unknown };
         } catch {
-          // Not our JSON — the route is missing.
+          // Not JSON at all — Express's own 404 page.
         }
-        throw new ApiHttpError(404, serverMessage);
+        if (envelope === null || typeof envelope !== 'object') {
+          throw new ApiRouteNotFoundError(path);
+        }
+        // JSON, so something answered deliberately. Prefer its `error`, and
+        // fall back to the status text rather than to silence — an empty
+        // message here would read as "the route is missing", which this is not.
+        throw new ApiHttpError(
+          404,
+          typeof envelope.error === 'string' && envelope.error !== ''
+            ? envelope.error
+            : res.statusText || 'Not Found',
+        );
       }
 
       await assertOk(res);
