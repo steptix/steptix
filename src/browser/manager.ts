@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { chromium, firefox, webkit, type Browser, type BrowserContext, type Page } from 'playwright';
+import { chromium, firefox, webkit, type Browser, type BrowserContext, type Dialog, type Page } from 'playwright';
 import { chromium as stealthChromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
@@ -1135,6 +1135,70 @@ export interface LaunchOverrides {
   videoDir?: string;
 }
 
+/** Contexts already guarded, so a double-install cannot make two listeners
+ *  fight over one dialog (the loser would throw "already handled"). */
+const dialogGuarded = new WeakSet<BrowserContext>();
+
+/**
+ * Take ownership of native JavaScript dialogs (`alert` / `confirm` / `prompt` /
+ * `beforeunload`) for every page in a context.
+ *
+ * **This exists because not subscribing is fatal** (issues/047). Playwright's
+ * server-side `DialogManager.dialogDidOpen` auto-dismisses any dialog nobody
+ * subscribed to, and does it as `dialog.close().then(() => {})` — with no
+ * `.catch()`, unlike the identical call in `removeDialogHandler` ten lines
+ * below it. So if that one CDP round-trip loses to whatever already closed the
+ * dialog (a cross-origin iframe torn down mid-dialog, a navigation, a
+ * background tab), the rejection has no owner, Node escalates it to an uncaught
+ * exception, and the whole Sessions API process dies — every session, every
+ * browser, mid-run. Confirmed still unfixed in playwright-core 1.62.1, so this
+ * is not something an upgrade retires.
+ *
+ * Subscribing flips Playwright's `hasHandlers` to true, which retires the
+ * unguarded branch entirely. It also *transfers the duty*: once anyone is
+ * listening, nothing else will close the dialog, and an unanswered dialog
+ * blocks the renderer for the rest of the run. So this handler must always
+ * answer, which is why every path below ends in a handle call.
+ *
+ * **On the context, not the page.** `DialogManager` is context-wide, so the
+ * blast radius is every tab in the context — including, under CDP, the user's
+ * own tabs that `PageTracker` deliberately ignores. Guarding only the pages we
+ * track would leave a dialog on an unrelated tab able to kill the server.
+ *
+ * The disposition mirrors Playwright's own default exactly (accept
+ * `beforeunload`, dismiss the rest), so runs behave as they always have. The
+ * difference is that the failures are caught and the dialogs are finally
+ * visible: until now every dialog in every run was dismissed silently, with
+ * nothing in the log to say it ever happened.
+ */
+export function installDialogGuard(context: BrowserContext): void {
+  if (dialogGuarded.has(context)) return;
+  dialogGuarded.add(context);
+
+  context.on('dialog', (dialog: Dialog) => {
+    const type = dialog.type();
+    // `beforeunload` is accepted rather than dismissed for the same reason
+    // Playwright accepts it: dismissing one means "stay on this page", which
+    // silently cancels the navigation the step just asked for.
+    const accepting = type === 'beforeunload';
+    const where = dialog.page()?.url() ?? 'unknown page';
+    logger.info(
+      `Browser dialog [${type}] auto-${accepting ? 'accepted' : 'dismissed'} on ${where}` +
+        (dialog.message() ? `: ${dialog.message()}` : ''),
+    );
+    // The `.catch` is the entire point of this function. A dialog that is
+    // already gone by the time our answer reaches Chromium is an ordinary race,
+    // not a reason to lose every session on the server.
+    const answered = accepting ? dialog.accept() : dialog.dismiss();
+    void answered.catch((err: unknown) => {
+      logger.debug(
+        `Dialog [${type}] could not be ${accepting ? 'accepted' : 'dismissed'} — ` +
+          `it was already gone (${err instanceof Error ? err.message : String(err)})`,
+      );
+    });
+  });
+}
+
 /**
  * Launch a Playwright browser and create a new page with the given configuration.
  * When `cdp` is provided, attaches to a running Chrome over CDP instead of
@@ -1222,6 +1286,10 @@ export async function launchBrowser(
       : {}),
   });
 
+  // Before the first page exists, so no page can ever raise a dialog into the
+  // unguarded default (issues/047).
+  installDialogGuard(context);
+
   const page = await context.newPage();
   const pageTracker = new PageTracker(page);
 
@@ -1285,6 +1353,12 @@ async function connectOverCdpSession(
       `This is unexpected — try restarting Chrome.`,
     );
   }
+
+  // Before any tab is touched. This context is the user's whole browser, so
+  // the guard covers their pre-existing tabs too — which is the point: a
+  // dialog on a tab we deliberately ignore could otherwise kill the server
+  // (issues/047).
+  installDialogGuard(context);
 
   const preExistingPages = new Set<Page>(context.pages());
   let page: Page;

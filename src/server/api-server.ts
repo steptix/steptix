@@ -1179,6 +1179,62 @@ const SHUTDOWN_GRACE_MS = 250;
 /** Backstop for a teardown that hangs (a wedged browser, a stuck socket). */
 const SHUTDOWN_HARD_EXIT_MS = 10_000;
 
+/** Just enough of `process` to register the two guards, so a test can pass a
+ *  bare EventEmitter instead of arming handlers on the real process. */
+export interface CrashGuardTarget {
+  on(event: 'unhandledRejection' | 'uncaughtException', listener: (reason: unknown) => void): unknown;
+}
+
+/**
+ * Keep the server alive through an async failure nobody was awaiting.
+ *
+ * The Sessions API is a shared, long-lived process holding every client's
+ * sessions and every browser those sessions drive. Node's default for an
+ * unowned rejection is to exit, and that default is calibrated for a one-shot
+ * script, not for this: issues/047 is a Playwright event handler dropping a
+ * rejected `Page.handleJavaScriptDialog` on the floor, which took the whole
+ * process down mid-run and lost every session — while the browsers it had
+ * launched stayed orphaned and the MCP client got a naked dropped stream it
+ * could only describe as "the run may still be executing".
+ *
+ * The specific bug is fixed at the source (`installDialogGuard`). This is the
+ * backstop for the next one, and the class is worth a backstop: a stray promise
+ * inside a browser event listener says nothing about whether this process can
+ * keep serving the sessions it is holding. So both handlers log loudly
+ * — with the stack, which is the whole reason you want one of these — and
+ * carry on. A run whose own await chain broke still fails on its own; nothing
+ * here papers over that.
+ *
+ * `uncaughtException` is the one to be uneasy about, since Node's warning about
+ * an indeterminate process state is real. It is installed anyway because a
+ * synchronous throw from the same class of listener has the same blast radius,
+ * and "definitely lose every session" is worse than "possibly degraded".
+ *
+ * **Armed only once the listener is bound**, which is load-bearing rather than
+ * tidy. A failed `listen` — EADDRINUSE, above all — surfaces as an uncaught
+ * exception, and `mcp/server-start.ts` depends on that being fatal: a second
+ * server spawned onto a taken port must die there, not linger as a process that
+ * never bound anything. `app.listen`'s callback never runs in that case, so
+ * startup stays exactly as fatal as it was.
+ */
+export function installCrashGuards(target: CrashGuardTarget = process): void {
+  const describe = (err: unknown): string =>
+    err instanceof Error ? (err.stack ?? err.message) : String(err);
+
+  target.on('unhandledRejection', (reason: unknown) => {
+    logger.error(
+      `Unhandled promise rejection — the server is staying up and sessions are ` +
+        `unaffected:\n${describe(reason)}`,
+    );
+  });
+  target.on('uncaughtException', (err: unknown) => {
+    logger.error(
+      `Uncaught exception — the server is staying up and sessions are ` +
+        `unaffected:\n${describe(err)}`,
+    );
+  });
+}
+
 export async function startServer(config: Config): Promise<void> {
   let shuttingDown = false;
 
@@ -1198,6 +1254,8 @@ export async function startServer(config: Config): Promise<void> {
     `closing ${sessionManager.countOpenSessions()} session(s) and shutting down`;
 
   const server = app.listen(port, host, () => {
+    // Only now — see `installCrashGuards` on why a failed bind must stay fatal.
+    installCrashGuards();
     logger.info(`Sessions API server listening on http://${host}:${port}`);
     if (idleMonitor.armed) {
       logger.info(
