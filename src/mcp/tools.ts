@@ -1460,6 +1460,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'default, when no project resolved). Returns the **already-running** ' +
         'browser if that profile has one — the profile name is what selects ' +
         'between browsers, so asking twice does not start two.\n\n' +
+        'You almost never need project_root — omit it. For the user\'s own ' +
+        'browser (their real logins), pass scope: "user"; do NOT invent a ' +
+        'project_root such as the current or home directory — an out-of-bounds ' +
+        'path is refused, and guessing is never the right move.\n\n' +
         'A profile is a directory that persists. Sign in by hand once and the ' +
         'login survives closing the browser, restarting the server, and ' +
         'restarting this agent — that is the point of the feature.\n\n' +

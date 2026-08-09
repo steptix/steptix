@@ -71,10 +71,14 @@ const projectRoot = z
   .optional()
   .describe(
     'Absolute path of the project (the directory containing aiui.config.json). ' +
-      'Optional when the server was started inside the project, or when ' +
+      '**Omit this unless you have a real project path — do NOT pass a guess ' +
+      'like the current working directory or a home folder.** A path outside ' +
+      'the allowed roots is refused outright, and you rarely need it: it is ' +
+      'optional when the server was started inside the project, or when ' +
       'AIUI_MCP_ROOTS names exactly one directory. With no project anywhere, ' +
       'most tools fall back to the machine-wide user root and say so via ' +
-      'scope: "user" in their results.',
+      'scope: "user" in their results — for your own machine-wide browsers, ' +
+      'omit project_root entirely and use scope: "user" instead.',
   );
 
 /** The two roots a browser or run can belong to (stories/mcp-no-project.md). */
@@ -510,8 +514,11 @@ export const startCdpBrowserInput = toolSchema({
       'Where the browser lives. "project" (the default inside a project) — ' +
         'under this project, addressable only here. "user" — under the ' +
         'machine-wide user root, reachable from any directory forever; this ' +
-        'is the default (and only option) when no project resolved. Pass ' +
-        '"user" from inside a project for a personal browser that outlives it.',
+        'is the default (and only option) when no project resolved. **For the ' +
+        'user\'s own signed-in browser — the one with their real logins — pass ' +
+        'scope: "user" and no project_root.** That reaches it from anywhere, ' +
+        'in a project or not, with no path to guess. Requests like "open my ' +
+        'Chrome / my personal browser" mean scope: "user".',
     ),
   project_root: projectRoot,
 });
