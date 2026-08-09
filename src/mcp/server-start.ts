@@ -192,29 +192,25 @@ export const ensureServerReady: EnsureServerReady = (project, signal) =>
   ensureServerReadyWith(project, signal);
 
 /**
- * Refuse to talk to whatever holds the port unless it identifies as ours.
+ * Refuse to talk to whatever holds the port unless it identifies as ours,
+ * WITHOUT starting one — the report-only half of the readiness split.
  *
- * For the tools that only report on what is already there — `list_sessions`,
- * `close_session`, `get_last_run`, `get_page_content`, `list_cdp_browsers`.
- * They still send
- * `AIUI_SERVER_API_KEY`, and without this they send it to any process that happens
- * to hold the port: an agent calling `list_sessions` as a harmless "what's
- * running?" probe would hand the project's key to a squatter. That is the same
- * hazard §5 arm 2 exists for, and the same one `aiui stop` guards before
- * sending merely the key.
+ * Used only by the two tools whose contract is to report server state and be
+ * able to answer "nothing is running": `server_status` and `get_run_settings`.
+ * They still send `AIUI_SERVER_API_KEY` once a healthy server answers, and
+ * without this check they would send it to any process that happens to hold the
+ * port — the same hazard §5 arm 2 exists for, and the same one `aiui stop`
+ * guards before sending merely the key. A `down` server is allowed through so
+ * the caller can report `running: false` rather than starting one.
  *
- * Deliberately NOT `ensureServerReady`: asking what is running must never start
- * a server. A `down` server is allowed through so the caller's own request
- * fails with an ordinary connect error rather than a confusing refusal.
- *
- * The test is what a tool is FOR, not whether it happens to talk to the server.
- * One whose purpose is to make something exist belongs on `ensureServerReady`:
- * `start_cdp_browser` was routed here by the helper it shares with the probes
- * and inherited this rule, so against a stopped server it died on a bare
- * ECONNREFUSED while `run_test_file` from the same agent would have started
- * one. `close_cdp_tab` and `focus_cdp_tab` are on `ensureServerReady` for the
- * same reason: they act on live browser state rather than reporting on it. Keep
- * this list in step with `withProject`'s `autoStart` in [tools.ts](./tools.ts).
+ * Every OTHER tool now auto-starts: `withProject` defaults to `ensureServerReady`
+ * (stories/mcp-no-project.md — whichever aiui tool an agent reaches for first
+ * should bring the server up, not fail on ECONNREFUSED). `ensureServerReady`'s
+ * `unrecognized` arm throws the same refusal this does, so auto-starting never
+ * hands the key to a squatter; it only starts a *down* loopback server. Keep
+ * this pair in step with the `autoStart: false` callers in
+ * [tools.ts](./tools.ts) — today there are none, because the two report-only
+ * tools bypass `withProject` and call this directly / probe `/health`.
  */
 export async function assertServerRecognized(
   project: ProjectContext,
