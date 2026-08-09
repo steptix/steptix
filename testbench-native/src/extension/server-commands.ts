@@ -135,7 +135,8 @@ export function registerServerCommands(args: {
     }
     if (!target.apiKey) {
       void vscode.window.showErrorMessage(
-        'TestBench: SERVER_API_KEY is not set in the workspace root .env — cannot authenticate the stop.',
+        'TestBench: no AIUI_SERVER_API_KEY anywhere — not in the workspace .env, the process ' +
+          'environment, or the machine key file — cannot authenticate the stop.',
       );
       return;
     }
@@ -174,8 +175,9 @@ export function registerServerCommands(args: {
 
     if (res.status === 401) {
       void vscode.window.showErrorMessage(
-        `TestBench: ${target.serverUrl} rejected SERVER_API_KEY. The key in the workspace .env must ` +
-          "match the one the server process was started with (e.g. its --env-file).",
+        `TestBench: ${target.serverUrl} rejected AIUI_SERVER_API_KEY. The key TestBench resolved ` +
+          '(workspace .env, process environment, or the machine key file) must match the one the ' +
+          'server process was started with (e.g. its --env-file).',
       );
       return;
     }

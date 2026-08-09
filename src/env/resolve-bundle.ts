@@ -46,7 +46,7 @@ export async function resolveEnvBundle(opts: ResolveBundleOptions = {}): Promise
   const dataDir = opts.dataDir ?? 'data';
 
   // Baseline = the process's own environment (OS env, the server/CLI startup
-  // base `.env`, SERVER_API_KEY, etc). Project layers compose ON TOP of this.
+  // base `.env`, AIUI_SERVER_API_KEY, etc). Project layers compose ON TOP of this.
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === 'string') env[k] = v;

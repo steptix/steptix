@@ -24,7 +24,7 @@ const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtur
 
 const BASE_ENV = {
   SERVER_URL: 'http://127.0.0.1:3100',
-  SERVER_API_KEY: 'project-key',
+  AIUI_SERVER_API_KEY: 'project-key',
   BASE_URL: 'https://base.example.com',
   GREETING: 'Welcome back',
   TEST_PASSWORD: 'hunter2',
@@ -76,7 +76,7 @@ const originalEnv = { ...process.env };
 
 beforeEach(() => {
   delete process.env['SERVER_URL'];
-  delete process.env['SERVER_API_KEY'];
+  delete process.env['AIUI_SERVER_API_KEY'];
   root = makeProject(
     { tests: { skillsDir: './skills', toolsDir: './tools/src' }, cache: { enabled: true } },
     ['skills', 'tools/src', 'data'],

@@ -19,7 +19,7 @@
  * (auto-discovered by the glob — no wiring needed).
  *
  * Required env (from templates/.env, picked up via walkup):
- *   SERVER_URL, SERVER_API_KEY, AI_API_KEY, GITHUB_USERNAME, GITHUB_PASSWORD
+ *   SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY, GITHUB_USERNAME, GITHUB_PASSWORD
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');

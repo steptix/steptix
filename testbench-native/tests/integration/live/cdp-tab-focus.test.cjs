@@ -46,7 +46,7 @@
  * (auto-discovered by the glob), or scope it with
  * TESTBENCH_LIVE_GREP="CDP tab focus".
  *
- * Required env: SERVER_API_KEY in templates/.env. No AI key needed.
+ * Required env: AIUI_SERVER_API_KEY in templates/.env. No AI key needed.
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -202,8 +202,8 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       `no aiui.config.json under ${projectRoot}`,
     );
 
-    apiKey = readEnvValue(path.join(workspaceRoot, '.env'), 'SERVER_API_KEY');
-    assert.ok(apiKey, 'SERVER_API_KEY missing from templates/.env');
+    apiKey = readEnvValue(path.join(workspaceRoot, '.env'), 'AIUI_SERVER_API_KEY');
+    assert.ok(apiKey, 'AIUI_SERVER_API_KEY missing from templates/.env');
 
     // AI credentials come from the REPO ROOT `.env` in preference to
     // `templates/.env`, and the difference is the model rather than the key.

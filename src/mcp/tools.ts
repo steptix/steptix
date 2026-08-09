@@ -628,7 +628,7 @@ async function screenshotResult(
  * Exists so the non-run tools report failures as well as the run tools do:
  * with `project` scoped inside each handler's own `try`, a 401 was caught
  * with no `envFilesConsulted` and no base URL — rendering §7's row as
- * " rejected our SERVER_API_KEY. Ours came from:  (or the environment)",
+ * " rejected our AIUI_SERVER_API_KEY. Ours came from:  (or the environment)",
  * which names neither of the two things it exists to name.
  *
  * `autoStart` picks which guarantee the caller needs, and the split is by what

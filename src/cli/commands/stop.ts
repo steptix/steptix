@@ -1,6 +1,7 @@
 import path from 'node:path';
 import chalk from 'chalk';
 import type { Command } from 'commander';
+import { readMachineKey, userRootEnvPath } from '../../env/user-root.js';
 import { probeHealth } from '../../server/health.js';
 import { resolveServerUrl, type ServerTargetOptions } from '../server-target.js';
 
@@ -39,11 +40,25 @@ export function registerStopCommand(program: Command): void {
  * refusal/auth paths are testable against a stub server.
  */
 export async function stopCommand(opts: StopOptions): Promise<number> {
-  const apiKey = process.env['SERVER_API_KEY'];
+  // Same chain as every client (stories/machine-key.md): the environment,
+  // then the machine key — which is what lets a bare shell stop a server
+  // `serve` started bare. Never generated here: a key that no server holds
+  // stops nothing.
+  const envKey = process.env['AIUI_SERVER_API_KEY'];
+  const apiKey = envKey ?? readMachineKey() ?? undefined;
+  /** Where the key came from, for the 401 message — naming the actual source
+   *  is what makes a mismatch diagnosable instead of a hunt. The CLI entry
+   *  folds `./.env` into process.env at startup, so a defined env var may
+   *  really be the working directory's project key; name both candidates. */
+  const keySource =
+    envKey !== undefined
+      ? `the environment (the shell, or ${path.join(process.cwd(), '.env')})`
+      : `the machine key at ${userRootEnvPath()}`;
   if (!apiKey) {
     console.error(
-      chalk.red('SERVER_API_KEY is not set') +
-        ` — add it to ${path.join(process.cwd(), '.env')}, or export it, so the stop request can authenticate.`,
+      chalk.red('No AIUI_SERVER_API_KEY available') +
+        ` — none in the environment, and ${userRootEnvPath()} has none. ` +
+        'The stop request cannot authenticate without the key the server was started with.',
     );
     return 1;
   }
@@ -52,7 +67,7 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
 
   // §1: clients MUST check `service` before treating a port as ours. Without
   // this, a foreign process squatting the configured port is handed
-  // SERVER_API_KEY in a request it could never honour anyway. A pre-/health
+  // AIUI_SERVER_API_KEY in a request it could never honour anyway. A pre-/health
   // aiui server also lands here — it has no /admin/shutdown either, so
   // refusing with a clear message beats posting a key at a 404.
   const probe = await probeHealth(baseUrl, PROBE_TIMEOUT_MS);
@@ -108,15 +123,15 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
   }
 
   if (res.status === 401) {
-    // The likeliest cause by far: the server was launched with a different
-    // --env-file than the one the CLI read. Name both ends so the fix is
-    // obvious rather than a hunt.
+    // The likeliest cause: the server was launched with an explicit
+    // --env-file or exported key that never reached the machine key file.
+    // Name the source actually consulted so the fix is obvious, not a hunt.
     console.error(chalk.red('Unauthorized (401) — the API key sent does not match the server\'s.'));
     console.error(
       chalk.dim(
-        `  this CLI sent SERVER_API_KEY from ${path.join(process.cwd(), '.env')} (or the shell environment)\n` +
-          `  the server at ${baseUrl} was started with its own env file (e.g. --env-file=templates/.env)\n` +
-          '  make the two SERVER_API_KEY values match, or run stop from the directory whose .env the server used.',
+        `  this CLI sent AIUI_SERVER_API_KEY from ${keySource}\n` +
+          `  the server at ${baseUrl} holds whatever key it was started with (an explicit --env-file, say)\n` +
+          '  export that key in this shell, or restart the server bare so it uses the machine key.',
       ),
     );
     return 1;

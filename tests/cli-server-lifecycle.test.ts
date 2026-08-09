@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { statusCommand, formatUptime } from '../src/cli/commands/status.js';
 import { stopCommand } from '../src/cli/commands/stop.js';
@@ -173,27 +176,65 @@ describe('aiui status', () => {
 });
 
 describe('aiui stop', () => {
-  const savedKey = process.env['SERVER_API_KEY'];
+  const savedKey = process.env['AIUI_SERVER_API_KEY'];
+  // The machine-key chain reads the user root's .env — redirect it into an
+  // empty tmp dir so these tests see this machine's real key never.
+  const savedUserRoot = {
+    LOCALAPPDATA: process.env['LOCALAPPDATA'],
+    XDG_CONFIG_HOME: process.env['XDG_CONFIG_HOME'],
+  };
+  let userRootTmp: string;
 
   beforeEach(() => {
-    process.env['SERVER_API_KEY'] = 'cli-key';
+    process.env['AIUI_SERVER_API_KEY'] = 'cli-key';
+    userRootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stop-test-'));
+    process.env['LOCALAPPDATA'] = userRootTmp;
+    process.env['XDG_CONFIG_HOME'] = userRootTmp;
   });
 
   afterEach(() => {
-    if (savedKey === undefined) delete process.env['SERVER_API_KEY'];
-    else process.env['SERVER_API_KEY'] = savedKey;
+    if (savedKey === undefined) delete process.env['AIUI_SERVER_API_KEY'];
+    else process.env['AIUI_SERVER_API_KEY'] = savedKey;
+    for (const [k, v] of Object.entries(savedUserRoot)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(userRootTmp, { recursive: true, force: true });
   });
 
-  it('errors out when SERVER_API_KEY is unset, without making a request', async () => {
-    delete process.env['SERVER_API_KEY'];
+  it('errors out when no key exists anywhere, without making a request', async () => {
+    delete process.env['AIUI_SERVER_API_KEY'];
     let hit = false;
     const url = await startStub(() => {
       hit = true;
     });
 
     expect(await stopCommand({ url })).toBe(1);
-    expect(err.join('\n')).toMatch(/SERVER_API_KEY is not set/);
+    expect(err.join('\n')).toMatch(/No AIUI_SERVER_API_KEY available/);
     expect(hit).toBe(false);
+  });
+
+  it('falls back to the machine key when the environment has none', async () => {
+    delete process.env['AIUI_SERVER_API_KEY'];
+    const aiuiDir = path.join(userRootTmp, 'aiui');
+    fs.mkdirSync(aiuiDir, { recursive: true });
+    fs.writeFileSync(path.join(aiuiDir, '.env'), 'AIUI_SERVER_API_KEY=machine-key\n');
+
+    let sentKey: string | undefined;
+    const url = await startStub((req, res) => {
+      if (req.url === '/health') {
+        json(res, 200, healthBody());
+        return;
+      }
+      sentKey = req.headers['x-api-key'] as string | undefined;
+      json(res, 200, JSON.stringify({ ok: true }));
+      // The confirm loop needs the server to go dark after accepting.
+      const mine = server;
+      setTimeout(() => void stopStub(mine), 10);
+    });
+
+    await stopCommand({ url, confirmTimeoutMs: 2_000, confirmPollMs: 50 });
+    expect(sentKey).toBe('machine-key');
   });
 
   it('sends the key + force flag and exits 0 once the server goes dark', async () => {
@@ -258,7 +299,7 @@ describe('aiui stop', () => {
 
     expect(code).toBe(1);
     // §1: check `service` BEFORE treating the port as ours. Handing
-    // SERVER_API_KEY to a foreign process is the thing being prevented.
+    // AIUI_SERVER_API_KEY to a foreign process is the thing being prevented.
     expect(shutdownHit).toBe(false);
     expect(err.join('\n')).toMatch(/not an ai-ui-automation server/);
   });
@@ -277,8 +318,10 @@ describe('aiui stop', () => {
     expect(code).toBe(1);
     const text = err.join('\n');
     expect(text).toMatch(/401/);
-    expect(text).toMatch(/\.env/); // the CLI's source
-    expect(text).toMatch(/--env-file/); // the server's source
+    // The CLI's actual source this run — the env var was set by beforeEach,
+    // and the message also names cwd/.env since the entry folds it in.
+    expect(text).toMatch(/the environment \(the shell, or /);
+    expect(text).toMatch(/--env-file/); // the server's likely source
   });
 
   it('treats a 503 as success, but still waits for the port to go free', async () => {

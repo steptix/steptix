@@ -16,9 +16,11 @@ import {
   parseParameters,
   readEnvFile,
   readEnvOverlayFile,
+  readMachineKey,
   reportError,
   resolveEnvFile,
   resolveSection,
+  userRootEnvPath,
   type ClassifiedStep,
   type ErrorPayload,
   type HostEditorOptions,
@@ -102,7 +104,7 @@ export class RunController {
     const out = getOutputChannel();
     const ts = () => new Date().toISOString().slice(11, 23);
 
-    // Resolve env just to get SERVER_URL + SERVER_API_KEY. Anything missing
+    // Resolve env just to get SERVER_URL + AIUI_SERVER_API_KEY. Anything missing
     // is silently ignored — we want close to be cheap and forgiving.
     const settings = vscode.workspace.getConfiguration('testbench');
     const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
@@ -134,7 +136,7 @@ export class RunController {
       /* unreadable overlay — proceed with base .env */
     }
     const serverUrl = env['SERVER_URL']?.trim();
-    const apiKey = env['SERVER_API_KEY']?.trim();
+    const apiKey = env['AIUI_SERVER_API_KEY']?.trim();
     if (!serverUrl || !apiKey) return;
 
     out.appendLine(`[${ts()}] closing server session for ${filePath}`);
@@ -165,7 +167,7 @@ export class RunController {
 
   /**
    * Overlay the active env's `.env.<name>` onto a base `.env` map so $VAR in
-   * ## Parameters / ## Config — and SERVER_URL/SERVER_API_KEY — honour the
+   * ## Parameters / ## Config — and SERVER_URL/AIUI_SERVER_API_KEY — honour the
    * selected environment (matching the server's ${env.X} map and the CLI).
    *
    * With no env selected, returns `baseEnv` unchanged. A selected env with no
@@ -290,11 +292,19 @@ export class RunController {
       const payload = reportError('TB004', { envPath: envResolution.path, value: serverUrl });
       return this.fail(payload, log);
     }
-    if (!env['SERVER_API_KEY'] || env['SERVER_API_KEY'].trim() === '') {
-      const payload = reportError('TB003', { envPath: envResolution.path });
+    // The client chain of stories/machine-key.md: the project's walk-up .env,
+    // then the extension host's environment, then the machine key. Most
+    // machines only ever have the last one — `aiui serve` generates it.
+    const projectKey = env['AIUI_SERVER_API_KEY']?.trim();
+    const processKey = process.env['AIUI_SERVER_API_KEY']?.trim();
+    const apiKey = projectKey || processKey || readMachineKey() || '';
+    if (apiKey === '') {
+      const payload = reportError('TB003', {
+        envPath: envResolution.path,
+        machineEnvPath: userRootEnvPath(),
+      });
       return this.fail(payload, log);
     }
-    const apiKey = env['SERVER_API_KEY'].trim();
 
     // 4. Classify the requested lines into normal steps / [input:] / [interactive].
     // Expand the user's raw selection to actual step lines first — clicking

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DEFAULT_CONFIG } from './defaults.js';
 import type { Config, UserConfig } from './types.js';
 import { parseBoolEnv } from '../env/loader.js';
+import { readUserRootEnv } from '../env/user-root.js';
 import { logger } from '../utils/logger.js';
 
 /** True for a non-null, non-array object literal. */
@@ -77,7 +78,7 @@ function withEnvDefaults(config: Config): Config {
     result = { ...result, ai: { ...result.ai, model: model.trim() } };
   }
 
-  const serverApiKey = process.env['SERVER_API_KEY'];
+  const serverApiKey = process.env['AIUI_SERVER_API_KEY'];
   if (serverApiKey !== undefined) {
     result = { ...result, server: { ...result.server, apiKey: serverApiKey } };
   }
@@ -110,6 +111,56 @@ function withEnvDefaults(config: Config): Config {
 }
 
 /**
+ * The machine floor for the AI settings (stories/machine-key.md): values from
+ * the user root's `.env` apply only when neither the environment nor the
+ * project's config file set one.
+ *
+ * `project .env → project aiui.config.json → user-root .env → built-in`
+ *
+ * This is deliberately NOT a `process.env` preload. `withEnvDefaults` lets an
+ * env `AI_MODEL` override the config file — correct for a value the caller
+ * explicitly exported or `--env-file`d, wrong for a machine-wide default,
+ * which would then silently override every project's configured model. A
+ * default that beats explicit project config is not a default, so the floor
+ * is applied last and only into gaps (verification rule 9: a floor, never an
+ * override).
+ *
+ * `fileAi` is the *raw* user config, pre-merge — after the merge a file model
+ * and the built-in default are indistinguishable on the result.
+ */
+function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Config {
+  const userRoot = readUserRootEnv();
+  let result = config;
+
+  // `undefined` here means neither the config file nor the environment
+  // supplied one — `withEnvDefaults` only fills this key, never clears it.
+  const machineApiKey = userRoot['AI_API_KEY'];
+  if (
+    result.ai.apiKey === undefined &&
+    machineApiKey !== undefined &&
+    machineApiKey.trim() !== ''
+  ) {
+    result = { ...result, ai: { ...result.ai, apiKey: machineApiKey.trim() } };
+  }
+
+  const envModel = process.env['AI_MODEL'];
+  const envSetModel = envModel !== undefined && envModel.trim() !== '';
+  const fileModel = fileAi?.model;
+  const fileSetModel = typeof fileModel === 'string' && fileModel.trim() !== '';
+  const machineModel = userRoot['AI_MODEL'];
+  if (
+    !envSetModel &&
+    !fileSetModel &&
+    machineModel !== undefined &&
+    machineModel.trim() !== ''
+  ) {
+    result = { ...result, ai: { ...result.ai, model: machineModel.trim() } };
+  }
+
+  return result;
+}
+
+/**
  * Load and merge configuration from `aiui.config.json` + defaults.
  *
  * A missing config file is valid — the project runs on defaults. A config
@@ -134,7 +185,7 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
 
   if (!resolvedPath) {
     logger.debug('No config file found, using defaults');
-    return withEnvDefaults(baseDefaults);
+    return withMachineAiFloor(withEnvDefaults(baseDefaults), null);
   }
 
   logger.debug(`Loading config from: ${resolvedPath}`);
@@ -150,7 +201,7 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
       throw new Error(`Config file not found: ${resolvedPath}`);
     }
     logger.debug(`Config file not readable, using defaults: ${String(err)}`);
-    return withEnvDefaults(baseDefaults);
+    return withMachineAiFloor(withEnvDefaults(baseDefaults), null);
   }
 
   let parsed: unknown;
@@ -169,7 +220,8 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   // `$schema` is an editor-only hint (autocomplete/validation), not a Config
   // field — strip it before merging so it never reaches the resolved config.
   const { $schema: _schema, ...userConfig } = parsed;
-  return withEnvDefaults(mergeConfig(baseDefaults, userConfig as UserConfig));
+  const typed = userConfig as UserConfig;
+  return withMachineAiFloor(withEnvDefaults(mergeConfig(baseDefaults, typed)), typed.ai ?? null);
 }
 
 /** Apply CLI flag overrides onto an already-loaded config */

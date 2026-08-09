@@ -20,13 +20,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_CONFIG } from '../config/defaults.js';
 import { readDefaultEnvVars, readEnvFileVars } from '../env/loader.js';
+import { readMachineKey } from '../env/user-root.js';
 import {
   badEnvName,
   badProjectConfig,
   badRootEntry,
   envFileMissing,
   noProjectConfig,
-  noServerApiKey,
   noServerUrl,
   pathMustBeAbsolute,
   pathOutsideProjectRoot,
@@ -192,7 +192,7 @@ interface RawProjectConfig {
  * Read `aiui.config.json` directly — never `loadConfig`.
  *
  * `loadConfig` folds `process.env` (`AI_API_KEY`, `AI_MODEL`,
- * `SERVER_API_KEY`) into its result and always materialises relative
+ * `AIUI_SERVER_API_KEY`) into its result and always materialises relative
  * `tests.skillsDir`/`toolsDir`, so "the project's config" would silently
  * include the MCP host process's environment. The ban is on the loader, not
  * on its default literals — those are reused below.
@@ -329,7 +329,7 @@ export function resolveTestsGlob(project: ProjectContext): { dir: string; patter
 /**
  * Everything about a project except which server it talks to.
  *
- * The split exists so `SERVER_URL` and `SERVER_API_KEY` are read exactly once,
+ * The split exists so `SERVER_URL` and `AIUI_SERVER_API_KEY` are read exactly once,
  * *after* any `.env.<name>` overlay: an overlay may name a different server
  * than the base `.env` does, and checking before it lands would both refuse a
  * project whose URL lives only in the overlay and report the wrong file in the
@@ -360,12 +360,16 @@ function withServerDiscovery(fields: ProjectDraft): ProjectContext {
   const serverUrl = firstNonEmpty(fields.env['SERVER_URL'], process.env['SERVER_URL']);
   if (serverUrl === null) fail(noServerUrl(fields.envFilesConsulted));
 
-  // Its own error rather than a generic one: `serve` hard-exits before binding
-  // without a key, so a missing key would otherwise cost a full 20 s
-  // auto-start poll and report "the server never became healthy" — which is
-  // true, and useless.
-  const apiKey = firstNonEmpty(fields.env['SERVER_API_KEY'], process.env['SERVER_API_KEY']);
-  if (apiKey === null) fail(noServerApiKey(fields.envFilesConsulted));
+  // The client chain of stories/machine-key.md: project `.env` → environment
+  // → the machine key. A miss on all three is NOT failed here — only
+  // `server-start.ts` can decide what it means, because the answer depends on
+  // the server's state: down + loopback may generate a key and spawn with it,
+  // while a running server means a refusal naming the file to write.
+  const apiKey = firstNonEmpty(
+    fields.env['AIUI_SERVER_API_KEY'],
+    process.env['AIUI_SERVER_API_KEY'],
+    readMachineKey() ?? undefined,
+  );
 
   return { ...fields, serverUrl, apiKey };
 }

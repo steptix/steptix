@@ -16,7 +16,7 @@ runner via a new `runner-core` package.
 - **Server is user-managed.** Extension never spawns or bundles `ai-ui-automation`; it speaks HTTP+SSE to whatever server the user started
 - **Per-run `.env`**: extension reads the file, ships its parsed contents in the request body; server applies them to the per-session child process only (request env wins, no inheritance of secrets)
 - **`.env` resolution**: walk up from the test file to the nearest ancestor containing `.env`, stop at workspace root; on miss, fall back to `testbench.defaultEnvFile` setting; on miss, hard-fail in run log. Every resolution step logged to the "TestBench" output channel
-- **Required `.env` keys**: `SERVER_URL` (full URL incl. scheme/host/port), `SERVER_API_KEY`. Other keys (e.g. `AI_API_KEY`, `AI_MODEL`) passed through as-is
+- **Required `.env` keys**: `SERVER_URL` (full URL incl. scheme/host/port), `AIUI_SERVER_API_KEY`. Other keys (e.g. `AI_API_KEY`, `AI_MODEL`) passed through as-is
 - **Session ID** = absolute path of the test file. Same file across two VS Code windows reuses one server-side session
 - **Concurrency**: multiple `.env`s within one workspace, possibly pointing at different `SERVER_URL`s, are supported. Each run resolves independently
 - **Step-only gutter affordances** (▶, status, breakpoints, run menu) only on numbered lines beneath the steps heading
@@ -39,13 +39,13 @@ Every error reaches the user via two channels: **inline run-log** (red banner in
 
 | Code | Trigger | User-facing message (template) |
 |---|---|---|
-| `TB001` | Walk-up + fallback both miss | `TB001: No .env file found for this test. Searched: <list of dirs up to workspace root>, then fallback setting "testbench.defaultEnvFile" (=<value or "unset">). Fix: create a .env next to this test (or any ancestor folder up to workspace root) with SERVER_URL and SERVER_API_KEY, or set "testbench.defaultEnvFile" in Settings. [Open Settings] [Create .env here]` |
+| `TB001` | Walk-up + fallback both miss | `TB001: No .env file found for this test. Searched: <list of dirs up to workspace root>, then fallback setting "testbench.defaultEnvFile" (=<value or "unset">). Fix: create a .env next to this test (or any ancestor folder up to workspace root) with SERVER_URL and AIUI_SERVER_API_KEY, or set "testbench.defaultEnvFile" in Settings. [Open Settings] [Create .env here]` |
 | `TB002` | `.env` found but `SERVER_URL` missing | `TB002: SERVER_URL is missing from <abs path to .env>. Fix: add a line like SERVER_URL=http://localhost:3100 (full URL including scheme and port). [Reveal .env]` |
-| `TB003` | `.env` found but `SERVER_API_KEY` missing | `TB003: SERVER_API_KEY is missing from <abs path to .env>. Fix: add SERVER_API_KEY=<your-key>. The key must match what the ai-ui-automation server was started with. [Reveal .env]` |
+| `TB003` | `.env` found but `AIUI_SERVER_API_KEY` missing | `TB003: AIUI_SERVER_API_KEY is missing from <abs path to .env>. Fix: add AIUI_SERVER_API_KEY=<your-key>. The key must match what the ai-ui-automation server was started with. [Reveal .env]` |
 | `TB004` | `SERVER_URL` present but unparseable | `TB004: SERVER_URL in <abs path> is not a valid URL: "<value>". Fix: use a full URL like http://localhost:3100 — include scheme, host, and port. [Reveal .env]` |
 | `TB005` | `.env` parse error (malformed line) | `TB005: Could not parse <abs path> at line <n>: "<line>". Fix: each entry must be KEY=VALUE on its own line. Comments start with #. [Reveal .env]` |
 | `TB010` | Server unreachable (ECONNREFUSED, DNS, timeout) | `TB010: Cannot reach the ai-ui-automation server at <SERVER_URL> (<error kind>). Fix: start the server (`+`npm run server`+` in the ai-ui-automation repo) and confirm it's listening on <host:port>. If running on another machine, check firewall and that SERVER_URL uses the right host. [Show Run Log]` |
-| `TB011` | 401 from server | `TB011: Server rejected the API key (401). Fix: SERVER_API_KEY in <abs path to .env> must match the SERVER_API_KEY the server was started with. [Reveal .env]` |
+| `TB011` | 401 from server | `TB011: Server rejected the API key (401). Fix: AIUI_SERVER_API_KEY in <abs path to .env> must match the AIUI_SERVER_API_KEY the server was started with. [Reveal .env]` |
 | `TB012` | 404 / endpoint missing (server too old) | `TB012: Server at <SERVER_URL> does not support streaming (?stream=1 returned 404). Fix: update the ai-ui-automation server — this extension requires server build with SSE streaming.` |
 | `TB013` | 5xx from server | `TB013: Server returned <status> while starting the run. Detail in run log. Fix: check the server's terminal for a stack trace; this is a server-side bug or misconfiguration. [Show Run Log]` |
 | `TB014` | SSE stream dropped mid-run | `TB014: Connection to the server was lost mid-run (<reason>). The session may still be running on the server. Fix: check the server is still up and re-run; use "TestBench: Stop" to abort the orphaned session. [Show Run Log]` |
@@ -129,7 +129,7 @@ ai-ui-automation/
 Confirm against current code:
 
 - API server endpoints used: `POST /sessions/:id/steps`, `GET /sessions/:id`, `GET /sessions`, `DELETE /sessions/:id`, plus the new `?stream=1` and `/resume`
-- Auth: `x-api-key` header → value comes from `.env`'s `SERVER_API_KEY`
+- Auth: `x-api-key` header → value comes from `.env`'s `AIUI_SERVER_API_KEY`
 - TestBenchUI today uses ESM Vite + Monaco workers (`?worker` import); webview must replicate worker plumbing under VS Code's CSP
 
 No code changes in this phase.
@@ -289,7 +289,7 @@ No code changes in this phase.
 
 - `run-controller.ts` — owns one run-per-editor. On `run` message:
   1. Resolve `.env` via `runner-core/env-file.resolveEnvFile`. Log the search to "TestBench" channel. On miss → `reportError('TB001', { searchedDirs, fallbackSetting })` and abort
-  2. Read+parse `.env`. Parse error → `TB005`. Missing `SERVER_URL` → `TB002`. Unparseable URL → `TB004`. Missing `SERVER_API_KEY` → `TB003`. All include the absolute `.env` path
+  2. Read+parse `.env`. Parse error → `TB005`. Missing `SERVER_URL` → `TB002`. Unparseable URL → `TB004`. Missing `AIUI_SERVER_API_KEY` → `TB003`. All include the absolute `.env` path
   3. Build session ID = `document.uri.fsPath`
   4. Call `runner-core/api-client.streamSteps(...)`. Map transport failures to error codes: `ECONNREFUSED`/DNS/timeout → `TB010`, 401 → `TB011`, 404 → `TB012`, 5xx → `TB013`, mid-stream drop → `TB014`. All include `SERVER_URL`
   5. Forward each SSE event to the webview; mirror to "TestBench" output channel

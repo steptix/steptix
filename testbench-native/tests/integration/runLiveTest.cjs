@@ -6,7 +6,7 @@
 //
 // Prereq: ai-ui-automation Sessions API server is running locally
 // (e.g. `npm run dev` from the repo root, listening on
-// http://localhost:3100 with the SERVER_API_KEY from templates/.env).
+// http://localhost:3100 with the AIUI_SERVER_API_KEY from templates/.env).
 const path = require('node:path');
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -32,7 +32,7 @@ async function main() {
     if (!fs.existsSync(path.join(workspacePath, '.env'))) {
       console.error(
         `templates/.env not found at ${workspacePath}. The live test ` +
-          `requires SERVER_URL, SERVER_API_KEY, AI_API_KEY, ` +
+          `requires SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY, ` +
           `GITHUB_USERNAME, GITHUB_PASSWORD in that file.`,
       );
       process.exit(2);

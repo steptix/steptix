@@ -611,7 +611,7 @@ JSON-RPC channel and steals stdin from the transport.
 **Config source is `aiui.config.json`, read directly — not
 `loadConfig`**, which always populates relative `tests.skillsDir`/
 `toolsDir` and folds `process.env` (`AI_API_KEY`, `AI_MODEL`,
-`SERVER_API_KEY`) into its result, so "the project's config" would
+`AIUI_SERVER_API_KEY`) into its result, so "the project's config" would
 include the MCP process's environment. The ban is on the *loader*, not
 its default literals, which §3's table and `list_test_files` both reuse.
 
@@ -666,7 +666,7 @@ with no `env_name` and otherwise ship the whole MCP host environment as
 the request's `env` field and into the spawned child — the egress §5
 arm 2 exists to prevent. Cited as contrast, not as the recipe.
 
-**Discovery-only fallback.** `SERVER_URL` and `SERVER_API_KEY` may also
+**Discovery-only fallback.** `SERVER_URL` and `AIUI_SERVER_API_KEY` may also
 come from `process.env`, at **lowest precedence** (`.env.<name>` >
 `.env` > `process.env`) and **never merged into the `env` map sent to
 the server**. This is required, not a convenience: for Codex CLI and
@@ -678,7 +678,7 @@ inconsistent and would make those hosts unconfigurable.
 Note `aiui stop` does neither — it reads `process.env` and derives its
 URL from `loadConfig().server.host/port`, never `SERVER_URL`. No
 `SERVER_URL` in scope ⇒ pre-flight error naming both files and the env
-var. **No `SERVER_API_KEY`** ⇒ its own pre-flight error (§7): `serve`
+var. **No `AIUI_SERVER_API_KEY`** ⇒ its own pre-flight error (§7): `serve`
 hard-exits before binding without it, so otherwise a missing key costs a
 full 20 s poll and reports "auto-start failed" instead of the truth.
 
@@ -751,7 +751,7 @@ refuses `foreign` and `unrecognized` identically, so it buys nothing —
 behaviours, because `aiui status` and `aiui stop` test
 `kind === 'unrecognized'` with an `if`, not an exhaustive switch. A
 missed update makes `status` exit 1 instead of its documented 2, and
-makes `stop` fall past its refusal and POST `SERVER_API_KEY` to the
+makes `stop` fall past its refusal and POST `AIUI_SERVER_API_KEY` to the
 foreign process.)*
 
 **`SERVER_URL` validation.** Refuse with a §7 row, *before the probe*, a
@@ -778,7 +778,7 @@ Decision tree:
 2. `unrecognized` (foreign service, non-2xx, or non-JSON) ⇒ pre-flight
    error naming the port and what it reported. **Never spawn, never
    proceed.** *(Changed from an earlier draft's "probably an older aiui
-   server, proceed": our next act sends `SERVER_API_KEY` **and the
+   server, proceed": our next act sends `AIUI_SERVER_API_KEY` **and the
    entire composed `.env` map** as `env` — for this repo, AI, banking
    and GitHub credentials. `aiui stop` already checks `service` before
    sending merely the key.)*
@@ -837,13 +837,13 @@ Every part of that is load-bearing:
   in an MCP server that drops the host connection entirely. Attach one
   that appends to the log so §7's tail explains it.
 - **Explicit `env`.** `serve` hard-exits before binding when
-  `SERVER_API_KEY` is unset, and `loadDefaultEnvFileSync` reads only the
+  `AIUI_SERVER_API_KEY` is unset, and `loadDefaultEnvFileSync` reads only the
   base `.env` — never the overlay — and does not override keys already
   in `process.env`. Inheritance alone gives either an instantly-dead
   child or a live child holding the *base* key while the client sends
   the *overlay* key: a permanent 401. On win32, merge keys
   case-insensitively — `process.env` reads case-insensitively but
-  spreading preserves the parent's casing, so a `SERVER_API_KEY` vs
+  spreading preserves the parent's casing, so a `AIUI_SERVER_API_KEY` vs
   `server_api_key` collision would silently pick a winner.
 - **`--inspect=0`.** Both clients share one server; whoever starts it
   decides whether TestBench's tool step-into works (`/health` reporting
@@ -1019,7 +1019,7 @@ a dozen literals.
 | path/root outside allowed roots; unresolvable `project_root` | the root, the candidates, and `AIUI_MCP_ROOTS` |
 | no `aiui.config.json` within the root | `AIUI_MCP_ROOTS` first, then every directory searched |
 | no `SERVER_URL` | both env files and the env var |
-| no `SERVER_API_KEY` | both env files and the env var |
+| no `AIUI_SERVER_API_KEY` | both env files and the env var |
 | `SERVER_URL` non-`http:`, portless, or path-bearing | the URL and the rule |
 | unrecognized service on the port | the port and what it reported |
 | server down, remote URL | the URL; only loopback auto-starts |
@@ -1176,7 +1176,7 @@ does not typecheck them.
   reach via the parser and skill expander — extend it or do not mock
   the logger here; and **port ordering** — mkdtemp → `createApiServer` →
   `listenOnRandomPort` → *then* write `.env` with the resulting
-  `SERVER_URL` and a matching `SERVER_API_KEY` → then call the tool.
+  `SERVER_URL` and a matching `AIUI_SERVER_API_KEY` → then call the tool.
   Scope note: with `step-executor` mocked, per-step statuses are
   synthetic, so this is a **field-drop** test (`envName`, `sections`,
   `sourceLines`, `dataSources` against the allow-list), not a fold test.
@@ -1306,7 +1306,7 @@ disagree with the sections above, **these are what shipped**.
 - **The healthy arm clears the backoff record too**, not only a successful
   start, so a server that failed to start, came up by other means, and later
   fails again is not suppressed by a stale record.
-- **`SERVER_API_KEY` is pinned explicitly into the child's environment**
+- **`AIUI_SERVER_API_KEY` is pinned explicitly into the child's environment**
   rather than relying on the composed map: §4's discovery fallback means the
   key may live only in `process.env`, and that value is deliberately kept out
   of the map sent to the server — but client and child must still agree.
@@ -1351,7 +1351,7 @@ Two bugs that the unit tests could not reach, because both need a real run:
 
 Security, all fixed:
 
-- **Three tools sent `SERVER_API_KEY` to an unidentified listener.**
+- **Three tools sent `AIUI_SERVER_API_KEY` to an unidentified listener.**
   `list_sessions`, `close_session` and `get_last_run` never reach
   `ensureServerReady`, so nothing checked `service` first — an agent's
   harmless "what's running?" probe would hand the key to a port squatter.
@@ -1470,7 +1470,7 @@ coexist cleanly).
    silent field-drops live — the `envName` lesson), with §3's table and
    §2's folding rules as the checklist.
 4. `security-review` before merge — §4a's six rules, the spawn, arm 2's
-   refusal, key handling (never log `SERVER_API_KEY` or the composed
+   refusal, key handling (never log `AIUI_SERVER_API_KEY` or the composed
    `env`, including to stderr), and the result payload as egress.
 
 ## Repo gotchas (from project memory — real, previously hit)

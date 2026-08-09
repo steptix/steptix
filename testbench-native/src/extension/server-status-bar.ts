@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { readEnvFile, readEnvOverlayFile, composeEnv } from 'ai-ui-automation-runner-core';
+import { readEnvFile, readEnvOverlayFile, readMachineKey, composeEnv } from 'ai-ui-automation-runner-core';
 import { EnvSelector } from './env-selector.js';
 import {
   defaultHealthProbe,
@@ -23,7 +23,7 @@ export interface ServerTarget {
 }
 
 /**
- * SERVER_URL + SERVER_API_KEY for out-of-run operations (story
+ * SERVER_URL + AIUI_SERVER_API_KEY for out-of-run operations (story
  * server-lifecycle §6.2).
  *
  * There is no test file in play, so the walk-up-from-the-test-file `.env`
@@ -57,7 +57,16 @@ export async function resolveServerTarget(
   }
   const serverUrl = env['SERVER_URL']?.trim();
   if (!serverUrl) return null;
-  return { serverUrl, apiKey: env['SERVER_API_KEY']?.trim() ?? '' };
+  // Same chain as a run (stories/machine-key.md): workspace .env, then the
+  // extension host's environment, then the machine key. Without the fallback
+  // the status bar's stop action would 401 against a machine-key server the
+  // runs themselves can talk to.
+  const apiKey =
+    env['AIUI_SERVER_API_KEY']?.trim() ||
+    process.env['AIUI_SERVER_API_KEY']?.trim() ||
+    readMachineKey() ||
+    '';
+  return { serverUrl, apiKey };
 }
 
 /**

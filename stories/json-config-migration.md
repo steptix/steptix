@@ -102,7 +102,7 @@ Notes:
   ([src/config/defaults.ts](../src/config/defaults.ts)). With the new deep
   merge, `"browser": { "viewport": { "width": 800 } }` now keeps the default
   `height` instead of dropping it.
-- Secrets stay in `.env` (`AI_API_KEY`, `SERVER_API_KEY`, etc.) — they were
+- Secrets stay in `.env` (`AI_API_KEY`, `AIUI_SERVER_API_KEY`, etc.) — they were
   never meant to live in the committed config and `withEnvDefaults` already
   injects them.
 - The `$schema` key must be allowed through the merge as a no-op (it is not a

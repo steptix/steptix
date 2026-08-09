@@ -197,7 +197,7 @@ beforeAll(async () => {
   tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-seam-')));
   await fs.writeFile(
     path.join(tmpDir, '.env'),
-    `SERVER_URL=${baseUrl}\nSERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
+    `SERVER_URL=${baseUrl}\nAIUI_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
   );
   // The environment overlay, so `${env.GREETING}` has something to resolve to
   // — and resolving it is the evidence that `envName` survived the wire.

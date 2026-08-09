@@ -34,7 +34,10 @@ Environment
                     your project.
   SERVER_URL        Sessions API base URL. Normally read from the project's
                     .env / .env.<name>; this is a lowest-precedence fallback.
-  SERVER_API_KEY    Sessions API key. Same precedence as SERVER_URL.
+  AIUI_SERVER_API_KEY    Sessions API key. Chain: project .env, then this
+                    variable, then the machine key at %LOCALAPPDATA%\aiui\.env
+                    (~/.aiui elsewhere) — which is generated on first need,
+                    so most setups never set this anywhere.
 
 Host configuration
   See the "MCP server" section of the README for copy-paste config for

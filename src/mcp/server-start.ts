@@ -12,7 +12,7 @@
  *
  * Arm 2 is the one that looks wrong and is not. TestBench's equivalent treats
  * an unrecognized answer as "probably an older aiui server" and proceeds — it
- * only ever sends a step payload. We would send `SERVER_API_KEY` *and the
+ * only ever sends a step payload. We would send `AIUI_SERVER_API_KEY` *and the
  * project's entire composed `.env`* as the request's `env` field, which for
  * this repo means AI, banking and GitHub credentials handed to whatever
  * process happens to hold the port. `aiui stop` already refuses on the same
@@ -41,11 +41,13 @@ import {
   probeHealth,
   type HealthProbeResult,
 } from '../server/health.js';
+import { ensureMachineKey, userRootEnvPath } from '../env/user-root.js';
 import {
   autoStartFailed,
   autoStartSuppressed,
   badServerUrl,
   distEntryMissing,
+  noKeyForRunningServer,
   remoteServerDown,
   unrecognizedService,
 } from './errors.js';
@@ -195,7 +197,7 @@ export const ensureServerReady: EnsureServerReady = (project, signal) =>
  * For the tools that only report on what is already there — `list_sessions`,
  * `close_session`, `get_last_run`, `get_page_content`, `list_cdp_browsers`.
  * They still send
- * `SERVER_API_KEY`, and without this they send it to any process that happens
+ * `AIUI_SERVER_API_KEY`, and without this they send it to any process that happens
  * to hold the port: an agent calling `list_sessions` as a harmless "what's
  * running?" probe would hand the project's key to a squatter. That is the same
  * hazard §5 arm 2 exists for, and the same one `aiui stop` guards before
@@ -227,6 +229,16 @@ export async function assertServerRecognized(
       unrecognizedService(normalizeBaseUrl(project.serverUrl), health.detail),
     );
   }
+  // Ours and running, but no source had a key (stories/machine-key.md): the
+  // deferred null lands here. Generating would only manufacture a 401 — that
+  // server holds whatever key it was started with — so this is the refusal
+  // arm. The `down` case stays let-through: the caller's own request fails on
+  // connect before any header matters.
+  if (health.kind === 'ok' && project.apiKey === null) {
+    throw new PreflightFailure(
+      noKeyForRunningServer(normalizeBaseUrl(project.serverUrl), userRootEnvPath()),
+    );
+  }
 }
 
 /** {@link ensureServerReady} with its collaborators exposed. Tests drive this. */
@@ -248,6 +260,15 @@ export async function ensureServerReadyWith(
 
   switch (health.kind) {
     case 'ok':
+      // Ours and running with no key on hand: refuse rather than generate —
+      // stories/machine-key.md. A generated key would just be rejected by a
+      // server that already holds a different one, and the 401 would land
+      // after this preflight claimed everything was fine.
+      if (project.apiKey === null) {
+        throw new PreflightFailure(
+          noKeyForRunningServer(normalizeBaseUrl(project.serverUrl), userRootEnvPath()),
+        );
+      }
       // A healthy server never reaches the backoff check, so this is not
       // required for correctness now — it is here so a start that failed,
       // succeeded by other means, and later fails again is not silently
@@ -267,7 +288,7 @@ export async function ensureServerReadyWith(
       // Fail closed on an arm added to `HealthProbeResult` later. The spec
       // records what the open version of this mistake costs elsewhere: the CLI
       // tests `kind === 'unrecognized'` with an `if`, so a new arm silently
-      // falls past `aiui stop`'s refusal and posts SERVER_API_KEY to a foreign
+      // falls past `aiui stop`'s refusal and posts AIUI_SERVER_API_KEY to a foreign
       // process. This is the one place that can refuse instead.
       const unreachable: never = health;
       void unreachable;
@@ -279,6 +300,17 @@ export async function ensureServerReadyWith(
 
   if (!isLoopbackHost(url.hostname)) {
     throw new PreflightFailure(remoteServerDown(normalizeBaseUrl(project.serverUrl)));
+  }
+
+  // §5 arm 4 — down + loopback — is the one place a missing key may be
+  // GENERATED rather than refused (stories/machine-key.md): we are about to
+  // start the server ourselves, so whatever key we persist is by construction
+  // the key it runs with. Filled before the single-flight gate so a caller
+  // that merely *waits* on another's spawn re-reads the same file and sends
+  // the same key. Synchronous, so two same-process callers cannot interleave
+  // their generations.
+  if (project.apiKey === null) {
+    project.apiKey = ensureMachineKey().key;
   }
 
   assertSpawnable(url, project.serverUrl);
@@ -536,7 +568,7 @@ const attemptLogOffsets = new Map<string, number>();
  * layered on top.
  *
  * Inheritance alone is not enough, in two different ways. `serve` hard-exits
- * before binding when `SERVER_API_KEY` is unset, so a host started without one
+ * before binding when `AIUI_SERVER_API_KEY` is unset, so a host started without one
  * yields an instantly-dead child and a 20 s wait for nothing. And
  * `loadDefaultEnvFileSync` reads only the base `.env` — never the
  * `.env.<name>` overlay — and does not override keys already in `process.env`,
@@ -575,25 +607,32 @@ const UNSAFE_CHILD_ENV_KEYS = new Set(
 );
 
 function childEnv(project: ProjectContext): NodeJS.ProcessEnv {
+  // The arm-4 fill in `ensureServerReadyWith` runs before any spawn, so a
+  // null here is a wiring bug, not a state the child could meaningfully
+  // inherit — an env var set to the string "null" would fail every request.
+  if (project.apiKey === null) {
+    throw new Error('childEnv: apiKey must be resolved before spawning (machine-key arm-4 fill)');
+  }
   // `project.apiKey` is pinned explicitly because it may not be in
-  // `project.env` at all: §4's discovery fallback lets SERVER_API_KEY come
+  // `project.env` at all: §4's discovery fallback lets AIUI_SERVER_API_KEY come
   // from `process.env`, and that value is deliberately kept out of the map we
   // send to the server. The child and the client must agree on it regardless.
-  const overlay: Record<string, string> = { SERVER_API_KEY: project.apiKey };
+  const overlay: Record<string, string> = { AIUI_SERVER_API_KEY: project.apiKey };
   for (const [key, value] of Object.entries(project.env)) {
     if (UNSAFE_CHILD_ENV_KEYS.has(key.toLowerCase())) continue;
     overlay[key] = value;
   }
   // Re-pin after the loop, so a project `.env` cannot shadow it.
-  overlay['SERVER_API_KEY'] = project.apiKey;
+  overlay['AIUI_SERVER_API_KEY'] = project.apiKey;
   const merged: NodeJS.ProcessEnv = { ...process.env };
 
   if (process.platform !== 'win32') return Object.assign(merged, overlay);
 
   // Windows environment lookups are case-insensitive, but spreading
-  // `process.env` preserves the parent's casing — so a parent `Server_Api_Key`
-  // and an overlay `SERVER_API_KEY` would both survive into the child's block
-  // and Windows would pick a winner for us. Replace the colliding key instead.
+  // `process.env` preserves the parent's casing — so a parent
+  // `Aiui_Server_Api_Key` and an overlay `AIUI_SERVER_API_KEY` would both
+  // survive into the child's block and Windows would pick a winner for us.
+  // Replace the colliding key instead.
   const canonical = new Map<string, string>();
   for (const key of Object.keys(merged)) canonical.set(key.toLowerCase(), key);
 
