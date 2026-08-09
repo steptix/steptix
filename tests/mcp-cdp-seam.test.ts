@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
 import { resetRegistry } from '../src/mcp/registry.js';
-import { ApiHttpError } from '../src/mcp/types.js';
+import { ApiHttpError, ApiRouteNotFoundError } from '../src/mcp/types.js';
 import type { ApiClient, McpDeps, ProjectContext, StreamResult } from '../src/mcp/types.js';
 
 // ---------------------------------------------------------------------------
@@ -1265,7 +1265,7 @@ describe('focus_cdp_tab', () => {
     // sitting there.
     const h = await connect({
       browsers: { running: RUNNING_WITH_TABS },
-      focusThrows: new ApiHttpError(404, ''),
+      focusThrows: new ApiRouteNotFoundError('/cdp/browsers/51000/tabs/A1B2C3/focus'),
     });
     const result = await h.client.callTool({
       name: 'focus_cdp_tab',
@@ -1277,6 +1277,25 @@ describe('focus_cdp_tab', () => {
     expect(text(result)).toMatch(/npm run build/);
     // And it must NOT say the tab is gone.
     expect(text(result)).not.toMatch(/already been closed/i);
+  });
+
+  it('does not read a bare 404 as a stale server — only the route-missing type does that', async () => {
+    // `ApiRouteNotFoundError` extends `ApiHttpError`, so the order of the two
+    // `instanceof` checks in the handler is load-bearing. This pins the other
+    // direction: a plain 404 that happens to carry a thin message is about the
+    // TAB, and must not tell the user to rebuild a server that is fine.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      focusThrows: new ApiHttpError(404, 'Not Found'),
+    });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('Not Found');
+    expect(text(result)).not.toMatch(/npm run build/);
   });
 
   it('describes what surprises: match it yourself, say which tab, and the weak guarantee', async () => {

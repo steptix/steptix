@@ -38,6 +38,7 @@ import * as schemas from './schemas.js';
 import { probeHealth, normalizeBaseUrl } from '../server/health.js';
 import {
   ApiHttpError,
+  ApiRouteNotFoundError,
   DEFAULT_SCREENSHOTS_RETURN,
   PreflightFailure,
   type ApiClient,
@@ -1671,13 +1672,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             // The one status worth splitting: 404 means the tab is gone OR the
             // route is, and telling a user their tab was closed when the real
             // answer is "rebuild the server" sends them looking for a window
-            // that is still sitting there.
+            // that is still sitting there. The client distinguishes them by
+            // type — checked first, since it is the narrower one.
+            if (err instanceof ApiRouteNotFoundError) {
+              return errorResult(cdpFocusRouteMissing(normalizeBaseUrl(project.serverUrl)));
+            }
             if (err instanceof ApiHttpError && err.status === 404) {
-              return errorResult(
-                err.serverMessage
-                  ? cdpFocusTabNotFound(err.serverMessage)
-                  : cdpFocusRouteMissing(normalizeBaseUrl(project.serverUrl)),
-              );
+              return errorResult(cdpFocusTabNotFound(err.serverMessage));
             }
             throw err;
           }

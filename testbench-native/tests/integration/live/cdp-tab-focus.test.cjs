@@ -2,21 +2,32 @@
  * Live end-to-end CDP tab focus (stories/cdp-tab-focus.md).
  *
  * Drives a REAL Chrome over CDP through the REAL ai-ui-automation Sessions API
- * server ($LIVE_SERVER_URL, default http://localhost:3100). No AI calls and no
- * session: this exercises the browser-control routes, which is the whole of
- * what the feature is.
+ * server ($LIVE_SERVER_URL, default http://localhost:3100). Most of it needs no
+ * AI and no session; the last scenario runs real steps to prove focusing does
+ * not disturb them.
  *
  * **What it can and cannot prove.** No assertion in this repo can see a screen,
  * so "the user can see that window" stays a human check (the story's
- * verification rule 1). What *is* observable is that the browser selected the
- * tab: Chrome serves `/json/list` in most-recently-used order — the HTTP
- * handler sorts by `GetLastActivityTime()` descending, and `ActivateTabAt`
- * bumps that clock — so a tab that moves to the head of the list after a focus
- * call is a tab the browser really activated. That is the half this test owns.
- * It is deliberately blind to whether the OS honoured the window raise, which
- * is exactly why `focused: true` means "the browser accepted it".
+ * verification rule 1). What *is* observable is that the browser **selected**
+ * the tab: Chrome serves `/json/list` in most-recently-used order, and a tab
+ * that moves to the head of that list after a focus call is one the browser
+ * really activated rather than merely acknowledged. That is the half this test
+ * owns.
  *
- * MRU ordering is source-confirmed for Chrome and unverified for Edge, so this
+ * **It is NOT a substitute for W0, and it is not fully independent of it
+ * either.** An earlier version of this comment claimed the ordering check was
+ * "structurally blind" to whether the OS honoured the window raise, on the
+ * grounds that `ActivateTabAt` bumps the activity clock regardless. That is
+ * stronger than the mechanism supports: the clock behind the ordering is
+ * `WebContents::GetLastActiveTime()`, and Chromium stamps `last_active_time_`
+ * on the transition to VISIBLE — so a tab activated inside a window the
+ * compositor considers occluded may not bump it at all. In other words, on the
+ * exact machine state W0 exists to investigate (Chrome fully covered by another
+ * window, Windows declining the raise), this assertion could go red for the one
+ * thing it was designed not to test. Run it with the browser not buried, and
+ * read a failure here as "look at the screen", not as "the route is broken".
+ *
+ * MRU ordering is documented for Chrome and unverified for Edge, so this
  * launches Chrome explicitly rather than whatever is around.
  *
  * It also stands as the story's rule (9): the focus route answers a plain
@@ -85,14 +96,15 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
 
   let serverUrl;
   let apiKey;
+  /** AI credentials for the one scenario that runs real steps. */
+  let aiKey;
+  let aiModel;
   let projectRoot;
   /** @type {http.Server} */
   let fixtureServer;
   let fixtureBase;
   /** CDP debug port of the browser this test launched. */
   let cdpPort;
-  /** targetId of every tab this test opened, so cleanup closes exactly those. */
-  const openedTabs = [];
 
   const auth = () => ({ 'x-api-key': apiKey });
 
@@ -114,11 +126,40 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     return entry.tabs;
   }
 
-  /** The browser's raw target list, newest-activity first (see the header). */
-  async function rawTargets() {
-    const res = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
-    const all = await res.json();
-    return all.filter((t) => t.type === 'page');
+  /**
+   * Wait for `targetId` to reach the head of the tab list, i.e. for the browser
+   * to report it as the most recently active tab.
+   *
+   * Two things this deliberately does NOT do. It does not hand-roll a page
+   * filter: `ourTabs()` comes back through the framework's own `toPageTabs`,
+   * which preserves `/json/list` order while dropping `devtools://`,
+   * `chrome-extension://` and the `*-dialog` surfaces Chromium reports as
+   * `type: 'page'`. A raw `type === 'page'` filter would let a sync-confirmation
+   * dialog or an extension page take the head and fail the run for a reason
+   * that has nothing to do with focus.
+   *
+   * And it does not sleep a fixed amount and then assert. Activation is
+   * asynchronous, so a single settle is a bet on a machine's timing; polling
+   * to a budget passes instantly on a quick machine and still gives a loaded
+   * one room. Exhausting the budget means what it says.
+   */
+  async function waitForHeadTab(targetId, label, budgetMs = 5_000) {
+    const deadline = Date.now() + budgetMs;
+    let head;
+    for (;;) {
+      const tabs = await ourTabs();
+      head = tabs[0];
+      if (head && head.targetId === targetId) return;
+      if (Date.now() >= deadline) break;
+      await sleep(100);
+    }
+    assert.fail(
+      `after focusing ${label} the browser's most-recently-used tab is still ` +
+        `${JSON.stringify(head ? head.title : '(none)')} after ${budgetMs}ms.\n` +
+        'Chrome serves /json/list most-recently-used first, so the focused tab should ' +
+        'head it. If the browser window is buried behind another application, see this ' +
+        "file's header — the ordering can depend on the raise the OS may have declined.",
+    );
   }
 
   async function focusTab(targetId, extraQuery = '') {
@@ -146,7 +187,6 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     assert.ok(res.ok, `/json/new refused (${res.status})`);
     const target = await res.json();
     assert.ok(target.id, '/json/new returned no target id');
-    openedTabs.push(target.id);
     return target.id;
   }
 
@@ -164,6 +204,18 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
 
     apiKey = readEnvValue(path.join(workspaceRoot, '.env'), 'SERVER_API_KEY');
     assert.ok(apiKey, 'SERVER_API_KEY missing from templates/.env');
+
+    // AI credentials come from the REPO ROOT `.env` in preference to
+    // `templates/.env`, and the difference is the model rather than the key.
+    // The two files carry the same `AI_API_KEY`, but templates names a bare
+    // `openrouter/…` model, which routes direct/BYOK — so the gateway key is
+    // sent to a provider that has never heard of it and the first step dies on
+    // `401 Missing Authentication header`. The root file's `aibroker/…` prefix
+    // routes through the gateway the key actually belongs to.
+    const repoRootEnv = path.resolve(workspaceRoot, '..', '.env');
+    const preferred = fs.existsSync(repoRootEnv) ? repoRootEnv : path.join(workspaceRoot, '.env');
+    aiKey = readEnvValue(preferred, 'AI_API_KEY') || readEnvValue(path.join(workspaceRoot, '.env'), 'AI_API_KEY');
+    aiModel = readEnvValue(preferred, 'AI_MODEL') || readEnvValue(path.join(workspaceRoot, '.env'), 'AI_MODEL');
 
     serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
     try {
@@ -213,6 +265,17 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     // Leave nothing on the user's screen or in their profile directory's way:
     // close every tab we opened, then take the browser down with its last one.
     if (cdpPort) {
+      // A session left holding a tab makes the close below refuse, so it goes
+      // first. Harmless when the run test already closed it — the route 404s
+      // and we do not care.
+      try {
+        await fetch(`${serverUrl}/sessions/${encodeURIComponent(`live-focus-run-${cdpPort}`)}`, {
+          method: 'DELETE',
+          headers: auth(),
+        });
+      } catch {
+        /* nothing to close */
+      }
       try {
         const remaining = await ourTabs();
         for (let i = 0; i < remaining.length; i++) {
@@ -236,7 +299,7 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     // cannot be an accident of the order they were opened in.
     let res = await readJson(await focusTab(gamma.targetId));
     assert.equal(res.status, 200, res.raw);
-    await sleep(300);
+    await waitForHeadTab(gamma.targetId, 'Gamma Tab');
 
     res = await readJson(await focusTab(alpha.targetId));
     assert.equal(res.status, 200, res.raw);
@@ -257,23 +320,14 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     assert.equal('remainingTabs' in body, false);
     assert.equal('browserExited' in body, false);
 
-    await sleep(300);
-    const targets = await rawTargets();
-    assert.equal(
-      targets[0].id,
-      alpha.targetId,
-      'the browser did not select the focused tab — /json/list is most-recently-used ' +
-        'ordered on Chrome, so the focused tab should now be first. ' +
-        `Got: ${JSON.stringify(targets.map((t) => t.title))}`,
-    );
+    await waitForHeadTab(alpha.targetId, 'Alpha Tab');
 
     // And it moves again, so the first result was not a tab that happened to
     // already be selected.
     res = await readJson(await focusTab(gamma.targetId));
     assert.equal(res.status, 200, res.raw);
     assert.equal(res.body.title, 'Gamma Tab');
-    await sleep(300);
-    assert.equal((await rawTargets())[0].id, gamma.targetId);
+    await waitForHeadTab(gamma.targetId, 'Gamma Tab');
   });
 
   it('switches between EVERY tab of a multi-tab browser, in both directions', async () => {
@@ -308,14 +362,7 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       );
       assert.equal(res.body.url, tab.url);
 
-      await sleep(300);
-      const head = (await rawTargets())[0];
-      assert.equal(
-        head.id,
-        tab.targetId,
-        `after focusing ${JSON.stringify(tab.title)} the browser's most-recently-used ` +
-          `tab is ${JSON.stringify(head.title)}`,
-      );
+      await waitForHeadTab(tab.targetId, JSON.stringify(tab.title));
       visited.push(tab.title);
     }
 
@@ -335,9 +382,226 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     );
   });
 
+  it('photographs a backgrounded tab identically — the rendering half of rule (5)', async function () {
+    // The part of verification rule (5) the story says nobody had measured:
+    // "does `Page.captureScreenshot` render a backgrounded tab of a headful
+    // browser identically". Everything above the renderer is target-addressed
+    // and provably unaffected by a focus; this is the layer that could
+    // plausibly have differed, because a compositor is entitled to stop
+    // producing frames for a tab nobody is looking at.
+    //
+    // Measured here rather than reasoned about, and deliberately WITHOUT the
+    // AI: shoot the tab while it is in front, focus a different one through the
+    // real route, shoot it again, and compare the bytes.
+    let chromium;
+    try {
+      ({ chromium } = require('playwright'));
+    } catch {
+      console.log('[live] playwright not resolvable from here — skipping the pixel check');
+      this.skip();
+      return;
+    }
+
+    const tabs = await ourTabs();
+    const alphaTab = tabs.find((t) => t.title === 'Alpha Tab');
+    const gammaTab = tabs.find((t) => t.title === 'Gamma Tab');
+    assert.ok(alphaTab && gammaTab, 'fixture tabs missing');
+
+    const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
+    try {
+      const pages = browser.contexts()[0].pages();
+      const alpha = pages.find((p) => p.url() === alphaTab.url);
+      assert.ok(alpha, `no attached page for ${alphaTab.url}`);
+
+      await focusTab(alphaTab.targetId);
+      await waitForHeadTab(alphaTab.targetId, 'Alpha Tab');
+      const frontmost = await alpha.screenshot({ timeout: 20_000 });
+
+      await focusTab(gammaTab.targetId);
+      await waitForHeadTab(gammaTab.targetId, 'Gamma Tab');
+      const backgrounded = await alpha.screenshot({ timeout: 20_000 });
+
+      assert.ok(backgrounded.length > 2_000, `backgrounded frame is only ${backgrounded.length} bytes`);
+      assert.equal(
+        Buffer.compare(frontmost, backgrounded),
+        0,
+        `a backgrounded tab photographed differently: ${frontmost.length} bytes in front, ` +
+          `${backgrounded.length} behind. Rule (5) claims focus changes nothing observable — ` +
+          'if this ever fails, the tool description has to stop saying so.',
+      );
+      console.log(
+        `[live] backgrounded screenshot is byte-identical (${backgrounded.length} bytes)`,
+      );
+    } finally {
+      // `close()` over CDP is a no-op on the browser itself — it detaches.
+      await browser.close().catch(() => {});
+    }
+  });
+
+  it('leaves a RUN IN FLIGHT on another tab alone, screenshots included', async function () {
+    // **Verification rule (5)** — the one thing the story says it "genuinely
+    // has to prove rather than assume", and the only scenario here that needs
+    // a real session and real AI steps.
+    //
+    // A session attaches to the alpha tab and starts running. Mid-run, while a
+    // step is executing, a focus call brings a DIFFERENT tab to the front. The
+    // run must not notice: Playwright drives a page by target, not by which tab
+    // is frontmost.
+    //
+    // The screenshot half is why `capture: 'every-step'` is set. Everything
+    // above the renderer is target-addressed and provably unaffected, but "does
+    // `Page.captureScreenshot` render a backgrounded tab of a headful browser
+    // identically" is the part of the claim nobody had measured — so this
+    // asserts the steps taken *after* the focus still come back with real,
+    // decodable PNG frames rather than blank or stale ones.
+    // The only scenario here that spends an AI call. Skipped rather than failed
+    // without a key, so the rest of this file stays runnable on a machine that
+    // has none.
+    if (!aiKey) {
+      console.log('[live] AI_API_KEY missing from templates/.env — skipping rule (5)');
+      this.skip();
+      return;
+    }
+
+    const tabs = await ourTabs();
+    const alpha = tabs.find((t) => t.title === 'Alpha Tab');
+    const gamma = tabs.find((t) => t.title === 'Gamma Tab');
+    assert.ok(alpha && gamma, 'fixture tabs missing');
+
+    const sessionId = `live-focus-run-${cdpPort}`;
+    const events = [];
+    let focusResult = null;
+
+    // Two navigations rather than assertions: deterministic, cheap, and each
+    // one produces a step:pass carrying a frame.
+    const body = {
+      steps: [`Navigate to ${fixtureBase}/beta`, `Navigate to ${fixtureBase}/gamma`],
+      testFilePath: path.join(projectRoot, '.aiui-live-focus.md'),
+      config: { cdp: { port: cdpPort, tab: `targetId:${alpha.targetId}` } },
+      runSettings: { capture: 'every-step' },
+      // The AI credentials travel per request, exactly as TestBench sends them
+      // — the server resolves its AI config from the *project's* env bundle, so
+      // the key in the shell that started it is not what a run uses.
+      env: { AI_API_KEY: aiKey, ...(aiModel ? { AI_MODEL: aiModel } : {}) },
+    };
+
+    const res = await fetch(`${serverUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`, {
+      method: 'POST',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    // Read the body ONLY on failure. An `await res.text()` in the assertion
+    // message is evaluated eagerly, which consumes the very stream this test
+    // is about to read.
+    if (res.status !== 200) assert.fail(`starting the run failed: ${await res.text()}`);
+
+    // Read the SSE stream by hand, and fire the focus at the first sign the run
+    // is actually executing — "in flight" is the whole point, so focusing
+    // before the first step or after the last would prove nothing.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      const frames = buffered.split('\n\n');
+      buffered = frames.pop() ?? '';
+      for (const frame of frames) {
+        const line = frame.split('\n').find((l) => l.startsWith('data:'));
+        if (!line) continue;
+        const event = JSON.parse(line.slice('data:'.length).trim());
+        events.push(event);
+
+        if (event.type === 'step:start' && focusResult === null) {
+          focusResult = await readJson(await focusTab(gamma.targetId));
+          console.log(`[live] focused "Gamma Tab" mid-run (status ${focusResult.status})`);
+        }
+      }
+    }
+
+    assert.ok(focusResult, 'never saw a step start, so nothing was focused mid-run');
+    assert.equal(focusResult.status, 200, focusResult.raw);
+    assert.equal(focusResult.body.title, 'Gamma Tab');
+
+    // ── Asserted whatever the AI did ──────────────────────────────────────
+    //
+    // Every step still reports the tab the SESSION owns, not the one now in
+    // front. This is rule (5)'s core claim and it holds on a failing run as
+    // firmly as on a passing one — a step that errored still errored *on its
+    // own tab*. (`tab` rides the streaming path only; the non-streaming
+    // response has never carried it, a trap cdp-tabs.md §Tests records.)
+    const withTab = events.filter((e) => e.tab);
+    assert.ok(withTab.length > 0, 'no step event carried a `tab` — is this the streaming path?');
+    for (const event of withTab) {
+      assert.equal(
+        event.tab.targetId,
+        alpha.targetId,
+        `a ${event.type} reported tab ${JSON.stringify(event.tab)} — the run moved off its own tab`,
+      );
+    }
+    assert.equal(events.filter((e) => e.type === 'step:start').length >= 1, true);
+
+    const done = events.find((e) => e.type === 'done');
+    assert.ok(done, `the run produced no done event: ${JSON.stringify(events.map((e) => e.type))}`);
+
+    await fetch(`${serverUrl}/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      headers: auth(),
+    });
+
+    // ── The half that needs the model to have answered ────────────────────
+    //
+    // A dead AI credential is an environment problem, not a focus regression,
+    // and every other AI-driven test in this directory is failing the same way
+    // when it happens. Narrowed to authentication specifically so a genuine
+    // failure — a step that broke because of the focus — still fails here.
+    const authFailed = events.some(
+      (e) =>
+        e.type === 'output' &&
+        /\b401\b|missing authentication|unauthor/i.test(String(e.msg ?? '')),
+    );
+    if (done.status !== 'passed' && authFailed) {
+      console.log(
+        '[live] the run could not reach the model (auth) — the tab invariant above still ' +
+          'held; skipping the screenshot half. Check AI_API_KEY in templates/.env.',
+      );
+      this.skip();
+      return;
+    }
+
+    assert.equal(
+      done.status,
+      'passed',
+      `the run did not survive the focus: ${JSON.stringify(
+        events.filter((e) => e.type === 'step:fail' || e.type === 'output').slice(-5),
+      )}`,
+    );
+
+    // Steps that ran while another tab was in front still photographed their
+    // own backgrounded tab. The pixel-level version of this is the test above,
+    // which needs no AI; this is the same claim through the whole runner.
+    const shots = events.filter((e) => e.type === 'step:pass' && e.screenshot);
+    assert.ok(
+      shots.length > 0,
+      'no step:pass carried a screenshot — capture: every-step should have produced one per step',
+    );
+    for (const shot of shots) {
+      const base64 = String(shot.screenshot).replace(/^data:image\/png;base64,/, '');
+      const buf = Buffer.from(base64, 'base64');
+      // A real PNG, not a blank or truncated frame: magic bytes plus enough
+      // bytes that an empty capture would not pass.
+      assert.equal(buf.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'not a PNG');
+      assert.ok(buf.length > 2_000, `screenshot is only ${buf.length} bytes — likely blank`);
+    }
+    console.log(
+      `[live] run survived the focus: ${withTab.length} events on tab ${alpha.targetId}, ` +
+        `${shots.length} screenshots`,
+    );
+  });
+
   it('closes nothing and starts nothing — the tab count is unchanged', async () => {
-    // Verification rule (5), at the layer an automated test can reach: focus is
-    // the one operation here that is free of consequence, and a regression that
+    // The cheap half of rule (5), with no session in play: a regression that
     // quietly closed or re-bound something would still look like a success.
     const before = await ourTabs();
     const sessionsBefore = await (await fetch(`${serverUrl}/sessions`, { headers: auth() })).json();
