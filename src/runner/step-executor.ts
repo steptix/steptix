@@ -139,6 +139,58 @@ class StepFailureError extends Error {
 
 
 /**
+ * Whether the browser this step is driving has a window a human can watch.
+ *
+ * Read off the **active browser session** rather than the shared config
+ * because `openBrowser` can override `headed` per browser, so one run can hold
+ * a headed browser and a headless one at the same time. Falls back to the
+ * config for the single-browser paths (and older tests) that synthesize a
+ * session without going through `launchBrowser`.
+ */
+function isHeadedRun(opts: StepExecutorOptions): boolean {
+  try {
+    const active = opts.browserTracker?.getActive();
+    if (active?.headed !== undefined) return active.headed;
+  } catch {
+    // `getActive()` throws once `closeBrowser` has left nothing tracked. The
+    // config is the right answer then, not a crash in a focus call.
+  }
+  return opts.config.browser.headed;
+}
+
+/**
+ * Bring the tab the automation just moved to onto the screen
+ * (stories/cdp-tab-focus.md §4).
+ *
+ * `switchToAsync` moves the tracker's index and returns the Page; nothing
+ * raises it. In a headed run that means a `switchTab` step moves the
+ * automation *behind* the tab the user is looking at, and the visible tab
+ * stops changing while the run continues.
+ *
+ * **Gated on headed, in both browser modes** — not headed-CDP-only. `headed`
+ * defaults to true, a launch-mode run's pages open as tabs in one visible
+ * window, and a human watching that has the identical complaint. Headless is
+ * the only place the call is pointless, and the only thing it is gated
+ * against.
+ *
+ * Lives here rather than inside `switchToAsync` for layering: `PageTracker`'s
+ * constructor takes `(page, ignoredPages)` and knows nothing about headedness
+ * or CDP, while the step executor already holds the config and can reach the
+ * active browser.
+ *
+ * Non-fatal, like every other `bringToFront` in the codebase: an OS that
+ * declines to raise a window must not fail a step that otherwise worked.
+ */
+async function showTab(page: Page, opts: StepExecutorOptions): Promise<void> {
+  if (!isHeadedRun(opts)) return;
+  try {
+    await page.bringToFront();
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/**
  * Snapshot the current state of the browser tracker into the shape
  * `formatTestInfo` consumes. Returns undefined when single-browser mode is
  * in play (no tracker, or only one session) so the prompt's browser block
@@ -823,6 +875,9 @@ async function executeStepAttempt(
             const switched = await pageTracker.switchToAsync(newPage.url());
             if (switched) page = switched;
             else page = newPage;
+            // A newly opened tab the run is about to drive should be the one on
+            // screen (§4).
+            await showTab(page, opts);
             logger.info(`Opened new page → ${newPage.url()}${action.as ? ` (as "${action.as}")` : ''}`);
           } catch (err) {
             if (!openError) {
@@ -1005,6 +1060,9 @@ async function executeStepAttempt(
           const targetPage = await pageTracker.switchToAsync(action.page);
           if (targetPage) {
             page = targetPage;
+            // The tracker moved where automation goes; this moves what is on
+            // screen, so a watching human sees the tab being driven (§4).
+            await showTab(page, opts);
             logger.info(`Switched to page: ${action.page} (${targetPage.url()})`);
           } else {
             switchError = `switchPage failed: no page matching "${action.page}"`;

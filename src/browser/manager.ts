@@ -723,6 +723,20 @@ export interface BrowserSession {
    *  without going through `launchBrowser` (CDP mode, tests, etc). */
   engine?: 'chromium' | 'firefox' | 'webkit';
   channel?: string;
+  /**
+   * Whether this browser has a window a human can watch.
+   *
+   * Recorded per session rather than read back off the shared `BrowserConfig`
+   * because `openBrowser` can override `headed` per browser, so a run can hold
+   * a headed one and a headless one at once. The step executor reads it to
+   * decide whether bringing a tab to the front is worth doing
+   * (stories/cdp-tab-focus.md §4) — pointless in headless, and the point of
+   * the feature in headed.
+   *
+   * Always true under CDP: we attached to a real browser someone started, and
+   * `incompatibleCdpConfig` already reports `headed: false` as ignored there.
+   */
+  headed?: boolean;
 }
 
 /** Validation rules for author-supplied browser labels (the `as` field on
@@ -1233,7 +1247,7 @@ export async function launchBrowser(
 
   logger.debug(`Browser launched: ${browserType} ${browser.version()}`);
 
-  const session: BrowserSession = { browser, context, page, pageTracker, engine: browserType };
+  const session: BrowserSession = { browser, context, page, pageTracker, engine: browserType, headed };
   if (browserType === 'chromium') session.channel = channel ?? 'chrome';
   return session;
 }
@@ -1294,6 +1308,12 @@ async function connectOverCdpSession(
     // Don't ignore the resolved tab — it's our main page. Anything else
     // pre-existing should be ignored.
     preExistingPages.delete(page);
+    // Same call its `new`-tab sibling makes a few lines up, and the asymmetry
+    // had no defence: a user who names the tab they want the run to use then
+    // watches their carefully arranged cart sit untouched while steps run
+    // behind it. Silent `catch` to match both neighbours — a browser that
+    // declines to raise a window must not fail an attach.
+    try { await page.bringToFront(); } catch { /* non-fatal */ }
     logger.info(`CDP: attached to existing tab (${page.url()})`);
   }
 
@@ -1319,6 +1339,10 @@ async function connectOverCdpSession(
     pageTracker,
     cdp: true,
     cdpTabOpenedByUs: openedByUs,
+    // Not read off `config`: a CDP browser is one a human started and is
+    // looking at, and `incompatibleCdpConfig` already reports `headed: false`
+    // as one of the settings this mode ignores.
+    headed: true,
   };
 }
 

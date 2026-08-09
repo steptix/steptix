@@ -8,6 +8,7 @@ import {
   knownProfiles,
   startCdpBrowser,
   closeCdpTab,
+  focusCdpTab,
   UNKNOWN_HOLDER,
   DEFAULT_PROFILE,
   type CdpFailureKind,
@@ -996,6 +997,54 @@ export function createApiServer(
     }
   });
 
+  /**
+   * The three inputs every per-tab route takes, validated once.
+   *
+   * Shared by the close and focus routes rather than written twice: they
+   * address the same thing by the same three values, and two copies of a
+   * validation rule is how one route ends up accepting a port the other
+   * rejects. Answers the request and returns null when anything is wrong, so a
+   * caller reads it as `if (!params) return;`.
+   */
+  function readTabParams(
+    req: Request,
+    res: Response,
+  ): { projectRoot: string; port: number; targetId: string } | null {
+    const projectRoot =
+      typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
+    if (!projectRoot) {
+      res.status(400).json({ error: 'projectRoot query parameter is required' });
+      return null;
+    }
+    if (!path.isAbsolute(projectRoot)) {
+      res.status(400).json({ error: `projectRoot must be an absolute path (got "${projectRoot}")` });
+      return null;
+    }
+
+    const port = Number(req.params.port);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      res.status(400).json({ error: `port must be a valid TCP port (got "${req.params.port}")` });
+      return null;
+    }
+
+    const targetId = String(req.params.targetId ?? '');
+    if (targetId === '') {
+      res.status(400).json({ error: 'targetId is required' });
+      return null;
+    }
+
+    return { projectRoot, port, targetId };
+  }
+
+  /** Whether a browser this project did NOT launch may be acted on. Same shape
+   *  and same reasoning as `includeForeignTabs` on the listing: the server
+   *  cannot tell an agent from a human, so it honours what it is asked, and the
+   *  withholding lives MCP-side where `mcp.cdp.allowUnowned` is read. Without
+   *  this the MCP gate would pass a foreign port that the registry then refuses
+   *  anyway — an opt-in that says it grants something it cannot. */
+  const readAllowUnowned = (req: Request): boolean =>
+    req.query['allowUnowned'] === 'true' || req.query['allowUnowned'] === '1';
+
   // DELETE /cdp/browsers/:port/tabs/:targetId (stories/cdp-tabs.md §2)
   //
   // The one destructive verb over a live browser. Every guard lives in
@@ -1005,42 +1054,13 @@ export function createApiServer(
     '/cdp/browsers/:port/tabs/:targetId',
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const projectRoot =
-          typeof req.query['projectRoot'] === 'string' ? req.query['projectRoot'] : '';
-        if (!projectRoot) {
-          res.status(400).json({ error: 'projectRoot query parameter is required' });
-          return;
-        }
-        if (!path.isAbsolute(projectRoot)) {
-          res
-            .status(400)
-            .json({ error: `projectRoot must be an absolute path (got "${projectRoot}")` });
-          return;
-        }
-
-        const port = Number(req.params.port);
-        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-          res.status(400).json({ error: `port must be a valid TCP port (got "${req.params.port}")` });
-          return;
-        }
-
-        const targetId = String(req.params.targetId ?? '');
-        if (targetId === '') {
-          res.status(400).json({ error: 'targetId is required' });
-          return;
-        }
+        const params = readTabParams(req, res);
+        if (!params) return;
+        const { projectRoot, port, targetId } = params;
 
         const allowBrowserExit =
           req.query['allowBrowserExit'] === 'true' || req.query['allowBrowserExit'] === '1';
-        // Whether a browser this project did NOT launch may be closed. Same
-        // shape and same reasoning as `includeForeignTabs` on the listing: the
-        // server cannot tell an agent from a human, so it honours what it is
-        // asked, and the withholding lives MCP-side where `mcp.cdp.allowUnowned`
-        // is read. Without this the MCP gate would pass a foreign port that the
-        // registry then refuses anyway — an opt-in that says it grants
-        // something it cannot.
-        const allowUnowned =
-          req.query['allowUnowned'] === 'true' || req.query['allowUnowned'] === '1';
+        const allowUnowned = readAllowUnowned(req);
 
         const result = await queueCdpClose(port, () =>
           closeCdpTab({
@@ -1079,6 +1099,52 @@ export function createApiServer(
           remainingTabs: result.remainingTabs,
           browserExited: result.browserExited,
           owned: result.owned,
+          warnings: result.warnings,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /cdp/browsers/:port/tabs/:targetId/focus (stories/cdp-tab-focus.md §2)
+  //
+  // `POST` rather than `PUT`: this is an action on a tab, not a replacement of
+  // one. **No queue** — the close route serialises per port because two
+  // concurrent closes can defeat the last-tab guard; focus has no guard to
+  // defeat and no irreversible outcome, so two concurrent focuses simply mean
+  // the second wins, which is what "focus" means.
+  app.post(
+    '/cdp/browsers/:port/tabs/:targetId/focus',
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const params = readTabParams(req, res);
+        if (!params) return;
+        const { projectRoot, port, targetId } = params;
+
+        const result = await focusCdpTab({
+          projectRoot,
+          port,
+          targetId,
+          allowUnowned: readAllowUnowned(req),
+        });
+
+        if (!result.ok) {
+          res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+          return;
+        }
+
+        res.status(200).json({
+          // "The browser accepted it", not "the user can see it" — the DevTools
+          // HTTP surface has no read that would justify the stronger claim, and
+          // the field's description says so rather than pretending otherwise.
+          focused: true,
+          targetId: result.targetId,
+          title: result.title,
+          url: result.url,
+          engine: result.engine,
+          profile: result.profile,
+          port: result.port,
           warnings: result.warnings,
         });
       } catch (err) {

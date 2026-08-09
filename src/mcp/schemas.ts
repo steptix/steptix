@@ -578,6 +578,61 @@ export const closeCdpTabOutput = toolSchema({
   warnings: z.array(z.string()),
 });
 
+export const focusCdpTabInput = toolSchema({
+  target_id: z
+    .string()
+    // Same reason as `close_cdp_tab`'s: an empty id would reach the wire as
+    // `/tabs//focus`, which matches no route and comes back as an unrelated
+    // error.
+    .min(1)
+    .describe(
+      'Exact targetId of the tab to bring to the front, from ' +
+        'list_cdp_browsers. There is no fuzzy matching — match the user\'s ' +
+        'words against the tab titles and urls yourself, then pass the id of ' +
+        'the one you picked.',
+    ),
+  profile: z
+    .string()
+    .optional()
+    .describe(
+      'Profile name of the browser holding the tab, e.g. "default". Prefer ' +
+        'this over `port`. Give exactly one of `profile` or `port`.',
+    ),
+  engine: z
+    .enum(['chrome', 'edge'])
+    .optional()
+    .describe(
+      'Disambiguates `profile` when Chrome and Edge are both running the ' +
+        'same profile name. Only meaningful alongside `profile`.',
+    ),
+  port: z
+    .number()
+    .int()
+    .optional()
+    .describe('Port of the browser holding the tab. Pass this OR `profile`, not both.'),
+  project_root: projectRoot,
+});
+
+export const focusCdpTabOutput = toolSchema({
+  focused: z
+    .boolean()
+    .describe(
+      'The browser accepted the request. Deliberately weaker than ' +
+        '`close_cdp_tab`\'s `closed`: a closed tab can be polled for, but ' +
+        'whether a window actually came to the front is not readable, and an ' +
+        'operating system may decline to raise a background application\'s ' +
+        'window. If the user says they cannot see it, ask them to click the ' +
+        'browser in their taskbar.',
+    ),
+  targetId: z.string(),
+  title: z.string().describe('Title of the tab brought forward — say this, not just that it worked.'),
+  url: z.string(),
+  engine: z.string(),
+  profile: z.string(),
+  port: z.number(),
+  warnings: z.array(z.string()),
+});
+
 export const listCdpBrowsersOutput = toolSchema({
   running: z.array(
     z.object({

@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
 import { resetRegistry } from '../src/mcp/registry.js';
+import { ApiHttpError } from '../src/mcp/types.js';
 import type { ApiClient, McpDeps, ProjectContext, StreamResult } from '../src/mcp/types.js';
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,8 @@ interface Harness {
   /** Every `closeCdpTab` that reached the wire — empty means a refusal fired
    *  before the request, which is the point of a pre-flight gate. */
   closeCalls: Record<string, unknown>[];
+  /** Same, for `focusCdpTab`. */
+  focusCalls: Record<string, unknown>[];
   /** Which readiness check the tool took — `'ensure'` auto-starts a stopped
    *  server, `'assert'` only refuses a squatter. */
   readiness: ('ensure' | 'assert')[];
@@ -61,6 +64,10 @@ async function connect(
     browsers?: Browsers;
     started?: Record<string, unknown>;
     closed?: Record<string, unknown>;
+    focused?: Record<string, unknown>;
+    /** Make `focusCdpTab` throw — used for the two 404 readings, which are the
+     *  only place the tool inspects an HTTP status itself. */
+    focusThrows?: Error;
     /** Sessions `list_sessions` should report. */
     sessions?: Record<string, unknown>[];
     /** Make the registry unreachable, to prove a listing failure cannot change
@@ -81,6 +88,7 @@ async function connect(
   const listCalls: Harness['listCalls'] = [];
   const startCalls: Harness['startCalls'] = [];
   const closeCalls: Harness['closeCalls'] = [];
+  const focusCalls: Harness['focusCalls'] = [];
   const readiness: Harness['readiness'] = [];
 
   const fakeClient: ApiClient = {
@@ -133,6 +141,27 @@ async function connect(
         warnings: [],
       }) as never;
     },
+    async focusCdpTab(args) {
+      focusCalls.push(args as unknown as Record<string, unknown>);
+      if (opts.focusThrows) throw opts.focusThrows;
+      // Echo the tab the id actually names, the way the real route does — it
+      // reads title and url out of the browser's own list. A fake that always
+      // answered with one hardcoded title would let a tool that focused the
+      // wrong tab pass every assertion about what it says it showed.
+      const known = (opts.browsers?.running ?? [])
+        .flatMap((b) => b.tabs as { targetId: string; title: string; url: string }[])
+        .find((t) => t.targetId === args.targetId);
+      return (opts.focused ?? {
+        focused: true,
+        targetId: args.targetId,
+        title: known?.title ?? 'OpenRouter — Docs',
+        url: known?.url ?? 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: args.port,
+        warnings: [],
+      }) as never;
+    },
     async getCdpBrowsers(args) {
       listCalls.push(args);
       if (opts.browsersThrow === true) throw new Error('registry unreachable');
@@ -168,7 +197,7 @@ async function connect(
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  return { client, runs, listCalls, startCalls, closeCalls, readiness };
+  return { client, runs, listCalls, startCalls, closeCalls, focusCalls, readiness };
 }
 
 function structured(result: unknown): Record<string, unknown> {
@@ -215,6 +244,23 @@ const RUNNING_WITH_TABS = [
     ],
   },
 ];
+/** A browser holding several tabs — the shape the focus flow is for. Four,
+ *  because two would let a toggle pass as a switcher. */
+const RUNNING_WITH_MANY_TABS = [
+  {
+    engine: 'edge',
+    profile: 'default',
+    port: 51000,
+    profileDir: 'c:/proj/p/edge-default',
+    tabs: [
+      { targetId: 'T-DOCS', title: 'OpenRouter — Docs', url: 'https://openrouter.ai/docs', sessionId: null },
+      { targetId: 'T-CART', title: 'Cart — Shop', url: 'https://shop.example/cart', sessionId: 'mcp:x' },
+      { targetId: 'T-MAIL', title: 'Inbox', url: 'https://mail.example/inbox', sessionId: null },
+      { targetId: 'T-NEW', title: 'New Tab', url: 'edge://newtab/', sessionId: null },
+    ],
+  },
+];
+
 const FOREIGN = [{ engine: 'chrome', port: 9222, tabs: null, tabsWithheld: true, error: null }];
 
 beforeEach(() => resetRegistry());
@@ -981,6 +1027,286 @@ describe('close_cdp_tab', () => {
       }
     }
     expect(tool.description).toMatch(/did not start it|ask the user first/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// focus_cdp_tab (stories/cdp-tab-focus.md §5, §6)
+//
+// The harmless verb, and that is exactly what needs pinning: it must clear the
+// same ownership gate as its destructive neighbour while refusing none of the
+// things that neighbour refuses.
+// ---------------------------------------------------------------------------
+
+describe('focus_cdp_tab', () => {
+  it('resolves a profile to a port and focuses the named tab', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(h.focusCalls).toHaveLength(1);
+    expect(h.focusCalls[0]).toMatchObject({
+      projectRoot: PROJECT_ROOT,
+      port: 51000,
+      targetId: 'A1B2C3',
+    });
+  });
+
+  it('maps every output field through as structured content', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(structured(result)).toEqual({
+      focused: true,
+      targetId: 'A1B2C3',
+      title: 'OpenRouter — Docs',
+      url: 'https://openrouter.ai/docs',
+      engine: 'edge',
+      profile: 'default',
+      port: 51000,
+      warnings: [],
+    });
+  });
+
+  it('names the tab it brought forward in text, for a host that shows only that', async () => {
+    // The whole user-visible payoff: "Brought X to the front" is what the agent
+    // repeats back, and a host that ignores structured content sees nothing
+    // else. `title` reaching the summary is the difference between the agent
+    // saying which tab it showed and saying only that a call succeeded.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(summary(result)).toContain('OpenRouter — Docs');
+    expect(summary(result)).toContain('edge "default"');
+  });
+
+  it('switches between every tab of a multi-tab browser, naming each one', async () => {
+    // The whole flow, repeated: list once, then ask for one tab after another
+    // the way a user does ("now show me the cart", "now the inbox"). Four tabs
+    // rather than two, because a toggle would satisfy two. What each hop has
+    // to get right is the pairing — the id that reached the wire and the title
+    // in the summary must describe the SAME tab, since the summary is what the
+    // agent repeats back and the id is what actually moved.
+    const h = await connect({ browsers: { running: RUNNING_WITH_MANY_TABS } });
+
+    const listed = await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
+    const tabs = (structured(listed).running as { tabs: { targetId: string; title: string }[] }[])[0]!
+      .tabs;
+    expect(tabs).toHaveLength(4);
+
+    // Forwards, then backwards, so every tab is both the one being left and
+    // the one being asked for.
+    const walk = [...tabs, ...[...tabs].reverse()];
+    for (const tab of walk) {
+      const result = await h.client.callTool({
+        name: 'focus_cdp_tab',
+        arguments: { profile: 'default', target_id: tab.targetId },
+      });
+      expect(result.isError, `focusing ${tab.title}`).toBeFalsy();
+      expect(structured(result).targetId).toBe(tab.targetId);
+      expect(structured(result).title).toBe(tab.title);
+      expect(summary(result)).toContain(tab.title);
+    }
+
+    expect(h.focusCalls.map((c) => c.targetId)).toEqual(walk.map((t) => t.targetId));
+    // One listing, eight focuses: the agent does not have to re-list between
+    // hops, because a targetId stays valid while the tab is open.
+    expect(h.listCalls).toHaveLength(1 + walk.length);
+  });
+
+  it('focuses a tab a session is DRIVING, without a word of complaint', async () => {
+    // The deliberate opposite of `close_cdp_tab`, and the single most likely
+    // reason anyone calls this: "show me what the test is doing". D4E5F6 is the
+    // tab `RUNNING_WITH_TABS` marks as held by session mcp:x.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'D4E5F6' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(h.focusCalls[0]).toMatchObject({ targetId: 'D4E5F6' });
+  });
+
+  it('survives an older server that omits `warnings`', async () => {
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      focused: {
+        focused: true,
+        targetId: 'A1B2C3',
+        title: 'Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: 51000,
+      },
+    });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(structured(result).warnings).toEqual([]);
+  });
+
+  it('refuses both `profile` and `port`, and never reaches the wire', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', port: 51000, target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).not.toContain('config.cdp');
+    expect(text(result)).toMatch(/not both/i);
+    expect(h.focusCalls).toHaveLength(0);
+  });
+
+  it('refuses neither `profile` nor `port`, naming its own argument names', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('focus_cdp_tab');
+    expect(text(result)).toContain('list_cdp_browsers');
+    expect(h.focusCalls).toHaveLength(0);
+  });
+
+  it('skips the gate for a profile-resolved port', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(h.listCalls.filter((c) => c.includeForeign === true)).toHaveLength(0);
+  });
+
+  it('gates a caller-supplied port, and refuses a foreign one', async () => {
+    // Non-destructive is not the same as unobtrusive: focusing a tab in
+    // someone else's browser yanks their screen and reveals which tab they are
+    // being shown. Same gate as attaching and closing.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('mcp.cdp.allowUnowned');
+    expect(h.focusCalls).toHaveLength(0);
+  });
+
+  it('permits a foreign port once allowUnowned is set, and forwards the flag', async () => {
+    const h = await connect({
+      project: fakeProject({ cdpPermissions: { allowUnowned: true, ports: null } }),
+      browsers: { running: RUNNING_WITH_TABS, foreign: FOREIGN },
+    });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { port: 9222, target_id: 'A1B2C3' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(h.focusCalls[0]).toMatchObject({ port: 9222, allowUnowned: true });
+  });
+
+  it('does not send allowUnowned when no human permitted it', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(h.focusCalls[0]).not.toHaveProperty('allowUnowned');
+  });
+
+  it('auto-starts a stopped server, like the other tools that act', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+    expect(h.readiness).toEqual(['ensure']);
+  });
+
+  it('passes a real 404 through as prose, not as a transport complaint', async () => {
+    // The server's own message names the id, both readings and the call that
+    // refreshes the list. Wrapping it in "rejected the request (HTTP 404)"
+    // buries an actionable message under one the agent cannot act on.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      focusThrows: new ApiHttpError(
+        404,
+        'No tab with target id GONE is open in edge "default" (port 51000).\n\n' +
+          'Either it has already been closed, or the id belongs to a different browser.\n' +
+          'Call list_cdp_browsers for the tabs open right now.',
+      ),
+    });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'GONE' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/already been closed/i);
+    expect(text(result)).toMatch(/different browser/i);
+    expect(text(result)).not.toMatch(/rejected the request/i);
+  });
+
+  it('tells the agent to rebuild when the ROUTE is what is missing', async () => {
+    // The same status, the opposite meaning. Reachable without doing anything
+    // wrong: pull this branch, restart the MCP server, and the Sessions API
+    // server from the previous build is still holding the port. Telling the
+    // user their tab was closed sends them looking for a window that is still
+    // sitting there.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      focusThrows: new ApiHttpError(404, ''),
+    });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/predates this tool|no tab-focus route/i);
+    expect(text(result)).toMatch(/npm run build/);
+    // And it must NOT say the tab is gone.
+    expect(text(result)).not.toMatch(/already been closed/i);
+  });
+
+  it('describes what surprises: match it yourself, say which tab, and the weak guarantee', async () => {
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    const description = tools.find((t) => t.name === 'focus_cdp_tab')!.description!;
+
+    // An agent that does not know matching is its job looks for a selector.
+    expect(description).toContain('list_cdp_browsers');
+    expect(description).toMatch(/yourself/);
+    // The result is only useful if the agent relays which tab it showed.
+    expect(description).toMatch(/say which tab/i);
+    // `focused: true` means accepted, and the description has to hold that
+    // line — reporting the strong contract while holding the weak one is the
+    // one thing the story forbids outright.
+    expect(description).toMatch(/accepted the request/i);
+    expect(description).toMatch(/taskbar/i);
+    // And it is not a way to make steps run somewhere.
+    expect(description).toContain('config.cdp.tab');
+  });
+
+  it('promises in its schema that focused means accepted, not seen', async () => {
+    // The static prose an agent reads before it ever calls this. `closed` on
+    // the neighbouring tool means "gone"; if this field claimed the same
+    // strength, an agent would report a window the user cannot see as shown.
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    const output = JSON.stringify(tools.find((t) => t.name === 'focus_cdp_tab')!.outputSchema);
+    expect(output).toMatch(/accepted the request/i);
+    expect(output).toMatch(/taskbar/i);
   });
 });
 

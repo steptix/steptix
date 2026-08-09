@@ -370,6 +370,59 @@ export function cdpTabTargetAmbiguous(both: boolean): McpToolError {
   );
 }
 
+/**
+ * `focus_cdp_tab` gave neither address, or both.
+ *
+ * Separate from `cdpTabTargetAmbiguous` in more than field names: closing the
+ * wrong tab cannot be undone, so that message leans on the stakes. Focusing the
+ * wrong one is a nuisance, and saying otherwise would teach an agent to weigh
+ * the two calls the same way. The rule is identical because two identical
+ * interfaces over one listing beat two rules a model has to remember which is
+ * which.
+ */
+export function cdpFocusTargetAmbiguous(both: boolean): McpToolError {
+  return preflightError(
+    both
+      ? 'Give `profile` or `port`, not both. They can name different browsers, ' +
+        'so there is no safe way to choose between them — and you would be ' +
+        'showing the user a tab in the wrong window.\n' +
+        'Prefer `profile`: a port is reassigned every launch.'
+      : 'focus_cdp_tab needs to know which browser: give `profile` (preferred) ' +
+        'or `port`.\n' +
+        'Call list_cdp_browsers to see what this project has running, and to get ' +
+        'the `targetId` of the tab you mean.',
+  );
+}
+
+/** The server answered 404 with its own message: no tab by that id. The prose
+ *  is the registry's, because it is the layer that knows which browser was
+ *  looked in — it names the id, both readings (already closed, or an id from a
+ *  different browser) and the call that refreshes the list. Passed through
+ *  rather than wrapped in "the server rejected the request (HTTP 404)", which
+ *  would bury an actionable message under a transport one. */
+export function cdpFocusTabNotFound(serverMessage: string): McpToolError {
+  return preflightError(serverMessage);
+}
+
+/**
+ * A 404 with no message of ours in it — so the *route* is missing, not the tab.
+ *
+ * Reachable without doing anything wrong: pull this branch, restart the MCP
+ * server, and the Sessions API server from the previous build is still holding
+ * the port. There is no version check, only an identity one. Without this row
+ * the agent is told the user's tab has been closed, which is both false and
+ * unfixable by anything it can do next.
+ */
+export function cdpFocusRouteMissing(baseUrl: string): McpToolError {
+  return preflightError(
+    `${baseUrl} has no tab-focus route, so it is running a build that predates ` +
+      'this tool. **The tab is fine** — nothing was looked up.\n\n' +
+      'Rebuild and restart the Sessions API server: `npm run build`, then stop ' +
+      'the running server and start it again. Ask the user to do it if you ' +
+      'cannot.',
+  );
+}
+
 export function listSessionsTimedOut(timeoutMs: number): McpToolError {
   return preflightError(
     `Listing sessions took longer than ${timeoutMs}ms. The server reads each ` +

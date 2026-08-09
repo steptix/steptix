@@ -15,6 +15,9 @@ import { createHash } from 'node:crypto';
 import { assembleSteps, assembleTestFile } from './assemble.js';
 import {
   badCdpProfileName,
+  cdpFocusRouteMissing,
+  cdpFocusTabNotFound,
+  cdpFocusTargetAmbiguous,
   cdpTabTargetAmbiguous,
   listSessionsTimedOut,
   preflightError,
@@ -1588,6 +1591,117 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         // Acts on live browser state, like the run tools — not a read-only
         // probe. Kept off `ensureServerReady` would mean a close against a
         // stopped server died on a bare ECONNREFUSED.
+        { autoStart: true, signal: extra.signal },
+      ),
+  );
+
+  // -- focus_cdp_tab --------------------------------------------------------
+  server.registerTool(
+    'focus_cdp_tab',
+    {
+      title: 'Show a CDP browser tab',
+      description:
+        'Bring one tab of a CDP browser to the front, so the user can see it. ' +
+        'Takes the exact `targetId` from **list_cdp_browsers** — call that ' +
+        'first and match the user\'s words ("the openrouter tab") against the ' +
+        'titles and urls yourself.\n\n' +
+        'This moves a real window on the user\'s screen. Say which tab you ' +
+        'brought forward, not just that it worked — the result carries its ' +
+        '`title` and `url`.\n\n' +
+        '`focused: true` means the browser accepted the request. Whether the ' +
+        'window actually came to the front is not something this can read ' +
+        'back, and an operating system may refuse to raise a background ' +
+        'application\'s window. If the user says they still cannot see it, ' +
+        'ask them to click the browser in their taskbar rather than calling ' +
+        'this again.\n\n' +
+        'It changes nothing else: no tab is closed, no session is created, and ' +
+        'a run in flight elsewhere keeps running — automation drives a tab ' +
+        'whether or not it is visible. So this is for **showing a human ' +
+        'something**, and it is not a way to make steps run somewhere; that is ' +
+        '`config.cdp.tab` on a new session. It is safe to call on a tab a ' +
+        'session is driving, which is the usual reason to want it.',
+      inputSchema: schemas.focusCdpTabInput,
+      outputSchema: schemas.focusCdpTabOutput,
+    },
+    async (args, extra) =>
+      withProject(
+        deps,
+        args.project_root,
+        async (client, project) => {
+          const { port, gateOwed } = await resolveCdpTarget(
+            client,
+            project.projectRoot,
+            {
+              ...(args.profile !== undefined ? { profile: args.profile } : {}),
+              ...(args.engine !== undefined ? { engine: args.engine } : {}),
+              ...(args.port !== undefined ? { port: args.port } : {}),
+            },
+            extra.signal,
+            cdpFocusTargetAmbiguous,
+          );
+          // The same gate as attaching and closing. Non-destructive is not the
+          // same as unobtrusive: focusing a tab in someone else's browser yanks
+          // their screen and reveals which tab they are being shown.
+          if (gateOwed) {
+            await assertPortAttachable(
+              client,
+              project.projectRoot,
+              port,
+              project.cdpPermissions,
+              extra.signal,
+            );
+          }
+
+          let focused;
+          try {
+            focused = await client.focusCdpTab(
+              {
+                projectRoot: project.projectRoot,
+                port,
+                targetId: args.target_id,
+                // Read directly rather than through `maySeeForeignTabs`, which
+                // asks a different question that happens to consult the same
+                // field. Without it the gate above would let a foreign port
+                // through and the server would refuse it anyway.
+                ...(project.cdpPermissions.allowUnowned ? { allowUnowned: true } : {}),
+              },
+              extra.signal,
+            );
+          } catch (err) {
+            // The one status worth splitting: 404 means the tab is gone OR the
+            // route is, and telling a user their tab was closed when the real
+            // answer is "rebuild the server" sends them looking for a window
+            // that is still sitting there.
+            if (err instanceof ApiHttpError && err.status === 404) {
+              return errorResult(
+                err.serverMessage
+                  ? cdpFocusTabNotFound(err.serverMessage)
+                  : cdpFocusRouteMissing(normalizeBaseUrl(project.serverUrl)),
+              );
+            }
+            throw err;
+          }
+
+          // Normalised for the same reason `close_cdp_tab` normalises its own:
+          // `warnings` is required by the output schema, so a Sessions API
+          // server that omits it would fail validation and degrade a working
+          // result to `isError` with nothing readable in it.
+          const result = { ...focused, warnings: focused.warnings ?? [] };
+
+          const what = result.title || result.url || result.targetId;
+          const browser = result.profile
+            ? `${result.engine} "${result.profile}"`
+            : `the browser on port ${result.port}`;
+          return validated(
+            schemas.focusCdpTabOutput,
+            result as unknown as Record<string, unknown>,
+            `Brought "${what}" to the front in ${browser}` +
+              (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
+          );
+        },
+        // Acts on live browser state rather than reporting on it, like
+        // `close_cdp_tab` — so a stopped server is started rather than
+        // surfaced as a bare ECONNREFUSED.
         { autoStart: true, signal: extra.signal },
       ),
   );

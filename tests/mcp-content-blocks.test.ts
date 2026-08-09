@@ -178,6 +178,18 @@ async function connect(): Promise<Client> {
         warnings: [],
       } as never;
     },
+    async focusCdpTab(args) {
+      return {
+        focused: true,
+        targetId: args.targetId,
+        title: 'OpenRouter — Docs',
+        url: 'https://openrouter.ai/docs',
+        engine: 'edge',
+        profile: 'default',
+        port: args.port,
+        warnings: [],
+      } as never;
+    },
   };
 
   const deps: McpDeps = {
@@ -214,6 +226,7 @@ function argumentsFor(): Record<string, Record<string, unknown>> {
     list_cdp_browsers: { project_root: tmpDir },
     start_cdp_browser: { engine: 'edge', profile: 'default', project_root: tmpDir },
     close_cdp_tab: { profile: 'default', target_id: 'A1B2C3', project_root: tmpDir },
+    focus_cdp_tab: { profile: 'default', target_id: 'A1B2C3', project_root: tmpDir },
   };
 }
 
@@ -326,6 +339,9 @@ describe('every tool serializes its structured content into a content block', ()
           throw new Error('not reached');
         },
         async closeCdpTab() {
+          throw new Error('not reached');
+        },
+        async focusCdpTab() {
           throw new Error('not reached');
         },
       }),

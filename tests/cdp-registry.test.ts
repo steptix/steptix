@@ -8,6 +8,7 @@ import {
   knownProfiles,
   startCdpBrowser,
   closeCdpTab,
+  focusCdpTab,
   UNKNOWN_HOLDER,
   resetProfile,
   PROFILE_MARKER,
@@ -1077,5 +1078,180 @@ describe('closeCdpTab', () => {
 
     expect(result).toMatchObject({ ok: false, kind: 'launch_failed' });
     expect((result as { error: string }).error).toContain('HTTP 500');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Focusing a tab (stories/cdp-tab-focus.md §2)
+//
+// The same ownership rules as a close and none of its guards, so what these
+// pin is mostly what focus deliberately does NOT refuse — plus the one guard
+// it keeps, which is the only thing standing between the tool and the browser
+// happily "activating" an omnibox.
+// ---------------------------------------------------------------------------
+
+describe('focusCdpTab', () => {
+  const DIR = path.join(PROFILES, 'edge-default');
+  const PORT = 51000;
+
+  const TWO_TABS = [
+    { targetId: 'A1B2C3', title: 'OpenRouter — Docs', url: 'https://openrouter.ai/docs' },
+    { targetId: 'D4E5F6', title: 'Cart — Shop', url: 'https://shop.example/cart' },
+  ];
+
+  function liveBrowser(tabs: { targetId: string; title: string; url: string }[] | null = TWO_TABS) {
+    const { deps } = fakeFs({
+      dirs: [PROFILES, DIR],
+      files: { [path.join(DIR, 'DevToolsActivePort')]: `${PORT}\n/devtools/browser/x` },
+    });
+    const activateFn = vi.fn(async () => ({ ok: true, notFound: false, error: null }));
+    return {
+      deps: {
+        ...deps,
+        probe: probeFor({ [PORT]: 'edge' }),
+        listTabs: (async () => tabs) as never,
+        activate: activateFn as never,
+      },
+      activateFn,
+    };
+  }
+
+  it('activates the named tab and echoes what it brought forward', async () => {
+    const h = liveBrowser();
+    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+
+    expect(result).toMatchObject({
+      ok: true,
+      targetId: 'A1B2C3',
+      // The echo is the whole point: an agent that only knows "it worked"
+      // cannot tell the user which tab it put in front of them.
+      title: 'OpenRouter — Docs',
+      url: 'https://openrouter.ai/docs',
+      engine: 'edge',
+      profile: 'default',
+      port: PORT,
+      owned: true,
+    });
+    expect(h.activateFn).toHaveBeenCalledWith(PORT, 'A1B2C3');
+  });
+
+  it('refuses a target the LISTING would not have shown, without asking the browser', async () => {
+    // The load-bearing guard, and not hypothetical: the browser answers
+    // `200 "Target activated"` for `iframe` and `browser_ui` ids as readily as
+    // for a real tab. `listTabs` here is the shared filter's output, so an id
+    // that is not in it is one the agent was never shown.
+    const h = liveBrowser();
+    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'IFRAME1' }, h.deps);
+
+    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    const error = (result as { error: string }).error;
+    expect(error).toMatch(/already been closed/i);
+    expect(error).toMatch(/different browser/i);
+    expect(error).toContain('list_cdp_browsers');
+    expect(h.activateFn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a port that is not one of ours, and activates nothing', async () => {
+    const h = liveBrowser();
+    const result = await focusCdpTab({ projectRoot: ROOT, port: 9222, targetId: 'A1B2C3' }, h.deps);
+
+    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    expect((result as { error: string }).error).toContain('51000');
+    expect(h.activateFn).not.toHaveBeenCalled();
+  });
+
+  it('reaches a foreign browser only with allowUnowned, and says whose it is', async () => {
+    const h = liveBrowser();
+    h.deps.probe = probeFor({ 9222: 'chrome' }) as never;
+
+    const result = await focusCdpTab(
+      { projectRoot: ROOT, port: 9222, targetId: 'A1B2C3', allowUnowned: true },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ ok: true, owned: false, profile: '', engine: 'chrome' });
+  });
+
+  it('does NOT refuse a tab a session is driving', async () => {
+    // The deliberate opposite of `closeCdpTab`. "Show me what the test is
+    // doing" is the single most likely reason to call this, and the tab a
+    // session holds is exactly the tab the user wants to see — so there is no
+    // session lookup here at all, which is what this asserts by there being no
+    // hook to inject one.
+    const h = liveBrowser();
+    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'D4E5F6' }, h.deps);
+    expect(result).toMatchObject({ ok: true, targetId: 'D4E5F6' });
+  });
+
+  it('does NOT refuse a browser\'s only tab', async () => {
+    // Nothing closes, so there is no last-tab hazard to guard against.
+    const h = liveBrowser([TWO_TABS[0]!]);
+    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it('reports a tab that vanished between the list and the activate', async () => {
+    // The browser's own 404. Absorbing it would hand the caller a title and url
+    // for a tab that no longer exists, and it would tell the user it is
+    // looking at something that is gone.
+    const h = liveBrowser();
+    h.deps.activate = (async () => ({ ok: false, notFound: true, error: 'HTTP 404' })) as never;
+
+    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    expect((result as { error: string }).error).toMatch(/something else closed it first/i);
+  });
+
+  it('surfaces a browser that refuses the activate outright', async () => {
+    const h = liveBrowser();
+    h.deps.activate = (async () => ({ ok: false, notFound: false, error: 'HTTP 500' })) as never;
+
+    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    expect(result).toMatchObject({ ok: false, kind: 'launch_failed' });
+    expect((result as { error: string }).error).toContain('HTTP 500');
+  });
+
+  it('reports an unreadable tab list rather than activating blind', async () => {
+    const h = liveBrowser(null);
+    const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'A1B2C3' }, h.deps);
+    expect(result).toMatchObject({ ok: false, kind: 'launch_failed' });
+    expect(h.activateFn).not.toHaveBeenCalled();
+  });
+
+  it('rejects every target the SHARED FILTER drops, straight from a raw /json/list', async () => {
+    // The drift guard, driven through the real `listPageTabs` so the whole
+    // chain — browser JSON → toPageTabs → the focus lookup — is what is under
+    // test rather than a hand-shaped list.
+    //
+    // This is the one that fails only in production if it is wrong: the
+    // browser answers `200 "Target activated"` for `iframe` and `browser_ui`
+    // ids exactly as it does for real tabs, so nothing downstream would notice
+    // us "focusing" an omnibox. The `*-dialog` row is the same hazard one step
+    // further in — Edge reports its modals as `type: 'page'`, and that one was
+    // measured in live testing, not predicted.
+    const RAW = [
+      { id: 'PAGE1', type: 'page', title: 'Orders', url: 'https://shop/orders' },
+      { id: 'IFRAME1', type: 'iframe', title: 'ad', url: 'https://ads.example/frame' },
+      { id: 'UI1', type: 'browser_ui', title: '', url: 'chrome://omnibox-popup.top-chrome/' },
+      { id: 'DIALOG1', type: 'page', title: 'Sync', url: 'edge://sync-confirmation-dialog/' },
+      { id: 'EXT1', type: 'page', title: 'Ext', url: 'chrome-extension://abc/popup.html' },
+      { id: 'WORKER1', type: 'service_worker', title: 'sw', url: 'https://shop/sw.js' },
+    ];
+    const fetchFn = (async () =>
+      ({ ok: true, status: 200, json: async () => RAW }) as unknown as Response) as typeof fetch;
+
+    const h = liveBrowser();
+    h.deps.listTabs = ((port: number) => listPageTabs(port, 100, fetchFn)) as never;
+
+    for (const hidden of ['IFRAME1', 'UI1', 'DIALOG1', 'EXT1', 'WORKER1']) {
+      const result = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: hidden }, h.deps);
+      expect(result, hidden).toMatchObject({ ok: false, kind: 'not_found' });
+    }
+    expect(h.activateFn).not.toHaveBeenCalled();
+
+    // And the real tab in the same payload still works, so the filter is
+    // rejecting by type rather than rejecting everything.
+    const ok = await focusCdpTab({ projectRoot: ROOT, port: PORT, targetId: 'PAGE1' }, h.deps);
+    expect(ok).toMatchObject({ ok: true, title: 'Orders' });
   });
 });

@@ -241,6 +241,7 @@ describe('tool registration', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close_cdp_tab',
       'close_session',
+      'focus_cdp_tab',
       'get_last_run',
       'get_page_content',
       'get_run_settings',
