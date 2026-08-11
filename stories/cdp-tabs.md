@@ -69,8 +69,8 @@ through makes the gaps concrete.
 `run_steps` call with the step *"Close the OpenRouter tab"*, does not work
 either, for a reason that is easy to miss: in CDP mode every tab that existed
 before the session attached is deliberately **invisible to the session** —
-[manager.ts:1151](../src/browser/manager.ts:1151) puts pre-existing pages on
-the tracker's ignore list, and [manager.ts:281](../src/browser/manager.ts:281)
+[manager.ts:1300](../src/browser/manager.ts:1300) puts pre-existing pages on
+the tracker's ignore list, and [manager.ts:302](../src/browser/manager.ts:302)
 drops them on adoption. The AI's `closePage` action can only close tabs the
 session itself opened. That invisibility is correct (a test should not trip
 over the user's other tabs) and it means the workaround costs a session, a
@@ -316,7 +316,7 @@ are allowed, and the author owns the consequences".
 
 ```
 close_cdp_tab { target_id,
-                profile? | port?,      // exactly one, like config.cdp
+                profile? | port?,      // one address (an agreeing pair is ok), like config.cdp
                 engine?,               // disambiguates profile, as in config.cdp
                 allow_browser_exit?,   // required true to close a browser's last tab
                 project_root? }
@@ -382,7 +382,7 @@ action.
 | tab is held by a live session | the session id and its tab | `close_session` that session, then retry — or leave it alone if the session is wanted |
 | last page tab, no `allow_browser_exit` | that this is the browser's last tab, closing it closes the browser, and the profile stays signed in on disk | pass `allow_browser_exit: true` if that is intended, or leave the tab |
 | port not `running` / foreign | which list the port was found in, and `mcp.cdp.allowUnowned` | pick from `running`, launch from `available`, or ask the user to set the opt-in |
-| both or neither of `profile`/`port` | the exactly-one rule | — (same wording as `config.cdp`'s) |
+| neither of `profile`/`port`, or a pair that disagrees | the missing address; or both facts — the port the profile is actually on vs. the port given (an agreeing pair is accepted) | — (same wording as `config.cdp`'s) |
 | close accepted but tab (or, for a last tab, the process) still present after the poll budget | the id and that the state is unknown | re-list before retrying |
 
 ## Out of scope
@@ -454,8 +454,9 @@ excludes `tests` so lint does not typecheck them.
 
 - `close_cdp_tab` end to end against a faked client; `structuredContent`
   complete; text summary names the closed tab's title.
-- Exactly-one `profile`/`port` refusal; profile resolution skips the gate;
-  raw `port` still gated; foreign refused naming `allowUnowned`.
+- Neither-given and disagreeing-pair refusals (an agreeing pair is
+  accepted); profile resolution skips the gate; raw `port` still gated;
+  foreign refused naming `allowUnowned`.
 - `list_cdp_browsers` maps `sessionId` through; `list_sessions` maps `tab`
   through, null for a fresh session.
 - Existing inventory guards (`mcp-seam.test.ts` tool list, both
@@ -753,7 +754,8 @@ rule (7) is proved against the streaming path.
   the listing — the listing is advisory, the guard is authoritative.
 - **Two browsers, same profile name, different engines** — inherited
   ambiguity, same answer as [cdp-session-binding.md](cdp-session-binding.md):
-  refuse and name both unless `engine` disambiguates.
+  refuse and name both unless `engine`/`scope` — or an agreeing `port` —
+  disambiguates.
 - **"The last tab closes the process" is a Windows/Linux default, not a
   law.** macOS keeps an app alive with zero windows, and Edge on Windows has
   Startup Boost / background modes that could keep a resident process. W0
@@ -765,7 +767,7 @@ rule (7) is proved against the streaming path.
   confirms its tabs **do** appear in `/json/list` and **do** close, so this
   story works on them. The other half does not: attach resolves `cdp.tab`
   against the default context's pages only
-  ([manager.ts:1163](../src/browser/manager.ts:1163)), so
+  ([manager.ts:1287](../src/browser/manager.ts:1287)), so
   `tab: "targetId:<incognito>"` cannot resolve and a session cannot be bound
   to one. Closing works, selecting does not — a pre-existing asymmetry this
   story surfaces rather than introduces, and a candidate for its own change.

@@ -107,15 +107,20 @@ Run A is a usability failure. Run C is a correctness one.
 ### 1. `config.cdp` accepts a profile
 
 Schema ([src/mcp/schemas.ts](../src/mcp/schemas.ts)) — `port` becomes optional
-and `profile` joins it, with **exactly one required**:
+and `profile` joins it, with **an address required**:
 
 ```
 cdp: { port?: number, profile?: string, tab?: string }
 ```
 
-Both absent, or both present, is a pre-flight refusal. Both-present is refused
-rather than resolved-and-compared: the two could disagree, and picking a winner
-silently is how run C happened.
+Both absent is a pre-flight refusal. Both present is resolved-and-compared
+(amended — this originally refused any pair): the profile is resolved against
+the registry and the pair is accepted only when it lands on exactly the given
+port — both halves of one `list_cdp_browsers` row. That is the pair an agent
+naturally sends back after listing, and it is precision, not ambiguity;
+refusing it taught every fresh agent the same lesson through a wasted
+round-trip. A pair that *disagrees* is still refused, with both facts stated —
+picking a winner silently is how run C happened, and nothing is ever picked.
 
 Resolution, in `assemble.ts`'s caller (`tools.ts`, beside the existing gate
 call — it is the only place with an `ApiClient`):
@@ -192,7 +197,7 @@ guaranteed to be in front of the model at the moment of the call:
 | [src/mcp/assemble.ts](../src/mcp/assemble.ts) | Carry a tool-supplied `profile` through `projectConfig` as an unresolved marker; W1's precondition. |
 | [src/mcp/cdp.ts](../src/mcp/cdp.ts) | `resolveProfileToPort`, beside `assertPortAttachable`. |
 | [src/mcp/tools.ts](../src/mcp/tools.ts) | Resolution before the gate; both warnings; `list_sessions` mapping; the two descriptions. |
-| [src/mcp/errors.ts](../src/mcp/errors.ts) | Profile-not-running / profile-unknown / both-or-neither refusals. |
+| [src/mcp/errors.ts](../src/mcp/errors.ts) | Profile-not-running / profile-unknown / no-address and disagreeing-pair refusals. |
 | [src/server/session-manager.ts](../src/server/session-manager.ts) | Retain `cdp` on `sessionConfig`; `SessionListItem.cdp` with registry lookup. |
 
 ## Tests
@@ -206,7 +211,8 @@ In [tests/mcp-cdp-seam.test.ts](../tests/mcp-cdp-seam.test.ts):
   `start_cdp_browser` and the profile.
 - `{profile}` unknown → refused, message lists the profiles that exist.
 - `{port}` unchanged → still gated (regression guard on §6).
-- `{port}` **and** `{profile}` → refused, neither silently wins.
+- `{port}` **and** `{profile}` agreeing → accepted, gate skipped;
+  disagreeing → refused stating both facts. Neither silently wins.
 - Neither → refused.
 - W1: `cdp` supplied, session exists → warning present and names
   `close_session`; `configApplied` still false.
@@ -263,8 +269,8 @@ the reported bug on its own.
 profile at list time, MCP maps it through.
 
 **W4 — profile addressing.** §1. Schema, resolution, refusals, and the gate
-skip — with the both-present and neither-present refusals written first, since
-they are the cases that keep run C from coming back in a new shape.
+skip — with the disagreeing-pair and neither-present refusals written first,
+since they are the cases that keep run C from coming back in a new shape.
 
 ## Repo gotchas
 

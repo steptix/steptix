@@ -482,16 +482,36 @@ describe('config.cdp addressed by profile', () => {
     expect(h.runs).toHaveLength(0);
   });
 
-  it('refuses when profile and port are both given', async () => {
-    // They can name different browsers. Picking a winner in silence is exactly
-    // the class of bug this story exists to remove.
+  it('accepts profile and port together when they name the same browser', async () => {
+    // The pair an agent naturally sends: both halves read off one
+    // list_cdp_browsers row. That is precision, not ambiguity — refusing it
+    // taught every fresh agent the same lesson through a wasted round-trip.
     const h = await connect({ browsers: { running: RUNNING } });
     const result = await h.client.callTool({
       name: 'run_steps',
       arguments: { steps: ['click x'], config: { cdp: { profile: 'default', port: 51000 } } },
     });
+    expect(result.isError).toBeFalsy();
+    expect(h.runs[0]?.body).toMatchObject({ config: { cdp: { port: 51000, profile: 'default' } } });
+    // The port was confirmed against our own registry entry, so the gate is
+    // skipped exactly as it is for a profile-only call.
+    expect(h.listCalls.filter((c) => c.includeForeign === true)).toHaveLength(0);
+  });
+
+  it('refuses a profile+port pair that disagrees, stating both facts', async () => {
+    // Two addresses pointing at different browsers have no correct winner.
+    // Picking one in silence is exactly the class of bug this story exists to
+    // remove — and the message must say where the profile actually is, or the
+    // agent cannot choose.
+    const h = await connect({ browsers: { running: RUNNING } });
+    const result = await h.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['click x'], config: { cdp: { profile: 'default', port: 9999 } } },
+    });
     expect(result.isError).toBe(true);
-    expect(text(result)).toContain('both');
+    expect(text(result)).toMatch(/disagree/i);
+    expect(text(result)).toContain('51000');
+    expect(text(result)).toContain('9999');
     expect(h.runs).toHaveLength(0);
   });
 
@@ -929,18 +949,32 @@ describe('close_cdp_tab', () => {
     expect(h.closeCalls[0]).toMatchObject({ allowBrowserExit: true });
   });
 
-  it('refuses both `profile` and `port`, and never reaches the wire', async () => {
-    // Two addresses that disagree have no correct winner, and this call closes
-    // something. The message must name THIS tool's arguments — a refusal that
-    // talks about config.cdp cannot be acted on here.
+  it('accepts an agreeing profile+port pair, and closes on that port', async () => {
+    // Both halves read off one list_cdp_browsers row name one browser twice.
     const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
     const result = await h.client.callTool({
       name: 'close_cdp_tab',
       arguments: { profile: 'default', port: 51000, target_id: 'A1B2C3' },
     });
+    expect(result.isError).toBeFalsy();
+    expect(h.closeCalls[0]).toMatchObject({ port: 51000, targetId: 'A1B2C3' });
+  });
+
+  it('refuses a disagreeing profile+port pair, and never reaches the wire', async () => {
+    // Two addresses pointing at different browsers have no correct winner, and
+    // this call closes something. The message must name THIS tool's arguments —
+    // a refusal that talks about config.cdp cannot be acted on here — and state
+    // both facts, or the agent cannot choose.
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', port: 9999, target_id: 'A1B2C3' },
+    });
     expect(result.isError).toBe(true);
     expect(text(result)).not.toContain('config.cdp');
-    expect(text(result)).toMatch(/not both/i);
+    expect(text(result)).toMatch(/disagree/i);
+    expect(text(result)).toContain('51000');
+    expect(text(result)).toContain('9999');
     expect(h.closeCalls).toHaveLength(0);
   });
 
@@ -1164,15 +1198,27 @@ describe('focus_cdp_tab', () => {
     expect(structured(result).warnings).toEqual([]);
   });
 
-  it('refuses both `profile` and `port`, and never reaches the wire', async () => {
+  it('accepts an agreeing profile+port pair, and focuses on that port', async () => {
     const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
     const result = await h.client.callTool({
       name: 'focus_cdp_tab',
       arguments: { profile: 'default', port: 51000, target_id: 'A1B2C3' },
     });
+    expect(result.isError).toBeFalsy();
+    expect(h.focusCalls[0]).toMatchObject({ port: 51000, targetId: 'A1B2C3' });
+  });
+
+  it('refuses a disagreeing profile+port pair, and never reaches the wire', async () => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', port: 9999, target_id: 'A1B2C3' },
+    });
     expect(result.isError).toBe(true);
     expect(text(result)).not.toContain('config.cdp');
-    expect(text(result)).toMatch(/not both/i);
+    expect(text(result)).toMatch(/disagree/i);
+    expect(text(result)).toContain('51000');
+    expect(text(result)).toContain('9999');
     expect(h.focusCalls).toHaveLength(0);
   });
 
@@ -1499,6 +1545,38 @@ describe('scope resolution (rule 5)', () => {
     expect(result.isError).toBeFalsy();
     expect(h.focusCalls[0]).toMatchObject({ port: 52000, targetId: 'U1' });
     expect(summary(result)).toContain('(user root)');
+  });
+
+  it('an agreeing port settles the tie too, with no scope field', async () => {
+    // A port belongs to exactly one browser, so `{profile, port}` names one of
+    // the two or none — the same narrowing scope and engine perform, falling
+    // out of resolve-and-compare rather than being its own rule.
+    const h = await connect({ browsers: { running: RUNNING_BOTH_SCOPES } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', port: 52000, target_id: 'U1' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(h.focusCalls[0]).toMatchObject({ port: 52000, targetId: 'U1' });
+    expect(summary(result)).toContain('(user root)');
+  });
+
+  it('an ambiguous profile plus a port matching neither lists every match', async () => {
+    // Profile running twice AND the given port on neither of them — the
+    // mismatch refusal must carry all three ports or the agent cannot choose.
+    const h = await connect({ browsers: { running: RUNNING_BOTH_SCOPES } });
+    const result = await h.client.callTool({
+      name: 'focus_cdp_tab',
+      arguments: { profile: 'default', port: 9999, target_id: 'U1' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/disagree/i);
+    expect(text(result)).toContain('51000');
+    expect(text(result)).toContain('52000');
+    expect(text(result)).toContain('9999');
+    expect(h.focusCalls).toHaveLength(0);
   });
 
   it('scope narrows run_steps config.cdp the same way', async () => {

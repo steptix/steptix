@@ -377,17 +377,46 @@ export function badCdpEngine(engine: string): McpToolError {
   );
 }
 
-/** `config.cdp` gave neither address, or both.
+/** The facts of a `profile`/`port` pair that does not name one browser: every
+ *  running browser bearing the name (with the port each is actually on), and
+ *  the port the caller sent instead. */
+export interface CdpAddressMismatch {
+  profile: string;
+  matches: { engine: string; scope?: RootScope; port: number }[];
+  given: number;
+}
+
+/** `edge "default" is on port 51000, but the call says port 9999` — the
+ *  mismatch facts, shared by the three per-tool messages so the same pair
+ *  reads the same way from every tool. */
+function describeMismatch(m: CdpAddressMismatch): string {
+  const where = m.matches
+    .map((b) => `${describeBrowser({ ...b, profile: m.profile })} is on port ${b.port}`)
+    .join(', ');
+  return `${where}, but the call says port ${m.given}`;
+}
+
+/** The remedy for a disagreeing pair, identical everywhere it can happen. */
+const MISMATCH_REMEDY =
+  'A port is reassigned every launch, so the port is the likelier stale half: ' +
+  'drop it and keep `profile`, or call list_cdp_browsers for the current pairing.';
+
+/** `config.cdp` gave no address at all, or a `profile`/`port` pair that does
+ *  not name one browser — the port belongs to a different browser, or to none.
  *
- *  Both is refused rather than resolved-and-compared: a port and a profile that
- *  disagree have no correct winner, and picking one in silence is precisely the
- *  failure this story exists to remove. */
-export function cdpTargetAmbiguous(both: boolean): McpToolError {
+ *  A pair that AGREES never lands here — it is accepted upstream, because an
+ *  agent that just read a listing row holds both halves of one address and
+ *  echoing them back is precision, not ambiguity. What still has no correct
+ *  winner is a pair that disagrees, and picking one in silence is precisely
+ *  the failure this story exists to remove — so the message states both facts
+ *  and makes the agent choose. */
+export function cdpTargetAmbiguous(mismatch: CdpAddressMismatch | null): McpToolError {
   return preflightError(
-    both
-      ? 'config.cdp has both `profile` and `port`. They can name different ' +
-        'browsers, so there is no safe way to choose between them.\n' +
-        'Send one. Prefer `profile` — a port is reassigned every launch.'
+    mismatch !== null
+      ? 'config.cdp\'s `profile` and `port` disagree: ' +
+        `${describeMismatch(mismatch)}. Nothing is picked for you — the wrong ` +
+        'pick is a browser signed in as somebody else.\n' +
+        MISMATCH_REMEDY
       : 'config.cdp needs an address: give `profile` (preferred) or `port`.\n' +
         'Call list_cdp_browsers to see what this project has running.',
   );
@@ -467,20 +496,20 @@ export function cdpProfileAmbiguous(
 }
 
 /**
- * `close_cdp_tab` gave neither address, or both.
+ * `close_cdp_tab` gave no address, or a `profile`/`port` pair that disagrees.
  *
  * Separate from `cdpTargetAmbiguous` only in the field names it quotes: this
  * tool takes `profile`/`port` at the top level, and a message telling an agent
  * to fix `config.cdp` when there is no `config` in the call is a message that
  * cannot be acted on.
  */
-export function cdpTabTargetAmbiguous(both: boolean): McpToolError {
+export function cdpTabTargetAmbiguous(mismatch: CdpAddressMismatch | null): McpToolError {
   return preflightError(
-    both
-      ? 'Give `profile` or `port`, not both. They can name different browsers, ' +
-        'so there is no safe way to choose between them — and this call closes ' +
-        'a real tab.\n' +
-        'Prefer `profile`: a port is reassigned every launch.'
+    mismatch !== null
+      ? '`profile` and `port` disagree: ' +
+        `${describeMismatch(mismatch)} — and this call closes a real tab, so ` +
+        'nothing is picked for you.\n' +
+        MISMATCH_REMEDY
       : 'close_cdp_tab needs to know which browser: give `profile` (preferred) ' +
         'or `port`.\n' +
         'Call list_cdp_browsers to see what this project has running, and to get ' +
@@ -489,7 +518,7 @@ export function cdpTabTargetAmbiguous(both: boolean): McpToolError {
 }
 
 /**
- * `focus_cdp_tab` gave neither address, or both.
+ * `focus_cdp_tab` gave no address, or a `profile`/`port` pair that disagrees.
  *
  * Separate from `cdpTabTargetAmbiguous` in more than field names: closing the
  * wrong tab cannot be undone, so that message leans on the stakes. Focusing the
@@ -498,13 +527,13 @@ export function cdpTabTargetAmbiguous(both: boolean): McpToolError {
  * interfaces over one listing beat two rules a model has to remember which is
  * which.
  */
-export function cdpFocusTargetAmbiguous(both: boolean): McpToolError {
+export function cdpFocusTargetAmbiguous(mismatch: CdpAddressMismatch | null): McpToolError {
   return preflightError(
-    both
-      ? 'Give `profile` or `port`, not both. They can name different browsers, ' +
-        'so there is no safe way to choose between them — and you would be ' +
-        'showing the user a tab in the wrong window.\n' +
-        'Prefer `profile`: a port is reassigned every launch.'
+    mismatch !== null
+      ? '`profile` and `port` disagree: ' +
+        `${describeMismatch(mismatch)} — and picking one for you could put ` +
+        'the wrong window in front of the user.\n' +
+        MISMATCH_REMEDY
       : 'focus_cdp_tab needs to know which browser: give `profile` (preferred) ' +
         'or `port`.\n' +
         'Call list_cdp_browsers to see what this project has running, and to get ' +
