@@ -677,8 +677,9 @@ export const focusCdpTabOutput = toolSchema({
         '`close_cdp_tab`\'s `closed`: a closed tab can be polled for, but ' +
         'whether a window actually came to the front is not readable, and an ' +
         'operating system may decline to raise a background application\'s ' +
-        'window. If the user says they cannot see it, ask them to click the ' +
-        'browser in their taskbar.',
+        'window. If the host offers an OS-level window-focus tool, it should ' +
+        'match the tab title to the Chrome window title and use that tool; ' +
+        'otherwise, ask the user to click the browser in their taskbar.',
     ),
   targetId: z.string(),
   title: z.string().describe('Title of the tab brought forward — say this, not just that it worked.'),
