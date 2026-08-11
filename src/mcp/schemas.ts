@@ -89,8 +89,10 @@ const cdpScopeArg = rootScope
   .describe(
     'Which root the profile name refers to: "project" — this project\'s browser; ' +
       '"user" — the machine-wide one, reachable from any directory. Needed only ' +
-      'when the same profile name exists in both, which is refused as ambiguous ' +
-      'until you say which. Irrelevant when addressing by `port`.',
+      'when the same profile name exists in both and nothing else settles it — ' +
+      'an agreeing `port` beside `profile` also settles the tie. With both ' +
+      '`profile` and `scope` given, `port` must agree with THAT browser. ' +
+      'Ignored when addressing by `port` alone.',
   );
 
 const sessionId = z
@@ -143,8 +145,10 @@ const cdpTarget = z
       .describe(
         'Port of a CDP browser from list_cdp_browsers `running`, or from ' +
           'start_cdp_browser. Ports are assigned by the browser and change on ' +
-          'every launch, so read one rather than assuming 9222. Pass this OR ' +
-          '`profile`, not both.',
+          'every launch, so read one rather than assuming 9222. Prefer ' +
+          '`profile`; giving both is accepted only when they name the same ' +
+          'browser (one list_cdp_browsers row) — a pair that disagrees is ' +
+          'refused.',
       ),
     tab: z
       .string()
@@ -160,9 +164,10 @@ const cdpTarget = z
   .optional()
   .describe(
     'Attach to an already-running CDP browser instead of launching a fresh ' +
-      'one. Give exactly one of `profile` (preferred) or `port`. Only ' +
-      'browsers this project started are permitted; anything else is refused ' +
-      'unless a human sets mcp.cdp.allowUnowned in aiui.config.json.',
+      'one. Address it by `profile` (preferred) or `port`; both together ' +
+      'must name the same browser. Only browsers this project started are ' +
+      'permitted; anything else is refused unless a human sets ' +
+      'mcp.cdp.allowUnowned in aiui.config.json.',
   );
 
 const toolConfig = z
@@ -558,7 +563,7 @@ export const closeCdpTabInput = toolSchema({
     .optional()
     .describe(
       'Profile name of the browser holding the tab, e.g. "default". Prefer ' +
-        'this over `port`. Give exactly one of `profile` or `port`.',
+        'this over `port`.',
     ),
   engine: z
     .enum(['chrome', 'edge'])
@@ -572,7 +577,11 @@ export const closeCdpTabInput = toolSchema({
     .number()
     .int()
     .optional()
-    .describe('Port of the browser holding the tab. Pass this OR `profile`, not both.'),
+    .describe(
+      'Port of the browser holding the tab. Prefer `profile`; giving both is ' +
+        'accepted only when they name the same browser (one list_cdp_browsers ' +
+        'row) — a pair that disagrees is refused.',
+    ),
   allow_browser_exit: z
     .boolean()
     .optional()
@@ -638,7 +647,7 @@ export const focusCdpTabInput = toolSchema({
     .optional()
     .describe(
       'Profile name of the browser holding the tab, e.g. "default". Prefer ' +
-        'this over `port`. Give exactly one of `profile` or `port`.',
+        'this over `port`.',
     ),
   engine: z
     .enum(['chrome', 'edge'])
@@ -652,7 +661,11 @@ export const focusCdpTabInput = toolSchema({
     .number()
     .int()
     .optional()
-    .describe('Port of the browser holding the tab. Pass this OR `profile`, not both.'),
+    .describe(
+      'Port of the browser holding the tab. Prefer `profile`; giving both is ' +
+        'accepted only when they name the same browser (one list_cdp_browsers ' +
+        'row) — a pair that disagrees is refused.',
+    ),
   project_root: projectRoot,
 });
 

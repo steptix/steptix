@@ -1596,9 +1596,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         deps,
         args.project_root,
         async (client, project) => {
-          // Same exactly-one rule as `config.cdp`, and refused for the same
-          // reason: two addresses that disagree have no correct winner, and
-          // this call closes something.
+          // Same address rule as `config.cdp`: `profile` or `port`, or both
+          // when they agree. Refused only when the pair disagrees, for the
+          // same reason as there — two addresses pointing at different
+          // browsers have no correct winner, and this call closes something.
           const { port, gateOwed, scope: resolvedScope } = await resolveCdpTarget(
             client,
             project.projectRoot,

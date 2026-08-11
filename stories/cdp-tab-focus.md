@@ -302,7 +302,7 @@ about to drive should be the one on screen.
 
 ```
 focus_cdp_tab { target_id,
-                profile? | port?,   // exactly one, like config.cdp
+                profile? | port?,   // one address (an agreeing pair is ok), like config.cdp
                 engine?,            // disambiguates profile
                 project_root? }
 ```
@@ -357,7 +357,7 @@ never thrown, no TB codes.
 | `target_id` not found in that browser | the id, and both readings — already closed, or a different browser's id | `list_cdp_browsers` for the current list |
 | **404 with no server message** — the route itself is missing, i.e. a Sessions API server from an older build | that the server predates this route, not that the tab is gone | rebuild `dist/` and restart the server |
 | port not `running` / foreign | which list the port was found in, and `mcp.cdp.allowUnowned` | pick from `running`, launch from `available`, or ask the user to set the opt-in |
-| both or neither of `profile`/`port` | the exactly-one rule | — (same wording as `close_cdp_tab`'s) |
+| neither of `profile`/`port`, or a pair that disagrees | the missing address; or both facts — the port the profile is actually on vs. the port given (an agreeing pair is accepted) | — (same wording as `close_cdp_tab`'s) |
 | activate accepted but the tab is demonstrably not frontmost (only if W0 yields an observable) | the id and that the browser accepted but did not raise it | try again, or ask the user to click the window — the OS may be refusing the raise |
 
 ## Out of scope
@@ -424,8 +424,9 @@ excludes `tests` so lint does not typecheck them.
 
 - `focus_cdp_tab` end to end against a faked client; `structuredContent`
   complete; text summary names the tab's title.
-- Exactly-one `profile`/`port` refusal; profile resolution skips the gate;
-  raw `port` still gated; foreign refused naming `allowUnowned`.
+- Neither-given and disagreeing-pair refusals (an agreeing pair is
+  accepted); profile resolution skips the gate; raw `port` still gated;
+  foreign refused naming `allowUnowned`.
 - The new tool appears in every inventory guard — those fail first by design.
 - **The content-block guard** in
   [tests/mcp-content-blocks.test.ts](../tests/mcp-content-blocks.test.ts)

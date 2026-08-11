@@ -27,6 +27,7 @@ import {
   cdpProfileAmbiguous,
   cdpProfileNotRunning,
   cdpTargetAmbiguous,
+  type CdpAddressMismatch,
   type McpToolError,
 } from './errors.js';
 import {
@@ -121,28 +122,27 @@ export async function assertPortAttachable(
  *
  * Returns the port, and whether the caller still owes a gate check.
  *
- * `ambiguous` lets a caller supply its own both-or-neither message. Several
- * tools share this resolution but not their argument names — `run_steps` nests
- * the address under `config.cdp`, while `close_cdp_tab` and `focus_cdp_tab`
- * take it at the top level — and an error telling an agent to fix `config.cdp`
- * on a call that has no `config` is one it cannot act on. The message also
- * carries the stakes, which differ: closing the wrong tab cannot be undone,
- * focusing the wrong one is a nuisance.
+ * `ambiguous` lets a caller supply its own refusal messages. Several tools
+ * share this resolution but not their argument names — `run_steps` nests the
+ * address under `config.cdp`, while `close_cdp_tab` and `focus_cdp_tab` take
+ * it at the top level — and an error telling an agent to fix `config.cdp` on a
+ * call that has no `config` is one it cannot act on. The message also carries
+ * the stakes, which differ: closing the wrong tab cannot be undone, focusing
+ * the wrong one is a nuisance. Called with `null` when no address was given at
+ * all, or with the facts of a `profile`/`port` pair that does not name one
+ * browser — the port belongs to a different browser, or to none.
  */
 export async function resolveCdpTarget(
   client: ApiClient,
   projectRoot: string,
   target: CdpTarget,
   signal?: AbortSignal,
-  ambiguous: (both: boolean) => McpToolError = cdpTargetAmbiguous,
+  ambiguous: (mismatch: CdpAddressMismatch | null) => McpToolError = cdpTargetAmbiguous,
 ): Promise<{ port: number; gateOwed: boolean; scope?: 'project' | 'user' }> {
   const hasProfile = target.profile !== undefined && target.profile.trim() !== '';
   const hasPort = target.port !== undefined;
 
-  // Both is refused rather than resolved-and-compared. Two addresses that
-  // disagree have no correct winner, and silently picking one is the shape of
-  // the bug this story exists to remove.
-  if (hasProfile === hasPort) throw new PreflightFailure(ambiguous(hasProfile && hasPort));
+  if (!hasProfile && !hasPort) throw new PreflightFailure(ambiguous(null));
 
   if (!hasProfile) return { port: target.port!, gateOwed: true };
 
@@ -163,6 +163,33 @@ export async function resolveCdpTarget(
       (engine === null || b.engine === engine) &&
       (scope === null || b.scope === scope),
   );
+
+  // A pair is resolved-and-compared, not refused: an agent that just read a
+  // listing row holds `profile` AND `port` for the same browser, and echoing
+  // both back is precision, not ambiguity. Agreement also settles a profile
+  // name that is running more than once — a port belongs to exactly one
+  // browser, so the pair names one browser or none. What is still refused,
+  // loudly and with both facts, is a pair that disagrees — the port names a
+  // different browser, or none. That has no correct winner, and silently
+  // picking one is the shape of the bug this story exists to remove.
+  if (hasPort) {
+    const agreed = matches.find((b) => b.port === target.port);
+    if (agreed !== undefined) return { port: agreed.port, gateOwed: false, scope: agreed.scope };
+    if (matches.length > 0) {
+      throw new PreflightFailure(
+        ambiguous({
+          profile,
+          matches: matches.map((b) => ({ engine: b.engine, scope: b.scope, port: b.port })),
+          given: target.port!,
+        }),
+      );
+    }
+    // Nothing matches the name as narrowed by engine/scope — either the
+    // profile's browser is stopped, or the narrowing excluded the running
+    // name-bearer the port points at. Both read the same to the caller: the
+    // profile half of the pair failed, so it falls through to the profile
+    // refusals, which name the exact ask and list what IS running.
+  }
 
   // The matched entry's scope rides back for the callers' result summaries —
   // a profile-resolved port already knows which root it came from, and the
