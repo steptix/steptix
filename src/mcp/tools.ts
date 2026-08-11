@@ -1729,9 +1729,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         '`focused: true` means the browser accepted the request. Whether the ' +
         'window actually came to the front is not something this can read ' +
         'back, and an operating system may refuse to raise a background ' +
-        'application\'s window. If the user says they still cannot see it, ' +
-        'ask them to click the browser in their taskbar rather than calling ' +
-        'this again.\n\n' +
+        'application\'s window. If the user needs to see Chrome and the host ' +
+        'offers an OS-level window-focus tool, match the tab title to the ' +
+        'Chrome window title and use that tool. Otherwise, ask the user to ' +
+        'click the browser in their taskbar rather than calling this again.\n\n' +
         'It changes nothing else: no tab is closed, no session is created, and ' +
         'a run in flight elsewhere keeps running — automation drives a tab ' +
         'whether or not it is visible. So this is for **showing a human ' +
@@ -1819,7 +1820,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           return validated(
             schemas.focusCdpTabOutput,
             result as unknown as Record<string, unknown>,
-            `Brought "${what}" to the front in ${browser}` +
+            `Requested activation of "${what}" in ${browser}` +
               (result.warnings.length > 0 ? `\n${result.warnings.join('\n')}` : ''),
           );
         },

@@ -1116,11 +1116,10 @@ describe('focus_cdp_tab', () => {
     });
   });
 
-  it('names the tab it brought forward in text, for a host that shows only that', async () => {
-    // The whole user-visible payoff: "Brought X to the front" is what the agent
-    // repeats back, and a host that ignores structured content sees nothing
-    // else. `title` reaching the summary is the difference between the agent
-    // saying which tab it showed and saying only that a call succeeded.
+  it('reports tab activation in text, for a host that shows only that', async () => {
+    // The summary must name the tab without claiming the OS foregrounded its
+    // window. `title` reaching it is the difference between the agent saying
+    // which tab it activated and saying only that a call succeeded.
     const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
     const result = await h.client.callTool({
       name: 'focus_cdp_tab',
@@ -1128,6 +1127,7 @@ describe('focus_cdp_tab', () => {
     });
     expect(summary(result)).toContain('OpenRouter — Docs');
     expect(summary(result)).toContain('edge "default"');
+    expect(summary(result)).toContain('Requested activation');
   });
 
   it('switches between every tab of a multi-tab browser, naming each one', async () => {
@@ -1367,6 +1367,7 @@ describe('focus_cdp_tab', () => {
     // line — reporting the strong contract while holding the weak one is the
     // one thing the story forbids outright.
     expect(description).toMatch(/accepted the request/i);
+    expect(description).toMatch(/OS-level window-focus tool/i);
     expect(description).toMatch(/taskbar/i);
     // And it is not a way to make steps run somewhere.
     expect(description).toContain('config.cdp.tab');
@@ -1380,6 +1381,7 @@ describe('focus_cdp_tab', () => {
     const { tools } = await client.listTools();
     const output = JSON.stringify(tools.find((t) => t.name === 'focus_cdp_tab')!.outputSchema);
     expect(output).toMatch(/accepted the request/i);
+    expect(output).toMatch(/OS-level window-focus tool/i);
     expect(output).toMatch(/taskbar/i);
   });
 });
