@@ -88,8 +88,18 @@ function openSseStream(res: Response): SseStream {
   // `res.on('close')`, not `req.on('close')` — the latter fires when
   // express.json() finishes parsing the body, which would falsely signal a
   // disconnect immediately.
+  //
+  // Seeded from `res.closed` BEFORE the listener, because a listener cannot
+  // hear an event that already fired. The errand route reaches this only after
+  // `errandRunner.begin` has awaited its session join, which talks to a browser
+  // and can take seconds: a client that gave up inside that window has already
+  // had its 'close' emitted, so a bare listener leaves `clientGone` false
+  // forever — the run's abort signal never fires and the errand drives the
+  // whole thing unwatched, holding the tab lock and the in-flight run counter
+  // to the end.
   const abortController = new AbortController();
-  let clientGone = false;
+  let clientGone = res.closed === true;
+  if (clientGone) abortController.abort();
   res.on('close', () => {
     clientGone = true;
     abortController.abort();

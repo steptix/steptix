@@ -49,6 +49,20 @@ export interface FoldedStep {
   } | null;
 }
 
+/**
+ * The warning a truncated stream earns, verbatim, so a caller that cannot offer
+ * its remedy can drop it by IDENTITY instead of matching its prose.
+ *
+ * `run_errand` is that caller: `get_last_run` is addressed by `session_id`
+ * (`getLastRunInput`), and an errand has no session — so this text names a call
+ * the errand's caller cannot make. It substitutes its own remedy
+ * (`unfinishedErrandResult`, src/mcp/tools.ts). Exported for that filter alone;
+ * reword it freely, the filter follows.
+ */
+export const STREAM_DROPPED_WARNING =
+  'The connection to the server ended without a completion event. The run ' +
+  'may still be executing there; call get_last_run to check.';
+
 export interface FoldedRun {
   status: RunStatus;
   streamDropped: boolean;
@@ -396,10 +410,7 @@ export function foldRun(input: FoldInput): FoldedRun {
     );
   }
   if (streamDropped) {
-    warnings.push(
-      'The connection to the server ended without a completion event. The run ' +
-        'may still be executing there; call get_last_run to check.',
-    );
+    warnings.push(STREAM_DROPPED_WARNING);
   }
   if (doneStatus === 'aborted') {
     // Not expected: the only abort source is our own disconnect, and a client

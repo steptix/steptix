@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { Page } from 'playwright';
 import type { Config, EffectiveSettings } from '../config/types.js';
 import { resolveRunSettings } from '../config/run-settings.js';
 import {
@@ -341,15 +342,24 @@ export class ErrandRunner {
         line: 0,
       };
       /**
-       * Every tab this errand claimed, as the sweep that claimed it saw it.
+       * Every tab this errand opened, as the sweep that saw it did.
        *
        * Written during the run rather than walked at detach because the receipt
        * names the tabs an errand opened "whether or not it survived"
        * (src/mcp/schemas.ts, `ErrandSummary` in session-manager.ts): a tab a
        * later step closed is already out of the tracker by the time the detach
        * looks.
+       *
+       * Keyed on the PAGE, not the target id, because the id is the one thing
+       * about a tab that can be missing: it resolves asynchronously and can
+       * fail outright (`TrackedPage.targetId` is permanently null on a context
+       * that cannot make CDP sessions). Keying on it meant a tab whose id never
+       * resolved was recorded nowhere — dropped from `openedTabs` entirely,
+       * even though `ErrandTab.targetId` is optional precisely so such a tab
+       * can be named by its url and title. The page object is stable for the
+       * whole life of the tab and is the same identity the tracker holds.
        */
-      const ownTabs = new Map<string, ErrandTab>();
+      const ownTabs = new Map<Page, ErrandTab>();
       let errand: ErrandSummary;
       try {
         await this.act({
@@ -435,7 +445,7 @@ export class ErrandRunner {
     /** Written as the loop goes, so a throw past it still leaves a receipt. */
     outcome: ActOutcome;
     /** Filled by the claim sweep — see `claimOpenedTabs` below. */
-    ownTabs: Map<string, ErrandTab>;
+    ownTabs: Map<Page, ErrandTab>;
     steps: string[];
     runConfig: Config;
     envDataCtx: EnvDataContext | null;
@@ -712,7 +722,7 @@ export class ErrandRunner {
   private async claimOpenedTabs(
     lease: ErrandLease,
     borrowed: BrowserSession,
-    ownTabs: Map<string, ErrandTab>,
+    ownTabs: Map<Page, ErrandTab>,
   ): Promise<void> {
     try {
       // Awaited for its effect as much as its answer: the sweep resolves the
@@ -728,7 +738,7 @@ export class ErrandRunner {
       const tracked = [...borrowed.pageTracker.tabs()];
       lease.claimOpened(errandOwnTargetIds(tracked));
       for (const entry of tracked) {
-        if (entry.page === borrowed.page || entry.targetId === null) continue;
+        if (entry.page === borrowed.page) continue;
         // Recorded on PROVENANCE, closed on the LEASE — deliberately two
         // different questions.
         //
@@ -740,7 +750,14 @@ export class ErrandRunner {
         // of the receipt would hide the very collision the caller needs to
         // explain the page state with.
         if (entry.unexpected) continue;
-        ownTabs.set(entry.targetId, await describeTab(entry));
+        // No `targetId !== null` gate on THIS path, unlike the claim above and
+        // the close in `detach`: both of those address a tab by its id and
+        // cannot act without one, while the receipt names a tab by url and
+        // title and carries the id only when there is one (`ErrandTab.targetId`
+        // is optional for exactly this case). An unresolved id is a tab the
+        // errand opened and cannot close — the one it most owes the caller a
+        // line about.
+        ownTabs.set(entry.page, await describeTab(entry));
       }
     } catch {
       // A tracker that cannot enumerate leaves the borrowed tab held, which is
@@ -767,7 +784,7 @@ export class ErrandRunner {
     /** The turn lock, consulted before every close — see `closable`. */
     lease: ErrandLease;
     /** What the claim sweeps recorded, closed tabs included. */
-    ownTabs: Map<string, ErrandTab>;
+    ownTabs: Map<Page, ErrandTab>;
   }): Promise<ErrandSummary> {
     const { errandId, keepOpen, borrowed, browserTracker, lease } = args;
     const borrowedPage = borrowed.page;
@@ -776,6 +793,24 @@ export class ErrandRunner {
     // appeared after the final step's sweep is otherwise unheld, and unheld is
     // exactly what this path leaves behind.
     await this.claimOpenedTabs(lease, borrowed, args.ownTabs);
+
+    /**
+     * What the tracker still holds, read ONCE.
+     *
+     * Two questions are asked of this list and they are not the same question:
+     * what this errand may CLOSE, and what of its own is still OPEN. Two reads
+     * could disagree about a tab that closed between them, and the receipt
+     * would then both close a tab and report it open.
+     */
+    let tracked: TrackedPage[] = [];
+    try {
+      tracked = [...borrowed.pageTracker.tabs()];
+    } catch {
+      // A tracker that cannot list its tabs leaves nothing to close, which is
+      // the safe direction for a rule about not closing other people's tabs —
+      // and nothing reported still open, which is the safe direction for a
+      // claim about the user's screen.
+    }
 
     /**
      * The tabs this errand may close: still tracked, not the borrowed one, and
@@ -798,25 +833,31 @@ export class ErrandRunner {
      * resolved is spared for the same reason stranding is the safe direction
      * (manager.ts:176).
      */
-    let closable: TrackedPage[] = [];
-    try {
-      closable = borrowed.pageTracker
-        .tabs()
-        .filter(
-          (entry) =>
-            entry.page !== borrowedPage && entry.targetId !== null && lease.holds(entry.targetId),
-        );
-    } catch {
-      // A tracker that cannot list its tabs leaves nothing to close, which is
-      // the safe direction for a rule about not closing other people's tabs.
-    }
+    const closable: TrackedPage[] = tracked.filter(
+      (entry) =>
+        entry.page !== borrowedPage && entry.targetId !== null && lease.holds(entry.targetId),
+    );
 
-    // Every tab the errand claimed, whether or not it survived the run — the
+    // Every tab the errand opened, whether or not it survived the run — the
     // promise `openedTabs` makes in src/mcp/schemas.ts and on `ErrandSummary`.
     // Read from the sweeps rather than from what is still tracked, because a
     // tab a later step closed left the tracker when it went.
     const openedTabs: ErrandTab[] = [...args.ownTabs.values()];
-    const stillOpen = new Set(closable.map((entry) => entry.targetId));
+
+    /**
+     * Which of those are still open, minus whatever the closes below take away.
+     *
+     * Built from what is TRACKED, with no `lease.holds` filter: that gate says
+     * what this errand may close, which is a different question from what is
+     * open. A tab this errand opened but another errand took the wheel of is
+     * spared the close (`closable`) and is therefore still on screen — reported
+     * through the lease it would be listed as gone, which is a false claim
+     * about the user's browser and hides the collision the receipt exists to
+     * explain.
+     */
+    const stillOpen = new Set<Page>(
+      tracked.map((entry) => entry.page).filter((page) => args.ownTabs.has(page)),
+    );
 
     let finalUrl = '';
     let finalTitle = '';
@@ -835,10 +876,17 @@ export class ErrandRunner {
       for (const entry of closable) {
         try {
           await entry.page.close();
+          stillOpen.delete(entry.page);
         } catch {
           // Already gone is the outcome we wanted. Guarded per tab, because
           // this runs inside a `finally`: one refusing tab must not replace the
           // receipt — or the error — the caller was already reporting.
+          //
+          // Left in `stillOpen` deliberately: this tab was in the tracker a
+          // moment ago (that is what put it in `closable`), so the evidence
+          // says it is open and the close did not answer. Reporting it closed
+          // on the strength of having tried is the guess this receipt is meant
+          // to replace.
         }
       }
     }
@@ -879,9 +927,24 @@ export class ErrandRunner {
       // A socket that will not close cleanly is not worth failing a receipt for.
     }
 
+    /**
+     * Still open on return — what `keptOpen` says it is (src/mcp/schemas.ts,
+     * `ErrandSummary`), rather than "what `keep_open` spared".
+     *
+     * Under the default `keep_open: false` this is normally empty, and the
+     * exceptions are the whole point of reporting it honestly: a tab another
+     * errand took the wheel of was spared the close, and a tab that refused to
+     * close is still there. Both are open, and a caller told they were closed
+     * goes looking for a page that is on screen. A tab an earlier step closed
+     * is in neither set — it left the tracker when it went.
+     */
+    const keptOpen: ErrandTab[] = [...args.ownTabs]
+      .filter(([page]) => stillOpen.has(page))
+      .map(([, tab]) => tab);
+
     logger.info(
       `Errand ${errandId}: detached (${openedTabs.length} tab(s) opened, ` +
-        `${keepOpen ? 'kept open' : 'closed'})`,
+        `${keptOpen.length} still open)`,
     );
 
     return {
@@ -891,12 +954,7 @@ export class ErrandRunner {
       finalUrl,
       finalTitle,
       openedTabs,
-      // The surviving subset, not the whole list: `keep_open` spares the tabs
-      // still there to spare, and one an earlier step closed is neither open
-      // nor the caller's to go looking for.
-      keptOpen: keepOpen
-        ? [...args.ownTabs].filter(([id]) => stillOpen.has(id)).map(([, tab]) => tab)
-        : [],
+      keptOpen,
     };
   }
 }

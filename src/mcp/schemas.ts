@@ -983,7 +983,11 @@ export const runErrandOutput = toolSchema({
     .describe('Tabs the errand opened along the way, whether or not they survived it.'),
   keptOpen: z
     .array(errandTab)
-    .describe('The subset still open on return. Empty unless keep_open was set.'),
+    .describe(
+      'The subset still open on return — normally the keep_open ones and nothing ' +
+        'else, but a tab another errand took over is spared the close and is listed ' +
+        'here too, because it really is still on screen.',
+    ),
   messages: z.array(z.object({ level: z.enum(['error', 'warn']), text: z.string() })),
   warnings: z.array(z.string()),
   error: z.string().nullable(),

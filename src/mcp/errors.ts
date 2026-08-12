@@ -573,7 +573,7 @@ export function cdpFocusRouteMissing(baseUrl: string): McpToolError {
 // ---------------------------------------------------------------------------
 // Errands (stories/errands.md)
 //
-// Two of these four are the story's "wrong doors redirect" layer: a misrouted
+// The first two are the story's "wrong doors redirect" layer: a misrouted
 // call is answered with one self-correcting sentence naming the other tool,
 // which turns a wrong pick into one extra round-trip instead of a wrong run.
 // ---------------------------------------------------------------------------

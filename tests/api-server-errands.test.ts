@@ -37,7 +37,10 @@ import type { StepResult } from '../src/report/types.js';
 // ---------------------------------------------------------------------------
 
 interface FakePage {
-  targetId: string;
+  /** `null` for a tab whose target id never resolved — the real tracker's
+   *  permanent state on a context that cannot make CDP sessions, and its
+   *  transient one until the first sweep answers (manager.ts:158). */
+  targetId: string | null;
   url: ReturnType<typeof vi.fn>;
   title: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
@@ -47,7 +50,7 @@ interface FakePage {
   closed: boolean;
 }
 
-function makePage(targetId: string, url: string, title: string): FakePage {
+function makePage(targetId: string | null, url: string, title: string): FakePage {
   const closeHandlers: (() => void)[] = [];
   const page: FakePage = {
     targetId,
@@ -83,6 +86,22 @@ const mockLaunchedPage = {
   title: vi.fn(async () => 'Example Page'),
   goto: vi.fn(async () => null),
 };
+
+/**
+ * A one-shot park inside the tracker's target-id sweep.
+ *
+ * That sweep is what the route's pre-flight session join is made of, and it is
+ * the only `await` between the request arriving and the SSE stream opening — so
+ * it is where a test can hold an errand still long enough for its client to
+ * hang up. Self-disarming, so the errand's own claim sweeps a moment later run
+ * at full speed and no later test inherits a gate.
+ *
+ * `vi.hoisted` because the mock factory below is lifted above every import and
+ * cannot close over an ordinary module-level binding.
+ */
+const trackerHooks = vi.hoisted(() => ({
+  parkNextSweep: null as null | (() => Promise<void>),
+}));
 
 vi.mock('../src/browser/manager.js', () => {
   /**
@@ -153,6 +172,11 @@ vi.mock('../src/browser/manager.js', () => {
       };
     }
     async resolvedTargetIds() {
+      const park = trackerHooks.parkNextSweep;
+      if (park) {
+        trackerHooks.parkNextSweep = null;
+        await park();
+      }
       return { ids: this.pages.map((p) => p.targetId).filter((id): id is string => !!id), complete: true };
     }
     async activeTabRef() {
@@ -421,6 +445,23 @@ async function api(
   if (body !== undefined) init.body = JSON.stringify(body);
   const res = await fetch(`${baseUrl}${urlPath}`, init);
   return { status: res.status, body: await res.json() };
+}
+
+/** The server's own count of runs it is still driving — the only thing that can
+ *  answer "is that errand finished?" once its client has hung up. */
+async function runsInFlight(): Promise<number> {
+  return (await (await fetch(`${baseUrl}/health`)).json()).runsInFlight;
+}
+
+/** Wait until the server is driving nothing. A test whose client aborted has no
+ *  response to await, and leaving before the errand's detach releases its lease
+ *  would 409 the next test on the same tab. */
+async function serverIdle(): Promise<void> {
+  for (let attempt = 0; attempt < 300; attempt++) {
+    if ((await runsInFlight()) === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('a run was still in flight after 3s');
 }
 
 /** Read SSE frames into {event, data} pairs. */
@@ -700,6 +741,72 @@ describe('POST /errands', () => {
     expect(done.reportPath).toBeUndefined();
   });
 
+  it('stops an errand whose client left DURING the attach, before a step runs', async () => {
+    // The stream's abort signal is wired up by `openSseStream`, which the route
+    // reaches only after `errandRunner.begin` has awaited its session join —
+    // seconds of browser work in the real thing. A client that gives up inside
+    // that window has already had its 'close' emitted, and a listener cannot
+    // hear an event that already fired: without a seed from `res.closed` the
+    // signal never aborts and the errand drives the user's tab to the end with
+    // nobody watching, holding the tab lock and the in-flight run counter.
+    //
+    // An idle session on the port is what makes the join do real work — it is
+    // the sweep the park below sits inside. Idle blocks no errand (its own
+    // sibling test), so it changes nothing but the timing.
+    expect((await cdpSession('sse-late-listener')).status).toBe(200);
+    vi.mocked(executeStepMock).mockClear();
+
+    let releaseJoin!: () => void;
+    let joinEntered!: () => void;
+    const joinGate = new Promise<void>((resolve) => (releaseJoin = resolve));
+    const entered = new Promise<void>((resolve) => (joinEntered = resolve));
+    trackerHooks.parkNextSweep = async () => {
+      joinEntered();
+      await joinGate;
+    };
+
+    // The server's own view of the disconnect, so the test waits for the socket
+    // teardown to land instead of sleeping and hoping. Registered before the
+    // request it describes; `once` binds it to that request.
+    const responseClosed = new Promise<void>((resolve) => {
+      server.once('request', (_req, res) => res.once('close', () => resolve()));
+    });
+
+    const controller = new AbortController();
+    const request = fetch(`${baseUrl}/errands?stream=1`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(errandBody()),
+      signal: controller.signal,
+    }).catch((err: Error) => err);
+
+    try {
+      await entered;
+      controller.abort();
+      await responseClosed;
+    } finally {
+      // A parked join outlives a failed assertion and keeps the tab locked.
+      releaseJoin();
+    }
+    expect(((await request) as Error).name).toBe('AbortError');
+
+    // Asserted only once the server has finished with it: "no step ran yet" is
+    // true of any errand caught early enough, and would pass with the abort
+    // never firing at all.
+    await serverIdle();
+    expect(executeStepMock).not.toHaveBeenCalled();
+    // The borrowed tab still went back the way it came — the detach runs on the
+    // abort path like every other.
+    expect(borrowedPage.bringToFront).toHaveBeenCalled();
+    expect(borrowedPage.close).not.toHaveBeenCalled();
+
+    await api('DELETE', '/sessions/sse-late-listener');
+  });
+
   // -------------------------------------------------------------------------
   // (c) + (d) The house rules
   // -------------------------------------------------------------------------
@@ -845,10 +952,58 @@ describe('POST /errands', () => {
     expect(body.errand.openedTabs).toEqual([
       { targetId: 'tab-opened', url: 'https://openrouter.ai/export', title: 'Export' },
     ]);
-    // `keptOpen` is the surviving subset of what this errand still held, and
-    // `keep_open` was not asked for — a tab another errand is driving is not
-    // one this errand kept open.
-    expect(body.errand.keptOpen).toEqual([]);
+    // …and named as STILL OPEN, which is what `keptOpen` means
+    // (src/mcp/schemas.ts) — not "the tabs keep_open spared". `keep_open` was
+    // not asked for and this tab is open anyway, because the lease spared it;
+    // reporting it closed sends the caller looking for a page that is on
+    // screen, and hides that somebody else is driving it. Its control is the
+    // sibling above: same step, same tab, no rival hold, closed, keptOpen [].
+    expect(body.errand.keptOpen).toEqual([
+      { targetId: 'tab-opened', url: 'https://openrouter.ai/export', title: 'Export' },
+    ]);
+    expect(borrowedPage.close).not.toHaveBeenCalled();
+  });
+
+  it('names a tab whose target id never resolved, and leaves it alone', async () => {
+    // A target id resolves asynchronously and can fail outright
+    // (manager.ts:158). The close path and the lock are both keyed on it, so a
+    // tab without one is spared both — stranding is the safe direction. The
+    // receipt is the opposite question: it names a tab by url and title and
+    // carries the id only when there is one (`ErrandTab.targetId` is optional
+    // for exactly this), so an id-less tab the errand opened and CANNOT close
+    // is the one it most owes the caller a line about. Keyed on the target id,
+    // the record path dropped it entirely.
+    const idless = makePage(null, 'https://openrouter.ai/pending', 'Pending');
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      cdpBrowser.pages.push(idless);
+      opts.pageTracker!.addPage(idless as any);
+      opts.pageTracker!.markExpected(idless as any);
+      return {
+        index: idx as number,
+        instruction: 'opened one that never resolved',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api('POST', '/errands', errandBody());
+
+    expect(body.status).toBe('passed');
+    expect(body.errand.openedTabs).toEqual([
+      { url: 'https://openrouter.ai/pending', title: 'Pending' },
+    ]);
+    // Absent, not null: the schema's `targetId` is optional here, and the MCP
+    // side is what turns an absent one into the null its own schema requires.
+    expect(body.errand.openedTabs[0]).not.toHaveProperty('targetId');
+    // Not closed — the control is the coat test above, where the same step
+    // opens a tab WITH an id and that tab is closed.
+    expect(idless.close).not.toHaveBeenCalled();
+    // …and so, still open on return.
+    expect(body.errand.keptOpen).toEqual([
+      { url: 'https://openrouter.ai/pending', title: 'Pending' },
+    ]);
     expect(borrowedPage.close).not.toHaveBeenCalled();
   });
 
@@ -1016,6 +1171,12 @@ describe('POST /errands', () => {
     // and the borrowed browser is disconnected.
     expect(borrowedPage.bringToFront).toHaveBeenCalled();
     expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toContain(lastBorrowed);
+    // The tab is reported still open, because nothing here says otherwise: it
+    // was in the tracker a moment before the close, and the close did not
+    // answer. "We tried" is not "it is gone".
+    expect(body.errand.keptOpen).toEqual([
+      { targetId: 'tab-opened', url: 'https://openrouter.ai/export', title: 'Export' },
+    ]);
   });
 
   it('leaves a tab it only ADOPTED alone: not closed, not on the receipt, not locked', async () => {

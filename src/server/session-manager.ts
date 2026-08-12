@@ -357,8 +357,10 @@ export interface ErrandSummary {
   finalTitle: string;
   /** Every tab the errand opened along the way, whether or not it survived. */
   openedTabs: ErrandTab[];
-  /** The subset still open on return — `keepOpen` tabs. Empty by default,
-   *  because an errand takes its coat when it leaves. */
+  /** The subset still open on return. Normally the `keepOpen` tabs and nothing
+   *  else, because an errand takes its coat when it leaves — but a tab it
+   *  opened and no longer holds the wheel of is spared the close and belongs
+   *  here too (`ErrandRunner.detach`). */
   keptOpen: ErrandTab[];
 }
 

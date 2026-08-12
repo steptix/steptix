@@ -52,6 +52,7 @@ import { discoverTestFiles } from '../parser/markdown.js';
 import {
   DATA_URI_PREFIX,
   MAX_SCREENSHOT_BASE64,
+  STREAM_DROPPED_WARNING,
   foldRun,
   readErrandSummary,
   type FoldedEffectiveSettings,
@@ -1008,14 +1009,11 @@ async function runErrand(
     effectiveSettings: folded.effectiveSettings,
   };
 
-  const image: ToolResult['content'] = folded.screenshotBase64
-    ? [{ type: 'image', data: folded.screenshotBase64, mimeType: 'image/png' }]
-    : [];
   return validated(
     schemas.runErrandOutput,
     receipt as unknown as Record<string, unknown>,
     summarizeErrand(receipt, borrowed, where),
-    image,
+    screenshotBlock(folded.screenshotBase64),
     // Keeps what nothing else can recover: which errand it was, which tab it
     // left behind, and that it ran at all.
     (detail) => ({
@@ -1050,6 +1048,33 @@ function tabWasDriven(events: readonly RunEvent[]): boolean {
 }
 
 /**
+ * What a truncated errand stream can actually be done about.
+ *
+ * The session-shaped remedy this replaces (`STREAM_DROPPED_WARNING`) is not
+ * merely unhelpful here — `get_last_run` takes a `session_id` and an errand
+ * creates none, so a caller that follows it has nothing to pass. What IS
+ * reachable is the browser itself, which is the same place the receipt's own
+ * error text sends the caller for the tab's end state.
+ *
+ * The re-run caveat is the other half: the errand may have gone on driving the
+ * tab after the stream died, so "just run it again" can be the second click of
+ * two on somebody's real page.
+ */
+const ERRAND_STREAM_DROPPED =
+  'The connection to the server ended without a completion event, and there is ' +
+  'no get_last_run for an errand — it has no session to look up. Call ' +
+  'list_cdp_browsers to see the tab and what else is open now. The errand may ' +
+  'have kept driving the tab after the stream died, so re-running the same ' +
+  'steps is only safe if they are idempotent.';
+
+/** The one image block a receipt ever carries, built the same way on both the
+ *  finished and the truncated path — a screenshot the fold kept is a picture of
+ *  the user's real page, and which path returned it changes nothing about that. */
+function screenshotBlock(base64: string | null): ToolResult['content'] {
+  return base64 ? [{ type: 'image', data: base64, mimeType: 'image/png' }] : [];
+}
+
+/**
  * The stream carried steps and then ended without the errand's accounting.
  *
  * A receipt rather than an `isError`, for the reason the whole `isError`
@@ -1078,6 +1103,16 @@ function unfinishedErrandResult(input: {
 }): ToolResult {
   const { folded, project, tab } = input;
   const detail = folded.error ?? firstError(folded);
+
+  // The fold's own stream-dropped warning sends the caller to `get_last_run`,
+  // which is addressed by `session_id` (`getLastRunInput`) — an errand has
+  // none, so that line names the one call this caller provably cannot make.
+  // Dropped by identity against the exported constant rather than by matching
+  // its prose, and the substitute is pushed on the SAME condition (something
+  // was actually removed), so the two cannot drift apart.
+  const foldWarnings = folded.warnings.filter((warning) => warning !== STREAM_DROPPED_WARNING);
+  if (foldWarnings.length !== folded.warnings.length) foldWarnings.push(ERRAND_STREAM_DROPPED);
+
   const receipt: ErrandReceipt = {
     status: 'error',
     streamDropped: folded.streamDropped,
@@ -1096,7 +1131,7 @@ function unfinishedErrandResult(input: {
     messages: folded.messages,
     warnings: [
       ...input.warnings,
-      ...folded.warnings,
+      ...foldWarnings,
       'openedTabs and keptOpen are empty because the errand never reported ' +
         'them, not because it opened nothing. A tab it opened may still be ' +
         'open — call list_cdp_browsers to see what is there now.',
@@ -1116,7 +1151,11 @@ function unfinishedErrandResult(input: {
     schemas.runErrandOutput,
     receipt as unknown as Record<string, unknown>,
     summarizeErrand(receipt, input.borrowed, input.where),
-    [],
+    // The same image block the finished path returns. A stream that died after
+    // a failing step still folded that step's screenshot, and it is a picture
+    // of the user's real page taken at the moment things went wrong — the one
+    // artefact this degraded receipt least deserves to drop.
+    screenshotBlock(folded.screenshotBase64),
     (detailText) => ({
       ...receipt,
       steps: [],
@@ -1195,9 +1234,16 @@ function summarizeErrand(
     lines.push(`Tab left at: ${receipt.finalTitle || '(untitled)'} — ${receipt.finalUrl}`);
   }
   if (receipt.openedTabs.length > 0) {
+    // Counted from the two lists the server sent, not from `keep_open`. "The
+    // rest closed on the way out" was a claim about the user's screen that the
+    // receipt cannot support twice over: a tab another errand took the wheel of
+    // is spared the close and is still open, and a tab a STEP closed mid-run
+    // was never the detach's to close. So the second half says what is knowable
+    // — no longer open — and not who closed it.
+    const gone = receipt.openedTabs.length - receipt.keptOpen.length;
     lines.push(
-      `Opened ${receipt.openedTabs.length} tab(s); ` +
-        `${receipt.keptOpen.length} left open, the rest closed on the way out.`,
+      `Opened ${receipt.openedTabs.length} tab(s); ${receipt.keptOpen.length} still open` +
+        (gone > 0 ? `, ${gone} no longer open.` : '.'),
     );
   }
   if (receipt.warnings.length > 0) lines.push(`Warnings: ${receipt.warnings.length}`);

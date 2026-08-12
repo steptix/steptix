@@ -8,6 +8,7 @@ import {
   errandTabHeldByErrand,
   errandTabHeldBySession,
 } from '../src/mcp/errors.js';
+import { STREAM_DROPPED_WARNING } from '../src/mcp/run-fold.js';
 import { ApiHttpError } from '../src/mcp/types.js';
 import type {
   ApiClient,
@@ -161,7 +162,11 @@ async function connect(
       return {
         events,
         receivedAt: events.map((_e, i) => i),
-        streamDropped: false,
+        // Derived, exactly as the real client derives it — `!sawDone`
+        // (src/mcp/api-client.ts:235). Hard-coded `false` here meant a script
+        // that ended mid-stream reached the tool claiming the stream was
+        // intact, so every warning the truncated path adds went untested.
+        streamDropped: !events.some((event) => event.type === 'done'),
         dropped: [],
       };
     },
@@ -454,6 +459,49 @@ describe('the receipt', () => {
     expect(receipt.keptOpen).toHaveLength(1);
   });
 
+  it('never says a tab closed when the receipt says it is still open', async () => {
+    // `keptOpen` is "still open on return" (src/mcp/schemas.ts), and under the
+    // default `keep_open: false` it is normally empty — but not always: a tab
+    // this errand opened and another errand took the wheel of is spared the
+    // close and is still on screen. "The rest closed on the way out" was
+    // arithmetic dressed as an observation, and for that tab it was false.
+    const spared = { targetId: 'T-NEW', url: 'https://shop.example/receipt', title: 'Receipt' };
+    const collided = await connect({
+      events: (body) => [
+        { type: 'step:pass', line: 1, output: 'opened it' },
+        {
+          type: 'done',
+          status: 'passed',
+          errand: errandBlock(body, { openedTabs: [spared], keptOpen: [spared] }),
+        },
+      ],
+    });
+
+    const result = await errand(collided);
+
+    expect(text(result)).toContain('Opened 1 tab(s); 1 still open.');
+    expect(text(result)).not.toMatch(/closed on the way out/);
+
+    // The control, and the ordinary case: nothing survived, so the count of
+    // what is gone is the whole list — still without claiming who closed it,
+    // since a tab a STEP closed mid-run never reached the detach.
+    const swept = await connect({
+      events: (body) => [
+        { type: 'step:pass', line: 1, output: 'opened two' },
+        {
+          type: 'done',
+          status: 'passed',
+          errand: errandBlock(body, {
+            openedTabs: [spared, { targetId: 'T-OLD', url: 'https://shop.example/x', title: 'X' }],
+            keptOpen: [],
+          }),
+        },
+      ],
+    });
+
+    expect(text(await errand(swept))).toContain('Opened 2 tab(s); 0 still open, 2 no longer open.');
+  });
+
   it('has no session in it, and creates none', async () => {
     // The receipt is the whole surface an errand leaves behind. A `sessionId`
     // here would be something a caller could try to reuse, and there is nothing
@@ -637,6 +685,47 @@ describe('an errand that never got the tab', () => {
     expect(receipt.finalUrl).toBe('');
     expect(receipt.openedTabs).toEqual([]);
     expect((receipt.warnings as string[]).join('\n')).toContain('openedTabs');
+
+    // The remedy an errand can actually carry out. A stream that ends with no
+    // `done` IS a dropped stream, and the fold's own warning for one says "call
+    // get_last_run to check" — a call addressed by `session_id` (getLastRunInput)
+    // that an errand can never satisfy, because it creates no session. So that
+    // line is filtered out by identity and replaced with one aimed at the
+    // browser, which is where the tab's real state is.
+    expect(receipt.streamDropped).toBe(true);
+    const warnings = receipt.warnings as string[];
+    expect(warnings).not.toContain(STREAM_DROPPED_WARNING);
+    expect(warnings.join('\n')).not.toMatch(/call get_last_run/);
+    expect(warnings.join('\n')).toContain('list_cdp_browsers');
+    // …and the caveat that makes "just run it again" a decision rather than a
+    // reflex: the errand may have kept driving the tab after the stream died.
+    expect(warnings.join('\n')).toMatch(/idempotent/i);
+  });
+
+  it('keeps the failure screenshot when the stream dies MID-errand', async () => {
+    // The picture is of the user's real page at the moment things went wrong,
+    // and this is the receipt that can say least about what happened next — the
+    // last one that should be dropping it. It was: the truncated path passed no
+    // image block at all while the finished path passed one.
+    const h = await connect({
+      events: () => [
+        { type: 'step:start', line: 1 },
+        {
+          type: 'step:fail',
+          line: 1,
+          error: 'no Checkout button',
+          screenshot: 'data:image/png;base64,QUJD',
+        },
+        // …and then nothing.
+      ],
+    });
+
+    const result = await errand(h);
+
+    const blocks = (result as unknown as { content: { type: string; data?: string }[] }).content;
+    // Prefix stripped by the fold, and last in the content array, exactly as the
+    // finished path returns it.
+    expect(blocks.at(-1)).toEqual({ type: 'image', data: 'QUJD', mimeType: 'image/png' });
   });
 });
 
