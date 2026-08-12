@@ -7,7 +7,7 @@
  * the seam tests drive real tools against fakes, and the real-app test drives
  * a real client at an ephemeral port.
  */
-import type { RunEvent } from '../server/session-manager.js';
+import type { ErrandSummary, ErrandTab, RunEvent } from '../server/session-manager.js';
 import type {
   CaptureMode,
   EffectiveSettings,
@@ -19,7 +19,12 @@ import type {
 // playwright. `import type` erases at compile time, so nothing in this graph
 // pulls a browser stack into the MCP process. Re-exported so the rest of
 // src/mcp/ never has to reach into the server package itself.
-export type { RunEvent };
+//
+// `ErrandSummary` rides the `done` frame, so it is part of that same wire
+// protocol and is re-exported for the same reason rather than re-declared —
+// two hand-kept copies of a wire shape drift in the direction of whichever
+// half gets edited.
+export type { ErrandSummary, ErrandTab, RunEvent };
 
 // Re-exported rather than re-declared. These travel the wire in both directions
 // — `runSettings` out on the request, `effectiveSettings` back on `done` and on
@@ -178,6 +183,45 @@ export interface McpStepRequest {
    * argument here cannot be mistaken for something a test file declared.
    */
   runSettings?: RunSettings;
+}
+
+/**
+ * The body `POST /errands` accepts (stories/errands.md).
+ *
+ * Mirrors `parseErrandRequest`'s allow-list, which is the same hazard
+ * `McpStepRequest` carries: the server BUILDS its request object field by
+ * field, so widening a type here compiles cleanly and drops the value at
+ * runtime.
+ *
+ * No `sessionId`, and there is nowhere to put one — that absence is the tool's
+ * whole contract. No run-settings either: an errand has no session to hold
+ * overrides, so the chain is server base → project bundle.
+ */
+export interface ErrandRequestBody {
+  /** Resolved MCP-side from profile + engine + scope. The server is handed the
+   *  answer, never the name. */
+  port: number;
+  /** The winner of the two-stage match, exact — so the first-match-wins arm of
+   *  `resolveCdpTab` is never asked to arbitrate. */
+  targetId: string;
+  steps: string[];
+  /** The synthetic `<root>/.aiui-errand.md`. The only thing the server resolves
+   *  a project root from; without it the project layer of `effectiveSettings`
+   *  falls back to server defaults with nothing saying so. */
+  testFilePath: string;
+  /** Echoed into the receipt: every result says which root it used
+   *  (stories/mcp-no-project.md §Locked). */
+  root: string;
+  scope: RootScope;
+  /** Leave errand-opened TABS behind. Never spares a browser a step opened. */
+  keepOpen?: boolean;
+  /** Without it the server builds no env bundle and `${env.X}` reaches the AI
+   *  as literal text — there is no default-env concept. */
+  envName?: string;
+  /** The project's composed `.env`, exactly as `run_steps` sends it: this is
+   *  how a project's own AI_API_KEY and AI_MODEL reach the run instead of the
+   *  server process's. */
+  env?: Record<string, string>;
 }
 
 /** An assembled request plus everything the fold and the result need that is
@@ -488,6 +532,18 @@ export interface ApiClient {
   streamSteps(
     sessionId: string,
     body: McpStepRequest,
+    signal?: AbortSignal,
+    onEvent?: (event: RunEvent) => void,
+  ): Promise<StreamResult>;
+  /**
+   * `POST /errands?stream=1` — borrow a tab, drive it, hand it back.
+   *
+   * Same `StreamResult` as `streamSteps`, because it is the same event stream:
+   * the errand's own accounting rides the `done` frame, so the fold that turns
+   * events into `steps[]` + `captures{}` serves both.
+   */
+  runErrand(
+    body: ErrandRequestBody,
     signal?: AbortSignal,
     onEvent?: (event: RunEvent) => void,
   ): Promise<StreamResult>;

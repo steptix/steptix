@@ -329,10 +329,14 @@ Description draft — the behaviours that surprise, per
 > way to make steps run somewhere; that is `config.cdp.tab` on a new session.
 
 Inventory updates [page-content.md](page-content.md) proved are easy to miss:
-`usage.ts`, the README tool table, `server-start.ts`'s auto-start list, the
-`mcp-seam.test.ts` tool list, **both** manifests in
-`mcp-schema-dialect.test.ts`, and the `argumentsFor()` table in
-`mcp-content-blocks.test.ts` (§Tests).
+`usage.ts`, the README tool table, the `mcp-seam.test.ts` tool list, **both**
+manifests in `mcp-schema-dialect.test.ts`, and the `argumentsFor()` table in
+`mcp-content-blocks.test.ts` (§Tests). *(Corrected by
+[errands.md](errands.md): there is no auto-start list in `server-start.ts` to
+update, and there never was. Reaching the server through `withProject` gives a
+tool the ON default; no tool passes `autoStart: false`, and the two that must
+be able to answer "nothing is running" — `server_status` and
+`get_run_settings` — do not use that helper at all.)*
 
 **The tool count: increment, never assert a number.** An earlier draft said
 "11 → 12" and was already stale when written — `run_settings` was landing in
@@ -398,7 +402,7 @@ never thrown, no TB codes.
 | [src/mcp/errors.ts](../src/mcp/errors.ts) | The §6 rows. |
 | [src/browser/manager.ts](../src/browser/manager.ts) | §3's one call on the attach-to-existing branch. |
 | [src/runner/step-executor.ts](../src/runner/step-executor.ts) | §4's call after `switchPage` and `openPage`. |
-| `usage.ts`, README, `server-start.ts`, seam + dialect manifests, `mcp-content-blocks.test.ts` | Inventories, and the count sentences — **increment, do not assert a number** (§5). |
+| `usage.ts`, README, seam + dialect manifests, `mcp-content-blocks.test.ts` | Inventories, and the count sentences — **increment, do not assert a number** (§5). `server-start.ts` was listed here and does not belong: it has no auto-start list (corrected by [errands.md](errands.md)). |
 
 ## Tests
 

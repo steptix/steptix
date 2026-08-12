@@ -257,6 +257,7 @@ describe('tool registration', () => {
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
+      'run_errand',
       'run_steps',
       'run_test_file',
       'server_status',

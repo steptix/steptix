@@ -140,6 +140,7 @@ and one cache. If no server is running it starts one for you.
 |------|--------------|
 | `run_steps` | Run ad-hoc natural-language steps in a browser session |
 | `run_test_file` | Run one `.md` test file end to end |
+| `run_errand` | Drive a tab you already have open, then hand it back — no session, nothing kept |
 | `list_test_files` | List the project's test files |
 | `list_sessions` | List open browser sessions on the server |
 | `close_session` | Close a session and its browser |

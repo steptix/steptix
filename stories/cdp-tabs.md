@@ -341,10 +341,11 @@ Description draft — the behaviours that surprise, per
 > disk, and `start_cdp_browser` brings it back.
 
 Inventory updates that [page-content.md](page-content.md) proved are easy
-to miss: `usage.ts`, the README tool table, and `server-start.ts`'s
-auto-start list (`close_cdp_tab` acts on live state, so it may auto-start
-the server like the other action tools — decided at plan time, but it must
-appear in exactly one of the two lists).
+to miss: `usage.ts` and the README tool table. *(Corrected by
+[errands.md](errands.md): this said "and `server-start.ts`'s auto-start
+list", which does not exist. `close_cdp_tab` does auto-start, but by
+reaching the server through `withProject`, whose default is ON — there are
+no two lists to appear in.)*
 
 ### 4. Selection and visibility — finishing what exists
 
@@ -427,7 +428,7 @@ action.
 | [src/mcp/tools.ts](../src/mcp/tools.ts) | Register `close_cdp_tab`; gate; description; the §4 description sentences. |
 | [src/mcp/api-client.ts](../src/mcp/api-client.ts) | `closeCdpTab` — id and targetId via `encodeURIComponent`. |
 | [src/mcp/errors.ts](../src/mcp/errors.ts) | The §5 rows. |
-| `usage.ts`, README, `server-start.ts` | Inventories (§3). |
+| `usage.ts`, README | Inventories (§3). `server-start.ts` was listed here and does not belong: it has no auto-start list (corrected by [errands.md](errands.md)). |
 
 ## Tests
 

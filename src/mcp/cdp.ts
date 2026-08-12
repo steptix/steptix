@@ -34,6 +34,7 @@ import {
   PreflightFailure,
   type ApiClient,
   type CdpBrowsers,
+  type CdpTab,
   type CdpTarget,
 } from './types.js';
 
@@ -218,6 +219,54 @@ export async function resolveCdpTarget(
       running.map((b) => ({ engine: b.engine, profile: b.profile, scope: b.scope })),
     ),
   );
+}
+
+/**
+ * Stage two of an errand's attach: which of a browser's tabs the `tab`
+ * argument names (stories/errands.md §Attach).
+ *
+ * Pure, and deliberately dumb — `String.includes`, no globs and no regex.
+ * Every caller of this refuses on zero or several matches naming the
+ * candidates, which is what makes a name-shaped argument safe here at all: the
+ * rule stories/cdp-tabs.md and stories/cdp-tab-focus.md guard against is
+ * first-match-wins, not matching.
+ *
+ * `tabs` must be the listing's own page-type-filtered view, so an errand can
+ * only borrow a tab `list_cdp_browsers` would show — an `iframe`, `browser_ui`
+ * or `*-dialog` target is never a candidate, however well it matches.
+ *
+ * There is no `new`: an errand borrows a tab that already exists.
+ */
+export function matchTabsByName(spec: string, tabs: readonly CdpTab[]): CdpTab[] {
+  const trimmed = spec.trim();
+
+  // Exact, and case-sensitive: a target id is an opaque identifier the caller
+  // read out of a listing, not a description of a tab.
+  const targetId = stripPrefix(trimmed, 'targetId:');
+  if (targetId !== null) return tabs.filter((tab) => tab.targetId === targetId);
+
+  const title = stripPrefix(trimmed, 'title~');
+  if (title !== null) return tabs.filter((tab) => contains(tab.title, title));
+
+  const url = stripPrefix(trimmed, 'url~');
+  if (url !== null) return tabs.filter((tab) => contains(tab.url, url));
+
+  // A bare string is the union, not the intersection: a user who says "the
+  // openrouter tab" may be naming what they read in the tab strip or what they
+  // know the site to be, and the refusals make a wide net cheap.
+  return tabs.filter((tab) => contains(tab.title, trimmed) || contains(tab.url, trimmed));
+}
+
+/** The value after `prefix`, or null when the spec does not carry it.
+ *  Case-insensitive on the prefix itself — the form is syntax, not content. */
+function stripPrefix(spec: string, prefix: string): string | null {
+  if (spec.length < prefix.length) return null;
+  if (spec.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) return null;
+  return spec.slice(prefix.length).trim();
+}
+
+function contains(haystack: string, needle: string): boolean {
+  return haystack.toLowerCase().includes(needle.toLowerCase());
 }
 
 /**

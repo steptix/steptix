@@ -106,6 +106,31 @@ async function connect(): Promise<Client> {
         dropped: [],
       };
     },
+    async runErrand(body): Promise<StreamResult> {
+      // One driven step and a `done` carrying the errand's own accounting —
+      // the shape the receipt is folded out of.
+      return {
+        events: [
+          { type: 'step:pass', line: 1 },
+          {
+            type: 'done',
+            status: 'passed',
+            errand: {
+              errandId: 'errand-abc123',
+              root: body.root,
+              scope: body.scope,
+              finalUrl: 'https://openrouter.ai/docs',
+              finalTitle: 'OpenRouter — Docs',
+              openedTabs: [],
+              keptOpen: [],
+            },
+          },
+        ],
+        receivedAt: [0, 1],
+        streamDropped: false,
+        dropped: [],
+      };
+    },
     async getLastRun() {
       return { finalized: true, reportPath: 'c:/proj/reports/x.html', tokens: null };
     },
@@ -215,6 +240,8 @@ function argumentsFor(): Record<string, Record<string, unknown>> {
   return {
     run_steps: { steps: ['Click Login'], project_root: tmpDir },
     run_test_file: { path: testFile, project_root: tmpDir },
+    // The fake browser's one tab, named exactly — the matcher's happy path.
+    run_errand: { tab: 'targetId:A1B2C3', profile: 'default', steps: ['Click Login'], project_root: tmpDir },
     list_test_files: { project_root: tmpDir },
     list_sessions: { project_root: tmpDir },
     close_session: { session_id: 'mcp:a', project_root: tmpDir },

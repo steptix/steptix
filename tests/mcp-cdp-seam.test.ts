@@ -580,6 +580,13 @@ describe('CDP warnings', () => {
     const result = await secondCall(h,{ config: { cdp: { port: 51000 } } });
     const warnings = structured(result)['warnings'] as string[];
     expect(warnings.join('\n')).toContain('close_session');
+    // …and the other door (stories/errands.md §Routing 4). This warning fires
+    // on exactly the request errands exist for — "use my open tab" — so the
+    // one sentence that rescues a misrouted call is a pointer at the tool that
+    // needs no session to be closed first.
+    expect(warnings.join('\n')).toContain(
+      'or use run_errand if you just want to drive that tab.',
+    );
     expect(structured(result)['configApplied']).toBe(false);
   });
 
