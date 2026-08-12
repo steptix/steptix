@@ -55,9 +55,11 @@ export interface FoldedStep {
  *
  * `run_errand` is that caller: `get_last_run` is addressed by `session_id`
  * (`getLastRunInput`), and an errand has no session — so this text names a call
- * the errand's caller cannot make. It substitutes its own remedy
- * (`unfinishedErrandResult`, src/mcp/tools.ts). Exported for that filter alone;
- * reword it freely, the filter follows.
+ * the errand's caller cannot make. It substitutes its own remedy in
+ * `errandWarnings` (src/mcp/tools.ts), which BOTH its receipt paths run — the
+ * truncated one and the finished one, since a stream can die after the `done`
+ * frame and still fold with `streamDropped` set. Exported for that filter
+ * alone; reword it freely, the filter follows.
  */
 export const STREAM_DROPPED_WARNING =
   'The connection to the server ended without a completion event. The run ' +

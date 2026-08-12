@@ -45,12 +45,15 @@
 > error, exactly as `run_steps` would not;
 > (5) a tab the errand did not open is never closed by it; a tab or
 > browser it DID open during its steps is gone by the time it returns —
-> or, for tabs with `keep_open: true`, still open and named in the receipt
-> — and `keep_open` is not the only way one survives: `keptOpen` is every
-> errand-opened tab still open on return, so a tab another errand took the
-> wheel of, or one whose close threw, is named there too rather than
-> claimed closed; and the detach path REQUESTS activation of the borrowed
-> tab, asserted at the mocked Playwright seam; whether it visibly came
+> or, for tabs with `keep_open: true` in the borrowed browser, still open
+> and named in the receipt — `keep_open` spares tabs, not browsers, so a
+> tab inside a browser a step opened goes with it; and `keep_open` is not
+> the only way one survives: `keptOpen` is every errand-opened tab still
+> open on return, so a tab another errand took the wheel of, one whose
+> close threw, or one in a browser still connected after its close was
+> asked for, is named there too rather than claimed closed; and the
+> detach path REQUESTS activation of the borrowed tab, asserted at the
+> mocked Playwright seam; whether it visibly came
 > forward is confirmed by a human in the live pass, because no assertion
 > in this repo can see a screen
 > ([cdp-tab-focus](cdp-tab-focus.md)'s own rule); (6)

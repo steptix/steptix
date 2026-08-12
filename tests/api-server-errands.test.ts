@@ -195,6 +195,28 @@ vi.mock('../src/browser/manager.js', () => {
       this.sessions.push({ label, session });
       this.activeIndex = this.sessions.length - 1;
     }
+    /**
+     * The real one's load-bearing half (manager.ts:877): route through
+     * `closeBrowser`, then SPLICE the session out — so a browser a step closed
+     * is gone from `all()`, and with it every tab it ever held. That is why a
+     * receipt assembled at the detach cannot see them.
+     */
+    async close(label: string): Promise<void> {
+      const idx = this.sessions.findIndex((s) => s.label === label);
+      if (idx === -1) throw new Error(`No browser registered as "${label}"`);
+      const { session } = this.sessions[idx]!;
+      try {
+        await closeBrowser(session);
+      } catch {
+        // The real one logs and splices anyway.
+      }
+      this.sessions.splice(idx, 1);
+      if (this.activeIndex >= this.sessions.length) {
+        this.activeIndex = Math.max(0, this.sessions.length - 1);
+      } else if (this.activeIndex > idx) {
+        this.activeIndex--;
+      }
+    }
     all() {
       return this.sessions.map((s) => s.session);
     }
@@ -214,9 +236,35 @@ vi.mock('../src/browser/manager.js', () => {
     }
   }
 
+  // Faithful to the real one in the three ways the detach reads it: it severs
+  // the connection, it closes a tab only when the ATTACH opened it, and it
+  // NEVER REJECTS — manager.ts:1482 wraps its whole body in a try/catch and
+  // logs. So a browser whose `context.close()` refuses is reported to the
+  // caller exactly like one that closed, and `isConnected()` is the only thing
+  // that can tell those two apart: a close that worked leaves the browser
+  // disconnected, a wedged one stays up.
+  //
+  // Declared out here, not inline below, because `BrowserTracker.close` routes
+  // through it exactly as the real tracker routes through the real one.
+  const closeBrowser = vi.fn(async (session: any) => {
+    try {
+      if (session.cdp) {
+        if (session.cdpTabOpenedByUs) await session.page.close();
+      } else {
+        await session.context?.close?.();
+      }
+    } catch {
+      // Swallowed where the real one swallows it, and the browser stays
+      // connected because nothing closed it.
+      return;
+    }
+    session.browser = { isConnected: () => false };
+  });
+
   return {
     PageTracker,
     BrowserTracker,
+    closeBrowser,
     launchBrowser: vi.fn(async (_config: unknown, cdp?: { port: number; tab?: string }) => {
       if (!cdp) {
         // Ordinary launch — the session path, used only by this file's control.
@@ -249,15 +297,6 @@ vi.mock('../src/browser/manager.js', () => {
         headed: true,
       };
       return lastBorrowed;
-    }),
-    // Faithful to the real one: severs the connection, and closes a tab only
-    // when the ATTACH opened it.
-    closeBrowser: vi.fn(async (session: any) => {
-      if (session.cdp) {
-        if (session.cdpTabOpenedByUs) await session.page.close();
-        return;
-      }
-      await session.context?.close?.();
     }),
     // Real behaviour, not a stub: a mock that resolved instantly would hide a hang.
     briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
@@ -897,8 +936,15 @@ describe('POST /errands', () => {
     expect(borrowedPage.bringToFront).toHaveBeenCalled();
   });
 
-  /** A step that opens NOTHING in the borrowed browser — only a second browser
-   *  with a page of its own, which is all `openBrowser` does. */
+  /**
+   * A step that opens NOTHING in the borrowed browser — only a second browser
+   * with a page of its own, which is all `openBrowser` does.
+   *
+   * `closeFails` wedges it the way a real one wedges: `context.close()` rejects,
+   * the real `closeBrowser` swallows that and returns normally (manager.ts:1482),
+   * and the browser is left CONNECTED. That last part is the only observable
+   * difference from a browser that closed, which is why the detach reads it.
+   */
   function stepThatOpensOnlyABrowser(closeFails = false): { worker: any; workerPage: FakePage } {
     const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
     const worker = {
@@ -944,8 +990,11 @@ describe('POST /errands', () => {
       { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
     ]);
     // Not still open, and not closed as a TAB either: the browser went whole,
-    // which is what took the page with it.
+    // which is what took the page with it. The control for the wedged test
+    // below is right here — same step, same browser, and the close WORKED, so
+    // the browser is disconnected and its page is reported gone.
     expect(body.errand.keptOpen).toEqual([]);
+    expect(worker.browser.isConnected()).toBe(false);
     expect(workerPage.close).not.toHaveBeenCalled();
     expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toEqual([worker, lastBorrowed]);
     // Recorded, never CLAIMED: a launched browser has no CDP port, so no rival
@@ -956,16 +1005,25 @@ describe('POST /errands', () => {
   });
 
   it('reports a launched browser tab still open when that browser refused to close', async () => {
-    // The one way a launched browser's tab survives the hand-back. `keptOpen`
-    // is "still open on return", and the evidence rule the per-tab closes
-    // already follow applies here too: the close did not answer, and the page
-    // was in that browser's tracker a moment ago, so calling it closed on the
-    // strength of having tried is exactly the guess the receipt replaces.
-    const { workerPage } = stepThatOpensOnlyABrowser(true);
+    // The one way a launched browser's tab survives the hand-back, and it is
+    // SILENT: `closeBrowser` wraps its whole body and logs (manager.ts:1482), so
+    // a `context.close()` that rejects comes back to the detach as a resolved
+    // promise, indistinguishable from a browser that went. Keying the retention
+    // on a throw meant this arm could never run in production — the receipt said
+    // "closed" about a browser still on the user's screen. `isConnected()` is
+    // the evidence that survives the swallow, and the rule is the one the
+    // per-tab closes already follow: the page was in that browser's tracker a
+    // moment ago and the browser is still there, so calling it closed on the
+    // strength of having asked is exactly the guess the receipt replaces.
+    const { worker, workerPage } = stepThatOpensOnlyABrowser(true);
 
     const { body } = await api('POST', '/errands', errandBody());
 
     expect(body.status).toBe('passed');
+    // The close was ASKED FOR and came back without complaint — the shape that
+    // used to be read as success.
+    expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toContain(worker);
+    expect(worker.browser.isConnected()).toBe(true);
     expect(body.errand.openedTabs).toEqual([
       { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
     ]);
@@ -974,6 +1032,119 @@ describe('POST /errands', () => {
     ]);
     // And the wedged browser did not take the hand-back with it.
     expect(workerPage.close).not.toHaveBeenCalled();
+    expect(borrowedPage.bringToFront).toHaveBeenCalled();
+  });
+
+  it('names a tab opened INSIDE a launched browser and closed by a later step', async () => {
+    // The borrowed browser's invariant (see "names a tab it opened and then
+    // CLOSED" below) applied where the second tracker lives. A launched
+    // browser's tracker drops a page the moment it closes (manager.ts:331), so
+    // a pass that runs only at the detach can only ever report survivors — and
+    // `openedTabs` promises every tab the errand opened "whether or not it
+    // survived" (src/mcp/schemas.ts, `ErrandSummary`). Recorded in the step
+    // loop, alongside the borrowed browser's own claim sweep, it is on the
+    // receipt before the step that closes it can run.
+    const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
+    const extra = makePage('worker-extra', 'https://openrouter.ai/csv', 'CSV');
+    const worker = {
+      browser: { isConnected: () => true },
+      context: { close: vi.fn(async () => {}) },
+      page: workerPage,
+      pageTracker: new PageTrackerMock(workerPage as any),
+    };
+    /** Which tracker each step was handed — `add` auto-promotes, so step 2's is
+     *  the LAUNCHED browser's, which is the whole point of this test. */
+    const trackerPerStep: unknown[] = [];
+    let step = 0;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      trackerPerStep.push(opts.pageTracker);
+      const n = step++;
+      if (n === 0) {
+        opts.browserTracker!.add('worker', worker as any);
+      } else if (n === 1) {
+        opts.pageTracker!.addPage(extra as any);
+        opts.pageTracker!.markExpected(extra as any);
+      } else {
+        await extra.close();
+      }
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open a second browser', 'open the csv tab in it', 'close the csv tab'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // The tab really was opened in the LAUNCHED browser, not the borrowed one —
+    // otherwise the borrowed browser's own sweep would have caught it and this
+    // test would prove nothing about the second tracker.
+    expect(trackerPerStep[1]).toBe(worker.pageTracker);
+    expect(lastBorrowed.pageTracker.tabs().map((t: any) => t.page)).not.toContain(extra);
+    // Gone from its own tracker by the detach, and still on the receipt.
+    expect(worker.pageTracker.tabs().map((t: any) => t.page)).not.toContain(extra);
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+      { targetId: 'worker-extra', url: 'https://openrouter.ai/csv', title: 'CSV' },
+    ]);
+    // Neither survives: one closed as a tab, one went down with its browser.
+    expect(body.errand.keptOpen).toEqual([]);
+  });
+
+  it('names the tabs of a browser opened AND closed inside the run', async () => {
+    // `BrowserTracker.close` splices the session out of `all()`
+    // (manager.ts:892), so a browser a step opened and a later step closed is
+    // invisible to the detach — as is every tab it ever held, tracker and all.
+    // A whole browser could come and go on the user's screen and the receipt
+    // named nothing, which is the promise `openedTabs` makes broken in its
+    // largest form.
+    const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
+    const worker = {
+      browser: { isConnected: () => true },
+      context: { close: vi.fn(async () => {}) },
+      page: workerPage,
+      pageTracker: new PageTrackerMock(workerPage as any),
+    };
+    let step = 0;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (step++ === 0) opts.browserTracker!.add('worker', worker as any);
+      else await (opts.browserTracker as any).close('worker');
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open a second browser', 'close the second browser'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // Closed mid-run, by the step — and therefore never seen by the detach's
+    // own close loop, which is what makes the detach blind to its tabs.
+    expect(worker.context.close).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toEqual([worker, lastBorrowed]);
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+    ]);
+    // The browser went while the errand was still running, so nothing of it is
+    // open on return.
+    expect(body.errand.keptOpen).toEqual([]);
+    expect(borrowedPage.close).not.toHaveBeenCalled();
     expect(borrowedPage.bringToFront).toHaveBeenCalled();
   });
 

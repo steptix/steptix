@@ -249,8 +249,16 @@ vi.mock('../src/browser/manager.js', () => {
         cdpTabOpenedByUs: false,
       };
     }),
+    // NEVER REJECTS, like the real one (manager.ts:1482 wraps its whole body and
+    // logs), and a close that worked severs the connection — which is what the
+    // detach reads to tell a closed browser from a wedged one.
     closeBrowser: vi.fn(async (session: any) => {
-      if (session.cdp && session.cdpTabOpenedByUs) await session.page.close();
+      try {
+        if (session.cdp && session.cdpTabOpenedByUs) await session.page.close();
+      } catch {
+        return;
+      }
+      session.browser = { isConnected: () => false };
     }),
     briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
       Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
