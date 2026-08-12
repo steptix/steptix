@@ -172,6 +172,34 @@ describe('PageTracker unexpected-tab attribution', () => {
     expect((await tracker.describeActiveTab())!.unexpected).toBe(false);
   });
 
+  it('flags the popup of a tab it only ADOPTED — provenance does not launder', async () => {
+    // Two hops, which is where "the opener is a page we track" and "the opener
+    // is a page we account for" come apart. The user opens a tab mid-run (we
+    // adopt it, unexpected), then clicks a `target=_blank` link in it. Clearing
+    // on the opener's PRESENCE made the popup ours, and an errand closes what
+    // is its own — so the safe answer here is the whole of house rule 1
+    // (stories/errands.md).
+    const main = fakePage({ url: 'https://shop', targetId: 'MAIN' });
+    const tracker = new PageTracker(main);
+
+    const theirs = fakePage({ url: 'https://news.example', targetId: 'THEIRS' });
+    tracker.addPage(theirs);
+    const theirPopup = fakePage({ url: 'https://news.example/story', targetId: 'THEIR-POPUP', opener: theirs });
+    tracker.addPage(theirPopup);
+
+    // The control, same tracker and same code path: an opener we DO account for
+    // still clears its popup, so this is about the opener's flag rather than
+    // opener resolution having stopped working.
+    const ourPopup = fakePage({ url: 'https://shop/popup', targetId: 'OUR-POPUP', opener: main });
+    tracker.addPage(ourPopup);
+
+    await new Promise((r) => setTimeout(r, 10));
+    const byId = new Map(tracker.tabs().map((entry) => [entry.targetId, entry.unexpected]));
+    expect(byId.get('THEIRS')).toBe(true);
+    expect(byId.get('THEIR-POPUP')).toBe(true);
+    expect(byId.get('OUR-POPUP')).toBe(false);
+  });
+
   it('the flag is advisory — it is not a status and cannot fail a step', async () => {
     const tracker = new PageTracker(fakePage({ targetId: 'MAIN' }));
     const stranger = fakePage({ url: 'https://elsewhere', targetId: 'STRANGER' });

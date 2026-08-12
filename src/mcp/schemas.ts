@@ -310,6 +310,78 @@ export const runTestFileInput = toolSchema({
   screenshots_return: screenshotsReturn,
 });
 
+// ---------------------------------------------------------------------------
+// Errands (stories/errands.md §Tool surface)
+//
+// Deliberately absent, and each absence is a decision: `config` (an errand
+// inherits the project's baseUrl/timeout), report-path plumbing (the receipt IS
+// the report — no file is written), `parameters` (steps are literal; the caller
+// inlines values), and the five run-settings overrides `run_steps` carries (an
+// errand has no session to hold an override, so the project/server chain
+// decides).
+// ---------------------------------------------------------------------------
+
+export const runErrandInput = toolSchema({
+  tab: z
+    .string()
+    .min(1)
+    .describe(
+      'Which open tab to borrow. `targetId:<id>` from list_cdp_browsers is the ' +
+        'exact form and the one to prefer. Otherwise `title~<substring>`, ' +
+        '`url~<substring>`, or a bare string — matched case-insensitively as a ' +
+        'substring of the tab\'s title AND of its url. Plain substrings only: no ' +
+        'globs, no regex. Matching a tab that does not exist, or several tabs, is ' +
+        'refused with the candidates named — so a rough name is safe to try. ' +
+        'There is no `new`: an errand borrows a tab that is already open.',
+    ),
+  profile: z
+    .string()
+    .optional()
+    .describe(
+      'Profile name of the CDP browser holding the tab. Defaults to "default", ' +
+        'which is the one start_cdp_browser makes unless told otherwise. Call ' +
+        'list_cdp_browsers if unsure which exist.',
+    ),
+  engine: z
+    .enum(['chrome', 'edge'])
+    .optional()
+    .describe(
+      'Disambiguates `profile` when Chrome and Edge are both running the ' +
+        'same profile name. Only meaningful alongside `profile`.',
+    ),
+  scope: cdpScopeArg,
+  project_root: projectRoot,
+  env_name: envName,
+  steps: z
+    .array(z.string())
+    .min(1)
+    .describe(
+      'Natural-language steps, one per entry — the same step language as ' +
+        'run_steps, and `store as` captures come back in the receipt. ' +
+        '`[skill: ...]` and `[tool: ...]` are refused: an errand carries no ' +
+        'project skills or tools directory, so those need run_steps.',
+    ),
+  keep_open: z
+    .boolean()
+    .optional()
+    .describe(
+      'Leave behind any tabs the errand itself opened (default false — an ' +
+        'errand takes its coat when it leaves). Never affects the borrowed tab, ' +
+        'which is never closed either way, and never spares a whole browser a ' +
+        'step opened.',
+    ),
+  session_id: z
+    .string()
+    .optional()
+    .describe(
+      'DO NOT PASS THIS — errands have no sessions, and a call carrying it is ' +
+        'refused before anything touches the browser. It is declared only so ' +
+        'this can be said: if you want state that persists across calls, that is ' +
+        'run_steps with a session_id. An errand is one request that keeps ' +
+        'nothing.',
+    ),
+});
+
 export const getRunSettingsInput = toolSchema({
   project_root: projectRoot,
   session_id: z
@@ -852,6 +924,72 @@ export const runResultOutput = toolSchema({
   warnings: z.array(z.string()),
   reportPath: z.string().nullable(),
   tokens: tokens.nullable(),
+  error: z.string().nullable(),
+  effectiveSettings,
+});
+
+/** One tab an errand opened. `targetId` is nullable rather than optional for
+ *  the schema's usual reason — a missing key is fatal to `validateToolOutput`
+ *  where a null one is merely "the tracker never resolved one". */
+const errandTab = z.object({
+  targetId: z.string().nullable(),
+  url: z.string(),
+  title: z.string(),
+});
+
+/**
+ * The receipt (stories/errands.md §Return).
+ *
+ * It is `runResultOutput`'s shape minus everything that is session state —
+ * there is no `sessionId`, no `sessionCreated`/`configApplied`, no
+ * `queuedForMs` (an errand takes no session lock) and no `reportPath` (no file
+ * is written, ever) — plus what an errand alone can say: which tab it gave
+ * back, and what it opened while it was there.
+ */
+export const runErrandOutput = toolSchema({
+  status: z.enum(['passed', 'failed', 'error', 'aborted']),
+  streamDropped: z.boolean(),
+  errandId: z
+    .string()
+    .describe(
+      'This errand, for the length of this request only. Nothing on the server ' +
+        'answers to it afterwards — there is no close_errand, and nothing to close. ' +
+        'Empty in one case only: the stream ended before the errand reported one, ' +
+        'which status "error" and the error text describe.',
+    ),
+  root: z.string().describe('The root the errand resolved its project layer against.'),
+  scope: rootScope.describe(
+    'Which root that was. "user" means no project resolved and the errand ran ' +
+      'against the machine-wide user root — if you expected a project, its ' +
+      'aiui.config.json did not resolve; say so rather than reporting a normal run.',
+  ),
+  steps: z.array(foldedStep),
+  captures: z
+    .record(z.string(), z.string())
+    .describe(
+      'Every `store as` capture. This is where an errand\'s variables go — to ' +
+        'you, because the server keeps no scope. A later errand starts empty, so ' +
+        'anything you need again must be passed back in the step text.',
+    ),
+  finalUrl: z
+    .string()
+    .describe(
+      'Where the borrowed tab ended up. An errand navigates it only when a step ' +
+        'said to, and this is the only record of that.',
+    ),
+  finalTitle: z.string(),
+  openedTabs: z
+    .array(errandTab)
+    .describe('Tabs the errand opened along the way, whether or not they survived it.'),
+  keptOpen: z
+    .array(errandTab)
+    .describe(
+      'The subset still open on return — normally the keep_open ones and nothing ' +
+        'else, but a tab another errand took over is spared the close and is listed ' +
+        'here too, because it really is still on screen.',
+    ),
+  messages: z.array(z.object({ level: z.enum(['error', 'warn']), text: z.string() })),
+  warnings: z.array(z.string()),
   error: z.string().nullable(),
   effectiveSettings,
 });

@@ -24,7 +24,9 @@ import {
   type SessionSummary,
   type StartedCdpBrowser,
   type StreamResult,
+  type TabHolder,
 } from './types.js';
+import type { ErrandRequestBody, McpStepRequest } from './types.js';
 import { normalizeBaseUrl } from '../server/health.js';
 
 /** Event types we know how to fold. Anything else is recorded and dropped
@@ -171,6 +173,95 @@ function shapeProblem(type: string, event: Record<string, unknown>): string | nu
   }
 }
 
+/**
+ * Read one SSE run stream to the end.
+ *
+ * Shared by the two streaming routes rather than written twice, for the same
+ * reason the server shares its own SSE plumbing between them: almost every line
+ * here exists because of a specific failure — arrival timestamps that cannot be
+ * recovered later, our own cancellation being distinguishable from a dropped
+ * stream, a missing `done` meaning the run may still be executing over there —
+ * and two copies is how one of them quietly loses a fix.
+ */
+async function consumeRunStream(
+  res: Response,
+  signal: AbortSignal | undefined,
+  onEvent: ((event: RunEvent) => void) | undefined,
+): Promise<StreamResult> {
+  if (!res.body) {
+    return { events: [], receivedAt: [], streamDropped: true, dropped: [] };
+  }
+
+  const parser = new SseParser();
+  const events: RunEvent[] = [];
+  // Stamped here, at arrival, because it is unrecoverable afterwards: the
+  // fold walks the finished array, where every clock read is the same
+  // instant.
+  const receivedAt: number[] = [];
+  const dropped: string[] = [];
+  let sawDone = false;
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      const result = parser.push(chunk);
+      dropped.push(...result.dropped);
+      const now = Date.now();
+      for (const event of result.events) {
+        if (event.type === 'done') sawDone = true;
+        events.push(event);
+        receivedAt.push(now);
+        onEvent?.(event);
+      }
+    }
+  } catch (err) {
+    // Our own cancellation is not a dropped stream — the caller asked for
+    // this, and the tool returns nothing to the host either way. Checking
+    // the signal first is what keeps the two apart.
+    if (signal?.aborted) throw err;
+    return { events, receivedAt, streamDropped: true, dropped };
+  } finally {
+    reader.releaseLock();
+  }
+
+  // A stream that ends without `done` means the server went away
+  // mid-run — killed, force-stopped, or reaped. The run may still be
+  // executing over there, which is why this is not simply a failure.
+  return { events, receivedAt, streamDropped: !sawDone, dropped };
+}
+
+/**
+ * The `holder` of a turn-lock 409 (stories/errands.md §The wheel), read field
+ * by field.
+ *
+ * Wire data from a server that may be older than this client, so anything that
+ * is not exactly one of the two shapes degrades to `null` — which lands the
+ * caller on the generic HTTP message carrying the server's own prose. A partly
+ * trusted holder would put an empty errand id into a refusal that tells the
+ * model to wait for it.
+ */
+function readTabHolder(value: unknown): TabHolder | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record.kind === 'errand') {
+    const { errandId, tabRole } = record;
+    if (typeof errandId !== 'string' || errandId === '') return null;
+    if (tabRole !== 'borrowed' && tabRole !== 'opened') return null;
+    return { kind: 'errand', errandId, tabRole };
+  }
+  if (record.kind === 'session') {
+    const { sessionId } = record;
+    if (typeof sessionId !== 'string' || sessionId === '') return null;
+    return { kind: 'session', sessionId };
+  }
+  return null;
+}
+
 export const createApiClient = (opts: ApiClientOptions): ApiClient => {
   const base = normalizeBaseUrl(opts.baseUrl);
   const doFetch = opts.fetchImpl ?? fetch;
@@ -191,74 +282,55 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
     // request (HTTP 404): " with a dangling colon and no cause. The status is
     // always worth something; say it rather than going quiet.
     let message = res.statusText || `HTTP ${res.status}`;
+    let holder: TabHolder | null = null;
     try {
-      const body = (await res.json()) as { error?: unknown };
+      const body = (await res.json()) as { error?: unknown; holder?: unknown };
       if (typeof body.error === 'string' && body.error !== '') message = body.error;
+      holder = readTabHolder(body.holder);
     } catch {
       // Non-JSON error body; the status alone will have to do.
     }
-    throw new ApiHttpError(res.status, message);
+    throw new ApiHttpError(res.status, message, holder);
+  }
+
+  /** The two streaming POSTs send the same headers and read the same stream;
+   *  only the URL and the body differ. */
+  async function postForStream(
+    url: string,
+    body: McpStepRequest | ErrandRequestBody,
+    signal: AbortSignal | undefined,
+    onEvent: ((event: RunEvent) => void) | undefined,
+  ): Promise<StreamResult> {
+    const res = await doFetch(url, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+
+    // Validation failures, auth failures and the shutdown gate all answer
+    // before the SSE headers flush, so they arrive as ordinary HTTP even
+    // though we asked for a stream. For an errand that also covers the attach
+    // refusal, which is why a tab that vanished reaches the tool as a real
+    // error rather than as an empty receipt.
+    await assertOk(res);
+    return consumeRunStream(res, signal, onEvent);
   }
 
   return {
     async streamSteps(sessionId, body, signal, onEvent): Promise<StreamResult> {
-      const url = `${base}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-      const res = await doFetch(url, {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        ...(signal ? { signal } : {}),
-      });
+      return postForStream(
+        `${base}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`,
+        body,
+        signal,
+        onEvent,
+      );
+    },
 
-      // Validation failures, auth failures and the shutdown gate all answer
-      // before the SSE headers flush, so they arrive as ordinary HTTP even
-      // though we asked for a stream.
-      await assertOk(res);
-      if (!res.body) {
-        return { events: [], receivedAt: [], streamDropped: true, dropped: [] };
-      }
-
-      const parser = new SseParser();
-      const events: RunEvent[] = [];
-      // Stamped here, at arrival, because it is unrecoverable afterwards: the
-      // fold walks the finished array, where every clock read is the same
-      // instant.
-      const receivedAt: number[] = [];
-      const dropped: string[] = [];
-      let sawDone = false;
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          const result = parser.push(chunk);
-          dropped.push(...result.dropped);
-          const now = Date.now();
-          for (const event of result.events) {
-            if (event.type === 'done') sawDone = true;
-            events.push(event);
-            receivedAt.push(now);
-            onEvent?.(event);
-          }
-        }
-      } catch (err) {
-        // Our own cancellation is not a dropped stream — the caller asked for
-        // this, and the tool returns nothing to the host either way. Checking
-        // the signal first is what keeps the two apart.
-        if (signal?.aborted) throw err;
-        return { events, receivedAt, streamDropped: true, dropped };
-      } finally {
-        reader.releaseLock();
-      }
-
-      // A stream that ends without `done` means the server went away
-      // mid-run — killed, force-stopped, or reaped. The run may still be
-      // executing over there, which is why this is not simply a failure.
-      return { events, receivedAt, streamDropped: !sawDone, dropped };
+    async runErrand(body, signal, onEvent): Promise<StreamResult> {
+      // Not under /sessions, because an errand creates none — the URL is the
+      // first place that has to say so.
+      return postForStream(`${base}/errands?stream=1`, body, signal, onEvent);
     },
 
     async getLastRun(sessionId): Promise<LastRunInfo> {

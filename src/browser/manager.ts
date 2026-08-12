@@ -160,9 +160,21 @@ export interface TrackedPage {
    * True when this tab appeared with nothing in this session accounting for
    * it: no step asked for it, and its opener is not a page we drive.
    *
-   * Diagnostics only, never enforcement. A wrong guess here is a misleading
-   * note in a report; the same guess used as a guard would break a legitimate
-   * test. See the §11 rejection of opener-based filtering as a gate.
+   * Diagnostics for a session, never enforcement: a wrong guess here is a
+   * misleading note in a report, while the same guess used as a guard would
+   * break a legitimate test. See the §11 rejection of opener-based filtering
+   * as a gate.
+   *
+   * **An errand is the one exception, and it is exact about why**
+   * (stories/errands.md §House rules 1, `errandOwnTargetIds` in
+   * `src/server/errand-runner.ts`). An errand closes what it opened, so the
+   * flag decides a destructive act there — but the failure directions are not
+   * symmetric the way they are for a run: a false `unexpected` strands a tab,
+   * while a false `expected` closes somebody else's. Every path that clears
+   * the flag leans that way — a step (`markExpected`) or an opener that is
+   * ITSELF accounted for (`resolveOpener`), never a tab we merely adopted, so
+   * provenance cannot be laundered along an opener chain. Stranding is the
+   * safe direction, which is the trade a session does not have.
    */
   unexpected: boolean;
 }
@@ -362,11 +374,24 @@ export class PageTracker {
     this.targetIdResolutions.set(entry.page, pending);
   }
 
-  /** A tab opened by a page we already drive is accounted for. */
+  /**
+   * A tab opened by a page we drive **and account for** is accounted for too.
+   *
+   * The opener's own flag is read, not merely its presence in the list: we
+   * adopt every tab opened on the browser, so an opener can itself be one
+   * nothing here accounts for. Clearing on presence alone laundered
+   * provenance one hop — a tab the user opened mid-errand is adopted
+   * `unexpected`, and a `target=_blank` click inside it produced a popup the
+   * errand then called its own and closed.
+   *
+   * A chain deeper than one hop can settle in either order, so it errs toward
+   * `unexpected` — the safe direction for the one gate that reads this flag.
+   */
   private async resolveOpener(entry: TrackedPage): Promise<void> {
     try {
       const opener = await entry.page.opener();
-      if (opener && this.pages.some((p) => p.page === opener)) entry.unexpected = false;
+      const openerEntry = opener ? this.pages.find((p) => p.page === opener) : undefined;
+      if (openerEntry && !openerEntry.unexpected) entry.unexpected = false;
     } catch {
       // Popup already closed, or an engine without opener tracking. Leaving
       // the flag set is the honest answer: we still cannot account for it.

@@ -1,9 +1,15 @@
 import { basename, dirname, join as pathJoin, relative as pathRelative, resolve as pathResolve, sep } from 'node:path';
-import { stat } from 'node:fs/promises';
 import { StepCache, frameScopedStepKey, cacheDirName, envCacheSegment } from '../cache/step-cache.js';
-import { resolveProjectRoot } from './project-root.js';
 import { arraysEqual, chooseCacheHashSource } from './cache-hash-source.js';
-import { loadConfig } from '../config/loader.js';
+import { ProjectBundleResolver, type ProjectBundle } from './project-bundle.js';
+import {
+  applyEnvToAiConfig,
+  autoCapturedNames,
+  buildEnrichedInstruction,
+  isBrowserClosed,
+  isSkippableStep,
+  parseOutputPrefixes,
+} from './run-helpers.js';
 import type { Config, EffectiveSettings, RunSettings } from '../config/types.js';
 import { mergeRunSettings, resolveRunSettings } from '../config/run-settings.js';
 import type { StepResult, TestReport } from '../report/types.js';
@@ -26,7 +32,6 @@ import { interpolate } from '../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { resolveDataSourcePath } from '../parser/markdown.js';
 import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
-import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
 import { clearSkillCache, expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
@@ -323,6 +328,42 @@ export interface TabInfo {
   unexpected: boolean;
 }
 
+/** One tab an errand opened, as the receipt names it. `targetId` is absent
+ *  when the tracker never resolved one (an engine that cannot answer, or a tab
+ *  that closed first) — the url + title still identify it for a human. */
+export interface ErrandTab {
+  targetId?: string;
+  url: string;
+  title: string;
+}
+
+/**
+ * What an errand did, carried on its `done` event (stories/errands.md §Return).
+ *
+ * Declared here beside the rest of the wire protocol, not in `errand-runner`,
+ * so the `done` event's type is complete in one place; the errand runner is
+ * what fills it in. A session never sets it.
+ */
+export interface ErrandSummary {
+  errandId: string;
+  /** The root the errand resolved against, and its scope — echoed from the
+   *  request because every result must say which root it used
+   *  (stories/mcp-no-project.md §Locked). */
+  root: string;
+  scope: 'project' | 'user';
+  /** Where the borrowed tab ended up. The errand navigates it when a step says
+   *  to, and the receipt is the only record of that. */
+  finalUrl: string;
+  finalTitle: string;
+  /** Every tab the errand opened along the way, whether or not it survived. */
+  openedTabs: ErrandTab[];
+  /** The subset still open on return. Normally the `keepOpen` tabs and nothing
+   *  else, because an errand takes its coat when it leaves — but a tab it
+   *  opened and no longer holds the wheel of is spared the close and belongs
+   *  here too (`ErrandRunner.detach`). */
+  keptOpen: ErrandTab[];
+}
+
 export type RunEvent =
   | { type: 'step:start'; line: number; frame?: FrameInfo; tab?: TabInfo }
   | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo; fromCache?: boolean; tab?: TabInfo }
@@ -350,6 +391,16 @@ export type RunEvent =
        * omits it entirely.
        */
       effectiveSettings?: EffectiveSettings;
+      /**
+       * Present only on an errand's `done` (stories/errands.md §Return).
+       *
+       * It rides this event rather than a separate frame because the MCP side
+       * builds the receipt with the same fold that already turns events into
+       * `steps[]` + `captures{}` — and because the errand's tabs are only
+       * knowable after the detach path has run, which is the last thing that
+       * happens before this event.
+       */
+      errand?: ErrandSummary;
     }
   | { type: 'frame:push'; frame: FrameInfo }
   | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
@@ -425,6 +476,28 @@ export interface SessionListItem {
  */
 export interface SessionsByTarget {
   byTarget: Map<string, string>;
+  complete: boolean;
+}
+
+/** One session driving one tab, and whether it is doing anything with it right
+ *  now. `executing` means a batch is in flight. */
+export interface SessionTabHolder {
+  sessionId: string;
+  status: 'active' | 'executing';
+}
+
+/**
+ * The same join as `SessionsByTarget`, carrying **every** holder of each tab
+ * with its status (stories/errands.md §The wheel).
+ *
+ * Both extensions are load-bearing for the errand guard and neither is
+ * cosmetic. Two sessions can legitimately hold one tab, and `SessionsByTarget`
+ * keeps only the first to answer — so an idle winner would mask a session
+ * mid-batch, and the errand would borrow a wheel someone else is turning.
+ * Filtering `SessionsByTarget`'s output cannot recover either fact.
+ */
+export interface SessionsHoldingTargets {
+  byTarget: Map<string, SessionTabHolder[]>;
   complete: boolean;
 }
 
@@ -539,9 +612,6 @@ function sliceWholeCodePoints(text: string, max: number): string {
   return text.slice(0, endsOnHighSurrogate ? max - 1 : max);
 }
 
-/** Pattern for [input: variable_name] steps */
-const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
-
 /**
  * Bound on any single page read taken while listing sessions.
  *
@@ -551,12 +621,6 @@ const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
  * a blank field rather than a timeout with nothing in it.
  */
 const PAGE_READ_TIMEOUT_MS = 1_500;
-
-/** Pattern for [interactive] steps */
-const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
-
-/** Pattern for a single [output: variable_name] prefix */
-const OUTPUT_PREFIX_PATTERN = /\[output:\s*(\w+)\]/gi;
 
 /** `SessionListItem.cdp` for one session. Reads the retained `sessionConfig`
  *  rather than probing anything — the binding was decided when the session was
@@ -744,105 +808,6 @@ interface ManagedSession {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse all [output: varname] prefixes from a step instruction.
- * Returns the variable names and the cleaned instruction with output prefixes removed.
- */
-function parseOutputPrefixes(instruction: string): {
-  variables: string[];
-  cleanedInstruction: string;
-} {
-  const variables: string[] = [];
-  let cleaned = instruction;
-
-  // Collect all [output: varname] matches
-  let match: RegExpExecArray | null;
-  // Reset lastIndex since the regex has the global flag
-  OUTPUT_PREFIX_PATTERN.lastIndex = 0;
-  while ((match = OUTPUT_PREFIX_PATTERN.exec(instruction)) !== null) {
-    variables.push(match[1]!);
-  }
-
-  if (variables.length === 0) {
-    return { variables: [], cleanedInstruction: instruction };
-  }
-
-  // Strip all [output: ...] prefixes from the instruction
-  cleaned = instruction.replace(OUTPUT_PREFIX_PATTERN, '').trim();
-
-  if (!cleaned) {
-    cleaned = `Capture value into "${variables.join(', ')}"`;
-  }
-
-  return { variables, cleanedInstruction: cleaned };
-}
-
-/**
- * Build the enriched instruction that tells the AI to capture output values.
- * Appends `[store as: var1, var2]` matching the existing pattern from test-runner.
- */
-function buildEnrichedInstruction(
-  cleanedInstruction: string,
-  variables: string[],
-): string {
-  return `${cleanedInstruction} [store as: ${variables.join(', ')}]`;
-}
-
-/**
- * Check if a step instruction is an input step or interactive step (to be skipped in API mode).
- */
-function isSkippableStep(instruction: string): boolean {
-  return INPUT_STEP_PATTERN.test(instruction) || INTERACTIVE_STEP_PATTERN.test(instruction);
-}
-
-/**
- * Build an AiConfig with optional env overrides applied over a base. Only
- * `apiKey` and `model` are honoured today — these are the env knobs a `.env`
- * shipped from a client realistically wants to override. Always pass the server
- * base config (`this.config.ai`) as `baseConfig`, never a session's current
- * config: overrides apply only on non-empty values, so basing on the fixed
- * server config lets a removed `.env` line revert cleanly instead of sticking
- * on the prior override. Server process.env is never mutated.
- *
- * **Always returns a fresh object, even with nothing to apply.** It used to
- * return `baseConfig` itself on the no-overrides path, which handed
- * `new AiClient(...)` a reference to the SERVER's `config.ai` — and `syncAuth`
- * mutates its config in place, so a model change on one session rewrote the
- * server's startup model for every session created afterwards. Caught live: a
- * `runSettings.model` override on one session moved `GET /config`'s reported
- * server base with it, which is exactly the process-wide leak the whole feature
- * is scoped to avoid. Copying is what keeps the sessions isolated; nothing here
- * relies on the identity.
- */
-function applyEnvToAiConfig(
-  baseConfig: import('../config/types.js').AiConfig,
-  envOverrides: Record<string, string> | undefined,
-): import('../config/types.js').AiConfig {
-  const next = { ...baseConfig };
-  if (!envOverrides) return next;
-  const apiKey = envOverrides['AI_API_KEY'];
-  if (typeof apiKey === 'string' && apiKey.length > 0) {
-    next.apiKey = apiKey;
-  }
-  const model = envOverrides['AI_MODEL'];
-  if (typeof model === 'string' && model.trim().length > 0) {
-    next.model = model.trim();
-  }
-  return next;
-}
-
-/**
- * Check if the browser context has been closed (e.g. after a "Close the browser" step).
- */
-function isBrowserClosed(browserSession: BrowserSession): boolean {
-  try {
-    // Accessing browser.isConnected() is the reliable way to check
-    return !browserSession.browser.isConnected();
-  } catch {
-    return true;
-  }
-}
-
-/**
  * True iff this request carries usable section definitions.
  *
  * `{}` is truthy in JS, so a bare `request.sections` check would flip every
@@ -925,37 +890,12 @@ function outermostSkillName(
 // SessionManager
 // ---------------------------------------------------------------------------
 
-/**
- * Resolved per-project context for a step batch: the project's config + the
- * env/data bundle, anchored at the test file's project root (NOT the server's
- * cwd). `projectRoot` is null when no `aiui.config.json` was found above the
- * test file (the defaults fallback). See
- * stories/project-scoped-data-dir-and-env.md.
- */
-interface ProjectBundle {
-  projectRoot: string | null;
-  config: Config;
-  envBundle: EnvBundle | null;
-}
-
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private config: Config;
 
   /** Backing store for `runsInFlight()`. See `executeSteps`. */
   private activeRuns = 0;
-
-  /**
-   * Per-project resolution cache, keyed by `<projectRoot>::<envName>`. Holds the
-   * resolved bundle plus the mtimes of every input file (config, `.env`,
-   * `.env.<name>`, data JSON) so a saved edit is picked up on the next batch
-   * (closes issue 011). Independent of session lifetime — survives Close
-   * Session, shared across sessions in the same project.
-   */
-  private projectBundleCache = new Map<string, { mtimes: Map<string, number>; bundle: ProjectBundle }>();
-  /** Dedupes concurrent (re)loads of the same key so two in-flight batches for
-   *  one project don't both read+parse from disk. */
-  private projectBundleInflight = new Map<string, Promise<ProjectBundle>>();
 
   /**
    * Last finalized run per session id — the channel for delivering a report path
@@ -972,8 +912,37 @@ export class SessionManager {
    */
   private lastRunInfo = new Map<string, LastRunInfo>();
 
-  constructor(config: Config) {
+  constructor(
+    config: Config,
+    /** Injectable so the errand runner beside this manager resolves — and
+     *  caches — projects through the same instance. Defaulted so every existing
+     *  caller keeps working unchanged. */
+    private readonly projectBundles = new ProjectBundleResolver(config),
+  ) {
     this.config = config;
+  }
+
+  /**
+   * Count work this manager does not own as a run in flight, and hand back the
+   * release.
+   *
+   * The one thing an errand borrows from the session world (stories/errands.md
+   * §What already exists vs what is new): `/health`, the `POST /admin/shutdown`
+   * 409 and the idle reaper all read `runsInFlight()`, and an errand IS a run —
+   * a server that reaped itself mid-errand would kill work a user is watching.
+   *
+   * The returned release is idempotent and MUST be called in a `finally`: a
+   * stranded increment disables the idle timeout for the rest of the process's
+   * life and makes every later `aiui stop` answer 409.
+   */
+  beginExternalRun(): () => void {
+    this.activeRuns++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeRuns--;
+    };
   }
 
   /**
@@ -1026,112 +995,7 @@ export class SessionManager {
     testFilePath: string | undefined,
     envName: string | null,
   ): Promise<ProjectBundle> {
-    const projectRoot = testFilePath ? await resolveProjectRoot(testFilePath) : null;
-    const key = `${projectRoot ?? '<none>'}::${envName ?? '<none>'}`;
-
-    const cached = this.projectBundleCache.get(key);
-    if (cached && (await this.bundleInputsUnchanged(cached.mtimes))) {
-      return cached.bundle;
-    }
-
-    const inflight = this.projectBundleInflight.get(key);
-    if (inflight) return inflight;
-
-    const loadPromise = this.loadProjectBundle(projectRoot, envName, key);
-    this.projectBundleInflight.set(key, loadPromise);
-    try {
-      return await loadPromise;
-    } finally {
-      this.projectBundleInflight.delete(key);
-    }
-  }
-
-  private async loadProjectBundle(
-    projectRoot: string | null,
-    envName: string | null,
-    key: string,
-  ): Promise<ProjectBundle> {
-    // Per-project config (for tests.dataDir et al.) when we have a root;
-    // the server's startup config otherwise. A malformed project config fails
-    // only this request — it's never cached, so a fix is picked up next batch.
-    let config = this.config;
-    if (projectRoot) {
-      try {
-        config = await loadConfig(undefined, projectRoot);
-      } catch (err) {
-        throw new Error(
-          `Failed to load aiui.config.json for project "${projectRoot}": ${(err as Error).message}`,
-        );
-      }
-    }
-
-    const dataDir = config.tests.dataDir;
-    let envBundle: EnvBundle | null = null;
-    if (envName) {
-      if (projectRoot) {
-        envBundle = await resolveEnvBundle({ envName, projectRoot, dataDir, mutateProcessEnv: false });
-      } else {
-        // Null fallback: no project files to read. Provide the process baseline
-        // so ${env.X} (server env) and ${envName} still resolve; data is empty,
-        // so ${data.X} fails loudly if used.
-        const baseline: Record<string, string> = {};
-        for (const [k, v] of Object.entries(process.env)) {
-          if (typeof v === 'string') baseline[k] = v;
-        }
-        envBundle = { envName, env: baseline, data: {} };
-        logger.warn(
-          'No aiui.config.json found above the test file — using defaults ' +
-            '(no project .env/data). ${data.*} references will fail if used.',
-        );
-      }
-    }
-
-    const bundle: ProjectBundle = { projectRoot, config, envBundle };
-    const mtimes = await this.bundleInputMtimes(projectRoot, envName, dataDir);
-    this.projectBundleCache.set(key, { mtimes, bundle });
-    return bundle;
-  }
-
-  /** mtimeMs of every bundle input file (config, `.env`, `.env.<name>`, data
-   *  JSON); a missing file records 0 so its later appearance invalidates. */
-  private async bundleInputMtimes(
-    projectRoot: string | null,
-    envName: string | null,
-    dataDir: string,
-  ): Promise<Map<string, number>> {
-    const paths: string[] = [];
-    if (projectRoot) {
-      paths.push(pathJoin(projectRoot, 'aiui.config.json'));
-      paths.push(pathJoin(projectRoot, '.env'));
-      if (envName) {
-        paths.push(pathJoin(projectRoot, `.env.${envName}`));
-        paths.push(pathJoin(projectRoot, dataDir, `${envName}.json`));
-      }
-    }
-    const m = new Map<string, number>();
-    await Promise.all(
-      paths.map(async (p) => {
-        try {
-          m.set(p, (await stat(p)).mtimeMs);
-        } catch {
-          m.set(p, 0);
-        }
-      }),
-    );
-    return m;
-  }
-
-  private async bundleInputsUnchanged(mtimes: Map<string, number>): Promise<boolean> {
-    for (const [p, prev] of mtimes) {
-      let cur = 0;
-      try {
-        cur = (await stat(p)).mtimeMs;
-      } catch {
-        cur = 0;
-      }
-      if (cur !== prev) return false;
-    }
-    return true;
+    return this.projectBundles.resolve(testFilePath, envName);
   }
 
   /**
@@ -1685,17 +1549,46 @@ export class SessionManager {
    * `port` — `targetId` → `sessionId`.
    *
    * Serves two callers with one join: the tab listing's `sessionId` field, and
-   * the close guard. Sessions are filtered by port first, so a project running
-   * launch-mode sessions pays nothing — those are on disposable browsers with
-   * no CDP port and can never hold a tab of this one.
+   * the close guard. Both want one name per tab, which is what this reduction
+   * of `sessionsHoldingTargets` gives them — and what the errand guard cannot
+   * use, for the reason that method's doc gives.
+   */
+  async sessionsByTarget(port: number): Promise<SessionsByTarget> {
+    const { byTarget: all, complete } = await this.sessionsHoldingTargets(port);
+    const byTarget = new Map<string, string>();
+    for (const [targetId, holders] of all) {
+      // First writer wins. Two sessions can legitimately hold the same tab
+      // (they share the browser's context), and for both of this method's
+      // callers — a listing label and a refusal — naming one is enough.
+      const first = holders[0];
+      if (first) byTarget.set(targetId, first.sessionId);
+    }
+    return { byTarget, complete };
+  }
+
+  /**
+   * The same join, with every holder and its status
+   * (stories/errands.md §The wheel).
+   *
+   * The errand guard is the caller that needs both: an idle session on a tab
+   * blocks nothing, a session with a batch in flight blocks the borrow, and the
+   * first-holder-per-target reduction above cannot express the difference — an
+   * idle winner would hide the executing session behind it.
+   *
+   * `sessionsByTarget` is derived from this rather than the other way round, so
+   * there is one sweep and one definition of who holds what.
+   *
+   * Sessions are filtered by port first, so a project running launch-mode
+   * sessions pays nothing — those are on disposable browsers with no CDP port
+   * and can never hold a tab of this one.
    *
    * **Only this server's sessions are visible.** A tab driven by another
    * Sessions API server, or by a human clicking in the window, is unknowable
    * from here — consistent with the standing decision that parallel users of
    * one CDP browser own the consequences.
    */
-  async sessionsByTarget(port: number): Promise<SessionsByTarget> {
-    const byTarget = new Map<string, string>();
+  async sessionsHoldingTargets(port: number): Promise<SessionsHoldingTargets> {
+    const byTarget = new Map<string, SessionTabHolder[]>();
     let complete = true;
 
     await Promise.all(
@@ -1717,13 +1610,20 @@ export class SessionManager {
           const perBrowser = await Promise.all(
             session.browserTracker.all().map((b) => b.pageTracker.resolvedTargetIds()),
           );
+          // Read after the sweep, not before it: the question a guard is
+          // asking is "is this session running RIGHT NOW", and the enumeration
+          // can take long enough for a batch to start or end inside it. The
+          // fresher read is the honest one, and it errs towards letting a
+          // just-finished session's tab be borrowed — the direction
+          // stories/errands.md chose for a borrow, which is bounded by one
+          // request.
+          const status = session.status === 'executing' ? 'executing' : 'active';
           for (const sweep of perBrowser) {
             if (!sweep.complete) complete = false;
             for (const targetId of sweep.ids) {
-              // First writer wins. Two sessions can legitimately hold the same
-              // tab (they share the browser's context), and for both callers —
-              // a listing label and a refusal — naming one is enough.
-              if (!byTarget.has(targetId)) byTarget.set(targetId, id);
+              const holders = byTarget.get(targetId);
+              if (holders) holders.push({ sessionId: id, status });
+              else byTarget.set(targetId, [{ sessionId: id, status }]);
             }
           }
         } catch {
@@ -3564,27 +3464,10 @@ export class SessionManager {
         }
 
         // Collect per-step output captures from resolvedParameters. Union
-        // explicit `[output: X]` declarations with every `as` name this
-        // step's own successful read/count actions used — auto-surfaced even
-        // with no `[output:]` prefix on the instruction (issue 042).
-        // Restricted to read/count (the only actions that write `as` into
-        // resolvedParameters — see step-executor.ts) with no `.error`, for
-        // two reasons: (1) other `as` uses aren't captures at all — e.g.
-        // openPage's tab-label `as` shares the same namespace but never
-        // writes resolvedParameters, and extract_value's `as` is currently a
-        // documented no-op sub-action; (2) resolvedParameters persists
-        // across steps, so an unfiltered failed action's `as` could still be
-        // `in resolvedParameters` from an *earlier* step and wrongly emit a
-        // stale value attributed to this one. `__skill*`-namespaced names are
-        // always excluded — those are skill-internal (see the `__skill*`
-        // invariant at session-manager.ts ~2063 / expander.ts) and must never
-        // reach session.outputs/captures or leak into the next batch's seed.
-        const autoOutputVars = stepResult.turns
-          .flatMap((t) => t.subActions)
-          .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'))
-          .map((sa) => sa.action.as)
-          .filter((name): name is string => !!name && !name.startsWith('__skill'));
-        const captureVars = new Set([...outputVars, ...autoOutputVars]);
+        // explicit `[output: X]` declarations with every `as` name this step's
+        // own successful read/count actions used (see `autoCapturedNames` for
+        // why that set is filtered the way it is — issue 042).
+        const captureVars = new Set([...outputVars, ...autoCapturedNames(stepResult)]);
 
         const stepOutputs: Record<string, string> = {};
         for (const varName of captureVars) {

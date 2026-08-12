@@ -21,7 +21,7 @@
 
 // Type-only, so the value-level dependency stays one-directional
 // (`types.ts` → `errors.ts`) and no runtime cycle exists.
-import type { RootScope } from './types.js';
+import type { CdpTab, RootScope } from './types.js';
 
 export interface McpToolError {
   content: { type: 'text'; text: string }[];
@@ -567,6 +567,223 @@ export function cdpFocusRouteMissing(baseUrl: string): McpToolError {
       'Rebuild and restart the Sessions API server: `npm run build`, then stop ' +
       'the running server and start it again. Ask the user to do it if you ' +
       'cannot.',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Errands (stories/errands.md)
+//
+// The first two are the story's "wrong doors redirect" layer: a misrouted
+// call is answered with one self-correcting sentence naming the other tool,
+// which turns a wrong pick into one extra round-trip instead of a wrong run.
+// ---------------------------------------------------------------------------
+
+/**
+ * `run_errand` was called with a `session_id`.
+ *
+ * The argument is declared ONLY so this refusal can exist. A bare Zod schema
+ * would strip an undeclared key in silence — the wrong-door silence errands
+ * exist to kill — and an SDK schema throw carries only generic text no model
+ * learns from.
+ */
+export function errandsHaveNoSessions(sessionId: string): McpToolError {
+  return preflightError(
+    `Errands have no sessions, so session_id "${sessionId}" cannot be honoured — ` +
+      'and it is refused rather than ignored, because the two tools do different ' +
+      'jobs.\n' +
+      'An errand borrows a tab the user already has open, drives it for ONE ' +
+      'request, and keeps nothing: no session, no browser of its own, no ' +
+      'variables held over.\n' +
+      'If you want state to persist across calls — a session to come back to — ' +
+      'use run_steps with that session_id. If you want this tab driven now, call ' +
+      'run_errand again without session_id.',
+  );
+}
+
+/**
+ * `[skill:]` / `[tool:]` in an errand's steps.
+ *
+ * The same token rule `run_steps` refuses in user scope, and for the same
+ * reason: an errand deliberately carries no `skillsDir`/`toolsDir`, and the
+ * server's behaviour for such a line with no directory on the wire is to hand
+ * it to the AI as prose — a silent, expensive wrong answer three layers down.
+ */
+export function errandCodeSteps(offending: readonly string[]): McpToolError {
+  return preflightError(
+    `${offending.length} step(s) invoke a skill or tool, but an errand carries ` +
+      'neither: it borrows a tab and runs plain steps in it, with no project ' +
+      'skills or tools directory on the wire — so these would reach the AI as ' +
+      'prose rather than executing.\n' +
+      `Steps: ${offending.map((step) => JSON.stringify(step)).join(', ')}\n` +
+      'Rewrite them as plain-English steps, or use run_steps in the project, ' +
+      'which does send those directories.',
+  );
+}
+
+/** `"OpenRouter — Docs" — https://openrouter.ai/docs (targetId: A1B2C3)`, the
+ *  one spelling both tab refusals use, so a caller can compare a candidate list
+ *  against a "what is open" list without re-reading two formats. */
+function describeTab(tab: CdpTab): string {
+  return `"${tab.title}" — ${tab.url} (targetId: ${tab.targetId})`;
+}
+
+/**
+ * `run_errand`'s `tab` matched nothing.
+ *
+ * Answered with the browser's whole tab list, so the caller can re-name one
+ * from what is actually open rather than guessing again. This is the refusal
+ * that makes a name-shaped `tab` argument safe at all: the alternative to
+ * "several candidates, say which" is the first-match-wins rule
+ * stories/cdp-tabs.md refuses.
+ */
+export function errandTabNotFound(
+  spec: string,
+  browser: string,
+  tabs: readonly CdpTab[],
+): McpToolError {
+  return preflightError(
+    `No tab in ${browser} matches "${spec}", so there is nothing to borrow.\n\n` +
+      (tabs.length > 0
+        ? `Open tabs:\n${tabs.map((t) => `  ${describeTab(t)}`).join('\n')}\n\n` +
+          'Name one of these — a distinctive part of its title or url, or ' +
+          '`targetId:<id>` for the exact tab.'
+        : 'That browser reports no tabs at all. Call list_cdp_browsers to see ' +
+          'what is running, and check the profile is the one you meant.'),
+  );
+}
+
+/**
+ * `run_errand`'s `tab` matched more than one.
+ *
+ * Every candidate is named with all three of its identifiers, because the
+ * caller has to pick between them and a title alone is routinely duplicated
+ * (two "Inbox" tabs, two docs pages). Nothing is picked for you: driving the
+ * wrong tab types into somebody's real, signed-in page.
+ */
+export function errandTabAmbiguous(spec: string, matches: readonly CdpTab[]): McpToolError {
+  return preflightError(
+    `"${spec}" matches ${matches.length} open tabs, so it does not name one — ` +
+      'and nothing is picked for you, because an errand DRIVES the tab it ' +
+      'borrows.\n\n' +
+      `${matches.map((t) => `  ${describeTab(t)}`).join('\n')}\n\n` +
+      'Say which by passing `targetId:<id>`, or a substring that appears in ' +
+      'only one of them.',
+  );
+}
+
+/**
+ * The stream came back with no errand block, and with no step event either.
+ *
+ * The runner builds the accounting in a `finally` and emits the `done` frame
+ * after it, and the step loop is wrapped so a throw becomes that frame's
+ * `status: 'error'` rather than escaping — so the block rides every `done` an
+ * errand itself emits, including a failing one.
+ *
+ * Its absence is therefore not enough on its own: a stream can also die
+ * mid-errand, after steps have driven the tab, with no `done` frame at all (a
+ * force shutdown, a crashed server, a proxy that gave up). **The caller decides
+ * between the two on the step events**, and this refusal is for the half with
+ * none — the request died before the tab was ever borrowed (the attach refused,
+ * or the route's own catch answered), so there is no receipt to return and
+ * nothing ran. The other half keeps its folded steps and captures and says the
+ * tab was driven (`unfinishedErrandResult` in src/mcp/tools.ts).
+ *
+ * `isError` is therefore right here and wrong for a failed step — and wrong for
+ * a truncated stream: this is the "no run happened" case the contract reserves
+ * it for.
+ */
+export function errandDidNotAttach(tab: string, detail: string | null): McpToolError {
+  return preflightError(
+    `The errand never got tab "${tab}", so nothing ran in it` +
+      (detail !== null && detail !== '' ? `: ${detail}` : '.') +
+      '\n' +
+      'The tab may have been closed between the listing and the attach, or the ' +
+      'browser may have gone. Call list_cdp_browsers to see what is open now, ' +
+      'then name a tab from that.',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The turn lock (stories/errands.md §The wheel)
+//
+// Three refusals for one rule: a tab has one steering wheel. All three are
+// reached from a 409's `holder` shape rather than from its prose, because the
+// generic HTTP arm would answer a lock collision with "the tab may have been
+// closed" — advice that sends a model to re-list when the thing to do is wait.
+//
+// None of them offers a way to end the holder: there is no `close_errand`, and
+// an errand is one request. "Wait and retry" is the whole remedy, and it is a
+// real one — the wait is a single request long.
+// ---------------------------------------------------------------------------
+
+/** A second `run_errand` on a tab an errand already drives. */
+export function errandTabHeldByErrand(
+  errandId: string,
+  tabRole: 'borrowed' | 'opened',
+  tab: string,
+): McpToolError {
+  const opened = tabRole === 'opened';
+  return preflightError(
+    `Tab "${tab}" is already being driven by errand ${errandId}` +
+      (opened ? ', which opened it during its own run' : '') +
+      ', and two errands cannot drive one tab — they would fight over clicks, ' +
+      'dialogs and page-level settings.\n' +
+      'Nothing ran. Wait for that errand to finish and call run_errand again: an ' +
+      'errand is ONE request and releases every tab it holds when it returns, so ' +
+      'there is nothing to close and nothing to cancel.' +
+      (opened
+        ? '\nExpect that tab to be gone by then — an errand closes the tabs it ' +
+          'opened. Call list_cdp_browsers before retrying and name a tab from ' +
+          'what is actually open.'
+        : ''),
+  );
+}
+
+/**
+ * A `run_errand` on a tab a session has a batch in flight on.
+ *
+ * The only refusal of the three whose remedy has two branches, because the
+ * holder outlives its batch: waiting works, and so does ending the session —
+ * and which is right depends on whether the session is still wanted, which the
+ * caller knows and this layer does not.
+ */
+export function errandTabHeldBySession(sessionId: string, tab: string): McpToolError {
+  return preflightError(
+    `Session "${sessionId}" is running steps in tab "${tab}" right now, so an ` +
+      'errand cannot borrow it — that would be two drivers on one tab.\n' +
+      'Nothing ran. Wait for that batch to finish and call run_errand again; an ' +
+      'IDLE session on the tab would not have blocked this, only a running one ' +
+      'does. If the session is no longer wanted, close_session with session_id ' +
+      `"${sessionId}" first.`,
+  );
+}
+
+/**
+ * `close_cdp_tab` aimed at a tab an errand is driving or opened.
+ *
+ * The cdp-tabs §5 row this story adds. Distinct from the session refusal beside
+ * it because the remedy is different in both halves: no holder to close, and —
+ * for a tab the errand opened — a retry that will usually find nothing left to
+ * close at all.
+ */
+export function cdpTabHeldByErrand(
+  errandId: string,
+  tabRole: 'borrowed' | 'opened',
+  targetId: string,
+): McpToolError {
+  const opened = tabRole === 'opened';
+  return preflightError(
+    `Errand ${errandId} is driving tab ${targetId}` +
+      (opened ? ', which it opened during its own run' : ', a tab it borrowed') +
+      '. Closing it would break the errand mid-run, so nothing was closed.\n' +
+      'Wait for the errand to finish, then retry — an errand is one request and ' +
+      'lets go of every tab it holds when it returns. There is no close_errand ' +
+      'and none is needed.' +
+      (opened
+        ? '\nBy then the tab will normally be gone anyway, because an errand closes ' +
+          'what it opened — so the close becomes moot. Call list_cdp_browsers ' +
+          'before retrying.'
+        : ''),
   );
 }
 

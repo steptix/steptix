@@ -234,6 +234,14 @@ This is what makes the close refusal (§2) *predictable* rather than a
 surprise: the agent can see "that tab is session `mcp:x`'s" before trying.
 Foreign browsers are unaffected — their tabs are already withheld.
 
+**Amended by [errands](errands.md) §The wheel.** "Null for a tab nothing is
+driving" now carries one stated exception rather than a silent one: an
+**errand's** hold is deliberately not in this listing. It lasts a single
+request, so an entry here would be stale by the time an agent read and acted
+on it — and the refusal, which offers a retry that works moments later, is
+the authoritative answer instead. The `sessionId` field keeps its exact
+meaning; it never names an errand.
+
 The MCP output schema adds the field as `.nullable()`, never optional
 (missing keys are fatal to `structuredContent` validation).
 
@@ -256,23 +264,33 @@ Behind the existing auth middleware, beside the two routes of
    never refuse or count tabs the list would not show. Missing → 404 with
    the both-readings message (§Locked).
 3. **Refuse if a live managed session holds it** (409, naming the session).
-4. **If it is the last page tab, require `allowBrowserExit`** — refuse
+4. **Refuse if an errand is driving it, or opened it** (409, naming the
+   `errandId`) — added by [errands](errands.md) §The wheel, beside guard 3
+   and before the last-tab gate for the same remedy-quality reason, and
+   inside the same port-keyed close queue. The refusal is exact rather than
+   fail-closed: an errand's holds live in this process's memory, so there is
+   no "could not determine" arm. The remedy is wait-and-retry — there is no
+   `close_errand`, and none is needed, because an errand is one request.
+5. **If it is the last page tab, require `allowBrowserExit`** — refuse
    (409) without it, naming the flag and that the browser will exit.
 
-   *These two were originally the other way round, on the grounds that the
-   common refusal should be the cheap one. That was wrong: a one-tab browser
-   driven by a session is entirely reachable, and the last-tab refusal then
-   fires first and tells the caller to pass `allow_browser_exit: true` —
-   advice that leads straight into a different refusal. A remedy that does
-   not work costs more than the check it saved.*
+   *Guards 3 and 5 were originally the other way round, on the grounds that
+   the common refusal should be the cheap one. That was wrong: a one-tab
+   browser driven by a session is entirely reachable, and the last-tab
+   refusal then fires first and tells the caller to pass
+   `allow_browser_exit: true` — advice that leads straight into a different
+   refusal. A remedy that does not work costs more than the check it saved.
+   The errand guard is ordered ahead of the last-tab gate for exactly the
+   same reason, and an errand borrowing a one-tab browser's only tab is just
+   as reachable.*
 
    **Concurrent closes against one browser must be serialised by the caller**
-   (the route does, per port). Guard 4 reads a tab list to decide whether
+   (the route does, per port). Guard 5 reads a tab list to decide whether
    this is the last tab; two overlapping closes both read the same pre-close
    list, both conclude they are not closing the last tab, and the browser
    exits with neither caller having asked — the one guarantee
    `allow_browser_exit` exists to give, bypassed.
-5. **Close it, then confirm it is gone.** For an ordinary tab: poll the
+6. **Close it, then confirm it is gone.** For an ordinary tab: poll the
    tab list until the id is absent, bounded (~2 s), and report the count
    observed. For a last tab the success signal inverts — the DevTools
    endpoint dies **with** the process, so "gone" means the port no longer
@@ -302,7 +320,7 @@ So `Target.closeTarget` over the WebSocket is not needed, and the
 acknowledgement gap is measured rather than assumed — which is the whole
 argument for `closed: true` meaning *gone*.
 
-**Steps 4→5 carry a TOCTOU** — a session could bind the tab between check
+**Steps 5→6 carry a TOCTOU** — a session could bind the tab between check
 and close. Same class as
 [issues/039](../issues/039-toctou-between-confinement-check-and-read.md),
 recorded rather than solved; the window is milliseconds and the failure mode
@@ -341,10 +359,11 @@ Description draft — the behaviours that surprise, per
 > disk, and `start_cdp_browser` brings it back.
 
 Inventory updates that [page-content.md](page-content.md) proved are easy
-to miss: `usage.ts`, the README tool table, and `server-start.ts`'s
-auto-start list (`close_cdp_tab` acts on live state, so it may auto-start
-the server like the other action tools — decided at plan time, but it must
-appear in exactly one of the two lists).
+to miss: `usage.ts` and the README tool table. *(Corrected by
+[errands.md](errands.md): this said "and `server-start.ts`'s auto-start
+list", which does not exist. `close_cdp_tab` does auto-start, but by
+reaching the server through `withProject`, whose default is ON — there are
+no two lists to appear in.)*
 
 ### 4. Selection and visibility — finishing what exists
 
@@ -380,6 +399,7 @@ action.
 | --- | --- | --- |
 | `target_id` not found in that browser | the id, and both readings — already closed, or a different browser's id | `list_cdp_browsers` for the current list |
 | tab is held by a live session | the session id and its tab | `close_session` that session, then retry — or leave it alone if the session is wanted |
+| tab is held by an errand ([errands](errands.md) §The wheel) | the `errandId`, its tab, and whether the tab is the errand's borrowed one or one it opened | wait for the errand to finish, then retry — there is no `close_errand`; for an errand-**opened** tab the message adds that it will normally be gone by then, so the close becomes moot |
 | last page tab, no `allow_browser_exit` | that this is the browser's last tab, closing it closes the browser, and the profile stays signed in on disk | pass `allow_browser_exit: true` if that is intended, or leave the tab |
 | port not `running` / foreign | which list the port was found in, and `mcp.cdp.allowUnowned` | pick from `running`, launch from `available`, or ask the user to set the opt-in |
 | neither of `profile`/`port`, or a pair that disagrees | the missing address; or both facts — the port the profile is actually on vs. the port given (an agreeing pair is accepted) | — (same wording as `config.cdp`'s) |
@@ -427,7 +447,7 @@ action.
 | [src/mcp/tools.ts](../src/mcp/tools.ts) | Register `close_cdp_tab`; gate; description; the §4 description sentences. |
 | [src/mcp/api-client.ts](../src/mcp/api-client.ts) | `closeCdpTab` — id and targetId via `encodeURIComponent`. |
 | [src/mcp/errors.ts](../src/mcp/errors.ts) | The §5 rows. |
-| `usage.ts`, README, `server-start.ts` | Inventories (§3). |
+| `usage.ts`, README | Inventories (§3). `server-start.ts` was listed here and does not belong: it has no auto-start list (corrected by [errands.md](errands.md)). |
 
 ## Tests
 

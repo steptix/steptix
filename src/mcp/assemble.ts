@@ -68,8 +68,11 @@ const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
  * matched tight (no space after `[`), mirroring the tokenizers'
  * `prefix: '[skill:'`, so prose that merely *mentions* the bracket syntax
  * with different spacing is not swept in.
+ *
+ * Exported for `run_errand`, which refuses the same lines for the same reason:
+ * one rule, so "what counts as a code step" cannot mean two things.
  */
-const CODE_STEP_PATTERN = /\[(?:skill|tool):/i;
+export const CODE_STEP_PATTERN = /\[(?:skill|tool):/i;
 
 /** Any `${...}` reference, for the "nothing will interpolate this" warning. */
 const ANY_PLACEHOLDER = /\$\{[^}]*\}/g;
@@ -718,19 +721,35 @@ function warnUnresolvablePlaceholders(
   warnings: string[],
 ): void {
   if (project.envName !== null) return;
+  const texts = [
+    ...steps,
+    ...Object.values(values).filter((value): value is string => typeof value === 'string'),
+  ];
+  const warning = unresolvablePlaceholderWarning(texts);
+  if (warning !== null) warnings.push(warning);
+}
+
+/**
+ * The warning itself, over any collection of text.
+ *
+ * Exported because `run_errand` has exactly this problem for exactly this
+ * reason — the server builds no env bundle without an `env_name`
+ * (`if (envName)` in the session manager), so `${env.PASSWORD}` reaches the AI
+ * as literal text — and two wordings of one diagnostic teach an agent that
+ * they are two different problems.
+ *
+ * Returns null when there is nothing to say.
+ */
+export function unresolvablePlaceholderWarning(texts: readonly string[]): string | null {
   const found = new Set<string>();
-  for (const text of steps) {
+  for (const text of texts) {
     for (const match of text.matchAll(ANY_PLACEHOLDER)) found.add(match[0]);
   }
-  for (const value of Object.values(values)) {
-    if (typeof value !== 'string') continue;
-    for (const match of value.matchAll(ANY_PLACEHOLDER)) found.add(match[0]);
-  }
-  if (found.size === 0) return;
-  warnings.push(
+  if (found.size === 0) return null;
+  return (
     `No environment name is in play, so the server will not interpolate ` +
-      `${[...found].join(', ')} — they will be sent as literal text. Pass ` +
-      'env_name to resolve them.',
+    `${[...found].join(', ')} — they will be sent as literal text. Pass ` +
+    'env_name to resolve them.'
   );
 }
 

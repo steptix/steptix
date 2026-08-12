@@ -67,6 +67,7 @@ describe('tool schemas as they go out on the wire', () => {
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
+      'run_errand',
       'run_steps',
       'run_test_file',
       'server_status',
@@ -147,6 +148,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
   const cases: [name: string, schema: z.ZodType, io: 'input' | 'output'][] = [
     ['runStepsInput', schemas.runStepsInput, 'input'],
     ['runTestFileInput', schemas.runTestFileInput, 'input'],
+    ['runErrandInput', schemas.runErrandInput, 'input'],
     ['listTestFilesInput', schemas.listTestFilesInput, 'input'],
     ['listSessionsInput', schemas.listSessionsInput, 'input'],
     ['closeSessionInput', schemas.closeSessionInput, 'input'],
@@ -159,6 +161,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['closeCdpTabInput', schemas.closeCdpTabInput, 'input'],
     ['focusCdpTabInput', schemas.focusCdpTabInput, 'input'],
     ['runResultOutput', schemas.runResultOutput, 'output'],
+    ['runErrandOutput', schemas.runErrandOutput, 'output'],
     ['listTestFilesOutput', schemas.listTestFilesOutput, 'output'],
     ['listSessionsOutput', schemas.listSessionsOutput, 'output'],
     ['closeSessionOutput', schemas.closeSessionOutput, 'output'],

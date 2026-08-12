@@ -14,7 +14,7 @@ aiui mcp — drive browsers and run tests from an MCP client over stdio
 
   A project is optional. Inside one (a directory with aiui.config.json), you
   get its tests, skills, tools and environments. From anywhere else, the
-  browser verbs and run_steps still work against the machine-wide user root
+  browser verbs, run_steps and run_errand still work against the user root
   (%LOCALAPPDATA%\\aiui, ~/.aiui elsewhere) — your own signed-in CDP browsers,
   reachable from any directory. Results say which via a "scope" field;
   [skill:]/[tool:] steps and the two test-file tools still need a project.
@@ -22,6 +22,8 @@ aiui mcp — drive browsers and run tests from an MCP client over stdio
 Tools
   run_steps         run ad-hoc natural-language steps in a browser session
   run_test_file     run a .md test file end to end (needs a project)
+  run_errand        borrow a tab the user already has open, drive it, hand
+                    it back — no session, nothing kept
   list_test_files   list the project's test files (needs a project)
   list_sessions     list open browser sessions on the server
   close_session     close a session and its browser

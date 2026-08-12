@@ -12,13 +12,28 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHash } from 'node:crypto';
-import { assembleSteps, assembleTestFile } from './assemble.js';
+import path from 'node:path';
+import {
+  CODE_STEP_PATTERN,
+  assembleSteps,
+  assembleTestFile,
+  unresolvablePlaceholderWarning,
+} from './assemble.js';
 import {
   badCdpProfileName,
   cdpFocusRouteMissing,
   cdpFocusTabNotFound,
   cdpFocusTargetAmbiguous,
+  cdpTabHeldByErrand,
   cdpTabTargetAmbiguous,
+  describeBrowser,
+  errandCodeSteps,
+  errandDidNotAttach,
+  errandTabAmbiguous,
+  errandTabHeldByErrand,
+  errandTabHeldBySession,
+  errandTabNotFound,
+  errandsHaveNoSessions,
   listSessionsTimedOut,
   preflightError,
   unauthorized,
@@ -26,6 +41,7 @@ import {
 } from './errors.js';
 import {
   assertPortAttachable,
+  matchTabsByName,
   maySeeForeignTabs,
   resolveCdpTarget,
   summarizeBrowsers,
@@ -33,7 +49,16 @@ import {
 import { configuredRoots, canonicalize, isInsideRoot, resolveTestsGlob } from './project.js';
 import { userRootDir } from '../env/user-root.js';
 import { discoverTestFiles } from '../parser/markdown.js';
-import { DATA_URI_PREFIX, MAX_SCREENSHOT_BASE64, foldRun, type FoldedRun } from './run-fold.js';
+import {
+  DATA_URI_PREFIX,
+  MAX_SCREENSHOT_BASE64,
+  STREAM_DROPPED_WARNING,
+  foldRun,
+  readErrandSummary,
+  type FoldedEffectiveSettings,
+  type FoldedRun,
+  type FoldedStep,
+} from './run-fold.js';
 import { withSession } from './registry.js';
 import * as schemas from './schemas.js';
 import { probeHealth, normalizeBaseUrl } from '../server/health.js';
@@ -45,10 +70,15 @@ import {
   type ApiClient,
   type AssembledRun,
   type CaptureMode,
+  type CdpTab,
+  type ErrandRequestBody,
+  type ErrandTab,
   type McpDeps,
+  type ProjectContext,
   type RunEvent,
   type RunSettings,
   type ScreenshotsReturn,
+  type StreamResult,
 } from './types.js';
 
 /** The server refuses `config` on an existing session by throwing, and on the
@@ -503,13 +533,18 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
   // back `status: "passed"`, `warnings: []`, and executed in a fresh
   // signed-out browser. For a feature whose whole point is "use my signed-in
   // browser", a wrong-browser run that PASSES is the worst available outcome.
+  //
+  // The ending is the story's "wrong doors redirect" layer (stories/errands.md
+  // §Routing 4): this warning fires on exactly the request errands were built
+  // for — "use my open tab" — so it names the door that would have worked.
   if (request.config?.cdp !== undefined && !outcome.configApplied) {
     outcome.warnings = [
       ...outcome.warnings,
       `config.cdp was ignored: session "${sessionId}" already existed, and a ` +
         "session's browser is fixed when the session is created. These steps ran " +
         "in that session's existing browser, NOT the CDP one. To use the CDP " +
-        `browser: close_session "${sessionId}", then run again.`,
+        `browser: close_session "${sessionId}", then run again — or use ` +
+        'run_errand if you just want to drive that tab.',
     ];
   }
 
@@ -670,11 +705,20 @@ async function withProject(
   deps: McpDeps,
   projectRoot: string | undefined,
   body: (client: ApiClient, project: Awaited<ReturnType<McpDeps['resolveProject']>>) => Promise<ToolResult>,
-  opts: { autoStart?: boolean; signal?: AbortSignal | undefined } = {},
+  opts: {
+    autoStart?: boolean;
+    /** Layers `.env.<name>` the same way the run tools do. Only `run_errand`
+     *  passes one — every other tool through here reads no environment. */
+    envName?: string | undefined;
+    signal?: AbortSignal | undefined;
+  } = {},
 ): Promise<ToolResult> {
   let project: Awaited<ReturnType<McpDeps['resolveProject']>> | undefined;
   try {
-    project = await deps.resolveProject({ projectRoot });
+    project = await deps.resolveProject({
+      projectRoot,
+      ...(opts.envName !== undefined && { envName: opts.envName }),
+    });
     // Before the key goes anywhere: both arms refuse an unrecognized service,
     // so an agent calling `list_sessions` as a "what's running?" probe never
     // hands the project's key to whatever holds the port. The only difference
@@ -712,18 +756,22 @@ function summarize(outcome: RunOutcome): string {
   if (outcome.error) lines.push(`Error: ${outcome.error}`);
   if (outcome.reportPath) lines.push(`Report: ${outcome.reportPath}`);
   if (outcome.warnings.length > 0) lines.push(`Warnings: ${outcome.warnings.length}`);
-  // The echo, on the line a host that ignores structured output will show. A
-  // retained setting is invisible otherwise — and "why is there no screenshot?"
-  // is answered here rather than several turns later.
-  const settings = outcome.effectiveSettings;
-  if (settings) {
-    lines.push(
-      `Settings: model ${settings.model ?? '(not reported)'}, capture ` +
-        `${settings.capture ?? '(not reported)'}, return ${settings.screenshotsReturn}` +
-        (settings.sendScreenshots ? ', model sees screenshots' : ''),
-    );
-  }
+  const settings = settingsLine(outcome.effectiveSettings);
+  if (settings !== null) lines.push(settings);
   return lines.join('\n');
+}
+
+/** The echo, on the line a host that ignores structured output will show. A
+ *  retained setting is invisible otherwise — and "why is there no screenshot?"
+ *  is answered here rather than several turns later. Shared with the errand
+ *  receipt, which runs under the same chain minus the session layer. */
+function settingsLine(settings: FoldedEffectiveSettings | null): string | null {
+  if (!settings) return null;
+  return (
+    `Settings: model ${settings.model ?? '(not reported)'}, capture ` +
+    `${settings.capture ?? '(not reported)'}, return ${settings.screenshotsReturn}` +
+    (settings.sendScreenshots ? ', model sees screenshots' : '')
+  );
 }
 
 function outcomeToResult(outcome: RunOutcome): ToolResult {
@@ -761,6 +809,466 @@ function outcomeToResult(outcome: RunOutcome): ToolResult {
 }
 
 // ---------------------------------------------------------------------------
+// Errands (stories/errands.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * `run_steps` has `.aiui-mcp-steps.md`; an errand has this.
+ *
+ * Load-bearing rather than cosmetic: the server resolves the project root, the
+ * env/data bundle and the step-plan cache anchor entirely from `testFilePath`,
+ * so without one the project layer of `effectiveSettings` falls back to server
+ * defaults with nothing saying so. It is never read from disk and never exists.
+ */
+const SYNTHETIC_ERRAND_BASENAME = '.aiui-errand.md';
+
+/** `start_cdp_browser`'s own default, spelled here rather than imported: the
+ *  MCP process is deliberately browser-free (tests/mcp-entry-graph.test.ts
+ *  pins the import graph) and `cdp-registry.ts` is on the other side of that
+ *  line. */
+const DEFAULT_CDP_PROFILE = 'default';
+
+/** The receipt, as `runErrandOutput` declares it. Named rather than inferred so
+ *  the summary and the degraded fallback are describing the same object. */
+interface ErrandReceipt {
+  status: FoldedRun['status'];
+  streamDropped: boolean;
+  errandId: string;
+  root: string;
+  scope: 'project' | 'user';
+  steps: FoldedStep[];
+  captures: Record<string, string>;
+  finalUrl: string;
+  finalTitle: string;
+  openedTabs: { targetId: string | null; url: string; title: string }[];
+  keptOpen: { targetId: string | null; url: string; title: string }[];
+  messages: FoldedRun['messages'];
+  warnings: string[];
+  error: string | null;
+  effectiveSettings: FoldedEffectiveSettings | null;
+}
+
+/** What `run_errand` reads off its own call. */
+interface ErrandArgs {
+  tab: string;
+  profile?: string | undefined;
+  engine?: 'chrome' | 'edge' | undefined;
+  scope?: 'project' | 'user' | undefined;
+  env_name?: string | undefined;
+  steps: string[];
+  keep_open?: boolean | undefined;
+}
+
+/**
+ * Attach → act → return, from the MCP side.
+ *
+ * Both halves of the attach happen here rather than server-side, exactly as
+ * `close_cdp_tab`/`focus_cdp_tab` resolve theirs: the browser by profile +
+ * engine + scope, then the tab by name against THAT browser's listing. Only
+ * the winner's target id goes on the wire, so the first-match-wins arm of the
+ * server's own tab resolver is never asked to arbitrate.
+ */
+async function runErrand(
+  client: ApiClient,
+  project: ProjectContext,
+  args: ErrandArgs,
+  signal: AbortSignal | undefined,
+): Promise<ToolResult> {
+  const { port } = await resolveCdpTarget(
+    client,
+    project.projectRoot,
+    {
+      // Always a profile, never a port: `run_errand` has no `port` argument at
+      // all, so the no-address refusal family is unreachable here and must
+      // stay that way (stories/errands.md §Tool surface). That also settles the
+      // §6 gate by construction — a port resolved out of this call's own
+      // `running` list is owned — which is why `gateOwed` is not consulted.
+      profile: args.profile?.trim() || DEFAULT_CDP_PROFILE,
+      ...(args.engine !== undefined ? { engine: args.engine } : {}),
+      ...(args.scope !== undefined ? { scope: args.scope } : {}),
+    },
+    signal,
+  );
+
+  // Re-read rather than reuse the resolution's listing: an errand resolves the
+  // tab fresh every time, and the tab list is the half that moves. Foreign
+  // browsers are not asked for — an errand cannot reach one.
+  const browsers = await client.getCdpBrowsers(
+    { projectRoot: project.projectRoot, includeForeign: false },
+    signal,
+  );
+  const browser = browsers.running.find((b) => b.port === port);
+  const where =
+    browser === undefined
+      ? `the browser on port ${port}`
+      : describeBrowser({ engine: browser.engine, profile: browser.profile, scope: browser.scope });
+
+  // Already page-type-filtered by the server, which is what stops an iframe,
+  // a `browser_ui` target or a dialog ever being a candidate.
+  const tabs = browser?.tabs ?? [];
+  const matches = matchTabsByName(args.tab, tabs);
+  if (matches.length === 0) throw new PreflightFailure(errandTabNotFound(args.tab, where, tabs));
+  if (matches.length > 1) throw new PreflightFailure(errandTabAmbiguous(args.tab, matches));
+  const borrowed = matches[0]!;
+
+  const warnings: string[] = [];
+  // The server builds no env bundle without a name (`if (envName)`), so
+  // `${env.X}` would reach the AI as literal text. Same diagnostic, same
+  // wording, as `run_steps` — one problem should not read as two.
+  if (project.envName === null) {
+    const warning = unresolvablePlaceholderWarning(args.steps);
+    if (warning !== null) warnings.push(warning);
+  }
+
+  const body: ErrandRequestBody = {
+    port,
+    targetId: borrowed.targetId,
+    steps: args.steps,
+    testFilePath: path.join(project.projectRoot, SYNTHETIC_ERRAND_BASENAME),
+    root: project.projectRoot,
+    scope: project.scope,
+    env: project.env,
+    ...(project.envName !== null && { envName: project.envName }),
+    // Omitted when off, like `cacheEnabled` on a step request: an absent flag
+    // and an explicit `false` mean the same thing server-side.
+    ...(args.keep_open === true && { keepOpen: true }),
+  };
+
+  // The route answers a turn-lock collision before any SSE header flushes, so
+  // it arrives as an ordinary HTTP error rather than as a stream with no errand
+  // on its `done` frame. Recognised HERE rather than in the generic mapping
+  // because the alternative is `errandDidNotAttach`'s "the tab may have been
+  // closed" — the wrong story, and the wrong next action, for a tab that is
+  // very much open and busy (stories/errands.md §The wheel).
+  let stream: StreamResult;
+  try {
+    stream = await client.runErrand(body, signal);
+  } catch (err) {
+    if (err instanceof ApiHttpError && err.holder !== null) {
+      const { holder } = err;
+      throw new PreflightFailure(
+        holder.kind === 'errand'
+          ? errandTabHeldByErrand(holder.errandId, holder.tabRole, args.tab)
+          : errandTabHeldBySession(holder.sessionId, args.tab),
+      );
+    }
+    throw err;
+  }
+  const folded = foldRun({
+    events: stream.events,
+    receivedAt: stream.receivedAt,
+    streamDropped: stream.streamDropped,
+    dropped: stream.dropped,
+    sentSteps: args.steps,
+    // The runner emits `line` as the 1-based step index, and nothing expands,
+    // so this maps back exactly.
+    sourceLines: args.steps.map((_step, index) => index + 1),
+    testFilePath: body.testFilePath,
+    expansionPossible: false,
+    // The one client-side run setting an errand has, and it is not an argument:
+    // there is no session to retain an override, so the shipped default stands.
+    screenshotsReturn: DEFAULT_SCREENSHOTS_RETURN,
+  });
+
+  const errand = readErrandSummary(stream.events);
+  // No errand block covers two opposite stories, and the step events are the
+  // only thing that tells them apart.
+  //
+  // No step event ever arrived: the request died before the tab was borrowed —
+  // the attach refused, or the route's own catch answered — and `isError`
+  // ("nothing ran") is the honest report.
+  //
+  // Step events and then no `done` block: the stream died MID-errand (a force
+  // shutdown, a crash, a proxy timeout). The tab HAS been driven, and answering
+  // that with "nothing ran" throws away the folded steps and captures, which
+  // are by then the only surviving record of what happened to the user's page.
+  if (errand === null) {
+    if (!tabWasDriven(stream.events)) {
+      return errorResult(errandDidNotAttach(args.tab, folded.error ?? firstError(folded)));
+    }
+    return unfinishedErrandResult({ folded, tab: args.tab, project, warnings, borrowed, where });
+  }
+
+  const receipt: ErrandReceipt = {
+    status: folded.status,
+    streamDropped: folded.streamDropped,
+    errandId: errand.errandId,
+    // The server's echo of what we sent, not our copy of it: the receipt is
+    // the errand's own claim about which root it ran under.
+    root: errand.root,
+    scope: errand.scope,
+    steps: folded.steps,
+    captures: folded.captures,
+    finalUrl: errand.finalUrl,
+    finalTitle: errand.finalTitle,
+    openedTabs: errand.openedTabs.map(receiptTab),
+    keptOpen: errand.keptOpen.map(receiptTab),
+    messages: folded.messages,
+    warnings: [...warnings, ...errandWarnings(folded)],
+    error: folded.error,
+    effectiveSettings: folded.effectiveSettings,
+  };
+
+  return validated(
+    schemas.runErrandOutput,
+    receipt as unknown as Record<string, unknown>,
+    summarizeErrand(receipt, borrowed, where),
+    screenshotBlock(folded.screenshotBase64),
+    // Keeps what nothing else can recover: which errand it was, which tab it
+    // left behind, and that it ran at all.
+    (detail) => ({
+      ...receipt,
+      status: 'error',
+      steps: [],
+      captures: {},
+      messages: [],
+      warnings: [`The errand finished, but its result could not be encoded: ${detail}`],
+      error: detail,
+      effectiveSettings: null,
+    }),
+  );
+}
+
+/**
+ * Did anything actually reach the tab?
+ *
+ * Any step or capture event says yes: the runner emits `step:start` before it
+ * touches the page and cannot emit one before the attach has returned a
+ * borrowed tab. `output` frames do NOT count — the log bridge and the route's
+ * own error arm both emit them for an errand that never got past the attach.
+ */
+function tabWasDriven(events: readonly RunEvent[]): boolean {
+  return events.some(
+    (event) =>
+      event.type === 'step:start' ||
+      event.type === 'step:pass' ||
+      event.type === 'step:fail' ||
+      event.type === 'capture',
+  );
+}
+
+/**
+ * What a truncated errand stream can actually be done about.
+ *
+ * The session-shaped remedy this replaces (`STREAM_DROPPED_WARNING`) is not
+ * merely unhelpful here — `get_last_run` takes a `session_id` and an errand
+ * creates none, so a caller that follows it has nothing to pass. What IS
+ * reachable is the browser itself, which is the same place the receipt's own
+ * error text sends the caller for the tab's end state.
+ *
+ * The re-run caveat is the other half: the errand may have gone on driving the
+ * tab after the stream died, so "just run it again" can be the second click of
+ * two on somebody's real page.
+ */
+const ERRAND_STREAM_DROPPED =
+  'The connection to the server ended without a completion event, and there is ' +
+  'no get_last_run for an errand — it has no session to look up. Call ' +
+  'list_cdp_browsers to see the tab and what else is open now. The errand may ' +
+  'have kept driving the tab after the stream died, so re-running the same ' +
+  'steps is only safe if they are idempotent.';
+
+/**
+ * The fold's warnings with the session-shaped remedy swapped for the errand's.
+ *
+ * Both receipt paths run this, because a dropped stream is not the truncated
+ * path's private problem: the client sets `streamDropped` in its catch arm too
+ * (src/mcp/api-client.ts), so a stream that dies AFTER the `done` frame folds
+ * into a FINISHED receipt that still carries `STREAM_DROPPED_WARNING` — and
+ * that line tells the caller to call `get_last_run`, which takes a `session_id`
+ * the errand never created.
+ *
+ * Dropped by identity against the exported constant rather than by matching its
+ * prose, and the substitute is pushed on the SAME condition (something was
+ * actually removed), so the two cannot drift apart.
+ */
+function errandWarnings(folded: FoldedRun): string[] {
+  const kept = folded.warnings.filter((w) => w !== STREAM_DROPPED_WARNING);
+  if (kept.length !== folded.warnings.length) kept.push(ERRAND_STREAM_DROPPED);
+  return kept;
+}
+
+/** The one image block a receipt ever carries, built the same way on both the
+ *  finished and the truncated path — a screenshot the fold kept is a picture of
+ *  the user's real page, and which path returned it changes nothing about that. */
+function screenshotBlock(base64: string | null): ToolResult['content'] {
+  return base64 ? [{ type: 'image', data: base64, mimeType: 'image/png' }] : [];
+}
+
+/**
+ * The stream carried steps and then ended without the errand's accounting.
+ *
+ * A receipt rather than an `isError`, for the reason the whole `isError`
+ * contract exists (src/mcp/errors.ts): the tab was driven, so the steps and
+ * captures are the caller's only record of what an errand did to a real page,
+ * and an `isError` result carries no `structuredContent` to keep them in.
+ *
+ * Everything the `done` frame owns is missing and is reported missing rather
+ * than guessed: `status` is `error` whatever the fold made of a truncated
+ * stream, the final url and title are empty, and `openedTabs`/`keptOpen` are
+ * empty because nothing counted them — not because nothing was opened, which is
+ * what the warning says. `root` and `scope` are the only two fields answered
+ * from the request instead of the server's echo, and they are honest to answer
+ * that way: the tool resolved them and sent them, and the server does not
+ * re-derive them.
+ */
+function unfinishedErrandResult(input: {
+  folded: FoldedRun;
+  /** The `tab` spelling the caller used, so the message names the page in the
+   *  caller's own words rather than in a target id they never wrote. */
+  tab: string;
+  project: ProjectContext;
+  warnings: string[];
+  borrowed: CdpTab;
+  where: string;
+}): ToolResult {
+  const { folded, project, tab } = input;
+  const detail = folded.error ?? firstError(folded);
+
+  // The fold's own stream-dropped warning sends the caller to `get_last_run`,
+  // which is addressed by `session_id` (`getLastRunInput`) — an errand has
+  // none, so that line names the one call this caller provably cannot make.
+  const foldWarnings = errandWarnings(folded);
+
+  const receipt: ErrandReceipt = {
+    status: 'error',
+    streamDropped: folded.streamDropped,
+    // Never reported: the errand id is minted server-side and rides the `done`
+    // frame that never came. Empty is the one honest value — inventing one
+    // would hand back a handle onto nothing.
+    errandId: '',
+    root: project.projectRoot,
+    scope: project.scope,
+    steps: folded.steps,
+    captures: folded.captures,
+    finalUrl: '',
+    finalTitle: '',
+    openedTabs: [],
+    keptOpen: [],
+    messages: folded.messages,
+    warnings: [
+      ...input.warnings,
+      ...foldWarnings,
+      'openedTabs and keptOpen are empty because the errand never reported ' +
+        'them, not because it opened nothing. A tab it opened may still be ' +
+        'open — call list_cdp_browsers to see what is there now.',
+    ],
+    error:
+      `The errand DROVE tab "${tab}" and then the stream ended without a ` +
+      'completion event, so its final state is unknown' +
+      (detail !== null && detail !== '' ? `: ${detail}` : '.') +
+      '\n' +
+      'The steps and captures below really happened. What is missing is what ' +
+      'the errand did on the way out — where the tab ended up, and whether the ' +
+      'tabs it opened were closed. Read the page before assuming either.',
+    effectiveSettings: folded.effectiveSettings,
+  };
+
+  return validated(
+    schemas.runErrandOutput,
+    receipt as unknown as Record<string, unknown>,
+    summarizeErrand(receipt, input.borrowed, input.where),
+    // The same image block the finished path returns. A stream that died after
+    // a failing step still folded that step's screenshot, and it is a picture
+    // of the user's real page taken at the moment things went wrong — the one
+    // artefact this degraded receipt least deserves to drop.
+    screenshotBlock(folded.screenshotBase64),
+    (detailText) => ({
+      ...receipt,
+      steps: [],
+      captures: {},
+      messages: [],
+      warnings: [`The errand's partial result could not be encoded: ${detailText}`],
+      error: detailText,
+      effectiveSettings: null,
+    }),
+  );
+}
+
+/**
+ * `close_cdp_tab`'s call, with the turn-lock 409 turned into its own refusal.
+ *
+ * A session-held tab already has a good message from the server, which the
+ * generic HTTP arm relays intact. An errand-held one does not: it needs to say
+ * that the holder cannot be closed, only waited for, and — for a tab the errand
+ * opened — that the retry will probably find nothing to close.
+ */
+async function closeTabOrExplainHolder(
+  client: ApiClient,
+  args: Parameters<ApiClient['closeCdpTab']>[0],
+  signal: AbortSignal | undefined,
+): Promise<Awaited<ReturnType<ApiClient['closeCdpTab']>>> {
+  try {
+    return await client.closeCdpTab(args, signal);
+  } catch (err) {
+    if (err instanceof ApiHttpError && err.holder?.kind === 'errand') {
+      // Read off the same object the call was made with, so the tab the refusal
+      // names is by construction the tab the close was aimed at.
+      throw new PreflightFailure(
+        cdpTabHeldByErrand(err.holder.errandId, err.holder.tabRole, args.targetId),
+      );
+    }
+    throw err;
+  }
+}
+
+/** `ErrandTab` as the schema wants it: an unresolved target id is `null`, never
+ *  a missing key — a missing required key is fatal to `validateToolOutput`. */
+function receiptTab(tab: ErrandTab): { targetId: string | null; url: string; title: string } {
+  return { targetId: tab.targetId ?? null, url: tab.url, title: tab.title };
+}
+
+/** The first error-level message, for the attach refusal — `folded.error` is
+ *  null on a run the fold considers passed, and an attach failure that emitted
+ *  only an `output` frame would otherwise report no reason at all. */
+function firstError(folded: FoldedRun): string | null {
+  return folded.messages.find((m) => m.level === 'error')?.text ?? null;
+}
+
+/** One-line headline plus what a user who said "drive my tab" actually wants
+ *  back: which tab was driven, where it ended up, and what else was opened. */
+function summarizeErrand(
+  receipt: ErrandReceipt,
+  borrowed: CdpTab,
+  browser: string,
+): string {
+  const passed = receipt.steps.filter((s) => s.status === 'passed').length;
+  const lines = [
+    `${receipt.status.toUpperCase()} — ${passed}/${receipt.steps.length} steps in ` +
+      `"${borrowed.title || borrowed.url}" (${browser}, ` +
+      // Empty only on the stream-died-mid-errand path: the id rides the `done`
+      // frame that never arrived, and "errand " followed by nothing reads as a
+      // formatting bug rather than as a missing fact.
+      `errand ${receipt.errandId || 'id not reported'})`,
+  ];
+  if (receipt.scope === 'user') {
+    lines.push(`Ran project-less against the user root (${receipt.root}).`);
+  }
+  if (receipt.error) lines.push(`Error: ${receipt.error}`);
+  // Skipped rather than printed empty when the detach never reported one —
+  // "Tab left at: (untitled) — " states nothing and looks like a lost value.
+  if (receipt.finalUrl !== '' || receipt.finalTitle !== '') {
+    lines.push(`Tab left at: ${receipt.finalTitle || '(untitled)'} — ${receipt.finalUrl}`);
+  }
+  if (receipt.openedTabs.length > 0) {
+    // Counted from the two lists the server sent, not from `keep_open`. "The
+    // rest closed on the way out" was a claim about the user's screen that the
+    // receipt cannot support twice over: a tab another errand took the wheel of
+    // is spared the close and is still open, and a tab a STEP closed mid-run
+    // was never the detach's to close. So the second half says what is knowable
+    // — no longer open — and not who closed it.
+    const gone = receipt.openedTabs.length - receipt.keptOpen.length;
+    lines.push(
+      `Opened ${receipt.openedTabs.length} tab(s); ${receipt.keptOpen.length} still open` +
+        (gone > 0 ? `, ${gone} no longer open.` : '.'),
+    );
+  }
+  if (receipt.warnings.length > 0) lines.push(`Warnings: ${receipt.warnings.length}`);
+  const settings = settingsLine(receipt.effectiveSettings);
+  if (settings !== null) lines.push(settings);
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -786,6 +1294,13 @@ Step syntax: plain English, one action per step. Also supported:
  * text guaranteed to be in front of the model at the moment of the call.
  */
 const CDP_NOTE = `
+Whose browser? Ours to open — this tool opens one, or reuses one this
+framework already owns, and owns everything it touches until the session
+closes. Theirs to borrow — "my tab", "the one I have open", "my signed-in
+browser" — is run_errand, which drives an already-open tab for one request and
+hands it back. Ownership words decide it, not the word "test": "test the
+checkout on my open tab" is an errand.
+
 Browser: steps run in a fresh, signed-out, disposable browser UNLESS you say
 otherwise. Persistent CDP browsers holding real logins may also be running —
 the project's, and the user's machine-wide ones (scope "user", reachable from
@@ -795,11 +1310,30 @@ scope/engine if the name is ambiguous). Config is read only when a session is
 CREATED, so pass it on the first call for a session; passing it later is
 ignored.
 
-Tab: attaching opens a NEW tab by default. To run in a tab that is already
-open — one the user set up by hand — take its targetId from
-list_cdp_browsers and pass config.cdp: {profile: "<name>", tab:
-"targetId:<id>"}. Naming the profile alone leaves their tab untouched and
-runs somewhere else.`.trim();
+Tab: attaching opens a NEW tab by default. config.cdp: {profile: "<name>",
+tab: "targetId:<id>"} — the id comes from list_cdp_browsers — BINDS this
+session to a tab the user already has open, which is what you want when a
+whole test file has to run there, or when later calls on this session must
+stay in that tab. For a one-off "just drive that tab for me", reach for
+run_errand instead: it takes the tab by name, creates no session, and leaves
+nothing behind. Naming the profile alone leaves their tab untouched and runs
+somewhere else.`.trim();
+
+/**
+ * The syntax crib, minus what an errand cannot do.
+ *
+ * `STEP_SYNTAX` teaches `[skill:]` and `[tool:]`, which `run_errand` refuses —
+ * an errand carries no skills or tools directory — so handing it the same text
+ * would teach the one thing the handler then rejects.
+ */
+const ERRAND_STEP_SYNTAX = `
+Step syntax: plain English, one action per step. Also supported:
+  \${env.VAR} / \${data.key} substituted from env_name's environment — pass
+                            env_name, or they reach the AI as literal text
+  {{name}}                  substituted from a capture made EARLIER IN THIS
+                            errand; never from a previous one
+[skill: ...] and [tool: ...] are refused here — those need run_steps in a
+project, which is what carries the skills and tools directories.`.trim();
 
 /**
  * The two couplings between the settings, on the tools themselves.
@@ -826,6 +1360,49 @@ Two settings interact, and both surprise people:
     run, and "on-failure" needs capture to include failures.
   - send_screenshots: true forces a capture on every model turn regardless of
     capture, because the model's own request needs the image.`.trim();
+
+/**
+ * `run_errand`'s description — which is the routing layer that matters.
+ *
+ * A tool description is read only after the model is already considering the
+ * tool, so the first paragraph is the one-question decision rule
+ * (stories/errands.md §Routing 1) rather than a feature list: *whose browser?*
+ * The counter-example is there because it is the case a model gets wrong —
+ * "test the checkout on my open tab" is an errand, and a model that keys on the
+ * word "test" picks the session door and drives a fresh signed-out browser.
+ */
+const ERRAND_DESCRIPTION = `
+Drive a tab the user ALREADY has open — one request, then hand it back.
+
+Whose browser? That question picks the tool. Ours to open — a fresh browser,
+or one this framework already owns — is run_steps. Theirs to borrow is this
+one: "my tab", "the one I have open", "my signed-in browser", "that
+OpenRouter tab". Ownership words decide it, not the word "test":
+"test the checkout on my open tab" is an errand.
+
+Name the tab and it is resolved fresh, right now, against the live tab list.
+Nothing matches, or several do, and the call is refused with the candidates
+named — so a rough name is safe to try, and no wrong tab is ever picked for
+you. There is no fallback browser: an errand reaches only the persistent CDP
+browsers list_cdp_browsers reports.
+
+What comes back is a receipt: per-step outcomes, every capture, where the tab
+ended up, and any tabs the errand opened. What does NOT come back is a
+handle — there is no session, no report file, no server-side variable scope,
+and nothing answering to the errandId once the call returns. A second errand
+starts from nothing, so pass anything you need again in the step text.
+
+It borrows, it does not take over. The tab it was given is never closed and
+never signed out; tabs it opened itself go with it unless keep_open; and it
+ends by asking the browser to bring the borrowed tab forward, so the user is
+left looking at what happened. The user can also type into that tab while it
+runs — nothing stops them — which is the other reason to read the receipt
+rather than assume.
+
+This drives a real, signed-in browser belonging to a human. Say what you did
+in it, not just that it worked.
+
+${ERRAND_STEP_SYNTAX}`.trim();
 
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // -- run_steps ------------------------------------------------------------
@@ -939,6 +1516,42 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         if (extra.signal?.aborted) throw err;
         return asToolError(err, envFiles, baseUrl);
       }
+    },
+  );
+
+  // -- run_errand -----------------------------------------------------------
+  server.registerTool(
+    'run_errand',
+    {
+      title: 'Drive a tab the user already has open',
+      description: ERRAND_DESCRIPTION,
+      inputSchema: schemas.runErrandInput,
+      outputSchema: schemas.runErrandOutput,
+    },
+    async (args, extra) => {
+      // Both refusals happen here, before `withProject` — so before a server is
+      // started, a registry is read or a browser is touched. Neither needs a
+      // project to decide, and the story's "refused before any browser work"
+      // is a property of where they sit, not of what they say.
+      if (args.session_id !== undefined) {
+        return errorResult(errandsHaveNoSessions(args.session_id));
+      }
+      const codeSteps = args.steps.filter((step) => CODE_STEP_PATTERN.test(step));
+      if (codeSteps.length > 0) return errorResult(errandCodeSteps(codeSteps));
+
+      return withProject(
+        deps,
+        args.project_root,
+        async (client, project) => runErrand(client, project, args, extra.signal),
+        // Auto-start is the default: an errand against a stopped server brings
+        // it up rather than dying on a bare ECONNREFUSED.
+        {
+          signal: extra.signal,
+          // Same normalisation the run tools apply: `""` is an absent argument,
+          // not an environment named the empty string.
+          ...(args.env_name?.trim() ? { envName: args.env_name.trim() } : {}),
+        },
+      );
     },
   );
 
@@ -1572,9 +2185,12 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'better at "which one did they mean" than a substring rule.\n\n' +
         'This closes a real tab in the user\'s own signed-in browser window, ' +
         'so relay what was closed rather than only that it worked.\n\n' +
-        'Two refusals, both of which tell you what to do next:\n' +
+        'Three refusals, each of which tells you what to do next:\n' +
         '- **A session is driving that tab.** Close it with close_session ' +
         'first, or leave the tab alone if the session is still wanted.\n' +
+        '- **An errand is driving that tab.** Wait for it and retry — an ' +
+        'errand is one request, there is no way to end one early, and a tab it ' +
+        'opened itself will normally be gone by then anyway.\n' +
         '- **It is the browser\'s last tab.** Closing that closes the browser ' +
         'itself — there is no browser with zero tabs. Pass ' +
         '`allow_browser_exit: true` if that is what the user wants. For a ' +
@@ -1629,8 +2245,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             );
           }
 
-          const closed = await client.closeCdpTab(
-            {
+          // The close route's 409 can now come from the errand turn lock as
+          // well as from a session, and the two need different sentences — this
+          // wrapper is where the holder shape picks one.
+          const closed = await closeTabOrExplainHolder(client, {
               projectRoot: project.projectRoot,
               port,
               targetId: args.target_id,
@@ -1643,9 +2261,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               // browser this project has running" — an opt-in that grants
               // nothing.
               ...(project.cdpPermissions.allowUnowned ? { allowUnowned: true } : {}),
-            },
-            extra.signal,
-          );
+          }, extra.signal);
 
           // Normalised for the same reason `list_cdp_browsers` normalises
           // `sessionId`, and it matters more here: this field is required by

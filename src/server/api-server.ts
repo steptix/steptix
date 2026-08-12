@@ -18,7 +18,15 @@ import {
 import { discoverCdpPorts } from '../browser/cdp-discovery.js';
 import { userRootDir } from '../env/user-root.js';
 import fs from 'node:fs';
-import { SessionManager, type RunEvent, type StepRequest } from './session-manager.js';
+import {
+  SessionManager,
+  type RunEvent,
+  type RunEventListener,
+  type StepRequest,
+} from './session-manager.js';
+import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
+import { ErrandLocks } from './errand-locks.js';
+import { ProjectBundleResolver } from './project-bundle.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
 import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
@@ -41,6 +49,87 @@ const DEFAULT_CONTENT_MAX_CHARS = 20_000;
 function writeSseEvent(res: Response, event: RunEvent): void {
   res.write(`event: ${event.type}\n`);
   res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+/** An open SSE stream: where a run's events go, and how it learns the client
+ *  left. */
+interface SseStream {
+  /** Write one frame, unless the client has already gone. */
+  emit: RunEventListener;
+  /** Aborted on client disconnect, so a run can stop instead of burning
+   *  through every remaining step. */
+  signal: AbortSignal;
+  /** True once the client's socket closed. */
+  readonly clientGone: boolean;
+  /** Stop the keepalive and end the response. */
+  close(): void;
+}
+
+/**
+ * Open an SSE stream on `res`.
+ *
+ * Shared by the two streaming run routes rather than written twice: every line
+ * here is load-bearing in a way that is not obvious from reading it, and two
+ * copies is how one of them quietly loses a fix.
+ */
+function openSseStream(res: Response): SseStream {
+  // Headers must be set before any res.write().
+  //
+  // Note: don't set Connection: keep-alive explicitly — Node's HTTP keep-alive
+  // socket pool can hold the connection open after res.end() and keep
+  // server.close() blocked. The default is keep-alive anyway, and SSE consumers
+  // don't require it.
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering if any
+  res.flushHeaders();
+
+  // `res.on('close')`, not `req.on('close')` — the latter fires when
+  // express.json() finishes parsing the body, which would falsely signal a
+  // disconnect immediately.
+  //
+  // Seeded from `res.closed` BEFORE the listener, because a listener cannot
+  // hear an event that already fired. The errand route reaches this only after
+  // `errandRunner.begin` has awaited its session join, which talks to a browser
+  // and can take seconds: a client that gave up inside that window has already
+  // had its 'close' emitted, so a bare listener leaves `clientGone` false
+  // forever — the run's abort signal never fires and the errand drives the
+  // whole thing unwatched, holding the tab lock and the in-flight run counter
+  // to the end.
+  const abortController = new AbortController();
+  let clientGone = res.closed === true;
+  if (clientGone) abortController.abort();
+  res.on('close', () => {
+    clientGone = true;
+    abortController.abort();
+  });
+
+  // Periodic comment frame so intermediaries don't time the connection out
+  // (typical proxy idle window is 30s).
+  const keepalive = setInterval(() => {
+    if (clientGone) return;
+    try {
+      res.write(': keep-alive\n\n');
+    } catch {
+      // socket may be gone
+    }
+  }, 25_000);
+
+  return {
+    emit: (event) => {
+      if (clientGone) return;
+      writeSseEvent(res, event);
+    },
+    signal: abortController.signal,
+    get clientGone() {
+      return clientGone;
+    },
+    close: () => {
+      clearInterval(keepalive);
+      if (!clientGone) res.end();
+    },
+  };
 }
 
 /**
@@ -66,11 +155,32 @@ export function createApiServer(
   app: express.Express;
   sessionManager: SessionManager;
   idleMonitor: IdleMonitor;
+  /**
+   * The one turn-lock registry this app runs on (stories/errands.md §The
+   * wheel).
+   *
+   * Returned so a test can put a hold on it and watch BOTH readers answer —
+   * the errand route's `begin` and the close guard's `errandHolding`. Two
+   * registries would pass every unit test either half has and refuse nothing
+   * in the app.
+   */
+  errandLocks: ErrandLocks;
   /** Close the app to new work (§2). Idempotent. */
   beginShutdown: () => void;
 } {
   const app = express();
-  const sessionManager = new SessionManager(config);
+  // One resolver behind both, so an errand and a session running against the
+  // same project read the same `.env` at the same moment.
+  const projectBundles = new ProjectBundleResolver(config);
+  const sessionManager = new SessionManager(config, projectBundles);
+  // Beside the manager, never inside it: an errand adds nothing to the sessions
+  // map, which is what makes "nothing survives on the server" checkable.
+  //
+  // The lock lives out here rather than inside the runner because it has a
+  // second reader: `close_cdp_tab`'s hold guard, which must refuse a tab an
+  // errand is driving (stories/errands.md §The wheel, amending cdp-tabs §2).
+  const errandLocks = new ErrandLocks();
+  const errandRunner = new ErrandRunner(config, sessionManager, projectBundles, errandLocks);
   const version = getPackageVersion();
   const startedAt = new Date().toISOString();
   let shuttingDown = false;
@@ -474,63 +584,17 @@ export function createApiServer(
       }
 
       if (streaming) {
-        // Open SSE stream. Headers must be set before any res.write().
-        // Note: don't set Connection: keep-alive explicitly — Node's HTTP
-        // keep-alive socket pool can hold the connection open after res.end()
-        // and keep server.close() blocked. The default is keep-alive anyway,
-        // and SSE consumers don't require it.
-        res.status(200);
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering if any
-        res.flushHeaders();
-
-        // Use res.on('close') for client disconnect — req.on('close') fires
-        // when express.json() finishes parsing the body, which would falsely
-        // signal a disconnect immediately.
-        //
-        // The AbortController lets sessionManager.executeSteps see the
-        // disconnect and stop processing further steps; without it the
-        // server would burn through every queued step before noticing.
-        const abortController = new AbortController();
-        let clientGone = false;
-        res.on('close', () => {
-          clientGone = true;
-          abortController.abort();
-        });
-
-        // Periodic comment frame so intermediaries don't time the connection
-        // out (typical proxy idle window is 30s).
-        const keepalive = setInterval(() => {
-          if (clientGone) return;
-          try {
-            res.write(': keep-alive\n\n');
-          } catch {
-            // socket may be gone
-          }
-        }, 25_000);
-
+        const sse = openSseStream(res);
         try {
-          await sessionManager.executeSteps(
-            sessionId,
-            request,
-            (event) => {
-              if (clientGone) return;
-              writeSseEvent(res, event);
-            },
-            abortController.signal,
-          );
+          await sessionManager.executeSteps(sessionId, request, sse.emit, sse.signal);
         } catch (err) {
-          if (!clientGone) {
+          if (!sse.clientGone) {
             const message = err instanceof Error ? err.message : String(err);
-            writeSseEvent(res, { type: 'output', msg: `Server error: ${message}`, kind: 'error' });
-            writeSseEvent(res, { type: 'done', status: 'error' });
+            sse.emit({ type: 'output', msg: `Server error: ${message}`, kind: 'error' });
+            sse.emit({ type: 'done', status: 'error' });
           }
         } finally {
-          clearInterval(keepalive);
-          if (!clientGone) {
-            res.end();
-          }
+          sse.close();
         }
         return;
       }
@@ -547,6 +611,67 @@ export function createApiServer(
         return;
       }
 
+      next(err);
+    }
+  });
+
+  // POST /errands (stories/errands.md)
+  // ?stream=1 → SSE stream of the same per-step events the steps route emits,
+  // otherwise the folded JSON receipt.
+  //
+  // Deliberately not under /sessions: an errand creates none, and the URL is
+  // the first place that has to say so. The runner lives beside the session
+  // manager and borrows only its in-flight run counter — so a running errand
+  // pins `/health`, the shutdown 409 and the idle reaper exactly as a session's
+  // run does.
+  app.post('/errands', async (req: Request, res: Response, next: NextFunction) => {
+    const streaming = req.query['stream'] === '1';
+
+    try {
+      const parsed = parseErrandRequest(req.body);
+      if (typeof parsed === 'string') {
+        res.status(400).json({ error: parsed });
+        return;
+      }
+
+      // Before any SSE header flushes: a tab someone else is driving is a 409,
+      // and once the stream is open the only shape left is a 200 that says the
+      // errand ran (stories/errands.md §The wheel).
+      const started = await errandRunner.begin(parsed);
+      if (!started.ok) {
+        res
+          .status(409)
+          .json({ error: started.refusal.error, holder: started.refusal.holder });
+        return;
+      }
+      const { lease } = started;
+
+      try {
+        if (streaming) {
+          const sse = openSseStream(res);
+          try {
+            await errandRunner.run(lease, parsed, sse.emit, sse.signal);
+          } catch (err) {
+            if (!sse.clientGone) {
+              const message = err instanceof Error ? err.message : String(err);
+              sse.emit({ type: 'output', msg: `Server error: ${message}`, kind: 'error' });
+              sse.emit({ type: 'done', status: 'error' });
+            }
+          } finally {
+            sse.close();
+          }
+          return;
+        }
+
+        const receipt = await errandRunner.run(lease, parsed);
+        res.status(200).json(receipt);
+      } finally {
+        // `run` releases in its own `finally`; this covers the gap between
+        // `begin` and it — `openSseStream` throwing there would otherwise
+        // strand both the tab lock and the in-flight run counter. Idempotent.
+        lease.release();
+      }
+    } catch (err) {
       next(err);
     }
   });
@@ -1132,11 +1257,20 @@ export function createApiServer(
               // tab out from under a live run.
               return complete ? null : UNKNOWN_HOLDER;
             },
+            // The second holder kind (stories/errands.md §The wheel, amending
+            // cdp-tabs §2). Synchronous and exact — an errand's holds are in
+            // this process's memory, so there is no maybe to fail closed on.
+            errandHolding: (id) => errandLocks.holder(port, id),
           }),
         );
 
         if (!result.ok) {
-          res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+          res.status(statusForCdpFailure(result.kind)).json({
+            error: result.error,
+            // Present only on the errand refusal, so the MCP side can map it to
+            // a message naming the errand rather than the generic HTTP arm.
+            ...(result.holder ? { holder: result.holder } : {}),
+          });
           return;
         }
 
@@ -1220,6 +1354,7 @@ export function createApiServer(
     app,
     sessionManager,
     idleMonitor,
+    errandLocks,
     beginShutdown: () => {
       shuttingDown = true;
     },
@@ -1487,6 +1622,101 @@ function parseRunSettings(raw: unknown): RunSettings | string {
   }
 
   return out;
+}
+
+/**
+ * Parse an errand request off a request body, or return the 400 message.
+ *
+ * An explicit per-field allow-list, like the steps route's request builder and
+ * for the same reason: `ErrandRequest` is BUILT here, so widening the type
+ * alone compiles cleanly and drops the field at runtime — which is exactly how
+ * `envName` was lost once.
+ *
+ * Every refusal names what was wrong. An errand is one request with no state
+ * behind it, so a caller that guessed a field name has nothing to inspect
+ * afterwards; the refusal is the only feedback there is.
+ */
+function parseErrandRequest(raw: unknown): ErrandRequest | string {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return 'Request body must be an object';
+  }
+  const body = raw as Record<string, unknown>;
+
+  if (!body.steps || !Array.isArray(body.steps) || body.steps.length === 0) {
+    return 'Request body must include a "steps" array with at least one step';
+  }
+  if (!body.steps.every((s: unknown) => typeof s === 'string')) {
+    return 'All steps must be strings';
+  }
+
+  const port = body.port;
+  if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    return `"port" must be a valid TCP port (got ${JSON.stringify(port)})`;
+  }
+
+  // Exact, and only exact. The tab was matched MCP-side against the same
+  // filtered listing `list_cdp_browsers` shows, so the server is handed the
+  // winner rather than a name to arbitrate.
+  const targetId = body.targetId;
+  if (typeof targetId !== 'string' || targetId === '') {
+    return '"targetId" is required and must be a non-empty string';
+  }
+
+  // The synthetic `<root>/.aiui-errand.md`. Required: it is the only thing a
+  // project root is resolved from, and without it the project layer of
+  // `effectiveSettings` falls back to server defaults with nothing saying so.
+  const testFilePath = body.testFilePath;
+  if (typeof testFilePath !== 'string' || testFilePath === '') {
+    return '"testFilePath" is required — the errand\'s project root is resolved from it';
+  }
+
+  // Echoed into the receipt rather than re-derived: every result says which
+  // root it used (stories/mcp-no-project.md §Locked).
+  const root = body.root;
+  if (typeof root !== 'string' || root === '') {
+    return '"root" is required — the receipt must say which root the errand used';
+  }
+  if (!path.isAbsolute(root)) {
+    return `"root" must be an absolute path (got "${root}")`;
+  }
+  const scope = body.scope;
+  if (scope !== 'project' && scope !== 'user') {
+    return '"scope" must be "project" or "user"';
+  }
+
+  const request: ErrandRequest = {
+    port,
+    targetId,
+    steps: body.steps as string[],
+    testFilePath,
+    root,
+    scope,
+  };
+
+  if (body.keepOpen !== undefined) {
+    if (typeof body.keepOpen !== 'boolean') {
+      return '"keepOpen" must be a boolean';
+    }
+    request.keepOpen = body.keepOpen;
+  }
+  if (body.envName !== undefined) {
+    if (typeof body.envName !== 'string') {
+      return '"envName" must be a string';
+    }
+    request.envName = body.envName;
+  }
+  if (body.env !== undefined) {
+    if (typeof body.env !== 'object' || body.env === null || Array.isArray(body.env)) {
+      return '"env" must be an object';
+    }
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(body.env)) {
+      if (typeof v === 'string') env[k] = v;
+    }
+    request.env = env;
+  }
+
+  return request;
 }
 
 /**

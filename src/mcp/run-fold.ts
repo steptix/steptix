@@ -8,7 +8,13 @@
  * lists different lengths.
  */
 import type { FrameInfo } from '../server/session-manager.js';
-import type { EffectiveSettings, RunEvent, ScreenshotsReturn } from './types.js';
+import type {
+  EffectiveSettings,
+  ErrandSummary,
+  ErrandTab,
+  RunEvent,
+  ScreenshotsReturn,
+} from './types.js';
 
 export type StepStatus = 'passed' | 'failed' | 'skipped' | 'not-run' | 'unknown';
 export type RunStatus = 'passed' | 'failed' | 'error' | 'aborted';
@@ -42,6 +48,22 @@ export interface FoldedStep {
     unexpected: boolean;
   } | null;
 }
+
+/**
+ * The warning a truncated stream earns, verbatim, so a caller that cannot offer
+ * its remedy can drop it by IDENTITY instead of matching its prose.
+ *
+ * `run_errand` is that caller: `get_last_run` is addressed by `session_id`
+ * (`getLastRunInput`), and an errand has no session — so this text names a call
+ * the errand's caller cannot make. It substitutes its own remedy in
+ * `errandWarnings` (src/mcp/tools.ts), which BOTH its receipt paths run — the
+ * truncated one and the finished one, since a stream can die after the `done`
+ * frame and still fold with `streamDropped` set. Exported for that filter
+ * alone; reword it freely, the filter follows.
+ */
+export const STREAM_DROPPED_WARNING =
+  'The connection to the server ended without a completion event. The run ' +
+  'may still be executing there; call get_last_run to check.';
 
 export interface FoldedRun {
   status: RunStatus;
@@ -390,10 +412,7 @@ export function foldRun(input: FoldInput): FoldedRun {
     );
   }
   if (streamDropped) {
-    warnings.push(
-      'The connection to the server ended without a completion event. The run ' +
-        'may still be executing there; call get_last_run to check.',
-    );
+    warnings.push(STREAM_DROPPED_WARNING);
   }
   if (doneStatus === 'aborted') {
     // Not expected: the only abort source is our own disconnect, and a client
@@ -503,6 +522,65 @@ function readEffectiveSettings(value: unknown): EffectiveSettings | null {
     sendScreenshots: record.sendScreenshots,
     sources,
   };
+}
+
+/**
+ * The errand's own accounting, off the `done` frame (stories/errands.md
+ * §Return).
+ *
+ * Separate from `foldRun` rather than a field on it: the fold is shared with
+ * the two session run tools, and an errand block on their results would be a
+ * key that is always null. The receipt is `foldRun`'s output plus this.
+ *
+ * Validated field by field for the same reason `readEffectiveSettings` is —
+ * this is wire data, and a malformed block must read as "no errand" (which the
+ * tool reports as an attach failure) rather than reach an output schema that
+ * rejects it after the errand has already driven someone's tab.
+ *
+ * Returns null when no `done` frame carried one, which is what an errand that
+ * never attached looks like.
+ */
+export function readErrandSummary(events: readonly RunEvent[]): ErrandSummary | null {
+  const done = events.find((event) => event.type === 'done');
+  if (!done || done.type !== 'done') return null;
+  const value = done.errand as unknown;
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.errandId !== 'string' || record.errandId === '') return null;
+  if (typeof record.root !== 'string') return null;
+  if (record.scope !== 'project' && record.scope !== 'user') return null;
+  const openedTabs = readErrandTabs(record.openedTabs);
+  const keptOpen = readErrandTabs(record.keptOpen);
+  if (openedTabs === null || keptOpen === null) return null;
+  return {
+    errandId: record.errandId,
+    root: record.root,
+    scope: record.scope,
+    // The two page reads the detach path is allowed to fail at: a tab that
+    // went away under us still produces a receipt, with these empty.
+    finalUrl: typeof record.finalUrl === 'string' ? record.finalUrl : '',
+    finalTitle: typeof record.finalTitle === 'string' ? record.finalTitle : '',
+    openedTabs,
+    keptOpen,
+  };
+}
+
+/** One tab list off the wire, or null when it is not one. A tab whose
+ *  `targetId` never resolved simply omits the key — the url and title still
+ *  identify it — so it is read as optional rather than required. */
+function readErrandTabs(value: unknown): ErrandTab[] | null {
+  if (!Array.isArray(value)) return null;
+  const tabs: ErrandTab[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return null;
+    const record = entry as Record<string, unknown>;
+    tabs.push({
+      ...(typeof record.targetId === 'string' && { targetId: record.targetId }),
+      url: typeof record.url === 'string' ? record.url : '',
+      title: typeof record.title === 'string' ? record.title : '',
+    });
+  }
+  return tabs;
 }
 
 /**
