@@ -327,22 +327,10 @@ export class ErrandRunner {
         port: request.port,
         tab: `targetId:${request.targetId}`,
       });
-      const browserTracker = new BrowserTracker(borrowed);
-      logger.info(
-        `Errand ${errandId}: borrowed tab ${request.targetId} on port ${request.port} ` +
-          `(${request.steps.length} step(s))`,
-      );
-
-      const outcome: ActOutcome = {
-        results: [],
-        captures: {},
-        status: 'passed',
-        stepsCompleted: 0,
-        error: null,
-        line: 0,
-      };
       /**
        * Every tab this errand opened, as the sweep that saw it did.
+       *
+       * Declared BEFORE the tracker below, which closes over it.
        *
        * Written during the run rather than walked at detach because the receipt
        * names the tabs an errand opened "whether or not it survived"
@@ -358,6 +346,17 @@ export class ErrandRunner {
        * `finally`, so what a step opened is recorded before a later step can
        * close it, and once more at the detach, for the tab that arrives after
        * the last step. Neither pass alone is enough at either moment.
+       * `recordLaunchedTabs` runs at a THIRD moment as well, inside the wrapped
+       * `close` below, because a step's `finally` is already too late for a
+       * browser that same step closed.
+       *
+       * One boundary is left, and it is that same case one size smaller: a PAGE
+       * opened and closed inside a SINGLE step of the borrowed browser is out
+       * of its tracker (manager.ts:339) before that step's `finally` sweeps, so
+       * `openedTabs` does not name it. Closing that gap needs a hook at OPEN
+       * time — `PageTracker` has none, and nothing here can add one from the
+       * outside; the browser-level case below is reachable only because the
+       * CLOSE goes through a tracker this errand constructs.
        *
        * Keyed on the PAGE, not the target id, because the id is the one thing
        * about a tab that can be missing: it resolves asynchronously and can
@@ -369,6 +368,47 @@ export class ErrandRunner {
        * whole life of the tab and is the same identity the tracker holds.
        */
       const ownTabs = new Map<Page, ErrandTab>();
+      const browserTracker = new BrowserTracker(borrowed);
+      /**
+       * Record before the splice.
+       *
+       * `openBrowser` and `closeBrowser` are SUB-ACTIONS of one `executeStep`
+       * turn (step-executor.ts:961, :1034), so a single step can open a browser
+       * and close it again — and `BrowserTracker.close` splices the session out
+       * of `all()` (manager.ts:892) with every tab it held. By the time that
+       * step's `finally` runs `recordLaunchedTabs` there is nothing left to
+       * walk, so a whole browser came and went on the user's screen and the
+       * receipt named none of its tabs. Sweeping from inside `close`, before it
+       * delegates, is the last moment the session is still in the list.
+       *
+       * Wrapped on the instance rather than pushed into `BrowserTracker`
+       * itself: the tracker is the runner's for every other caller too (the
+       * session path, the CLI), and none of them keeps an errand receipt.
+       *
+       * Recording on EVERY close, not just the mid-step ones, costs nothing:
+       * `recordLaunchedTabs` is keyed on the page and keeps each entry's first
+       * position, so a repeat refreshes a description without reordering the
+       * receipt, and it never throws — writing the receipt must not be a new
+       * way for `closeBrowser` to fail.
+       */
+      const closeTrackedBrowser = browserTracker.close.bind(browserTracker);
+      browserTracker.close = async (label: string): Promise<void> => {
+        await this.recordLaunchedTabs(browserTracker, borrowed, ownTabs);
+        await closeTrackedBrowser(label);
+      };
+      logger.info(
+        `Errand ${errandId}: borrowed tab ${request.targetId} on port ${request.port} ` +
+          `(${request.steps.length} step(s))`,
+      );
+
+      const outcome: ActOutcome = {
+        results: [],
+        captures: {},
+        status: 'passed',
+        stepsCompleted: 0,
+        error: null,
+        line: 0,
+      };
       let errand: ErrandSummary;
       try {
         await this.act({
@@ -813,19 +853,27 @@ export class ErrandRunner {
    *
    * Run after every step AND once more at the detach, for the two things a
    * detach-only walk cannot see — a tab a later step closed, which its tracker
-   * drops (manager.ts:331), and a whole browser a later step closed, which
+   * drops (manager.ts:339), and a whole browser a later step closed, which
    * `BrowserTracker.close` splices out of `all()` (manager.ts:892) with every
    * tab it held. Recording the same tab twice is free: `ownTabs` is keyed on the
    * page and keeps its first position, so a later pass refreshes the
    * description without reordering the receipt.
    *
+   * Run at a THIRD moment too, and for the case neither of those two can reach:
+   * `drive` wraps the tracker's own `close` so this runs BEFORE the splice,
+   * because `openBrowser` and `closeBrowser` are sub-actions of ONE
+   * `executeStep` turn (step-executor.ts:961, :1034) — a browser opened and
+   * closed inside a single step is out of `all()` before that step's `finally`
+   * ever asks.
+   *
    * Returns what it saw THIS pass, per session, so the detach can put a
    * browser's tabs back into `stillOpen` when the close did not take. The step
-   * loop discards it.
+   * loop and the close wrapper discard it.
    *
    * Never throws: `all()` is a plain array read and everything after it is
-   * guarded, which is what lets one caller be a `finally` inside the step loop
-   * and the other the detach.
+   * guarded, which is what lets its callers be a `finally` inside the step loop,
+   * the detach, and a browser close that must not start failing because the
+   * receipt could not be written.
    */
   private async recordLaunchedTabs(
     browserTracker: BrowserTracker,

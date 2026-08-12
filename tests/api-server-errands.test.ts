@@ -113,7 +113,7 @@ vi.mock('../src/browser/manager.js', () => {
    *     `markExpected` — which is what the real `openPage` action calls once
    *     `context.newPage()` resolves (step-executor.ts:869). A tab that appears
    *     with nobody claiming it that way is somebody else's.
-   *  3. A page that closes is dropped (manager.ts:331), so a tab a step opened
+   *  3. A page that closes is dropped (manager.ts:339), so a tab a step opened
    *     and later closed is not in `tabs()` by the time the detach looks.
    */
   class PageTracker {
@@ -1038,7 +1038,7 @@ describe('POST /errands', () => {
   it('names a tab opened INSIDE a launched browser and closed by a later step', async () => {
     // The borrowed browser's invariant (see "names a tab it opened and then
     // CLOSED" below) applied where the second tracker lives. A launched
-    // browser's tracker drops a page the moment it closes (manager.ts:331), so
+    // browser's tracker drops a page the moment it closes (manager.ts:339), so
     // a pass that runs only at the detach can only ever report survivors — and
     // `openedTabs` promises every tab the errand opened "whether or not it
     // survived" (src/mcp/schemas.ts, `ErrandSummary`). Recorded in the step
@@ -1146,6 +1146,120 @@ describe('POST /errands', () => {
     expect(body.errand.keptOpen).toEqual([]);
     expect(borrowedPage.close).not.toHaveBeenCalled();
     expect(borrowedPage.bringToFront).toHaveBeenCalled();
+  });
+
+  it('names the tabs of a browser opened AND closed inside ONE step', async () => {
+    // The same loss as the test above, one turn smaller — and the step loop's
+    // `finally` cannot reach it. `openBrowser` and `closeBrowser` are SUB-ACTIONS
+    // of a single `executeStep` turn (step-executor.ts:961, :1034), so both
+    // halves can land before the step returns; `BrowserTracker.close` has
+    // already spliced the session out of `all()` (manager.ts:892) by the time
+    // that `finally` sweeps, so the sweep walks a tracker holding only the
+    // borrowed browser and the receipt names nothing. The test above is the
+    // control: same browser, same close, one step later, and the step-loop sweep
+    // catches it there.
+    const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
+    const worker = {
+      browser: { isConnected: () => true },
+      context: { close: vi.fn(async () => {}) },
+      page: workerPage,
+      pageTracker: new PageTrackerMock(workerPage as any),
+    };
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      opts.browserTracker!.add('worker', worker as any);
+      await (opts.browserTracker as any).close('worker');
+      return {
+        index: idx as number,
+        instruction: 'opened a browser and closed it again',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open a second browser and close it again'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // Both halves inside the one step: the browser was closed by the step, so
+    // the detach's own close loop never saw it — its `all()` walk has only the
+    // borrowed session left.
+    expect(worker.context.close).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toEqual([worker, lastBorrowed]);
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+    ]);
+    // The browser went while the step was still running, so nothing of it is
+    // open on return.
+    expect(body.errand.keptOpen).toEqual([]);
+    expect(borrowedPage.close).not.toHaveBeenCalled();
+    expect(borrowedPage.bringToFront).toHaveBeenCalled();
+  });
+
+  it('leaves a tab a LAUNCHED browser only adopted off the receipt', async () => {
+    // The launched-level mirror of "leaves a tab it only ADOPTED alone" below,
+    // and it exists because the two sweeps ask the same provenance question of
+    // two different trackers. A browser this errand launched adopts every page
+    // opened on it afterwards, whoever opened it — `context.on('page')` does not
+    // ask — and those arrive `unexpected`, cleared only by the `markExpected`
+    // the real `openPage` calls. `openedTabs` promises the tabs the errand
+    // OPENED, so a tab it merely watched appear is not one it may claim; without
+    // the gate the receipt would invent a page the caller never asked for and
+    // hide that somebody else put it there. The browser's own first page is the
+    // control sitting right beside it: this errand opened that browser, so it
+    // opened that page, and it IS named.
+    const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
+    const stray = makePage('worker-stray', 'https://news.example/', 'The News');
+    const worker = {
+      browser: { isConnected: () => true },
+      context: { close: vi.fn(async () => {}) },
+      page: workerPage,
+      pageTracker: new PageTrackerMock(workerPage as any),
+    };
+    /** Which tracker each step was handed — `add` auto-promotes, so step 2's is
+     *  the LAUNCHED browser's, which is where the stray has to land. */
+    const trackerPerStep: unknown[] = [];
+    let step = 0;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      trackerPerStep.push(opts.pageTracker);
+      if (step++ === 0) {
+        opts.browserTracker!.add('worker', worker as any);
+      } else {
+        // Adopted, never claimed: no `markExpected`, because no step of this
+        // errand opened it. That is the whole difference from the tests above.
+        opts.pageTracker!.addPage(stray as any);
+      }
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open a second browser', 'watch a tab appear in it'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // The stray really is in the LAUNCHED browser's tracker, unexpected and
+    // tracked — so its absence from the receipt is the gate's doing and not the
+    // sweep having missed the tracker entirely.
+    expect(trackerPerStep[1]).toBe(worker.pageTracker);
+    const strayEntry = worker.pageTracker.tabs().find((t: any) => t.page === stray);
+    expect(strayEntry?.unexpected).toBe(true);
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+    ]);
+    expect(body.errand.keptOpen).toEqual([]);
   });
 
   it('runs the house rules on the failure path too', async () => {

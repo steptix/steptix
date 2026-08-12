@@ -212,16 +212,56 @@ vi.mock('../src/browser/manager.js', () => {
     }
   }
 
+  // NEVER REJECTS, like the real one (manager.ts:1482 wraps its whole body and
+  // logs), and a close that worked severs the connection — which is what the
+  // detach reads to tell a closed browser from a wedged one.
+  //
+  // Declared out here, not inline below, because `BrowserTracker.close` routes
+  // through it exactly as the real tracker routes through the real one.
+  const closeBrowser = vi.fn(async (session: any) => {
+    try {
+      if (session.cdp && session.cdpTabOpenedByUs) await session.page.close();
+    } catch {
+      return;
+    }
+    session.browser = { isConnected: () => false };
+  });
+
   class BrowserTracker {
-    sessions: any[] = [];
-    constructor(initialSession: any) {
-      this.sessions.push(initialSession);
+    sessions: { label: string; session: any }[] = [];
+    constructor(initialSession: any, initialLabel = 'default') {
+      this.sessions.push({ label: initialLabel, session: initialSession });
+    }
+    add(label: string, session: any): void {
+      this.sessions.push({ label, session });
     }
     all() {
-      return this.sessions;
+      return this.sessions.map((s) => s.session);
     }
     getActive() {
-      return this.sessions[this.sessions.length - 1];
+      return this.sessions[this.sessions.length - 1]!.session;
+    }
+    /**
+     * The real one's load-bearing half (manager.ts:877): route through
+     * `closeBrowser`, then SPLICE the session out — so a browser a step closed
+     * is gone from `all()`, and with it every tab it ever held.
+     *
+     * Carried here because the errand runner WRAPS this method to sweep the
+     * launched trackers before that splice; a stand-in missing it is not a
+     * stand-in for the class the runner is handed. No errand in this suite opens
+     * a second browser, so nothing here calls it — it exists so the wrap has
+     * something real to wrap.
+     */
+    async close(label: string): Promise<void> {
+      const idx = this.sessions.findIndex((s) => s.label === label);
+      if (idx === -1) throw new Error(`No browser registered as "${label}"`);
+      const { session } = this.sessions[idx]!;
+      try {
+        await closeBrowser(session);
+      } catch {
+        // The real one logs and splices anyway.
+      }
+      this.sessions.splice(idx, 1);
     }
     closeAll = vi.fn(async () => {
       this.sessions.length = 0;
@@ -249,17 +289,7 @@ vi.mock('../src/browser/manager.js', () => {
         cdpTabOpenedByUs: false,
       };
     }),
-    // NEVER REJECTS, like the real one (manager.ts:1482 wraps its whole body and
-    // logs), and a close that worked severs the connection — which is what the
-    // detach reads to tell a closed browser from a wedged one.
-    closeBrowser: vi.fn(async (session: any) => {
-      try {
-        if (session.cdp && session.cdpTabOpenedByUs) await session.page.close();
-      } catch {
-        return;
-      }
-      session.browser = { isConnected: () => false };
-    }),
+    closeBrowser,
     briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
       Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
     resolveVideoMode: vi.fn(() => 'off'),
