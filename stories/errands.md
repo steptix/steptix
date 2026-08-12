@@ -529,6 +529,38 @@ to the seam + dialect tool-name manifests (`mcp-seam.test.ts`,
    and opened-browsers accounting, `keep_open`, `effectiveSettings` echo,
    the live probe matrix per host model, results recorded here.
 
+## Live pass record
+
+**2026-08-13, MCP-client smoke — 17/17 checks passed.** A real MCP client
+over stdio spawned the real `aiui mcp`, which auto-started a fresh API
+server for a throwaway project; `start_cdp_browser` launched a real
+project-scope Chrome, and `run_errand` drove it with real AI resolution
+(model `aibroker/openrouter/openai/gpt-5.6-luna`, 3/3 steps): navigation,
+a click, and a `store as` capture returned in the receipt alongside
+`errandId`, root+scope, final url/title, empty `openedTabs` and the
+`effectiveSettings` echo. `list_sessions` was identical before and after
+(item 1). A zero-match `tab` refused listing the open tabs, and
+`session_id` refused naming `run_steps` before any browser work (items 6
+and 7). Item (2) ran in full: `run_steps` bound a session to the same tab
+by `targetId:`, the errand still worked over it while idle, and the
+session's next batch succeeded afterwards — the two-client coexistence
+re-proved through the real tool.
+
+Two observations from the same pass, neither an errand defect: a project
+`.env` carrying a `SERVER_URL` routes every tool at that project to the
+server it names — the first driver attempt inherited the repo's own
+`.env` and reached the developer's live server (caught before any errand
+ran; a throwaway project must mint its own `SERVER_URL`); and directly
+after a same-process `close_session`, `close_cdp_tab` on that session's
+tab still refused naming it — a second attempt moments later (fresh MCP
+process, `allow_foreign_session` close, ~3s settle) closed the session,
+the tab and the browser cleanly, so session teardown's hold release lags
+its response.
+
+Still to run live: the human half of item (5) (does the borrowed tab
+visibly come forward), and the item (8) routing probe matrix per host
+model.
+
 ## Open questions
 
 - **Leave-where-found.** Should an errand offer `restore_url: true` to
