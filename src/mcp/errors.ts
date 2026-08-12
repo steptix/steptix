@@ -674,8 +674,10 @@ export function errandTabAmbiguous(spec: string, matches: readonly CdpTab[]): Mc
 /**
  * The stream came back with no errand block on its `done` frame.
  *
- * The errand's accounting is built in a `finally`, so it rides every `done` an
- * errand itself emits — including a failing one. Its absence means the request
+ * The runner builds the accounting in a `finally` and emits the `done` frame
+ * after it, and the step loop is wrapped so a throw becomes that frame's
+ * `status: 'error'` rather than escaping — so the block rides every `done` an
+ * errand itself emits, including a failing one. Its absence means the request
  * died before the tab was ever borrowed (the attach refused, or the route's own
  * catch answered), so there is no receipt to return and nothing ran.
  *

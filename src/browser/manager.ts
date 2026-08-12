@@ -160,9 +160,18 @@ export interface TrackedPage {
    * True when this tab appeared with nothing in this session accounting for
    * it: no step asked for it, and its opener is not a page we drive.
    *
-   * Diagnostics only, never enforcement. A wrong guess here is a misleading
-   * note in a report; the same guess used as a guard would break a legitimate
-   * test. See the §11 rejection of opener-based filtering as a gate.
+   * Diagnostics for a session, never enforcement: a wrong guess here is a
+   * misleading note in a report, while the same guess used as a guard would
+   * break a legitimate test. See the §11 rejection of opener-based filtering
+   * as a gate.
+   *
+   * **An errand is the one exception, and it is exact about why**
+   * (stories/errands.md §House rules 1, `errandOwnTargetIds` in
+   * `src/server/errand-runner.ts`). An errand closes what it opened, so the
+   * flag decides a destructive act there — but the failure directions are not
+   * symmetric the way they are for a run: a false `unexpected` strands a tab,
+   * while a false `expected` closes somebody else's. Stranding is the safe
+   * direction, which is the trade a session does not have.
    */
   unexpected: boolean;
 }

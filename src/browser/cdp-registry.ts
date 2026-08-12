@@ -728,9 +728,10 @@ async function resolveCdpOwner(
  * Close one tab in a browser this project owns.
  *
  * Every guard below closes a different hole, and nothing irreversible happens
- * until the request has cleared all of them. The ordering that matters is
- * holders-before-last-tab — both the session check (guard 3) and the errand
- * check (guard 4): see guard 3 for why the cheaper order was wrong.
+ * until the request has cleared all of them. Two orderings are load-bearing:
+ * both holder checks run before the last-tab gate (see guard 4 for why the
+ * cheaper order was wrong), and the errand check runs before the session one
+ * (see guard 3).
  *
  * **Callers must serialise concurrent closes against one browser** (the route
  * does, via its per-port queue). Guard 5 reads a tab list to decide whether
@@ -785,7 +786,40 @@ export async function closeCdpTab(
     };
   }
 
-  // 3. A tab a live session is driving. Yanking it turns that session's next
+  // 3. A tab an ERRAND is driving, or one it opened along the way
+  //    (stories/errands.md §The wheel).
+  //
+  //    **First of the two holder checks, deliberately.** This one is
+  //    synchronous, exact and answered from this process's own memory, while
+  //    the session join is an await over every live session and can only say
+  //    "somebody is on this tab", not whether they are doing anything with it.
+  //    Both holders on one tab is the ordinary case — an errand borrows a tab
+  //    an idle session is sitting on, which the errand lock permits — and with
+  //    the session check first that close was refused with "close_session, then
+  //    retry": destructive advice about the wrong holder, and advice that does
+  //    not work, because the errand still holds the tab afterwards.
+  const errand = opts.errandHolding?.(opts.targetId);
+  if (errand) {
+    const opened = errand.tabRole === 'opened';
+    return {
+      ok: false,
+      kind: 'refused',
+      holder: { kind: 'errand', errandId: errand.errandId, tabRole: errand.tabRole },
+      error:
+        `Errand ${errand.errandId} is driving that tab ("${target.title || target.url}")` +
+        (opened ? ', which it opened during its own run' : '') +
+        '. Closing it would break the errand mid-run.\n\n' +
+        'Wait for the errand to finish, then retry — an errand is one request and ' +
+        'lets go of every tab it holds when it returns. There is no way to end one ' +
+        'early.' +
+        (opened
+          ? '\nBy then that tab will normally be gone anyway: an errand closes what it ' +
+            'opened, so the close becomes moot.'
+          : ''),
+    };
+  }
+
+  // 4. A tab a live session is driving. Yanking it turns that session's next
   //    step into a baffling page-closed failure, so the session gets closed
   //    deliberately first — via the door that exists for it.
   //
@@ -822,36 +856,6 @@ export async function closeCdpTab(
         'Closing it would break that session mid-run.\n\n' +
         `Close the session first — close_session with session_id "${holder}" — then ` +
         'retry, or leave the tab alone if the session is still wanted.',
-    };
-  }
-
-  // 4. A tab an ERRAND is driving, or one it opened along the way
-  //    (stories/errands.md §The wheel). Beside the session refusal and before
-  //    the last-tab gate, for the reason guard 3 gives: an errand can be
-  //    borrowing a one-tab browser's only tab, and "pass allow_browser_exit"
-  //    would be advice leading into a different refusal.
-  //
-  //    The remedy is wait-and-retry rather than close-the-holder: there is no
-  //    `close_errand`, and there does not need to be — an errand is one request
-  //    and releases every tab it holds when it returns.
-  const errand = opts.errandHolding?.(opts.targetId);
-  if (errand) {
-    const opened = errand.tabRole === 'opened';
-    return {
-      ok: false,
-      kind: 'refused',
-      holder: { kind: 'errand', errandId: errand.errandId, tabRole: errand.tabRole },
-      error:
-        `Errand ${errand.errandId} is driving that tab ("${target.title || target.url}")` +
-        (opened ? ', which it opened during its own run' : '') +
-        '. Closing it would break the errand mid-run.\n\n' +
-        'Wait for the errand to finish, then retry — an errand is one request and ' +
-        'lets go of every tab it holds when it returns. There is no way to end one ' +
-        'early.' +
-        (opened
-          ? '\nBy then that tab will normally be gone anyway: an errand closes what it ' +
-            'opened, so the close becomes moot.'
-          : ''),
     };
   }
 

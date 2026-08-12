@@ -14,7 +14,10 @@
  *   sessions, is untouched.
  * - **Finishing IS releasing.** There is no `close_errand` and no release step
  *   anyone can forget: the lease is dropped in the runner's `finally`, so an
- *   errand that throws, aborts or wedges mid-detach still hands every tab back.
+ *   errand that throws or aborts still hands every tab back. A detach that
+ *   *hangs* is the one case this does not cover — it awaits page closes and a
+ *   `bringToFront` with no budget of their own, and the `finally` cannot run
+ *   until they settle.
  */
 
 export type ErrandTabRole = 'borrowed' | 'opened';
@@ -90,12 +93,6 @@ export class ErrandLocks {
     for (const [key, hold] of this.held) {
       if (hold.errandId === errandId) this.held.delete(key);
     }
-  }
-
-  /** Tabs held right now, across all ports. For tests and diagnostics: a lock
-   *  that leaks is invisible until the next errand is refused for no reason. */
-  get size(): number {
-    return this.held.size;
   }
 }
 

@@ -873,7 +873,7 @@ async function runErrand(
   args: ErrandArgs,
   signal: AbortSignal | undefined,
 ): Promise<ToolResult> {
-  const { port, scope: browserScope } = await resolveCdpTarget(
+  const { port } = await resolveCdpTarget(
     client,
     project.projectRoot,
     {
@@ -970,9 +970,10 @@ async function runErrand(
   });
 
   const errand = readErrandSummary(stream.events);
-  // No receipt means the tab was never borrowed — the accounting is built in a
-  // `finally`, so an errand that ran at all has one. `isError` is honest here
-  // and would be wrong for a failed step.
+  // No receipt means the tab was never borrowed. The accounting is built in a
+  // `finally` and the step loop is wrapped so nothing throws past it, so an
+  // errand that ran at all has one — even one that ended in an error.
+  // `isError` is honest here and would be wrong for a failed step.
   if (errand === null) {
     return errorResult(errandDidNotAttach(args.tab, folded.error ?? firstError(folded)));
   }
@@ -1030,7 +1031,6 @@ async function runErrand(
  */
 async function closeTabOrExplainHolder(
   client: ApiClient,
-  targetId: string,
   args: Parameters<ApiClient['closeCdpTab']>[0],
   signal: AbortSignal | undefined,
 ): Promise<Awaited<ReturnType<ApiClient['closeCdpTab']>>> {
@@ -1038,8 +1038,10 @@ async function closeTabOrExplainHolder(
     return await client.closeCdpTab(args, signal);
   } catch (err) {
     if (err instanceof ApiHttpError && err.holder?.kind === 'errand') {
+      // Read off the same object the call was made with, so the tab the refusal
+      // names is by construction the tab the close was aimed at.
       throw new PreflightFailure(
-        cdpTabHeldByErrand(err.holder.errandId, err.holder.tabRole, targetId),
+        cdpTabHeldByErrand(err.holder.errandId, err.holder.tabRole, args.targetId),
       );
     }
     throw err;
@@ -2068,7 +2070,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // The close route's 409 can now come from the errand turn lock as
           // well as from a session, and the two need different sentences — this
           // wrapper is where the holder shape picks one.
-          const closed = await closeTabOrExplainHolder(client, args.target_id, {
+          const closed = await closeTabOrExplainHolder(client, {
               projectRoot: project.projectRoot,
               port,
               targetId: args.target_id,

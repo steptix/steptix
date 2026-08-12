@@ -145,6 +145,16 @@ export function createApiServer(
   app: express.Express;
   sessionManager: SessionManager;
   idleMonitor: IdleMonitor;
+  /**
+   * The one turn-lock registry this app runs on (stories/errands.md §The
+   * wheel).
+   *
+   * Returned so a test can put a hold on it and watch BOTH readers answer —
+   * the errand route's `begin` and the close guard's `errandHolding`. Two
+   * registries would pass every unit test either half has and refuse nothing
+   * in the app.
+   */
+  errandLocks: ErrandLocks;
   /** Close the app to new work (§2). Idempotent. */
   beginShutdown: () => void;
 } {
@@ -1334,6 +1344,7 @@ export function createApiServer(
     app,
     sessionManager,
     idleMonitor,
+    errandLocks,
     beginShutdown: () => {
       shuttingDown = true;
     },

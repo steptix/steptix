@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
 import { resetRegistry } from '../src/mcp/registry.js';
+import { errandTabHeldByErrand, errandTabHeldBySession } from '../src/mcp/errors.js';
 import { ApiHttpError } from '../src/mcp/types.js';
 import type {
   ApiClient,
@@ -609,11 +610,13 @@ describe('a tab somebody else is driving', () => {
     const result = await errand(h, { tab: 'title~Cart' });
 
     expect(result.isError).toBe(true);
-    expect(text(result)).toContain('errand-7c1');
-    expect(text(result)).toMatch(/wait/i);
-    // The attach refusal's prose and its remedy, both absent.
-    expect(text(result)).not.toContain('never got tab');
-    expect(text(result)).not.toContain('may have been closed');
+    // Equality against the builder, not a list of phrases the text must avoid:
+    // "does not say 'never got tab'" passes again the moment either message is
+    // reworded, while this can only pass when the `holder` shape picked THIS
+    // refusal.
+    expect(text(result)).toBe(
+      errandTabHeldByErrand('errand-7c1', 'borrowed', 'title~Cart').content[0]!.text,
+    );
   });
 
   it('names the holding session, and its two remedies, for a session 409', async () => {
@@ -627,12 +630,13 @@ describe('a tab somebody else is driving', () => {
     const result = await errand(h, { tab: 'title~Cart' });
 
     expect(result.isError).toBe(true);
-    expect(text(result)).toContain('mcp:steps-1');
     // Unlike an errand, a session outlives its batch — so there are two ways
-    // out, and which is right depends on whether it is still wanted.
-    expect(text(result)).toMatch(/wait/i);
+    // out, and which is right depends on whether it is still wanted. Pinned by
+    // equality for the same reason as its sibling above.
+    expect(text(result)).toBe(
+      errandTabHeldBySession('mcp:steps-1', 'title~Cart').content[0]!.text,
+    );
     expect(text(result)).toContain('close_session');
-    expect(text(result)).not.toContain('never got tab');
   });
 
   it('says an errand-OPENED tab will be gone, and sends the caller to re-list', async () => {

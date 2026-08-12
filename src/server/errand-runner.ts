@@ -117,13 +117,24 @@ export interface ErrandResponse {
  *  has none of its own, and a wedged tab must not stall the hand-back. */
 const TAB_TITLE_TIMEOUT_MS = 500;
 
-/** What the step loop produced, before the detach path adds the tab accounting. */
+/**
+ * What the step loop has produced so far.
+ *
+ * Owned by `drive` and mutated by `act` rather than returned, so a throw that
+ * escapes the loop still leaves the partial results where the `done` frame can
+ * pick them up. That frame is the only thing carrying the errand block, and its
+ * absence is read MCP-side as "nothing ran" — a lie once steps have already
+ * driven the user's tab.
+ */
 interface ActOutcome {
   results: StepResultResponse[];
   captures: Record<string, string>;
   status: ErrandResponse['status'];
   stepsCompleted: number;
   error: { step: number; message: string } | null;
+  /** 1-based index of the step in flight, so an error nothing else attributed
+   *  can still name one. */
+  line: number;
 }
 
 /** `begin`'s answer: the errand may drive, or somebody else is. */
@@ -137,8 +148,10 @@ export class ErrandRunner {
      *  running against one project see the same `.env` at the same moment. */
     private readonly projectBundles: ProjectBundleResolver,
     /** Shared with the `close_cdp_tab` guard, which consults the same holds
-     *  (stories/errands.md §The wheel). */
-    private readonly locks: ErrandLocks = new ErrandLocks(),
+     *  (stories/errands.md §The wheel). Required, not defaulted: a runner that
+     *  quietly minted its own registry would take locks nothing else can see,
+     *  and the close guard would wave through every tab an errand is driving. */
+    private readonly locks: ErrandLocks,
   ) {}
 
   /**
@@ -316,12 +329,20 @@ export class ErrandRunner {
           `(${request.steps.length} step(s))`,
       );
 
-      let outcome: ActOutcome;
+      const outcome: ActOutcome = {
+        results: [],
+        captures: {},
+        status: 'passed',
+        stepsCompleted: 0,
+        error: null,
+        line: 0,
+      };
       let errand: ErrandSummary;
       try {
-        outcome = await this.act({
+        await this.act({
           errandId,
           lease,
+          outcome,
           steps: request.steps,
           runConfig: settings.config,
           envDataCtx,
@@ -332,6 +353,18 @@ export class ErrandRunner {
           emit,
           signal,
         });
+      } catch (err) {
+        // Belt and braces over the per-step guard: nothing in `act` is meant to
+        // throw past the loop, but anything that does used to escape `drive`
+        // altogether, and the route answered with a bare `done: error` carrying
+        // no errand block — which the MCP side reports as "nothing ran" about a
+        // tab it has already driven. The block rides every `done` from here on;
+        // the only errand without one is the one that never got the tab.
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(`Errand ${errandId} failed outside a step: ${message}`);
+        emit({ type: 'output', msg: message, kind: 'error' });
+        outcome.status = 'error';
+        outcome.error = { step: Math.max(outcome.line, 1), message };
       } finally {
         // House rules, on every path including a throw: this is the errand's
         // whole personality, not a tidy-up.
@@ -382,6 +415,8 @@ export class ErrandRunner {
   private async act(args: {
     errandId: string;
     lease: ErrandLease;
+    /** Written as the loop goes, so a throw past it still leaves a receipt. */
+    outcome: ActOutcome;
     steps: string[];
     runConfig: Config;
     envDataCtx: EnvDataContext | null;
@@ -391,11 +426,11 @@ export class ErrandRunner {
     browserTracker: BrowserTracker;
     emit: (event: RunEvent) => void;
     signal: AbortSignal | undefined;
-  }): Promise<ActOutcome> {
-    const { errandId, lease, steps, emit, signal, browserTracker } = args;
+  }): Promise<void> {
+    const { errandId, lease, outcome, steps, emit, signal, browserTracker } = args;
 
     /**
-     * Claim the wheel on every tab the errand has opened so far.
+     * Claim the wheel on every tab the errand OPENED ITSELF.
      *
      * The lock covers the borrowed tab plus everything the errand opened, for
      * the same reason stories/cdp-tabs.md §Locked tracks all of a session's
@@ -408,7 +443,11 @@ export class ErrandRunner {
      */
     const claimOpenedTabs = async (): Promise<void> => {
       try {
-        lease.claimOpened((await args.borrowed.pageTracker.resolvedTargetIds()).ids);
+        // Awaited for its effect as much as its answer: the sweep resolves the
+        // in-flight target ids into the tracker's own entries, which is what
+        // makes reading them back beside `unexpected` say anything.
+        await args.borrowed.pageTracker.resolvedTargetIds();
+        lease.claimOpened(errandOwnTargetIds(args.borrowed.pageTracker.tabs()));
       } catch {
         // A tracker that cannot enumerate leaves the borrowed tab held, which
         // is the claim that matters; a tab whose id never resolved is one no
@@ -416,8 +455,7 @@ export class ErrandRunner {
       }
     };
 
-    const results: StepResultResponse[] = [];
-    const captures: Record<string, string> = {};
+    const { results, captures } = outcome;
     /**
      * The errand's variable scope — LOCAL, and gone when the request is.
      *
@@ -431,9 +469,6 @@ export class ErrandRunner {
     const apiResponseStore = new ApiResponseStore();
     const csrfTokens: Record<string, string> = {};
 
-    let status: ErrandResponse['status'] = 'passed';
-    let stepsCompleted = 0;
-    let error: { step: number; message: string } | null = null;
     /** Refreshed from the tracker after each step — openBrowser / switchBrowser
      *  / closeBrowser move which browser is active. */
     let active = args.borrowed;
@@ -449,22 +484,64 @@ export class ErrandRunner {
       }
     };
 
+    /**
+     * Record a step that threw, so the run can stop on it.
+     *
+     * Shared by the two things a step can throw from — resolving its
+     * placeholders and running it — because from the receipt's side they are
+     * the same event: this step, this reason, nothing after it.
+     */
+    const recordThrow = (line: number, sentStep: string, err: unknown, screenshot: string): void => {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`Errand ${errandId} step ${line} error: ${message}`);
+      results.push({
+        step: sentStep,
+        status: 'error',
+        actions: [],
+        screenshot,
+        reasoning: message,
+        outputs: {},
+      });
+      emit({
+        type: 'step:fail',
+        line,
+        error: message,
+        ...(screenshot && { screenshot }),
+      });
+      outcome.status = 'error';
+      outcome.error = { step: line, message };
+    };
+
     for (let i = 0; i < steps.length; i++) {
       if (signal?.aborted) {
-        status = 'aborted';
+        outcome.status = 'aborted';
         logger.info(`Errand ${errandId}: aborted by client at step ${i + 1}/${steps.length}`);
         break;
       }
       const originalStep = steps[i]!;
       const line = i + 1;
+      outcome.line = line;
 
       // Env/data first (parse-time semantics), then runtime `{{...}}` against
       // the errand's own scope. With no env bundle the first pass is skipped
       // entirely, so `${env.X}` survives as literal text.
-      const envInterpolated = args.envDataCtx
-        ? interpolateEnvData(originalStep, args.envDataCtx)
-        : originalStep;
-      const interpolated = interpolate(envInterpolated, scope);
+      //
+      // Guarded, and the guard is the point: `interpolateEnvData` THROWS on an
+      // unknown `${env.X}` once an env bundle exists. Uncaught, that throw sat
+      // between steps rather than inside one — it escaped `act` and left the
+      // request with no errand block at all, so an errand that had already
+      // driven the user's tab was reported as never having started.
+      let interpolated: string;
+      try {
+        const envInterpolated = args.envDataCtx
+          ? interpolateEnvData(originalStep, args.envDataCtx)
+          : originalStep;
+        interpolated = interpolate(envInterpolated, scope);
+      } catch (err) {
+        emit({ type: 'step:start', line, ...(await tabSpread()) });
+        recordThrow(line, originalStep, err, '');
+        break;
+      }
 
       if (isSkippableStep(interpolated)) {
         logger.info(`Errand ${errandId}: skipping step ${line} (input/interactive not supported)`);
@@ -478,7 +555,7 @@ export class ErrandRunner {
           outputs: {},
         });
         emit({ type: 'step:pass', line, output: 'skipped' });
-        stepsCompleted++;
+        outcome.stepsCompleted++;
         continue;
       }
 
@@ -512,13 +589,10 @@ export class ErrandRunner {
         });
       } catch (err) {
         if (signal?.aborted) {
-          status = 'aborted';
+          outcome.status = 'aborted';
           logger.info(`Errand ${errandId}: aborted by client during step ${line}/${steps.length}`);
           break;
         }
-        const message = err instanceof Error ? err.message : String(err);
-        logger.error(`Errand ${errandId} step ${line} error: ${message}`);
-
         let errorScreenshot = '';
         try {
           const shot = await captureScreenshot(active.pageTracker.getActive());
@@ -526,22 +600,7 @@ export class ErrandRunner {
         } catch {
           // ignore
         }
-        results.push({
-          step: originalStep,
-          status: 'error',
-          actions: [],
-          screenshot: errorScreenshot,
-          reasoning: message,
-          outputs: {},
-        });
-        emit({
-          type: 'step:fail',
-          line,
-          error: message,
-          ...(errorScreenshot && { screenshot: errorScreenshot }),
-        });
-        status = 'error';
-        error = { step: line, message };
+        recordThrow(line, originalStep, err, errorScreenshot);
         break;
       } finally {
         // Runs before the `break` above takes effect, so a step that opened a
@@ -550,7 +609,7 @@ export class ErrandRunner {
       }
 
       if (signal?.aborted) {
-        status = 'aborted';
+        outcome.status = 'aborted';
         logger.info(`Errand ${errandId}: aborted by client during step ${line}/${steps.length}`);
         break;
       }
@@ -591,7 +650,7 @@ export class ErrandRunner {
 
       const tabAfterStep = await tabSpread();
       if (stepResult.status === 'passed') {
-        stepsCompleted++;
+        outcome.stepsCompleted++;
         logger.success(`Errand ${errandId} step ${line} passed`);
         emit({
           type: 'step:pass',
@@ -601,8 +660,8 @@ export class ErrandRunner {
           ...tabAfterStep,
         });
       } else {
-        status = 'failed';
-        error = { step: line, message: stepResult.error ?? 'Step failed' };
+        outcome.status = 'failed';
+        outcome.error = { step: line, message: stepResult.error ?? 'Step failed' };
         logger.error(`Errand ${errandId} step ${line} FAILED: ${stepResult.error ?? 'unknown'}`);
         emit({
           type: 'step:fail',
@@ -624,8 +683,6 @@ export class ErrandRunner {
       }
       if (isBrowserClosed(active)) break;
     }
-
-    return { results, captures, status, stepsCompleted, error };
   }
 
   /**
@@ -648,19 +705,22 @@ export class ErrandRunner {
     const borrowedPage = borrowed.page;
 
     /**
-     * Everything the errand opened: the tracker's pages minus the borrowed one.
+     * Everything the errand opened ITSELF: the tracker's pages, minus the
+     * borrowed one, minus everything it merely adopted (see
+     * `errandOwnTargetIds`).
      *
-     * Pre-existing tabs are not in this list at all — the CDP attach handed the
-     * tracker an ignore set of every page open at the time
-     * (`connectOverCdpSession`, manager.ts:1363), which is the guard the whole
-     * house-rule rests on. It is deliberately NOT filtered on
-     * `TrackedPage.unexpected`: that flag is diagnostics-only by standing
-     * decision (manager.ts:165), and a wrong guess used as a gate here either
-     * strands a tab or closes one that is not ours.
+     * Pages open at attach time are not in this list at all — the CDP attach
+     * handed the tracker an ignore set of them (`connectOverCdpSession`,
+     * manager.ts:1363). But that set is a snapshot, and `context.on('page')`
+     * adopts every tab opened on the browser AFTERWARDS, whoever opened it: the
+     * user, another session, another errand. House rule 1 is that those are not
+     * the errand's to close, so `unexpected` gates this list too.
      */
     let opened: TrackedPage[] = [];
     try {
-      opened = borrowed.pageTracker.tabs().filter((entry) => entry.page !== borrowedPage);
+      opened = borrowed.pageTracker
+        .tabs()
+        .filter((entry) => entry.page !== borrowedPage && !entry.unexpected);
     } catch {
       // A tracker that cannot list its tabs leaves nothing to close, which is
       // the safe direction for a rule about not closing other people's tabs.
@@ -698,9 +758,17 @@ export class ErrandRunner {
     // regardless — the teardown rule stories/multi-browser.md already sets for
     // runs, and an errand leaving a whole browser behind is not a coat, it is
     // a house guest.
+    //
+    // Guarded per browser, like the tab closes above: one wedged browser must
+    // not take the rest of the hand-back with it, and the raise and the
+    // disconnect below are what give the user their tab back.
     for (const session of browserTracker.all()) {
       if (session === borrowed) continue;
-      await closeBrowser(session);
+      try {
+        await closeBrowser(session);
+      } catch {
+        // Already gone, or refusing to go. Either way the errand is leaving.
+      }
     }
 
     // Hand the keys back visibly. "Request" is the honest verb: there is no
@@ -716,7 +784,11 @@ export class ErrandRunner {
     // Disconnect, never kill. `closeBrowser` severs the CDP websocket and
     // closes only a tab the ATTACH itself opened — which a `targetId:` attach
     // never does, so the borrowed tab survives by construction.
-    await closeBrowser(borrowed);
+    try {
+      await closeBrowser(borrowed);
+    } catch {
+      // A socket that will not close cleanly is not worth failing a receipt for.
+    }
 
     logger.info(
       `Errand ${errandId}: detached (${openedTabs.length} tab(s) opened, ` +
@@ -733,6 +805,32 @@ export class ErrandRunner {
       keptOpen: keepOpen ? [...openedTabs] : [],
     };
   }
+}
+
+/**
+ * The target ids of the tabs this errand can honestly call its own: the
+ * borrowed one, plus the ones its own steps opened.
+ *
+ * `unexpected` is `PageTracker`'s provenance flag. Every page the tracker adopts
+ * starts unexpected and is cleared by whichever of the two legitimate openers
+ * did it — an `openPage` step (`markExpected`) or a popup whose opener is a page
+ * we drive (`resolveOpener`). What is left set is a tab that appeared on the
+ * browser with nothing in this errand accounting for it: the user opened it,
+ * another session did, another errand did.
+ *
+ * Used as a GATE, which manager.ts:165 rules out for reports — and the exception
+ * is the whole of house rule 1. The two failure directions are not symmetric:
+ * a tab wrongly called unexpected is stranded (it stays open, and the receipt
+ * does not claim it), while one wrongly called ours is CLOSED out from under
+ * whoever opened it. Stranding is the safe direction, so the flag gates here
+ * even though it is a heuristic.
+ */
+function errandOwnTargetIds(pages: readonly TrackedPage[]): string[] {
+  return pages
+    .filter((entry): entry is TrackedPage & { targetId: string } =>
+      !entry.unexpected && entry.targetId !== null,
+    )
+    .map((entry) => entry.targetId);
 }
 
 /**

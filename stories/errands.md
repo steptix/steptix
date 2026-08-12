@@ -62,10 +62,22 @@
 > probe (both tools offered to a real model, a matrix of phrasings from
 > "run my login test" to "go export the report on my OpenRouter tab") is
 > run per supported host model and its table recorded here, misses
-> reported as product findings, never asserted as test failures. A vitest
-> suite drives (1)-(7) through a real in-memory MCP client against the
-> real API server; (2), the human half of (5), and (8) additionally run
-> live.
+> reported as product findings, never asserted as test failures.
+>
+> Two vitest suites carry (1)-(7) between them, and which carries what is
+> part of the rule rather than an accident of where a test was written.
+> `tests/mcp-errands-real-app.test.ts` drives (1), (2), (3), (4), (6) and
+> (7) through a real in-memory MCP client against the real API server,
+> with only the browser and the step executor faked — including the real
+> `run_steps` session that makes (2) and the session half of (3)
+> checkable at all. `tests/api-server-errands.test.ts` drives the same
+> real API server over raw HTTP and owns (5), because its claims are
+> about which page object was closed and which was raised: they can only
+> be made at the mocked Playwright seam, and no MCP result exposes it.
+> The `close_cdp_tab` half of (3) is a registry guard rather than an
+> errand call, so it lives in `tests/cdp-registry.test.ts` and
+> `tests/mcp-cdp-seam.test.ts`. (2), the human half of (5), and (8)
+> additionally run live.
 
 ## Context
 

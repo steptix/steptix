@@ -160,9 +160,14 @@ const dormantProfile = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+/** The app's own turn-lock registry — the one the errand route and the close
+ *  guard both have to be reading. */
+let errandLocks: import('../src/server/errand-locks.js').ErrandLocks;
+
 beforeAll(async () => {
-  const { app } = createApiServer(testConfig);
-  ({ server, baseUrl } = await listenOnRandomPort(app));
+  const created = createApiServer(testConfig);
+  errandLocks = created.errandLocks;
+  ({ server, baseUrl } = await listenOnRandomPort(created.app));
 });
 
 afterAll(async () => {
@@ -822,8 +827,41 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
       errandHolding?: (id: string) => unknown;
     };
     expect(typeof opts.errandHolding).toBe('function');
-    // No errand running is a definite "nobody": unlike the session join, an
-    // errand's holds live in this process's memory and cannot be unknown.
+
+    // Positive, and against the app's OWN registry: a hold taken here is one
+    // the injected lookup must be able to see. Asserting only that it answers
+    // null for an idle server passes just as well when it reads a second,
+    // private registry nothing ever writes to — and then the guard refuses
+    // nothing, forever, with every unit test still green.
+    //
+    // Port-keyed, so the wiring's port has to be right too: the same target id
+    // on another port is a different tab in a different browser.
+    const hold = { errandId: 'errand-wired', tabRole: 'borrowed' as const };
+    expect(errandLocks.acquire(51000, 'T1', hold)).toBeNull();
+    try {
+      expect(opts.errandHolding!('T1')).toEqual(hold);
+      // And the OTHER reader of that registry — the errand route's own
+      // pre-flight — sees the same hold, which is what makes it one wheel per
+      // tab rather than two lists that agree by luck.
+      const refused = await fetch(`${baseUrl}/errands`, {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          port: 51000,
+          targetId: 'T1',
+          steps: ['click something'],
+          testFilePath: path.join(PROJECT, '.aiui-errand.md'),
+          root: PROJECT,
+          scope: 'project',
+        }),
+      });
+      expect(refused.status).toBe(409);
+      expect((await refused.json()).holder).toEqual({ kind: 'errand', ...hold });
+    } finally {
+      errandLocks.release('errand-wired');
+    }
+    // Released with the errand, so a later close is not refused for a hold
+    // nobody is behind.
     expect(opts.errandHolding!('T1')).toBeNull();
 
     closeCdpTabMock.mockResolvedValue({

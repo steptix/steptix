@@ -11,11 +11,17 @@
  * builder is an explicit allow-list: widening `ErrandRequest` alone compiles
  * cleanly and drops the field at runtime.
  *
- * The browser is faked at the same seam the other server suites use, but the
- * fake `PageTracker` keeps the one behaviour the house rules rest on: pages
- * that existed at attach time are on its ignore list and are never tracked, so
- * "never closes a tab it did not open" is a claim about the errand's detach
- * path and not about the fake.
+ * The browser is faked at the same seam the other server suites use. The fake
+ * `PageTracker` is not a full stand-in and does not try to be — it keeps
+ * exactly the two rules the detach path reads, so that "never closes a tab it
+ * did not open" is a claim about the errand rather than about the fake:
+ *
+ *   - pages open at attach time are on the ignore list and are never tracked;
+ *   - every page it DOES adopt starts `unexpected` until `markExpected` claims
+ *     it, which is what the real `openPage` action calls.
+ *
+ * Everything else about it (labels, the active index, target-id resolution) is
+ * a convenience, and no assertion here rests on it.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -70,8 +76,16 @@ const mockLaunchedPage = {
 };
 
 vi.mock('../src/browser/manager.js', () => {
-  /** Mirrors the real tracker's one load-bearing rule: a page on the ignore
-   *  list (every tab open when the attach happened) is never tracked. */
+  /**
+   * Mirrors the real tracker's two load-bearing rules, and nothing else.
+   *
+   *  1. A page on the ignore list (every tab open when the attach happened) is
+   *     never tracked at all.
+   *  2. Every page it DOES adopt starts `unexpected: true`, cleared only by
+   *     `markExpected` — which is what the real `openPage` action calls once
+   *     `context.newPage()` resolves (step-executor.ts:869). A tab that appears
+   *     with nobody claiming it that way is somebody else's.
+   */
   class PageTracker {
     pages: { page: any; label: string; targetId: string | null; openedAt: number; unexpected: boolean }[] = [];
     activeIndex = 0;
@@ -97,6 +111,10 @@ vi.mock('../src/browser/manager.js', () => {
         unexpected: true,
       });
       return label;
+    }
+    markExpected(page: any): void {
+      const entry = this.pages.find((p) => p.page === page);
+      if (entry) entry.unexpected = false;
     }
     tabs() {
       return this.pages;
@@ -290,7 +308,7 @@ import { ErrandLocks } from '../src/server/errand-locks.js';
 import { ProjectBundleResolver } from '../src/server/project-bundle.js';
 import type { SessionManager, SessionTabHolder } from '../src/server/session-manager.js';
 import { executeStep as executeStepMock } from '../src/runner/step-executor.js';
-import { closeBrowser as closeBrowserMock } from '../src/browser/manager.js';
+import { closeBrowser as closeBrowserMock, launchBrowser as launchBrowserMock } from '../src/browser/manager.js';
 import { generateReport as generateReportMock } from '../src/report/generator.js';
 
 const defaultStepImpl = vi.mocked(executeStepMock).getMockImplementation()!;
@@ -539,19 +557,23 @@ describe('POST /errands', () => {
     const before = (await api('GET', '/sessions')).body.sessions.map((s: any) => s.sessionId);
 
     const errand = api('POST', '/errands', errandBody());
-    await started;
+    try {
+      await started;
 
-    // An errand IS a run: the idle reaper reads this field, and a server that
-    // reaped itself mid-errand would kill work the user is watching.
-    const health = await (await fetch(`${baseUrl}/health`)).json();
-    expect(health.runsInFlight).toBe(1);
+      // An errand IS a run: the idle reaper reads this field, and a server that
+      // reaped itself mid-errand would kill work the user is watching.
+      const health = await (await fetch(`${baseUrl}/health`)).json();
+      expect(health.runsInFlight).toBe(1);
 
-    const stop = await api('POST', '/admin/shutdown', {});
-    expect(stop.status).toBe(409);
-    expect(stop.body.runsInFlight).toBe(1);
-    expect(requestShutdown).not.toHaveBeenCalled();
-
-    release();
+      const stop = await api('POST', '/admin/shutdown', {});
+      expect(stop.status).toBe(409);
+      expect(stop.body.runsInFlight).toBe(1);
+      expect(requestShutdown).not.toHaveBeenCalled();
+    } finally {
+      // A parked errand outlives a failed assertion and keeps its holds, which
+      // would fail every later test in this file for the wrong reason.
+      release();
+    }
     const { status, body } = await errand;
     expect(status).toBe(200);
     expect(body.status).toBe('passed');
@@ -575,7 +597,9 @@ describe('POST /errands', () => {
     });
 
     expect(status).toBe(200);
-    expect(body.errandId).toMatch(/^errand-[0-9a-f]{8}$/);
+    // Shape, not width: how many random bytes an id carries is a tuning
+    // decision, and pinning it here would fail a change that broke nothing.
+    expect(body.errandId).toMatch(/^errand-[0-9a-f]+$/);
     expect(body.status).toBe('passed');
     expect(body.stepsCompleted).toBe(1);
     expect(body.stepsTotal).toBe(1);
@@ -604,6 +628,15 @@ describe('POST /errands', () => {
       finalTitle: 'Activity | OpenRouter',
       openedTabs: [],
       keptOpen: [],
+    });
+
+    // The attach spec, exactly as it goes to `launchBrowser`. The `targetId:`
+    // prefix is what routes `resolveCdpTab` to its exact-match arm, so dropping
+    // it hands the tab argument to first-match-wins — the rule cdp-tabs
+    // §Locked refuses, and the one thing this suite's fake normalises away.
+    expect(vi.mocked(launchBrowserMock)).toHaveBeenLastCalledWith(expect.anything(), {
+      port: cdpBrowser.port,
+      tab: 'targetId:tab-borrowed',
     });
   });
 
@@ -648,7 +681,8 @@ describe('POST /errands', () => {
   // (c) + (d) The house rules
   // -------------------------------------------------------------------------
 
-  /** A step that opens one tab and one browser, the way the real actions do. */
+  /** A step that opens one tab and one browser, the way the real actions do —
+   *  `addPage` then `markExpected`, which is `openPage`'s own order. */
   function stepThatOpensThings(): { opened: FakePage; worker: any } {
     const opened = makePage('tab-opened', 'https://openrouter.ai/export', 'Export');
     const worker = {
@@ -660,6 +694,7 @@ describe('POST /errands', () => {
     vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
       cdpBrowser.pages.push(opened);
       opts.pageTracker!.addPage(opened as any);
+      opts.pageTracker!.markExpected(opened as any);
       opts.browserTracker!.add('worker', worker as any);
       return {
         index: idx as number,
@@ -714,6 +749,7 @@ describe('POST /errands', () => {
     vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
       cdpBrowser.pages.push(opened);
       opts.pageTracker!.addPage(opened as any);
+      opts.pageTracker!.markExpected(opened as any);
       return {
         index: idx as number,
         instruction: 'failed',
@@ -736,6 +772,65 @@ describe('POST /errands', () => {
     expect(borrowedPage.bringToFront).toHaveBeenCalled();
     expect(vi.mocked(closeBrowserMock)).toHaveBeenCalledWith(lastBorrowed);
     expect(body.errand.openedTabs).toHaveLength(1);
+  });
+
+  it('leaves a tab it only ADOPTED alone: not closed, not on the receipt, not locked', async () => {
+    // House rule 1's hard case. The attach's ignore set is a SNAPSHOT of the
+    // tabs open at that instant; `context.on('page')` then adopts every tab
+    // opened on that browser afterwards, whoever opened it — the user in
+    // another window, another session, another errand. Those arrive
+    // `unexpected`, because nothing in this errand asked for them, and an
+    // errand's coat is the tabs it opened itself.
+    const stray = makePage('tab-stray', 'https://news.example/', 'The News');
+    let release!: () => void;
+    let markAdopted!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const adopted = new Promise<void>((r) => (markAdopted = r));
+    let step = 0;
+    let parked = false;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (step++ === 0) {
+        // Adopted, never claimed: no `markExpected`, because no step of this
+        // errand opened it. That is the whole difference from the tests above.
+        cdpBrowser.pages.push(stray);
+        opts.pageTracker!.addPage(stray as any);
+      } else if (!parked) {
+        // ONE step parks, ever — so the second errand below runs through
+        // rather than deadlocking on the same gate.
+        parked = true;
+        markAdopted();
+        await gate;
+      }
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const first = api('POST', '/errands', errandBody({ steps: ['do a thing', 'wait'] }));
+    try {
+      await adopted;
+      // (c) No hold was taken on it, so somebody else may drive it — the
+      // sibling test above is the control: a tab this errand DID open answers
+      // 409 here.
+      const second = await api('POST', '/errands', errandBody({ targetId: 'tab-stray' }));
+      expect(second.status).toBe(200);
+    } finally {
+      release();
+    }
+
+    const { body } = await first;
+    // (b) Not the errand's to account for…
+    expect(body.errand.openedTabs).toEqual([]);
+    expect(body.errand.keptOpen).toEqual([]);
+    // (a) …and not the errand's to close. Stranding a tab is the safe
+    // direction; closing somebody else's is not.
+    expect(stray.close).not.toHaveBeenCalled();
+    expect(borrowedPage.close).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -761,6 +856,40 @@ describe('POST /errands', () => {
   // -------------------------------------------------------------------------
   // (f) The scope dies with the errand
   // -------------------------------------------------------------------------
+
+  it('resolves {{x}} from a capture an EARLIER step of the same errand made', async () => {
+    // The half of the scope rule its sibling below cannot state. Within one
+    // errand the map is live, so step 2 sees what step 1 read — and only the
+    // executor seam can say so, for the same reason: the receipt's per-step
+    // `text` echoes the SENT step, prefix and placeholder and all.
+    const seen: string[] = [];
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, instruction, opts) => {
+      seen.push(instruction as string);
+      if ((idx as number) === 1) opts.resolvedParameters!.token = 'abc-123';
+      return {
+        index: idx as number,
+        instruction: instruction as string,
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({
+        steps: ['[output: token] read the API token', 'paste {{token}} into the box'],
+      }),
+    );
+
+    expect(body.status).toBe('passed');
+    expect(seen[1]).toBe('paste abc-123 into the box');
+    expect(body.captures).toEqual({ token: 'abc-123' });
+    // …and the receipt still echoes what was SENT, unresolved.
+    expect(body.results[1].step).toBe('paste {{token}} into the box');
+  });
 
   it('does not carry a capture into the next errand — {{x}} reaches the AI literally', async () => {
     stepThatCaptures('token', 'abc-123');
@@ -907,6 +1036,7 @@ describe('POST /errands', () => {
       if (step++ === 0) {
         cdpBrowser.pages.push(opened);
         opts.pageTracker!.addPage(opened as any);
+        opts.pageTracker!.markExpected(opened as any);
       } else if (!parked) {
         // ONE step parks, ever. If the guard were missing, the second errand
         // would attach and park on the same gate, and this test would deadlock
@@ -961,14 +1091,19 @@ describe('POST /errands', () => {
   it('refuses an errand while a session has a batch in flight on that tab', async () => {
     const park = parkSteps('session');
     const batch = cdpSession('wheel-busy');
-    await park.started;
+    try {
+      await park.started;
 
-    const refused = await api('POST', '/errands', errandBody());
-    expect(refused.status).toBe(409);
-    expect(refused.body.holder).toEqual({ kind: 'session', sessionId: 'wheel-busy' });
-    expect(String(refused.body.error)).toContain('wheel-busy');
-
-    park.release();
+      const refused = await api('POST', '/errands', errandBody());
+      expect(refused.status).toBe(409);
+      expect(refused.body.holder).toEqual({ kind: 'session', sessionId: 'wheel-busy' });
+      expect(String(refused.body.error)).toContain('wheel-busy');
+    } finally {
+      // A parked batch outlives a failed assertion and keeps its session
+      // executing, which would refuse every later errand in this file for the
+      // wrong reason.
+      park.release();
+    }
     await batch;
     await api('DELETE', '/sessions/wheel-busy');
   });
@@ -999,26 +1134,31 @@ describe('POST /errands', () => {
 
     expect((await cdpSession('join-idle', ['click quickly'])).status).toBe(200);
     const busy = cdpSession('join-busy', ['park here']);
-    await parked;
+    try {
+      await parked;
 
-    const join = await sessionManager.sessionsHoldingTargets(cdpBrowser.port);
-    const holders = join.byTarget.get('tab-borrowed') ?? [];
-    expect(holders.map((h) => h.sessionId).sort()).toEqual(['join-busy', 'join-idle']);
-    expect(holders.find((h) => h.sessionId === 'join-busy')?.status).toBe('executing');
-    expect(holders.find((h) => h.sessionId === 'join-idle')?.status).toBe('active');
+      const join = await sessionManager.sessionsHoldingTargets(cdpBrowser.port);
+      const holders = join.byTarget.get('tab-borrowed') ?? [];
+      expect(holders.map((h) => h.sessionId).sort()).toEqual(['join-busy', 'join-idle']);
+      expect(holders.find((h) => h.sessionId === 'join-busy')?.status).toBe('executing');
+      expect(holders.find((h) => h.sessionId === 'join-idle')?.status).toBe('active');
 
-    // And the reduction the listing and the close guard still read is unchanged
-    // — one name per tab.
-    const flat = await sessionManager.sessionsByTarget(cdpBrowser.port);
-    expect(['join-busy', 'join-idle']).toContain(flat.byTarget.get('tab-borrowed'));
-
-    release();
+      // And the reduction the listing and the close guard still read is
+      // unchanged — one name per tab.
+      const flat = await sessionManager.sessionsByTarget(cdpBrowser.port);
+      expect(['join-busy', 'join-idle']).toContain(flat.byTarget.get('tab-borrowed'));
+    } finally {
+      // A parked batch outlives a failed assertion and keeps its session
+      // executing, which would refuse every later errand in this file for the
+      // wrong reason.
+      release();
+    }
     await busy;
     await api('DELETE', '/sessions/join-idle');
     await api('DELETE', '/sessions/join-busy');
   });
 
-  it('lets an errand borrow a tab an IDLE session is sitting on', async () => {
+  it('lets an errand borrow a tab an IDLE session is sitting on, and the session runs on after', async () => {
     // Idle is the safe case and mid-run is the dangerous one; a guard refusing
     // both would put the two-client coexistence this story measured out of
     // reach of the tool. Its sibling above — the same helper, the same tab,
@@ -1028,6 +1168,22 @@ describe('POST /errands', () => {
     const errand = await api('POST', '/errands', errandBody());
     expect(errand.status).toBe(200);
     expect(errand.body.status).toBe('passed');
+
+    // The half a DELETE cannot make (verification item 2): the session's NEXT
+    // batch. Closing a session tells you nothing about whether it still worked,
+    // and "the errand handed the tab back intact" is exactly what this asks.
+    // No `config` this time — a session's browser is fixed at creation, and
+    // later batches address it by id alone, which is what a real second call
+    // looks like.
+    const next = await api('POST', '/sessions/wheel-idle/steps', {
+      steps: ['click something else'],
+      testFilePath: path.join(projectRoot, 'tests', 't.md'),
+    });
+    expect(next.status).toBe(200);
+    expect(next.body.status).toBe('passed');
+    // The same tab it was bound to before the errand borrowed it.
+    expect((await sessionManager.sessionsByTarget(cdpBrowser.port)).byTarget.get('tab-borrowed'))
+      .toBe('wheel-idle');
 
     await api('DELETE', '/sessions/wheel-idle');
   });
@@ -1054,17 +1210,23 @@ describe('POST /errands', () => {
   // `SessionManager` decides its own iteration order, so "the idle one answered
   // first" is only reproducible against a stub of the join.
   describe('the status-carrying join', () => {
-    function runnerWith(byTarget: Map<string, SessionTabHolder[]>, complete = true): ErrandRunner {
-      const gate = {
-        beginExternalRun: () => () => {},
-        sessionsHoldingTargets: async () => ({ byTarget, complete }),
-      };
+    function runnerAsking(
+      sessionsHoldingTargets: () => Promise<{
+        byTarget: Map<string, SessionTabHolder[]>;
+        complete: boolean;
+      }>,
+    ): ErrandRunner {
+      const gate = { beginExternalRun: () => () => {}, sessionsHoldingTargets };
       return new ErrandRunner(
         testConfig,
         gate,
         new ProjectBundleResolver(testConfig),
         new ErrandLocks(),
       );
+    }
+
+    function runnerWith(byTarget: Map<string, SessionTabHolder[]>, complete = true): ErrandRunner {
+      return runnerAsking(async () => ({ byTarget, complete }));
     }
 
     const request = () => ({
@@ -1110,7 +1272,25 @@ describe('POST /errands', () => {
       // maybe because its failure closes a tab under a live run, while a borrow
       // that guesses wrong is bounded by one request and shows up in both
       // sides' receipts.
-      const started = await runnerWith(new Map(), false).begin(request());
+      //
+      // The holder is on ANOTHER tab, so `complete: false` is the only thing
+      // that could refuse this borrow: an empty map would let the test pass for
+      // the ordinary reason — nobody holds the tab — and say nothing at all
+      // about the incompleteness arm.
+      const started = await runnerWith(
+        new Map([['tab-elsewhere', [{ sessionId: 'busy-elsewhere', status: 'executing' as const }]]]),
+        false,
+      ).begin(request());
+      expect(started.ok).toBe(true);
+    });
+
+    it('lets an errand through when the join THROWS', async () => {
+      // Same rule, harder case: a manager that cannot answer AT ALL is the same
+      // as one that answered partially. This is the arm a `catch` covers, and
+      // without a test the `catch` could equally well be re-raising.
+      const started = await runnerAsking(async () => {
+        throw new Error('the session manager is wedged');
+      }).begin(request());
       expect(started.ok).toBe(true);
     });
   });

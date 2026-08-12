@@ -820,6 +820,69 @@ describe('closeCdpTab', () => {
 
     expect(result).toMatchObject({ holder: { tabRole: 'opened' } });
     expect((result as { error: string }).error).toMatch(/gone|moot/i);
+    // A refusal that closed the tab anyway would still carry every word above.
+    expect(h.closeFn).not.toHaveBeenCalled();
+  });
+
+  it('names the ERRAND when an idle session is on the tab too', async () => {
+    // Both holders at once is the ordinary case, not an exotic one: an errand
+    // is allowed to borrow a tab an idle session sits on, so for the whole of
+    // that errand this is exactly what the close guard sees.
+    //
+    // The session check used to run first, and its remedy — "close_session
+    // <id>, then retry" — is destructive AND does not work: the errand still
+    // holds the tab afterwards. The errand check is synchronous, exact, and
+    // in-process, so it answers first.
+    const locks = new ErrandLocks();
+    locks.acquire(PORT, 'D4E5F6', { errandId: 'errand-abc123', tabRole: 'borrowed' });
+
+    const h = liveBrowser(TWO_TABS);
+    const result = await closeCdpTab(
+      {
+        roots: PROJECT_ROOTS,
+        port: PORT,
+        targetId: 'D4E5F6',
+        sessionHolding: (id) => (id === 'D4E5F6' ? 'mcp:idle' : null),
+        errandHolding: (id) => locks.holder(PORT, id),
+      },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      kind: 'refused',
+      holder: { kind: 'errand', errandId: 'errand-abc123', tabRole: 'borrowed' },
+    });
+    const error = (result as { error: string }).error;
+    expect(error).toContain('errand-abc123');
+    expect(error).not.toContain('mcp:idle');
+    expect(error).not.toContain('close_session');
+    expect(h.closeFn).not.toHaveBeenCalled();
+  });
+
+  it('names the ERRAND even when the session join could not answer', async () => {
+    // The session arm's `UNKNOWN_HOLDER` refusal is a guess dressed as advice
+    // ("retry in a moment, or close whichever session is running"). The errand
+    // hold is neither a guess nor a maybe, so it is the better answer — and it
+    // is also the true one, because the retry it offers is the one that works.
+    const locks = new ErrandLocks();
+    locks.acquire(PORT, 'D4E5F6', { errandId: 'errand-abc123', tabRole: 'borrowed' });
+
+    const h = liveBrowser(TWO_TABS);
+    const result = await closeCdpTab(
+      {
+        roots: PROJECT_ROOTS,
+        port: PORT,
+        targetId: 'D4E5F6',
+        sessionHolding: () => UNKNOWN_HOLDER,
+        errandHolding: (id) => locks.holder(PORT, id),
+      },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ holder: { kind: 'errand', errandId: 'errand-abc123' } });
+    expect((result as { error: string }).error).not.toMatch(/could not determine/i);
+    expect(h.closeFn).not.toHaveBeenCalled();
   });
 
   it('refuses an errand-held LAST tab by naming the errand, not the exit flag', async () => {
@@ -843,6 +906,9 @@ describe('closeCdpTab', () => {
     const error = (result as { error: string }).error;
     expect(error).toContain('errand-solo');
     expect(error).not.toContain('allow_browser_exit');
+    // …and the browser is still standing, which is the whole reason this guard
+    // runs before the last-tab one.
+    expect(h.closeFn).not.toHaveBeenCalled();
   });
 
   it('leaves every other refusal without a holder field', async () => {

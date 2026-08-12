@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
 import { resetRegistry } from '../src/mcp/registry.js';
+import { cdpTabHeldByErrand } from '../src/mcp/errors.js';
 import { ApiHttpError, ApiRouteNotFoundError } from '../src/mcp/types.js';
 import type { ApiClient, McpDeps, ProjectContext, StreamResult } from '../src/mcp/types.js';
 
@@ -803,11 +804,14 @@ describe('close_cdp_tab', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(text(result)).toContain('errand-5d2');
-    expect(text(result)).toContain('A1B2C3');
-    expect(text(result)).toMatch(/wait/i);
+    // Equality against the builder rather than a list of phrases the text must
+    // avoid: "does not say 'rejected the request'" starts passing again the
+    // moment the generic HTTP arm is reworded, whereas only the errand branch
+    // can produce this.
+    expect(text(result)).toBe(
+      cdpTabHeldByErrand('errand-5d2', 'borrowed', 'A1B2C3').content[0]!.text,
+    );
     expect(text(result)).not.toContain('close_session');
-    expect(text(result)).not.toContain('rejected the request');
   });
 
   it('adds the tab-will-be-gone note for a tab the errand opened', async () => {

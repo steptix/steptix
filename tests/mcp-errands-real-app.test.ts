@@ -12,7 +12,11 @@
  * A test that inspects the runner in isolation cannot tell you whether
  * `list_sessions` gained a row.
  *
- * Verification items (1), (4), (6) and (7) of stories/errands.md live here.
+ * Verification items (1), (2), (3), (4), (6) and (7) of stories/errands.md live
+ * here. Item (5)'s tab accounting is here too as far as a receipt can show it;
+ * its mocked-Playwright-seam assertions — which page was closed, which was
+ * raised — are in `api-server-errands.test.ts`, where the fake browser is
+ * reachable.
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -66,36 +70,94 @@ const TABS = [
   makePage('tab-mail', 'https://mail.example/inbox', 'Inbox'),
 ];
 
+/**
+ * The browser's raw `/json/list`, as Chromium actually reports it: real tabs
+ * alongside three things that are not tabs, each of them named so it would
+ * match the same words a real tab does.
+ *
+ * Raw rather than pre-filtered because the filter is what item (7)'s last
+ * clause is about. Writing the filtered list here would assert the fixture;
+ * this way the candidate set is whatever the REAL `toPageTabs` makes of it.
+ */
+function rawDevToolsTargets(): unknown[] {
+  return [
+    ...TABS.filter((p) => !p.closed).map((p) => ({
+      id: p.targetId,
+      type: 'page',
+      title: p.titleText,
+      url: p.urlText,
+    })),
+    {
+      id: 'frame-cart-promo',
+      type: 'iframe',
+      title: 'Cart — Shop promo',
+      url: 'https://shop.example/cart/promo',
+    },
+    {
+      id: 'ui-omnibox',
+      type: 'browser_ui',
+      title: 'Cart — Shop omnibox',
+      url: 'edge://omnibox/',
+    },
+    {
+      id: 'dialog-sync',
+      type: 'page',
+      title: 'Cart — Shop sync',
+      url: 'edge://sync-confirmation-dialog/',
+    },
+  ];
+}
+
+/** A DevTools HTTP surface with nothing behind it. The two endpoints
+ *  `probePort` reads, and a throw for anything else so a silent shape change
+ *  cannot pass as an empty browser. */
+const devToolsFetch = (async (input: RequestInfo | URL) => {
+  const url = String(input);
+  const body = url.endsWith('/json/version')
+    ? { Browser: 'Edg/151.0.0.0' }
+    : url.endsWith('/json/list')
+      ? rawDevToolsTargets()
+      : null;
+  if (body === null) throw new Error(`unexpected DevTools fetch: ${url}`);
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}) as typeof fetch;
+
 vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/cdp-registry.js')>();
+  const discovery = await import('../src/browser/cdp-discovery.js');
   return {
     ...actual,
-    // The whole sweep, so no filesystem is read and no browser is spawned. The
-    // tabs are the listing the MCP matcher gets to work with — and they are the
-    // page-type-filtered view, which is what stops an iframe ever being a
-    // candidate.
-    knownProfilesAcross: async () => [
-      {
-        engine: 'edge',
-        profile: 'default',
-        profileDir: 'C:/proj/.aiui/cdp-profiles/edge-default',
-        live: true,
-        port: CDP_PORT,
-        scope: 'project',
-        tabs: TABS.filter((p) => !p.closed).map((p) => ({
-          targetId: p.targetId,
-          title: p.titleText,
-          url: p.urlText,
-        })),
-      },
-    ],
+    // The whole sweep, so no filesystem is read and no browser is spawned —
+    // but the TABS half runs the real probe over the faked DevTools surface
+    // above, so `toPageTabs` is the product's filter rather than a stand-in.
+    knownProfilesAcross: async () => {
+      const probed = await discovery.probePort(CDP_PORT, 1_000, devToolsFetch);
+      return [
+        {
+          engine: 'edge',
+          profile: 'default',
+          profileDir: 'C:/proj/.aiui/cdp-profiles/edge-default',
+          live: true,
+          port: CDP_PORT,
+          scope: 'project',
+          tabs: probed.tabs ?? [],
+        },
+      ];
+    },
   };
 });
 
 vi.mock('../src/browser/manager.js', () => {
-  /** The real tracker's one load-bearing rule: a page open at attach time is on
-   *  the ignore list and is never tracked, so "never closes a tab it did not
-   *  open" is a claim about the errand and not about this fake. */
+  /**
+   * The real tracker's two load-bearing rules, so "never closes a tab it did not
+   * open" is a claim about the errand and not about this fake: a page open at
+   * attach time is on the ignore list and is never tracked, and every page that
+   * IS adopted starts `unexpected` until `markExpected` claims it — which the
+   * real `openPage` action does (step-executor.ts:869).
+   */
   class PageTracker {
     pages: { page: any; label: string; targetId: string | null; unexpected: boolean }[] = [];
     private ignored: Set<any>;
@@ -117,6 +179,10 @@ vi.mock('../src/browser/manager.js', () => {
         unexpected: true,
       });
       return `page:${this.pages.length}`;
+    }
+    markExpected(page: any): void {
+      const entry = this.pages.find((p) => p.page === page);
+      if (entry) entry.unexpected = false;
     }
     tabs() {
       return this.pages;
@@ -310,6 +376,13 @@ import { createMcpServer } from '../src/mcp/server.js';
 import { createApiClient } from '../src/mcp/api-client.js';
 import { resolveProject } from '../src/mcp/project.js';
 import { resetRegistry } from '../src/mcp/registry.js';
+import {
+  describeBrowser,
+  errandDidNotAttach,
+  errandTabHeldByErrand,
+  errandTabHeldBySession,
+  errandTabNotFound,
+} from '../src/mcp/errors.js';
 
 const API_KEY = 'sk-errand-real-app';
 
@@ -345,6 +418,9 @@ beforeAll(async () => {
     path.join(tmpDir, '.env'),
     `SERVER_URL=${baseUrl}\nAIUI_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
   );
+  // An environment with a name, so `${env.X}` is actually resolved rather than
+  // passed through — which is the only state in which an UNKNOWN name throws.
+  await fs.writeFile(path.join(tmpDir, '.env.uat'), 'ERRAND_USER=zoe\n');
   await fs.writeFile(path.join(tmpDir, 'aiui.config.json'), JSON.stringify({ tests: { dir: './tests' } }));
 
   previousRoots = process.env['AIUI_MCP_ROOTS'];
@@ -382,6 +458,17 @@ async function listSessionIds(): Promise<string[]> {
 
 function content(result: unknown): string {
   return JSON.stringify((result as { content: unknown }).content);
+}
+
+/** The refusal as a model reads it, for comparison against the exported error
+ *  builders — a substring match decays the moment either side is reworded. */
+function textOf(result: unknown): string {
+  return (result as { content: { text?: string }[] }).content.map((c) => c.text ?? '').join('\n');
+}
+
+/** The one text an `McpToolError` builder carries. */
+function errorText(built: { content: { text: string }[] }): string {
+  return built.content.map((c) => c.text).join('\n');
 }
 
 describe('run_errand over the real HTTP seam', () => {
@@ -441,8 +528,15 @@ describe('run_errand over the real HTTP seam', () => {
     expect(receipt.keptOpen).toEqual([]);
     expect((receipt.steps as unknown[])).toHaveLength(1);
     // The settings the errand ran under: server base → project bundle, with no
-    // session layer to hold an override.
-    expect(receipt.effectiveSettings).toMatchObject({ screenshotsReturn: 'on-failure' });
+    // session layer to hold an override. Asserted on a SERVER-derived value —
+    // the model the project's own .env named, which only the `done` frame can
+    // carry — because `screenshotsReturn` is decided on this side of the wire
+    // and reads the same whether the server reported anything at all.
+    expect(receipt.effectiveSettings).toMatchObject({
+      model: 'project-model',
+      sources: { model: 'project' },
+      screenshotsReturn: 'on-failure',
+    });
 
     // No report file, checked two ways: nothing generated one, and the project
     // gained no report directory.
@@ -546,26 +640,28 @@ describe('run_errand over the real HTTP seam', () => {
       project_root: tmpDir,
     };
     const first = client.callTool({ name: 'run_errand', arguments: args });
-    await started;
-
-    const second = await client.callTool({ name: 'run_errand', arguments: args });
-
-    expect(second.isError, content(second)).toBe(true);
-    expect(content(second)).toMatch(/errand-[0-9a-f]+/);
-    expect(content(second)).toMatch(/wait/i);
-    // Not the attach refusal, and not the generic HTTP arm either — both would
-    // relay a status or a "the tab may have been closed" for a tab that is open
-    // and busy. The `holder` shape is what routes it to its own message.
-    expect(content(second)).not.toContain('never got tab');
-    expect(content(second)).not.toContain('rejected the request');
-
-    release();
-    vi.mocked(executeStepMock).mockImplementation(original);
+    let second: Awaited<ReturnType<typeof client.callTool>>;
+    try {
+      await started;
+      second = await client.callTool({ name: 'run_errand', arguments: args });
+      expect(second.isError, content(second)).toBe(true);
+    } finally {
+      // A parked errand outlives a failed assertion and keeps its holds, which
+      // would fail every later test in this file for the wrong reason.
+      release();
+      vi.mocked(executeStepMock).mockImplementation(original);
+    }
     const firstRes = await first;
     expect(firstRes.isError, content(firstRes)).toBeFalsy();
     const holder = (firstRes.structuredContent as { errandId: string }).errandId;
-    // The refusal named the errand that was actually holding the wheel.
-    expect(content(second)).toContain(holder);
+
+    // Word for word the turn-lock refusal, naming the errand that was actually
+    // holding the wheel. Equality rather than "does not say 'never got tab'":
+    // this is the one place the `holder` shape is proved to have routed the 409
+    // to its own message instead of to the attach refusal ("the tab may have
+    // been closed") or the generic HTTP arm — and both of those would still
+    // pass a list of things the text must not contain, after a reword.
+    expect(textOf(second)).toBe(errorText(errandTabHeldByErrand(holder, 'borrowed', args.tab)));
 
     // The remedy it offered is a real one.
     const retry = await client.callTool({ name: 'run_errand', arguments: args });
@@ -573,6 +669,294 @@ describe('run_errand over the real HTTP seam', () => {
     expect((retry.structuredContent as { errandId: string }).errandId).not.toBe(holder);
 
     // And not one of the three left a session behind.
+    expect(await listSessionIds()).toEqual([]);
+  }, 30_000);
+
+  it('refuses a retry naming a tab the holder OPENED, with the zero-match refusal (item 3)', async () => {
+    // The other half of what that refusal promised. It said the tab would
+    // normally be GONE by the time the wait ended, because an errand closes
+    // what it opened — so the retry does not meet a second lock 409, it meets
+    // "no tab matches", listing what actually is open.
+    const receiptTab = makePage('tab-receipt', 'https://shop.example/receipt', 'Receipt — Shop');
+    const original = vi.mocked(executeStepMock).getMockImplementation()!;
+    try {
+      vi.mocked(executeStepMock).mockImplementation(async (i, t, instruction, options) => {
+        const tracker = (options as unknown as { pageTracker?: { addPage: (p: unknown) => void; markExpected: (p: unknown) => void } }).pageTracker;
+        // Appearing DURING the run is the point: a tab already in TABS at attach
+        // time is on the tracker's ignore list and never adopted at all.
+        // `openPage`'s own two calls, in its order.
+        TABS.push(receiptTab);
+        tracker?.addPage(receiptTab);
+        tracker?.markExpected(receiptTab);
+        return original(i, t, instruction, options);
+      });
+
+      const opened = await client.callTool({
+        name: 'run_errand',
+        arguments: { tab: 'targetId:tab-cart', steps: ['open the receipt'], project_root: tmpDir },
+      });
+      expect(opened.isError, content(opened)).toBeFalsy();
+      expect((opened.structuredContent as { openedTabs: unknown }).openedTabs).toEqual([
+        { targetId: 'tab-receipt', url: 'https://shop.example/receipt', title: 'Receipt — Shop' },
+      ]);
+      // Taken with its coat — and therefore out of the listing the next match
+      // runs against, which is what makes the refusal below the right one.
+      expect(receiptTab.closed).toBe(true);
+    } finally {
+      vi.mocked(executeStepMock).mockImplementation(original);
+    }
+
+    const retry = await client.callTool({
+      name: 'run_errand',
+      arguments: { tab: 'targetId:tab-receipt', steps: ['click something'], project_root: tmpDir },
+    });
+
+    expect(retry.isError).toBe(true);
+    expect(textOf(retry)).toBe(
+      errorText(
+        errandTabNotFound(
+          'targetId:tab-receipt',
+          describeBrowser({ engine: 'edge', profile: 'default', scope: 'project' }),
+          TABS.filter((p) => !p.closed).map((p) => ({
+            targetId: p.targetId,
+            title: p.titleText,
+            url: p.urlText,
+          })),
+        ),
+      ),
+    );
+  }, 30_000);
+
+  it('never makes an iframe, a browser_ui target or a dialog a candidate (item 7)', async () => {
+    // The listing's page-type filter, running for real: the fake DevTools
+    // surface behind this suite reports an iframe, a browser_ui target and an
+    // `edge://…-dialog` page whose titles all contain "Cart — Shop", so any of
+    // them WOULD match if the candidate set were the raw target list.
+    executedSteps.length = 0;
+    for (const spec of ['targetId:frame-cart-promo', 'targetId:ui-omnibox', 'targetId:dialog-sync']) {
+      const res = await client.callTool({
+        name: 'run_errand',
+        arguments: { tab: spec, steps: ['click something'], project_root: tmpDir },
+      });
+      expect(res.isError, `${spec}: ${content(res)}`).toBe(true);
+      expect(textOf(res), spec).toBe(
+        errorText(
+          errandTabNotFound(
+            spec,
+            describeBrowser({ engine: 'edge', profile: 'default', scope: 'project' }),
+            TABS.filter((p) => !p.closed).map((p) => ({
+              targetId: p.targetId,
+              title: p.titleText,
+              url: p.urlText,
+            })),
+          ),
+        ),
+      );
+    }
+    // Control: the three are not merely absent from the listing, they are
+    // absent from the candidate set for a name they all carry — "Cart — Shop"
+    // still resolves to exactly one tab.
+    const one = await client.callTool({
+      name: 'run_errand',
+      arguments: { tab: 'Cart — Shop', steps: ['click something'], project_root: tmpDir },
+    });
+    expect(one.isError, content(one)).toBeFalsy();
+    expect(executedSteps).toEqual(['click something']);
+  }, 30_000);
+
+  it('reports an unresolvable ${env.X} as the step it failed on, receipt and all', async () => {
+    // The throw that used to escape BETWEEN steps: `interpolateEnvData` refuses
+    // an unknown name once an env bundle exists, and that pass sat outside the
+    // per-step try. The request then ended with no errand block on its `done`
+    // frame, and the tool answered "the errand never got the tab" — about a tab
+    // step 1 had already driven.
+    executedSteps.length = 0;
+    const res = await client.callTool({
+      name: 'run_errand',
+      arguments: {
+        tab: 'targetId:tab-cart',
+        env_name: 'uat',
+        steps: ['click the checkout button', 'sign in as ${env.NOT_IN_ANY_ENV_FILE}'],
+        project_root: tmpDir,
+      },
+    });
+
+    // A receipt, not an `isError`: the errand ran, and what it did to a real
+    // page is the thing the caller most needs back.
+    expect(res.isError, content(res)).toBeFalsy();
+    const receipt = res.structuredContent as Record<string, unknown>;
+    expect(receipt.errandId).toMatch(/^errand-[0-9a-f]+$/);
+    expect(receipt.status).toBe('error');
+    expect(receipt.finalUrl).toBe('https://shop.example/cart');
+
+    // Step 1 really ran and is recorded; step 2 is the one that failed, by name.
+    expect(executedSteps).toEqual(['click the checkout button']);
+    const steps = receipt.steps as { status: string; error: string | null }[];
+    expect(steps).toHaveLength(2);
+    expect(steps[0]!.status).toBe('passed');
+    expect(steps[1]!.status).toBe('failed');
+    expect(String(steps[1]!.error)).toContain('NOT_IN_ANY_ENV_FILE');
+
+    // …and the "nothing ran" refusal is ruled out by its own builder rather
+    // than by a sentence someone can reword.
+    expect(textOf(res)).not.toContain(
+      errorText(errandDidNotAttach('targetId:tab-cart', null)),
+    );
+  }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // Item (2), and the session half of item (3), through the real tools rather
+  // than the raw route: a real `run_steps` session on the same tab.
+  // -------------------------------------------------------------------------
+
+  /**
+   * A `run_steps` batch on the shared tab, through the door sessions use.
+   *
+   * `bind` sends `config.cdp`, which the server only honours when it CREATES
+   * the session — so it belongs on a session's first batch and nowhere else.
+   *
+   * Each test uses its own `id`, and that is not tidiness: the MCP process
+   * remembers which session ids it has configured (`src/mcp/registry.ts`), so a
+   * closed id reused by the next test has its `config` stripped client-side and
+   * the server builds a launch-mode session instead of a CDP one.
+   */
+  function sessionSteps(id: string, steps: string[], bind: boolean) {
+    return client.callTool({
+      name: 'run_steps',
+      arguments: {
+        session_id: id,
+        steps,
+        project_root: tmpDir,
+        ...(bind ? { config: { cdp: { profile: 'default', tab: 'targetId:tab-mail' } } } : {}),
+      },
+    });
+  }
+
+  function closeSession(id: string) {
+    return client.callTool({
+      name: 'close_session',
+      arguments: { session_id: id, project_root: tmpDir },
+    });
+  }
+
+  it('borrows a tab an IDLE session sits on, and that session still works after (item 2)', async () => {
+    // Idle is the safe case; mid-run is the dangerous one. Refusing both would
+    // put the two-client coexistence this story measured out of reach of the
+    // tool — so this is the case that has to keep working, on BOTH sides.
+    const id = 'mcp:errand-idle';
+    executedSteps.length = 0;
+    const bound = await sessionSteps(id, ['read the inbox'], true);
+    expect(bound.isError, content(bound)).toBeFalsy();
+    expect((bound.structuredContent as { status: string }).status).toBe('passed');
+    expect(await listSessionIds()).toEqual([id]);
+
+    try {
+      const errand = await client.callTool({
+        name: 'run_errand',
+        arguments: {
+          tab: 'targetId:tab-mail',
+          steps: ['archive the first mail'],
+          project_root: tmpDir,
+        },
+      });
+      expect(errand.isError, content(errand)).toBeFalsy();
+      expect((errand.structuredContent as { status: string }).status).toBe('passed');
+
+      // The half a DELETE cannot make: the session's NEXT batch. An errand that
+      // left the tab or the binding broken shows up here and nowhere else.
+      const next = await sessionSteps(id, ['read the inbox again'], false);
+      expect(next.isError, content(next)).toBeFalsy();
+      expect((next.structuredContent as { status: string }).status).toBe('passed');
+      expect(executedSteps).toContain('read the inbox again');
+
+      // And the errand added nothing to the sessions map on its way through.
+      expect(await listSessionIds()).toEqual([id]);
+    } finally {
+      await closeSession(id);
+    }
+  }, 30_000);
+
+  it('is refused while that session is MID-BATCH, naming the session (item 3)', async () => {
+    const id = 'mcp:errand-midbatch';
+    executedSteps.length = 0;
+    let release!: () => void;
+    let markParked!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const parked = new Promise<void>((r) => (markParked = r));
+    const original = vi.mocked(executeStepMock).getMockImplementation()!;
+    vi.mocked(executeStepMock).mockImplementation(async (i, t, instruction, options) => {
+      if (String(instruction).includes('park')) {
+        markParked();
+        await gate;
+      }
+      return original(i, t, instruction, options);
+    });
+
+    let refused: Awaited<ReturnType<typeof client.callTool>>;
+    let batch: ReturnType<typeof sessionSteps>;
+    try {
+      const bound = await sessionSteps(id, ['read the inbox'], true);
+      expect(bound.isError, content(bound)).toBeFalsy();
+
+      batch = sessionSteps(id, ['park here'], false);
+      await parked;
+      refused = await client.callTool({
+        name: 'run_errand',
+        arguments: { tab: 'targetId:tab-mail', steps: ['archive it'], project_root: tmpDir },
+      });
+      expect(refused.isError, content(refused)).toBe(true);
+    } finally {
+      release();
+      vi.mocked(executeStepMock).mockImplementation(original);
+    }
+    expect((await batch!).isError).toBeFalsy();
+
+    // Word for word, so the 409's `holder` is proved to have routed this to the
+    // session refusal — which offers close_session as well as waiting, because
+    // unlike an errand a session outlives its batch.
+    expect(textOf(refused!)).toBe(errorText(errandTabHeldBySession(id, 'targetId:tab-mail')));
+    // Nothing ran in the tab, which is what "refused before any browser work"
+    // means from the caller's side.
+    expect(executedSteps).not.toContain('archive it');
+
+    await closeSession(id);
+  }, 30_000);
+
+  it('never blocks a run_steps batch on a tab an errand is driving (item 3)', async () => {
+    // Sessions take no lock and are refused by none: the errand-only guard is a
+    // bounded amendment to mcp-cdp-browser §Locked, whose subject — parallel
+    // sessions — is untouched.
+    const id = 'mcp:errand-parallel';
+    executedSteps.length = 0;
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const started = new Promise<void>((r) => (markStarted = r));
+    const original = vi.mocked(executeStepMock).getMockImplementation()!;
+    vi.mocked(executeStepMock).mockImplementation(async (i, t, instruction, options) => {
+      if (String(instruction).includes('drive slowly')) {
+        markStarted();
+        await gate;
+      }
+      return original(i, t, instruction, options);
+    });
+
+    const errand = client.callTool({
+      name: 'run_errand',
+      arguments: { tab: 'targetId:tab-mail', steps: ['drive slowly'], project_root: tmpDir },
+    });
+    try {
+      await started;
+      const batch = await sessionSteps(id, ['read the inbox'], true);
+      expect(batch.isError, content(batch)).toBeFalsy();
+      expect((batch.structuredContent as { status: string }).status).toBe('passed');
+    } finally {
+      release();
+      vi.mocked(executeStepMock).mockImplementation(original);
+    }
+    expect((await errand).isError).toBeFalsy();
+
+    await closeSession(id);
     expect(await listSessionIds()).toEqual([]);
   }, 30_000);
 });

@@ -8,7 +8,7 @@
  * a real client at an ephemeral port.
  */
 import type { ErrandSummary, ErrandTab, RunEvent } from '../server/session-manager.js';
-import type { ErrandTabRole, TabHolder } from '../server/errand-locks.js';
+import type { TabHolder } from '../server/errand-locks.js';
 import type {
   CaptureMode,
   EffectiveSettings,
@@ -26,9 +26,9 @@ import type {
 // two hand-kept copies of a wire shape drift in the direction of whichever
 // half gets edited.
 //
-// `TabHolder` is the third: it rides a 409 body rather than the event stream,
+// `TabHolder` is the last: it rides a 409 body rather than the event stream,
 // and it is the thing that keeps a turn-lock refusal from being read as prose.
-export type { ErrandSummary, ErrandTab, ErrandTabRole, RunEvent, TabHolder };
+export type { ErrandSummary, ErrandTab, RunEvent, TabHolder };
 
 // Re-exported rather than re-declared. These travel the wire in both directions
 // — `runSettings` out on the request, `effectiveSettings` back on `done` and on
