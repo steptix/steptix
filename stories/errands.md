@@ -3,43 +3,54 @@
 > **Verification rule for this story.** "Done" means: (1) with a CDP browser
 > holding a signed-in tab that NO session has ever touched, `run_errand`
 > naming that tab by title drives real steps in it and returns a receipt —
-> and `list_sessions` afterwards shows **no new session**; (2) while a
-> session is attached to that same tab but idle, the same errand still works,
-> and the session's next `run_steps` afterwards still works (the two-client
-> coexistence this story measured on 2026-08-12, re-proved through the real
-> tool rather than a raw socket); (3) an errand arriving while ANOTHER
-> errand is driving that tab is refused with a message naming the holding
-> errand and succeeds on retry once the holder finishes; an errand arriving
-> while a session is mid-batch on that tab is refused naming the session id;
-> and the reverse never blocks — a `run_steps` batch arriving while an
-> errand drives that tab proceeds, because sessions take no lock (the
-> [mcp-cdp-browser](mcp-cdp-browser.md) §Locked decision — no per-port
-> serialisation, no claim registry over sessions — stands); (4) the receipt
-> carries the per-step outcomes, every `store as` capture, the tab's final
-> `url` and `title`, the list of tabs the errand opened, and the
-> `effectiveSettings` it ran under — and nothing of the errand survives on
-> the server, checked three bounded ways: `list_sessions` returns the same
-> set before and after, the project's report directory gains no file, and a
-> second errand interpolating a variable the first errand captured fails to
-> resolve it; (5) a tab the errand did not open is never closed by it; a tab
-> it DID open during its steps is gone by the time it returns — or, with
-> `keep_open: true`, still open and named in the receipt — and the detach
-> path REQUESTS activation of the borrowed tab, asserted at the mocked
-> Playwright seam; whether it visibly came forward is confirmed by a human
-> in the live pass, because no assertion in this repo can see a screen
-> ([cdp-tab-focus](cdp-tab-focus.md)'s own rule); (6) `run_errand` passing
-> `session_id` is refused before any browser work with an `isError` result
-> naming `run_steps` as the door for sessions, and `run_steps` passing
-> `config.cdp` onto an existing session now ends its warning with a pointer
-> to `run_errand`; (7) an errand naming a tab that matches nothing, or two
-> tabs, refuses honestly — naming the candidates — rather than guessing;
-> (8) a live routing probe (both tools offered to a real model, a matrix of
-> phrasings from "run my login test" to "go export the report on my
-> OpenRouter tab") is run per supported host model and its table recorded
-> here, misses reported as product findings, never asserted as test
-> failures. A vitest suite drives (1)-(7) through a real in-memory MCP
-> client against the real API server; (2), the human half of (5), and (8)
-> additionally run live.
+> `list_sessions` afterwards shows **no new session**, and yet while the
+> errand runs the server counts it as a run in flight: `POST
+> /admin/shutdown` without `force` refuses, and the idle reaper cannot fire
+> ([server-lifecycle](server-lifecycle.md) — "idle" means no run in flight,
+> and an errand IS a run); (2) while a session is attached to that same tab
+> but idle, the same errand still works, and the session's next `run_steps`
+> afterwards still works (the two-client coexistence this story measured on
+> 2026-08-12, re-proved through the real tool rather than a raw socket);
+> (3) an errand arriving while ANOTHER errand is driving that tab is
+> refused with a message naming the holding `errandId` and offering
+> wait-and-retry (there is no `close_errand`), and succeeds on retry once
+> the holder finishes; an errand arriving while a session is mid-batch on
+> that tab is refused naming the session id; a `run_steps` batch arriving
+> while an errand drives that tab proceeds — sessions take no lock (the
+> [mcp-cdp-browser](mcp-cdp-browser.md) §Locked decision, "no per-port
+> serialisation and no tab-collision guard" *for runs*, stands: nothing
+> here serialises or refuses session work); and `close_cdp_tab` aimed at a
+> tab an errand is driving is refused naming that `errandId`, and succeeds
+> once the errand finishes; (4) the receipt carries the `errandId`, the
+> per-step outcomes, every `store as` capture, the tab's final `url` and
+> `title`, the list of tabs the errand opened, and the `effectiveSettings`
+> it ran under — and nothing of the errand survives on the server, checked
+> three bounded ways: `list_sessions` returns the same set before and
+> after, the project's report directory gains no file, and a second errand
+> interpolating a variable the first errand captured fails to resolve it;
+> (5) a tab the errand did not open is never closed by it; a tab or
+> browser it DID open during its steps is gone by the time it returns —
+> or, for tabs with `keep_open: true`, still open and named in the receipt
+> — and the detach path REQUESTS activation of the borrowed tab, asserted
+> at the mocked Playwright seam; whether it visibly came forward is
+> confirmed by a human in the live pass, because no assertion in this repo
+> can see a screen ([cdp-tab-focus](cdp-tab-focus.md)'s own rule); (6)
+> `run_errand` passing `session_id` is refused before any browser work
+> with an `isError` result naming `run_steps` as the door for sessions,
+> and `run_steps` passing `config.cdp` onto an existing session now ends
+> its warning with a pointer to `run_errand`; (7) an errand naming a tab
+> that matches nothing is refused with the browser's open tabs listed, so
+> the caller can re-name one from what is actually open; one that matches
+> two is refused naming both candidates; and the candidate set is only
+> ever the filtered listing — an `iframe`, `browser_ui` or `*-dialog`
+> target is never a candidate, however well it matches; (8) a live routing
+> probe (both tools offered to a real model, a matrix of phrasings from
+> "run my login test" to "go export the report on my OpenRouter tab") is
+> run per supported host model and its table recorded here, misses
+> reported as product findings, never asserted as test failures. A vitest
+> suite drives (1)-(7) through a real in-memory MCP client against the
+> real API server; (2), the human half of (5), and (8) additionally run
+> live.
 
 ## Context
 
@@ -99,44 +110,70 @@ the user can finally say *"now drive it."*
 
 An errand is: **attach → act → return → detach**, in one request.
 
-- **Attach.** Resolve the tab fresh, every time, in two stages. First,
-  resolve the browser the way `close_cdp_tab`/`focus_cdp_tab` already do —
-  profile + engine + scope through the registry
-  ([src/browser/cdp-registry.ts](../src/browser/cdp-registry.ts)), a name
-  live under two engines or under both roots refused naming both, never a
-  silent pick. Second, match the named tab against that browser's tab list
-  over the DevTools HTTP surface
-  ([src/browser/cdp-discovery.ts](../src/browser/cdp-discovery.ts)),
-  **before** any Playwright connection: exactly one match proceeds; zero or
-  several refuse, naming the candidates (`title` + `url` + `targetId`
-  each). The winner's `targetId` is what gets handed to the existing
-  attach path (`connectOverCDP` + `resolveCdpTab` with a `targetId:` spec,
-  [src/browser/manager.ts:1344](../src/browser/manager.ts:1344)) — so the
-  first-match-wins arm of `resolveCdpTab` is never asked to arbitrate.
-  Nothing about a previous errand's resolution is remembered or reused.
+- **Attach.** Resolve the tab fresh, every time, in two stages, both
+  MCP-side the way `close_cdp_tab`/`focus_cdp_tab` resolve
+  (`resolveCdpTarget` against the server's browser listing,
+  [src/mcp/cdp.ts:135](../src/mcp/cdp.ts:135), the registry behind `GET
+  /cdp/browsers`). First the browser: profile + engine + scope, a name
+  live under two engines or under both roots refused naming both
+  (`cdpProfileAmbiguous` and kin, reused as-is), never a silent pick.
+  Second the tab: match the `tab` argument against the resolved browser's
+  tab list **as the listing reports it** — the same page-type-filtered
+  view `list_cdp_browsers` shows (`toPageTabs`,
+  [src/browser/cdp-discovery.ts:137](../src/browser/cdp-discovery.ts:137)),
+  so an errand can only borrow a tab the listing would show. Exactly one
+  match proceeds; several refuse, naming every matching candidate
+  (`title` + `url` + `targetId` each); zero refuse the same way over the
+  browser's whole tab list, so the caller can re-name one from what is
+  actually open. The winner's `targetId` is what the request carries to
+  the server, and the existing attach path (`connectOverCDP` +
+  `resolveCdpTab` with a `targetId:` spec,
+  [src/browser/manager.ts:1344](../src/browser/manager.ts:1344)) is
+  handed only that exact spec — the first-match-wins arm of
+  `resolveCdpTab` is never asked to arbitrate. Nothing about a previous
+  errand's resolution is remembered or reused.
 - **Act.** Run the steps with the same executor, action vocabulary and AI
-  resolution sessions use. A step neither knows nor cares whether a session
-  or an errand is running it. The project-scoped forms are the exception
-  and are refused by name: `[skill: …]`, `[tool: …]` and section calls need
-  `skillsDir`/`toolsDir`/`testFilePath`
-  ([src/mcp/assemble.ts:407](../src/mcp/assemble.ts:407)), which an errand
-  deliberately does not carry. `${env.X}` resolves from the project's
-  default environment; `{{placeholders}}` resolve only from the errand's
+  resolution sessions use. A step neither knows nor cares whether a
+  session or an errand is running it. `[skill: …]` and `[tool: …]` are the
+  exception, refused by name — the same `[skill:`/`[tool:` token rule
+  `run_steps` already refuses in user scope
+  ([src/mcp/assemble.ts:63](../src/mcp/assemble.ts:63)) — because an
+  errand deliberately carries no `skillsDir`/`toolsDir`. Section calls
+  need no refusal: they resolve only through the `sections` map a parsed
+  test file supplies ([src/mcp/types.ts:159](../src/mcp/types.ts:159)),
+  which a fileless request never carries, so a bare section-name line is
+  already just prose. The errand DOES carry a synthetic `testFilePath`
+  (`<project_root>/.aiui-errand.md`, the same device `run_steps` already
+  uses, [src/mcp/assemble.ts:332](../src/mcp/assemble.ts:332)) and an
+  optional `env_name` — that path is the only thing the server resolves a
+  project root from
+  ([src/server/session-manager.ts:1029](../src/server/session-manager.ts:1029)),
+  and without it `${env.X}` and the project layer of `effectiveSettings`
+  would both silently fall back to server defaults. So `${env.X}`
+  resolves from the project's environment (default env unless `env_name`
+  says otherwise), and `{{placeholders}}` resolve only from the errand's
   own earlier `store as` captures.
-- **Return.** The response is a receipt: per-step outcomes, every `store
-  as` capture (this is where variables go — to the caller, who is the brain
-  here; the server keeps no scope), the final `url` and `title` of the
-  borrowed tab, a list of anything the errand opened along the way, and the
-  `effectiveSettings` it ran under — an errand has no session to hold
-  overrides, so it runs on the project/server values and the receipt echoes
-  them ([run-settings](run-settings.md): every run result names the
-  settings it ran under).
-- **Detach.** Disconnect from the browser without disturbing it. Close tabs
-  the errand opened; never the borrowed tab or any other pre-existing one.
-  Request activation of the borrowed tab on the way out — hand back the
-  keys visibly. "Request" is the honest verb: the DevTools surface has no
-  read of "is this tab frontmost", and on Windows the OS may decline a
-  raise from a background process
+- **Return.** The response is a receipt: an `errandId` the server mints
+  per request (alive only while the errand runs — see item (4)), per-step
+  outcomes, every `store as` capture (this is where variables go — to the
+  caller, who is the brain here; the server keeps no scope), the final
+  `url` and `title` of the borrowed tab, a list of anything the errand
+  opened along the way, and the `effectiveSettings` it ran under — an
+  errand has no session to hold overrides, so the chain is server base →
+  project bundle, and the receipt echoes it
+  ([run-settings](run-settings.md): every run result names the settings
+  it ran under). Transport is the shape that already exists: the errand
+  route emits the same `RunEvent` stream `POST /sessions/:id/steps?stream=1`
+  does, `effectiveSettings` rides the `done` frame, and the MCP side
+  builds the receipt with the same fold that already turns events into
+  `steps[]` + `captures{}` ([src/mcp/run-fold.ts](../src/mcp/run-fold.ts)).
+- **Detach.** Disconnect from the browser without disturbing it. Close
+  tabs — and any browsers a step opened — that the errand created; never
+  the borrowed tab or any other pre-existing one. Request activation of
+  the borrowed tab on the way out — hand back the keys visibly. "Request"
+  is the honest verb: the DevTools surface has no read of "is this tab
+  frontmost", and on Windows the OS may decline a raise from a background
+  process
   ([src/browser/cdp-discovery.ts:228](../src/browser/cdp-discovery.ts:228)) —
   so the raise is silent and non-fatal, the same posture as
   [cdp-tab-focus](cdp-tab-focus.md).
@@ -157,26 +194,46 @@ errands only**:
 
 - An errand takes the lock for its lifetime. Release is not a step anyone
   can forget — finishing *is* releasing, including finishing by error.
-- A second errand on a held tab is refused with the holding errand named,
-  and told to retry; it does not queue silently.
+- A second errand on a held tab is refused with the holding `errandId`
+  named and told to wait and retry — there is no `close_errand`, and it
+  does not queue silently.
 - Before taking the lock, an errand also consults the session manager's
-  own tab tracking (the same `sessionsByTarget` join `close_cdp_tab`'s
-  guard already does, narrowed to sessions with a batch in flight): a
-  session mid-batch on that tab refuses the errand, naming the session id.
-  An idle session blocks nothing — idle is the safe case, mid-run is the
-  dangerous one.
+  own tab tracking — the same join `close_cdp_tab`'s guard already does
+  ([src/server/session-manager.ts:1697](../src/server/session-manager.ts:1697)),
+  **extended to carry each holder's status**. The extension is not
+  optional: the join today returns `targetId → sessionId` with no status
+  and keeps only the first holder per target
+  ([src/server/session-manager.ts:1723](../src/server/session-manager.ts:1723)),
+  so filtering its output would let an idle winner mask a mid-batch
+  session. A session with a batch in flight (`status === 'executing'`) on
+  that tab refuses the errand, naming the session id. An idle session
+  blocks nothing — idle is the safe case, mid-run is the dangerous one.
+  A join that could not be completed does not block either: unlike a
+  close — where the guard refuses on a maybe because its failure closes a
+  tab under a live run — a borrow that guesses wrong is bounded by one
+  request and shows up in both sides' receipts.
 - **Sessions never take and are never blocked by this lock.** That is not
-  an oversight: [mcp-cdp-browser](mcp-cdp-browser.md) §Locked explicitly
-  rejected per-tab claim registries over sessions, and that decision
-  stands. A `run_steps` batch arriving while an errand drives the tab
-  proceeds; the hazard is bounded by one errand request and both sides'
-  receipts/observability make what happened explainable.
+  an oversight: [mcp-cdp-browser](mcp-cdp-browser.md) §Locked rejected
+  per-port serialisation and tab-collision guards *for runs*, and that
+  decision stands — nothing here serialises or refuses session work. A
+  `run_steps` batch arriving while an errand drives the tab proceeds; the
+  hazard is bounded by one errand request and both sides' receipts make
+  what happened explainable.
 - `close_cdp_tab`'s hold guard consults the errand lock the same way it
   consults sessions: a tab an errand is driving refuses the close, naming
-  the errand. **This is a named amendment to
-  [cdp-tabs](cdp-tabs.md) §5's error table** (one new row: errand-held tab
-  → refusal naming the errand), not a silent change. `focus_cdp_tab` is
-  unaffected — it has no guard by design.
+  the `errandId` and offering wait-and-retry. **This is a named amendment
+  to [cdp-tabs](cdp-tabs.md) §1, §2 and §5** — §2 gains the errand check
+  as a numbered step beside the session refusal (before the last-tab
+  gate, for the same remedy-quality reason cdp-tabs ordered 3 before 4,
+  and inside the same port-keyed close queue); §5's error table gains the
+  row (condition: errand-held tab; message names: the `errandId` and its
+  tab; next action: wait for the errand to finish, then retry); and §1's
+  "null for a tab nothing is driving" gains a stated exception rather
+  than a silent one: an errand's hold is NOT in the listing, because it
+  lasts one request — a listing entry would be stale by the time an agent
+  acted on it, and the refusal, which offers a retry that works moments
+  later, is authoritative. `focus_cdp_tab` is unaffected — it has no
+  guard by design.
 
 The lock cannot cover the human. The user is always the implicit senior
 driver, and no lock stops them typing into the tab mid-errand. The receipt
@@ -188,11 +245,14 @@ page state is explainable rather than mysterious.
 1. Never close, navigate-away, or sign out a tab the errand did not open.
    Navigation *as a requested step* is allowed — the receipt records where
    the page ended up.
-2. Tabs opened during the errand are the errand's coat: taken when leaving,
-   unless the request set `keep_open: true` — in which case they stay and
-   the receipt names them. (Closing them at all is new code: today nothing
-   closes tabs opened mid-run on a CDP browser — `closeBrowser` only
-   handles the tab the attach itself opened.)
+2. Tabs and browsers opened during the errand are the errand's coat: taken
+   when leaving. `keep_open: true` spares **tabs** — they stay and the
+   receipt names them; it never spares a browser a step opened, which is
+   closed regardless (the teardown rule
+   [multi-browser](multi-browser.md) already sets for runs). Closing
+   errand-opened tabs at all is new code: today nothing closes tabs opened
+   mid-run on a CDP browser — `closeBrowser` only handles the tab the
+   attach itself opened.
 3. End by requesting activation of the borrowed tab — the same silent,
    non-fatal `bringToFront` courtesy the attach path already extends at
    [src/browser/manager.ts:1390](../src/browser/manager.ts:1390).
@@ -209,20 +269,28 @@ run_errand {
                                 # url~<substring>, or a bare string — matched case-insensitively
                                 # as a substring of the tab's title and of its url (the union is
                                 # the candidate set). String.includes semantics: no globs, no
-                                # regex. Resolved fresh, over the browser's live tab list;
-                                # zero or several matches refuse, naming the candidates.
+                                # regex. Resolved fresh, over the filtered live tab list;
+                                # zero or several matches refuse (§Attach).
   profile?:     string          # CDP profile name, default "default"
   engine?:      'chrome'|'edge' # disambiguates profile, as on close_cdp_tab/focus_cdp_tab
   scope?:       'project'|'user'
   project_root?: string         # as on every other tool
-  steps:        string[]        # step language as run_steps, minus project-scoped forms (§Act)
+  env_name?:    string          # as on run_steps; picks the project env for ${env.X}
+  steps:        string[]        # step language as run_steps, minus [skill:]/[tool:] (§Act)
   keep_open?:   boolean         # leave errand-opened tabs behind (default false)
 }
 ```
 
-Addressing is the same profile + engine + scope triple as
+**Browser** addressing is the same profile + engine + scope triple as
 `close_cdp_tab`/`focus_cdp_tab`, port never required; the ambiguity
-refusals (`cdpProfileAmbiguous` and kin) are reused as-is.
+refusals (`cdpProfileAmbiguous` and kin) are reused as-is. The **tab**
+slot is different on purpose, and that difference is a **named amendment
+to [cdp-tabs](cdp-tabs.md) §Locked and [cdp-tab-focus](cdp-tab-focus.md)
+§Locked** ("the agent matches; the tool takes an exact `targetId`"):
+`run_errand` accepts a name because the parameter funnel is a routing
+mechanism (§Routing 3), and because zero-or-several *refuses naming
+candidates* rather than the first-match-wins those stories were guarding
+against. The destructive verb — `close_cdp_tab` — keeps exact-only.
 
 Deliberately absent: `config` (no baseUrl/timeout bundle; an errand
 inherits the project's), report-path plumbing (the receipt IS the report —
@@ -278,13 +346,12 @@ misses.
 
 Reused unchanged: CDP discovery and profile addressing, including the
 ambiguity refusals ([src/browser/cdp-registry.ts](../src/browser/cdp-registry.ts),
-[src/mcp/cdp.ts](../src/mcp/cdp.ts)); the tab lists over the DevTools HTTP
-surface ([src/browser/cdp-discovery.ts](../src/browser/cdp-discovery.ts));
+[src/mcp/cdp.ts](../src/mcp/cdp.ts)); the filtered tab lists over the
+DevTools HTTP surface ([src/browser/cdp-discovery.ts](../src/browser/cdp-discovery.ts));
 the attach path (`connectOverCDP` at
 [src/browser/manager.ts:1344](../src/browser/manager.ts:1344), then
 `resolveCdpTab` — [src/browser/manager.ts:985](../src/browser/manager.ts:985) —
-handed only an exact `targetId:` spec, so its first-match arm never
-arbitrates for an errand); the pre-existing-pages guard
+handed only an exact `targetId:` spec); the pre-existing-pages guard
 ([src/browser/manager.ts:1363](../src/browser/manager.ts:1363)) and
 disconnect-not-kill semantics (`closeBrowser`,
 [src/browser/manager.ts:1457](../src/browser/manager.ts:1457)); the step
@@ -296,25 +363,42 @@ already turns run events into `steps[]` + `captures{}`
 not the HTML report path.
 
 New: the `run_errand` tool and schema; a `POST /errands` route on the API
-server and a matching `ApiClient` method — required, not stylistic: the
-MCP process is deliberately browser-free (its import graph is pinned by
+server, emitting the same `RunEvent` stream the steps route does, and a
+matching `ApiClient` method — required, not stylistic: the MCP process is
+deliberately browser-free (its import graph is pinned by
 `tests/mcp-entry-graph.test.ts`), so the runner must live server-side; an
-`ErrandRunner` beside — not inside — `SessionManager` (it never touches the
-sessions map, which is what makes verification item (1) checkable); the
+`ErrandRunner` beside — not inside — `SessionManager` (it never **adds to**
+the sessions map, which is what makes verification item (1) checkable — it
+does read the tab-tracking join), sharing `SessionManager`'s in-flight run
+counter for its lifetime so `/health`, the `POST /admin/shutdown` 409 and
+the idle reaper all treat a running errand as the run it is
+([server-lifecycle](server-lifecycle.md)); the per-request `errandId`; the
 errand's two-stage tab matcher with its zero-or-several refusal; the
-per-tab turn lock (errand-held only) and the `close_cdp_tab` guard row;
-the detach path that closes errand-opened tabs; the receipt shape.
+status-carrying extension of the tab-tracking join; the per-tab turn lock
+(errand-held only) and the `close_cdp_tab` guard row; the detach path that
+closes errand-opened tabs and browsers; the receipt shape.
+
+And the inventory, which every tool story owes
+([cdp-tab-focus](cdp-tab-focus.md) §5's standing rule): increment
+`mcp-server.md` §2's tool-count sentences — the numeral and the spelled
+word — and add `run_errand` to its by-name enumeration; add it to
+`usage.ts`, the README tool table, `server-start.ts`'s auto-start list
+(**on**, by the same reasoning as the other live-browser tools), and the
+`mcp-seam.test.ts`, `mcp-schema-dialect.test.ts` (both manifests) and
+`mcp-content-blocks.test.ts` `argumentsFor()` inventories.
 
 ## Build order
 
-1. **Tool + runner.** Route, client method, tool, matcher, receipt.
-   Attach-fresh-every-time alone dissolves the measured stale-session
-   failure. No lock yet; collisions are possible but were always possible.
+1. **Tool + runner.** Route, client method, tool, matcher, receipt,
+   in-flight counting. Attach-fresh-every-time alone dissolves the
+   measured stale-session failure. No lock yet; collisions are possible
+   but were always possible.
 2. **The wheel.** Errand-held per-tab lock, both refusal messages (errand
-   holds it / session mid-batch on it), the `close_cdp_tab` guard row.
+   holds it / session mid-batch on it), the status-carrying join
+   extension, the `close_cdp_tab` guard row and the cdp-tabs amendments.
 3. **Receipt polish + routing probe.** Capture forwarding, opened-tabs
-   accounting and `keep_open`, `effectiveSettings` echo, the live probe
-   matrix per host model, results recorded here.
+   and opened-browsers accounting, `keep_open`, `effectiveSettings` echo,
+   the live probe matrix per host model, results recorded here.
 
 ## Open questions
 
