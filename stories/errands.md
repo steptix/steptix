@@ -13,15 +13,22 @@
 > 2026-08-12, re-proved through the real tool rather than a raw socket);
 > (3) an errand arriving while ANOTHER errand is driving **or opened**
 > that tab is refused with a message naming the holding `errandId` and
-> offering wait-and-retry (there is no `close_errand`), and succeeds on
-> retry once the holder finishes; an errand arriving while a session is
-> mid-batch on that tab is refused naming the session id; a `run_steps`
-> batch arriving while an errand drives that tab proceeds — sessions take
-> no lock (the [mcp-cdp-browser](mcp-cdp-browser.md) §Locked decision,
-> "no per-port serialisation and no tab-collision guard" *for runs*,
-> stands: nothing here serialises or refuses session work); and
-> `close_cdp_tab` aimed at a tab an errand is driving or opened is
-> refused naming that `errandId`, and succeeds once the errand finishes;
+> offering wait-and-retry (there is no `close_errand`); once the holder
+> finishes, a retry on the BORROWED tab succeeds, while a retry on a tab
+> the holder itself had opened meets the zero-match refusal — the tab is
+> normally gone with its errand, and the original refusal said which kind
+> of hold it was; an errand arriving while a session is mid-batch on that
+> tab is refused naming the session id; a `run_steps` batch arriving
+> while an errand drives that tab proceeds — sessions take no lock
+> (nothing here serialises or refuses session work; the errand-only
+> guard is a **named amendment** to
+> [mcp-cdp-browser](mcp-cdp-browser.md) §Locked's "no per-port
+> serialisation and no tab-collision guard", whose subject — parallel
+> sessions — is untouched); and `close_cdp_tab` aimed at a tab an errand
+> is driving or opened is refused naming that `errandId`, and once the
+> errand finishes the close succeeds for the borrowed tab (an
+> errand-opened tab is by then already gone under the default
+> `keep_open: false`, and the refusal's message says so);
 > (4) the receipt carries the `errandId`, the root the errand resolved
 > against and its `scope` ([mcp-no-project](mcp-no-project.md) §Locked —
 > every result says which root it used), the per-step outcomes, every
@@ -145,7 +152,7 @@ An errand is: **attach → act → return → detach**, in one request.
   session or an errand is running it. `[skill: …]` and `[tool: …]` are the
   exception, refused by name — the same `[skill:`/`[tool:` token rule
   `run_steps` already refuses in user scope
-  ([src/mcp/assemble.ts:63](../src/mcp/assemble.ts:63)) — because an
+  ([src/mcp/assemble.ts:72](../src/mcp/assemble.ts:72)) — because an
   errand deliberately carries no `skillsDir`/`toolsDir`. Section calls
   need no refusal: they resolve only through the `sections` map a parsed
   test file supplies ([src/mcp/types.ts:159](../src/mcp/types.ts:159)),
@@ -166,7 +173,10 @@ An errand is: **attach → act → return → detach**, in one request.
   pass-`env_name`-to-resolve warning `run_steps` already does
   ([src/mcp/assemble.ts:720](../src/mcp/assemble.ts:720)).
   `{{placeholders}}` resolve only from the errand's own earlier `store
-  as` captures.
+  as` captures. (One deliberate survivor: the step-plan cache keys on the
+  synthetic path, so errands share a project-owned, content-keyed cache
+  namespace — a performance artifact of the project, not errand state,
+  and outside item (4)'s three checks on purpose.)
 - **Return.** The response is a receipt: an `errandId` the server mints
   per request (alive only while the errand runs — see item (4)), the root
   the errand resolved against and its `scope`
@@ -235,11 +245,16 @@ errands only**:
   request and shows up in both sides' receipts.
 - **Sessions never take and are never blocked by this lock.** That is not
   an oversight: [mcp-cdp-browser](mcp-cdp-browser.md) §Locked rejected
-  per-port serialisation and tab-collision guards *for runs*, and that
-  decision stands — nothing here serialises or refuses session work. A
-  `run_steps` batch arriving while an errand drives the tab proceeds; the
-  hazard is bounded by one errand request and both sides' receipts make
-  what happened explainable.
+  per-port serialisation and tab-collision guards, and its subject —
+  parallel sessions — is untouched. What this story adds is a **named,
+  bounded amendment to that decision**: a tab-collision guard now exists,
+  taken by errands only; session behaviour is unchanged. (It also widens
+  [server-lifecycle](server-lifecycle.md)'s descriptive gloss of a run —
+  "sessions currently executing steps" — to include errands; the locked
+  definition, "no run in flight", already covers them.) A `run_steps`
+  batch arriving while an errand drives the tab proceeds; the hazard is
+  bounded by one errand request and both sides' receipts make what
+  happened explainable.
 - `close_cdp_tab`'s hold guard consults the errand lock the same way it
   consults sessions: a tab an errand is driving or opened refuses the
   close, naming the `errandId` and offering wait-and-retry. **This is a named amendment
@@ -247,8 +262,11 @@ errands only**:
   as a numbered step beside the session refusal (before the last-tab
   gate, for the same remedy-quality reason cdp-tabs ordered 3 before 4,
   and inside the same port-keyed close queue); §5's error table gains the
-  row (condition: errand-held tab; message names: the `errandId` and its
-  tab; next action: wait for the errand to finish, then retry); and §1's
+  row (condition: errand-held tab; message names: the `errandId`, its tab,
+  and whether the tab is the errand's borrowed tab or one it opened; next
+  action: wait for the errand to finish, then retry — for an errand-opened
+  tab the message adds that it will normally be gone by then, so the close
+  becomes moot); and §1's
   "null for a tab nothing is driving" gains a stated exception rather
   than a silent one: an errand's hold is NOT in the listing, because it
   lasts one request — a listing entry would be stale by the time an agent
@@ -321,6 +339,19 @@ mechanism (§Routing 3), and because zero-or-several *refuses naming
 candidates* rather than the first-match-wins those stories were guarding
 against. The destructive verb — `close_cdp_tab` — keeps exact-only.
 
+The tool's name itself is a second **named amendment**, this time to the
+`cdp` prefix rule ([mcp-cdp-browser](mcp-cdp-browser.md) §5, restated as
+locked in [cdp-tabs](cdp-tabs.md) — "the tool name says the scope"):
+`run_errand` is CDP-only by construction yet carries no `cdp`, because
+§Routing 2 measured that the name must echo the user's words at the
+moment of choice, and users say "my tab", not "my CDP browser". The
+prefix rule's own rationale — a bare name claims authority over both
+browser kinds — is answered differently here: the errand cannot reach a
+launched browser at all, and its refusals say so. The naming probe
+(§Open questions) tests a `cdp`-carrying spelling alongside the bare
+ones; if the probe contradicts the routing argument, the amendment
+dissolves and the prefix wins.
+
 Deliberately absent: `config` (no baseUrl/timeout bundle; an errand
 inherits the project's), report-path plumbing (the receipt IS the report —
 no file is written, full stop), `parameters` (steps are literal; the
@@ -340,12 +371,20 @@ returned, not thrown; a bare Zod schema would silently strip an undeclared
 key, which is the wrong-door silence this story exists to kill, and an SDK
 schema throw carries only generic text no model learns from).
 
-`run_steps` changes in two places, neither behavioural: its ignored-CDP
+`run_steps` changes in three places, none behavioural: its ignored-CDP
 warning gains the ending *"…or use run_errand if you just want to drive
-that tab"*, and the shared `CDP_NOTE` in both run tools' descriptions
+that tab"*; the shared `CDP_NOTE` in both run tools' descriptions
 ([src/mcp/tools.ts:788](../src/mcp/tools.ts:788), shared with
 `run_test_file` — the added sentence is phrased to be true of both) gains
-the whose-browser decision rule from §Routing. Session *behaviour* is
+the whose-browser decision rule from §Routing; and `CDP_NOTE`'s existing
+"Tab:" paragraph — which today teaches the `config.cdp.tab:
+"targetId:<id>"` flow for *"a tab that is already open — one the user set
+up by hand"*, exactly the ownership case §Routing sends to `run_errand` —
+is reworded rather than left to say both things at once: the
+`config.cdp.tab` flow remains documented for **binding a session** to a
+user tab (still the only way to run a *test file* against one, which is
+why the reword must stay true for `run_test_file`), and the
+one-off-driving case now points at `run_errand`. Session *behaviour* is
 untouched: no new refusal, no lock, no queueing change.
 
 ## Routing: how a model picks the right door
@@ -363,8 +402,12 @@ increasing order of trustworthiness:
    open tab" is an errand.
 2. **The name.** `run_errand` (or `drive_tab`) echoes the user's own words
    at the moment of choice. Necessary, measured insufficient on its own.
-3. **Parameter funnel.** The tab slot exists only on the errand. A model
-   holding a tab name has nowhere else to put it.
+3. **Parameter funnel.** The errand has the only first-class tab-name
+   slot. The session door still carries a targetId-only `config.cdp.tab`
+   buried in its config object — so the funnel narrows rather than
+   forces, and completing it is the deprecation question §Open questions
+   records. A model holding a tab *name* still has nowhere else to put
+   it.
 4. **Wrong doors redirect.** Both tools answer a misrouted call with one
    self-correcting sentence: on `run_steps`, the ignored-CDP warning's
    new ending pointing at `run_errand`; on `run_errand`, the
@@ -421,11 +464,13 @@ by-name enumeration's own "the six added since" → seven, gaining
 `run_errand`; add it to `usage.ts` and the README tool table; auto-start
 needs no change — reaching the server through `withProject` gives it the
 ON default ([src/mcp/tools.ts:669](../src/mcp/tools.ts:669)), and no tool
-passes `autoStart: false` (cdp-tab-focus §5's "auto-start list" sentence
-describes a list `server-start.ts` does not have — corrected there in
-this story's PR); and add it to the `mcp-seam.test.ts`,
-`mcp-schema-dialect.test.ts` (both manifests) and
-`mcp-content-blocks.test.ts` `argumentsFor()` inventories.
+passes `autoStart: false` — the "auto-start list" that cdp-tab-focus §5,
+cdp-tabs §3 and both stories' §Composition rows describe is a list
+`server-start.ts` does not have, and all four sites are corrected in this
+story's PR so the next tool story stops inheriting the claim; and add it
+to the seam + dialect tool-name manifests (`mcp-seam.test.ts`,
+`mcp-schema-dialect.test.ts`) and `mcp-content-blocks.test.ts`
+`argumentsFor()` inventories.
 
 ## Build order
 
@@ -446,8 +491,10 @@ this story's PR); and add it to the `mcp-seam.test.ts`,
   navigate the tab back to where it started? Default no — the receipt
   reports the final location — but a borrowing mid-someone's-work case may
   want it.
-- **Naming.** `run_errand` vs `drive_tab`. The probe (verification item 8)
-  should test both spellings before the name freezes.
+- **Naming.** `run_errand` vs `drive_tab` — plus a `cdp`-carrying
+  spelling (`drive_cdp_tab`), per the prefix-rule amendment in §Tool
+  surface. The probe (verification item 8) should test all three before
+  the name freezes.
 - **Scope search on a miss.** Ambiguity is settled — a profile name live
   under both roots refuses naming both (§Attach). Still open: when the
   named profile simply isn't running in the requested scope but is in the
