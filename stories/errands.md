@@ -11,23 +11,31 @@
 > but idle, the same errand still works, and the session's next `run_steps`
 > afterwards still works (the two-client coexistence this story measured on
 > 2026-08-12, re-proved through the real tool rather than a raw socket);
-> (3) an errand arriving while ANOTHER errand is driving that tab is
-> refused with a message naming the holding `errandId` and offering
-> wait-and-retry (there is no `close_errand`), and succeeds on retry once
-> the holder finishes; an errand arriving while a session is mid-batch on
-> that tab is refused naming the session id; a `run_steps` batch arriving
-> while an errand drives that tab proceeds — sessions take no lock (the
-> [mcp-cdp-browser](mcp-cdp-browser.md) §Locked decision, "no per-port
-> serialisation and no tab-collision guard" *for runs*, stands: nothing
-> here serialises or refuses session work); and `close_cdp_tab` aimed at a
-> tab an errand is driving is refused naming that `errandId`, and succeeds
-> once the errand finishes; (4) the receipt carries the `errandId`, the
-> per-step outcomes, every `store as` capture, the tab's final `url` and
-> `title`, the list of tabs the errand opened, and the `effectiveSettings`
-> it ran under — and nothing of the errand survives on the server, checked
-> three bounded ways: `list_sessions` returns the same set before and
-> after, the project's report directory gains no file, and a second errand
-> interpolating a variable the first errand captured fails to resolve it;
+> (3) an errand arriving while ANOTHER errand is driving **or opened**
+> that tab is refused with a message naming the holding `errandId` and
+> offering wait-and-retry (there is no `close_errand`), and succeeds on
+> retry once the holder finishes; an errand arriving while a session is
+> mid-batch on that tab is refused naming the session id; a `run_steps`
+> batch arriving while an errand drives that tab proceeds — sessions take
+> no lock (the [mcp-cdp-browser](mcp-cdp-browser.md) §Locked decision,
+> "no per-port serialisation and no tab-collision guard" *for runs*,
+> stands: nothing here serialises or refuses session work); and
+> `close_cdp_tab` aimed at a tab an errand is driving or opened is
+> refused naming that `errandId`, and succeeds once the errand finishes;
+> (4) the receipt carries the `errandId`, the root the errand resolved
+> against and its `scope` ([mcp-no-project](mcp-no-project.md) §Locked —
+> every result says which root it used), the per-step outcomes, every
+> `store as` capture, the tab's final `url` and `title`, the list of tabs
+> the errand opened, and the `effectiveSettings` it ran under — and
+> nothing of the errand survives on the server, checked three bounded
+> ways: `list_sessions` returns the same set before and after, the
+> project's report directory gains no file, and a second errand
+> interpolating a variable the first errand captured leaves it
+> unresolved — the step text reaching the executor still carries the
+> literal `{{x}}` (observed at the executor seam; the receipt's per-step
+> `text` echoes the *sent* step, so it cannot discriminate) and the
+> second receipt's `captures` carry no such name; the errand does not
+> error, exactly as `run_steps` would not;
 > (5) a tab the errand did not open is never closed by it; a tab or
 > browser it DID open during its steps is gone by the time it returns —
 > or, for tabs with `keep_open: true`, still open and named in the receipt
@@ -148,14 +156,23 @@ An errand is: **attach → act → return → detach**, in one request.
   optional `env_name` — that path is the only thing the server resolves a
   project root from
   ([src/server/session-manager.ts:1029](../src/server/session-manager.ts:1029)),
-  and without it `${env.X}` and the project layer of `effectiveSettings`
-  would both silently fall back to server defaults. So `${env.X}`
-  resolves from the project's environment (default env unless `env_name`
-  says otherwise), and `{{placeholders}}` resolve only from the errand's
-  own earlier `store as` captures.
+  and without it the project layer of `effectiveSettings` would silently
+  fall back to server defaults. `${env.X}` resolves from the project's
+  environment **only when `env_name` names one**: with no `env_name` the
+  server builds no env bundle (`if (envName)`,
+  [src/server/session-manager.ts:1070](../src/server/session-manager.ts:1070))
+  and the placeholder reaches the AI as literal text — there is no
+  default-env concept — so `run_errand` emits the same
+  pass-`env_name`-to-resolve warning `run_steps` already does
+  ([src/mcp/assemble.ts:720](../src/mcp/assemble.ts:720)).
+  `{{placeholders}}` resolve only from the errand's own earlier `store
+  as` captures.
 - **Return.** The response is a receipt: an `errandId` the server mints
-  per request (alive only while the errand runs — see item (4)), per-step
-  outcomes, every `store as` capture (this is where variables go — to the
+  per request (alive only while the errand runs — see item (4)), the root
+  the errand resolved against and its `scope`
+  ([mcp-no-project](mcp-no-project.md) §Locked: every result says which
+  root it used — an errand's whole project layer hangs off that
+  resolution), per-step outcomes, every `store as` capture (this is where variables go — to the
   caller, who is the brain here; the server keeps no scope), the final
   `url` and `title` of the borrowed tab, a list of anything the errand
   opened along the way, and the `effectiveSettings` it ran under — an
@@ -192,11 +209,15 @@ simultaneity hazards.
 So the server keeps a per-tab (targetId-keyed) turn lock — **taken by
 errands only**:
 
-- An errand takes the lock for its lifetime. Release is not a step anyone
-  can forget — finishing *is* releasing, including finishing by error.
-- A second errand on a held tab is refused with the holding `errandId`
-  named and told to wait and retry — there is no `close_errand`, and it
-  does not queue silently.
+- An errand holds the lock on **every tab it is tracking — the borrowed
+  tab plus any it opened** — for its lifetime, mirroring
+  [cdp-tabs](cdp-tabs.md) §Locked's "all of a session's tracked pages"
+  and for the same reason: steps can switch back to a tab they opened.
+  Release is not a step anyone can forget — finishing *is* releasing,
+  including finishing by error.
+- A second errand on any tab of that set is refused with the holding
+  `errandId` named and told to wait and retry — there is no
+  `close_errand`, and it does not queue silently.
 - Before taking the lock, an errand also consults the session manager's
   own tab tracking — the same join `close_cdp_tab`'s guard already does
   ([src/server/session-manager.ts:1697](../src/server/session-manager.ts:1697)),
@@ -220,8 +241,8 @@ errands only**:
   hazard is bounded by one errand request and both sides' receipts make
   what happened explainable.
 - `close_cdp_tab`'s hold guard consults the errand lock the same way it
-  consults sessions: a tab an errand is driving refuses the close, naming
-  the `errandId` and offering wait-and-retry. **This is a named amendment
+  consults sessions: a tab an errand is driving or opened refuses the
+  close, naming the `errandId` and offering wait-and-retry. **This is a named amendment
   to [cdp-tabs](cdp-tabs.md) §1, §2 and §5** — §2 gains the errand check
   as a numbered step beside the session refusal (before the last-tab
   gate, for the same remedy-quality reason cdp-tabs ordered 3 before 4,
@@ -271,13 +292,21 @@ run_errand {
                                 # the candidate set). String.includes semantics: no globs, no
                                 # regex. Resolved fresh, over the filtered live tab list;
                                 # zero or several matches refuse (§Attach).
-  profile?:     string          # CDP profile name, default "default"
+  profile?:     string          # CDP profile name, default "default"; an explicit "" is
+                                # normalised to the default before resolution (a deliberate
+                                # divergence from close_cdp_tab's no-default optional —
+                                # run_errand has no port, so the per-tool no-address
+                                # refusal family is unreachable and must stay that way)
   engine?:      'chrome'|'edge' # disambiguates profile, as on close_cdp_tab/focus_cdp_tab
   scope?:       'project'|'user'
   project_root?: string         # as on every other tool
-  env_name?:    string          # as on run_steps; picks the project env for ${env.X}
+  env_name?:    string          # as on run_steps; without it no env bundle is built and
+                                # ${env.X} passes through as literal text (§Act)
   steps:        string[]        # step language as run_steps, minus [skill:]/[tool:] (§Act)
   keep_open?:   boolean         # leave errand-opened tabs behind (default false)
+  session_id?:  string          # DECLARED ONLY TO BE REFUSED — the description says
+                                # "errands have no sessions — use run_steps"; the handler
+                                # refuses any call carrying it before any browser work
 }
 ```
 
@@ -294,8 +323,13 @@ against. The destructive verb — `close_cdp_tab` — keeps exact-only.
 
 Deliberately absent: `config` (no baseUrl/timeout bundle; an errand
 inherits the project's), report-path plumbing (the receipt IS the report —
-no file is written, full stop), and `parameters` (steps are literal; the
-caller inlines values).
+no file is written, full stop), `parameters` (steps are literal; the
+caller inlines values), and the five run-settings overrides `run_steps`
+carries (`model`, `capture`, `full_page`, `send_screenshots`,
+`screenshots_return`) — an errand has no session to hold overrides, so
+the project/server chain decides; the one client-side member,
+`screenshots_return`, folds with its shipped default
+(`DEFAULT_SCREENSHOTS_RETURN`, `'on-failure'`).
 
 `session_id` is **declared but always refused**: the schema lists it only
 so its description can say "errands have no sessions — use run_steps", and
@@ -332,10 +366,11 @@ increasing order of trustworthiness:
 3. **Parameter funnel.** The tab slot exists only on the errand. A model
    holding a tab name has nowhere else to put it.
 4. **Wrong doors redirect.** Both tools answer a misrouted call with one
-   self-correcting sentence: the §Tool surface warning ending on
-   `run_steps`, and the handler-level `session_id` refusal naming
-   `run_steps` on `run_errand`. This is the layer that rescues small
-   models, because it converts a wrong pick into one extra round-trip.
+   self-correcting sentence: on `run_steps`, the ignored-CDP warning's
+   new ending pointing at `run_errand`; on `run_errand`, the
+   handler-level `session_id` refusal naming `run_steps`. This is the
+   layer that rescues small models, because it converts a wrong pick into
+   one extra round-trip.
 
 Per the verification rule, routing is *probed live and reported*, never
 asserted: a miss is a product finding about a model, and the record of it
@@ -379,12 +414,17 @@ status-carrying extension of the tab-tracking join; the per-tab turn lock
 closes errand-opened tabs and browsers; the receipt shape.
 
 And the inventory, which every tool story owes
-([cdp-tab-focus](cdp-tab-focus.md) §5's standing rule): increment
-`mcp-server.md` §2's tool-count sentences — the numeral and the spelled
-word — and add `run_errand` to its by-name enumeration; add it to
-`usage.ts`, the README tool table, `server-start.ts`'s auto-start list
-(**on**, by the same reasoning as the other live-browser tools), and the
-`mcp-seam.test.ts`, `mcp-schema-dialect.test.ts` (both manifests) and
+([cdp-tab-focus](cdp-tab-focus.md) §5's standing rule): increment every
+tool-count sentence in `mcp-server.md` — §2's "Thirteen tools" (word) and
+"all 13 schemas" (numeral), §Tests' "**13** tools" (numeral), and the
+by-name enumeration's own "the six added since" → seven, gaining
+`run_errand`; add it to `usage.ts` and the README tool table; auto-start
+needs no change — reaching the server through `withProject` gives it the
+ON default ([src/mcp/tools.ts:669](../src/mcp/tools.ts:669)), and no tool
+passes `autoStart: false` (cdp-tab-focus §5's "auto-start list" sentence
+describes a list `server-start.ts` does not have — corrected there in
+this story's PR); and add it to the `mcp-seam.test.ts`,
+`mcp-schema-dialect.test.ts` (both manifests) and
 `mcp-content-blocks.test.ts` `argumentsFor()` inventories.
 
 ## Build order
