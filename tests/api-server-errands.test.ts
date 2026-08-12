@@ -1263,6 +1263,211 @@ describe('POST /errands', () => {
     expect(borrowedPage.bringToFront).toHaveBeenCalled();
   });
 
+  it('re-asks at the hand-back whether a STEP-closed browser is still there', async () => {
+    // The answer that used to be frozen at the splice. `BrowserTracker.close`
+    // takes the session out of `all()` (manager.ts:892), so the close wrapper is
+    // the only place that session can be CAUGHT — but it is not the moment the
+    // receipt is written. Reading `isConnected()` there recorded "still on the
+    // user's screen" and the detach then repeated it as fact however long the
+    // rest of the run took: a wedge that lets go, a window the user closes, a
+    // browser process that dies, and `keptOpen` still named it. `keptOpen` is a
+    // claim about the browser as the tab goes back, so it has to be measured
+    // then. The control is the test directly above — identical step, identical
+    // wedge, and there the browser is STILL up at the detach and rightly named.
+    const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
+    const worker = {
+      browser: { isConnected: () => true },
+      context: {
+        close: vi.fn(async () => {
+          throw new Error('the browser would not close');
+        }),
+      },
+      page: workerPage,
+      pageTracker: new PageTrackerMock(workerPage as any),
+    };
+    /** Read right after the step's close, because "was it up when the splice
+     *  hid it?" is the whole premise: without this the assertions below would
+     *  pass just as well on a browser that had already gone by then, and the
+     *  test would prove nothing about WHEN the question is asked. */
+    let connectedAtClose = false;
+    let step = 0;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (step++ === 0) {
+        opts.browserTracker!.add('worker', worker as any);
+        await (opts.browserTracker as any).close('worker');
+        connectedAtClose = worker.browser.isConnected();
+      } else {
+        // The wedge lets go while the errand is still running: whatever was
+        // holding the browser open finishes, and the window goes.
+        worker.browser = { isConnected: () => false };
+      }
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open a second browser and close it again', 'let it finish going'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // The close was asked for by the STEP, wedged, and the session was spliced
+    // out with the browser still up — the exact state the wrapper used to bank.
+    expect(worker.context.close).toHaveBeenCalledTimes(1);
+    expect(connectedAtClose).toBe(true);
+    // And it was gone by the time the receipt was written.
+    expect(worker.browser.isConnected()).toBe(false);
+    // Still named as opened — that promise is about the whole run, not the end
+    // of it — and NOT named as still open, because it is not.
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+    ]);
+    expect(body.errand.keptOpen).toEqual([]);
+    expect(borrowedPage.bringToFront).toHaveBeenCalled();
+  });
+
+  it('drops a tab closed inside a STEP-closed browser that is still up', async () => {
+    // The other half of asking at the hand-back: once the browser answers "still
+    // here", WHAT is still in it is a second question, and the pre-splice sweep
+    // is no better an answer to it than the pre-splice connection was to the
+    // first. A tab the user closes inside that wedged-open window splices itself
+    // out of its tracker (manager.ts:339) exactly as it would in any other
+    // browser, so the detach re-reads the tracker rather than replaying what the
+    // wrapper saw — the same reason `launchedTabs` is read at the detach instead
+    // of carried from the step loop. The browser's own first page is the control
+    // sitting beside it: same browser, same sweep, never closed, still named.
+    const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
+    const extra = makePage('worker-extra', 'https://openrouter.ai/csv', 'CSV');
+    const worker = {
+      browser: { isConnected: () => true },
+      context: {
+        close: vi.fn(async () => {
+          throw new Error('the browser would not close');
+        }),
+      },
+      page: workerPage,
+      pageTracker: new PageTrackerMock(workerPage as any),
+    };
+    let step = 0;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (step++ === 0) {
+        opts.browserTracker!.add('worker', worker as any);
+        // Opened in the LAUNCHED browser's own tracker, the way `openPage`
+        // does it — `addPage` then `markExpected`.
+        worker.pageTracker.addPage(extra as any);
+        worker.pageTracker.markExpected(extra as any);
+        await (opts.browserTracker as any).close('worker');
+      } else {
+        // Closed inside a browser the tracker no longer lists at all.
+        await extra.close();
+      }
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open a second browser with two tabs and close it', 'close the csv tab'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // The premise: the browser is still on screen, and the tab is not.
+    expect(worker.browser.isConnected()).toBe(true);
+    expect(worker.pageTracker.tabs().map((t: any) => t.page)).not.toContain(extra);
+    // Both opened — the sweep before the splice is what caught the csv tab, and
+    // `openedTabs` keeps it whether or not it survived.
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+      { targetId: 'worker-extra', url: 'https://openrouter.ai/csv', title: 'CSV' },
+    ]);
+    // Only what is actually there.
+    expect(body.errand.keptOpen).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+    ]);
+  });
+
+  it('strands only the browser a STEP closed, never its siblings', async () => {
+    // The `remaining.has(session)` guard in `drive`'s close wrapper, which reads
+    // like tidiness and is not. The sweep it filters is a sweep of EVERY browser
+    // this errand launched, taken before the splice, so without the guard one
+    // step closing one browser strands all of its siblings — sessions that are
+    // still perfectly listed and that the detach is about to close itself. The
+    // detach asks the stranded question before it does its own closing, so those
+    // siblings answer "connected", their tabs go into `keptOpen`, and nothing
+    // takes them out again when the close a moment later works: the receipt
+    // names as "still on your screen" a browser it shut cleanly.
+    const wedgedPage = makePage('a-main', 'https://openrouter.ai/a', 'A');
+    const siblingPage = makePage('b-main', 'https://openrouter.ai/b', 'B');
+    const wedged = {
+      browser: { isConnected: () => true },
+      context: {
+        close: vi.fn(async () => {
+          throw new Error('the browser would not close');
+        }),
+      },
+      page: wedgedPage,
+      pageTracker: new PageTrackerMock(wedgedPage as any),
+    };
+    const sibling = {
+      browser: { isConnected: () => true },
+      context: { close: vi.fn(async () => {}) },
+      page: siblingPage,
+      pageTracker: new PageTrackerMock(siblingPage as any),
+    };
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      opts.browserTracker!.add('a', wedged as any);
+      opts.browserTracker!.add('b', sibling as any);
+      await (opts.browserTracker as any).close('a');
+      return {
+        index: idx as number,
+        instruction: 'opened two browsers and closed the first',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open two browsers and close the first'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // The sibling was never the step's to close: it stayed listed, and the
+    // DETACH closed it — which is what makes it the control for the wedged one.
+    expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toEqual([
+      wedged,
+      sibling,
+      lastBorrowed,
+    ]);
+    expect(wedged.browser.isConnected()).toBe(true);
+    expect(sibling.browser.isConnected()).toBe(false);
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'a-main', url: 'https://openrouter.ai/a', title: 'A' },
+      { targetId: 'b-main', url: 'https://openrouter.ai/b', title: 'B' },
+    ]);
+    // The wedged one only.
+    expect(body.errand.keptOpen).toEqual([
+      { targetId: 'a-main', url: 'https://openrouter.ai/a', title: 'A' },
+    ]);
+  });
+
   it('leaves a tab a LAUNCHED browser only adopted off the receipt', async () => {
     // The launched-level mirror of "leaves a tab it only ADOPTED alone" below,
     // and it exists because the two sweeps ask the same provenance question of

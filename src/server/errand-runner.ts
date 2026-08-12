@@ -361,8 +361,11 @@ export class ErrandRunner {
        * Closing that gap needs a hook at OPEN time, and an open-time hook is
        * the one moment the receipt cannot use: `addPage` enters every page as
        * `unexpected: true` (manager.ts:327) and only a later `markExpected`
-       * says otherwise (step-executor.ts:869), so a hook firing there would be
-       * asked the provenance question before anything can answer it — and this
+       * (step-executor.ts:869) or `resolveOpener` (manager.ts:394) says
+       * otherwise — one after the `newPage()` that produced the tab resolves,
+       * the other after an `opener()` round-trip, so both land AFTER the hook
+       * would have fired — meaning a hook firing there would be asked the
+       * provenance question before anything can answer it, and this
        * errand may only name tabs it can account for. The browser-level case
        * below is reachable because the CLOSE goes through a tracker this errand
        * constructs, and by then the answer is already recorded.
@@ -379,7 +382,8 @@ export class ErrandRunner {
       const ownTabs = new Map<Page, ErrandTab>();
       const browserTracker = new BrowserTracker(borrowed);
       /**
-       * The tabs of a browser a STEP closed whose close did not take.
+       * The browsers a STEP closed, out of the detach's reach, with the tabs
+       * the sweep saw in each of them before the splice.
        *
        * The same wedge the detach's own close loop reads for, at the one moment
        * that loop cannot: `closeBrowser` swallows its own failure and returns
@@ -387,17 +391,25 @@ export class ErrandRunner {
        * session out of `all()` (manager.ts:892) either way — so a browser whose
        * `context.close()` rejected is off the list while its window is still on
        * the user's screen. The detach asks `isConnected()` of every session it
-       * can still see; this one it cannot see, so without a record taken here
+       * can still see; this one it cannot see, so without the SESSION kept here
        * its tabs reach `openedTabs` and never `keptOpen`, which is the receipt
        * saying "closed" about a window the user is looking at — the case
        * stories/errands.md §Return item (5) names as "still connected after its
        * close was asked for".
        *
-       * Filled by the wrapper below, which is the only place both halves are in
-       * hand: the tabs, from the sweep taken before the splice, and the
-       * survival, from a connection the splice does not sever.
+       * The session, not an answer about it: survival is asked at the DETACH
+       * (`detach`), because a browser that was still up when its close was
+       * asked for can be gone by the time the receipt is written — the wedge
+       * clears, the user closes the window, the process dies — and an answer
+       * frozen here would have the receipt name a browser that is no longer
+       * there. What the wrapper below can do, and the only place it can be
+       * done, is catch the SESSION on its way out of `all()`; the pages beside
+       * it are the sweep it had just taken, the one that put them in `ownTabs`.
+       * The detach works from the keys and asks both halves for itself — of the
+       * connection, and of the tracker — so nothing measured here is replayed
+       * there as fact.
        */
-      const strandedOpen = new Set<Page>();
+      const strandedOpen = new Map<BrowserSession, Page[]>();
       /**
        * Record before the splice, and read the wreckage after it.
        *
@@ -430,18 +442,14 @@ export class ErrandRunner {
         await closeTrackedBrowser(label);
         const remaining = new Set(browserTracker.all());
         for (const [session, pages] of before) {
-          // Still listed means this close was not about it. The detach's own
-          // loop will reach it and ask the same question there.
+          // Load-bearing, not tidiness: `before` is a sweep of EVERY launched
+          // browser, so without this a close of one browser would strand every
+          // sibling that is still perfectly listed — and the detach would then
+          // report as "still open" the tabs of browsers it went on to close
+          // cleanly. Still listed means this close was not about it, and the
+          // detach's own loop will reach it and ask the same question there.
           if (remaining.has(session)) continue;
-          let survived = false;
-          try {
-            survived = session.browser.isConnected();
-          } catch {
-            // No answer either way. The asked-for close is then the only
-            // evidence there is, so this claims nothing — the same direction
-            // the detach's own unreadable case takes.
-          }
-          if (survived) for (const page of pages) strandedOpen.add(page);
+          strandedOpen.set(session, pages);
         }
       };
       logger.info(
@@ -921,7 +929,7 @@ export class ErrandRunner {
    * the splice hides from the detach entirely. The step loop's own calls want
    * only the recording and discard it.
    *
-   * Never throws: `all()` is a plain array read and everything after it is
+   * Never throws: `all()` is a plain array read and `recordSessionTabs` is
    * guarded, which is what lets its callers be a `finally` inside the step loop,
    * the detach, and a browser close that must not start failing because the
    * receipt could not be written.
@@ -934,26 +942,50 @@ export class ErrandRunner {
     const launchedTabs = new Map<BrowserSession, Page[]>();
     for (const session of browserTracker.all()) {
       if (session === borrowed) continue;
-      const recorded: Page[] = [];
-      try {
-        // A SNAPSHOT, for the reason `claimOpenedTabs` takes one: a tab that
-        // closes inside the `describeTab` await splices itself out of `tabs()`
-        // and the live iterator then skips its neighbour.
-        for (const entry of [...session.pageTracker.tabs()]) {
-          // The same provenance gate the borrowed sweep applies: a tab this
-          // errand cannot account for is not one it may claim to have opened.
-          if (entry.unexpected) continue;
-          ownTabs.set(entry.page, await describeTab(entry));
-          recorded.push(entry.page);
-        }
-      } catch {
-        // A tracker that cannot enumerate costs the receipt a line; it must not
-        // cost the caller the hand-back — this runs inside a `finally`.
-        // Whatever was recorded before the throw stands.
-      }
-      launchedTabs.set(session, recorded);
+      launchedTabs.set(session, await this.recordSessionTabs(session, ownTabs));
     }
     return launchedTabs;
+  }
+
+  /**
+   * One launched browser's sweep: record its tabs, and answer which of them the
+   * tracker holds RIGHT NOW.
+   *
+   * Split out of `recordLaunchedTabs` because the detach needs this for a
+   * session that walk can no longer reach — a browser a STEP closed, spliced
+   * out of `all()` (manager.ts:892) and kept only in `strandedOpen`. Same two
+   * jobs there as here, and for the same reason: the recording is what
+   * `openedTabs` is built from, and the return is the evidence `keptOpen` needs
+   * about what is on the user's screen at the hand-back rather than earlier.
+   *
+   * Everything it returns it has just recorded into `ownTabs` one line above,
+   * so a caller may put the whole list into `stillOpen` without re-filtering:
+   * `keptOpen` walks `ownTabs`, and a page that never entered it could not be
+   * named there anyway.
+   *
+   * Never throws. A tracker that cannot enumerate costs the receipt a line; it
+   * must not cost the caller the hand-back, which runs inside a `finally`.
+   */
+  private async recordSessionTabs(
+    session: BrowserSession,
+    ownTabs: Map<Page, ErrandTab>,
+  ): Promise<Page[]> {
+    const recorded: Page[] = [];
+    try {
+      // A SNAPSHOT, for the reason `claimOpenedTabs` takes one: a tab that
+      // closes inside the `describeTab` await splices itself out of `tabs()`
+      // and the live iterator then skips its neighbour.
+      for (const entry of [...session.pageTracker.tabs()]) {
+        // The same provenance gate the borrowed sweep applies: a tab this
+        // errand cannot account for is not one it may claim to have opened.
+        if (entry.unexpected) continue;
+        ownTabs.set(entry.page, await describeTab(entry));
+        recorded.push(entry.page);
+      }
+    } catch {
+      // Whatever was recorded before the throw stands.
+    }
+    return recorded;
   }
 
   /**
@@ -976,11 +1008,15 @@ export class ErrandRunner {
     /** What the claim sweeps recorded, closed tabs included. */
     ownTabs: Map<Page, ErrandTab>;
     /**
-     * Tabs of a browser a STEP closed that is still connected — gathered by the
-     * wrapped `browserTracker.close` in `drive`, because the splice takes those
-     * sessions out of reach of the close loop below.
+     * The browsers a STEP closed, with what the pre-splice sweep saw in each —
+     * gathered by the wrapped `browserTracker.close` in `drive`, because the
+     * splice takes those sessions out of reach of the close loop below.
+     *
+     * Sessions, not a verdict: whether each is still on the user's screen is
+     * asked HERE, at the hand-back, like every other survival question on this
+     * path.
      */
-    strandedOpen: Set<Page>;
+    strandedOpen: Map<BrowserSession, Page[]>;
   }): Promise<ErrandSummary> {
     const { errandId, keepOpen, borrowed, browserTracker, lease } = args;
     const borrowedPage = borrowed.page;
@@ -1051,6 +1087,45 @@ export class ErrandRunner {
      */
     const launchedTabs = await this.recordLaunchedTabs(browserTracker, borrowed, args.ownTabs);
 
+    /**
+     * The same two jobs for the browsers a STEP closed, which `launchedTabs`
+     * cannot reach: `BrowserTracker.close` spliced them out of `all()`
+     * (manager.ts:892), so `drive`'s close wrapper kept the sessions.
+     *
+     * Survival is asked HERE and nowhere earlier. The wrapper could have read
+     * `isConnected()` at the moment of the splice, and that answer would then
+     * have been repeated as fact however long the rest of the run took: a
+     * browser whose wedge cleared, whose window the user closed, or whose
+     * process died mid-run would still be named "still open" on a receipt
+     * written afterwards. `keptOpen` is a claim about the browser as the errand
+     * hands the tab back, so it is measured then — the same question, the same
+     * guard, and the same "unreadable claims nothing" direction as the close
+     * loop's own check below.
+     *
+     * And when the answer is yes, the tracker is re-read rather than trusted
+     * from the splice, exactly as `launchedTabs` re-reads instead of carrying
+     * the step loop's sweeps: a tab the user closed inside that wedged-open
+     * browser has spliced itself out (manager.ts:339) and must not be reported
+     * still open, and every descriptor the receipt carries is refreshed to what
+     * the tab says now. Recording only — a stranded browser is past closing.
+     *
+     * Before `openedTabs` below, because that sweep writes into `ownTabs`:
+     * anything it finds or refreshes belongs on the receipt it builds.
+     */
+    const strandedTabs: Page[] = [];
+    for (const session of args.strandedOpen.keys()) {
+      let survived = false;
+      try {
+        survived = session.browser.isConnected();
+      } catch {
+        // No answer either way. The asked-for close is then the only evidence
+        // there is, so this claims nothing — the same direction the close
+        // loop's own unreadable case takes below.
+      }
+      if (!survived) continue;
+      strandedTabs.push(...(await this.recordSessionTabs(session, args.ownTabs)));
+    }
+
     // Every tab the errand opened, whether or not it survived the run — the
     // promise `openedTabs` makes in src/mcp/schemas.ts and on `ErrandSummary`.
     // Read from the sweeps rather than from what is still tracked, because a
@@ -1072,20 +1147,19 @@ export class ErrandRunner {
      * start outside this set and stay outside it — correctly: the close loop
      * takes their whole browser down, and a tab cannot outlive the browser it
      * is in. The ways back in are the two halves of one evidence rule, for a
-     * browser still connected once its close has been asked for: that loop's
-     * own check, for a browser the detach closed, and `strandedOpen` for one a
-     * STEP closed — which the splice (manager.ts:892) put beyond the loop's
-     * reach before it ever ran.
+     * browser still connected once its close has been asked for — and both
+     * halves ask at THIS hand-back, of the connection and of the tracker: the
+     * close loop's own check below, for a browser the detach closed, and
+     * `strandedTabs` above for one a STEP closed, which the splice
+     * (manager.ts:892) put beyond that loop's reach before it ever ran.
      */
     const stillOpen = new Set<Page>(
       tracked.map((entry) => entry.page).filter((page) => args.ownTabs.has(page)),
     );
-    // Filtered on `ownTabs` like the borrowed browser's own pages above: a page
-    // this errand cannot claim to have opened has no line in the receipt to be
-    // reported open on, and `keptOpen` is built by walking `ownTabs`.
-    for (const page of args.strandedOpen) {
-      if (args.ownTabs.has(page)) stillOpen.add(page);
-    }
+    // No `ownTabs` filter, and none needed: `recordSessionTabs` records every
+    // page it returns, so these are already in `ownTabs` — the same reason the
+    // close loop's own arm below adds `launchedTabs` unfiltered.
+    for (const page of strandedTabs) stillOpen.add(page);
 
     let finalUrl = '';
     let finalTitle = '';
