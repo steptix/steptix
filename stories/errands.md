@@ -382,9 +382,9 @@ the whose-browser decision rule from §Routing; and `CDP_NOTE`'s existing
 up by hand"*, exactly the ownership case §Routing sends to `run_errand` —
 is reworded rather than left to say both things at once: the
 `config.cdp.tab` flow remains documented for **binding a session** to a
-user tab (still the only way to run a *test file* against one, which is
-why the reword must stay true for `run_test_file`), and the
-one-off-driving case now points at `run_errand`. Session *behaviour* is
+user tab (still the session-door path a *test-file* run against one goes
+through, which is why the reword must stay true for `run_test_file`),
+and the one-off-driving case now points at `run_errand`. Session *behaviour* is
 untouched: no new refusal, no lock, no queueing change.
 
 ## Routing: how a model picks the right door
@@ -403,11 +403,11 @@ increasing order of trustworthiness:
 2. **The name.** `run_errand` (or `drive_tab`) echoes the user's own words
    at the moment of choice. Necessary, measured insufficient on its own.
 3. **Parameter funnel.** The errand has the only first-class tab-name
-   slot. The session door still carries a targetId-only `config.cdp.tab`
-   buried in its config object — so the funnel narrows rather than
-   forces, and completing it is the deprecation question §Open questions
-   records. A model holding a tab *name* still has nowhere else to put
-   it.
+   slot. The session door's `config.cdp.tab` does still accept
+   `title~`/`url~` — but buried inside a config object, resolved
+   first-match-wins, and documented (`CDP_NOTE`'s "Tab:" paragraph) for
+   target ids only — so the funnel narrows rather than forces, and
+   completing it is the deprecation question §Open questions records.
 4. **Wrong doors redirect.** Both tools answer a misrouted call with one
    self-correcting sentence: on `run_steps`, the ignored-CDP warning's
    new ending pointing at `run_errand`; on `run_errand`, the
