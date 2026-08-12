@@ -1200,6 +1200,69 @@ describe('POST /errands', () => {
     expect(borrowedPage.bringToFront).toHaveBeenCalled();
   });
 
+  it('reports the tabs of a browser a STEP closed when that close did not take', async () => {
+    // The wedged-browser rule at the one moment the detach cannot enforce it.
+    // `closeBrowser` swallows a rejecting `context.close()` and returns normally
+    // (manager.ts:1482), and `BrowserTracker.close` splices the session out of
+    // `all()` regardless (manager.ts:892) — so a browser a STEP closed and
+    // wedged is off the list while its window is still on the user's screen,
+    // and the detach's own `isConnected()` check never gets to ask about it.
+    // Its tabs then landed in `openedTabs` and never in `keptOpen`: the receipt
+    // saying "closed" about a window the user is looking at, which is exactly
+    // what stories/errands.md §Return item (5) forbids. The control is the test
+    // directly above: same step, same browser, same close, and it WORKED — so
+    // the browser is disconnected there and its page is rightly reported gone.
+    const workerPage = makePage('worker-main', 'https://openrouter.ai/report', 'Report');
+    const worker = {
+      browser: { isConnected: () => true },
+      context: {
+        close: vi.fn(async () => {
+          throw new Error('the browser would not close');
+        }),
+      },
+      page: workerPage,
+      pageTracker: new PageTrackerMock(workerPage as any),
+    };
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      opts.browserTracker!.add('worker', worker as any);
+      await (opts.browserTracker as any).close('worker');
+      return {
+        index: idx as number,
+        instruction: 'opened a browser and closed it again',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open a second browser and close it again'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // The close was asked for by the STEP and came back without complaint — the
+    // shape a caller cannot tell from success — and the session is out of the
+    // tracker, so the detach's close loop never saw it.
+    expect(worker.context.close).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toEqual([worker, lastBorrowed]);
+    // The evidence that survives the swallow: nothing closed the browser.
+    expect(worker.browser.isConnected()).toBe(true);
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+    ]);
+    // Named as still open, because it is.
+    expect(body.errand.keptOpen).toEqual([
+      { targetId: 'worker-main', url: 'https://openrouter.ai/report', title: 'Report' },
+    ]);
+    // And the wedged browser did not take the hand-back with it.
+    expect(workerPage.close).not.toHaveBeenCalled();
+    expect(borrowedPage.close).not.toHaveBeenCalled();
+    expect(borrowedPage.bringToFront).toHaveBeenCalled();
+  });
+
   it('leaves a tab a LAUNCHED browser only adopted off the receipt', async () => {
     // The launched-level mirror of "leaves a tab it only ADOPTED alone" below,
     // and it exists because the two sweeps ask the same provenance question of
