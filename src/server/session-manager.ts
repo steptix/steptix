@@ -477,6 +477,28 @@ export interface SessionsByTarget {
   complete: boolean;
 }
 
+/** One session driving one tab, and whether it is doing anything with it right
+ *  now. `executing` means a batch is in flight. */
+export interface SessionTabHolder {
+  sessionId: string;
+  status: 'active' | 'executing';
+}
+
+/**
+ * The same join as `SessionsByTarget`, carrying **every** holder of each tab
+ * with its status (stories/errands.md §The wheel).
+ *
+ * Both extensions are load-bearing for the errand guard and neither is
+ * cosmetic. Two sessions can legitimately hold one tab, and `SessionsByTarget`
+ * keeps only the first to answer — so an idle winner would mask a session
+ * mid-batch, and the errand would borrow a wheel someone else is turning.
+ * Filtering `SessionsByTarget`'s output cannot recover either fact.
+ */
+export interface SessionsHoldingTargets {
+  byTarget: Map<string, SessionTabHolder[]>;
+  complete: boolean;
+}
+
 /** How to read the page — see stories/page-content.md §1. */
 export interface PageContentOptions {
   format: PageContentFormat;
@@ -1525,17 +1547,46 @@ export class SessionManager {
    * `port` — `targetId` → `sessionId`.
    *
    * Serves two callers with one join: the tab listing's `sessionId` field, and
-   * the close guard. Sessions are filtered by port first, so a project running
-   * launch-mode sessions pays nothing — those are on disposable browsers with
-   * no CDP port and can never hold a tab of this one.
+   * the close guard. Both want one name per tab, which is what this reduction
+   * of `sessionsHoldingTargets` gives them — and what the errand guard cannot
+   * use, for the reason that method's doc gives.
+   */
+  async sessionsByTarget(port: number): Promise<SessionsByTarget> {
+    const { byTarget: all, complete } = await this.sessionsHoldingTargets(port);
+    const byTarget = new Map<string, string>();
+    for (const [targetId, holders] of all) {
+      // First writer wins. Two sessions can legitimately hold the same tab
+      // (they share the browser's context), and for both of this method's
+      // callers — a listing label and a refusal — naming one is enough.
+      const first = holders[0];
+      if (first) byTarget.set(targetId, first.sessionId);
+    }
+    return { byTarget, complete };
+  }
+
+  /**
+   * The same join, with every holder and its status
+   * (stories/errands.md §The wheel).
+   *
+   * The errand guard is the caller that needs both: an idle session on a tab
+   * blocks nothing, a session with a batch in flight blocks the borrow, and the
+   * first-holder-per-target reduction above cannot express the difference — an
+   * idle winner would hide the executing session behind it.
+   *
+   * `sessionsByTarget` is derived from this rather than the other way round, so
+   * there is one sweep and one definition of who holds what.
+   *
+   * Sessions are filtered by port first, so a project running launch-mode
+   * sessions pays nothing — those are on disposable browsers with no CDP port
+   * and can never hold a tab of this one.
    *
    * **Only this server's sessions are visible.** A tab driven by another
    * Sessions API server, or by a human clicking in the window, is unknowable
    * from here — consistent with the standing decision that parallel users of
    * one CDP browser own the consequences.
    */
-  async sessionsByTarget(port: number): Promise<SessionsByTarget> {
-    const byTarget = new Map<string, string>();
+  async sessionsHoldingTargets(port: number): Promise<SessionsHoldingTargets> {
+    const byTarget = new Map<string, SessionTabHolder[]>();
     let complete = true;
 
     await Promise.all(
@@ -1557,13 +1608,20 @@ export class SessionManager {
           const perBrowser = await Promise.all(
             session.browserTracker.all().map((b) => b.pageTracker.resolvedTargetIds()),
           );
+          // Read after the sweep, not before it: the question a guard is
+          // asking is "is this session running RIGHT NOW", and the enumeration
+          // can take long enough for a batch to start or end inside it. The
+          // fresher read is the honest one, and it errs towards letting a
+          // just-finished session's tab be borrowed — the direction
+          // stories/errands.md chose for a borrow, which is bounded by one
+          // request.
+          const status = session.status === 'executing' ? 'executing' : 'active';
           for (const sweep of perBrowser) {
             if (!sweep.complete) complete = false;
             for (const targetId of sweep.ids) {
-              // First writer wins. Two sessions can legitimately hold the same
-              // tab (they share the browser's context), and for both callers —
-              // a listing label and a refusal — naming one is enough.
-              if (!byTarget.has(targetId)) byTarget.set(targetId, id);
+              const holders = byTarget.get(targetId);
+              if (holders) holders.push({ sessionId: id, status });
+              else byTarget.set(targetId, [{ sessionId: id, status }]);
             }
           }
         } catch {

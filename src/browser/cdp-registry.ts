@@ -539,6 +539,30 @@ export interface CloseTabOptions {
   sessionHolding?: (
     targetId: string,
   ) => Promise<string | null | typeof UNKNOWN_HOLDER> | string | null | typeof UNKNOWN_HOLDER;
+  /**
+   * Which errand, if any, is driving a given tab of this browser
+   * (stories/errands.md §The wheel — a named amendment to
+   * stories/cdp-tabs.md §1, §2 and §5).
+   *
+   * Injected for the same reason as `sessionHolding`, and with one difference
+   * that matters: an errand's holds live in the server process's own memory, so
+   * the answer is exact and there is no `UNKNOWN_HOLDER` arm to fail closed on.
+   *
+   * `tabRole` decides what the refusal may promise. A borrowed tab is still
+   * there when the errand finishes, so "wait and retry" works; a tab the errand
+   * itself opened is normally gone by then, and the message says so rather than
+   * sending the caller into a `not_found`.
+   */
+  errandHolding?: (targetId: string) => ErrandTabHold | null;
+}
+
+/** See `CloseTabOptions.errandHolding`. Structurally the `ErrandHold` of
+ *  `src/server/errand-locks.ts`, declared here so this module — which the CLI
+ *  and any future client also sit on — keeps its zero imports from the server
+ *  layer. The wiring site type-checks the two against each other. */
+export interface ErrandTabHold {
+  errandId: string;
+  tabRole: 'borrowed' | 'opened';
 }
 
 /** See `CloseTabOptions.sessionHolding`. */
@@ -568,7 +592,15 @@ export type CloseTabResult =
       scope: ProfileScope | null;
       warnings: string[];
     }
-  | { ok: false; kind: CdpFailureKind; error: string };
+  | {
+      ok: false;
+      kind: CdpFailureKind;
+      error: string;
+      /** Machine-readable holder for the errand refusal, so the route can put
+       *  it on the 409 body and the MCP side can recognise the shape instead of
+       *  matching prose. Absent on every other failure. */
+      holder?: { kind: 'errand'; errandId: string; tabRole: 'borrowed' | 'opened' };
+    };
 
 export interface CloseTabDeps extends RegistryDeps {
   close?: typeof closeTab;
@@ -697,10 +729,11 @@ async function resolveCdpOwner(
  *
  * Every guard below closes a different hole, and nothing irreversible happens
  * until the request has cleared all of them. The ordering that matters is
- * session-before-last-tab: see guard 3 for why the cheaper order was wrong.
+ * holders-before-last-tab — both the session check (guard 3) and the errand
+ * check (guard 4): see guard 3 for why the cheaper order was wrong.
  *
  * **Callers must serialise concurrent closes against one browser** (the route
- * does, via its per-port queue). Guard 4 reads a tab list to decide whether
+ * does, via its per-port queue). Guard 5 reads a tab list to decide whether
  * this is the last tab, and two overlapping closes would both read the same
  * pre-close list and both conclude they are not.
  */
@@ -792,7 +825,37 @@ export async function closeCdpTab(
     };
   }
 
-  // 4. The last tab. Closing it closes the browser — there is no zero-tab
+  // 4. A tab an ERRAND is driving, or one it opened along the way
+  //    (stories/errands.md §The wheel). Beside the session refusal and before
+  //    the last-tab gate, for the reason guard 3 gives: an errand can be
+  //    borrowing a one-tab browser's only tab, and "pass allow_browser_exit"
+  //    would be advice leading into a different refusal.
+  //
+  //    The remedy is wait-and-retry rather than close-the-holder: there is no
+  //    `close_errand`, and there does not need to be — an errand is one request
+  //    and releases every tab it holds when it returns.
+  const errand = opts.errandHolding?.(opts.targetId);
+  if (errand) {
+    const opened = errand.tabRole === 'opened';
+    return {
+      ok: false,
+      kind: 'refused',
+      holder: { kind: 'errand', errandId: errand.errandId, tabRole: errand.tabRole },
+      error:
+        `Errand ${errand.errandId} is driving that tab ("${target.title || target.url}")` +
+        (opened ? ', which it opened during its own run' : '') +
+        '. Closing it would break the errand mid-run.\n\n' +
+        'Wait for the errand to finish, then retry — an errand is one request and ' +
+        'lets go of every tab it holds when it returns. There is no way to end one ' +
+        'early.' +
+        (opened
+          ? '\nBy then that tab will normally be gone anyway: an errand closes what it ' +
+            'opened, so the close becomes moot.'
+          : ''),
+    };
+  }
+
+  // 5. The last tab. Closing it closes the browser — there is no zero-tab
   //    Chromium — so it needs saying out loud rather than discovering.
   const isLast = before.length === 1;
   if (isLast && opts.allowBrowserExit !== true) {
@@ -819,7 +882,7 @@ export async function closeCdpTab(
     };
   }
 
-  // 5. Close, then confirm. The browser acknowledges before the tab is gone
+  // 6. Close, then confirm. The browser acknowledges before the tab is gone
   //    (W0: 1-5 ms ack, 7-41 ms actual), so the ack alone is an intention.
   const requested = await close(opts.port, opts.targetId);
   if (requested.notFound) {

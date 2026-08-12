@@ -586,3 +586,81 @@ describe('an errand that never got the tab', () => {
     expect(text(result)).toContain('list_cdp_browsers');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The turn lock, from the tool's side (§The wheel)
+// ---------------------------------------------------------------------------
+
+describe('a tab somebody else is driving', () => {
+  it('does NOT read a turn-lock 409 as an attach failure', async () => {
+    // The trap this suite exists for. A lock 409 and a vanished tab both arrive
+    // as an `ApiHttpError`, and the attach message — "the tab may have been
+    // closed, call list_cdp_browsers" — is the wrong story AND the wrong next
+    // action for a tab that is very much open and very much busy. The `holder`
+    // shape is the only thing telling them apart.
+    const h = await connect({
+      throws: new ApiHttpError(409, 'Errand errand-7c1 is already driving that tab.', {
+        kind: 'errand',
+        errandId: 'errand-7c1',
+        tabRole: 'borrowed',
+      }),
+    });
+
+    const result = await errand(h, { tab: 'title~Cart' });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('errand-7c1');
+    expect(text(result)).toMatch(/wait/i);
+    // The attach refusal's prose and its remedy, both absent.
+    expect(text(result)).not.toContain('never got tab');
+    expect(text(result)).not.toContain('may have been closed');
+  });
+
+  it('names the holding session, and its two remedies, for a session 409', async () => {
+    const h = await connect({
+      throws: new ApiHttpError(409, 'Session "mcp:steps-1" has a batch in flight.', {
+        kind: 'session',
+        sessionId: 'mcp:steps-1',
+      }),
+    });
+
+    const result = await errand(h, { tab: 'title~Cart' });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('mcp:steps-1');
+    // Unlike an errand, a session outlives its batch — so there are two ways
+    // out, and which is right depends on whether it is still wanted.
+    expect(text(result)).toMatch(/wait/i);
+    expect(text(result)).toContain('close_session');
+    expect(text(result)).not.toContain('never got tab');
+  });
+
+  it('says an errand-OPENED tab will be gone, and sends the caller to re-list', async () => {
+    const h = await connect({
+      throws: new ApiHttpError(409, 'Errand errand-7c1 opened that tab.', {
+        kind: 'errand',
+        errandId: 'errand-7c1',
+        tabRole: 'opened',
+      }),
+    });
+
+    const result = await errand(h, { tab: 'title~Cart' });
+
+    expect(text(result)).toMatch(/gone/i);
+    expect(text(result)).toContain('list_cdp_browsers');
+  });
+
+  it('falls back to the generic message when a 409 carries no usable holder', async () => {
+    // A server older than the lock, or a holder shape this build cannot read.
+    // Inventing a refusal out of half a shape would put an empty errand id into
+    // a sentence telling the model to wait for it.
+    const h = await connect({
+      throws: new ApiHttpError(409, 'Something else refused this.', null),
+    });
+
+    const result = await errand(h, { tab: 'title~Cart' });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('Something else refused this.');
+  });
+});

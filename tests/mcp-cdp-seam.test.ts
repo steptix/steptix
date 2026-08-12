@@ -70,6 +70,9 @@ async function connect(
     /** Make `focusCdpTab` throw — used for the two 404 readings, which are the
      *  only place the tool inspects an HTTP status itself. */
     focusThrows?: Error;
+    /** Make `closeCdpTab` throw — the route's 409s, which the tool re-words
+     *  when they carry a `holder` (stories/errands.md §The wheel). */
+    closeThrows?: Error;
     /** Sessions `list_sessions` should report. */
     sessions?: Record<string, unknown>[];
     /** Make the registry unreachable, to prove a listing failure cannot change
@@ -129,6 +132,7 @@ async function connect(
     },
     async closeCdpTab(args) {
       closeCalls.push(args as unknown as Record<string, unknown>);
+      if (opts.closeThrows) throw opts.closeThrows;
       return (opts.closed ?? {
         closed: true,
         targetId: args.targetId,
@@ -778,6 +782,71 @@ describe('close_cdp_tab', () => {
     });
     // The agent never sent a port; it named the browser the way a user does.
     expect(h.closeCalls[0]).not.toHaveProperty('allowBrowserExit');
+  });
+
+  it('re-words an errand-held 409 into the wait-and-retry refusal', async () => {
+    // The cdp-tabs §5 row this story adds. The session refusal's remedy is
+    // close_session; an errand has no door like that, so relaying the generic
+    // "the server rejected the request" would leave a model with a refusal and
+    // nothing it can do about it.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closeThrows: new ApiHttpError(409, 'Errand errand-5d2 is driving that tab.', {
+        kind: 'errand',
+        errandId: 'errand-5d2',
+        tabRole: 'borrowed',
+      }),
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('errand-5d2');
+    expect(text(result)).toContain('A1B2C3');
+    expect(text(result)).toMatch(/wait/i);
+    expect(text(result)).not.toContain('close_session');
+    expect(text(result)).not.toContain('rejected the request');
+  });
+
+  it('adds the tab-will-be-gone note for a tab the errand opened', async () => {
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closeThrows: new ApiHttpError(409, 'Errand errand-5d2 opened that tab.', {
+        kind: 'errand',
+        errandId: 'errand-5d2',
+        tabRole: 'opened',
+      }),
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(text(result)).toMatch(/gone|moot/i);
+  });
+
+  it("leaves a session-held 409 to the server's own words", async () => {
+    // Unchanged behaviour, asserted because the new branch sits in front of it:
+    // the registry's session message already names the session and offers
+    // close_session, and re-wording it here would be two sources for one row.
+    const h = await connect({
+      browsers: { running: RUNNING_WITH_TABS },
+      closeThrows: new ApiHttpError(
+        409,
+        'Session "mcp:cart" is driving that tab. Close the session first — ' +
+          'close_session with session_id "mcp:cart".',
+      ),
+    });
+    const result = await h.client.callTool({
+      name: 'close_cdp_tab',
+      arguments: { profile: 'default', target_id: 'A1B2C3' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('mcp:cart');
+    expect(text(result)).toContain('close_session');
   });
 
   it('maps every output field through as structured content', async () => {

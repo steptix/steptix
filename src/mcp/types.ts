@@ -8,6 +8,7 @@
  * a real client at an ephemeral port.
  */
 import type { ErrandSummary, ErrandTab, RunEvent } from '../server/session-manager.js';
+import type { ErrandTabRole, TabHolder } from '../server/errand-locks.js';
 import type {
   CaptureMode,
   EffectiveSettings,
@@ -24,7 +25,10 @@ import type {
 // protocol and is re-exported for the same reason rather than re-declared —
 // two hand-kept copies of a wire shape drift in the direction of whichever
 // half gets edited.
-export type { ErrandSummary, ErrandTab, RunEvent };
+//
+// `TabHolder` is the third: it rides a 409 body rather than the event stream,
+// and it is the thing that keeps a turn-lock refusal from being read as prose.
+export type { ErrandSummary, ErrandTab, ErrandTabRole, RunEvent, TabHolder };
 
 // Re-exported rather than re-declared. These travel the wire in both directions
 // — `runSettings` out on the request, `effectiveSettings` back on `done` and on
@@ -580,6 +584,17 @@ export class ApiHttpError extends Error {
   constructor(
     readonly status: number,
     readonly serverMessage: string,
+    /**
+     * The 409 body's `holder`, when the refusal was a turn-lock one
+     * (stories/errands.md §The wheel).
+     *
+     * Carried as a shape rather than left in the prose because the two tools
+     * that meet it have to say different things — `run_errand` "wait for that
+     * errand", `close_cdp_tab` "wait, and the tab may be gone by then" — and
+     * because the alternative, matching the server's sentence, breaks the first
+     * time either side rewords.
+     */
+    readonly holder: TabHolder | null = null,
   ) {
     super(`HTTP ${status}: ${serverMessage}`);
     this.name = 'ApiHttpError';

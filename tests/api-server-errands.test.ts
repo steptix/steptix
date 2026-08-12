@@ -285,6 +285,10 @@ vi.mock('../src/utils/logger.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { createApiServer } from '../src/server/api-server.js';
+import { ErrandRunner } from '../src/server/errand-runner.js';
+import { ErrandLocks } from '../src/server/errand-locks.js';
+import { ProjectBundleResolver } from '../src/server/project-bundle.js';
+import type { SessionManager, SessionTabHolder } from '../src/server/session-manager.js';
 import { executeStep as executeStepMock } from '../src/runner/step-executor.js';
 import { closeBrowser as closeBrowserMock } from '../src/browser/manager.js';
 import { generateReport as generateReportMock } from '../src/report/generator.js';
@@ -468,9 +472,14 @@ function recordInstructions(): string[] {
 // ---------------------------------------------------------------------------
 
 describe('POST /errands', () => {
+  /** The real manager behind the routes, for the one assertion HTTP cannot
+   *  make: what the tab→session join itself returns. */
+  let sessionManager: SessionManager;
+
   beforeAll(async () => {
-    const { app } = createApiServer(testConfig, { requestShutdown });
-    ({ server, baseUrl } = await listenOnRandomPort(app));
+    const created = createApiServer(testConfig, { requestShutdown });
+    sessionManager = created.sessionManager;
+    ({ server, baseUrl } = await listenOnRandomPort(created.app));
   });
 
   afterAll(async () => {
@@ -811,5 +820,298 @@ describe('POST /errands', () => {
       expect(String(res.body.error)).toMatch(pattern);
     }
     expect(executeStepMock).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // (h) The wheel — one driver at a time (stories/errands.md §The wheel,
+  //     verification item 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Park every step of one KIND of run, so a second request meets a live holder
+   * instead of racing it. The errand's `testName` is `errand:<id>`, which is the
+   * only thing telling the two runs apart at this seam.
+   */
+  function parkSteps(who: 'errand' | 'session'): { started: Promise<void>; release: () => void } {
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const started = new Promise<void>((r) => (markStarted = r));
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (String(opts.testName ?? '').startsWith('errand:') === (who === 'errand')) {
+        markStarted();
+        await gate;
+      }
+      return {
+        index: idx as number,
+        instruction: 'parked',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+    return { started, release };
+  }
+
+  /** A CDP session bound to the borrowed tab, through the door sessions use.
+   *  Every caller closes it afterwards — a session left alive holds a stale
+   *  page whose target id would block the NEXT test's errand. */
+  async function cdpSession(id: string, steps: string[] = ['click something']) {
+    return api('POST', `/sessions/${id}/steps`, {
+      steps,
+      testFilePath: path.join(projectRoot, 'tests', 't.md'),
+      config: { cdp: { port: cdpBrowser.port, tab: 'targetId:tab-borrowed' } },
+    });
+  }
+
+  it('refuses a second errand on the tab an errand is driving, and lets the retry in', async () => {
+    const park = parkSteps('errand');
+    const first = api('POST', '/errands', errandBody());
+    let second;
+    try {
+      await park.started;
+      second = await api('POST', '/errands', errandBody());
+      expect(second.status).toBe(409);
+      expect(second.body.holder).toMatchObject({ kind: 'errand', tabRole: 'borrowed' });
+      // Wait-and-retry, because there is no close_errand to offer.
+      expect(String(second.body.error)).toMatch(/wait/i);
+    } finally {
+      // A parked errand outlives a failed assertion and keeps its holds, which
+      // would fail every later test in this file for the wrong reason.
+      park.release();
+    }
+    const firstRes = await first;
+    expect(firstRes.status).toBe(200);
+    // The refusal named the RUNNING errand, not a placeholder.
+    expect(second.body.holder.errandId).toBe(firstRes.body.errandId);
+    expect(String(second.body.error)).toContain(firstRes.body.errandId);
+
+    // Finishing IS releasing: the retry is a plain success, not a queued one.
+    const retry = await api('POST', '/errands', errandBody());
+    expect(retry.status).toBe(200);
+    expect(retry.body.errandId).not.toBe(firstRes.body.errandId);
+  });
+
+  it('holds the tabs it OPENS too, and says which kind of hold it refused for', async () => {
+    // Steps can switch back to a tab the errand opened, so the lock covers
+    // every tab it tracks — the rule cdp-tabs §Locked already sets for sessions.
+    const opened = makePage('tab-opened', 'https://openrouter.ai/export', 'Export');
+    let release!: () => void;
+    let markOpened!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const openedNow = new Promise<void>((r) => (markOpened = r));
+    let step = 0;
+    let parked = false;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (step++ === 0) {
+        cdpBrowser.pages.push(opened);
+        opts.pageTracker!.addPage(opened as any);
+      } else if (!parked) {
+        // ONE step parks, ever. If the guard were missing, the second errand
+        // would attach and park on the same gate, and this test would deadlock
+        // instead of failing — a hang reads as a broken test, not a broken lock.
+        parked = true;
+        markOpened();
+        await gate;
+      }
+      return {
+        index: idx as number,
+        instruction: 'opened',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const first = api('POST', '/errands', errandBody({ steps: ['open the export tab', 'wait'] }));
+    try {
+      await openedNow;
+
+      const second = await api('POST', '/errands', errandBody({ targetId: 'tab-opened' }));
+      expect(second.status).toBe(409);
+      expect(second.body.holder).toMatchObject({ kind: 'errand', tabRole: 'opened' });
+      // The role is the whole reason it is on the wire: a borrowed tab is still
+      // there after the wait; one the holder opened normally is not.
+      expect(String(second.body.error)).toMatch(/gone/i);
+    } finally {
+      // A parked errand outlives a failed assertion and keeps its holds, which
+      // would fail every later test in this file for the wrong reason.
+      release();
+      await first;
+    }
+  });
+
+  it('releases every hold when a step throws, not only when one passes', async () => {
+    vi.mocked(executeStepMock).mockImplementation(async () => {
+      throw new Error('the page went away');
+    });
+    const failed = await api('POST', '/errands', errandBody());
+    expect(failed.body.status).toBe('error');
+
+    // A lock released only on the happy path stays invisible until the next
+    // errand — which is exactly what this asserts.
+    vi.mocked(executeStepMock).mockImplementation(defaultStepImpl);
+    const next = await api('POST', '/errands', errandBody());
+    expect(next.status).toBe(200);
+    expect(next.body.status).toBe('passed');
+  });
+
+  it('refuses an errand while a session has a batch in flight on that tab', async () => {
+    const park = parkSteps('session');
+    const batch = cdpSession('wheel-busy');
+    await park.started;
+
+    const refused = await api('POST', '/errands', errandBody());
+    expect(refused.status).toBe(409);
+    expect(refused.body.holder).toEqual({ kind: 'session', sessionId: 'wheel-busy' });
+    expect(String(refused.body.error)).toContain('wheel-busy');
+
+    park.release();
+    await batch;
+    await api('DELETE', '/sessions/wheel-busy');
+  });
+
+  it('reports EVERY session holding a tab, each with its own status', async () => {
+    // The extension itself, which no HTTP answer exposes: `sessionsByTarget`
+    // keeps one holder per target and no status at all, so an idle winner would
+    // mask the session mid-batch behind it. Two real sessions on one tab, one
+    // of them parked mid-step, is the shape that tells the two joins apart.
+    let release!: () => void;
+    let markParked!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const parked = new Promise<void>((r) => (markParked = r));
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, instruction) => {
+      if (String(instruction).includes('park')) {
+        markParked();
+        await gate;
+      }
+      return {
+        index: idx as number,
+        instruction: String(instruction),
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    expect((await cdpSession('join-idle', ['click quickly'])).status).toBe(200);
+    const busy = cdpSession('join-busy', ['park here']);
+    await parked;
+
+    const join = await sessionManager.sessionsHoldingTargets(cdpBrowser.port);
+    const holders = join.byTarget.get('tab-borrowed') ?? [];
+    expect(holders.map((h) => h.sessionId).sort()).toEqual(['join-busy', 'join-idle']);
+    expect(holders.find((h) => h.sessionId === 'join-busy')?.status).toBe('executing');
+    expect(holders.find((h) => h.sessionId === 'join-idle')?.status).toBe('active');
+
+    // And the reduction the listing and the close guard still read is unchanged
+    // — one name per tab.
+    const flat = await sessionManager.sessionsByTarget(cdpBrowser.port);
+    expect(['join-busy', 'join-idle']).toContain(flat.byTarget.get('tab-borrowed'));
+
+    release();
+    await busy;
+    await api('DELETE', '/sessions/join-idle');
+    await api('DELETE', '/sessions/join-busy');
+  });
+
+  it('lets an errand borrow a tab an IDLE session is sitting on', async () => {
+    // Idle is the safe case and mid-run is the dangerous one; a guard refusing
+    // both would put the two-client coexistence this story measured out of
+    // reach of the tool. Its sibling above — the same helper, the same tab,
+    // refused mid-batch — is the control proving this session IS a holder.
+    expect((await cdpSession('wheel-idle')).status).toBe(200);
+
+    const errand = await api('POST', '/errands', errandBody());
+    expect(errand.status).toBe(200);
+    expect(errand.body.status).toBe('passed');
+
+    await api('DELETE', '/sessions/wheel-idle');
+  });
+
+  it('never blocks a run_steps batch on a tab an errand is driving', async () => {
+    // Sessions take no lock and are refused by none. The errand-only guard is
+    // a bounded amendment to mcp-cdp-browser §Locked, whose subject — parallel
+    // sessions — is untouched.
+    const park = parkSteps('errand');
+    const errand = api('POST', '/errands', errandBody());
+    try {
+      await park.started;
+      const batch = await cdpSession('wheel-parallel');
+      expect(batch.status).toBe(200);
+      expect(batch.body.status).toBe('passed');
+    } finally {
+      park.release();
+    }
+    expect((await errand).status).toBe(200);
+    await api('DELETE', '/sessions/wheel-parallel');
+  });
+
+  // The join extension, at the seam the route cannot reach: a real
+  // `SessionManager` decides its own iteration order, so "the idle one answered
+  // first" is only reproducible against a stub of the join.
+  describe('the status-carrying join', () => {
+    function runnerWith(byTarget: Map<string, SessionTabHolder[]>, complete = true): ErrandRunner {
+      const gate = {
+        beginExternalRun: () => () => {},
+        sessionsHoldingTargets: async () => ({ byTarget, complete }),
+      };
+      return new ErrandRunner(
+        testConfig,
+        gate,
+        new ProjectBundleResolver(testConfig),
+        new ErrandLocks(),
+      );
+    }
+
+    const request = () => ({
+      port: cdpBrowser.port,
+      targetId: 'tab-borrowed',
+      steps: ['click'],
+      testFilePath: errandFilePath(),
+      root: projectRoot,
+      scope: 'project' as const,
+    });
+
+    it('refuses on an executing session the first-writer-wins map would have hidden', async () => {
+      // THE test for the extension. `sessionsByTarget` keeps only the first
+      // holder per target, so with the idle session answering first, filtering
+      // its output reports "idle" and lets the errand take a wheel a live batch
+      // is already turning.
+      const started = await runnerWith(
+        new Map([
+          [
+            'tab-borrowed',
+            [
+              { sessionId: 'idle-one', status: 'active' as const },
+              { sessionId: 'busy-one', status: 'executing' as const },
+            ],
+          ],
+        ]),
+      ).begin(request());
+
+      expect(started.ok).toBe(false);
+      if (started.ok) return;
+      expect(started.refusal.holder).toEqual({ kind: 'session', sessionId: 'busy-one' });
+    });
+
+    it('lets an errand through when every holder is idle', async () => {
+      const started = await runnerWith(
+        new Map([['tab-borrowed', [{ sessionId: 'idle-one', status: 'active' as const }]]]),
+      ).begin(request());
+      expect(started.ok).toBe(true);
+    });
+
+    it('lets an errand through on an INCOMPLETE join', async () => {
+      // The opposite of the close guard, deliberately: a close refuses on a
+      // maybe because its failure closes a tab under a live run, while a borrow
+      // that guesses wrong is bounded by one request and shows up in both
+      // sides' receipts.
+      const started = await runnerWith(new Map(), false).begin(request());
+      expect(started.ok).toBe(true);
+    });
   });
 });

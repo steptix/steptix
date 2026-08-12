@@ -810,6 +810,36 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
     // No sessions at all is a COMPLETE answer of "nobody", not an unknown.
     await expect(opts.sessionHolding!('T1')).resolves.toBeNull();
   });
+
+  it('supplies an errand lookup the registry can call, and relays its holder', async () => {
+    // Two halves, each of which fails silently on its own. Without the
+    // injection the errand guard never fires — a green suite with the guard
+    // disconnected. Without the relay the 409 loses its `holder`, and the MCP
+    // side falls back to the generic "the server rejected the request".
+    closeCdpTabMock.mockResolvedValue(closedTab());
+    await del(51000, 'T1');
+    const opts = closeCdpTabMock.mock.calls[0]![0] as {
+      errandHolding?: (id: string) => unknown;
+    };
+    expect(typeof opts.errandHolding).toBe('function');
+    // No errand running is a definite "nobody": unlike the session join, an
+    // errand's holds live in this process's memory and cannot be unknown.
+    expect(opts.errandHolding!('T1')).toBeNull();
+
+    closeCdpTabMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      error: 'Errand errand-abc123 is driving that tab.',
+      holder: { kind: 'errand', errandId: 'errand-abc123', tabRole: 'opened' },
+    });
+    const refused = await del(51000, 'T1');
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).holder).toEqual({
+      kind: 'errand',
+      errandId: 'errand-abc123',
+      tabRole: 'opened',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

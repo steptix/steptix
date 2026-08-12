@@ -24,6 +24,7 @@ import {
   type SessionSummary,
   type StartedCdpBrowser,
   type StreamResult,
+  type TabHolder,
 } from './types.js';
 import type { ErrandRequestBody, McpStepRequest } from './types.js';
 import { normalizeBaseUrl } from '../server/health.js';
@@ -234,6 +235,33 @@ async function consumeRunStream(
   return { events, receivedAt, streamDropped: !sawDone, dropped };
 }
 
+/**
+ * The `holder` of a turn-lock 409 (stories/errands.md §The wheel), read field
+ * by field.
+ *
+ * Wire data from a server that may be older than this client, so anything that
+ * is not exactly one of the two shapes degrades to `null` — which lands the
+ * caller on the generic HTTP message carrying the server's own prose. A partly
+ * trusted holder would put an empty errand id into a refusal that tells the
+ * model to wait for it.
+ */
+function readTabHolder(value: unknown): TabHolder | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record.kind === 'errand') {
+    const { errandId, tabRole } = record;
+    if (typeof errandId !== 'string' || errandId === '') return null;
+    if (tabRole !== 'borrowed' && tabRole !== 'opened') return null;
+    return { kind: 'errand', errandId, tabRole };
+  }
+  if (record.kind === 'session') {
+    const { sessionId } = record;
+    if (typeof sessionId !== 'string' || sessionId === '') return null;
+    return { kind: 'session', sessionId };
+  }
+  return null;
+}
+
 export const createApiClient = (opts: ApiClientOptions): ApiClient => {
   const base = normalizeBaseUrl(opts.baseUrl);
   const doFetch = opts.fetchImpl ?? fetch;
@@ -254,13 +282,15 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
     // request (HTTP 404): " with a dangling colon and no cause. The status is
     // always worth something; say it rather than going quiet.
     let message = res.statusText || `HTTP ${res.status}`;
+    let holder: TabHolder | null = null;
     try {
-      const body = (await res.json()) as { error?: unknown };
+      const body = (await res.json()) as { error?: unknown; holder?: unknown };
       if (typeof body.error === 'string' && body.error !== '') message = body.error;
+      holder = readTabHolder(body.holder);
     } catch {
       // Non-JSON error body; the status alone will have to do.
     }
-    throw new ApiHttpError(res.status, message);
+    throw new ApiHttpError(res.status, message, holder);
   }
 
   /** The two streaming POSTs send the same headers and read the same stream;

@@ -33,9 +33,17 @@ import type {
   ErrandTab,
   RunEvent,
   RunEventListener,
+  SessionsHoldingTargets,
   StepResultResponse,
   TabInfo,
 } from './session-manager.js';
+import {
+  ErrandLease,
+  ErrandLocks,
+  errandHoldsTabMessage,
+  sessionHoldsTabMessage,
+  type ErrandRefusal,
+} from './errand-locks.js';
 import { logger, addLogCallback, shouldEmit } from '../utils/logger.js';
 
 /**
@@ -51,9 +59,17 @@ import { logger, addLogCallback, shouldEmit } from '../utils/logger.js';
  * and the idle reaper must all see it (stories/server-lifecycle.md).
  */
 
-/** Just enough of `SessionManager` for an errand to count as a run in flight. */
+/**
+ * Just enough of `SessionManager` for an errand to count as a run in flight,
+ * and to see which sessions are mid-batch on a tab it wants to borrow.
+ *
+ * The second half is READ-ONLY and stays that way: an errand consults the
+ * session world, never changes it (stories/errands.md §The wheel — sessions
+ * neither take nor are blocked by the errand lock).
+ */
 export interface ErrandRunGate {
   beginExternalRun(): () => void;
+  sessionsHoldingTargets(port: number): Promise<SessionsHoldingTargets>;
 }
 
 export interface ErrandRequest {
@@ -110,6 +126,9 @@ interface ActOutcome {
   error: { step: number; message: string } | null;
 }
 
+/** `begin`'s answer: the errand may drive, or somebody else is. */
+export type ErrandStart = { ok: true; lease: ErrandLease } | { ok: false; refusal: ErrandRefusal };
+
 export class ErrandRunner {
   constructor(
     private readonly config: Config,
@@ -117,38 +136,126 @@ export class ErrandRunner {
     /** The same resolver the session manager uses, so an errand and a session
      *  running against one project see the same `.env` at the same moment. */
     private readonly projectBundles: ProjectBundleResolver,
+    /** Shared with the `close_cdp_tab` guard, which consults the same holds
+     *  (stories/errands.md §The wheel). */
+    private readonly locks: ErrandLocks = new ErrandLocks(),
   ) {}
 
   /**
-   * Run one errand start to finish.
+   * Take the wheel for the borrowed tab, or say who has it.
+   *
+   * Separate from `run` because the answer has to be an HTTP status: the
+   * streaming route flushes SSE headers before the first event, and a refusal
+   * discovered after that could only be a `done` frame on a 200 — which is the
+   * shape reserved for "the errand ran and failed".
+   *
+   * Order is deliberate. The lock is taken FIRST, synchronously, because it is
+   * the only step two concurrent errands race on; the session join that follows
+   * is an `await`, and checking before taking would let both winners through it.
+   * A session refusal then releases what it took.
+   */
+  async begin(request: ErrandRequest): Promise<ErrandStart> {
+    // Short, and alive only for this request: an errandId that outlived the
+    // errand would be a handle onto something that no longer exists.
+    const errandId = `errand-${randomBytes(4).toString('hex')}`;
+
+    const held = this.locks.acquire(request.port, request.targetId, {
+      errandId,
+      tabRole: 'borrowed',
+    });
+    if (held) {
+      return {
+        ok: false,
+        refusal: {
+          holder: { kind: 'errand', errandId: held.errandId, tabRole: held.tabRole },
+          error: errandHoldsTabMessage(held, request.targetId),
+        },
+      };
+    }
+
+    // Counted from here, not from the first step: the attach itself talks to a
+    // browser, and a server that reaped itself during it would kill the request
+    // just as dead.
+    const lease = new ErrandLease(
+      errandId,
+      request.port,
+      this.locks,
+      this.gate.beginExternalRun(),
+    );
+
+    const busy = await this.sessionMidBatch(request);
+    if (busy !== null) {
+      lease.release();
+      return {
+        ok: false,
+        refusal: {
+          holder: { kind: 'session', sessionId: busy },
+          error: sessionHoldsTabMessage(busy, request.targetId),
+        },
+      };
+    }
+
+    return { ok: true, lease };
+  }
+
+  /**
+   * The session id of a batch in flight on the borrowed tab, or null.
+   *
+   * Two rules from stories/errands.md §The wheel, and they point opposite ways
+   * to the close guard's on purpose:
+   *
+   * - An **idle** session blocks nothing. Idle is the safe case; mid-run is the
+   *   dangerous one, and every holder is examined rather than the first — an
+   *   idle winner must not mask an executing session.
+   * - An **incomplete** join does not block either. A close refuses on a maybe
+   *   because its failure closes a tab under a live run; a borrow that guesses
+   *   wrong is bounded by one request and shows up in both sides' receipts.
+   */
+  private async sessionMidBatch(request: ErrandRequest): Promise<string | null> {
+    let holders;
+    try {
+      holders = (await this.gate.sessionsHoldingTargets(request.port)).byTarget.get(
+        request.targetId,
+      );
+    } catch (err) {
+      // The join is advisory here. A manager that cannot answer at all is the
+      // same case as one that answered partially: it does not block the borrow.
+      logger.warn(`Errand pre-flight: session join failed, proceeding: ${String(err)}`);
+      return null;
+    }
+    return holders?.find((holder) => holder.status === 'executing')?.sessionId ?? null;
+  }
+
+  /**
+   * Run one errand start to finish, under a lease `begin` handed out.
    *
    * `onEvent` receives the same `RunEvent` stream a session emits, with the
    * errand's accounting on the `done` frame.
+   *
+   * The lease is released in a `finally`: finishing IS releasing, including
+   * finishing by throw or abort. There is no `close_errand` because there is
+   * nothing an errand can be left holding.
    */
   async run(
+    lease: ErrandLease,
     request: ErrandRequest,
     onEvent?: RunEventListener,
     signal?: AbortSignal,
   ): Promise<ErrandResponse> {
-    // Short, and alive only for this request: an errandId that outlived the
-    // errand would be a handle onto something that no longer exists.
-    const errandId = `errand-${randomBytes(4).toString('hex')}`;
-    // Taken at the very entry, released in a `finally` — a throw or an abort
-    // must never strand the counter above zero.
-    const release = this.gate.beginExternalRun();
     try {
-      return await this.drive(errandId, request, onEvent, signal);
+      return await this.drive(lease, request, onEvent, signal);
     } finally {
-      release();
+      lease.release();
     }
   }
 
   private async drive(
-    errandId: string,
+    lease: ErrandLease,
     request: ErrandRequest,
     onEvent: RunEventListener | undefined,
     signal: AbortSignal | undefined,
   ): Promise<ErrandResponse> {
+    const errandId = lease.errandId;
     const emit = (event: RunEvent): void => {
       if (!onEvent) return;
       try {
@@ -214,6 +321,7 @@ export class ErrandRunner {
       try {
         outcome = await this.act({
           errandId,
+          lease,
           steps: request.steps,
           runConfig: settings.config,
           envDataCtx,
@@ -273,6 +381,7 @@ export class ErrandRunner {
    */
   private async act(args: {
     errandId: string;
+    lease: ErrandLease;
     steps: string[];
     runConfig: Config;
     envDataCtx: EnvDataContext | null;
@@ -283,7 +392,29 @@ export class ErrandRunner {
     emit: (event: RunEvent) => void;
     signal: AbortSignal | undefined;
   }): Promise<ActOutcome> {
-    const { errandId, steps, emit, signal, browserTracker } = args;
+    const { errandId, lease, steps, emit, signal, browserTracker } = args;
+
+    /**
+     * Claim the wheel on every tab the errand has opened so far.
+     *
+     * The lock covers the borrowed tab plus everything the errand opened, for
+     * the same reason stories/cdp-tabs.md §Locked tracks all of a session's
+     * pages: a step can switch back to a tab it opened.
+     *
+     * Swept rather than hooked at open time because `PageTracker.addPage` is
+     * synchronous and the target id it needs is not — this is the same resolved
+     * sweep the session join reads, and the only window it leaves is a tab
+     * whose id nothing outside this errand can know yet.
+     */
+    const claimOpenedTabs = async (): Promise<void> => {
+      try {
+        lease.claimOpened((await args.borrowed.pageTracker.resolvedTargetIds()).ids);
+      } catch {
+        // A tracker that cannot enumerate leaves the borrowed tab held, which
+        // is the claim that matters; a tab whose id never resolved is one no
+        // other errand can name either.
+      }
+    };
 
     const results: StepResultResponse[] = [];
     const captures: Record<string, string> = {};
@@ -412,6 +543,10 @@ export class ErrandRunner {
         status = 'error';
         error = { step: line, message };
         break;
+      } finally {
+        // Runs before the `break` above takes effect, so a step that opened a
+        // tab and then threw still leaves that tab held for the detach.
+        await claimOpenedTabs();
       }
 
       if (signal?.aborted) {

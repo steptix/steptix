@@ -16,6 +16,7 @@ import {
   type RegistryDeps,
 } from '../src/browser/cdp-registry.js';
 import { listPageTabs } from '../src/browser/cdp-discovery.js';
+import { ErrandLocks } from '../src/server/errand-locks.js';
 
 const ROOT = path.join('C:', 'proj');
 const PROFILES = cdpProfilesRoot(ROOT);
@@ -750,6 +751,110 @@ describe('closeCdpTab', () => {
     expect(error).toContain('mcp:x');
     expect(error).toContain('close_session');
     expect(h.closeFn).not.toHaveBeenCalled();
+  });
+
+  // The errand guard row (stories/errands.md §The wheel, a named amendment to
+  // stories/cdp-tabs.md §1, §2 and §5). Driven against the REAL lock registry,
+  // so what the route injects and what the guard reads cannot drift apart.
+  it('refuses a tab an errand is driving, and closes it once the errand lets go', async () => {
+    const locks = new ErrandLocks();
+    expect(
+      locks.acquire(PORT, 'D4E5F6', { errandId: 'errand-abc123', tabRole: 'borrowed' }),
+    ).toBeNull();
+
+    const h = liveBrowser(TWO_TABS);
+    const refused = await closeCdpTab(
+      {
+        roots: PROJECT_ROOTS,
+        port: PORT,
+        targetId: 'D4E5F6',
+        errandHolding: (id) => locks.holder(PORT, id),
+      },
+      h.deps,
+    );
+
+    expect(refused).toMatchObject({
+      ok: false,
+      kind: 'refused',
+      holder: { kind: 'errand', errandId: 'errand-abc123', tabRole: 'borrowed' },
+    });
+    const error = (refused as { error: string }).error;
+    expect(error).toContain('errand-abc123');
+    expect(error).toMatch(/wait/i);
+    // There is no holder to close, so the session refusal's remedy would be
+    // advice that cannot be taken.
+    expect(error).not.toContain('close_session');
+    expect(h.closeFn).not.toHaveBeenCalled();
+
+    // Finishing IS releasing, and the retry the refusal promised then works.
+    locks.release('errand-abc123');
+    const after = await closeCdpTab(
+      {
+        roots: PROJECT_ROOTS,
+        port: PORT,
+        targetId: 'D4E5F6',
+        errandHolding: (id) => locks.holder(PORT, id),
+      },
+      h.deps,
+    );
+    expect(after).toMatchObject({ ok: true, targetId: 'D4E5F6' });
+  });
+
+  it('says an errand-OPENED tab will be gone by the time the retry lands', async () => {
+    // The role changes what the remedy can promise, which is why it is on the
+    // wire at all: waiting for a borrowed tab leaves it there, waiting for one
+    // the errand opened normally makes the close moot.
+    const locks = new ErrandLocks();
+    locks.acquire(PORT, 'D4E5F6', { errandId: 'errand-abc123', tabRole: 'opened' });
+
+    const h = liveBrowser(TWO_TABS);
+    const result = await closeCdpTab(
+      {
+        roots: PROJECT_ROOTS,
+        port: PORT,
+        targetId: 'D4E5F6',
+        errandHolding: (id) => locks.holder(PORT, id),
+      },
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ holder: { tabRole: 'opened' } });
+    expect((result as { error: string }).error).toMatch(/gone|moot/i);
+  });
+
+  it('refuses an errand-held LAST tab by naming the errand, not the exit flag', async () => {
+    // Same ordering argument as the session guard's: an errand borrowing a
+    // one-tab browser's only tab is exactly reachable, and the last-tab remedy
+    // would lead straight into a different refusal.
+    const locks = new ErrandLocks();
+    locks.acquire(PORT, 'A1B2C3', { errandId: 'errand-solo', tabRole: 'borrowed' });
+
+    const h = liveBrowser([TWO_TABS[0]!]);
+    const result = await closeCdpTab(
+      {
+        roots: PROJECT_ROOTS,
+        port: PORT,
+        targetId: 'A1B2C3',
+        errandHolding: (id) => locks.holder(PORT, id),
+      },
+      h.deps,
+    );
+
+    const error = (result as { error: string }).error;
+    expect(error).toContain('errand-solo');
+    expect(error).not.toContain('allow_browser_exit');
+  });
+
+  it('leaves every other refusal without a holder field', async () => {
+    // The MCP side branches on the presence of `holder`, so a stray one would
+    // answer a last-tab refusal with "wait for the errand to finish".
+    const h = liveBrowser([TWO_TABS[0]!]);
+    const result = await closeCdpTab(
+      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
+      h.deps,
+    );
+    expect(result).toMatchObject({ ok: false, kind: 'refused' });
+    expect((result as { holder?: unknown }).holder).toBeUndefined();
   });
 
   it('closes a tab no session holds, even while another tab is held', async () => {

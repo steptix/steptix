@@ -693,6 +693,90 @@ export function errandDidNotAttach(tab: string, detail: string | null): McpToolE
   );
 }
 
+// ---------------------------------------------------------------------------
+// The turn lock (stories/errands.md §The wheel)
+//
+// Three refusals for one rule: a tab has one steering wheel. All three are
+// reached from a 409's `holder` shape rather than from its prose, because the
+// generic HTTP arm would answer a lock collision with "the tab may have been
+// closed" — advice that sends a model to re-list when the thing to do is wait.
+//
+// None of them offers a way to end the holder: there is no `close_errand`, and
+// an errand is one request. "Wait and retry" is the whole remedy, and it is a
+// real one — the wait is a single request long.
+// ---------------------------------------------------------------------------
+
+/** A second `run_errand` on a tab an errand already drives. */
+export function errandTabHeldByErrand(
+  errandId: string,
+  tabRole: 'borrowed' | 'opened',
+  tab: string,
+): McpToolError {
+  const opened = tabRole === 'opened';
+  return preflightError(
+    `Tab "${tab}" is already being driven by errand ${errandId}` +
+      (opened ? ', which opened it during its own run' : '') +
+      ', and two errands cannot drive one tab — they would fight over clicks, ' +
+      'dialogs and page-level settings.\n' +
+      'Nothing ran. Wait for that errand to finish and call run_errand again: an ' +
+      'errand is ONE request and releases every tab it holds when it returns, so ' +
+      'there is nothing to close and nothing to cancel.' +
+      (opened
+        ? '\nExpect that tab to be gone by then — an errand closes the tabs it ' +
+          'opened. Call list_cdp_browsers before retrying and name a tab from ' +
+          'what is actually open.'
+        : ''),
+  );
+}
+
+/**
+ * A `run_errand` on a tab a session has a batch in flight on.
+ *
+ * The only refusal of the three whose remedy has two branches, because the
+ * holder outlives its batch: waiting works, and so does ending the session —
+ * and which is right depends on whether the session is still wanted, which the
+ * caller knows and this layer does not.
+ */
+export function errandTabHeldBySession(sessionId: string, tab: string): McpToolError {
+  return preflightError(
+    `Session "${sessionId}" is running steps in tab "${tab}" right now, so an ` +
+      'errand cannot borrow it — that would be two drivers on one tab.\n' +
+      'Nothing ran. Wait for that batch to finish and call run_errand again; an ' +
+      'IDLE session on the tab would not have blocked this, only a running one ' +
+      'does. If the session is no longer wanted, close_session with session_id ' +
+      `"${sessionId}" first.`,
+  );
+}
+
+/**
+ * `close_cdp_tab` aimed at a tab an errand is driving or opened.
+ *
+ * The cdp-tabs §5 row this story adds. Distinct from the session refusal beside
+ * it because the remedy is different in both halves: no holder to close, and —
+ * for a tab the errand opened — a retry that will usually find nothing left to
+ * close at all.
+ */
+export function cdpTabHeldByErrand(
+  errandId: string,
+  tabRole: 'borrowed' | 'opened',
+  targetId: string,
+): McpToolError {
+  const opened = tabRole === 'opened';
+  return preflightError(
+    `Errand ${errandId} is driving tab ${targetId}` +
+      (opened ? ', which it opened during its own run' : ', a tab it borrowed') +
+      '. Closing it would break the errand mid-run, so nothing was closed.\n' +
+      'Wait for the errand to finish, then retry — an errand is one request and ' +
+      'lets go of every tab it holds when it returns. There is no close_errand ' +
+      'and none is needed.' +
+      (opened
+        ? '\nBy then the tab will normally be gone anyway, because an errand closes ' +
+          'what it opened — so the close becomes moot. Call list_cdp_browsers ' +
+          'before retrying.'
+        : ''),
+  );
+}
+
 export function listSessionsTimedOut(timeoutMs: number): McpToolError {
   return preflightError(
     `Listing sessions took longer than ${timeoutMs}ms. The server reads each ` +

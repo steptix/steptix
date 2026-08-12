@@ -303,6 +303,7 @@ vi.mock('../src/utils/logger.js', () => ({
 
 import { createApiServer } from '../src/server/api-server.js';
 import { generateReport as generateReportMock } from '../src/report/generator.js';
+import { executeStep as executeStepMock } from '../src/runner/step-executor.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
@@ -519,4 +520,59 @@ describe('run_errand over the real HTTP seam', () => {
     expect(content(res)).not.toContain('tab-mail');
     expect(executedSteps).toEqual([]);
   });
+
+  it('refuses a second errand on a tab one is driving, then lets the retry in (item 3)', async () => {
+    // Verification item (3), end to end: two real `run_errand` calls through
+    // the real MCP client, the real HTTP client and the real route. Nothing
+    // between the tool and the lock is stubbed, which is the only way to prove
+    // the 409 does not reach the model as `errandDidNotAttach`'s "the tab may
+    // have been closed" — advice that would send it re-listing a tab that is
+    // open and busy.
+    executedSteps.length = 0;
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const started = new Promise<void>((r) => (markStarted = r));
+    const original = vi.mocked(executeStepMock).getMockImplementation()!;
+    vi.mocked(executeStepMock).mockImplementation(async (i, t, instruction, options) => {
+      markStarted();
+      await gate;
+      return original(i, t, instruction, options);
+    });
+
+    const args = {
+      tab: 'title~Cart',
+      steps: ['click the checkout button'],
+      project_root: tmpDir,
+    };
+    const first = client.callTool({ name: 'run_errand', arguments: args });
+    await started;
+
+    const second = await client.callTool({ name: 'run_errand', arguments: args });
+
+    expect(second.isError, content(second)).toBe(true);
+    expect(content(second)).toMatch(/errand-[0-9a-f]+/);
+    expect(content(second)).toMatch(/wait/i);
+    // Not the attach refusal, and not the generic HTTP arm either — both would
+    // relay a status or a "the tab may have been closed" for a tab that is open
+    // and busy. The `holder` shape is what routes it to its own message.
+    expect(content(second)).not.toContain('never got tab');
+    expect(content(second)).not.toContain('rejected the request');
+
+    release();
+    vi.mocked(executeStepMock).mockImplementation(original);
+    const firstRes = await first;
+    expect(firstRes.isError, content(firstRes)).toBeFalsy();
+    const holder = (firstRes.structuredContent as { errandId: string }).errandId;
+    // The refusal named the errand that was actually holding the wheel.
+    expect(content(second)).toContain(holder);
+
+    // The remedy it offered is a real one.
+    const retry = await client.callTool({ name: 'run_errand', arguments: args });
+    expect(retry.isError, content(retry)).toBeFalsy();
+    expect((retry.structuredContent as { errandId: string }).errandId).not.toBe(holder);
+
+    // And not one of the three left a session behind.
+    expect(await listSessionIds()).toEqual([]);
+  }, 30_000);
 });

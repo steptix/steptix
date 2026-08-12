@@ -25,6 +25,7 @@ import {
   type StepRequest,
 } from './session-manager.js';
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
+import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
@@ -154,7 +155,12 @@ export function createApiServer(
   const sessionManager = new SessionManager(config, projectBundles);
   // Beside the manager, never inside it: an errand adds nothing to the sessions
   // map, which is what makes "nothing survives on the server" checkable.
-  const errandRunner = new ErrandRunner(config, sessionManager, projectBundles);
+  //
+  // The lock lives out here rather than inside the runner because it has a
+  // second reader: `close_cdp_tab`'s hold guard, which must refuse a tab an
+  // errand is driving (stories/errands.md §The wheel, amending cdp-tabs §2).
+  const errandLocks = new ErrandLocks();
+  const errandRunner = new ErrandRunner(config, sessionManager, projectBundles, errandLocks);
   const version = getPackageVersion();
   const startedAt = new Date().toISOString();
   let shuttingDown = false;
@@ -608,24 +614,43 @@ export function createApiServer(
         return;
       }
 
-      if (streaming) {
-        const sse = openSseStream(res);
-        try {
-          await errandRunner.run(parsed, sse.emit, sse.signal);
-        } catch (err) {
-          if (!sse.clientGone) {
-            const message = err instanceof Error ? err.message : String(err);
-            sse.emit({ type: 'output', msg: `Server error: ${message}`, kind: 'error' });
-            sse.emit({ type: 'done', status: 'error' });
-          }
-        } finally {
-          sse.close();
-        }
+      // Before any SSE header flushes: a tab someone else is driving is a 409,
+      // and once the stream is open the only shape left is a 200 that says the
+      // errand ran (stories/errands.md §The wheel).
+      const started = await errandRunner.begin(parsed);
+      if (!started.ok) {
+        res
+          .status(409)
+          .json({ error: started.refusal.error, holder: started.refusal.holder });
         return;
       }
+      const { lease } = started;
 
-      const receipt = await errandRunner.run(parsed);
-      res.status(200).json(receipt);
+      try {
+        if (streaming) {
+          const sse = openSseStream(res);
+          try {
+            await errandRunner.run(lease, parsed, sse.emit, sse.signal);
+          } catch (err) {
+            if (!sse.clientGone) {
+              const message = err instanceof Error ? err.message : String(err);
+              sse.emit({ type: 'output', msg: `Server error: ${message}`, kind: 'error' });
+              sse.emit({ type: 'done', status: 'error' });
+            }
+          } finally {
+            sse.close();
+          }
+          return;
+        }
+
+        const receipt = await errandRunner.run(lease, parsed);
+        res.status(200).json(receipt);
+      } finally {
+        // `run` releases in its own `finally`; this covers the gap between
+        // `begin` and it — `openSseStream` throwing there would otherwise
+        // strand both the tab lock and the in-flight run counter. Idempotent.
+        lease.release();
+      }
     } catch (err) {
       next(err);
     }
@@ -1212,11 +1237,20 @@ export function createApiServer(
               // tab out from under a live run.
               return complete ? null : UNKNOWN_HOLDER;
             },
+            // The second holder kind (stories/errands.md §The wheel, amending
+            // cdp-tabs §2). Synchronous and exact — an errand's holds are in
+            // this process's memory, so there is no maybe to fail closed on.
+            errandHolding: (id) => errandLocks.holder(port, id),
           }),
         );
 
         if (!result.ok) {
-          res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+          res.status(statusForCdpFailure(result.kind)).json({
+            error: result.error,
+            // Present only on the errand refusal, so the MCP side can map it to
+            // a message naming the errand rather than the generic HTTP arm.
+            ...(result.holder ? { holder: result.holder } : {}),
+          });
           return;
         }
 

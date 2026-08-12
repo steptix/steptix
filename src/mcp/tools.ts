@@ -24,11 +24,14 @@ import {
   cdpFocusRouteMissing,
   cdpFocusTabNotFound,
   cdpFocusTargetAmbiguous,
+  cdpTabHeldByErrand,
   cdpTabTargetAmbiguous,
   describeBrowser,
   errandCodeSteps,
   errandDidNotAttach,
   errandTabAmbiguous,
+  errandTabHeldByErrand,
+  errandTabHeldBySession,
   errandTabNotFound,
   errandsHaveNoSessions,
   listSessionsTimedOut,
@@ -74,6 +77,7 @@ import {
   type RunEvent,
   type RunSettings,
   type ScreenshotsReturn,
+  type StreamResult,
 } from './types.js';
 
 /** The server refuses `config` on an existing session by throwing, and on the
@@ -929,7 +933,26 @@ async function runErrand(
     ...(args.keep_open === true && { keepOpen: true }),
   };
 
-  const stream = await client.runErrand(body, signal);
+  // The route answers a turn-lock collision before any SSE header flushes, so
+  // it arrives as an ordinary HTTP error rather than as a stream with no errand
+  // on its `done` frame. Recognised HERE rather than in the generic mapping
+  // because the alternative is `errandDidNotAttach`'s "the tab may have been
+  // closed" — the wrong story, and the wrong next action, for a tab that is
+  // very much open and busy (stories/errands.md §The wheel).
+  let stream: StreamResult;
+  try {
+    stream = await client.runErrand(body, signal);
+  } catch (err) {
+    if (err instanceof ApiHttpError && err.holder !== null) {
+      const { holder } = err;
+      throw new PreflightFailure(
+        holder.kind === 'errand'
+          ? errandTabHeldByErrand(holder.errandId, holder.tabRole, args.tab)
+          : errandTabHeldBySession(holder.sessionId, args.tab),
+      );
+    }
+    throw err;
+  }
   const folded = foldRun({
     events: stream.events,
     receivedAt: stream.receivedAt,
@@ -995,6 +1018,32 @@ async function runErrand(
       effectiveSettings: null,
     }),
   );
+}
+
+/**
+ * `close_cdp_tab`'s call, with the turn-lock 409 turned into its own refusal.
+ *
+ * A session-held tab already has a good message from the server, which the
+ * generic HTTP arm relays intact. An errand-held one does not: it needs to say
+ * that the holder cannot be closed, only waited for, and — for a tab the errand
+ * opened — that the retry will probably find nothing to close.
+ */
+async function closeTabOrExplainHolder(
+  client: ApiClient,
+  targetId: string,
+  args: Parameters<ApiClient['closeCdpTab']>[0],
+  signal: AbortSignal | undefined,
+): Promise<Awaited<ReturnType<ApiClient['closeCdpTab']>>> {
+  try {
+    return await client.closeCdpTab(args, signal);
+  } catch (err) {
+    if (err instanceof ApiHttpError && err.holder?.kind === 'errand') {
+      throw new PreflightFailure(
+        cdpTabHeldByErrand(err.holder.errandId, err.holder.tabRole, targetId),
+      );
+    }
+    throw err;
+  }
 }
 
 /** `ErrandTab` as the schema wants it: an unresolved target id is `null`, never
@@ -1956,9 +2005,12 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'better at "which one did they mean" than a substring rule.\n\n' +
         'This closes a real tab in the user\'s own signed-in browser window, ' +
         'so relay what was closed rather than only that it worked.\n\n' +
-        'Two refusals, both of which tell you what to do next:\n' +
+        'Three refusals, each of which tells you what to do next:\n' +
         '- **A session is driving that tab.** Close it with close_session ' +
         'first, or leave the tab alone if the session is still wanted.\n' +
+        '- **An errand is driving that tab.** Wait for it and retry — an ' +
+        'errand is one request, there is no way to end one early, and a tab it ' +
+        'opened itself will normally be gone by then anyway.\n' +
         '- **It is the browser\'s last tab.** Closing that closes the browser ' +
         'itself — there is no browser with zero tabs. Pass ' +
         '`allow_browser_exit: true` if that is what the user wants. For a ' +
@@ -2013,8 +2065,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             );
           }
 
-          const closed = await client.closeCdpTab(
-            {
+          // The close route's 409 can now come from the errand turn lock as
+          // well as from a session, and the two need different sentences — this
+          // wrapper is where the holder shape picks one.
+          const closed = await closeTabOrExplainHolder(client, args.target_id, {
               projectRoot: project.projectRoot,
               port,
               targetId: args.target_id,
@@ -2027,9 +2081,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               // browser this project has running" — an opt-in that grants
               // nothing.
               ...(project.cdpPermissions.allowUnowned ? { allowUnowned: true } : {}),
-            },
-            extra.signal,
-          );
+          }, extra.signal);
 
           // Normalised for the same reason `list_cdp_browsers` normalises
           // `sessionId`, and it matters more here: this field is required by
