@@ -838,6 +838,59 @@ export class ErrandRunner {
         entry.page !== borrowedPage && entry.targetId !== null && lease.holds(entry.targetId),
     );
 
+    /**
+     * The tabs inside browsers this errand's own steps LAUNCHED.
+     *
+     * An `openBrowser` step builds a second `BrowserSession` with a
+     * `PageTracker` all of its own, and every claim sweep above reads the
+     * BORROWED browser's tracker — so without this pass a tab in a launched
+     * browser reaches no receipt at all, and `openedTabs` breaks the promise it
+     * makes: every tab the errand opened along the way, whether or not it
+     * survived (`ErrandSummary`, session-manager.ts; the same words in
+     * src/mcp/schemas.ts, and stories/errands.md §Return and its verification
+     * item (4)).
+     *
+     * Recorded only — no `lease.claimOpened`, and nothing here joins
+     * `closable`. Neither is missing by oversight: the `openBrowser` action
+     * launches with no cdp argument at all (step-executor.ts:961), so a browser
+     * this errand launched has no CDP port for a rival errand to name a tab
+     * through, and none of these tabs takes a turn lock — the lease is keyed on
+     * the BORROWED browser's port. And the browser-close loop below takes each
+     * launched browser down whole, which is what closes these tabs. A per-tab
+     * close would be a second, slower way to do what closing the browser
+     * already does.
+     *
+     * The tracker's own first page is recorded, unlike the borrowed browser's
+     * (skipped there as the tab we were lent): this errand opened the browser,
+     * so it opened the page the browser came up on.
+     *
+     * Kept per session so the close loop can put a browser's tabs back into
+     * `stillOpen` when the close THREW — the evidence rule the per-tab closes
+     * already follow.
+     */
+    const launchedTabs = new Map<BrowserSession, Page[]>();
+    for (const session of browserTracker.all()) {
+      if (session === borrowed) continue;
+      const recorded: Page[] = [];
+      try {
+        // A SNAPSHOT, for the reason `claimOpenedTabs` takes one: a tab that
+        // closes inside the `describeTab` await splices itself out of `tabs()`
+        // and the live iterator then skips its neighbour.
+        for (const entry of [...session.pageTracker.tabs()]) {
+          // The same provenance gate the borrowed sweep applies: a tab this
+          // errand cannot account for is not one it may claim to have opened.
+          if (entry.unexpected) continue;
+          args.ownTabs.set(entry.page, await describeTab(entry));
+          recorded.push(entry.page);
+        }
+      } catch {
+        // A tracker that cannot enumerate costs the receipt a line; it must not
+        // cost the caller the hand-back — this runs inside a `finally`.
+        // Whatever was recorded before the throw stands.
+      }
+      launchedTabs.set(session, recorded);
+    }
+
     // Every tab the errand opened, whether or not it survived the run — the
     // promise `openedTabs` makes in src/mcp/schemas.ts and on `ErrandSummary`.
     // Read from the sweeps rather than from what is still tracked, because a
@@ -854,6 +907,12 @@ export class ErrandRunner {
      * through the lease it would be listed as gone, which is a false claim
      * about the user's browser and hides the collision the receipt exists to
      * explain.
+     *
+     * `tracked` is the BORROWED browser's list, so a launched browser's tabs
+     * start outside this set and stay outside it — correctly: the close loop
+     * takes their whole browser down, and a tab cannot outlive the browser it
+     * is in. The one way back in is that loop's catch, for a browser that
+     * refused to close.
      */
     const stillOpen = new Set<Page>(
       tracked.map((entry) => entry.page).filter((page) => args.ownTabs.has(page)),
@@ -904,7 +963,13 @@ export class ErrandRunner {
       try {
         await closeBrowser(session);
       } catch {
-        // Already gone, or refusing to go. Either way the errand is leaving.
+        // Already gone, or refusing to go. Either way the errand is leaving —
+        // but its tabs go back into `stillOpen`, on the evidence rule the
+        // per-tab closes above already follow: they were in this browser's
+        // tracker a moment ago and the close did not answer, so calling them
+        // closed on the strength of having tried is the guess the receipt
+        // exists to replace.
+        for (const page of launchedTabs.get(session) ?? []) stillOpen.add(page);
       }
     }
 

@@ -1004,7 +1004,7 @@ async function runErrand(
     openedTabs: errand.openedTabs.map(receiptTab),
     keptOpen: errand.keptOpen.map(receiptTab),
     messages: folded.messages,
-    warnings: [...warnings, ...folded.warnings],
+    warnings: [...warnings, ...errandWarnings(folded)],
     error: folded.error,
     effectiveSettings: folded.effectiveSettings,
   };
@@ -1067,6 +1067,26 @@ const ERRAND_STREAM_DROPPED =
   'have kept driving the tab after the stream died, so re-running the same ' +
   'steps is only safe if they are idempotent.';
 
+/**
+ * The fold's warnings with the session-shaped remedy swapped for the errand's.
+ *
+ * Both receipt paths run this, because a dropped stream is not the truncated
+ * path's private problem: the client sets `streamDropped` in its catch arm too
+ * (src/mcp/api-client.ts), so a stream that dies AFTER the `done` frame folds
+ * into a FINISHED receipt that still carries `STREAM_DROPPED_WARNING` — and
+ * that line tells the caller to call `get_last_run`, which takes a `session_id`
+ * the errand never created.
+ *
+ * Dropped by identity against the exported constant rather than by matching its
+ * prose, and the substitute is pushed on the SAME condition (something was
+ * actually removed), so the two cannot drift apart.
+ */
+function errandWarnings(folded: FoldedRun): string[] {
+  const kept = folded.warnings.filter((w) => w !== STREAM_DROPPED_WARNING);
+  if (kept.length !== folded.warnings.length) kept.push(ERRAND_STREAM_DROPPED);
+  return kept;
+}
+
 /** The one image block a receipt ever carries, built the same way on both the
  *  finished and the truncated path — a screenshot the fold kept is a picture of
  *  the user's real page, and which path returned it changes nothing about that. */
@@ -1107,11 +1127,7 @@ function unfinishedErrandResult(input: {
   // The fold's own stream-dropped warning sends the caller to `get_last_run`,
   // which is addressed by `session_id` (`getLastRunInput`) — an errand has
   // none, so that line names the one call this caller provably cannot make.
-  // Dropped by identity against the exported constant rather than by matching
-  // its prose, and the substitute is pushed on the SAME condition (something
-  // was actually removed), so the two cannot drift apart.
-  const foldWarnings = folded.warnings.filter((warning) => warning !== STREAM_DROPPED_WARNING);
-  if (foldWarnings.length !== folded.warnings.length) foldWarnings.push(ERRAND_STREAM_DROPPED);
+  const foldWarnings = errandWarnings(folded);
 
   const receipt: ErrandReceipt = {
     status: 'error',

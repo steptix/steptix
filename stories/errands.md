@@ -46,10 +46,14 @@
 > (5) a tab the errand did not open is never closed by it; a tab or
 > browser it DID open during its steps is gone by the time it returns —
 > or, for tabs with `keep_open: true`, still open and named in the receipt
-> — and the detach path REQUESTS activation of the borrowed tab, asserted
-> at the mocked Playwright seam; whether it visibly came forward is
-> confirmed by a human in the live pass, because no assertion in this repo
-> can see a screen ([cdp-tab-focus](cdp-tab-focus.md)'s own rule); (6)
+> — and `keep_open` is not the only way one survives: `keptOpen` is every
+> errand-opened tab still open on return, so a tab another errand took the
+> wheel of, or one whose close threw, is named there too rather than
+> claimed closed; and the detach path REQUESTS activation of the borrowed
+> tab, asserted at the mocked Playwright seam; whether it visibly came
+> forward is confirmed by a human in the live pass, because no assertion
+> in this repo can see a screen
+> ([cdp-tab-focus](cdp-tab-focus.md)'s own rule); (6)
 > `run_errand` passing `session_id` is refused before any browser work
 > with an `isError` result naming `run_steps` as the door for sessions,
 > and `run_steps` passing `config.cdp` onto an existing session now ends
@@ -221,8 +225,9 @@ An errand is: **attach → act → return → detach**, in one request.
   resolution), per-step outcomes, every `store as` capture (this is where variables go — to the
   caller, who is the brain here; the server keeps no scope), the final
   `url` and `title` of the borrowed tab, a list of anything the errand
-  opened along the way, and the `effectiveSettings` it ran under — an
-  errand has no session to hold overrides, so the chain is server base →
+  opened along the way and a second of what of it is still open, and the
+  `effectiveSettings` it ran under — an errand has no session to hold
+  overrides, so the chain is server base →
   project bundle, and the receipt echoes it
   ([run-settings](run-settings.md): every run result names the settings
   it ran under). Transport is the shape that already exists: the errand

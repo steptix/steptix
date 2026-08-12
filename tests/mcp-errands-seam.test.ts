@@ -136,6 +136,12 @@ async function connect(
     /** Make `runErrand` throw — the 500 the route answers an attach failure
      *  with, which reaches the client as an ordinary HTTP error. */
     throws?: Error;
+    /** The one dropped-stream shape `!sawDone` cannot express: the connection
+     *  dies AFTER the `done` frame arrived, so the events are complete and yet
+     *  the real client still reports `streamDropped: true` — from its catch arm
+     *  (src/mcp/api-client.ts), which returns the events it has without ever
+     *  consulting `sawDone`. */
+    dropAfterDone?: boolean;
   } = {},
 ): Promise<Harness> {
   const errands: Harness['errands'] = [];
@@ -166,7 +172,10 @@ async function connect(
         // (src/mcp/api-client.ts:235). Hard-coded `false` here meant a script
         // that ended mid-stream reached the tool claiming the stream was
         // intact, so every warning the truncated path adds went untested.
-        streamDropped: !events.some((event) => event.type === 'done'),
+        // `dropAfterDone` is the client's OTHER source of the same flag (its
+        // catch arm), and only an explicit opt-in reaches it, so every other
+        // test keeps the `!sawDone` derivation unchanged.
+        streamDropped: opts.dropAfterDone === true || !events.some((event) => event.type === 'done'),
         dropped: [],
       };
     },
@@ -558,6 +567,51 @@ describe('the receipt', () => {
     expect(structured(result).status).toBe('failed');
     expect(structured(result).error).toBe('no Checkout button');
     expect(structured(result).errandId).toBe('errand-9f2a1c');
+  });
+
+  it('swaps the get_last_run remedy on a FINISHED receipt too, when the stream died after done', async () => {
+    // A dropped stream is not the truncated path's private problem. The client
+    // sets `streamDropped` in its catch arm as well (src/mcp/api-client.ts),
+    // where it returns the events it already has — so a connection that dies
+    // after the `done` frame folds into a complete, finished receipt that the
+    // fold has still stamped with `STREAM_DROPPED_WARNING`. That line offers
+    // `get_last_run`, addressed by a `session_id` this errand never created:
+    // the same impossible remedy, on the receipt that reaches callers most.
+    const h = await connect({ dropAfterDone: true });
+
+    const result = await errand(h);
+
+    const receipt = structured(result);
+    // Finished, not truncated: the `done` frame arrived, so the errand block is
+    // on the receipt — the truncated path reports both of these missing. This
+    // is the FINISHED path, and it still says dropped.
+    expect(receipt.errandId).toBe('errand-9f2a1c');
+    expect(receipt.finalUrl).toBe('https://shop.example/cart?checkout=1');
+    expect(receipt.streamDropped).toBe(true);
+    // `passed` even though the `done` frame said so would be a claim about a
+    // run whose end this client did not see; the fold forces `error` on any
+    // dropped stream (run-fold.ts:385). Pinned so the discriminator above stays
+    // the errand block rather than the status.
+    expect(receipt.status).toBe('error');
+
+    const warnings = receipt.warnings as string[];
+    expect(warnings).not.toContain(STREAM_DROPPED_WARNING);
+    expect(warnings.join('\n')).not.toMatch(/call get_last_run/);
+    expect(warnings.join('\n')).toContain('list_cdp_browsers');
+    expect(warnings.join('\n')).toMatch(/idempotent/i);
+  });
+
+  it('leaves an intact finished receipt free of the dropped-stream warning', async () => {
+    // The other half of the swap: it fires on the condition, not on the path.
+    // A stream that neither dropped nor truncated earns neither warning, so the
+    // filter cannot be passing the test above by pushing its substitute
+    // unconditionally.
+    const h = await connect();
+
+    const receipt = structured(await errand(h));
+
+    expect(receipt.streamDropped).toBe(false);
+    expect((receipt.warnings as string[]).join('\n')).not.toContain('list_cdp_browsers');
   });
 });
 
