@@ -337,12 +337,23 @@ export class ErrandRunner {
         error: null,
         line: 0,
       };
+      /**
+       * Every tab this errand claimed, as the sweep that claimed it saw it.
+       *
+       * Written during the run rather than walked at detach because the receipt
+       * names the tabs an errand opened "whether or not it survived"
+       * (src/mcp/schemas.ts, `ErrandSummary` in session-manager.ts): a tab a
+       * later step closed is already out of the tracker by the time the detach
+       * looks.
+       */
+      const ownTabs = new Map<string, ErrandTab>();
       let errand: ErrandSummary;
       try {
         await this.act({
           errandId,
           lease,
           outcome,
+          ownTabs,
           steps: request.steps,
           runConfig: settings.config,
           envDataCtx,
@@ -375,6 +386,8 @@ export class ErrandRunner {
           keepOpen: request.keepOpen === true,
           borrowed,
           browserTracker,
+          lease,
+          ownTabs,
         });
       }
 
@@ -417,6 +430,8 @@ export class ErrandRunner {
     lease: ErrandLease;
     /** Written as the loop goes, so a throw past it still leaves a receipt. */
     outcome: ActOutcome;
+    /** Filled by the claim sweep — see `claimOpenedTabs` below. */
+    ownTabs: Map<string, ErrandTab>;
     steps: string[];
     runConfig: Config;
     envDataCtx: EnvDataContext | null;
@@ -429,31 +444,8 @@ export class ErrandRunner {
   }): Promise<void> {
     const { errandId, lease, outcome, steps, emit, signal, browserTracker } = args;
 
-    /**
-     * Claim the wheel on every tab the errand OPENED ITSELF.
-     *
-     * The lock covers the borrowed tab plus everything the errand opened, for
-     * the same reason stories/cdp-tabs.md §Locked tracks all of a session's
-     * pages: a step can switch back to a tab it opened.
-     *
-     * Swept rather than hooked at open time because `PageTracker.addPage` is
-     * synchronous and the target id it needs is not — this is the same resolved
-     * sweep the session join reads, and the only window it leaves is a tab
-     * whose id nothing outside this errand can know yet.
-     */
-    const claimOpenedTabs = async (): Promise<void> => {
-      try {
-        // Awaited for its effect as much as its answer: the sweep resolves the
-        // in-flight target ids into the tracker's own entries, which is what
-        // makes reading them back beside `unexpected` say anything.
-        await args.borrowed.pageTracker.resolvedTargetIds();
-        lease.claimOpened(errandOwnTargetIds(args.borrowed.pageTracker.tabs()));
-      } catch {
-        // A tracker that cannot enumerate leaves the borrowed tab held, which
-        // is the claim that matters; a tab whose id never resolved is one no
-        // other errand can name either.
-      }
-    };
+    const claimOpenedTabs = (): Promise<void> =>
+      this.claimOpenedTabs(lease, args.borrowed, args.ownTabs);
 
     const { results, captures } = outcome;
     /**
@@ -686,6 +678,58 @@ export class ErrandRunner {
   }
 
   /**
+   * Claim the wheel on every tab the errand OPENED ITSELF, and record what each
+   * one looked like.
+   *
+   * The lock covers the borrowed tab plus everything the errand opened, for the
+   * same reason stories/cdp-tabs.md §Locked tracks all of a session's pages: a
+   * step can switch back to a tab it opened.
+   *
+   * Swept rather than hooked at open time because `PageTracker.addPage` is
+   * synchronous and the target id it needs is not — this is the same resolved
+   * sweep the session join reads. The window it leaves is real, not
+   * theoretical: a tab is in the browser's own `/json/list` the moment it
+   * exists, so a second errand can name it and take the wheel before this sweep
+   * claims it. What makes that harmless is the detach path, which closes only
+   * what this lease still holds.
+   *
+   * Run after every step AND once more at the detach, because the last thing to
+   * open a tab need not be a step: a `window.open` the page fires after the
+   * final step would otherwise never be claimed, and an unclaimed tab is one
+   * the detach deliberately leaves behind.
+   *
+   * The descriptors are taken here, in the same pass, because the tracker drops
+   * a page as soon as it closes — and the receipt owes every tab the errand
+   * opened, surviving or not.
+   *
+   * Never throws: one caller is a `finally` inside the step loop, the other is
+   * the detach.
+   */
+  private async claimOpenedTabs(
+    lease: ErrandLease,
+    borrowed: BrowserSession,
+    ownTabs: Map<string, ErrandTab>,
+  ): Promise<void> {
+    try {
+      // Awaited for its effect as much as its answer: the sweep resolves the
+      // in-flight target ids into the tracker's own entries, which is what
+      // makes reading them back beside `unexpected` say anything.
+      await borrowed.pageTracker.resolvedTargetIds();
+      const tracked = borrowed.pageTracker.tabs();
+      lease.claimOpened(errandOwnTargetIds(tracked));
+      for (const entry of tracked) {
+        if (entry.page === borrowed.page || entry.targetId === null) continue;
+        if (!lease.holds(entry.targetId)) continue;
+        ownTabs.set(entry.targetId, await describeTab(entry));
+      }
+    } catch {
+      // A tracker that cannot enumerate leaves the borrowed tab held, which is
+      // the claim that matters; a tab whose id never resolved is one no other
+      // errand can name either.
+    }
+  }
+
+  /**
    * Hand the tab back (stories/errands.md §House rules).
    *
    * Enforced here rather than promised in prose, and enforced on error paths
@@ -700,36 +744,58 @@ export class ErrandRunner {
     keepOpen: boolean;
     borrowed: BrowserSession;
     browserTracker: BrowserTracker;
+    /** The turn lock, consulted before every close — see `closable`. */
+    lease: ErrandLease;
+    /** What the claim sweeps recorded, closed tabs included. */
+    ownTabs: Map<string, ErrandTab>;
   }): Promise<ErrandSummary> {
-    const { errandId, keepOpen, borrowed, browserTracker } = args;
+    const { errandId, keepOpen, borrowed, browserTracker, lease } = args;
     const borrowedPage = borrowed.page;
 
+    // One last claim, before anything is closed or reported: a tab that
+    // appeared after the final step's sweep is otherwise unheld, and unheld is
+    // exactly what this path leaves behind.
+    await this.claimOpenedTabs(lease, borrowed, args.ownTabs);
+
     /**
-     * Everything the errand opened ITSELF: the tracker's pages, minus the
-     * borrowed one, minus everything it merely adopted (see
-     * `errandOwnTargetIds`).
+     * The tabs this errand may close: still tracked, not the borrowed one, and
+     * still held by THIS errand's lease.
      *
-     * Pages open at attach time are not in this list at all — the CDP attach
+     * Pages open at attach time are not candidates at all — the CDP attach
      * handed the tracker an ignore set of them (`connectOverCdpSession`,
      * manager.ts:1363). But that set is a snapshot, and `context.on('page')`
      * adopts every tab opened on the browser AFTERWARDS, whoever opened it: the
-     * user, another session, another errand. House rule 1 is that those are not
-     * the errand's to close, so `unexpected` gates this list too.
+     * user, another session, another errand.
+     *
+     * The **lease**, not `unexpected`, is what gates the close. A tab this
+     * errand opened is unlocked until the next claim sweep, and in that window
+     * another errand can name it from the browser's own listing and take the
+     * wheel; `claimOpened` then correctly declines to steal it back, so
+     * `unexpected` alone would still say "ours" and close a tab somebody else
+     * is driving. Holding the lock implies the sweep saw the tab as this
+     * errand's own, so this set is a subset of the claimed one by
+     * construction — and a tab whose target id never resolved is spared for
+     * the same reason stranding is the safe direction (manager.ts:159).
      */
-    let opened: TrackedPage[] = [];
+    let closable: TrackedPage[] = [];
     try {
-      opened = borrowed.pageTracker
+      closable = borrowed.pageTracker
         .tabs()
-        .filter((entry) => entry.page !== borrowedPage && !entry.unexpected);
+        .filter(
+          (entry) =>
+            entry.page !== borrowedPage && entry.targetId !== null && lease.holds(entry.targetId),
+        );
     } catch {
       // A tracker that cannot list its tabs leaves nothing to close, which is
       // the safe direction for a rule about not closing other people's tabs.
     }
 
-    const openedTabs: ErrandTab[] = [];
-    for (const entry of opened) {
-      openedTabs.push(await describeTab(entry));
-    }
+    // Every tab the errand claimed, whether or not it survived the run — the
+    // promise `openedTabs` makes in src/mcp/schemas.ts and on `ErrandSummary`.
+    // Read from the sweeps rather than from what is still tracked, because a
+    // tab a later step closed left the tracker when it went.
+    const openedTabs: ErrandTab[] = [...args.ownTabs.values()];
+    const stillOpen = new Set(closable.map((entry) => entry.targetId));
 
     let finalUrl = '';
     let finalTitle = '';
@@ -745,11 +811,13 @@ export class ErrandRunner {
     }
 
     if (!keepOpen) {
-      for (const entry of opened) {
+      for (const entry of closable) {
         try {
           await entry.page.close();
         } catch {
-          // Already gone is the outcome we wanted.
+          // Already gone is the outcome we wanted. Guarded per tab, because
+          // this runs inside a `finally`: one refusing tab must not replace the
+          // receipt — or the error — the caller was already reporting.
         }
       }
     }
@@ -802,7 +870,12 @@ export class ErrandRunner {
       finalUrl,
       finalTitle,
       openedTabs,
-      keptOpen: keepOpen ? [...openedTabs] : [],
+      // The surviving subset, not the whole list: `keep_open` spares the tabs
+      // still there to spare, and one an earlier step closed is neither open
+      // nor the caller's to go looking for.
+      keptOpen: keepOpen
+        ? [...args.ownTabs].filter(([id]) => stillOpen.has(id)).map(([, tab]) => tab)
+        : [],
     };
   }
 }
@@ -814,7 +887,8 @@ export class ErrandRunner {
  * `unexpected` is `PageTracker`'s provenance flag. Every page the tracker adopts
  * starts unexpected and is cleared by whichever of the two legitimate openers
  * did it — an `openPage` step (`markExpected`) or a popup whose opener is a page
- * we drive (`resolveOpener`). What is left set is a tab that appeared on the
+ * we drive *and already account for* (`resolveOpener`, which is why an adopted
+ * tab's popups stay unexpected). What is left set is a tab that appeared on the
  * browser with nothing in this errand accounting for it: the user opened it,
  * another session did, another errand did.
  *

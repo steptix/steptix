@@ -123,7 +123,10 @@ export class ErrandLease {
    * Called after each step rather than from a tracker callback: `addPage` is
    * synchronous and the target id it needs is not, so "on track" is only
    * reachable through the same resolved sweep the session join uses. The window
-   * this leaves is a tab whose id nothing else can know yet.
+   * this leaves is real — the tab is in the browser's own `/json/list` the
+   * moment it exists, so a second errand can name it before this sweep runs —
+   * and `holds` is what keeps it harmless: the detach path closes only what the
+   * lease still holds.
    *
    * A tab already held by SOMEONE else is left alone rather than stolen — it
    * cannot happen for a tab this errand just opened, and if it somehow did, the
@@ -134,6 +137,19 @@ export class ErrandLease {
     for (const targetId of targetIds) {
       this.locks.acquire(this.port, targetId, { errandId: this.errandId, tabRole: 'opened' });
     }
+  }
+
+  /**
+   * Is this errand still the one driving that tab?
+   *
+   * The detach path's gate. Holding the lock is the only claim that survives
+   * the window above: a tab this errand opened but another errand took first is
+   * one `claimOpened` declined to steal, and closing it on the way out would
+   * kill a tab somebody else is mid-run on.
+   */
+  holds(targetId: string): boolean {
+    if (this.released) return false;
+    return this.locks.holder(this.port, targetId)?.errandId === this.errandId;
   }
 
   release(): void {

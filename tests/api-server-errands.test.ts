@@ -43,19 +43,28 @@ interface FakePage {
   close: ReturnType<typeof vi.fn>;
   bringToFront: ReturnType<typeof vi.fn>;
   goto: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
   closed: boolean;
 }
 
 function makePage(targetId: string, url: string, title: string): FakePage {
+  const closeHandlers: (() => void)[] = [];
   const page: FakePage = {
     targetId,
     url: vi.fn(() => url),
     title: vi.fn(async () => title),
+    // A real page tells its tracker when it goes, and the tracker forgets it —
+    // which is the whole reason the receipt cannot be assembled from what is
+    // still tracked at the detach.
     close: vi.fn(async () => {
       page.closed = true;
+      for (const handler of [...closeHandlers]) handler();
     }),
     bringToFront: vi.fn(async () => {}),
     goto: vi.fn(async () => null),
+    on: vi.fn((event: string, handler: () => void) => {
+      if (event === 'close') closeHandlers.push(handler);
+    }),
     closed: false,
   };
   return page;
@@ -85,6 +94,8 @@ vi.mock('../src/browser/manager.js', () => {
    *     `markExpected` — which is what the real `openPage` action calls once
    *     `context.newPage()` resolves (step-executor.ts:869). A tab that appears
    *     with nobody claiming it that way is somebody else's.
+   *  3. A page that closes is dropped (manager.ts:331), so a tab a step opened
+   *     and later closed is not in `tabs()` by the time the detach looks.
    */
   class PageTracker {
     pages: { page: any; label: string; targetId: string | null; openedAt: number; unexpected: boolean }[] = [];
@@ -109,6 +120,14 @@ vi.mock('../src/browser/manager.js', () => {
         targetId: page.targetId ?? null,
         openedAt: Date.now(),
         unexpected: true,
+      });
+      page.on?.('close', () => {
+        const idx = this.pages.findIndex((p) => p.page === page);
+        if (idx === -1) return;
+        const wasActive = this.activeIndex === idx;
+        this.pages.splice(idx, 1);
+        if (wasActive) this.activeIndex = 0;
+        else if (this.activeIndex > idx) this.activeIndex--;
       });
       return label;
     }
@@ -493,10 +512,14 @@ describe('POST /errands', () => {
   /** The real manager behind the routes, for the one assertion HTTP cannot
    *  make: what the tab→session join itself returns. */
   let sessionManager: SessionManager;
+  /** The app's own turn-lock registry — the same object the runner holds, so a
+   *  test can play the part of a second errand that got there first. */
+  let errandLocks: ErrandLocks;
 
   beforeAll(async () => {
     const created = createApiServer(testConfig, { requestShutdown });
     sessionManager = created.sessionManager;
+    errandLocks = created.errandLocks;
     ({ server, baseUrl } = await listenOnRandomPort(created.app));
   });
 
@@ -774,6 +797,113 @@ describe('POST /errands', () => {
     expect(body.errand.openedTabs).toHaveLength(1);
   });
 
+  it('leaves a tab it opened but no longer HOLDS: the lease decides the close', async () => {
+    // The race the lease gate exists for, and the one `unexpected` cannot see.
+    // A tab is unlocked between the step that opens it and the sweep that
+    // claims it, and it is in the browser's own /json/list the whole time — so
+    // a second errand can name it by title and take the wheel first.
+    // `claimOpened` then declines to steal it back (correct), and provenance
+    // alone would still close a tab E2 is mid-run on. Its control is the
+    // sibling above: same step, same tab, no rival hold, and it IS closed.
+    const opened = makePage('tab-opened', 'https://openrouter.ai/export', 'Export');
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      cdpBrowser.pages.push(opened);
+      opts.pageTracker!.addPage(opened as any);
+      opts.pageTracker!.markExpected(opened as any);
+      // E2, arriving inside that window, on the app's own registry.
+      errandLocks.acquire(cdpBrowser.port, 'tab-opened', {
+        errandId: 'errand-second',
+        tabRole: 'borrowed',
+      });
+      return {
+        index: idx as number,
+        instruction: 'opened it',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    let body;
+    try {
+      ({ body } = await api('POST', '/errands', errandBody()));
+    } finally {
+      // A stray hold would refuse every later errand on that tab.
+      errandLocks.release('errand-second');
+    }
+
+    expect(body.status).toBe('passed');
+    expect(opened.close).not.toHaveBeenCalled();
+    // Nor claimed in the receipt: E1 never held it, so it is not E1's to report
+    // as one of its own.
+    expect(body.errand.openedTabs).toEqual([]);
+    expect(body.errand.keptOpen).toEqual([]);
+    expect(borrowedPage.close).not.toHaveBeenCalled();
+  });
+
+  it('names a tab it opened and then CLOSED — survivors are the smaller list', async () => {
+    // `openedTabs` is documented as every tab the errand opened "whether or not
+    // it survived" (src/mcp/schemas.ts, `ErrandSummary`), and the tracker drops
+    // a page the moment it closes — so a detach that walks what is still
+    // tracked can only report survivors. `keep_open` is what tells the two
+    // lists apart here: a surviving tab would be in BOTH.
+    const opened = makePage('tab-opened', 'https://openrouter.ai/export', 'Export');
+    let step = 0;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (step++ === 0) {
+        cdpBrowser.pages.push(opened);
+        opts.pageTracker!.addPage(opened as any);
+        opts.pageTracker!.markExpected(opened as any);
+      } else {
+        await opened.close();
+      }
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open the export tab', 'close the export tab'], keepOpen: true }),
+    );
+
+    expect(body.status).toBe('passed');
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'tab-opened', url: 'https://openrouter.ai/export', title: 'Export' },
+    ]);
+    expect(body.errand.keptOpen).toEqual([]);
+  });
+
+  it('hands the tab back even when a tab it opened refuses to close', async () => {
+    // The detach runs inside a `finally`, so anything it lets throw replaces
+    // the answer the caller was already sending: measured without the per-tab
+    // guard, this request is a 500 with no errand block at all — about a tab
+    // the errand has already driven.
+    const { opened } = stepThatOpensThings();
+    opened.close.mockImplementation(async () => {
+      throw new Error('the tab refused to close');
+    });
+
+    const { status, body } = await api('POST', '/errands', errandBody());
+
+    expect(status).toBe(200);
+    expect(body.errand).toMatchObject({
+      errandId: body.errandId,
+      finalUrl: 'https://openrouter.ai/activity',
+    });
+    // And the rest of the hand-back still happened: the keys go back visibly
+    // and the borrowed browser is disconnected.
+    expect(borrowedPage.bringToFront).toHaveBeenCalled();
+    expect(vi.mocked(closeBrowserMock).mock.calls.map((c) => c[0])).toContain(lastBorrowed);
+  });
+
   it('leaves a tab it only ADOPTED alone: not closed, not on the receipt, not locked', async () => {
     // House rule 1's hard case. The attach's ignore set is a SNAPSHOT of the
     // tabs open at that instant; `context.on('page')` then adopts every tab
@@ -957,17 +1087,25 @@ describe('POST /errands', () => {
   // -------------------------------------------------------------------------
 
   /**
-   * Park every step of one KIND of run, so a second request meets a live holder
-   * instead of racing it. The errand's `testName` is `errand:<id>`, which is the
-   * only thing telling the two runs apart at this seam.
+   * Park one KIND of run, so a second request meets a live holder instead of
+   * racing it. The errand's `testName` is `errand:<id>`, which is the only
+   * thing telling the two runs apart at this seam.
+   *
+   * `onStep` parks a chosen step rather than every one, which is how a test
+   * gets a holder that has already run a claim sweep — the run must send at
+   * least that many steps or `started` never resolves.
    */
-  function parkSteps(who: 'errand' | 'session'): { started: Promise<void>; release: () => void } {
+  function parkSteps(
+    who: 'errand' | 'session',
+    onStep?: number,
+  ): { started: Promise<void>; release: () => void } {
     let release!: () => void;
     let markStarted!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const started = new Promise<void>((r) => (markStarted = r));
     vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
-      if (String(opts.testName ?? '').startsWith('errand:') === (who === 'errand')) {
+      const mine = String(opts.testName ?? '').startsWith('errand:') === (who === 'errand');
+      if (mine && (onStep === undefined || (idx as number) === onStep)) {
         markStarted();
         await gate;
       }
@@ -995,8 +1133,13 @@ describe('POST /errands', () => {
   }
 
   it('refuses a second errand on the tab an errand is driving, and lets the retry in', async () => {
-    const park = parkSteps('errand');
-    const first = api('POST', '/errands', errandBody());
+    // Parked on the SECOND step, like its tab-opened sibling below, so the
+    // sweep after step 1 has already re-taken the borrowed tab by the time the
+    // refusal is read. `tabRole: 'borrowed'` is then an assertion about role
+    // PRESERVATION — a re-take that overwrote the role would call the user's
+    // own tab 'opened' and tell the caller to expect it gone.
+    const park = parkSteps('errand', 2);
+    const first = api('POST', '/errands', errandBody({ steps: ['click the export button', 'wait'] }));
     let second;
     try {
       await park.started;
@@ -1206,38 +1349,62 @@ describe('POST /errands', () => {
     await api('DELETE', '/sessions/wheel-parallel');
   });
 
-  // The join extension, at the seam the route cannot reach: a real
-  // `SessionManager` decides its own iteration order, so "the idle one answered
-  // first" is only reproducible against a stub of the join.
-  describe('the status-carrying join', () => {
-    function runnerAsking(
-      sessionsHoldingTargets: () => Promise<{
-        byTarget: Map<string, SessionTabHolder[]>;
-        complete: boolean;
-      }>,
-    ): ErrandRunner {
-      const gate = { beginExternalRun: () => () => {}, sessionsHoldingTargets };
-      return new ErrandRunner(
-        testConfig,
-        gate,
-        new ProjectBundleResolver(testConfig),
-        new ErrandLocks(),
-      );
-    }
+  /** A runner on its OWN lock registry, asking a stubbed join — the seam the
+   *  route cannot reach, because a real `SessionManager` decides its own
+   *  iteration order and its own timing. */
+  function runnerAsking(
+    sessionsHoldingTargets: () => Promise<{
+      byTarget: Map<string, SessionTabHolder[]>;
+      complete: boolean;
+    }>,
+  ): ErrandRunner {
+    const gate = { beginExternalRun: () => () => {}, sessionsHoldingTargets };
+    return new ErrandRunner(
+      testConfig,
+      gate,
+      new ProjectBundleResolver(testConfig),
+      new ErrandLocks(),
+    );
+  }
 
-    function runnerWith(byTarget: Map<string, SessionTabHolder[]>, complete = true): ErrandRunner {
-      return runnerAsking(async () => ({ byTarget, complete }));
-    }
+  function runnerWith(byTarget: Map<string, SessionTabHolder[]>, complete = true): ErrandRunner {
+    return runnerAsking(async () => ({ byTarget, complete }));
+  }
 
-    const request = () => ({
-      port: cdpBrowser.port,
-      targetId: 'tab-borrowed',
-      steps: ['click'],
-      testFilePath: errandFilePath(),
-      root: projectRoot,
-      scope: 'project' as const,
+  const request = () => ({
+    port: cdpBrowser.port,
+    targetId: 'tab-borrowed',
+    steps: ['click'],
+    testFilePath: errandFilePath(),
+    root: projectRoot,
+    scope: 'project' as const,
+  });
+
+  it('lets exactly one of two simultaneous errands take the wheel', async () => {
+    // Atomicity, which only a race can state. `begin` takes the lock FIRST and
+    // synchronously, before the session join it must await; a check-then-take
+    // split by that await lets both callers see an empty registry and both
+    // return ok — two drivers on one tab, which is the entire hazard §The wheel
+    // exists for. The join here yields the event loop deliberately, so the
+    // split is exercised rather than hoped for.
+    const runner = runnerAsking(async () => {
+      await new Promise((r) => setImmediate(r));
+      return { byTarget: new Map<string, SessionTabHolder[]>(), complete: true };
     });
 
+    const [a, b] = await Promise.all([runner.begin(request()), runner.begin(request())]);
+
+    const winners = [a, b].filter((started) => started.ok);
+    expect(winners).toHaveLength(1);
+    const loser = [a, b].find((started) => !started.ok)!;
+    if (loser.ok) return;
+    expect(loser.refusal.holder).toMatchObject({ kind: 'errand', tabRole: 'borrowed' });
+    for (const started of [a, b]) if (started.ok) started.lease.release();
+  });
+
+  // The join extension: "the idle one answered first" is only reproducible
+  // against a stub of the join.
+  describe('the status-carrying join', () => {
     it('refuses on an executing session the first-writer-wins map would have hidden', async () => {
       // THE test for the extension. `sessionsByTarget` keeps only the first
       // holder per target, so with the idle session answering first, filtering

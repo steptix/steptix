@@ -64,16 +64,30 @@
 > run per supported host model and its table recorded here, misses
 > reported as product findings, never asserted as test failures.
 >
-> Two vitest suites carry (1)-(7) between them, and which carries what is
+> Five vitest suites carry (1)-(7) between them, and which carries what is
 > part of the rule rather than an accident of where a test was written.
 > `tests/mcp-errands-real-app.test.ts` drives (1), (2), (3), (4), (6) and
 > (7) through a real in-memory MCP client against the real API server,
 > with only the browser and the step executor faked — including the real
 > `run_steps` session that makes (2) and the session half of (3)
-> checkable at all. `tests/api-server-errands.test.ts` drives the same
+> checkable at all. Two clauses sit outside its reach and are named
+> elsewhere: it has no `/health` and no shutdown route, so **(1)'s
+> run-in-flight half** — the count `/health` reports and the `POST
+> /admin/shutdown` 409 — is asserted only in
+> `tests/api-server-errands.test.ts`, and **(6)'s `run_steps` warning
+> ending** fires on the session door rather than on `run_errand`, so it
+> is asserted only in `tests/mcp-cdp-seam.test.ts`.
+> `tests/api-server-errands.test.ts` drives the same
 > real API server over raw HTTP and owns (5), because its claims are
 > about which page object was closed and which was raised: they can only
 > be made at the mocked Playwright seam, and no MCP result exposes it.
+> `tests/mcp-errands-seam.test.ts` runs the tool against a stubbed API
+> client, which is the only place the surface itself can be examined, and
+> owns what §Attach and §Tool surface say beyond the receipt: every `tab`
+> spelling and the union it matches over, both refusal shapes of (7) with
+> their candidate lists, the profile normalisation, and (6)'s
+> `session_id` and `[skill:]`/`[tool:]` refusals firing before any
+> request leaves the process.
 > The `close_cdp_tab` half of (3) is a registry guard rather than an
 > errand call, so it lives in `tests/cdp-registry.test.ts` and
 > `tests/mcp-cdp-seam.test.ts`. (2), the human half of (5), and (8)
@@ -185,10 +199,8 @@ An errand is: **attach → act → return → detach**, in one request.
   pass-`env_name`-to-resolve warning `run_steps` already does
   ([src/mcp/assemble.ts:720](../src/mcp/assemble.ts:720)).
   `{{placeholders}}` resolve only from the errand's own earlier `store
-  as` captures. (One deliberate survivor: the step-plan cache keys on the
-  synthetic path, so errands share a project-owned, content-keyed cache
-  namespace — a performance artifact of the project, not errand state,
-  and outside item (4)'s three checks on purpose.)
+  as` captures. An errand runs uncached: nothing keyed on the synthetic
+  path is written.
 - **Return.** The response is a receipt: an `errandId` the server mints
   per request (alive only while the errand runs — see item (4)), the root
   the errand resolved against and its `scope`
