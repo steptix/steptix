@@ -672,17 +672,25 @@ export function errandTabAmbiguous(spec: string, matches: readonly CdpTab[]): Mc
 }
 
 /**
- * The stream came back with no errand block on its `done` frame.
+ * The stream came back with no errand block, and with no step event either.
  *
  * The runner builds the accounting in a `finally` and emits the `done` frame
  * after it, and the step loop is wrapped so a throw becomes that frame's
  * `status: 'error'` rather than escaping — so the block rides every `done` an
- * errand itself emits, including a failing one. Its absence means the request
- * died before the tab was ever borrowed (the attach refused, or the route's own
- * catch answered), so there is no receipt to return and nothing ran.
+ * errand itself emits, including a failing one.
  *
- * `isError` is therefore right here and wrong for a failed step: this is the
- * "no run happened" case the contract reserves it for.
+ * Its absence is therefore not enough on its own: a stream can also die
+ * mid-errand, after steps have driven the tab, with no `done` frame at all (a
+ * force shutdown, a crashed server, a proxy that gave up). **The caller decides
+ * between the two on the step events**, and this refusal is for the half with
+ * none — the request died before the tab was ever borrowed (the attach refused,
+ * or the route's own catch answered), so there is no receipt to return and
+ * nothing ran. The other half keeps its folded steps and captures and says the
+ * tab was driven (`unfinishedErrandResult` in src/mcp/tools.ts).
+ *
+ * `isError` is therefore right here and wrong for a failed step — and wrong for
+ * a truncated stream: this is the "no run happened" case the contract reserves
+ * it for.
  */
 export function errandDidNotAttach(tab: string, detail: string | null): McpToolError {
   return preflightError(

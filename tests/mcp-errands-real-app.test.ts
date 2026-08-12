@@ -430,8 +430,12 @@ beforeAll(async () => {
     createApiClient,
     // The server is already up; this test is about the request path.
     ensureServerReady: async () => {},
-    // A bare `createApiServer` serves no /health route through this harness, so
-    // the identity probe would refuse a server we know is ours.
+    // Never called: `withProject` only reaches this dep when a tool passes
+    // `autoStart: false` (none does), and the one tool that calls it directly
+    // is `get_run_settings`, which this suite never drives. It is here because
+    // `McpDeps` requires it, not because anything reads it — the /health route
+    // it would probe IS served by this app, `createApiServer` registering it
+    // unconditionally.
     assertServerRecognized: async () => {},
     resolveProject,
   });

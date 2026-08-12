@@ -122,9 +122,12 @@ const TAB_TITLE_TIMEOUT_MS = 500;
  *
  * Owned by `drive` and mutated by `act` rather than returned, so a throw that
  * escapes the loop still leaves the partial results where the `done` frame can
- * pick them up. That frame is the only thing carrying the errand block, and its
- * absence is read MCP-side as "nothing ran" — a lie once steps have already
- * driven the user's tab.
+ * pick them up. That frame is the only thing carrying the errand block, and
+ * without it the MCP side has no receipt to hand back at all — only the folded
+ * steps and a "the tab was driven, its final state is unknown" result
+ * (`unfinishedErrandResult`, src/mcp/tools.ts). Every `done` this runner emits
+ * carries the block, so that degraded shape is reserved for a stream that died
+ * before the runner could answer.
  */
 interface ActOutcome {
   results: StepResultResponse[];
@@ -368,9 +371,10 @@ export class ErrandRunner {
         // Belt and braces over the per-step guard: nothing in `act` is meant to
         // throw past the loop, but anything that does used to escape `drive`
         // altogether, and the route answered with a bare `done: error` carrying
-        // no errand block — which the MCP side reports as "nothing ran" about a
-        // tab it has already driven. The block rides every `done` from here on;
-        // the only errand without one is the one that never got the tab.
+        // no errand block — costing the caller the receipt for a tab this errand
+        // had already driven. The block rides every `done` from here on; the
+        // only errand without one is the one that never got the tab, or one
+        // whose stream died before this frame could be written.
         const message = err instanceof Error ? err.message : String(err);
         logger.error(`Errand ${errandId} failed outside a step: ${message}`);
         emit({ type: 'output', msg: message, kind: 'error' });
@@ -715,11 +719,27 @@ export class ErrandRunner {
       // in-flight target ids into the tracker's own entries, which is what
       // makes reading them back beside `unexpected` say anything.
       await borrowed.pageTracker.resolvedTargetIds();
-      const tracked = borrowed.pageTracker.tabs();
+      // A SNAPSHOT, not the tracker's live array. The loop below awaits a page
+      // title per entry, and a tab that closes inside one of those awaits
+      // splices itself out of `tabs()` — which shifts every later entry down and
+      // makes the iterator skip the next one. That tab is claimed (the ids were
+      // read before the loop) but never recorded, so the receipt silently loses
+      // a tab the errand opened.
+      const tracked = [...borrowed.pageTracker.tabs()];
       lease.claimOpened(errandOwnTargetIds(tracked));
       for (const entry of tracked) {
         if (entry.page === borrowed.page || entry.targetId === null) continue;
-        if (!lease.holds(entry.targetId)) continue;
+        // Recorded on PROVENANCE, closed on the LEASE — deliberately two
+        // different questions.
+        //
+        // `openedTabs` promises every tab this errand opened, "whether or not
+        // they survived" (src/mcp/schemas.ts, `ErrandSummary` in
+        // session-manager.ts). A tab this errand opened but another errand
+        // claimed first is spared the close — the lease gate in `detach` sees
+        // to that — and it is still a tab this errand opened, so leaving it out
+        // of the receipt would hide the very collision the caller needs to
+        // explain the page state with.
+        if (entry.unexpected) continue;
         ownTabs.set(entry.targetId, await describeTab(entry));
       }
     } catch {
@@ -763,19 +783,20 @@ export class ErrandRunner {
      *
      * Pages open at attach time are not candidates at all — the CDP attach
      * handed the tracker an ignore set of them (`connectOverCdpSession`,
-     * manager.ts:1363). But that set is a snapshot, and `context.on('page')`
+     * manager.ts:1388). But that set is a snapshot, and `context.on('page')`
      * adopts every tab opened on the browser AFTERWARDS, whoever opened it: the
      * user, another session, another errand.
      *
-     * The **lease**, not `unexpected`, is what gates the close. A tab this
-     * errand opened is unlocked until the next claim sweep, and in that window
-     * another errand can name it from the browser's own listing and take the
-     * wheel; `claimOpened` then correctly declines to steal it back, so
-     * `unexpected` alone would still say "ours" and close a tab somebody else
-     * is driving. Holding the lock implies the sweep saw the tab as this
-     * errand's own, so this set is a subset of the claimed one by
-     * construction — and a tab whose target id never resolved is spared for
-     * the same reason stranding is the safe direction (manager.ts:159).
+     * The **lease**, not `unexpected`, is what gates the close — the one place
+     * the two questions come apart, since `claimOpenedTabs` records on
+     * provenance. A tab this errand opened is unlocked until the next claim
+     * sweep, and in that window another errand can name it from the browser's
+     * own listing and take the wheel; `claimOpened` then correctly declines to
+     * steal it back, so `unexpected` alone would close a tab somebody else is
+     * driving. That tab is still named in the receipt (this errand did open
+     * it); it is simply not this errand's to close. A tab whose target id never
+     * resolved is spared for the same reason stranding is the safe direction
+     * (manager.ts:176).
      */
     let closable: TrackedPage[] = [];
     try {
@@ -842,7 +863,7 @@ export class ErrandRunner {
     // Hand the keys back visibly. "Request" is the honest verb: there is no
     // read of "is this tab frontmost", and Windows may decline a raise from a
     // background process — so this is silent and non-fatal, the same posture as
-    // the attach path (manager.ts:1390).
+    // the attach path (manager.ts:1415).
     try {
       await borrowedPage.bringToFront();
     } catch {
@@ -892,7 +913,7 @@ export class ErrandRunner {
  * browser with nothing in this errand accounting for it: the user opened it,
  * another session did, another errand did.
  *
- * Used as a GATE, which manager.ts:165 rules out for reports — and the exception
+ * Used as a GATE, which manager.ts:163 rules out for reports — and the exception
  * is the whole of house rule 1. The two failure directions are not symmetric:
  * a tab wrongly called unexpected is stranded (it stays open, and the receipt
  * does not claim it), while one wrongly called ours is CLOSED out from under

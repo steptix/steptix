@@ -142,10 +142,16 @@ export class ErrandLease {
   /**
    * Is this errand still the one driving that tab?
    *
-   * The detach path's gate. Holding the lock is the only claim that survives
-   * the window above: a tab this errand opened but another errand took first is
-   * one `claimOpened` declined to steal, and closing it on the way out would
-   * kill a tab somebody else is mid-run on.
+   * One caller, and only one: the `closable` filter in `ErrandRunner.detach`,
+   * which decides what may be CLOSED. Holding the lock is the only claim that
+   * survives the window above — a tab this errand opened but another errand
+   * took first is one `claimOpened` declined to steal, and closing it on the
+   * way out would kill a tab somebody else is mid-run on.
+   *
+   * Deliberately not the gate on what the receipt REPORTS: the claim sweep
+   * records on the tracker's provenance flag instead, because a tab this errand
+   * opened is still one it opened even when it no longer holds the wheel
+   * (`claimOpenedTabs`).
    */
   holds(targetId: string): boolean {
     if (this.released) return false;

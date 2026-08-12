@@ -970,12 +970,22 @@ async function runErrand(
   });
 
   const errand = readErrandSummary(stream.events);
-  // No receipt means the tab was never borrowed. The accounting is built in a
-  // `finally` and the step loop is wrapped so nothing throws past it, so an
-  // errand that ran at all has one — even one that ended in an error.
-  // `isError` is honest here and would be wrong for a failed step.
+  // No errand block covers two opposite stories, and the step events are the
+  // only thing that tells them apart.
+  //
+  // No step event ever arrived: the request died before the tab was borrowed —
+  // the attach refused, or the route's own catch answered — and `isError`
+  // ("nothing ran") is the honest report.
+  //
+  // Step events and then no `done` block: the stream died MID-errand (a force
+  // shutdown, a crash, a proxy timeout). The tab HAS been driven, and answering
+  // that with "nothing ran" throws away the folded steps and captures, which
+  // are by then the only surviving record of what happened to the user's page.
   if (errand === null) {
-    return errorResult(errandDidNotAttach(args.tab, folded.error ?? firstError(folded)));
+    if (!tabWasDriven(stream.events)) {
+      return errorResult(errandDidNotAttach(args.tab, folded.error ?? firstError(folded)));
+    }
+    return unfinishedErrandResult({ folded, tab: args.tab, project, warnings, borrowed, where });
   }
 
   const receipt: ErrandReceipt = {
@@ -1016,6 +1026,104 @@ async function runErrand(
       messages: [],
       warnings: [`The errand finished, but its result could not be encoded: ${detail}`],
       error: detail,
+      effectiveSettings: null,
+    }),
+  );
+}
+
+/**
+ * Did anything actually reach the tab?
+ *
+ * Any step or capture event says yes: the runner emits `step:start` before it
+ * touches the page and cannot emit one before the attach has returned a
+ * borrowed tab. `output` frames do NOT count — the log bridge and the route's
+ * own error arm both emit them for an errand that never got past the attach.
+ */
+function tabWasDriven(events: readonly RunEvent[]): boolean {
+  return events.some(
+    (event) =>
+      event.type === 'step:start' ||
+      event.type === 'step:pass' ||
+      event.type === 'step:fail' ||
+      event.type === 'capture',
+  );
+}
+
+/**
+ * The stream carried steps and then ended without the errand's accounting.
+ *
+ * A receipt rather than an `isError`, for the reason the whole `isError`
+ * contract exists (src/mcp/errors.ts): the tab was driven, so the steps and
+ * captures are the caller's only record of what an errand did to a real page,
+ * and an `isError` result carries no `structuredContent` to keep them in.
+ *
+ * Everything the `done` frame owns is missing and is reported missing rather
+ * than guessed: `status` is `error` whatever the fold made of a truncated
+ * stream, the final url and title are empty, and `openedTabs`/`keptOpen` are
+ * empty because nothing counted them — not because nothing was opened, which is
+ * what the warning says. `root` and `scope` are the only two fields answered
+ * from the request instead of the server's echo, and they are honest to answer
+ * that way: the tool resolved them and sent them, and the server does not
+ * re-derive them.
+ */
+function unfinishedErrandResult(input: {
+  folded: FoldedRun;
+  /** The `tab` spelling the caller used, so the message names the page in the
+   *  caller's own words rather than in a target id they never wrote. */
+  tab: string;
+  project: ProjectContext;
+  warnings: string[];
+  borrowed: CdpTab;
+  where: string;
+}): ToolResult {
+  const { folded, project, tab } = input;
+  const detail = folded.error ?? firstError(folded);
+  const receipt: ErrandReceipt = {
+    status: 'error',
+    streamDropped: folded.streamDropped,
+    // Never reported: the errand id is minted server-side and rides the `done`
+    // frame that never came. Empty is the one honest value — inventing one
+    // would hand back a handle onto nothing.
+    errandId: '',
+    root: project.projectRoot,
+    scope: project.scope,
+    steps: folded.steps,
+    captures: folded.captures,
+    finalUrl: '',
+    finalTitle: '',
+    openedTabs: [],
+    keptOpen: [],
+    messages: folded.messages,
+    warnings: [
+      ...input.warnings,
+      ...folded.warnings,
+      'openedTabs and keptOpen are empty because the errand never reported ' +
+        'them, not because it opened nothing. A tab it opened may still be ' +
+        'open — call list_cdp_browsers to see what is there now.',
+    ],
+    error:
+      `The errand DROVE tab "${tab}" and then the stream ended without a ` +
+      'completion event, so its final state is unknown' +
+      (detail !== null && detail !== '' ? `: ${detail}` : '.') +
+      '\n' +
+      'The steps and captures below really happened. What is missing is what ' +
+      'the errand did on the way out — where the tab ended up, and whether the ' +
+      'tabs it opened were closed. Read the page before assuming either.',
+    effectiveSettings: folded.effectiveSettings,
+  };
+
+  return validated(
+    schemas.runErrandOutput,
+    receipt as unknown as Record<string, unknown>,
+    summarizeErrand(receipt, input.borrowed, input.where),
+    [],
+    (detailText) => ({
+      ...receipt,
+      steps: [],
+      captures: {},
+      messages: [],
+      warnings: [`The errand's partial result could not be encoded: ${detailText}`],
+      error: detailText,
       effectiveSettings: null,
     }),
   );
@@ -1071,13 +1179,21 @@ function summarizeErrand(
   const passed = receipt.steps.filter((s) => s.status === 'passed').length;
   const lines = [
     `${receipt.status.toUpperCase()} — ${passed}/${receipt.steps.length} steps in ` +
-      `"${borrowed.title || borrowed.url}" (${browser}, errand ${receipt.errandId})`,
+      `"${borrowed.title || borrowed.url}" (${browser}, ` +
+      // Empty only on the stream-died-mid-errand path: the id rides the `done`
+      // frame that never arrived, and "errand " followed by nothing reads as a
+      // formatting bug rather than as a missing fact.
+      `errand ${receipt.errandId || 'id not reported'})`,
   ];
   if (receipt.scope === 'user') {
     lines.push(`Ran project-less against the user root (${receipt.root}).`);
   }
   if (receipt.error) lines.push(`Error: ${receipt.error}`);
-  lines.push(`Tab left at: ${receipt.finalTitle || '(untitled)'} — ${receipt.finalUrl}`);
+  // Skipped rather than printed empty when the detach never reported one —
+  // "Tab left at: (untitled) — " states nothing and looks like a lost value.
+  if (receipt.finalUrl !== '' || receipt.finalTitle !== '') {
+    lines.push(`Tab left at: ${receipt.finalTitle || '(untitled)'} — ${receipt.finalUrl}`);
+  }
   if (receipt.openedTabs.length > 0) {
     lines.push(
       `Opened ${receipt.openedTabs.length} tab(s); ` +

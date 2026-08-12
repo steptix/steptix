@@ -71,23 +71,35 @@
 > with only the browser and the step executor faked — including the real
 > `run_steps` session that makes (2) and the session half of (3)
 > checkable at all. Two clauses sit outside its reach and are named
-> elsewhere: it has no `/health` and no shutdown route, so **(1)'s
-> run-in-flight half** — the count `/health` reports and the `POST
-> /admin/shutdown` 409 — is asserted only in
-> `tests/api-server-errands.test.ts`, and **(6)'s `run_steps` warning
-> ending** fires on the session door rather than on `run_errand`, so it
-> is asserted only in `tests/mcp-cdp-seam.test.ts`.
+> elsewhere. **(1)'s run-in-flight half** — the count `/health` reports and
+> the `POST /admin/shutdown` 409 — is asserted only in
+> `tests/api-server-errands.test.ts`, and the reason is the client, not the
+> app: both routes ARE served here (`createApiServer` registers them
+> unconditionally, [src/server/api-server.ts:204](../src/server/api-server.ts:204)
+> and [:272](../src/server/api-server.ts:272)), but this suite drives MCP
+> tools, and neither half has a tool-shaped door — nothing in the MCP
+> surface stops the server, and reading the count back through
+> `server_status` would be an assertion about that tool's own probe rather
+> than about the errand. **(6)'s `run_steps` warning ending** fires on the
+> session door rather than on `run_errand`, so it is asserted only in
+> `tests/mcp-cdp-seam.test.ts`.
 > `tests/api-server-errands.test.ts` drives the same
 > real API server over raw HTTP and owns (5), because its claims are
 > about which page object was closed and which was raised: they can only
 > be made at the mocked Playwright seam, and no MCP result exposes it.
 > `tests/mcp-errands-seam.test.ts` runs the tool against a stubbed API
-> client, which is the only place the surface itself can be examined, and
-> owns what §Attach and §Tool surface say beyond the receipt: every `tab`
-> spelling and the union it matches over, both refusal shapes of (7) with
-> their candidate lists, the profile normalisation, and (6)'s
-> `session_id` and `[skill:]`/`[tool:]` refusals firing before any
-> request leaves the process.
+> client, which is the only place the surface itself can be examined:
+> every `tab` spelling and the union it matches over, the profile
+> normalisation, the shape of (7)'s two refusals over a fixture listing —
+> the browser's whole tab list in the zero-match one, and every candidate's
+> `title`, `url` and `targetId` in the several-match one — and (6)'s
+> `session_id` refusal, which like §Act's `[skill:]`/`[tool:]` one is
+> proved there to fire before any browser work at all: no listing, nothing
+> on the wire.
+> That does not make it the owner of (6) or (7): the real-app suite runs
+> those same refusals end to end over the browser's real listing, and pins
+> the zero-match one word for word against the exported `errandTabNotFound`
+> builder.
 > The `close_cdp_tab` half of (3) is a registry guard rather than an
 > errand call, so it lives in `tests/cdp-registry.test.ts` and
 > `tests/mcp-cdp-seam.test.ts`. (2), the human half of (5), and (8)
@@ -107,11 +119,11 @@ variables worth keeping. Just: borrow my tab for a moment and drive it.
 
 Forcing that request through the session concept fails in a specific,
 measured way. A session's browser is chosen **once**, when the session is
-created, and never revisited ([src/server/session-manager.ts:1289](../src/server/session-manager.ts:1289)
+created, and never revisited ([src/server/session-manager.ts:1151](../src/server/session-manager.ts:1151)
 is `createSession`'s only call site — inside the miss-arm of a lookup by
 session name). The MCP tools default every `run_steps` call to the **same**
 session name (`mcp:steps-<pid>-<projecthash>`,
-[src/mcp/tools.ts:235](../src/mcp/tools.ts:235)), so the first `run_steps`
+[src/mcp/tools.ts:267](../src/mcp/tools.ts:267)), so the first `run_steps`
 of a server's life decides the browser for every later call. Measured live
 on 2026-08-12: the only session on the project server was
 `mcp:steps-9268-83ea9b2d`, sitting on `about:blank` in a plain launched
@@ -119,7 +131,7 @@ browser, while the user asked — repeatedly, via an agent — for work on a
 CDP tab named "Activity | OpenRouter". Every request found the session
 alive, reused it, and the named tab never reached the attach code. The
 warning added by [cdp-session-binding](cdp-session-binding.md)
-([src/mcp/tools.ts:509](../src/mcp/tools.ts:509)) correctly reported that
+([src/mcp/tools.ts:542](../src/mcp/tools.ts:542)) correctly reported that
 `config.cdp` was ignored — but a warning is a bandage on a concept asked to
 do a job it wasn't designed for.
 
@@ -154,7 +166,7 @@ An errand is: **attach → act → return → detach**, in one request.
 - **Attach.** Resolve the tab fresh, every time, in two stages, both
   MCP-side the way `close_cdp_tab`/`focus_cdp_tab` resolve
   (`resolveCdpTarget` against the server's browser listing,
-  [src/mcp/cdp.ts:135](../src/mcp/cdp.ts:135), the registry behind `GET
+  [src/mcp/cdp.ts:136](../src/mcp/cdp.ts:136), the registry behind `GET
   /cdp/browsers`). First the browser: profile + engine + scope, a name
   live under two engines or under both roots refused naming both
   (`cdpProfileAmbiguous` and kin, reused as-is), never a silent pick.
@@ -169,7 +181,7 @@ An errand is: **attach → act → return → detach**, in one request.
   actually open. The winner's `targetId` is what the request carries to
   the server, and the existing attach path (`connectOverCDP` +
   `resolveCdpTab` with a `targetId:` spec,
-  [src/browser/manager.ts:1344](../src/browser/manager.ts:1344)) is
+  [src/browser/manager.ts:1369](../src/browser/manager.ts:1369)) is
   handed only that exact spec — the first-match-wins arm of
   `resolveCdpTab` is never asked to arbitrate. Nothing about a previous
   errand's resolution is remembered or reused.
@@ -178,26 +190,26 @@ An errand is: **attach → act → return → detach**, in one request.
   session or an errand is running it. `[skill: …]` and `[tool: …]` are the
   exception, refused by name — the same `[skill:`/`[tool:` token rule
   `run_steps` already refuses in user scope
-  ([src/mcp/assemble.ts:72](../src/mcp/assemble.ts:72)) — because an
+  ([src/mcp/assemble.ts:75](../src/mcp/assemble.ts:75)) — because an
   errand deliberately carries no `skillsDir`/`toolsDir`. Section calls
   need no refusal: they resolve only through the `sections` map a parsed
-  test file supplies ([src/mcp/types.ts:159](../src/mcp/types.ts:159)),
+  test file supplies ([src/mcp/types.ts:168](../src/mcp/types.ts:168)),
   which a fileless request never carries, so a bare section-name line is
   already just prose. The errand DOES carry a synthetic `testFilePath`
   (`<project_root>/.aiui-errand.md`, the same device `run_steps` already
-  uses, [src/mcp/assemble.ts:332](../src/mcp/assemble.ts:332)) and an
+  uses, [src/mcp/assemble.ts:335](../src/mcp/assemble.ts:335)) and an
   optional `env_name` — that path is the only thing the server resolves a
   project root from
-  ([src/server/session-manager.ts:1029](../src/server/session-manager.ts:1029)),
+  ([src/server/project-bundle.ts:56](../src/server/project-bundle.ts:56)),
   and without it the project layer of `effectiveSettings` would silently
   fall back to server defaults. `${env.X}` resolves from the project's
   environment **only when `env_name` names one**: with no `env_name` the
   server builds no env bundle (`if (envName)`,
-  [src/server/session-manager.ts:1070](../src/server/session-manager.ts:1070))
+  [src/server/project-bundle.ts:97](../src/server/project-bundle.ts:97))
   and the placeholder reaches the AI as literal text — there is no
   default-env concept — so `run_errand` emits the same
   pass-`env_name`-to-resolve warning `run_steps` already does
-  ([src/mcp/assemble.ts:720](../src/mcp/assemble.ts:720)).
+  ([src/mcp/assemble.ts:743](../src/mcp/assemble.ts:743)).
   `{{placeholders}}` resolve only from the errand's own earlier `store
   as` captures. An errand runs uncached: nothing keyed on the synthetic
   path is written.
@@ -225,7 +237,7 @@ An errand is: **attach → act → return → detach**, in one request.
   is the honest verb: the DevTools surface has no read of "is this tab
   frontmost", and on Windows the OS may decline a raise from a background
   process
-  ([src/browser/cdp-discovery.ts:228](../src/browser/cdp-discovery.ts:228)) —
+  ([src/browser/cdp-discovery.ts:240](../src/browser/cdp-discovery.ts:240)) —
   so the raise is silent and non-fatal, the same posture as
   [cdp-tab-focus](cdp-tab-focus.md).
 
@@ -254,11 +266,11 @@ errands only**:
   `close_errand`, and it does not queue silently.
 - Before taking the lock, an errand also consults the session manager's
   own tab tracking — the same join `close_cdp_tab`'s guard already does
-  ([src/server/session-manager.ts:1697](../src/server/session-manager.ts:1697)),
+  ([src/server/session-manager.ts:1554](../src/server/session-manager.ts:1554)),
   **extended to carry each holder's status**. The extension is not
   optional: the join today returns `targetId → sessionId` with no status
   and keeps only the first holder per target
-  ([src/server/session-manager.ts:1723](../src/server/session-manager.ts:1723)),
+  ([src/server/session-manager.ts:1561](../src/server/session-manager.ts:1561)),
   so filtering its output would let an idle winner mask a mid-batch
   session. A session with a batch in flight (`status === 'executing'`) on
   that tab refuses the errand, naming the session id. An idle session
@@ -318,8 +330,8 @@ page state is explainable rather than mysterious.
    attach itself opened.
 3. End by requesting activation of the borrowed tab — the same silent,
    non-fatal `bringToFront` courtesy the attach path already extends at
-   [src/browser/manager.ts:1390](../src/browser/manager.ts:1390).
-4. The pre-existing-pages guard ([src/browser/manager.ts:1363](../src/browser/manager.ts:1363),
+   [src/browser/manager.ts:1415](../src/browser/manager.ts:1415).
+4. The pre-existing-pages guard ([src/browser/manager.ts:1388](../src/browser/manager.ts:1388),
    enforced through `PageTracker`) is the errand's whole personality:
    everything it protects for CDP sessions, an errand applies to every page
    but its own.
@@ -398,7 +410,7 @@ schema throw carries only generic text no model learns from).
 `run_steps` changes in three places, none behavioural: its ignored-CDP
 warning gains the ending *"…or use run_errand if you just want to drive
 that tab"*; the shared `CDP_NOTE` in both run tools' descriptions
-([src/mcp/tools.ts:788](../src/mcp/tools.ts:788), shared with
+([src/mcp/tools.ts:1234](../src/mcp/tools.ts:1234), shared with
 `run_test_file` — the added sentence is phrased to be true of both) gains
 the whose-browser decision rule from §Routing; and `CDP_NOTE`'s existing
 "Tab:" paragraph — which today teaches the `config.cdp.tab:
@@ -451,12 +463,12 @@ ambiguity refusals ([src/browser/cdp-registry.ts](../src/browser/cdp-registry.ts
 [src/mcp/cdp.ts](../src/mcp/cdp.ts)); the filtered tab lists over the
 DevTools HTTP surface ([src/browser/cdp-discovery.ts](../src/browser/cdp-discovery.ts));
 the attach path (`connectOverCDP` at
-[src/browser/manager.ts:1344](../src/browser/manager.ts:1344), then
-`resolveCdpTab` — [src/browser/manager.ts:985](../src/browser/manager.ts:985) —
+[src/browser/manager.ts:1369](../src/browser/manager.ts:1369), then
+`resolveCdpTab` — [src/browser/manager.ts:1010](../src/browser/manager.ts:1010) —
 handed only an exact `targetId:` spec); the pre-existing-pages guard
-([src/browser/manager.ts:1363](../src/browser/manager.ts:1363)) and
+([src/browser/manager.ts:1388](../src/browser/manager.ts:1388)) and
 disconnect-not-kill semantics (`closeBrowser`,
-[src/browser/manager.ts:1457](../src/browser/manager.ts:1457)); the step
+[src/browser/manager.ts:1482](../src/browser/manager.ts:1482)); the step
 executor and AI resolution
 ([src/runner/step-executor.ts:266](../src/runner/step-executor.ts:266) —
 it takes a page plus a context bag, not a session); and the run fold that
@@ -487,7 +499,7 @@ tool-count sentence in `mcp-server.md` — §2's "Thirteen tools" (word) and
 by-name enumeration's own "the six added since" → seven, gaining
 `run_errand`; add it to `usage.ts` and the README tool table; auto-start
 needs no change — reaching the server through `withProject` gives it the
-ON default ([src/mcp/tools.ts:669](../src/mcp/tools.ts:669)), and no tool
+ON default ([src/mcp/tools.ts:703](../src/mcp/tools.ts:703)), and no tool
 passes `autoStart: false` — the "auto-start list" that cdp-tab-focus §5,
 cdp-tabs §3 and both stories' §Composition rows describe is a list
 `server-start.ts` does not have, and all four sites are corrected in this

@@ -797,7 +797,7 @@ describe('POST /errands', () => {
     expect(body.errand.openedTabs).toHaveLength(1);
   });
 
-  it('leaves a tab it opened but no longer HOLDS: the lease decides the close', async () => {
+  it('leaves a tab it opened but no longer HOLDS — and still names it', async () => {
     // The race the lease gate exists for, and the one `unexpected` cannot see.
     // A tab is unlocked between the step that opens it and the sweep that
     // claims it, and it is in the browser's own /json/list the whole time — so
@@ -805,6 +805,12 @@ describe('POST /errands', () => {
     // `claimOpened` then declines to steal it back (correct), and provenance
     // alone would still close a tab E2 is mid-run on. Its control is the
     // sibling above: same step, same tab, no rival hold, and it IS closed.
+    //
+    // The receipt is the other half, and it answers the other question: E1
+    // opened this tab, so `openedTabs` names it "whether or not it survived"
+    // (src/mcp/schemas.ts, `ErrandSummary`) — the collision is exactly the case
+    // where a caller needs to know which tabs E1 put on screen and did not take
+    // away again.
     const opened = makePage('tab-opened', 'https://openrouter.ai/export', 'Export');
     vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
       cdpBrowser.pages.push(opened);
@@ -835,9 +841,13 @@ describe('POST /errands', () => {
 
     expect(body.status).toBe('passed');
     expect(opened.close).not.toHaveBeenCalled();
-    // Nor claimed in the receipt: E1 never held it, so it is not E1's to report
-    // as one of its own.
-    expect(body.errand.openedTabs).toEqual([]);
+    // Spared the close, but not omitted: E1 opened it, so E1 reports it.
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'tab-opened', url: 'https://openrouter.ai/export', title: 'Export' },
+    ]);
+    // `keptOpen` is the surviving subset of what this errand still held, and
+    // `keep_open` was not asked for — a tab another errand is driving is not
+    // one this errand kept open.
     expect(body.errand.keptOpen).toEqual([]);
     expect(borrowedPage.close).not.toHaveBeenCalled();
   });
@@ -879,6 +889,110 @@ describe('POST /errands', () => {
       { targetId: 'tab-opened', url: 'https://openrouter.ai/export', title: 'Export' },
     ]);
     expect(body.errand.keptOpen).toEqual([]);
+  });
+
+  it('records a tab the sweep would skip when an earlier one closes mid-sweep', async () => {
+    // The claim sweep awaits a page title per entry, and the tracker's `tabs()`
+    // is its LIVE array: a tab that closes inside one of those awaits splices
+    // itself out, every later entry shifts down, and a `for…of` over that array
+    // skips the next one. The skipped tab is still CLAIMED — the ids are read
+    // before the loop — so nothing refuses to close it later; it just never
+    // reaches the receipt.
+    //
+    // Aimed where the detach's own last sweep cannot paper over it: a second
+    // step closes the skipped tab, so by the detach it is out of the tracker
+    // altogether and this sweep was its only chance to be recorded.
+    const first = makePage('tab-first', 'https://openrouter.ai/a', 'A');
+    const second = makePage('tab-second', 'https://openrouter.ai/b', 'B');
+    const third = makePage('tab-third', 'https://openrouter.ai/c', 'C');
+    // Describing the second tab closes the FIRST one — an earlier entry, which
+    // is what shifts the array under the iterator. A page closing while its
+    // title is being read is ordinary: the sweep runs on tabs a step just
+    // opened, and a popup that closes itself is a normal page.
+    second.title.mockImplementation(async () => {
+      await first.close();
+      return 'B';
+    });
+
+    let step = 0;
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      if (step++ === 0) {
+        for (const page of [first, second, third]) {
+          cdpBrowser.pages.push(page);
+          opts.pageTracker!.addPage(page as any);
+          opts.pageTracker!.markExpected(page as any);
+        }
+      } else {
+        await third.close();
+      }
+      return {
+        index: idx as number,
+        instruction: 'ran',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api(
+      'POST',
+      '/errands',
+      errandBody({ steps: ['open three tabs', 'close the third'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    // All three, in the order they were opened — the third is the one a live
+    // array loses.
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'tab-first', url: 'https://openrouter.ai/a', title: 'A' },
+      { targetId: 'tab-second', url: 'https://openrouter.ai/b', title: 'B' },
+      { targetId: 'tab-third', url: 'https://openrouter.ai/c', title: 'C' },
+    ]);
+  });
+
+  it('claims and closes a tab that appears AFTER the last step', async () => {
+    // The per-step sweep runs in the step's own `finally`, and everything
+    // between it and the detach is microtasks — so a tab that arrives a
+    // macrotask later (a `window.open` the page fires once the last step's
+    // script settles) misses that sweep entirely. The detach's own sweep is the
+    // only thing that can still claim it, and an UNCLAIMED tab is one the
+    // detach deliberately leaves behind and never names.
+    const late = makePage('tab-late', 'https://openrouter.ai/late', 'Late');
+    // One macrotask, in the one place the runner reads the borrowed page
+    // between the per-step sweep and the detach: the tab spread on the step's
+    // terminal event. Without it the whole run finishes on microtasks, the
+    // timer below fires after the receipt is built, and the test would prove
+    // nothing about the detach sweep.
+    borrowedPage.title.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return 'Activity | OpenRouter';
+    });
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, _i, opts) => {
+      setTimeout(() => {
+        cdpBrowser.pages.push(late);
+        opts.pageTracker!.addPage(late as any);
+        opts.pageTracker!.markExpected(late as any);
+      }, 0);
+      return {
+        index: idx as number,
+        instruction: 'opened one on the way out',
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api('POST', '/errands', errandBody());
+
+    expect(body.status).toBe('passed');
+    // Claimed late, and therefore closable — an errand takes its coat.
+    expect(late.close).toHaveBeenCalled();
+    expect(body.errand.openedTabs).toEqual([
+      { targetId: 'tab-late', url: 'https://openrouter.ai/late', title: 'Late' },
+    ]);
+    expect(borrowedPage.close).not.toHaveBeenCalled();
   });
 
   it('hands the tab back even when a tab it opened refuses to close', async () => {

@@ -3,7 +3,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
 import { resetRegistry } from '../src/mcp/registry.js';
-import { errandTabHeldByErrand, errandTabHeldBySession } from '../src/mcp/errors.js';
+import {
+  errandDidNotAttach,
+  errandTabHeldByErrand,
+  errandTabHeldBySession,
+} from '../src/mcp/errors.js';
 import { ApiHttpError } from '../src/mcp/types.js';
 import type {
   ApiClient,
@@ -570,8 +574,8 @@ describe('an errand that never got the tab', () => {
 
   it('maps a done frame with no errand block the same way', async () => {
     // The errand's accounting is built in a `finally`, so an errand that ran at
-    // all has one. Its absence means nothing ran — which is the one case
-    // `isError` is reserved for.
+    // all has one. Its absence with NO step event means nothing ran — which is
+    // the one case `isError` is reserved for.
     const h = await connect({
       events: () => [
         { type: 'output', msg: 'Server error: connect ECONNREFUSED', kind: 'error' },
@@ -585,6 +589,54 @@ describe('an errand that never got the tab', () => {
     expect(text(result)).toContain('targetId:T-CART');
     expect(text(result)).toContain('ECONNREFUSED');
     expect(text(result)).toContain('list_cdp_browsers');
+  });
+
+  it('keeps the steps and captures when the stream dies MID-errand', async () => {
+    // The other half of "no errand block", and the opposite story: a force
+    // shutdown, a crashed server or a proxy timeout ends the stream after steps
+    // have already driven the user's tab. Answering that with the attach
+    // refusal reports "nothing ran" about a page that was clicked, and throws
+    // away the only surviving record of what was done to it.
+    const h = await connect({
+      events: () => [
+        { type: 'step:start', line: 1 },
+        { type: 'capture', line: 1, name: 'orderId', value: 'A-4417', source: 'capture' },
+        { type: 'step:pass', line: 1, output: 'clicked checkout' },
+        // …and then nothing. No `done`, no errand block.
+      ],
+    });
+
+    const result = await errand(h, {
+      tab: 'targetId:T-CART',
+      steps: ['click checkout', 'read the order id'],
+    });
+
+    // A receipt, not an `isError` — the payload is the point.
+    expect(result.isError).toBeFalsy();
+    const receipt = structured(result);
+    expect(receipt.status).toBe('error');
+    expect(receipt.captures).toEqual({ orderId: 'A-4417' });
+    const steps = receipt.steps as { text: string; status: string }[];
+    expect(steps.map((s) => s.text)).toEqual(['click checkout', 'read the order id']);
+    expect(steps[0]!.status).toBe('passed');
+
+    // What it says about the tab: driven, and its end state unknown.
+    expect(String(receipt.error)).toMatch(/DROVE tab "targetId:T-CART"/);
+    expect(String(receipt.error)).toMatch(/final state is unknown/i);
+
+    // And what it does NOT say. Pinned against the builder rather than a phrase
+    // someone can reword: "the errand never got tab X, so nothing ran in it" is
+    // the refusal this path exists to stop being.
+    expect(text(result)).not.toContain(
+      errandDidNotAttach('targetId:T-CART', null).content[0]!.text,
+    );
+
+    // Nothing is guessed in the fields the `done` frame owns: they are reported
+    // missing, and the warning says missing ≠ empty.
+    expect(receipt.errandId).toBe('');
+    expect(receipt.finalUrl).toBe('');
+    expect(receipt.openedTabs).toEqual([]);
+    expect((receipt.warnings as string[]).join('\n')).toContain('openedTabs');
   });
 });
 

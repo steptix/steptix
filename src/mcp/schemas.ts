@@ -953,7 +953,9 @@ export const runErrandOutput = toolSchema({
     .string()
     .describe(
       'This errand, for the length of this request only. Nothing on the server ' +
-        'answers to it afterwards — there is no close_errand, and nothing to close.',
+        'answers to it afterwards — there is no close_errand, and nothing to close. ' +
+        'Empty in one case only: the stream ended before the errand reported one, ' +
+        'which status "error" and the error text describe.',
     ),
   root: z.string().describe('The root the errand resolved its project layer against.'),
   scope: rootScope.describe(
