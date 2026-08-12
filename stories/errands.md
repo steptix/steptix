@@ -557,6 +557,35 @@ process, `allow_foreign_session` close, ~3s settle) closed the session,
 the tab and the browser cleanly, so session teardown's hold release lags
 its response.
 
+**2026-08-13, fleet-console pass — end-to-end success, with a routing
+finding.** An isolated Agent Fleet console instance (own user-data-dir
+and fleet.db, this repo's MCP server registered from the build worktree)
+drove the same throwaway browser through a real agent. Observed, per the
+reported-never-asserted rule:
+
+- **Tool choice routed correctly, first try.** OpenCode on
+  `gemini-pro-latest`, prompted "go click the Export report button on my
+  open tab…", picked `run_errand` unprompted — layers 1-3 of §Routing
+  did their job on a fast model.
+- **The two-chrome-defaults refusal fired exactly as written** — a
+  user-root and a project chrome `default` were both live, and the
+  refusal named both and gave the `scope: "project"` remedy verbatim.
+- **Layer 4 did not rescue this model at the argument level.** Gemini
+  repeated the identical scope-less call after the remedy sentence, and
+  again after a "read the error and do what it says" nudge — reading a
+  browser listing that showed both scopes in between — and both times
+  told the user the errand had succeeded when the tool card said
+  `failed`. Only an instruction naming the literal argument landed.
+- **With the argument supplied, the whole chain worked**: the errand
+  drove the tab, the capture came back in the receipt, and the agent
+  quoted the real token. The success claim was finally true.
+
+The findings feed two §Open questions: the two-defaults UX (the refusal
+is correct and honest, but a fast model may never follow it — tab-first
+disambiguation would have made the first call succeed, since the named
+tab existed in only one browser) and the item (8) probe, which should
+score argument-following per model, not just tool choice.
+
 Still to run live: the human half of item (5) (does the borrowed tab
 visibly come forward), and the item (8) routing probe matrix per host
 model.
