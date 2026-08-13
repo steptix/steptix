@@ -71,8 +71,11 @@
 > two is refused naming both candidates; and the candidate set is only
 > ever the filtered listing — an `iframe`, `browser_ui` or `*-dialog`
 > target is never a candidate, however well it matches; (8) a live routing
-> probe (both tools offered to a real model, a matrix of phrasings from
-> "run my login test" to "go export the report on my OpenRouter tab") is
+> probe (both run tools — widened by [tab-peek](tab-peek.md) to all
+> three tools, scoring read-vs-drive routing and argument-following
+> alongside tool choice — offered to a real model, a matrix of
+> phrasings from "run my login test" to "go export the report on my
+> OpenRouter tab") is
 > run per supported host model and its table recorded here, misses
 > reported as product findings, never asserted as test failures.
 >
@@ -193,7 +196,7 @@ An errand is: **attach → act → return → detach**, in one request.
   actually open. The winner's `targetId` is what the request carries to
   the server, and the existing attach path (`connectOverCDP` +
   `resolveCdpTab` with a `targetId:` spec,
-  [src/browser/manager.ts:1369](../src/browser/manager.ts:1369)) is
+  [src/browser/manager.ts:1403](../src/browser/manager.ts:1403)) is
   handed only that exact spec — the first-match-wins arm of
   `resolveCdpTab` is never asked to arbitrate. Nothing about a previous
   errand's resolution is remembered or reused.
@@ -343,8 +346,8 @@ page state is explainable rather than mysterious.
    attach itself opened.
 3. End by requesting activation of the borrowed tab — the same silent,
    non-fatal `bringToFront` courtesy the attach path already extends at
-   [src/browser/manager.ts:1415](../src/browser/manager.ts:1415).
-4. The pre-existing-pages guard ([src/browser/manager.ts:1388](../src/browser/manager.ts:1388),
+   [src/browser/manager.ts:1469](../src/browser/manager.ts:1469).
+4. The pre-existing-pages guard ([src/browser/manager.ts:1437](../src/browser/manager.ts:1437),
    enforced through `PageTracker`) is the errand's whole personality:
    everything it protects for CDP sessions, an errand applies to every page
    but its own.
@@ -453,8 +456,9 @@ increasing order of trustworthiness:
    open tab" is an errand.
 2. **The name.** `run_errand` (or `drive_tab`) echoes the user's own words
    at the moment of choice. Necessary, measured insufficient on its own.
-3. **Parameter funnel.** The errand has the only first-class tab-name
-   slot. The session door's `config.cdp.tab` does still accept
+3. **Parameter funnel.** The errand and the peek
+   ([tab-peek](tab-peek.md)) are the only first-class tab-name slots.
+   The session door's `config.cdp.tab` does still accept
    `title~`/`url~` — but buried inside a config object, resolved
    first-match-wins, and documented (`CDP_NOTE`'s "Tab:" paragraph) for
    target ids only — so the funnel narrows rather than forces, and
@@ -478,12 +482,12 @@ ambiguity refusals ([src/browser/cdp-registry.ts](../src/browser/cdp-registry.ts
 [src/mcp/cdp.ts](../src/mcp/cdp.ts)); the filtered tab lists over the
 DevTools HTTP surface ([src/browser/cdp-discovery.ts](../src/browser/cdp-discovery.ts));
 the attach path (`connectOverCDP` at
-[src/browser/manager.ts:1369](../src/browser/manager.ts:1369), then
-`resolveCdpTab` — [src/browser/manager.ts:1010](../src/browser/manager.ts:1010) —
+[src/browser/manager.ts:1403](../src/browser/manager.ts:1403), then
+`resolveCdpTab` — [src/browser/manager.ts:1032](../src/browser/manager.ts:1032) —
 handed only an exact `targetId:` spec); the pre-existing-pages guard
-([src/browser/manager.ts:1388](../src/browser/manager.ts:1388)) and
+([src/browser/manager.ts:1437](../src/browser/manager.ts:1437)) and
 disconnect-not-kill semantics (`closeBrowser`,
-[src/browser/manager.ts:1482](../src/browser/manager.ts:1482)); the step
+[src/browser/manager.ts:1541](../src/browser/manager.ts:1541)); the step
 executor and AI resolution
 ([src/runner/step-executor.ts:266](../src/runner/step-executor.ts:266) —
 it takes a page plus a context bag, not a session); and the run fold that
@@ -619,8 +623,10 @@ model.
   want it.
 - **Naming.** `run_errand` vs `drive_tab` — plus a `cdp`-carrying
   spelling (`drive_cdp_tab`), per the prefix-rule amendment in §Tool
-  surface. The probe (verification item 8) should test all three before
-  the name freezes.
+  surface. The probe (verification item 8, widened by
+  [tab-peek](tab-peek.md) to offer all three tools, score
+  read-vs-drive routing and argument-following, and test the peek
+  spellings alongside) should run before any name freezes.
 - **Scope search on a miss.** Ambiguity is settled — a profile name live
   under both roots refuses naming both (§Attach). Still open: when the
   named profile simply isn't running in the requested scope but is in the

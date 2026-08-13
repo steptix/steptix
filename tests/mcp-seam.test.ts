@@ -257,6 +257,7 @@ describe('tool registration', () => {
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
+      'peek_tab',
       'run_errand',
       'run_steps',
       'run_test_file',
@@ -549,11 +550,17 @@ describe('get_page_content', () => {
     expect(pageContentCalls).toHaveLength(1);
   });
 
-  it('answers a session-not-found 404 with the errand redirect, not a mystery', async () => {
+  it('answers a session-not-found 404 with the read-a-tab redirect, not a mystery', async () => {
     // Measured live (2026-08-13): a model runs run_errand, then reaches for
     // get_page_content — but an errand leaves no session, and the server's
-    // honest "Session not found" teaches the model nothing. The refusal now
-    // names the two working doors.
+    // honest "Session not found" teaches the model nothing. The refusal names
+    // the working doors.
+    //
+    // Since stories/tab-peek.md the first of those is peek_tab, the direct
+    // answer to the question that got the model here; the errand-capture
+    // sentence is DEMOTED to the drive-then-read case rather than deleted,
+    // because that case really is one errand instead of two calls. This pin
+    // moved with the text — every earlier assertion still stands.
     const { ApiHttpError } = await import('../src/mcp/types.js');
     const { client } = await connect({
       pageContentError: new ApiHttpError(404, 'Session not found'),
@@ -567,9 +574,24 @@ describe('get_page_content', () => {
     expect(res.isError).toBe(true);
     const body = JSON.stringify(res.content);
     expect(body).toContain('mcp:gone');
+    expect(body).toContain('peek_tab');
     expect(body).toContain('run_errand');
     expect(body).toContain('store as');
     expect(body).toContain('list_sessions');
+  });
+
+  it('names peek_tab in its own description for the read-a-tab case', async () => {
+    // The other half of the same amendment, and the half a model reads BEFORE
+    // it makes the wrong call rather than after.
+    const { client } = await connect({});
+    const { tools } = await client.listTools();
+    const description = tools.find((t) => t.name === 'get_page_content')!.description!;
+
+    expect(description).toContain('peek_tab');
+    expect(description).toContain('run_steps SESSION');
+    // Demoted, not deleted: the drive-then-read case is still one errand.
+    expect(description).toContain('run_errand');
+    expect(description).toContain('store as balance');
   });
 
   it('leaves a route-missing 404 alone — "rebuild the server" is the opposite remedy', async () => {
@@ -585,6 +607,7 @@ describe('get_page_content', () => {
 
     expect(res.isError).toBe(true);
     expect(JSON.stringify(res.content)).not.toContain('run_errand');
+    expect(JSON.stringify(res.content)).not.toContain('peek_tab');
   });
 
   it('warns that the page may be moving during a run', async () => {

@@ -169,7 +169,7 @@ async function connect(
         events,
         receivedAt: events.map((_e, i) => i),
         // Derived, exactly as the real client derives it — `!sawDone`
-        // (src/mcp/api-client.ts:235). Hard-coded `false` here meant a script
+        // (src/mcp/api-client.ts:236). Hard-coded `false` here meant a script
         // that ended mid-stream reached the tool claiming the stream was
         // intact, so every warning the truncated path adds went untested.
         // `dropAfterDone` is the client's OTHER source of the same flag (its
@@ -301,10 +301,16 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
     expect(h.errands).toEqual([]);
   });
 
-  it('carries the whose-browser decision rule in its description', async () => {
+  it('carries the whose-browser decision rule, now split by read-vs-act, in its description', async () => {
     // §Routing 1. A tool description is the only text guaranteed to be in front
     // of the model at the moment of the call, and the counter-example is the
     // one a model gets wrong by keying on the word "test".
+    //
+    // The rule gained a clause when the third door shipped
+    // (stories/tab-peek.md §Routing 3, a named amendment to errands §Routing
+    // 1): the ownership answer splits — theirs to borrow, READING is peek_tab
+    // and ACTING is this one. This pin MOVED with the text rather than being
+    // weakened around it, so the original four assertions still stand.
     const { client } = await connect();
     const { tools } = await client.listTools();
     const description = tools.find((t) => t.name === 'run_errand')!.description!;
@@ -313,6 +319,28 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
     expect(description).toContain('run_steps');
     expect(description).toContain('my tab');
     expect(description).toContain('test the checkout on my open tab');
+
+    expect(description).toContain('peek_tab');
+    expect(description).toMatch(/READING/);
+    expect(description).toMatch(/ACTING/);
+  });
+
+  it('splits the same rule in the shared CDP_NOTE, true of both tools that ship it', async () => {
+    // `CDP_NOTE` rides on `run_steps` AND `run_test_file`, so the added clause
+    // has to read correctly from either — neither of them can peek, and
+    // neither of them is the errand. Behaviour unchanged; text changed.
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+
+    for (const name of ['run_steps', 'run_test_file']) {
+      const description = tools.find((t) => t.name === name)!.description!;
+      expect(description, name).toMatch(/whose browser/i);
+      expect(description, name).toContain('peek_tab');
+      expect(description, name).toContain('run_errand');
+      // Said of the tool being described, not of the reader: "is not this
+      // tool" has to be true whichever of the two is doing the describing.
+      expect(description, name).toContain('is not this tool');
+    }
   });
 });
 

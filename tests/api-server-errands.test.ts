@@ -238,7 +238,7 @@ vi.mock('../src/browser/manager.js', () => {
 
   // Faithful to the real one in the three ways the detach reads it: it severs
   // the connection, it closes a tab only when the ATTACH opened it, and it
-  // NEVER REJECTS — manager.ts:1482 wraps its whole body in a try/catch and
+  // NEVER REJECTS — manager.ts:1541 wraps its whole body in a try/catch and
   // logs. So a browser whose `context.close()` refuses is reported to the
   // caller exactly like one that closed, and `isConnected()` is the only thing
   // that can tell those two apart: a close that worked leaves the browser
@@ -941,7 +941,7 @@ describe('POST /errands', () => {
    * with a page of its own, which is all `openBrowser` does.
    *
    * `closeFails` wedges it the way a real one wedges: `context.close()` rejects,
-   * the real `closeBrowser` swallows that and returns normally (manager.ts:1482),
+   * the real `closeBrowser` swallows that and returns normally (manager.ts:1541),
    * and the browser is left CONNECTED. That last part is the only observable
    * difference from a browser that closed, which is why the detach reads it.
    */
@@ -1006,7 +1006,7 @@ describe('POST /errands', () => {
 
   it('reports a launched browser tab still open when that browser refused to close', async () => {
     // The one way a launched browser's tab survives the hand-back, and it is
-    // SILENT: `closeBrowser` wraps its whole body and logs (manager.ts:1482), so
+    // SILENT: `closeBrowser` wraps its whole body and logs (manager.ts:1541), so
     // a `context.close()` that rejects comes back to the detach as a resolved
     // promise, indistinguishable from a browser that went. Keying the retention
     // on a throw meant this arm could never run in production — the receipt said
@@ -1203,7 +1203,7 @@ describe('POST /errands', () => {
   it('reports the tabs of a browser a STEP closed when that close did not take', async () => {
     // The wedged-browser rule at the one moment the detach cannot enforce it.
     // `closeBrowser` swallows a rejecting `context.close()` and returns normally
-    // (manager.ts:1482), and `BrowserTracker.close` splices the session out of
+    // (manager.ts:1541), and `BrowserTracker.close` splices the session out of
     // `all()` regardless (manager.ts:892) — so a browser a STEP closed and
     // wedged is off the list while its window is still on the user's screen,
     // and the detach's own `isConnected()` check never gets to ask about it.

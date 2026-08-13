@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  CdpTabNotFoundError,
   parseCdpTabSpec,
   resolveCdpTab,
   preflightCdpPort,
@@ -238,6 +239,41 @@ describe('resolveCdpTab', () => {
     await expect(
       resolveCdpTab([page] as any, { kind: 'targetId', value: 'any' }),
     ).rejects.toThrow(/requires.+newCDPSession/i);
+  });
+
+  it('raises CdpTabNotFoundError for a spec that matched nothing, and a plain Error otherwise', async () => {
+    // The type is what the peek route reads to answer a tab that closed
+    // between its pre-check and its attach with the gone-tab 404 instead of a
+    // 500 full of internal prose (stories/tab-peek.md). Every miss carries it,
+    // so a caller that catches it cannot be surprised by which spelling of
+    // `tab` the caller upstream used.
+    const pages = [fakePageWithTargetId('https://a.test', 'AAA')];
+    await expect(
+      resolveCdpTab(pages as any, { kind: 'targetId', value: 'ZZZ' }),
+    ).rejects.toBeInstanceOf(CdpTabNotFoundError);
+    await expect(
+      resolveCdpTab(pages as any, { kind: 'urlSubstring', value: 'nope' }),
+    ).rejects.toBeInstanceOf(CdpTabNotFoundError);
+    await expect(
+      resolveCdpTab(pages as any, { kind: 'titleSubstring', value: 'nope' }),
+    ).rejects.toBeInstanceOf(CdpTabNotFoundError);
+    await expect(
+      resolveCdpTab(pages as any, { kind: 'index', index: 9 }),
+    ).rejects.toBeInstanceOf(CdpTabNotFoundError);
+
+    // And the boundary, which is the half that keeps the route's 404 narrow: a
+    // malformed spec, or a context that cannot answer a `targetId:` query, is
+    // NOT a missing tab — answering either with "your tab is gone" would send
+    // a caller looking for a window that is still open.
+    await expect(
+      resolveCdpTab([] as any, { kind: 'invalid', reason: 'bad' }),
+    ).rejects.not.toBeInstanceOf(CdpTabNotFoundError);
+    await expect(
+      resolveCdpTab(
+        [{ url: () => 'https://a.test', title: async () => '', context: () => ({}) }] as any,
+        { kind: 'targetId', value: 'any' },
+      ),
+    ).rejects.not.toBeInstanceOf(CdpTabNotFoundError);
   });
 });
 

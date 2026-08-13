@@ -176,6 +176,101 @@ describe('CDP attach (stories/cdp-tab-focus.md §3)', () => {
     expect(cart.bringToFront).toHaveBeenCalled();
   });
 
+  it('leaves the tab where it is under activate: false (stories/tab-peek.md item 5)', async () => {
+    // The peek's whole promise, and this is the ONLY suite that can fail on
+    // it: every other harness stubs `launchBrowser` wholesale, so a
+    // mocked-manager test asserting "no raise" would be asserting its own
+    // fake. §3's courtesy exists because a run is about to DRIVE behind the
+    // tab you are looking at; a read drives nothing and shows nothing, so
+    // raising would only interrupt whatever the user was actually doing.
+    const cart = fakePage('https://shop.example/cart');
+    const other = fakePage('https://shop.example/');
+    const { browser } = fakeBrowser([other, cart]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const session = await launchBrowser(baseConfig(), {
+      port: CDP_PORT,
+      tab: 'url~/cart',
+      activate: false,
+    });
+
+    // It still attached to the right tab — the flag turns off the raise, not
+    // the resolution.
+    expect(session.page).toBe(cart);
+    expect(cart.bringToFront).not.toHaveBeenCalled();
+    expect(other.bringToFront).not.toHaveBeenCalled();
+    // And nothing was opened or closed on the way: a peek's detach severs the
+    // socket and no more.
+    expect(session.cdpTabOpenedByUs).toBeFalsy();
+  });
+
+  it('raises on an explicit activate: true, so the default is a value and not an absence', async () => {
+    // The control for the test above. Without it, a gate written the wrong way
+    // round (`if (cdp.activate === false)` inverted, or the raise deleted
+    // outright) still passes the no-raise assertion.
+    const cart = fakePage('https://shop.example/cart');
+    const { browser } = fakeBrowser([cart]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    await launchBrowser(baseConfig(), { port: CDP_PORT, tab: 'url~/cart', activate: true });
+
+    expect(cart.bringToFront).toHaveBeenCalledTimes(1);
+  });
+
+  it('still raises the tab it opens itself, whatever activate says', async () => {
+    // The `new`-tab arm is deliberately NOT gated: it opens a window that has
+    // to appear somewhere, and no caller has asked not to see one. A peek
+    // never takes this arm — it always sends an exact `targetId:` — so
+    // widening the gate here would be a change nothing asked for.
+    const existing = fakePage('https://shop.example/');
+    const { browser, opened } = fakeBrowser([existing]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const session = await launchBrowser(baseConfig(), { port: CDP_PORT, activate: false });
+
+    expect(session.cdpTabOpenedByUs).toBe(true);
+    expect(opened[0]!.bringToFront).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the connection when the attach fails, instead of leaking it for the life of the process', async () => {
+    // Nobody is left holding a session that never returned, so nobody ever
+    // calls `closeBrowser` on it — and the connection does not sit there
+    // harmlessly: it holds the context-wide dialog guard, which answers
+    // `alert`/`confirm`/`prompt`/`beforeunload` on EVERY tab of the user's
+    // browser, plus a `page` listener, until the server process exits.
+    //
+    // Deterministic rather than a race: a tab living in a second
+    // BrowserContext (an incognito window) is one `list_cdp_browsers` really
+    // does show and `contexts[0]` genuinely lacks — the same failure the
+    // close race produces, without the timing.
+    const shop = fakePage('https://shop.example/');
+    const { browser } = fakeBrowser([shop]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    await expect(
+      launchBrowser(baseConfig(), { port: CDP_PORT, tab: 'url~/cart' }),
+    ).rejects.toThrow(/no tab matches/);
+
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the attach failure through unchanged — the teardown must not become the diagnosis', async () => {
+    // The control for the test above, and not a hypothetical: severing a
+    // connection whose far end has already gone is exactly the case that
+    // throws. A teardown error that replaced the original would leave the
+    // caller holding "websocket already gone" and no idea which tab could not
+    // be found.
+    const shop = fakePage('https://shop.example/');
+    const { browser } = fakeBrowser([shop]);
+    browser.close.mockRejectedValue(new Error('websocket already gone'));
+    connectOverCDP.mockResolvedValue(browser);
+
+    await expect(
+      launchBrowser(baseConfig(), { port: CDP_PORT, tab: 'url~/cart' }),
+    ).rejects.toThrow(/no tab matches url substring "\/cart"/);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
   it('records the session as headed — a CDP browser is one a human is looking at', async () => {
     // Read by the §4 gate. `headed: false` is one of the settings
     // `incompatibleCdpConfig` already reports as ignored in this mode, so the

@@ -146,6 +146,7 @@ and one cache. If no server is running it starts one for you.
 | `close_session` | Close a session and its browser |
 | `get_last_run` | Report path and token totals for a finished run |
 | `get_page_content` | Read a session's current page — visible text, or the cleaned DOM |
+| `peek_tab` | Read a tab you already have open — visible text, or the cleaned DOM — changing nothing |
 | `server_status` | Health of the Sessions API server |
 | `start_cdp_browser` | Launch (or return) a persistent browser you can sign into — see below |
 | `list_cdp_browsers` | Which CDP browsers and profiles this project has, and their open tabs |

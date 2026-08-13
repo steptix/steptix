@@ -473,4 +473,107 @@ describe('createApiClient other routes', () => {
       await new Promise<void>((r) => server!.close(() => r()));
     }
   });
+
+  // -------------------------------------------------------------------------
+  // peekCdpTab (stories/tab-peek.md)
+  // -------------------------------------------------------------------------
+
+  it('GETs a tab read, encoding the target id and sending only the params it was given', async () => {
+    let seen = '';
+    let method = '';
+    const baseUrl = await startServer((url, res) => {
+      seen = url;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ targetId: 'A/B', root: null, content: 'hello' }));
+    });
+    server!.on('request', (req) => {
+      method = req.method ?? '';
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    await client.peekCdpTab({
+      port: 51000,
+      targetId: 'A/B',
+      testFilePath: 'C:\\proj\\.aiui-peek.md',
+    });
+
+    // A read: GET, no body (page-content.md §Locked's reasoning, verbatim).
+    expect(method).toBe('GET');
+    // Encoded, so an id carrying `/`, `?` or `#` addresses the tab it names
+    // rather than a different route.
+    expect(seen).toContain('/cdp/browsers/51000/tabs/A%2FB/content?');
+    expect(seen).toContain('testFilePath=');
+    // Omitted rather than defaulted client-side: the server owns the defaults,
+    // and sending our own would let the two drift.
+    expect(seen).not.toContain('format=');
+    expect(seen).not.toContain('selector=');
+    expect(seen).not.toContain('max_chars=');
+
+    await client.peekCdpTab({
+      port: 51000,
+      targetId: 'A/B',
+      testFilePath: 'C:\\proj\\.aiui-peek.md',
+      format: 'dom',
+      selector: '#total',
+      maxChars: 500,
+    });
+    expect(seen).toContain('format=dom');
+    expect(seen).toContain('selector=%23total');
+    // The sibling content route's spelling, not a camelCase invention.
+    expect(seen).toContain('max_chars=500');
+  });
+
+  it('distinguishes "no such tab" from "no such route" on a peek 404 too', async () => {
+    // The same split, and it has to be the same CODE: "the tab is gone" and
+    // "your dist/ predates this tool" are opposite remedies, and a peek that
+    // reported the first about the second would send a user hunting for a
+    // window still sitting on their screen.
+    const ours = await startServer((_url, res) => {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No tab with target id GONE is open' }));
+    });
+    const tabGone = await createApiClient({ baseUrl: ours, apiKey: 'k' })
+      .peekCdpTab({ port: 51000, targetId: 'GONE', testFilePath: 'C:\\proj\\.aiui-peek.md' })
+      .catch((e: unknown) => e);
+    expect(tabGone).toBeInstanceOf(ApiHttpError);
+    expect(tabGone).not.toBeInstanceOf(ApiRouteNotFoundError);
+    expect(tabGone).toMatchObject({
+      status: 404,
+      serverMessage: 'No tab with target id GONE is open',
+    });
+
+    await new Promise<void>((r) => server!.close(() => r()));
+
+    const older = await startServer((_url, res) => {
+      res.writeHead(404, { 'Content-Type': 'text/html' });
+      res.end(
+        '<!DOCTYPE html><html><body>Cannot GET /cdp/browsers/51000/tabs/T1/content</body></html>',
+      );
+    });
+    const routeGone = await createApiClient({ baseUrl: older, apiKey: 'k' })
+      .peekCdpTab({ port: 51000, targetId: 'T1', testFilePath: 'C:\\proj\\.aiui-peek.md' })
+      .catch((e: unknown) => e);
+    expect(routeGone).toBeInstanceOf(ApiRouteNotFoundError);
+  });
+
+  it('leaves a peek 409 and 400 as ordinary HTTP errors', async () => {
+    // The `PageCaptureError` mapping is the route's; the client must not
+    // reinterpret either status, or a navigated read would reach the tool
+    // wearing the gone-tab or the stale-build story.
+    for (const status of [409, 400]) {
+      const srv = await startServer((_url, res) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'the page navigated during the read' }));
+      });
+      const err = await createApiClient({ baseUrl: srv, apiKey: 'k' })
+        .peekCdpTab({ port: 51000, targetId: 'T1', testFilePath: 'C:\\proj\\.aiui-peek.md' })
+        .catch((e: unknown) => e);
+
+      expect(err, String(status)).toBeInstanceOf(ApiHttpError);
+      expect(err, String(status)).not.toBeInstanceOf(ApiRouteNotFoundError);
+      expect((err as ApiHttpError).status, String(status)).toBe(status);
+
+      await new Promise<void>((r) => server!.close(() => r()));
+    }
+  });
 });

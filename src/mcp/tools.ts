@@ -36,6 +36,11 @@ import {
   errandsHaveNoSessions,
   listSessionsTimedOut,
   pageContentSessionGone,
+  peekRouteMissing,
+  peekSessionsAreForGetPageContent,
+  peekTabAmbiguous,
+  peekTabGoneNow,
+  peekTabNotFound,
   preflightError,
   unauthorized,
   type McpToolError,
@@ -1030,6 +1035,174 @@ async function runErrand(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Tab peek (stories/tab-peek.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * `run_errand` has `.aiui-errand.md`; a peek has this.
+ *
+ * Load-bearing rather than cosmetic, and for a peek it is the whole of
+ * verification item (2): the server resolves the project root — and with it
+ * `domSnapshotCharLimit`, `maxIframeDepth` and the noise-reduction settings —
+ * entirely from `testFilePath`. Without one the capture silently runs under
+ * library defaults that DIFFER from the project's, so a peek and
+ * `get_page_content` would disagree about the same page with nothing saying
+ * why. It is never read from disk and never exists.
+ */
+const SYNTHETIC_PEEK_BASENAME = '.aiui-peek.md';
+
+/** What `peek_tab` reads off its own call. */
+interface PeekArgs {
+  tab: string;
+  format?: 'text' | 'dom' | undefined;
+  selector?: string | undefined;
+  max_chars?: number | undefined;
+  profile?: string | undefined;
+  engine?: 'chrome' | 'edge' | undefined;
+  scope?: 'project' | 'user' | undefined;
+}
+
+/**
+ * Attach → extract → detach, from the MCP side.
+ *
+ * The attach's two stages happen here, exactly as `run_errand`'s do and
+ * through the SAME two functions: the browser by profile + engine + scope
+ * (`resolveCdpTarget`, its ambiguity refusals reused as-is), then the tab by
+ * name against THAT browser's page-type-filtered listing (`matchTabsByName`,
+ * shared rather than copied). Only the winner's target id goes on the wire.
+ *
+ * There is no `port` argument, which settles the ownership question by
+ * construction: a profile-resolved port came out of this call's own `running`
+ * list, so the browser is registry-owned and mcp-cdp-browser §6's foreign-port
+ * gate is unreachable from here.
+ */
+async function peekTab(
+  client: ApiClient,
+  project: ProjectContext,
+  args: PeekArgs,
+  signal: AbortSignal | undefined,
+): Promise<ToolResult> {
+  const { port } = await resolveCdpTarget(
+    client,
+    project.projectRoot,
+    {
+      // Always a profile, never a port — same reasoning as `run_errand`'s.
+      profile: args.profile?.trim() || DEFAULT_CDP_PROFILE,
+      ...(args.engine !== undefined ? { engine: args.engine } : {}),
+      ...(args.scope !== undefined ? { scope: args.scope } : {}),
+    },
+    signal,
+  );
+
+  // Re-read rather than reuse the resolution's listing: a peek resolves the tab
+  // fresh every time, and the tab list is the half that moves. Foreign browsers
+  // are not asked for — a peek cannot reach one.
+  const browsers = await client.getCdpBrowsers(
+    { projectRoot: project.projectRoot, includeForeign: false },
+    signal,
+  );
+  const browser = browsers.running.find((b) => b.port === port);
+  const where =
+    browser === undefined
+      ? `the browser on port ${port}`
+      : describeBrowser({ engine: browser.engine, profile: browser.profile, scope: browser.scope });
+
+  // Already page-type-filtered by the server, which is what stops an iframe,
+  // a `browser_ui` target or a dialog ever being a candidate.
+  const tabs = browser?.tabs ?? [];
+  const matches = matchTabsByName(args.tab, tabs);
+  if (matches.length === 0) throw new PreflightFailure(peekTabNotFound(args.tab, where, tabs));
+  if (matches.length > 1) throw new PreflightFailure(peekTabAmbiguous(args.tab, matches));
+  const target = matches[0]!;
+
+  let peeked;
+  try {
+    peeked = await client.peekCdpTab(
+      {
+        port,
+        targetId: target.targetId,
+        testFilePath: path.join(project.projectRoot, SYNTHETIC_PEEK_BASENAME),
+        ...(args.format !== undefined ? { format: args.format } : {}),
+        ...(args.selector !== undefined ? { selector: args.selector } : {}),
+        ...(args.max_chars !== undefined ? { maxChars: args.max_chars } : {}),
+      },
+      signal,
+    );
+  } catch (err) {
+    // The 404 split cdp-tab-focus §6 locked. Route-missing is checked FIRST
+    // because it is the narrower type: "rebuild dist/" and "your tab is gone"
+    // are opposite remedies, and getting it backwards sends a user hunting for
+    // a window that is still sitting on their screen.
+    if (err instanceof ApiRouteNotFoundError) {
+      return errorResult(peekRouteMissing(normalizeBaseUrl(project.serverUrl)));
+    }
+    if (err instanceof ApiHttpError && err.status === 404) {
+      // The tab closed between our listing and the server's. Its row is dropped
+      // from the candidate list the refusal offers, because the server has just
+      // proved that entry stale — re-offering it would invite the same failed
+      // call again.
+      //
+      // A DIFFERENT refusal from the pre-flight miss, not the same one over a
+      // shorter list: the caller named a tab that was there, and the list they
+      // are handed back is one this arm emptied itself — which in a one-tab
+      // browser turns "no tab matches" into "that browser reports no tabs at
+      // all", both halves false (see `peekTabGoneNow`).
+      return errorResult(
+        peekTabGoneNow(
+          args.tab,
+          where,
+          tabs.filter((tab) => tab.targetId !== target.targetId),
+        ),
+      );
+    }
+    throw err;
+  }
+
+  // Not defaulted the way `list_cdp_browsers` defaults its optionals: a page
+  // read that arrived without content has nothing usable to degrade to, and
+  // substituting '' would tell the agent the page is empty when what actually
+  // happened is that we never received it — the one confusion this whole
+  // feature exists to prevent.
+  if (typeof peeked.content !== 'string') {
+    throw new Error(
+      'The Sessions API returned a tab-content response with no `content` field. ' +
+        'This is a bug in the server, not a page that is empty.',
+    );
+  }
+
+  const value = {
+    targetId: peeked.targetId ?? target.targetId,
+    url: peeked.url ?? '',
+    title: peeked.title ?? '',
+    format: peeked.format ?? 'text',
+    selector: peeked.selector ?? null,
+    content: peeked.content,
+    truncated: peeked.truncated ?? false,
+    returnedChars: peeked.returnedChars ?? 0,
+    availableChars: peeked.availableChars ?? 0,
+    // The server's own claim about which root its capture settings came from.
+    // Null means no `aiui.config.json` stood above the synthetic path and it
+    // used its defaults — the root this call addressed is then the honest
+    // thing to report, since that is the root the path was built from.
+    root: peeked.root ?? project.projectRoot,
+    scope: project.scope,
+  };
+
+  const narrowed = value.selector ? ` (${value.selector})` : '';
+  const size = value.truncated
+    ? `${value.returnedChars} of ${value.availableChars}+ chars — narrow with a selector to see the rest`
+    : `${value.returnedChars} chars`;
+  return validated(
+    schemas.peekTabOutput,
+    value,
+    // `where` carries the "(user root)" tag the way `close_cdp_tab`'s summary
+    // does: a project-scope call that read a machine-wide browser is the one
+    // thing a reader will not expect from the arguments they passed.
+    `Read "${value.title || value.url}"${narrowed} in ${where} — ${value.format}, ${size}`,
+  );
+}
+
 /**
  * Did anything actually reach the tab?
  *
@@ -1298,9 +1471,11 @@ const CDP_NOTE = `
 Whose browser? Ours to open — this tool opens one, or reuses one this
 framework already owns, and owns everything it touches until the session
 closes. Theirs to borrow — "my tab", "the one I have open", "my signed-in
-browser" — is run_errand, which drives an already-open tab for one request and
-hands it back. Ownership words decide it, not the word "test": "test the
-checkout on my open tab" is an errand.
+browser" — is not this tool, and splits by what you are doing to it: only
+READING it is peek_tab, which returns the page and changes nothing; ACTING in
+it — clicking, typing, navigating — is run_errand, which drives an
+already-open tab for one request and hands it back. Ownership words decide it,
+not the word "test": "test the checkout on my open tab" is an errand.
 
 Browser: steps run in a fresh, signed-out, disposable browser UNLESS you say
 otherwise. Persistent CDP browsers holding real logins may also be running —
@@ -1381,6 +1556,11 @@ one: "my tab", "the one I have open", "my signed-in browser", "that
 OpenRouter tab". Ownership words decide it, not the word "test":
 "test the checkout on my open tab" is an errand.
 
+Then one more question, because borrowing splits: are you only READING that
+tab? "What's on my OpenRouter tab?" is peek_tab, which returns the page and
+changes nothing. ACTING in it — clicking, typing, navigating — is this one.
+A drive-then-read is still ONE errand, because steps can capture.
+
 Name the tab and it is resolved fresh, right now, against the live tab list.
 Nothing matches, or several do, and the call is refused with the candidates
 named — so a rough name is safe to try, and no wrong tab is ever picked for
@@ -1404,6 +1584,52 @@ This drives a real, signed-in browser belonging to a human. Say what you did
 in it, not just that it worked.
 
 ${ERRAND_STEP_SYNTAX}`.trim();
+
+/**
+ * `peek_tab`'s description — the three-door rule, first.
+ *
+ * A tool description is read only after the model is already considering the
+ * tool, so what leads is the question that tells this door from its two
+ * neighbours (stories/tab-peek.md §Routing): what are you reading, and are you
+ * only reading it? The alternative was measured live — a model that wanted a
+ * tab's contents reached for `get_page_content`, got an honest 404 about a
+ * session it never created, and had no third door to fall back to.
+ */
+const PEEK_DESCRIPTION = `
+Read a tab the user ALREADY has open — its visible text, or its cleaned DOM —
+without changing anything on it.
+
+Three doors, one question each:
+  - Reading a tab you can name ("what's on my OpenRouter tab?") — this one.
+  - Driving a tab: clicking, typing, navigating — run_errand. Its steps can
+    also capture ("read the balance, store as balance"), so a drive-then-read
+    is ONE errand, not an errand and then a peek.
+  - Reading the page a run_steps SESSION is sitting on — get_page_content.
+
+Name the tab and it is resolved fresh, right now, against the live tab list.
+Nothing matches, or several do, and the call is refused with the candidates
+named — so a rough name is safe to try, and no wrong tab is ever read for you.
+There is no fallback browser: a peek reaches only the persistent CDP browsers
+list_cdp_browsers reports.
+
+It changes nothing at all. No click, no navigation, no tab opened or closed,
+no session created, nothing written — and it does NOT bring the tab forward,
+so the user keeps looking at whatever they were looking at. Use focus_cdp_tab
+if they should see it.
+
+It is safe to call on a tab something else is driving. A run in flight may
+move the page under you, so what comes back is what was there at the moment of
+the read: the content plus the url and title read alongside it.
+
+Returns the page as-is — nothing is summarised or interpreted for you, so
+budget for reading it yourself. format "text" (default) for what the page
+says; "dom" when you need element structure to pick a selector, and it is much
+larger. Narrow with selector rather than raising max_chars: a truncated result
+tells you it was truncated, and reading a bigger slice of the wrong part of
+the page costs context without answering anything.
+
+This reads a real, signed-in browser belonging to a human. Say what you read
+and where you read it.`.trim();
 
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // -- run_steps ------------------------------------------------------------
@@ -1895,11 +2121,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'This reads whatever is on screen right now. It does not wait for the ' +
         'page to settle, and if a run is in flight `status` comes back ' +
         '`executing` — the page may move under you.\n\n' +
-        'This reads a run_steps SESSION. An errand leaves no session behind, ' +
-        'so there is nothing here to read after run_errand — have the errand ' +
-        'capture what you need as a step ("read the balance, store as ' +
-        'balance"); its receipt returns the captures and the final url and ' +
-        'title.',
+        'This reads a run_steps SESSION. To read a tab the user has open — one ' +
+        'no session is sitting on — that is **peek_tab**, which takes the tab ' +
+        'by name and creates nothing.\n\n' +
+        'An errand leaves no session behind either, so there is nothing here ' +
+        'to read after run_errand: read the tab it drove with peek_tab. When ' +
+        'the drive and the read are one job, have the errand capture what you ' +
+        'need as a step instead ("read the balance, store as balance") — its ' +
+        'receipt returns the captures and the final url and title, in one call.',
       inputSchema: schemas.getPageContentInput,
       outputSchema: schemas.getPageContentOutput,
     },
@@ -2475,6 +2704,41 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         // than surfaced as a bare ECONNREFUSED.
         { signal: extra.signal },
       ),
+  );
+
+  // -- peek_tab -------------------------------------------------------------
+  server.registerTool(
+    'peek_tab',
+    {
+      title: 'Read a tab the user already has open',
+      description: PEEK_DESCRIPTION,
+      inputSchema: schemas.peekTabInput,
+      outputSchema: schemas.peekTabOutput,
+    },
+    async (args, extra) => {
+      // Here, before `withProject` — so before a server is started, a registry
+      // is read or a browser is touched. It needs no project to decide, and
+      // the story's "refused before any browser work" is a property of where
+      // this sits, not of what it says.
+      //
+      // The refusal fires only on a NON-EMPTY session_id. Some provider layers
+      // serialize every declared optional as "", so a model told to call again
+      // without it physically cannot — refusing "" strands it in a loop the
+      // redirect sentence cannot break (measured live, OpenCode +
+      // gpt-5.6-luna, 2026-08-13, on run_errand's identical argument).
+      if (args.session_id !== undefined && args.session_id.trim() !== '') {
+        return errorResult(peekSessionsAreForGetPageContent(args.session_id));
+      }
+
+      return withProject(
+        deps,
+        args.project_root,
+        async (client, project) => peekTab(client, project, args, extra.signal),
+        // Auto-start is the default; a peek against a stopped server brings it
+        // up rather than dying on a bare ECONNREFUSED.
+        { signal: extra.signal },
+      );
+    },
   );
 
   // -- server_status --------------------------------------------------------

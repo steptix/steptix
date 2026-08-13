@@ -18,6 +18,7 @@ import {
   type FocusedCdpTab,
   type LastRunInfo,
   type PageContent,
+  type PeekedTab,
   type RunEvent,
   type ServerConfigReport,
   type SessionStateSnapshot,
@@ -293,6 +294,62 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
     throw new ApiHttpError(res.status, message, holder);
   }
 
+  /**
+   * Throw the right error for a 404 on a tab route, or return and let the
+   * normal path continue.
+   *
+   * A 404 has two readings and only one of them is about the tab. Our routes
+   * answer with a JSON `error`; a Sessions API server from a build that
+   * predates the route has no such route at all, so Express answers its own
+   * 404 with an HTML body — which `assertOk` would flatten into the status
+   * text, telling the agent its tab is gone when the truth is that the server
+   * needs rebuilding.
+   *
+   * The distinction is carried by the error TYPE, not by an empty message: a
+   * body that parses as JSON but carries a non-string `error` is a response
+   * from something, and reporting it as a stale build would be a confident
+   * lie. Only a body we could not read as our own envelope means the route is
+   * not there.
+   *
+   * Shared by `focusCdpTab` and `peekCdpTab` rather than written twice — this
+   * is a rule about the SERVER's builds, and two copies is how one of them
+   * ends up telling a user their tab was closed after a rebuild they forgot.
+   */
+  async function splitTabOrRoute404(res: Response, path: string): Promise<void> {
+    if (res.status !== 404) return;
+    const raw = await res.text();
+    // **Whether it PARSED is a separate fact from what it parsed to**, and
+    // conflating the two reopens the hole this whole branch exists to close. A
+    // body of `null`, a bare JSON scalar, or an empty string all yield a
+    // falsy/non-object value while still being a deliberate answer from
+    // something — an empty-body 404 from a load balancer is the realistic case
+    // — and reporting those as a missing route is the same confident lie in a
+    // new costume.
+    let parsed = false;
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(raw);
+      parsed = true;
+    } catch {
+      // Not JSON at all — Express's own 404 page. THIS is a missing route.
+    }
+    if (!parsed) throw new ApiRouteNotFoundError(path);
+
+    const error =
+      envelope !== null && typeof envelope === 'object'
+        ? (envelope as { error?: unknown }).error
+        : undefined;
+    // Prefer the server's own prose, and fall back to the status rather than
+    // to silence — an empty message reads as "the route is missing", which
+    // this is not.
+    throw new ApiHttpError(
+      404,
+      typeof error === 'string' && error !== ''
+        ? error
+        : res.statusText || `HTTP ${res.status}`,
+    );
+  }
+
   /** The two streaming POSTs send the same headers and read the same stream;
    *  only the URL and the body differ. */
   async function postForStream(
@@ -462,54 +519,32 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
         ...(signal ? { signal } : {}),
       });
 
-      // A 404 has two readings here and only one of them is about the tab. Our
-      // route answers with a JSON `error`; a Sessions API server from a build
-      // that predates the route has no such route at all, so Express answers
-      // its own 404 with an HTML body — which `assertOk` would flatten into the
-      // status text, telling the agent its tab is gone when the truth is that
-      // the server needs rebuilding.
-      //
-      // The distinction is carried by the error TYPE, not by an empty message:
-      // a body that parses as JSON but carries a non-string `error` is a
-      // response from something, and reporting it as a stale build would be a
-      // confident lie. Only a body we could not read as our own envelope means
-      // the route is not there.
-      if (res.status === 404) {
-        const raw = await res.text();
-        // **Whether it PARSED is a separate fact from what it parsed to**, and
-        // conflating the two reopens the hole this whole branch exists to
-        // close. A body of `null`, a bare JSON scalar, or an empty string all
-        // yield a falsy/non-object value while still being a deliberate answer
-        // from something — an empty-body 404 from a load balancer is the
-        // realistic case — and reporting those as a missing route is the same
-        // confident lie in a new costume.
-        let parsed = false;
-        let envelope: unknown;
-        try {
-          envelope = JSON.parse(raw);
-          parsed = true;
-        } catch {
-          // Not JSON at all — Express's own 404 page. THIS is a missing route.
-        }
-        if (!parsed) throw new ApiRouteNotFoundError(path);
-
-        const error =
-          envelope !== null && typeof envelope === 'object'
-            ? (envelope as { error?: unknown }).error
-            : undefined;
-        // Prefer the server's own prose, and fall back to the status rather
-        // than to silence — an empty message reads as "the route is missing",
-        // which this is not.
-        throw new ApiHttpError(
-          404,
-          typeof error === 'string' && error !== ''
-            ? error
-            : res.statusText || `HTTP ${res.status}`,
-        );
-      }
-
+      await splitTabOrRoute404(res, path);
       await assertOk(res);
       return (await res.json()) as FocusedCdpTab;
+    },
+
+    async peekCdpTab(args, signal): Promise<PeekedTab> {
+      const params = new URLSearchParams({ testFilePath: args.testFilePath });
+      if (args.format !== undefined) params.set('format', args.format);
+      if (args.selector !== undefined) params.set('selector', args.selector);
+      if (args.maxChars !== undefined) params.set('max_chars', String(args.maxChars));
+      const path =
+        `/cdp/browsers/${args.port}/tabs/${encodeURIComponent(args.targetId)}/content` +
+        `?${params.toString()}`;
+      const res = await doFetch(`${base}${path}`, {
+        headers,
+        ...(signal ? { signal } : {}),
+      });
+
+      // The same split, for the same reason: "your tab is gone" and "rebuild
+      // the server" are opposite remedies, and only the body shape tells them
+      // apart.
+      await splitTabOrRoute404(res, path);
+      // Not defaulted the way `getCdpBrowsers` defaults its lists: a page read
+      // that came back without content has nothing usable to degrade to.
+      await assertOk(res);
+      return (await res.json()) as PeekedTab;
     },
 
     async startCdpBrowser(body, signal): Promise<StartedCdpBrowser> {
