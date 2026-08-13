@@ -2,42 +2,52 @@
 
 > **Verification rule for this story.** "Done" means: (1) `peek_tab` naming
 > a tab by title returns that tab's visible text with its `url`, `title`,
-> and the truncation facts — and `list_sessions` is identical before and
-> after, no run is ever in flight (a peek is a read, not a run), and
-> nothing of the peek survives on the server; (2) `format: "dom"` returns
-> the cleaned DOM, `selector` narrows either format to one element, and
-> `max_chars` clips with `truncated: true` — including the silent-clip
-> trap [page-content](page-content.md) §2 records: a page clipped by the
-> project's `domSnapshotCharLimit` before this layer sees it still reports
-> `truncated: true`; (3) a `tab` matching nothing refuses listing the
-> browser's open tabs, one matching two refuses naming both candidates,
-> and the candidate set is only ever the page-type-filtered listing — the
-> same matcher `run_errand` uses, and it is SHARED, not copied; (4) a peek
-> proceeds while an errand or a session batch is driving that same tab —
-> reads coexist with drivers (the two-client evidence
+> `targetId`, and the truncation facts — `list_sessions` is identical
+> before and after, the project's report directory gains no file, and the
+> peek adds nothing to `runsInFlight`: read from `/health` at the
+> api-server harness while the peek's extraction is held open, and equal
+> to the count taken immediately before (a peek is a read, not a run);
+> (2) `format: "dom"` returns the cleaned DOM under the PROJECT's
+> noise-reduction, iframe-depth and char-limit settings — not the library
+> defaults, which differ (100k vs 300k clip) — `selector` narrows either
+> format to one element, and `max_chars` clips with `truncated: true`,
+> including the silent-clip trap [page-content](page-content.md) §3
+> records: a page clipped by the project's `domSnapshotCharLimit` before
+> this layer sees it still reports `truncated: true`; (3) a `tab`
+> matching nothing refuses listing the browser's open tabs, one matching
+> two refuses naming both candidates, the candidate set is only ever the
+> page-type-filtered listing, and the matcher is the shared
+> `matchTabsByName` — pinned the way errands pins it: each tool's
+> refusals are asserted against its own exported builder, and the two
+> tools' builders are asserted to be fed the same candidate list; (4) a
+> peek proceeds while an errand or a session batch is driving that same
+> tab — reads coexist with drivers (the two-client evidence
 > [errands](errands.md) §The wheel measured on 2026-08-12) — and a peek
 > never takes, checks, or blocks the turn lock in either direction;
-> (5) a peek changes nothing it can avoid changing: no navigation, no
-> click, no tab opened or closed, no `bringToFront` (asserted at the
-> mocked Playwright seam — a read that raises a window is a read that
-> interrupts the user), pre-existing tabs untouched by the guard that
-> already protects them, and the detach severs the socket only; (6)
-> `peek_tab` passing a NON-EMPTY `session_id` is refused before any
-> browser work naming `get_page_content` as the door for sessions, and an
+> (5) a peek never raises the tab: the shared attach's raise is
+> parameterised off, asserted in `tests/browser-manager-focus.test.ts` —
+> the ONLY suite that mocks `playwright` itself and can see the
+> attach-path call; a mocked-manager harness cannot fail on this and
+> must not claim it — and no navigation, no click, no tab opened or
+> closed, and a detach that severs the socket only; (6) `peek_tab`
+> passing a NON-EMPTY `session_id` is refused before any browser work
+> naming `get_page_content` as the door for sessions, and an
 > empty/whitespace `session_id` is treated as absent (the serializer
-> reality [errands](errands.md) item (6) records: some provider layers
-> send `""` for every declared optional, and a refusal on presence is a
-> livelock); (7) `get_page_content`'s session-404 redirect and its
-> description now name `peek_tab` for the read-a-tab case instead of
-> teaching the errand workaround, and `peek_tab`'s own description
-> carries the three-door rule (read a tab → here; drive a tab →
-> `run_errand`; read a session's page → `get_page_content`); (8) a live
-> pass reads a real signed-in tab through the real chain and finds a
-> string known to be on it. A vitest suite drives (1)-(7) through the
-> real harnesses the errands story established — the real in-memory MCP
-> client + real API server for the tool surface and refusals, the
-> route/api-server harness for what only the mocked Playwright seam can
-> see — and (8) runs live.
+> reality [errands](errands.md) item (6) records); (7)
+> `get_page_content`'s session-404 redirect and its description now name
+> `peek_tab` for the read-a-tab case — the errand-capture sentence is
+> demoted to the drive-then-read case, not deleted — with
+> `tests/mcp-seam.test.ts`'s redirect pins updated alongside; and
+> `peek_tab`'s own description carries the three-door rule (read a tab →
+> here; drive a tab → `run_errand`; read a session's page →
+> `get_page_content`); (8) a live pass reads a real signed-in tab
+> through the real chain and finds a string known to be on it. A vitest
+> suite drives (1)-(7) through the harnesses the errands story
+> established — the real in-memory MCP client + real API server for the
+> tool surface and refusals; the raw-HTTP api-server harness for item
+> (1)'s in-flight clause and the route's error contract; the
+> playwright-mocked browser-manager suite for item (5)'s no-raise — and
+> (8) runs live.
 
 ## Context
 
@@ -69,44 +79,69 @@ So the peek is the third door, completing the set:
 | Does               | reads                   | drives                 | reads                  |
 | Leaves behind      | the session (unchanged) | nothing                | nothing                |
 | Takes the lock     | no                      | yes                    | no                     |
+| Raises the tab     | no                      | yes, on hand-back      | no                     |
 
 ## The concept, precisely
 
-A peek is: **attach → extract → detach**, in one request, touching
-nothing.
+A peek is: **attach → extract → detach**, in one request.
 
-- **Attach.** Identical to the errand's, and shared with it: resolve the
-  browser MCP-side (`resolveCdpTarget`, profile + engine + scope, the
-  ambiguity refusals reused as-is), match the `tab` argument against the
-  page-type-filtered listing with the same two-stage matcher
-  (`matchTabsByName` — exactly-one proceeds, zero refuses listing the
-  open tabs, several refuse naming candidates), then hand the winner's
-  `targetId:` to the existing attach path. The attach inherits the
-  errand's known environmental limit: a wedged privileged page (measured
-  live 2026-08-13: `chrome://extensions/` answers no CDP query) stalls
-  Playwright's connect for the whole browser; the diagnostics that name
-  the wedged tab are a separate story, and until then a peek fails with
-  the same honest timeout an errand does.
-- **Extract.** The same three reads `get_page_content` performs on a
-  session's page, byte-for-byte the same functions: `captureVisibleText`
-  for `format: "text"` (default), `captureDomSnapshot` for
-  `format: "dom"` (with the project's noise-reduction, iframe-depth and
-  char-limit settings), `expandDomSubtree` when a `selector` narrows a
-  DOM read. Clipping and `truncated` reporting follow
-  [page-content](page-content.md)'s rules unchanged — the silent
-  `domSnapshotCharLimit` clip still surfaces as `truncated: true`. The
-  extraction runs server-side (the MCP process stays browser-free, the
-  same constraint that shaped the errand).
-- **Detach.** Disconnect. Nothing was opened, so nothing closes; the
-  borrowed tab is not raised (`bringToFront` is a courtesy for a user
-  watching their tab being *driven* — a read has nothing to show them,
-  and raising a window on a read interrupts whatever they were actually
-  doing); the pre-existing-pages guard applies as everywhere. The
-  response carries `content`, `format`, `selector`, `truncated`,
-  `returnedChars`, `availableChars`, the tab's `url` and `title`, its
-  `targetId`, and the `root` + `scope` the peek resolved against
-  ([mcp-no-project](mcp-no-project.md): every result says which root it
-  used).
+- **Attach.** The same two stages as the errand, MCP-side: resolve the
+  browser (`resolveCdpTarget`, profile + engine + scope, the ambiguity
+  refusals reused as-is; the peek takes no `port`, so the ownership gate
+  is settled by construction — a profile-resolved browser is
+  registry-owned, and a foreign browser is unreachable), then match the
+  `tab` argument against the page-type-filtered listing with the shared
+  `matchTabsByName` — exactly-one proceeds, zero refuses listing the
+  open tabs, several refuse naming candidates. The server-side attach is
+  the same call `ErrandRunner.drive` makes — `launchBrowser` with a
+  `cdp` block and an exact `targetId:` spec — **with one parameterised
+  difference**: the attach path's existing-tab arm raises the tab today
+  (`page.bringToFront()`, the courtesy [cdp-tab-focus](cdp-tab-focus.md)
+  §3 shipped on purpose), and a read must not. `CdpLaunchOptions` gains
+  an `activate?: boolean` (default true — `run_errand` and `run_steps`
+  are untouched), and the peek passes `activate: false`. **This is a
+  named, bounded amendment to [cdp-tab-focus](cdp-tab-focus.md) §3**:
+  its rationale is a run about to drive behind the tab you are looking
+  at; a peek drives nothing and shows nothing, so raising would only
+  interrupt whatever the user was actually doing.
+- **Extract.** The same reads `get_page_content` performs, through a
+  seam this story creates so the sharing is real: a page-level
+  `capturePageContent(page, browserConfig, opts)` extracted from
+  `SessionManager.getPageContent`/`capturePage` — carrying the
+  navigation-retry arm, the whole-code-point slice, and the
+  `truncated = captureClipped || available > maxChars` derivation —
+  with `getPageContent` re-pointed at it, so session reads and peeks
+  cannot drift. `captureVisibleText` for `format: "text"` (default),
+  `captureDomSnapshot` for `format: "dom"`, `expandDomSubtree` under a
+  `selector`. The settings come from the project, by the same device
+  the errand uses and for the same reason: the request carries a
+  synthetic `testFilePath` (`<root>/.aiui-peek.md`) — the only thing
+  the server resolves a project root from — and the handler feeds
+  `bundle.config.browser` to both `launchBrowser` and the capture.
+  Without it the capture would silently run under library defaults
+  that differ from the project's (a 100k clip against the configured
+  300k, different noise reduction), and item (2)'s agreement with
+  `get_page_content` would be false.
+- **Detach.** Disconnect; nothing was opened, so nothing closes, and
+  the socket-severing semantics are the shipped `closeBrowser` ones.
+  Two attach side effects are named rather than hidden. First, the tab
+  is NOT raised (the `activate: false` arm above). Second, the dialog
+  guard: the shared attach installs it on the user's context before any
+  tab is touched, and for the life of the connection it answers
+  `alert`/`confirm`/`prompt`/`beforeunload` on ANY tab in that browser
+  — inherited from the errand, unavoidable (the guard is load-bearing),
+  and the reason a peek's connection is held for as short a time as the
+  extraction takes. The response carries `content`, `format`,
+  `selector`, `truncated`, `returnedChars`, `availableChars`, the tab's
+  `url`, `title` and `targetId`, and the `root` + `scope` the peek's
+  settings resolved against (the errand-receipt precedent —
+  [mcp-no-project](mcp-no-project.md): every result says which root it
+  used); when a project-scope call reads a user-root browser, the
+  summary line says so, the way `close_cdp_tab`'s does. The response
+  carries NO `status` and NO `sessionId` — its output schema is
+  `get_page_content`'s minus those two, plus `targetId`, `root` and
+  `scope`; whether another driver was on the tab is that driver's
+  receipt to tell.
 
 ### No lock, in either direction
 
@@ -115,10 +150,26 @@ blocks on it — and nothing blocks on a peek. This is not an oversight to
 fix later: the lock exists for *drivers* (interleaved input, dialog
 races, page-global emulation), and the coexistence of a second passive
 *client* is the measured-safe case errands §The wheel documents. A peek
-during a mid-run errand may see a page mid-change; `status` has no
-meaning here (there is no run), and the receipt's `url`/`title` are read
-at extraction time, which is the honest answer to "what was on it when
-you looked".
+during a mid-run errand may see a page mid-change; the honest answer to
+"what was on it when you looked" is the extraction plus the `url`/`title`
+read at extraction time, and the response shape carries no run `status`
+to lie with.
+
+### Disclosure posture
+
+Page content is the most sensitive thing this server hands out —
+[page-content](page-content.md) §Locked gates foreign SESSIONS for
+exactly that reason. A peek addresses no session, so that gate has
+nothing to hold; what bounds a peek is browser ownership: profile +
+engine + scope addressing can only resolve a registry-owned browser
+(the peek takes no `port`, so [mcp-cdp-browser](mcp-cdp-browser.md) §6's
+foreign-port gate is unreachable by construction), and an owned browser
+is the user's own. A tab that a foreign session happens to be driving
+inside an owned browser IS readable by a peek — recorded here as a
+**named, bounded amendment to [page-content](page-content.md) §Locked's
+side-door reasoning**: the session gate protects the session address
+from becoming a disclosure channel; the browser was always the user's
+to read, and `list_cdp_browsers` already shows them every tab of it.
 
 ## Tool surface
 
@@ -143,18 +194,29 @@ peek_tab {
 
 Deliberately absent: `steps` (a peek cannot act — wanting both means
 `run_errand`, whose steps can capture), `keep_open` (nothing opens),
-`format: "screenshot"` (a session's screenshot rides session state; a
-tab screenshot is an open question below), and any config bundle.
+`format: "screenshot"` (an open question below), and any config bundle.
+
+The `tab` slot is the story's second name-taking tab argument, and that
+is its own **named amendment to [cdp-tabs](cdp-tabs.md) §Locked and
+[cdp-tab-focus](cdp-tab-focus.md) §Locked** ("the agent matches; the
+tool takes an exact `targetId`"), on the class-shaped grounds the errand
+amendment supplies: a non-destructive verb whose zero-or-several
+refusals name candidates instead of first-match-guessing — the
+destructive verb, `close_cdp_tab`, keeps exact-only. The companion edit
+lands in errands.md §Routing 3, whose "the errand has the only
+first-class tab-name slot" becomes "the errand and the peek are the
+only first-class tab-name slots".
 
 The name `peek_tab` carries no `cdp` prefix for the same measured reason
-`run_errand` does not — the name must echo the user's words ("look at my
-tab", "what's on it"), and the tool cannot reach a launched browser at
-all. This extends the **named amendment** errands.md §Tool surface
-already records against the prefix rule
-([mcp-cdp-browser](mcp-cdp-browser.md) §5, [cdp-tabs](cdp-tabs.md)
-§Locked) to a second tool, on the same falsifiability terms: the naming
-probe (errands item (8), held) tests a `cdp`-carrying spelling, and if
-the probe contradicts the routing argument the prefix wins for both.
+`run_errand` does not, extending that story's named amendment to the
+prefix rule ([mcp-cdp-browser](mcp-cdp-browser.md) §5,
+[cdp-tabs](cdp-tabs.md) §Locked) on the same falsifiability terms — and
+to keep those terms real, **errands verification item (8) is amended by
+this story**: the held routing probe offers all THREE tools, scores
+read-vs-drive routing alongside tool choice and argument-following, and
+tests the peek spellings (`peek_tab` / `read_tab` / `read_cdp_tab`)
+next to the errand ones. errands.md §Open questions "Naming" gains the
+same widening.
 
 ## Routing: three doors, one question each
 
@@ -164,34 +226,74 @@ the probe contradicts the routing argument the prefix wins for both.
    clicking, typing, navigating — → `run_errand`, whose steps can also
    capture (`read the balance, store as balance`) so a drive-then-read
    is ONE errand, not an errand then a peek.
-3. **Wrong doors redirect.** `get_page_content`'s session-404 refusal
-   and description gain the `peek_tab` pointer (amending the PR #50
-   text, which could only teach the errand workaround); `peek_tab`'s
-   `session_id` refusal names `get_page_content`; `run_errand` is
-   unchanged — its capture pattern remains right whenever driving is
-   involved.
+3. **Wrong doors redirect, and the shipped rule gains a clause.**
+   [errands](errands.md) §Routing 1's one-question rule sends ownership
+   words ("my tab", "the one I have open") to `run_errand` — which
+   today routes this story's headline case ("what's on my tab?") to the
+   workaround. **Named amendment to errands §Routing 1**: the ownership
+   answer splits — theirs to borrow: *reading* → `peek_tab`, *acting* →
+   `run_errand` — applied where the rule ships, `run_errand`'s
+   description and the shared `CDP_NOTE` (behaviour unchanged, text
+   changed). `get_page_content`'s session-404 refusal and description
+   gain the `peek_tab` pointer, demoting (not deleting) the
+   errand-capture sentence to the drive-then-read case, with the
+   `tests/mcp-seam.test.ts` redirect pins updated alongside; and
+   `peek_tab`'s `session_id` refusal names `get_page_content`.
 
 ## What already exists vs what is new
 
-Reused unchanged, and shared rather than copied: the browser resolution
-and ambiguity refusals (`resolveCdpTarget`), the two-stage tab matcher
-(`matchTabsByName`) over the filtered listing, the attach path
-(`connectOverCDP` + `resolveCdpTab` handed only an exact `targetId:`),
-the pre-existing-pages guard and disconnect-not-kill semantics, the
-three extraction functions and their clipping/truncation contract, the
-empty-optional normalisation, and the wrong-door refusal conventions
-(returned `isError`, remedy in the text).
+Reused unchanged: the browser resolution and ambiguity refusals
+(`resolveCdpTarget` — pure of tool-specific text via its caller-supplied
+refusals); the shared matcher `matchTabsByName` (exported, pure, already
+built for a second caller) over the page-type-filtered listing; the
+three extraction functions; `closeBrowser`'s disconnect-not-kill; the
+empty-optional normalisation; the pre-existing-pages guard and the
+dialog guard (disclosed above).
 
-New: the `peek_tab` tool and schema; a peek route on the API server
-(request: port, targetId, format, selector, maxChars, root, scope;
-response: the §Detach shape — no streaming, a read is one round-trip);
-the matching `ApiClient` method; the server-side peek handler that
-attaches, extracts via the shared functions, and disconnects — beside
-`ErrandRunner`, sharing its attach seam, never touching the sessions map
-or the run counter; the redirect text updates on `get_page_content`; and
-the tool inventory (every count site [cdp-tab-focus](cdp-tab-focus.md)
-§5 names, 14 → 15, the by-name enumeration, `usage.ts`, README, the
-seam + dialect manifests, `argumentsFor()`).
+New, each named because round 1 caught them being assumed:
+
+- The `peek_tab` tool and schema; its output schema is
+  `getPageContentOutput` minus `sessionId` and `status`, plus
+  `targetId`, `root`, `scope`.
+- `activate?: boolean` on `CdpLaunchOptions` (default true) gating the
+  attach path's existing-tab raise; asserted where it can actually fail,
+  `tests/browser-manager-focus.test.ts`.
+- `capturePageContent(page, browserConfig, opts)` extracted from
+  `SessionManager.getPageContent`/`capturePage` (navigation retry,
+  whole-code-point slice, `truncated` derivation), with the session path
+  re-pointed at it.
+- The peek route: **`GET /cdp/browsers/:port/tabs/:targetId/content`**,
+  mirroring the close and focus routes' addressing —
+  [page-content](page-content.md) §Locked's GET-not-POST reasoning
+  applies verbatim (a read, no body, scalar params). Query: `format`,
+  `selector`, `maxChars`, `testFilePath` (the synthetic
+  `<root>/.aiui-peek.md`), `envName?`. Error contract: reuses
+  `GET /sessions/:id/content`'s `PageCaptureError` mapping (409
+  `navigated`, 400 for the selector family), and a `targetId` that no
+  longer resolves answers 404, which the MCP side turns into the same
+  open-tabs refusal item (3)'s zero-match gives — the tab closed while
+  we reached for it.
+- The matching `ApiClient` method (one round-trip, no streaming).
+- Peek-specific refusal builders in `src/mcp/errors.ts` —
+  `peekTabNotFound`, `peekTabAmbiguous`, `peekSessionsAreForGetPageContent`
+  — because the errand builders' prose names driving and borrowing
+  ("nothing to borrow", "an errand DRIVES the tab") and would lecture a
+  read about acting; the sharing that matters (one candidate list, one
+  matcher) is pinned per item (3).
+- The `get_page_content` description + redirect edits, the `run_errand`
+  description + `CDP_NOTE` clause (§Routing 3), and the errands.md
+  edits this story names (§Routing 3 exclusivity, §Open questions
+  naming, item (8) probe widening).
+- The tool inventory (every count site [cdp-tab-focus](cdp-tab-focus.md)
+  §5 names, 14 → 15, the by-name enumeration, `usage.ts`, README, the
+  seam + dialect manifests, `argumentsFor()`).
+
+The `chrome://extensions` stall (measured 2026-08-13: a wedged
+privileged page answers no CDP query, and Playwright's connect
+initializes every page target, so the whole browser times out) is
+inherited by the peek's attach exactly as by the errand's — this
+paragraph is that measurement's record in stories/, and the
+probe-and-name diagnostics are separate follow-up work.
 
 ## Open questions
 
@@ -199,9 +301,9 @@ seam + dialect manifests, `argumentsFor()`).
   Playwright can screenshot an attached page. Deferred: the return-size
   and privacy questions (`screenshots_return`'s reasoning) deserve their
   own decision rather than a rider on v1.
-- **Naming.** `peek_tab` vs `read_tab` vs `read_cdp_tab` — the held
-  routing probe should test the spellings alongside the errand names
-  before anything freezes.
+- **Naming.** `peek_tab` vs `read_tab` vs `read_cdp_tab` — settled by
+  the widened probe (errands item (8) as amended above) before anything
+  freezes.
 - **Leave-focus-alone as a promise.** v1 simply never raises. If a
   future case wants "peek and bring it forward", that is `focus_cdp_tab`
   composed after — two tools, not a flag.

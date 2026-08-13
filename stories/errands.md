@@ -453,8 +453,9 @@ increasing order of trustworthiness:
    open tab" is an errand.
 2. **The name.** `run_errand` (or `drive_tab`) echoes the user's own words
    at the moment of choice. Necessary, measured insufficient on its own.
-3. **Parameter funnel.** The errand has the only first-class tab-name
-   slot. The session door's `config.cdp.tab` does still accept
+3. **Parameter funnel.** The errand and the peek
+   ([tab-peek](tab-peek.md)) are the only first-class tab-name slots.
+   The session door's `config.cdp.tab` does still accept
    `title~`/`url~` — but buried inside a config object, resolved
    first-match-wins, and documented (`CDP_NOTE`'s "Tab:" paragraph) for
    target ids only — so the funnel narrows rather than forces, and
@@ -619,8 +620,10 @@ model.
   want it.
 - **Naming.** `run_errand` vs `drive_tab` — plus a `cdp`-carrying
   spelling (`drive_cdp_tab`), per the prefix-rule amendment in §Tool
-  surface. The probe (verification item 8) should test all three before
-  the name freezes.
+  surface. The probe (verification item 8, widened by
+  [tab-peek](tab-peek.md) to offer all three tab tools, score
+  read-vs-drive routing and argument-following, and test the peek
+  spellings alongside) should run before any name freezes.
 - **Scope search on a miss.** Ambiguity is settled — a profile name live
   under both roots refuses naming both (§Attach). Still open: when the
   named profile simply isn't running in the requested scope but is in the
