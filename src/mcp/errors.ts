@@ -579,6 +579,28 @@ export function cdpFocusRouteMissing(baseUrl: string): McpToolError {
 // ---------------------------------------------------------------------------
 
 /**
+ * `get_page_content` asked the server for a session it does not have.
+ *
+ * The natural flow that lands here was measured live (2026-08-13): a model
+ * runs `run_errand`, then reaches for `get_page_content` to read the result —
+ * but an errand deliberately leaves no session behind, so the server's honest
+ * 404 ("Session not found") reads as a mystery to a model that just watched
+ * its errand succeed. This wrong-door text replaces that 404 with the two
+ * working doors.
+ */
+export function pageContentSessionGone(sessionId: string): McpToolError {
+  return preflightError(
+    `No session named "${sessionId}" exists on this server, so there is no page to read.\n` +
+      'If you just ran run_errand: errands leave no session behind — the receipt you ' +
+      'already have carries the final url and title, and anything on the page you need ' +
+      'must be captured by the errand itself (a step like "read the balance, store as ' +
+      'balance" comes back in captures). Run the errand again with a read step.\n' +
+      'If you expected a run_steps session: it may have been closed — call list_sessions ' +
+      'to see what is open now.',
+  );
+}
+
+/**
  * `run_errand` was called with a NON-EMPTY `session_id`.
  *
  * The argument is declared ONLY so this refusal can exist. A bare Zod schema

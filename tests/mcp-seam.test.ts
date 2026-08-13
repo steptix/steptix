@@ -549,7 +549,11 @@ describe('get_page_content', () => {
     expect(pageContentCalls).toHaveLength(1);
   });
 
-  it('turns a server refusal into a readable error', async () => {
+  it('answers a session-not-found 404 with the errand redirect, not a mystery', async () => {
+    // Measured live (2026-08-13): a model runs run_errand, then reaches for
+    // get_page_content — but an errand leaves no session, and the server's
+    // honest "Session not found" teaches the model nothing. The refusal now
+    // names the two working doors.
     const { ApiHttpError } = await import('../src/mcp/types.js');
     const { client } = await connect({
       pageContentError: new ApiHttpError(404, 'Session not found'),
@@ -561,7 +565,26 @@ describe('get_page_content', () => {
     });
 
     expect(res.isError).toBe(true);
-    expect(JSON.stringify(res.content)).toContain('Session not found');
+    const body = JSON.stringify(res.content);
+    expect(body).toContain('mcp:gone');
+    expect(body).toContain('run_errand');
+    expect(body).toContain('store as');
+    expect(body).toContain('list_sessions');
+  });
+
+  it('leaves a route-missing 404 alone — "rebuild the server" is the opposite remedy', async () => {
+    const { ApiRouteNotFoundError } = await import('../src/mcp/types.js');
+    const { client } = await connect({
+      pageContentError: new ApiRouteNotFoundError('http://localhost:3999/sessions/x/page'),
+    });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:gone', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).not.toContain('run_errand');
   });
 
   it('warns that the page may be moving during a run', async () => {
