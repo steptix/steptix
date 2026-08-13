@@ -316,10 +316,10 @@ New, each named because round 1 caught them being assumed:
   matcher) is pinned per item (3).
 - The `get_page_content` description + redirect edits and the
   `run_errand` description + `CDP_NOTE` clause (§Routing 3, pinned per
-  item 7). Of the errands.md edits this story names, §Routing 3
-  exclusivity and §Open questions naming are ALREADY APPLIED alongside
-  this draft; only the item (8) probe-widening sentence rides with the
-  build.
+  item 7). The three errands.md edits this story names — §Routing 3
+  exclusivity, §Open questions naming, and the item (8) probe widening
+  — are ALREADY APPLIED alongside this draft; nothing in errands.md
+  rides with the build.
 - The tool inventory, increment-never-assert
   ([cdp-tab-focus](cdp-tab-focus.md) §5's standing rule, as errands
   complied with it): increment every tool-count sentence in
