@@ -217,6 +217,20 @@ async function connect(): Promise<Client> {
         warnings: [],
       } as never;
     },
+    async peekCdpTab(args) {
+      return {
+        targetId: args.targetId,
+        root: tmpDir,
+        url: 'https://openrouter.ai/docs',
+        title: 'OpenRouter — Docs',
+        format: 'text',
+        selector: null,
+        content: PAGE_TEXT,
+        truncated: false,
+        returnedChars: PAGE_TEXT.length,
+        availableChars: PAGE_TEXT.length,
+      } as never;
+    },
   };
 
   const deps: McpDeps = {
@@ -247,6 +261,8 @@ function argumentsFor(): Record<string, Record<string, unknown>> {
     close_session: { session_id: 'mcp:a', project_root: tmpDir },
     get_last_run: { session_id: 'mcp:a', project_root: tmpDir },
     get_page_content: { session_id: 'mcp:a', project_root: tmpDir },
+    // The fake browser's one tab again, named exactly — the peek's happy path.
+    peek_tab: { tab: 'targetId:A1B2C3', profile: 'default', project_root: tmpDir },
     // Against DEAD_SERVER this takes the `running: false` arm — which is a real
     // answer with real structured content, and the arm the live check exercises
     // ("reports it is not running and starts nothing").

@@ -15,7 +15,8 @@ import {
   type ScopedRoot,
   type StartResult,
 } from '../browser/cdp-registry.js';
-import { discoverCdpPorts } from '../browser/cdp-discovery.js';
+import { discoverCdpPorts, listPageTabs } from '../browser/cdp-discovery.js';
+import { closeBrowser, launchBrowser } from '../browser/manager.js';
 import { userRootDir } from '../env/user-root.js';
 import fs from 'node:fs';
 import {
@@ -27,6 +28,7 @@ import {
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
 import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
+import { capturePageContent, type PageContentOptions } from './page-capture.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
 import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
@@ -44,6 +46,91 @@ import { getPackageVersion } from '../utils/version.js';
  * more can ask; a caller that blows its context window cannot un-spend it.
  */
 const DEFAULT_CONTENT_MAX_CHARS = 20_000;
+
+/**
+ * The `format` / `selector` / `max_chars` triple both content routes take.
+ *
+ * Shared rather than copied when the peek route arrived (stories/tab-peek.md):
+ * every rule below is a trap that fails SILENTLY if it is dropped, so a second
+ * copy is how one route quietly starts widening a read the other narrows.
+ * Answers the request and returns null when anything is wrong, so a caller
+ * reads it as `if (!opts) return;`.
+ */
+function readContentQuery(req: Request, res: Response): PageContentOptions | null {
+  const rawFormat = req.query['format'];
+  const format = rawFormat === undefined ? 'text' : String(rawFormat);
+  if (format !== 'text' && format !== 'dom') {
+    // Deliberately not a fallback to 'text'. A caller that asked for
+    // 'html' and silently received prose has no way to notice.
+    res.status(400).json({
+      error: `Unknown format "${format}". Valid formats are "text" (visible text, default) and "dom" (cleaned DOM).`,
+    });
+    return null;
+  }
+
+  // Rejected rather than ignored. A repeated `?selector=a&selector=b`
+  // arrives as an array, and silently dropping it would widen the read
+  // from one element to the entire page — the opposite of what the caller
+  // asked for, on the endpoint whose whole size story is "narrow with a
+  // selector". `format` and `max_chars` already 400 on the same input.
+  const rawSelector = req.query['selector'];
+  if (rawSelector !== undefined && typeof rawSelector !== 'string') {
+    res.status(400).json({ error: 'selector must be a single string value.' });
+    return null;
+  }
+  // An empty `?selector=` is the same trap in a smaller shape: dropping it
+  // silently reads the whole page when the caller asked for one element.
+  if (rawSelector === '') {
+    res.status(400).json({ error: 'selector must not be empty.' });
+    return null;
+  }
+  const selector = typeof rawSelector === 'string' ? rawSelector : undefined;
+
+  const rawMax = req.query['max_chars'];
+  let maxChars = DEFAULT_CONTENT_MAX_CHARS;
+  if (rawMax !== undefined) {
+    maxChars = Number(String(rawMax));
+    if (!Number.isInteger(maxChars) || maxChars <= 0) {
+      res.status(400).json({
+        error: `max_chars must be a positive integer (got "${String(rawMax)}").`,
+      });
+      return null;
+    }
+  }
+
+  return { format, selector, maxChars };
+}
+
+/**
+ * The `PageCaptureError` → status mapping both content routes answer with.
+ *
+ * Returns true once it has answered, so a route reads it as
+ * `if (respondToPageCaptureError(err, res)) return;` and passes anything else
+ * to `next`.
+ */
+function respondToPageCaptureError(err: unknown, res: Response): boolean {
+  // A read that lost to a navigation is the caller's to retry — it says
+  // nothing about the session's health, so it must not read as a 500.
+  if (err instanceof PageCaptureError && err.kind === 'navigated') {
+    res.status(409).json({ error: err.message });
+    return true;
+  }
+  // Everything the CALLER got wrong is a 400. A bad selector answered 500
+  // tells an agent the server is broken and to try again later, when the
+  // fix is in its own next argument — and `div:has-text(…)` (a Playwright
+  // idiom, not CSS) is a mistake agents make constantly.
+  if (
+    err instanceof PageCaptureError &&
+    (err.kind === 'selector-miss' ||
+      err.kind === 'bad-selector' ||
+      err.kind === 'not-rendered' ||
+      err.kind === 'unreadable-element')
+  ) {
+    res.status(400).json({ error: err.message });
+    return true;
+  }
+  return false;
+}
 
 /** Write a single SSE frame. */
 function writeSseEvent(res: Response, event: RunEvent): void {
@@ -768,78 +855,17 @@ export function createApiServer(
 
       // Validate before touching the page, so a bad request never costs a
       // browser round-trip.
-      const rawFormat = req.query['format'];
-      const format = rawFormat === undefined ? 'text' : String(rawFormat);
-      if (format !== 'text' && format !== 'dom') {
-        // Deliberately not a fallback to 'text'. A caller that asked for
-        // 'html' and silently received prose has no way to notice.
-        res.status(400).json({
-          error: `Unknown format "${format}". Valid formats are "text" (visible text, default) and "dom" (cleaned DOM).`,
-        });
-        return;
-      }
+      const opts = readContentQuery(req, res);
+      if (!opts) return;
 
-      // Rejected rather than ignored. A repeated `?selector=a&selector=b`
-      // arrives as an array, and silently dropping it would widen the read
-      // from one element to the entire page — the opposite of what the caller
-      // asked for, on the endpoint whose whole size story is "narrow with a
-      // selector". `format` and `max_chars` already 400 on the same input.
-      const rawSelector = req.query['selector'];
-      if (rawSelector !== undefined && typeof rawSelector !== 'string') {
-        res.status(400).json({ error: 'selector must be a single string value.' });
-        return;
-      }
-      // An empty `?selector=` is the same trap in a smaller shape: dropping it
-      // silently reads the whole page when the caller asked for one element.
-      if (rawSelector === '') {
-        res.status(400).json({ error: 'selector must not be empty.' });
-        return;
-      }
-      const selector = typeof rawSelector === 'string' ? rawSelector : undefined;
-
-      const rawMax = req.query['max_chars'];
-      let maxChars = DEFAULT_CONTENT_MAX_CHARS;
-      if (rawMax !== undefined) {
-        maxChars = Number(String(rawMax));
-        if (!Number.isInteger(maxChars) || maxChars <= 0) {
-          res.status(400).json({
-            error: `max_chars must be a positive integer (got "${String(rawMax)}").`,
-          });
-          return;
-        }
-      }
-
-      const content = await sessionManager.getPageContent(sessionId, {
-        format,
-        selector,
-        maxChars,
-      });
+      const content = await sessionManager.getPageContent(sessionId, opts);
       if (!content) {
         res.status(404).json({ error: 'Session not found' });
         return;
       }
       res.status(200).json(content);
     } catch (err) {
-      // A read that lost to a navigation is the caller's to retry — it says
-      // nothing about the session's health, so it must not read as a 500.
-      if (err instanceof PageCaptureError && err.kind === 'navigated') {
-        res.status(409).json({ error: err.message });
-        return;
-      }
-      // Everything the CALLER got wrong is a 400. A bad selector answered 500
-      // tells an agent the server is broken and to try again later, when the
-      // fix is in its own next argument — and `div:has-text(…)` (a Playwright
-      // idiom, not CSS) is a mistake agents make constantly.
-      if (
-        err instanceof PageCaptureError &&
-        (err.kind === 'selector-miss' ||
-          err.kind === 'bad-selector' ||
-          err.kind === 'not-rendered' ||
-          err.kind === 'unreadable-element')
-      ) {
-        res.status(400).json({ error: err.message });
-        return;
-      }
+      if (respondToPageCaptureError(err, res)) return;
       next(err);
     }
   });
@@ -1198,6 +1224,19 @@ export function createApiServer(
       return null;
     }
 
+    const address = readPortAndTarget(req, res);
+    if (!address) return null;
+    return { projectRoot, ...address };
+  }
+
+  /** The path half of the same addressing, on its own — the peek route
+   *  (stories/tab-peek.md) resolves its project from `testFilePath` rather
+   *  than from a `projectRoot`, and must still reject the same ports and the
+   *  same empty target ids as its two siblings. */
+  function readPortAndTarget(
+    req: Request,
+    res: Response,
+  ): { port: number; targetId: string } | null {
     const port = Number(req.params.port);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
       res.status(400).json({ error: `port must be a valid TCP port (got "${req.params.port}")` });
@@ -1210,7 +1249,7 @@ export function createApiServer(
       return null;
     }
 
-    return { projectRoot, port, targetId };
+    return { port, targetId };
   }
 
   /** Whether a browser this project did NOT launch may be acted on. Same shape
@@ -1338,6 +1377,128 @@ export function createApiServer(
           warnings: result.warnings,
         });
       } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /cdp/browsers/:port/tabs/:targetId/content (stories/tab-peek.md)
+  //
+  // Attach → extract → detach, in one request. A read, so GET and no body —
+  // page-content.md §Locked's reasoning applies verbatim.
+  //
+  // What this route deliberately does NOT do is as load-bearing as what it
+  // does: it touches no sessions map, bumps no in-flight run counter (a peek
+  // is a read, not a run — verification item 1), takes and consults no errand
+  // turn lock in either direction (§No lock), and writes no report file.
+  app.get(
+    '/cdp/browsers/:port/tabs/:targetId/content',
+    async (req: Request, res: Response, next: NextFunction) => {
+      const params = readPortAndTarget(req, res);
+      if (!params) return;
+      const { port, targetId } = params;
+
+      const opts = readContentQuery(req, res);
+      if (!opts) return;
+
+      // The synthetic `<root>/.aiui-peek.md`, and it is required rather than
+      // optional: it is the only thing a project root resolves from, and
+      // without it the capture would silently run under library defaults that
+      // differ from the project's (a 100k dom clip against a configured 300k,
+      // different noise reduction) — so a peek and `get_page_content` would
+      // disagree about the same page with nothing saying why.
+      const rawTestFilePath = req.query['testFilePath'];
+      if (typeof rawTestFilePath !== 'string' || rawTestFilePath === '') {
+        res.status(400).json({ error: 'testFilePath query parameter is required' });
+        return;
+      }
+      if (!path.isAbsolute(rawTestFilePath)) {
+        res
+          .status(400)
+          .json({ error: `testFilePath must be an absolute path (got "${rawTestFilePath}")` });
+        return;
+      }
+      // Accepted so the project layer resolves exactly as an errand's does, and
+      // so a peek shares the resolver's cache entry with the runs beside it.
+      // It changes no capture setting — a peek interpolates nothing.
+      const rawEnvName = req.query['envName'];
+      if (rawEnvName !== undefined && typeof rawEnvName !== 'string') {
+        res.status(400).json({ error: 'envName must be a single string value.' });
+        return;
+      }
+
+      try {
+        // Pre-check, so a tab that closed while we reached for it is a 404
+        // with our own JSON envelope rather than whatever `connectOverCDP`
+        // makes of a missing target. The MCP side reads that envelope as "the
+        // tab is gone"; a BARE 404 means the route itself is missing, and the
+        // two remedies are opposites (stories/cdp-tab-focus.md §6).
+        //
+        // Same device as `focusCdpTab`'s: the browser answers for ids that are
+        // not tabs, so the id must be one `toPageTabs` would have shown.
+        const tabs = await listPageTabs(port);
+        if (tabs === null) {
+          res.status(statusForCdpFailure('launch_failed')).json({
+            error:
+              `Could not read the tab list from the browser on port ${port}. ` +
+              'It may be shutting down.\n' +
+              'Call list_cdp_browsers to see what is still running.',
+          });
+          return;
+        }
+        if (!tabs.some((tab) => tab.targetId === targetId)) {
+          res.status(statusForCdpFailure('not_found')).json({
+            error:
+              `No tab with target id ${targetId} is open in the browser on port ${port}.\n\n` +
+              'Either it has already been closed, or the id belongs to a different browser.\n' +
+              'Call list_cdp_browsers for the tabs open right now.',
+          });
+          return;
+        }
+
+        // The project layer, through the SAME resolver a session and an errand
+        // use, so all three read the same `.env` and the same config at the
+        // same moment.
+        const bundle = await projectBundles.resolve(rawTestFilePath, rawEnvName?.trim() || null);
+
+        // The same attach `ErrandRunner.drive` makes, with one parameterised
+        // difference: `activate: false`, because a read must not move the
+        // user's window (stories/tab-peek.md §Attach, amending
+        // cdp-tab-focus.md §3). The exact `targetId:` spec means the
+        // first-match-wins arm of `resolveCdpTab` is never asked to arbitrate.
+        const attached = await launchBrowser(bundle.config.browser, {
+          port,
+          tab: `targetId:${targetId}`,
+          activate: false,
+        });
+
+        let content;
+        try {
+          // `bundle.config.browser` on BOTH sides of this: the attach above and
+          // the capture here read the project's settings, never the server's.
+          content = await capturePageContent(attached.page, bundle.config.browser, opts);
+        } finally {
+          // Disconnect, never kill. `closeBrowser` severs the CDP websocket and
+          // closes only a tab the attach itself opened — a `targetId:` attach
+          // opens none, so nothing of the user's browser changes. In a
+          // `finally` because the connection also holds the context-wide dialog
+          // guard, and a peek must hold that for as long as the extraction
+          // takes and not one moment longer (§Detach).
+          await closeBrowser(attached);
+        }
+
+        res.status(200).json({
+          targetId,
+          // The root the SETTINGS came from, which is the claim
+          // stories/mcp-no-project.md asks every result to make. Null when no
+          // `aiui.config.json` stood above the synthetic path, in which case
+          // the server's own defaults were used and saying otherwise would be
+          // an invention.
+          root: bundle.projectRoot,
+          ...content,
+        });
+      } catch (err) {
+        if (respondToPageCaptureError(err, res)) return;
         next(err);
       }
     },

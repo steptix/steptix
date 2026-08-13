@@ -585,16 +585,23 @@ export function cdpFocusRouteMissing(baseUrl: string): McpToolError {
  * runs `run_errand`, then reaches for `get_page_content` to read the result —
  * but an errand deliberately leaves no session behind, so the server's honest
  * 404 ("Session not found") reads as a mystery to a model that just watched
- * its errand succeed. This wrong-door text replaces that 404 with the two
- * working doors.
+ * its errand succeed. This wrong-door text replaces that 404 with the working
+ * doors.
+ *
+ * `peek_tab` leads, because it is the direct answer to the question that got
+ * the model here (stories/tab-peek.md §Routing 3). The errand-capture sentence
+ * is DEMOTED rather than deleted: it is still the right answer when the drive
+ * and the read are one job, which is one errand rather than an errand and then
+ * a peek.
  */
 export function pageContentSessionGone(sessionId: string): McpToolError {
   return preflightError(
     `No session named "${sessionId}" exists on this server, so there is no page to read.\n` +
-      'If you just ran run_errand: errands leave no session behind — the receipt you ' +
-      'already have carries the final url and title, and anything on the page you need ' +
-      'must be captured by the errand itself (a step like "read the balance, store as ' +
-      'balance" comes back in captures). Run the errand again with a read step.\n' +
+      'If you just ran run_errand: errands leave no session behind, but the TAB is ' +
+      'still open — read it with peek_tab, naming the tab the errand drove (its ' +
+      'receipt carries the final url and title). When the drive and the read are ' +
+      'one job, have the errand capture what you need as a step instead ("read the ' +
+      'balance, store as balance" comes back in captures), so it is one call.\n' +
       'If you expected a run_steps session: it may have been closed — call list_sessions ' +
       'to see what is open now.',
   );
@@ -811,6 +818,107 @@ export function cdpTabHeldByErrand(
           'what it opened — so the close becomes moot. Call list_cdp_browsers ' +
           'before retrying.'
         : ''),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab peek (stories/tab-peek.md)
+//
+// Peek-specific rather than shared with the errand builders above, and the
+// story names why: their prose is about DRIVING and BORROWING ("nothing to
+// borrow", "an errand DRIVES the tab it borrows"), and it would lecture a read
+// about acting. What IS shared is the thing that matters — one candidate list,
+// one `matchTabsByName` — which the seam suites pin per verification item (3).
+// ---------------------------------------------------------------------------
+
+/**
+ * `peek_tab`'s `tab` matched nothing — or matched a tab that was gone by the
+ * time the server reached for it.
+ *
+ * Answered with the browser's tab list, so the caller can re-name one from
+ * what is actually open rather than guessing again. This is the refusal that
+ * makes a name-shaped `tab` argument safe at all: the alternative to "several
+ * candidates, say which" is the first-match-wins rule stories/cdp-tabs.md
+ * refuses.
+ */
+export function peekTabNotFound(
+  spec: string,
+  browser: string,
+  tabs: readonly CdpTab[],
+): McpToolError {
+  return preflightError(
+    `No tab in ${browser} matches "${spec}", so there is nothing to read.\n\n` +
+      (tabs.length > 0
+        ? `Open tabs:\n${tabs.map((t) => `  ${describeTab(t)}`).join('\n')}\n\n` +
+          'Name one of these — a distinctive part of its title or url, or ' +
+          '`targetId:<id>` for the exact tab.'
+        : 'That browser reports no tabs at all. Call list_cdp_browsers to see ' +
+          'what is running, and check the profile is the one you meant.'),
+  );
+}
+
+/**
+ * `peek_tab`'s `tab` matched more than one.
+ *
+ * Every candidate is named with all three of its identifiers, because the
+ * caller has to pick between them and a title alone is routinely duplicated
+ * (two "Inbox" tabs, two docs pages). Nothing is picked for you: the wrong
+ * guess here does not misclick, it hands back the contents of a page nobody
+ * asked about — and page content is the most sensitive thing this server
+ * returns.
+ */
+export function peekTabAmbiguous(spec: string, matches: readonly CdpTab[]): McpToolError {
+  return preflightError(
+    `"${spec}" matches ${matches.length} open tabs, so it does not name one — ` +
+      'and nothing is picked for you, because a peek returns whatever is on the ' +
+      'tab it reads.\n\n' +
+      `${matches.map((t) => `  ${describeTab(t)}`).join('\n')}\n\n` +
+      'Say which by passing `targetId:<id>`, or a substring that appears in ' +
+      'only one of them.',
+  );
+}
+
+/**
+ * `peek_tab` was called with a NON-EMPTY `session_id`.
+ *
+ * Declared only so this refusal can exist, the same way `run_errand`'s is —
+ * a bare Zod schema would strip an undeclared key in silence, which is the
+ * wrong-door silence these tools exist to kill.
+ *
+ * An empty/whitespace `session_id` never reaches this builder: some provider
+ * layers serialize every declared optional as `""`, so a model told to "call
+ * again without session_id" physically cannot (stories/errands.md item (6),
+ * measured live 2026-08-13). The refusal fires on VALUE, never on presence.
+ */
+export function peekSessionsAreForGetPageContent(sessionId: string): McpToolError {
+  return preflightError(
+    `A peek reads a TAB, not a session, so session_id "${sessionId}" cannot be ` +
+      'honoured — and it is refused rather than ignored, because the two tools ' +
+      'read different things.\n' +
+      'peek_tab takes a tab by name out of a CDP browser the user has open, and ' +
+      'creates nothing.\n' +
+      'To read the page a run_steps session is sitting on, use get_page_content ' +
+      `with that session_id. To read a tab, call peek_tab again without ` +
+      'session_id.',
+  );
+}
+
+/**
+ * The Sessions API server has no peek route.
+ *
+ * Beside `cdpFocusRouteMissing`, and split from the gone-tab refusal for the
+ * reason cdp-tab-focus §6 locked: telling a user their tab was closed when the
+ * real answer is "the server runs compiled dist/ and yours predates this tool"
+ * sends them looking for a window that is still sitting there.
+ */
+export function peekRouteMissing(baseUrl: string): McpToolError {
+  return preflightError(
+    `${baseUrl} has no tab-content route, so it is running a build that predates ` +
+      'this tool. **The tab is fine** — nothing was read and nothing was ' +
+      'touched.\n\n' +
+      'The server runs compiled dist/: rebuild and restart it (`npm run build`, ' +
+      'then stop the running server and start it again). Ask the user to do it ' +
+      'if you cannot.',
   );
 }
 

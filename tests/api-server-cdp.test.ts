@@ -16,6 +16,11 @@ const startCdpBrowserMock = vi.fn();
 const closeCdpTabMock = vi.fn();
 const focusCdpTabMock = vi.fn();
 const discoverCdpPortsMock = vi.fn();
+const listPageTabsMock = vi.fn();
+const launchBrowserMock = vi.fn();
+const closeBrowserMock = vi.fn();
+const captureVisibleTextMock = vi.fn();
+const captureDomSnapshotMock = vi.fn();
 
 vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/cdp-registry.js')>();
@@ -35,13 +40,19 @@ vi.mock('../src/browser/cdp-discovery.js', async (importOriginal) => {
   return {
     ...actual,
     discoverCdpPorts: (...args: unknown[]) => discoverCdpPortsMock(...args),
+    // The peek route's gone-tab pre-check reads this. Stubbed so the suite
+    // spawns nothing and probes no real port.
+    listPageTabs: (...args: unknown[]) => listPageTabsMock(...args),
   };
 });
 
 // The session manager pulls in the browser stack; stub the pieces it reaches
-// for so constructing the app is cheap and launches nothing.
+// for so constructing the app is cheap and launches nothing. `launchBrowser`
+// and `closeBrowser` are ALSO the peek route's attach and detach, so they are
+// controllable per test rather than bare `vi.fn()`s.
 vi.mock('../src/browser/manager.js', () => ({
-  launchBrowser: vi.fn(),
+  launchBrowser: (...args: unknown[]) => launchBrowserMock(...args),
+  closeBrowser: (...args: unknown[]) => closeBrowserMock(...args),
   PageTracker: vi.fn(),
   BrowserTracker: class {
     getActive = vi.fn();
@@ -54,6 +65,19 @@ vi.mock('../src/browser/manager.js', () => ({
   resolveVideoMode: vi.fn(() => 'off'),
   finalizeMainPageVideo: vi.fn(),
 }));
+
+// Only the three functions that talk to a real page. Everything else —
+// `PageCaptureError`, the failure classifier, the clip detector — stays REAL,
+// because the route's whole error contract is expressed in those types and a
+// stubbed classifier would be asserting the stub.
+vi.mock('../src/browser/dom-cleaner.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/browser/dom-cleaner.js')>();
+  return {
+    ...actual,
+    captureVisibleText: (...args: unknown[]) => captureVisibleTextMock(...args),
+    captureDomSnapshot: (...args: unknown[]) => captureDomSnapshotMock(...args),
+  };
+});
 
 const { createApiServer } = await import('../src/server/api-server.js');
 const { userRootDir } = await import('../src/env/user-root.js');
@@ -180,8 +204,18 @@ beforeEach(() => {
   closeCdpTabMock.mockReset();
   focusCdpTabMock.mockReset();
   discoverCdpPortsMock.mockReset();
+  listPageTabsMock.mockReset();
+  launchBrowserMock.mockReset();
+  closeBrowserMock.mockReset();
+  captureVisibleTextMock.mockReset();
+  captureDomSnapshotMock.mockReset();
   knownProfilesMock.mockResolvedValue([]);
   discoverCdpPortsMock.mockResolvedValue([]);
+  listPageTabsMock.mockResolvedValue([{ targetId: 'T1', title: 'Orders', url: 'https://shop/orders' }]);
+  launchBrowserMock.mockImplementation(async () => attachedSession());
+  closeBrowserMock.mockResolvedValue(undefined);
+  captureVisibleTextMock.mockResolvedValue(PAGE_TEXT);
+  captureDomSnapshotMock.mockResolvedValue('<html><body>Orders</body></html>');
 });
 
 function del(port: number | string, targetId: string, qs = '', headers = auth) {
@@ -194,6 +228,43 @@ function focus(port: number | string, targetId: string, qs = '', headers = auth)
   const base = `${baseUrl}/cdp/browsers/${port}/tabs/${encodeURIComponent(targetId)}/focus`;
   const query = `projectRoot=${encodeURIComponent(PROJECT)}${qs}`;
   return fetch(`${base}?${query}`, { method: 'POST', headers });
+}
+
+// ---------------------------------------------------------------------------
+// Peek fixtures (stories/tab-peek.md)
+// ---------------------------------------------------------------------------
+
+const PAGE_TEXT = 'Orders\n3 open\nTotal $120.00';
+
+/** The synthetic `<root>/.aiui-peek.md` the MCP side sends. No such file
+ *  exists and none is read — it is only what a project root resolves from. */
+const PEEK_FILE = path.join(PROJECT, '.aiui-peek.md');
+
+/** A page the capture functions never actually touch (they are stubbed), but
+ *  whose `url()`/`title()` the extraction really does read. */
+function attachedPage(url = 'https://shop/orders', title = 'Orders') {
+  return { url: () => url, title: async () => title };
+}
+
+function attachedSession(page = attachedPage()) {
+  return { page, browser: {}, context: {}, cdp: true, cdpTabOpenedByUs: false };
+}
+
+function peek(
+  port: number | string,
+  targetId: string,
+  qs = '',
+  headers: Record<string, string> = auth,
+) {
+  const base = `${baseUrl}/cdp/browsers/${port}/tabs/${encodeURIComponent(targetId)}/content`;
+  const query = `testFilePath=${encodeURIComponent(PEEK_FILE)}${qs}`;
+  return fetch(`${base}?${query}`, { headers });
+}
+
+/** `runsInFlight` as `/health` reports it — the count a peek must not move. */
+async function runsInFlight(): Promise<number> {
+  const body = (await (await fetch(`${baseUrl}/health`)).json()) as { runsInFlight: number };
+  return body.runsInFlight;
 }
 
 const focusedTab = (over: Record<string, unknown> = {}) => ({
@@ -1016,6 +1087,237 @@ describe('POST /cdp/browsers/:port/tabs/:targetId/focus', () => {
     focusCdpTabMock.mockResolvedValue(focusedTab());
     await focus(51000, 'T1');
     expect(closeCdpTabMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /cdp/browsers/:port/tabs/:targetId/content (stories/tab-peek.md)
+//
+// The route's own contract, at the layer no MCP result can reach: which
+// arguments the attach was handed, that the detach ran, the status codes, and
+// verification item (1)'s in-flight clause — `runsInFlight` read from `/health`
+// while the extraction is HELD OPEN, which is the only moment the claim "a peek
+// is a read, not a run" can be false.
+// ---------------------------------------------------------------------------
+
+describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
+  it('reads the tab and hands back the page, the tab and the root', async () => {
+    const res = await peek(51000, 'T1');
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      targetId: 'T1',
+      // Null: no `aiui.config.json` stands above the synthetic path in this
+      // suite, so the capture ran under the server's own defaults — and saying
+      // otherwise would be an invention.
+      root: null,
+      url: 'https://shop/orders',
+      title: 'Orders',
+      format: 'text',
+      selector: null,
+      content: PAGE_TEXT,
+      truncated: false,
+      returnedChars: PAGE_TEXT.length,
+      availableChars: PAGE_TEXT.length,
+    });
+  });
+
+  it('attaches with activate: false and an exact targetId spec, then detaches', async () => {
+    await peek(51000, 'T1');
+
+    expect(launchBrowserMock).toHaveBeenCalledTimes(1);
+    expect(launchBrowserMock.mock.calls[0]![1]).toEqual({
+      port: 51000,
+      tab: 'targetId:T1',
+      // Item (5). Whether Chromium then declines to raise is not something
+      // this repo can assert; what it CAN assert is that we never asked.
+      activate: false,
+    });
+    // Disconnect, never kill — and the connection holds the context-wide
+    // dialog guard, so it must not outlive the extraction.
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('detaches even when the extraction throws', async () => {
+    const { PageCaptureError } = await import('../src/browser/dom-cleaner.js');
+    captureVisibleTextMock.mockRejectedValue(
+      new PageCaptureError('bad-selector', 'Text capture failed: not a valid CSS selector (##x)'),
+    );
+
+    const res = await peek(51000, 'T1', '&selector=%23%23x');
+
+    expect(res.status).toBe(400);
+    // The `finally`, which is the whole reason the close is not written after
+    // the capture: a socket left open holds the dialog guard on every tab of
+    // the user's browser for the life of the process.
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds nothing to runsInFlight while the extraction is held open (item 1)', async () => {
+    // A peek is a read, not a run. Held open on purpose: a count taken after
+    // the request finished would pass for a route that bumped and released.
+    const before = await runsInFlight();
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let duringExtraction = -1;
+    captureVisibleTextMock.mockImplementation(async () => {
+      duringExtraction = await runsInFlight();
+      await gate;
+      return PAGE_TEXT;
+    });
+
+    const inflight = peek(51000, 'T1');
+    // The read above happens inside the extraction; release once it has landed.
+    await vi.waitFor(() => expect(duringExtraction).toBeGreaterThanOrEqual(0));
+    release();
+    expect((await inflight).status).toBe(200);
+
+    expect(duringExtraction).toBe(before);
+    expect(await runsInFlight()).toBe(before);
+  });
+
+  it('creates no session', async () => {
+    const before = await (await fetch(`${baseUrl}/sessions`, { headers: auth })).json();
+    await peek(51000, 'T1');
+    const after = await (await fetch(`${baseUrl}/sessions`, { headers: auth })).json();
+    expect(after).toEqual(before);
+  });
+
+  it('answers a gone tab with a JSON-envelope 404, before it attaches to anything', async () => {
+    // The named device: the pre-check via `listPageTabs`, the way `focusCdpTab`
+    // produces `kind: 'not_found'`. A bare non-JSON 404 means the ROUTE is
+    // missing and the MCP side says "rebuild" — so this one has to carry our
+    // own envelope, or the two stories swap.
+    listPageTabsMock.mockResolvedValue([
+      { targetId: 'T9', title: 'Mail', url: 'https://mail' },
+    ]);
+
+    const res = await peek(51000, 'T1');
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain('T1');
+    expect(body.error).toContain('list_cdp_browsers');
+    // Nothing was attached to, so nothing was detached from either.
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+    expect(closeBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('answers an unreachable browser with 500, not with "no such tab"', async () => {
+    // A browser shutting down and a tab that was closed are different answers,
+    // and the remedy differs: one is "look at what is still running".
+    listPageTabsMock.mockResolvedValue(null);
+
+    const res = await peek(51000, 'T1');
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain('shutting down');
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('maps a navigated read to 409, the same as the session content route', async () => {
+    const { PageCaptureError } = await import('../src/browser/dom-cleaner.js');
+    // Both attempts: the extraction retries a navigated read exactly once.
+    captureVisibleTextMock.mockRejectedValue(
+      new PageCaptureError('navigated', 'Text capture failed: the page navigated during the read.'),
+    );
+
+    const res = await peek(51000, 'T1');
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain('navigated');
+    // The retry is the shared extraction's, not this route's — proved by the
+    // count rather than by reading the code.
+    expect(captureVisibleTextMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['selector-miss', 'No element matches selector: #nope'],
+    ['bad-selector', 'DOM capture failed: not a valid CSS selector (##x)'],
+    ['not-rendered', 'The element matching #x is not rendered.'],
+    ['unreadable-element', 'The element matching #x could not be read.'],
+  ] as const)('maps a %s failure to 400 — the fix is the caller\'s next argument', async (kind, message) => {
+    const { PageCaptureError } = await import('../src/browser/dom-cleaner.js');
+    captureVisibleTextMock.mockRejectedValue(new PageCaptureError(kind, message));
+
+    const res = await peek(51000, 'T1', '&selector=%23x');
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe(message);
+  });
+
+  it('rejects an unknown format rather than falling back to text', async () => {
+    const res = await peek(51000, 'T1', '&format=html');
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('Unknown format');
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a repeated or empty selector, which would silently widen the read', async () => {
+    expect((await peek(51000, 'T1', '&selector=a&selector=b')).status).toBe(400);
+    expect((await peek(51000, 'T1', '&selector=')).status).toBe(400);
+  });
+
+  it('rejects a non-positive or non-integer max_chars', async () => {
+    expect((await peek(51000, 'T1', '&max_chars=0')).status).toBe(400);
+    expect((await peek(51000, 'T1', '&max_chars=1.5')).status).toBe(400);
+    expect((await peek(51000, 'T1', '&max_chars=lots')).status).toBe(400);
+  });
+
+  it('requires an absolute testFilePath — it is the only thing a project resolves from', async () => {
+    // Without it the capture silently runs under library defaults that differ
+    // from the project's, and a peek would disagree with get_page_content about
+    // the same page with nothing saying why.
+    const base = `${baseUrl}/cdp/browsers/51000/tabs/T1/content`;
+    expect((await fetch(base, { headers: auth })).status).toBe(400);
+    expect(
+      (await fetch(`${base}?testFilePath=.aiui-peek.md`, { headers: auth })).status,
+    ).toBe(400);
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a bad port exactly as its two siblings do', async () => {
+    // Shared with them through `readPortAndTarget`, so the three cannot drift
+    // into accepting different ports for the same browser.
+    expect((await peek('not-a-port', 'T1')).status).toBe(400);
+    expect((await peek(70000, 'T1')).status).toBe(400);
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('is behind the api key', async () => {
+    // Page content is the most sensitive thing this server hands out.
+    expect((await peek(51000, 'T1', '', {})).status).toBe(401);
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a capture the project limit already clipped as truncated', async () => {
+    // The silent-clip trap page-content.md §3 records, on the peek's own route:
+    // `captureDomSnapshot` enforces the limit before this layer sees the
+    // string, so a clipped page arrives looking complete. `availableChars` is
+    // under `max_chars` here, and `truncated` must still be true.
+    captureDomSnapshotMock.mockResolvedValue(
+      '<html><body>Orders</body></html>' +
+        '\n<!-- DOM snapshot truncated — page content exceeds size limit -->',
+    );
+
+    const res = await peek(51000, 'T1', '&format=dom&max_chars=100000');
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.truncated).toBe(true);
+    expect(body.availableChars).toBeLessThan(100000);
+  });
+
+  it('clips to max_chars and says so', async () => {
+    captureVisibleTextMock.mockResolvedValue('x'.repeat(500));
+
+    const body = await (await peek(51000, 'T1', '&max_chars=100')).json();
+
+    expect(body.content).toHaveLength(100);
+    expect(body.truncated).toBe(true);
+    expect(body.returnedChars).toBe(100);
+    expect(body.availableChars).toBe(500);
   });
 });
 

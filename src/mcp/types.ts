@@ -476,6 +476,44 @@ export interface FocusedCdpTab {
   scope?: RootScope;
 }
 
+/**
+ * Address of one tab to read (stories/tab-peek.md).
+ *
+ * No `allowUnowned` sibling, and that is by construction rather than by
+ * omission: `peek_tab` takes no `port`, so only a profile-resolved — therefore
+ * registry-owned — browser can ever be addressed, and mcp-cdp-browser §6's
+ * foreign-port gate is unreachable from here.
+ */
+export interface PeekCdpTabArgs {
+  port: number;
+  targetId: string;
+  /** The synthetic `<root>/.aiui-peek.md`. The only thing the server resolves
+   *  a project root from — and therefore the only thing that makes the capture
+   *  run under the PROJECT's dom limits rather than the library defaults. */
+  testFilePath: string;
+  format?: 'text' | 'dom' | undefined;
+  selector?: string | undefined;
+  maxChars?: number | undefined;
+}
+
+/** The tab as read. `get_page_content`'s body minus `sessionId`/`status` — a
+ *  peek addresses no session and carries no run status to lie with — plus the
+ *  `targetId` it read and the root its settings resolved against. */
+export interface PeekedTab {
+  targetId: string;
+  /** Null when no `aiui.config.json` stood above the synthetic path, so the
+   *  server's own defaults were used. */
+  root: string | null;
+  url: string;
+  title: string;
+  format: 'text' | 'dom';
+  selector: string | null;
+  content: string;
+  truncated: boolean;
+  returnedChars: number;
+  availableChars: number;
+}
+
 export interface GetCdpBrowsersArgs {
   projectRoot: string;
   includeForeign?: boolean;
@@ -568,6 +606,14 @@ export interface ApiClient {
   startCdpBrowser(body: StartCdpBrowserBody, signal?: AbortSignal): Promise<StartedCdpBrowser>;
   closeCdpTab(args: CloseCdpTabArgs, signal?: AbortSignal): Promise<ClosedCdpTab>;
   focusCdpTab(args: FocusCdpTabArgs, signal?: AbortSignal): Promise<FocusedCdpTab>;
+  /**
+   * `GET /cdp/browsers/:port/tabs/:targetId/content` — attach, extract, detach.
+   *
+   * One round-trip and no stream: a peek is a read, so there is nothing to
+   * report progress about. A 404 splits the same way `focusCdpTab`'s does —
+   * a JSON envelope means the tab is gone, a bare body means the route is.
+   */
+  peekCdpTab(args: PeekCdpTabArgs, signal?: AbortSignal): Promise<PeekedTab>;
 }
 
 /**

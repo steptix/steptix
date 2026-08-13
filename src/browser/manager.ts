@@ -1141,6 +1141,18 @@ export interface CdpLaunchOptions {
   port: number;
   /** Raw `cdpTab` string from the test config (parsed internally). */
   tab?: string | undefined;
+  /**
+   * Bring the tab we attached to forward (default true).
+   *
+   * A named, bounded amendment to stories/cdp-tab-focus.md §3, made by
+   * stories/tab-peek.md. That courtesy exists because a run is about to DRIVE
+   * behind the tab the user is looking at; a peek drives nothing and shows
+   * nothing, so raising would only interrupt whatever they were doing.
+   *
+   * Gates the EXISTING-tab arm only. The `new`-tab arm opens a window that
+   * has to appear somewhere, and no caller has asked not to see it.
+   */
+  activate?: boolean | undefined;
 }
 
 /** Per-launch overrides applied on top of `BrowserConfig`. Used by the
@@ -1412,7 +1424,13 @@ async function connectOverCdpSession(
     // watches their carefully arranged cart sit untouched while steps run
     // behind it. Silent `catch` to match both neighbours — a browser that
     // declines to raise a window must not fail an attach.
-    try { await page.bringToFront(); } catch { /* non-fatal */ }
+    //
+    // `activate: false` is the one caller that wants the old asymmetry back
+    // on purpose — a peek reads the tab and shows nothing
+    // (stories/tab-peek.md).
+    if (cdp.activate !== false) {
+      try { await page.bringToFront(); } catch { /* non-fatal */ }
+    }
     logger.info(`CDP: attached to existing tab (${page.url()})`);
   }
 

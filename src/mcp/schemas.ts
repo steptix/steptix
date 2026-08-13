@@ -382,6 +382,131 @@ export const runErrandInput = toolSchema({
     ),
 });
 
+// ---------------------------------------------------------------------------
+// Tab peek (stories/tab-peek.md §Tool surface)
+//
+// Deliberately absent, each one a decision: `steps` (a peek cannot act —
+// wanting both means run_errand, whose steps can capture), `keep_open`
+// (nothing opens), `format: "screenshot"` (an open question, not a rider on
+// v1), `port` (which is what makes the foreign-browser gate unreachable by
+// construction), and any config bundle.
+// ---------------------------------------------------------------------------
+
+export const peekTabInput = toolSchema({
+  tab: z
+    .string()
+    .min(1)
+    .describe(
+      'Which open tab to read. `targetId:<id>` from list_cdp_browsers is the ' +
+        'exact form and the one to prefer. Otherwise `title~<substring>`, ' +
+        '`url~<substring>`, or a bare string — matched case-insensitively as a ' +
+        'substring of the tab\'s title AND of its url. Plain substrings only: no ' +
+        'globs, no regex. Matching a tab that does not exist, or several tabs, is ' +
+        'refused with the candidates named — so a rough name is safe to try.',
+    ),
+  format: z
+    .enum(['text', 'dom'])
+    .optional()
+    .describe(
+      '`text` (default) — the page\'s visible text, for what it says. `dom` — ' +
+        'the cleaned DOM, for picking a selector to act on. `text` is far ' +
+        'smaller; reach for `dom` only when you need element structure. There is ' +
+        'no screenshot here — use get_page_content on a session for that.',
+    ),
+  selector: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'CSS selector to read instead of the whole page. **This is the right ' +
+        'way to handle a truncated result** — narrowing beats raising ' +
+        'max_chars. A selector matching nothing is an error, not empty text.',
+    ),
+  max_chars: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      'Cap on returned characters (default 20000). Over-limit content comes ' +
+        'back truncated and flagged, never silently clipped.',
+    ),
+  profile: z
+    .string()
+    .optional()
+    .describe(
+      'Profile name of the CDP browser holding the tab. Defaults to "default", ' +
+        'which is the one start_cdp_browser makes unless told otherwise. Call ' +
+        'list_cdp_browsers if unsure which exist.',
+    ),
+  engine: z
+    .enum(['chrome', 'edge'])
+    .optional()
+    .describe(
+      'Disambiguates `profile` when Chrome and Edge are both running the ' +
+        'same profile name. Only meaningful alongside `profile`.',
+    ),
+  scope: cdpScopeArg,
+  project_root: projectRoot,
+  session_id: z
+    .string()
+    .optional()
+    .describe(
+      'DO NOT PASS THIS — a peek reads a tab, not a session, and a call carrying ' +
+        'it is refused before anything touches the browser. It is declared only ' +
+        'so this can be said: to read the page a run_steps session is sitting on, ' +
+        'that is get_page_content with the session_id.',
+    ),
+});
+
+/**
+ * A FRESH declaration, not `getPageContentOutput.omit(...).extend(...)`.
+ *
+ * Two reasons, both measured rather than stylistic. Derivation loses the
+ * `.meta({$schema: undefined})` suppression `toolSchema` applies — the emitted
+ * body would regain a draft-07 `$schema`, `mcp-schema-dialect.test.ts` would
+ * fail, and the opencode client would reject every result. And it would drag
+ * in the screenshot-only `format` value plus field descriptions written for a
+ * tool that answers screenshots, on a tool that refuses them.
+ */
+export const peekTabOutput = toolSchema({
+  targetId: z.string().describe('The tab that was read, exactly as list_cdp_browsers reports it.'),
+  url: z.string(),
+  title: z.string(),
+  format: z.enum(['text', 'dom']),
+  selector: z.string().nullable(),
+  content: z
+    .string()
+    .describe(
+      'The page text or DOM, as it was at the moment of the read. An empty ' +
+        'value never means "the read failed": that is an error instead.',
+    ),
+  truncated: z
+    .boolean()
+    .describe(
+      'True when you did NOT receive the whole page — either it exceeded ' +
+        'max_chars, or the capture itself hit the project\'s DOM size limit. ' +
+        'Narrow with `selector` to see the rest.',
+    ),
+  returnedChars: z.number().describe('Characters returned.'),
+  availableChars: z
+    .number()
+    .describe(
+      'Characters captured before truncation. A FLOOR, not the page\'s true ' +
+        'size: for format "dom" the capture is itself capped by the project\'s ' +
+        'limit, so a large page reports the cap rather than its real length. ' +
+        'Trust `truncated`, not the difference between these two numbers.',
+    ),
+  root: z
+    .string()
+    .describe('The root whose settings the read ran under — dom limits and noise reduction.'),
+  scope: rootScope.describe(
+    'Which root that was. "user" means no project resolved and the peek ran ' +
+      'against the machine-wide user root — if you expected a project, its ' +
+      'aiui.config.json did not resolve; say so rather than reporting a normal read.',
+  ),
+});
+
 export const getRunSettingsInput = toolSchema({
   project_root: projectRoot,
   session_id: z
