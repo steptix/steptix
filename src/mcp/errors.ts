@@ -579,12 +579,17 @@ export function cdpFocusRouteMissing(baseUrl: string): McpToolError {
 // ---------------------------------------------------------------------------
 
 /**
- * `run_errand` was called with a `session_id`.
+ * `run_errand` was called with a NON-EMPTY `session_id`.
  *
  * The argument is declared ONLY so this refusal can exist. A bare Zod schema
  * would strip an undeclared key in silence — the wrong-door silence errands
  * exist to kill — and an SDK schema throw carries only generic text no model
  * learns from.
+ *
+ * An empty/whitespace `session_id` never reaches this builder: some provider
+ * layers serialize every declared optional as `""`, so a model told to "call
+ * again without session_id" physically cannot — the handler treats `""` as
+ * absent instead (measured live, OpenCode + gpt-5.6-luna, 2026-08-13).
  */
 export function errandsHaveNoSessions(sessionId: string): McpToolError {
   return preflightError(

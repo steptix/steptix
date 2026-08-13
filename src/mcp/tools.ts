@@ -1444,7 +1444,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         baseUrl = assembled.project.serverUrl;
 
         const sessionId =
-          args.session_id ??
+          (args.session_id?.trim() ? args.session_id : undefined) ??
           defaultSessionId('steps', assembled.project.projectRoot, assembled.request.testFilePath ?? '');
         checkSessionOwnership(sessionId, args.allow_foreign_session === true);
 
@@ -1499,7 +1499,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         baseUrl = assembled.project.serverUrl;
 
         const sessionId =
-          args.session_id ??
+          (args.session_id?.trim() ? args.session_id : undefined) ??
           defaultSessionId('file', assembled.project.projectRoot, assembled.request.testFilePath ?? args.path);
         checkSessionOwnership(sessionId, args.allow_foreign_session === true);
 
@@ -1533,7 +1533,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       // started, a registry is read or a browser is touched. Neither needs a
       // project to decide, and the story's "refused before any browser work"
       // is a property of where they sit, not of what they say.
-      if (args.session_id !== undefined) {
+      //
+      // The refusal fires only on a NON-EMPTY session_id. Some provider layers
+      // serialize every declared optional as "" — the model cannot omit the
+      // key, so refusing "" strands it in a loop the redirect sentence cannot
+      // break (measured live, OpenCode + gpt-5.6-luna, 2026-08-13). An empty
+      // id names no session, so there is no wrong door to redirect from.
+      if (args.session_id !== undefined && args.session_id.trim() !== '') {
         return errorResult(errandsHaveNoSessions(args.session_id));
       }
       const codeSteps = args.steps.filter((step) => CODE_STEP_PATTERN.test(step));
