@@ -353,6 +353,38 @@ inherited by the peek's attach exactly as by the errand's — this
 paragraph is that measurement's record in stories/, and the
 probe-and-name diagnostics are separate follow-up work.
 
+## Live pass record
+
+**2026-08-13, first live pass (per the build order: live before review).**
+Sixteen of sixteen mechanic checks passed through the real chain — real
+stdio MCP server, auto-started API server, real Chrome: peek by title
+(content, url/title/targetId, root+scope, honest truncation flags),
+`format: "dom"` + `selector` narrowing, `max_chars` clipping with
+`truncated: true`, the zero-match refusal listing the open tabs, the
+`session_id` refusal naming `get_page_content`, and `list_sessions`
+identical before and after. Two bonus proofs the plan did not schedule:
+
+- **The route-missing arm fired live, verbatim.** Aimed at the
+  developer's long-running server (a build predating this story), the
+  peek answered *"no tab-content route… running a build that predates
+  this tool. The tab is fine — nothing was read"* with the rebuild
+  remedy — item (3)'s split working against a genuinely stale server,
+  not a stub.
+- **A real tab read end to end**: the user-root Chrome (relaunched into
+  its existing profile), an errand staging `openrouter.ai`, then the
+  peek returning the page's faithful text. The profile's cookies had
+  lapsed, so the page was the sign-in page — the SIGNED-IN read of the
+  developer's daily browser waits on their live server being rebuilt to
+  a peek-capable dist, and the visible no-raise half of item (5) waits
+  on their eyes.
+
+One live observation for the scope-echo debate §Detach records: the
+receipt's `scope: "project"` beside a summary line reading `chrome
+"default" (user root)` is per-spec (settings scope in the field, browser
+named in the summary) but visibly confusable — first live use noted it
+within minutes. If it keeps confusing, a `browserScope` field is the
+candidate, as a follow-up rather than a churn now.
+
 ## Open questions
 
 - **`format: "screenshot"`.** "Show me the tab" is a real ask, and
