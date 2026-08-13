@@ -11,7 +11,8 @@
 > noise-reduction, iframe-depth and char-limit settings — not the library
 > defaults, which differ (100k vs 300k clip) — `selector` narrows either
 > format to one element, and `max_chars` clips with `truncated: true`,
-> including the silent-clip trap [page-content](page-content.md) §3
+> including the silent-clip trap [page-content](page-content.md)'s
+> adversarial-review defect 2
 > records: a page clipped by the project's `domSnapshotCharLimit` before
 > this layer sees it still reports `truncated: true`; (3) a `tab`
 > matching nothing refuses listing the browser's open tabs, one matching
@@ -28,7 +29,7 @@
 > peek proceeds while an errand or a session batch is driving that same
 > tab — reads coexist with drivers (the two-client evidence
 > [errands](errands.md) §The wheel measured on 2026-08-12, reconciled
-> with the dialog-guard overlap in §Detach) — INCLUDING when the driver
+> with the dialog-guard overlap in this story's own Detach bullet) — INCLUDING when the driver
 > is a FOREIGN session (a non-`mcp:` id bound to that tab at the
 > real-app harness): the peek succeeds, which is §Disclosure posture's
 > amendment asserted rather than argued — and a peek never takes,
@@ -161,7 +162,7 @@ A peek is: **attach → extract → detach**, in one request.
   swallows the loser's already-handled rejection — so a stolen dialog
   is answered exactly as it would have been, and the race has no
   observable outcome. The `dialogGuarded` WeakSet cannot dedupe across
-  two connections (it keys on each process's own context object), and
+  two connections (it keys on each connection's own context object), and
   does not need to. The response carries `content`, `format`,
   `selector`, `truncated`, `returnedChars`, `availableChars`, the tab's
   `url`, `title` and `targetId`, and the `root` + `scope` the peek's
@@ -315,7 +316,14 @@ New, each named because round 1 caught them being assumed:
   answered by a peek route-missing builder beside `cdpFocusRouteMissing`
   saying "rebuild dist/", never "your tab is gone" — the split
   cdp-tab-focus §6 locked and the PR #50 redirect already honours twice.
-- The matching `ApiClient` method (one round-trip, no streaming).
+- The matching `ApiClient` method (one round-trip, no streaming) —
+  carrying `focusCdpTab`'s INLINE JSON-envelope check rather than bare
+  `assertOk`: the `ApiRouteNotFoundError` split lives per client
+  method, and a method that skips the check turns a stale server's
+  Express 404 into the tab-gone refusal. Pinned in
+  `tests/mcp-api-client.test.ts` beside the focus rows. (The PR #50
+  redirect honours the split at the HANDLER layer only — its own client
+  method cannot yet produce the error; a latent gap recorded here.)
 - Peek-specific refusal builders in `src/mcp/errors.ts` —
   `peekTabNotFound`, `peekTabAmbiguous`, `peekSessionsAreForGetPageContent`
   — because the errand builders' prose names driving and borrowing
