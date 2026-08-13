@@ -497,11 +497,6 @@ export interface SessionsHoldingTargets {
   complete: boolean;
 }
 
-/** Re-exported from their new home so every existing importer of the page-read
- *  vocabulary keeps working: the reading itself moved to `page-capture.ts`
- *  when the peek route became its second caller (stories/tab-peek.md). */
-export type { PageContentOptions, PageContentFormat } from './page-capture.js';
-
 /** The page as read by a SESSION: the capture, plus the two facts only a
  *  session has. */
 export interface PageContent extends CapturedPageContent {

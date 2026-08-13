@@ -832,8 +832,9 @@ export function cdpTabHeldByErrand(
 // ---------------------------------------------------------------------------
 
 /**
- * `peek_tab`'s `tab` matched nothing — or matched a tab that was gone by the
- * time the server reached for it.
+ * `peek_tab`'s `tab` matched nothing in the listing — the PRE-FLIGHT miss, and
+ * only that one. A tab that was listed and has since closed is
+ * `peekTabGoneNow`, for the reasons recorded there.
  *
  * Answered with the browser's tab list, so the caller can re-name one from
  * what is actually open rather than guessing again. This is the refusal that
@@ -854,6 +855,42 @@ export function peekTabNotFound(
           '`targetId:<id>` for the exact tab.'
         : 'That browser reports no tabs at all. Call list_cdp_browsers to see ' +
           'what is running, and check the profile is the one you meant.'),
+  );
+}
+
+/**
+ * `peek_tab` named a tab that WAS in our listing and is not in the browser any
+ * more — the server's own JSON-envelope 404, raised in the window between the
+ * two reads.
+ *
+ * Split from `peekTabNotFound` because those words describe the wrong event
+ * twice over. "No tab matches" is false — one did, a moment ago — and the list
+ * this refusal can offer is our listing MINUS the tab the server has just
+ * proved stale, which the caller has already filtered out. In a one-tab
+ * browser that filtering empties the list, and `peekTabNotFound`'s zero-tab
+ * arm then claims the browser "reports no tabs at all" and sends the caller to
+ * check they named the right profile: a remedy for a mistake nobody made,
+ * about a browser sitting there with a window open.
+ *
+ * The lead is `closeCdpTab`'s vocabulary for the identical event
+ * (src/browser/cdp-registry.ts) — it was there when we looked, it is not there
+ * now, something else closed it.
+ */
+export function peekTabGoneNow(
+  spec: string,
+  browser: string,
+  remaining: readonly CdpTab[],
+): McpToolError {
+  return preflightError(
+    `"${spec}" was open in ${browser} when we listed it and the browser no longer ` +
+      'has it — something closed it in between. Nothing was read, and nothing was ' +
+      'touched.\n\n' +
+      (remaining.length > 0
+        ? `Still open:\n${remaining.map((t) => `  ${describeTab(t)}`).join('\n')}\n\n` +
+          'Name one of these if one of them is what you meant — a distinctive part ' +
+          'of its title or url, or `targetId:<id>` for the exact tab.'
+        : 'Nothing else is open in that browser now, so there is nothing to read ' +
+          'instead. Call list_cdp_browsers to see what is running.'),
   );
 }
 

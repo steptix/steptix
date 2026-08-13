@@ -39,6 +39,7 @@ import {
   peekRouteMissing,
   peekSessionsAreForGetPageContent,
   peekTabAmbiguous,
+  peekTabGoneNow,
   peekTabNotFound,
   preflightError,
   unauthorized,
@@ -1141,8 +1142,14 @@ async function peekTab(
       // from the candidate list the refusal offers, because the server has just
       // proved that entry stale — re-offering it would invite the same failed
       // call again.
+      //
+      // A DIFFERENT refusal from the pre-flight miss, not the same one over a
+      // shorter list: the caller named a tab that was there, and the list they
+      // are handed back is one this arm emptied itself — which in a one-tab
+      // browser turns "no tab matches" into "that browser reports no tabs at
+      // all", both halves false (see `peekTabGoneNow`).
       return errorResult(
-        peekTabNotFound(
+        peekTabGoneNow(
           args.tab,
           where,
           tabs.filter((tab) => tab.targetId !== target.targetId),

@@ -232,6 +232,45 @@ describe('CDP attach (stories/cdp-tab-focus.md §3)', () => {
     expect(opened[0]!.bringToFront).toHaveBeenCalledTimes(1);
   });
 
+  it('closes the connection when the attach fails, instead of leaking it for the life of the process', async () => {
+    // Nobody is left holding a session that never returned, so nobody ever
+    // calls `closeBrowser` on it — and the connection does not sit there
+    // harmlessly: it holds the context-wide dialog guard, which answers
+    // `alert`/`confirm`/`prompt`/`beforeunload` on EVERY tab of the user's
+    // browser, plus a `page` listener, until the server process exits.
+    //
+    // Deterministic rather than a race: a tab living in a second
+    // BrowserContext (an incognito window) is one `list_cdp_browsers` really
+    // does show and `contexts[0]` genuinely lacks — the same failure the
+    // close race produces, without the timing.
+    const shop = fakePage('https://shop.example/');
+    const { browser } = fakeBrowser([shop]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    await expect(
+      launchBrowser(baseConfig(), { port: CDP_PORT, tab: 'url~/cart' }),
+    ).rejects.toThrow(/no tab matches/);
+
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the attach failure through unchanged — the teardown must not become the diagnosis', async () => {
+    // The control for the test above, and not a hypothetical: severing a
+    // connection whose far end has already gone is exactly the case that
+    // throws. A teardown error that replaced the original would leave the
+    // caller holding "websocket already gone" and no idea which tab could not
+    // be found.
+    const shop = fakePage('https://shop.example/');
+    const { browser } = fakeBrowser([shop]);
+    browser.close.mockRejectedValue(new Error('websocket already gone'));
+    connectOverCDP.mockResolvedValue(browser);
+
+    await expect(
+      launchBrowser(baseConfig(), { port: CDP_PORT, tab: 'url~/cart' }),
+    ).rejects.toThrow(/no tab matches url substring "\/cart"/);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
   it('records the session as headed — a CDP browser is one a human is looking at', async () => {
     // Read by the §4 gate. `headed: false` is one of the settings
     // `incompatibleCdpConfig` already reports as ignored in this mode, so the

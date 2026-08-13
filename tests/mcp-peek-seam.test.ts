@@ -9,6 +9,7 @@ import {
   peekRouteMissing,
   peekSessionsAreForGetPageContent,
   peekTabAmbiguous,
+  peekTabGoneNow,
   peekTabNotFound,
 } from '../src/mcp/errors.js';
 import { ApiHttpError, ApiRouteNotFoundError } from '../src/mcp/types.js';
@@ -589,17 +590,54 @@ describe('the two readings of a 404', () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toBe(
       errorText(
-        peekTabNotFound(
+        peekTabGoneNow(
           'targetId:T-CART',
           THIS_BROWSER,
           TABS.filter((t) => t.targetId !== 'T-CART'),
         ),
       ),
     );
+    // Its OWN refusal, not the pre-flight miss over a shorter list. "No tab
+    // matches" is false here — one did, a moment ago — and a caller told they
+    // named nothing goes hunting for a better name instead of re-reading a
+    // browser that moved under them.
+    expect(text(result)).toContain('when we listed it');
+    expect(text(result)).toContain('closed it in between');
+    expect(text(result)).not.toContain('so there is nothing to read');
+    // The three still open are named, so the caller can re-aim without a
+    // second listing.
+    for (const still of TABS.filter((t) => t.targetId !== 'T-CART')) {
+      expect(text(result)).toContain(still.targetId);
+    }
     // The gone tab is echoed once, as the spec the caller passed — and NOT as
     // a candidate to try again.
     expect(text(result)).not.toContain('(targetId: T-CART)');
     expect(text(result)).not.toContain('rebuild');
+  });
+
+  it('does not tell a one-tab browser it "reports no tabs at all"', async () => {
+    // The list this arm hands back is one it emptied ITSELF, by dropping the
+    // row the server just proved stale. With a single tab open that leaves
+    // nothing — and the pre-flight refusal's zero-tab arm then reports the
+    // browser as having no tabs and tells the caller to check they named the
+    // right profile: two false claims about a browser sitting there with a
+    // window open, and a remedy for a mistake nobody made.
+    const h = await connect({
+      running: [{ ...RUNNING[0]!, tabs: [TABS[2]!] }],
+      throws: new ApiHttpError(404, 'No tab with target id T-CART is open in the browser on port 51000.'),
+    });
+
+    const result = await peek(h);
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe(errorText(peekTabGoneNow('targetId:T-CART', THIS_BROWSER, [])));
+    expect(text(result)).not.toContain('reports no tabs at all');
+    expect(text(result)).not.toContain('check the profile');
+    // It still says what happened and what to call next — an empty candidate
+    // list is not a reason to say less.
+    expect(text(result)).toContain('closed it in between');
+    expect(text(result)).toContain('Nothing else is open in that browser now');
+    expect(text(result)).toContain('list_cdp_browsers');
   });
 
   it('leaves every other status to the generic error path', async () => {

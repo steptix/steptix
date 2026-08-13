@@ -16,7 +16,7 @@ import {
   type StartResult,
 } from '../browser/cdp-registry.js';
 import { discoverCdpPorts, listPageTabs } from '../browser/cdp-discovery.js';
-import { closeBrowser, launchBrowser } from '../browser/manager.js';
+import { CdpTabNotFoundError, closeBrowser, launchBrowser } from '../browser/manager.js';
 import { userRootDir } from '../env/user-root.js';
 import fs from 'node:fs';
 import {
@@ -99,6 +99,24 @@ function readContentQuery(req: Request, res: Response): PageContentOptions | nul
   }
 
   return { format, selector, maxChars };
+}
+
+/**
+ * The gone-tab refusal the peek route answers with, from either of the two
+ * places that can discover it (stories/tab-peek.md).
+ *
+ * One text, built once, because the MCP side reads a JSON-envelope 404 as "the
+ * tab is gone" and a BARE 404 as "the server predates this route", and the two
+ * remedies are opposites (stories/cdp-tab-focus.md §6). The pre-check and the
+ * attach are a moment apart; a second wording for the later one would be a
+ * second story for the same event.
+ */
+function goneTabMessage(port: number, targetId: string): string {
+  return (
+    `No tab with target id ${targetId} is open in the browser on port ${port}.\n\n` +
+    'Either it has already been closed, or the id belongs to a different browser.\n' +
+    'Call list_cdp_browsers for the tabs open right now.'
+  );
 }
 
 /**
@@ -1447,12 +1465,7 @@ export function createApiServer(
           return;
         }
         if (!tabs.some((tab) => tab.targetId === targetId)) {
-          res.status(statusForCdpFailure('not_found')).json({
-            error:
-              `No tab with target id ${targetId} is open in the browser on port ${port}.\n\n` +
-              'Either it has already been closed, or the id belongs to a different browser.\n' +
-              'Call list_cdp_browsers for the tabs open right now.',
-          });
+          res.status(statusForCdpFailure('not_found')).json({ error: goneTabMessage(port, targetId) });
           return;
         }
 
@@ -1499,6 +1512,18 @@ export function createApiServer(
         });
       } catch (err) {
         if (respondToPageCaptureError(err, res)) return;
+        // The other half of the same 404, and the reason the pre-check above
+        // is not the whole answer: it reads the browser's tab list a moment
+        // BEFORE the attach, and a tab closed inside that window reaches
+        // `resolveCdpTab` instead. Left to `next`, that arrives as a 500
+        // carrying `CDP: no tab matches targetId "…"` — internal prose the MCP
+        // side can only read as a server fault, sending a caller to rebuild or
+        // retry when the true answer is "that tab is gone, here is what is
+        // open". Same envelope, same status, same words as the pre-check.
+        if (err instanceof CdpTabNotFoundError) {
+          res.status(statusForCdpFailure('not_found')).json({ error: goneTabMessage(port, targetId) });
+          return;
+        }
         next(err);
       }
     },

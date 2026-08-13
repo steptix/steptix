@@ -1003,9 +1003,31 @@ export function parseCdpTabSpec(raw: string | undefined): CdpTabSpec {
 }
 
 /**
+ * A `CdpTabSpec` that matched no open tab.
+ *
+ * A named type rather than a bare `Error` because one caller has to tell this
+ * failure apart from every other way an attach can fail: the peek route
+ * (stories/tab-peek.md) pre-checks the tab list, and a tab that closes inside
+ * the window between that check and the attach must still answer the
+ * gone-tab 404 rather than a 500 full of internal prose. Matching on the
+ * message would tie that answer to this file's wording.
+ *
+ * Only a spec that resolved to nothing raises it. A malformed spec, or a
+ * context that cannot answer a `targetId:` query, is a different failure and
+ * stays a plain `Error`.
+ */
+export class CdpTabNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CdpTabNotFoundError';
+  }
+}
+
+/**
  * Resolve a `CdpTabSpec` against a list of pages to a specific Page (or null
- * for `new`, meaning the caller should open a fresh tab). Throws with a clear
- * error listing open tabs when nothing matches.
+ * for `new`, meaning the caller should open a fresh tab). Throws
+ * `CdpTabNotFoundError` with a clear error listing open tabs when nothing
+ * matches.
  */
 export async function resolveCdpTab(
   pages: ReadonlyArray<Page>,
@@ -1017,7 +1039,7 @@ export async function resolveCdpTab(
   if (spec.kind === 'index') {
     const p = pages[spec.index];
     if (!p) {
-      throw new Error(
+      throw new CdpTabNotFoundError(
         `CDP: no tab at index ${spec.index}. ${await formatTabList(pages)}`,
       );
     }
@@ -1028,7 +1050,7 @@ export async function resolveCdpTab(
     const needle = spec.value.toLowerCase();
     const match = pages.find((p) => p.url().toLowerCase().includes(needle));
     if (!match) {
-      throw new Error(
+      throw new CdpTabNotFoundError(
         `CDP: no tab matches url substring "${spec.value}". ${await formatTabList(pages)}`,
       );
     }
@@ -1042,7 +1064,7 @@ export async function resolveCdpTab(
       try { title = await p.title(); } catch { /* tab may have closed */ }
       if (title.toLowerCase().includes(needle)) return p;
     }
-    throw new Error(
+    throw new CdpTabNotFoundError(
       `CDP: no tab matches title substring "${spec.value}". ${await formatTabList(pages)}`,
     );
   }
@@ -1067,7 +1089,7 @@ export async function resolveCdpTab(
       } catch { /* tab may have closed or CDP send failed; skip */ }
       if (id && id === spec.value) return p;
     }
-    throw new Error(
+    throw new CdpTabNotFoundError(
       `CDP: no tab matches targetId "${spec.value}". ${await formatTabList(pages)}`,
     );
   }
@@ -1079,7 +1101,7 @@ export async function resolveCdpTab(
   if (spec.kind === 'active') {
     const candidate = pages.find((p) => !p.url().startsWith('devtools://'));
     if (!candidate) {
-      throw new Error(`CDP: no active tab found. ${await formatTabList(pages)}`);
+      throw new CdpTabNotFoundError(`CDP: no active tab found. ${await formatTabList(pages)}`);
     }
     return candidate;
   }
@@ -1380,87 +1402,106 @@ async function connectOverCdpSession(
   logger.info(`Connecting to Chrome over CDP on port ${cdp.port}`);
   const browser = await chromium.connectOverCDP(`http://localhost:${cdp.port}`);
 
-  // The default context exposes the user's profile (cookies, extensions, etc.)
-  const contexts = browser.contexts();
-  const context = contexts[0];
-  if (!context) {
-    await browser.close().catch(() => {});
-    throw new Error(
-      `CDP: connected to Chrome on port ${cdp.port} but it has no contexts. ` +
-      `This is unexpected — try restarting Chrome.`,
-    );
-  }
-
-  // Before any tab is touched. This context is the user's whole browser, so
-  // the guard covers their pre-existing tabs too — which is the point: a
-  // dialog on a tab we deliberately ignore could otherwise kill the server
-  // (issues/047).
-  installDialogGuard(context);
-
-  const preExistingPages = new Set<Page>(context.pages());
-  let page: Page;
-  let openedByUs = false;
-
-  if (tabSpec.kind === 'new') {
-    page = await context.newPage();
-    openedByUs = true;
-    // Match the headed-launch path: pull the window forward so the user sees
-    // it on the active monitor instead of having to click the taskbar icon.
-    try { await page.bringToFront(); } catch { /* non-fatal */ }
-    logger.info(`CDP: opened new tab`);
-  } else {
-    const existing = context.pages();
-    const resolved = await resolveCdpTab(existing, tabSpec);
-    if (!resolved) {
-      // Should be impossible — non-`new` specs return a Page or throw.
-      throw new Error(`CDP: tab resolution returned null for spec ${tabSpec.kind}`);
+  // Everything after the connect is inside this `try`, and the reason is the
+  // websocket above: a failure between here and the `return` leaves NOBODY
+  // holding the session, so nobody ever calls `closeBrowser` on it. The
+  // connection is not idle while it leaks — it holds the context-wide dialog
+  // guard (which answers dialogs on every tab of the user's browser) and a
+  // `page` listener, for the life of the server process. `resolveCdpTab`
+  // throwing is the reachable case, and it is reachable two ways: a second
+  // BrowserContext (an incognito window) holding the tab the caller named, so
+  // `contexts[0]` genuinely lacks it, and the close race between a listing and
+  // an attach.
+  //
+  // `close()` on the way out is a DISCONNECT here, not a kill: Playwright
+  // severs a CDP connection it did not launch. The swallow keeps the original
+  // failure as the one the caller sees — a teardown error on top of it would
+  // replace the diagnosis with noise.
+  try {
+    // The default context exposes the user's profile (cookies, extensions, etc.)
+    const contexts = browser.contexts();
+    const context = contexts[0];
+    if (!context) {
+      throw new Error(
+        `CDP: connected to Chrome on port ${cdp.port} but it has no contexts. ` +
+        `This is unexpected — try restarting Chrome.`,
+      );
     }
-    page = resolved;
-    // Don't ignore the resolved tab — it's our main page. Anything else
-    // pre-existing should be ignored.
-    preExistingPages.delete(page);
-    // Same call its `new`-tab sibling makes a few lines up, and the asymmetry
-    // had no defence: a user who names the tab they want the run to use then
-    // watches their carefully arranged cart sit untouched while steps run
-    // behind it. Silent `catch` to match both neighbours — a browser that
-    // declines to raise a window must not fail an attach.
-    //
-    // `activate: false` is the one caller that wants the old asymmetry back
-    // on purpose — a peek reads the tab and shows nothing
-    // (stories/tab-peek.md).
-    if (cdp.activate !== false) {
+
+    // Before any tab is touched. This context is the user's whole browser, so
+    // the guard covers their pre-existing tabs too — which is the point: a
+    // dialog on a tab we deliberately ignore could otherwise kill the server
+    // (issues/047).
+    installDialogGuard(context);
+
+    const preExistingPages = new Set<Page>(context.pages());
+    let page: Page;
+    let openedByUs = false;
+
+    if (tabSpec.kind === 'new') {
+      page = await context.newPage();
+      openedByUs = true;
+      // Match the headed-launch path: pull the window forward so the user sees
+      // it on the active monitor instead of having to click the taskbar icon.
       try { await page.bringToFront(); } catch { /* non-fatal */ }
+      logger.info(`CDP: opened new tab`);
+    } else {
+      const existing = context.pages();
+      const resolved = await resolveCdpTab(existing, tabSpec);
+      if (!resolved) {
+        // Should be impossible — non-`new` specs return a Page or throw.
+        throw new Error(`CDP: tab resolution returned null for spec ${tabSpec.kind}`);
+      }
+      page = resolved;
+      // Don't ignore the resolved tab — it's our main page. Anything else
+      // pre-existing should be ignored.
+      preExistingPages.delete(page);
+      // Same call its `new`-tab sibling makes a few lines up, and the asymmetry
+      // had no defence: a user who names the tab they want the run to use then
+      // watches their carefully arranged cart sit untouched while steps run
+      // behind it. Silent `catch` to match both neighbours — a browser that
+      // declines to raise a window must not fail an attach.
+      //
+      // `activate: false` is the one caller that wants the old asymmetry back
+      // on purpose — a peek reads the tab and shows nothing
+      // (stories/tab-peek.md).
+      if (cdp.activate !== false) {
+        try { await page.bringToFront(); } catch { /* non-fatal */ }
+      }
+      logger.info(`CDP: attached to existing tab (${page.url()})`);
     }
-    logger.info(`CDP: attached to existing tab (${page.url()})`);
+
+    const pageTracker = new PageTracker(page, preExistingPages);
+
+    context.on('page', async (newPage) => {
+      const label = pageTracker.addPage(newPage);
+      if (label === null) return;
+      try {
+        await newPage.waitForLoadState('domcontentloaded');
+        logger.info(`Page ${label} loaded: ${newPage.url()}`);
+      } catch {
+        logger.debug(`Page ${label} closed before load completed`);
+      }
+    });
+
+    logger.debug(`CDP browser version: ${browser.version()}`);
+
+    return {
+      browser,
+      context,
+      page,
+      pageTracker,
+      cdp: true,
+      cdpTabOpenedByUs: openedByUs,
+      // Not read off `config`: a CDP browser is one a human started and is
+      // looking at, and `incompatibleCdpConfig` already reports `headed: false`
+      // as one of the settings this mode ignores.
+      headed: true,
+    };
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
   }
-
-  const pageTracker = new PageTracker(page, preExistingPages);
-
-  context.on('page', async (newPage) => {
-    const label = pageTracker.addPage(newPage);
-    if (label === null) return;
-    try {
-      await newPage.waitForLoadState('domcontentloaded');
-      logger.info(`Page ${label} loaded: ${newPage.url()}`);
-    } catch {
-      logger.debug(`Page ${label} closed before load completed`);
-    }
-  });
-
-  logger.debug(`CDP browser version: ${browser.version()}`);
-
-  return {
-    browser,
-    context,
-    page,
-    pageTracker,
-    cdp: true,
-    cdpTabOpenedByUs: openedByUs,
-    // Not read off `config`: a CDP browser is one a human started and is
-    // looking at, and `incompatibleCdpConfig` already reports `headed: false`
-    // as one of the settings this mode ignores.
-    headed: true,
-  };
 }
 
 /**

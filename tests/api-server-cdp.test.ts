@@ -50,9 +50,16 @@ vi.mock('../src/browser/cdp-discovery.js', async (importOriginal) => {
 // for so constructing the app is cheap and launches nothing. `launchBrowser`
 // and `closeBrowser` are ALSO the peek route's attach and detach, so they are
 // controllable per test rather than bare `vi.fn()`s.
-vi.mock('../src/browser/manager.js', () => ({
+vi.mock('../src/browser/manager.js', async (importOriginal) => ({
   launchBrowser: (...args: unknown[]) => launchBrowserMock(...args),
   closeBrowser: (...args: unknown[]) => closeBrowserMock(...args),
+  // REAL, the same way the `dom-cleaner` mock below keeps `PageCaptureError`
+  // real: the peek route tells a tab that closed under it from every other
+  // attach failure with an `instanceof`, so a class invented here would let
+  // both sides of that mapping agree on a fake. Importing the module launches
+  // nothing — `manager.ts` has no module-scope side effects.
+  CdpTabNotFoundError: (await importOriginal<typeof import('../src/browser/manager.js')>())
+    .CdpTabNotFoundError,
   PageTracker: vi.fn(),
   BrowserTracker: class {
     getActive = vi.fn();
@@ -1184,6 +1191,49 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     expect(after).toEqual(before);
   });
 
+  it('neither blocks on the errand turn lock nor takes one of its own (§No lock)', async () => {
+    // Item (4)'s last clause, and until now nothing could fail on it: a peek
+    // that quietly took the wheel and gave it back survives every other
+    // assertion in this file. Both directions, against the app's OWN
+    // `errandLocks` — the registry the errand route and the close guard read,
+    // so a peek that consulted a second private one would be caught too.
+
+    // Direction 1: a tab an errand is driving is still readable. Reads coexist
+    // with drivers; the lock exists for a second DRIVER.
+    const hold = { errandId: 'errand-peek-coexists', tabRole: 'borrowed' as const };
+    expect(errandLocks.acquire(51000, 'T1', hold)).toBeNull();
+    try {
+      expect((await peek(51000, 'T1')).status).toBe(200);
+      // And the errand still holds its tab afterwards: a peek that took the
+      // hold, or released it on the way out, would hand the wheel to whoever
+      // asked next while the errand was still mid-run behind it.
+      expect(errandLocks.holder(51000, 'T1')).toEqual(hold);
+    } finally {
+      errandLocks.release('errand-peek-coexists');
+    }
+
+    // Direction 2, read from INSIDE the extraction the way item (1)'s
+    // runsInFlight check is — a lock taken and released around the read is
+    // invisible from outside the request, and is exactly what an errand
+    // arriving mid-peek would be refused by.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let duringExtraction: unknown = 'never read';
+    captureVisibleTextMock.mockImplementation(async () => {
+      duringExtraction = errandLocks.holder(51000, 'T1');
+      await gate;
+      return PAGE_TEXT;
+    });
+
+    const inflight = peek(51000, 'T1');
+    await vi.waitFor(() => expect(duringExtraction).not.toBe('never read'));
+    release();
+    expect((await inflight).status).toBe(200);
+
+    expect(duringExtraction).toBeNull();
+    expect(errandLocks.holder(51000, 'T1')).toBeNull();
+  });
+
   it('answers a gone tab with a JSON-envelope 404, before it attaches to anything', async () => {
     // The named device: the pre-check via `listPageTabs`, the way `focusCdpTab`
     // produces `kind: 'not_found'`. A bare non-JSON 404 means the ROUTE is
@@ -1202,6 +1252,50 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     // Nothing was attached to, so nothing was detached from either.
     expect(launchBrowserMock).not.toHaveBeenCalled();
     expect(closeBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('answers a tab that closed AFTER the pre-check with the same 404 envelope', async () => {
+    // The pre-check reads the browser's tab list a moment BEFORE the attach,
+    // and a tab closed inside that window reaches `resolveCdpTab` instead —
+    // deterministically so when the tab lives in a second BrowserContext.
+    // Left to the generic arm it arrives as a 500 carrying
+    // `CDP: no tab matches targetId "…"`, which the MCP side can only read as
+    // a server fault: the split the pre-check exists to make would survive
+    // only until the race it is guarding against actually happened.
+    const { CdpTabNotFoundError } = await import('../src/browser/manager.js');
+    launchBrowserMock.mockRejectedValue(
+      new CdpTabNotFoundError('CDP: no tab matches targetId "T1". Open tabs (1):\n  [0] https://mail'),
+    );
+
+    const res = await peek(51000, 'T1');
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain('T1');
+    expect(body.error).toContain('list_cdp_browsers');
+    // None of the attach's internal prose reaches the caller.
+    expect(body.error).not.toContain('resolveCdpTab');
+    expect(body.error).not.toContain('CDP: no tab matches');
+
+    // Word for word the pre-check's answer, because the MCP side reads a
+    // JSON-envelope 404 as "your tab is gone" and a bare one as "rebuild
+    // dist/" — two answers for one event is how those cross.
+    listPageTabsMock.mockResolvedValue([{ targetId: 'T9', title: 'Mail', url: 'https://mail' }]);
+    const precheck = await peek(51000, 'T1');
+    expect(precheck.status).toBe(404);
+    expect((await precheck.json()).error).toBe(body.error);
+  });
+
+  it('leaves an attach failure that is NOT a missing tab as a 500', async () => {
+    // The control for the mapping above. A 404 for every attach failure would
+    // tell a caller whose browser just died that their tab was closed, and
+    // send them to re-list a browser that is not there.
+    launchBrowserMock.mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:51000'));
+
+    const res = await peek(51000, 'T1');
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain('ECONNREFUSED');
   });
 
   it('answers an unreachable browser with 500, not with "no such tab"', async () => {
