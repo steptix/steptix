@@ -212,7 +212,7 @@ vi.mock('../src/browser/manager.js', () => {
     }
   }
 
-  // NEVER REJECTS, like the real one (manager.ts:1482 wraps its whole body and
+  // NEVER REJECTS, like the real one (manager.ts:1541 wraps its whole body and
   // logs), and a close that worked severs the connection — which is what the
   // detach reads to tell a closed browser from a wedged one.
   //

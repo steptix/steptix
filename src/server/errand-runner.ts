@@ -387,7 +387,7 @@ export class ErrandRunner {
        *
        * The same wedge the detach's own close loop reads for, at the one moment
        * that loop cannot: `closeBrowser` swallows its own failure and returns
-       * normally (manager.ts:1482), and `BrowserTracker.close` splices the
+       * normally (manager.ts:1541), and `BrowserTracker.close` splices the
        * session out of `all()` (manager.ts:892) either way — so a browser whose
        * `context.close()` rejected is off the list while its window is still on
        * the user's screen. The detach asks `isConnected()` of every session it
@@ -1050,7 +1050,7 @@ export class ErrandRunner {
      *
      * Pages open at attach time are not candidates at all — the CDP attach
      * handed the tracker an ignore set of them (`connectOverCdpSession`,
-     * manager.ts:1388). But that set is a snapshot, and `context.on('page')`
+     * manager.ts:1437). But that set is a snapshot, and `context.on('page')`
      * adopts every tab opened on the browser AFTERWARDS, whoever opened it: the
      * user, another session, another errand.
      *
@@ -1210,7 +1210,7 @@ export class ErrandRunner {
         await closeBrowser(session);
       } catch {
         // Belt and braces, and named as such: `closeBrowser` wraps its whole
-        // body in a try/catch and logs (manager.ts:1482), so in production it
+        // body in a try/catch and logs (manager.ts:1541), so in production it
         // does not reject and this arm does not run. It stays because the
         // hand-back is a `finally` — a future edit that lets a throw out must
         // not take the raise and the disconnect below with it — and a close
@@ -1244,7 +1244,7 @@ export class ErrandRunner {
     // Hand the keys back visibly. "Request" is the honest verb: there is no
     // read of "is this tab frontmost", and Windows may decline a raise from a
     // background process — so this is silent and non-fatal, the same posture as
-    // the attach path (manager.ts:1415).
+    // the attach path (manager.ts:1469).
     try {
       await borrowedPage.bringToFront();
     } catch {

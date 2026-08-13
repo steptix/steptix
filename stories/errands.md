@@ -196,7 +196,7 @@ An errand is: **attach → act → return → detach**, in one request.
   actually open. The winner's `targetId` is what the request carries to
   the server, and the existing attach path (`connectOverCDP` +
   `resolveCdpTab` with a `targetId:` spec,
-  [src/browser/manager.ts:1369](../src/browser/manager.ts:1369)) is
+  [src/browser/manager.ts:1403](../src/browser/manager.ts:1403)) is
   handed only that exact spec — the first-match-wins arm of
   `resolveCdpTab` is never asked to arbitrate. Nothing about a previous
   errand's resolution is remembered or reused.
@@ -346,8 +346,8 @@ page state is explainable rather than mysterious.
    attach itself opened.
 3. End by requesting activation of the borrowed tab — the same silent,
    non-fatal `bringToFront` courtesy the attach path already extends at
-   [src/browser/manager.ts:1415](../src/browser/manager.ts:1415).
-4. The pre-existing-pages guard ([src/browser/manager.ts:1388](../src/browser/manager.ts:1388),
+   [src/browser/manager.ts:1469](../src/browser/manager.ts:1469).
+4. The pre-existing-pages guard ([src/browser/manager.ts:1437](../src/browser/manager.ts:1437),
    enforced through `PageTracker`) is the errand's whole personality:
    everything it protects for CDP sessions, an errand applies to every page
    but its own.
@@ -482,12 +482,12 @@ ambiguity refusals ([src/browser/cdp-registry.ts](../src/browser/cdp-registry.ts
 [src/mcp/cdp.ts](../src/mcp/cdp.ts)); the filtered tab lists over the
 DevTools HTTP surface ([src/browser/cdp-discovery.ts](../src/browser/cdp-discovery.ts));
 the attach path (`connectOverCDP` at
-[src/browser/manager.ts:1369](../src/browser/manager.ts:1369), then
-`resolveCdpTab` — [src/browser/manager.ts:1010](../src/browser/manager.ts:1010) —
+[src/browser/manager.ts:1403](../src/browser/manager.ts:1403), then
+`resolveCdpTab` — [src/browser/manager.ts:1032](../src/browser/manager.ts:1032) —
 handed only an exact `targetId:` spec); the pre-existing-pages guard
-([src/browser/manager.ts:1388](../src/browser/manager.ts:1388)) and
+([src/browser/manager.ts:1437](../src/browser/manager.ts:1437)) and
 disconnect-not-kill semantics (`closeBrowser`,
-[src/browser/manager.ts:1482](../src/browser/manager.ts:1482)); the step
+[src/browser/manager.ts:1541](../src/browser/manager.ts:1541)); the step
 executor and AI resolution
 ([src/runner/step-executor.ts:266](../src/runner/step-executor.ts:266) —
 it takes a page plus a context bag, not a session); and the run fold that

@@ -169,7 +169,7 @@ async function connect(
         events,
         receivedAt: events.map((_e, i) => i),
         // Derived, exactly as the real client derives it — `!sawDone`
-        // (src/mcp/api-client.ts:235). Hard-coded `false` here meant a script
+        // (src/mcp/api-client.ts:236). Hard-coded `false` here meant a script
         // that ended mid-stream reached the tool claiming the stream was
         // intact, so every warning the truncated path adds went untested.
         // `dropAfterDone` is the client's OTHER source of the same flag (its
