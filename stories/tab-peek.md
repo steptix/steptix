@@ -33,12 +33,16 @@
 > real-app harness): the peek succeeds, which is §Disclosure posture's
 > amendment asserted rather than argued — and a peek never takes,
 > checks, or blocks the turn lock in either direction;
-> (5) a peek never raises the tab: the shared attach's raise is
-> parameterised off, asserted in `tests/browser-manager-focus.test.ts` —
-> the ONLY suite that mocks `playwright` itself and can see the
-> attach-path call; a mocked-manager harness cannot fail on this and
-> must not claim it — and no navigation, no click, no tab opened or
-> closed, and a detach that severs the socket only; (6) `peek_tab`
+> (5) a peek never raises the tab, pinned in two halves the way errands
+> pins its mirror: the peek's launch options CARRY `activate: false` —
+> asserted where the mocked `launchBrowser` receives them (the
+> mocked-manager harnesses see the cdp options argument) — and
+> `activate: false` SUPPRESSES the attach-path raise, asserted in
+> `tests/browser-manager-focus.test.ts`, the only suite that mocks
+> `playwright` itself; a mocked-manager harness cannot prove the
+> suppression and must not claim that half — and no navigation, no
+> click, no tab opened or closed, and a detach that severs the socket
+> only; (6) `peek_tab`
 > passing a NON-EMPTY `session_id` is refused before any browser work
 > naming `get_page_content` as the door for sessions, and an
 > empty/whitespace `session_id` is treated as absent (the serializer
@@ -58,9 +62,13 @@
 > through the real chain and finds a string known to be on it. A vitest
 > suite drives (1)-(7) through the harnesses the errands story
 > established — the real in-memory MCP client + real API server for the
-> tool surface and refusals; the raw-HTTP api-server harness for item
-> (1)'s in-flight clause and the route's error contract; the
-> playwright-mocked browser-manager suite for item (5)'s no-raise — and
+> end-to-end surface; the real-client + INJECTED-ApiClient seam harness
+> for what only a fake client can produce: item (3)'s route-missing arm
+> (`ApiRouteNotFoundError` thrown by the stub, the way
+> `focus_cdp_tab`'s is pinned) and item (7)'s description/redirect
+> pins; the raw-HTTP api-server harness for item (1)'s in-flight clause
+> and the route's error contract; the playwright-mocked browser-manager
+> suite for item (5)'s suppression half — and
 > (8) runs live.
 
 ## Context
