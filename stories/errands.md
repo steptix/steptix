@@ -71,8 +71,11 @@
 > two is refused naming both candidates; and the candidate set is only
 > ever the filtered listing — an `iframe`, `browser_ui` or `*-dialog`
 > target is never a candidate, however well it matches; (8) a live routing
-> probe (both tools offered to a real model, a matrix of phrasings from
-> "run my login test" to "go export the report on my OpenRouter tab") is
+> probe (both run tools — widened by [tab-peek](tab-peek.md) to all
+> three tab tools, scoring read-vs-drive routing and argument-following
+> alongside tool choice — offered to a real model, a matrix of
+> phrasings from "run my login test" to "go export the report on my
+> OpenRouter tab") is
 > run per supported host model and its table recorded here, misses
 > reported as product findings, never asserted as test failures.
 >

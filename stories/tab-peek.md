@@ -19,11 +19,20 @@
 > page-type-filtered listing, and the matcher is the shared
 > `matchTabsByName` — pinned the way errands pins it: each tool's
 > refusals are asserted against its own exported builder, and the two
-> tools' builders are asserted to be fed the same candidate list; (4) a
+> tools' builders are asserted to be fed the same candidate list — and
+> the zero/gone refusal is scoped to a JSON-envelope 404: a bare
+> non-JSON 404 means the server predates the route and says "rebuild",
+> never "your tab is gone" ([cdp-tab-focus](cdp-tab-focus.md) §6's
+> locked split, via `ApiRouteNotFoundError` and a peek route-missing
+> builder beside `cdpFocusRouteMissing`); (4) a
 > peek proceeds while an errand or a session batch is driving that same
 > tab — reads coexist with drivers (the two-client evidence
-> [errands](errands.md) §The wheel measured on 2026-08-12) — and a peek
-> never takes, checks, or blocks the turn lock in either direction;
+> [errands](errands.md) §The wheel measured on 2026-08-12, reconciled
+> with the dialog-guard overlap in §Detach) — INCLUDING when the driver
+> is a FOREIGN session (a non-`mcp:` id bound to that tab at the
+> real-app harness): the peek succeeds, which is §Disclosure posture's
+> amendment asserted rather than argued — and a peek never takes,
+> checks, or blocks the turn lock in either direction;
 > (5) a peek never raises the tab: the shared attach's raise is
 > parameterised off, asserted in `tests/browser-manager-focus.test.ts` —
 > the ONLY suite that mocks `playwright` itself and can see the
@@ -40,7 +49,12 @@
 > `tests/mcp-seam.test.ts`'s redirect pins updated alongside; and
 > `peek_tab`'s own description carries the three-door rule (read a tab →
 > here; drive a tab → `run_errand`; read a session's page →
-> `get_page_content`); (8) a live pass reads a real signed-in tab
+> `get_page_content`); and the §Routing 3 amendment is pinned too:
+> `run_errand`'s description gains the read/act split — the existing
+> pin on the unsplit rule in `tests/mcp-errands-seam.test.ts` (~:304)
+> moves WITH it — and the `CDP_NOTE` clause is phrased to be true of
+> both run tools that ship it, neither of which can peek; (8) a live
+> pass reads a real signed-in tab
 > through the real chain and finds a string known to be on it. A vitest
 > suite drives (1)-(7) through the harnesses the errands story
 > established — the real in-memory MCP client + real API server for the
@@ -131,7 +145,16 @@ A peek is: **attach → extract → detach**, in one request.
   `alert`/`confirm`/`prompt`/`beforeunload` on ANY tab in that browser
   — inherited from the errand, unavoidable (the guard is load-bearing),
   and the reason a peek's connection is held for as short a time as the
-  extraction takes. The response carries `content`, `format`,
+  extraction takes. This is also where item (4)'s coexistence evidence
+  needs its reconciliation, because "both clients handling the same
+  dialog" is a hazard errands §The wheel names: when a peek's guard and
+  a concurrent driver's guard race, both carry the identical
+  disposition (accept `beforeunload`, dismiss the rest) and each
+  swallows the loser's already-handled rejection — so a stolen dialog
+  is answered exactly as it would have been, and the race has no
+  observable outcome. The `dialogGuarded` WeakSet cannot dedupe across
+  two connections (it keys on each process's own context object), and
+  does not need to. The response carries `content`, `format`,
   `selector`, `truncated`, `returnedChars`, `availableChars`, the tab's
   `url`, `title` and `targetId`, and the `root` + `scope` the peek's
   settings resolved against (the errand-receipt precedent —
@@ -252,9 +275,14 @@ dialog guard (disclosed above).
 
 New, each named because round 1 caught them being assumed:
 
-- The `peek_tab` tool and schema; its output schema is
-  `getPageContentOutput` minus `sessionId` and `status`, plus
-  `targetId`, `root`, `scope`.
+- The `peek_tab` tool and schema. The output schema is a FRESH
+  `toolSchema({...})` declaration — the same eleven fields §Detach
+  enumerates — NOT an `.omit()/.extend()` of `getPageContentOutput`:
+  derivation loses the `.meta({$schema: undefined})` suppression the
+  dialect gate requires (`mcp-schema-dialect.test.ts` would fail and
+  opencode would reject the output), and would drag in the
+  screenshot-only `format` value and field descriptions of a tool that
+  refuses screenshots. `format` is declared `text|dom` only.
 - `activate?: boolean` on `CdpLaunchOptions` (default true) gating the
   attach path's existing-tab raise; asserted where it can actually fail,
   `tests/browser-manager-focus.test.ts`.
@@ -266,13 +294,19 @@ New, each named because round 1 caught them being assumed:
   mirroring the close and focus routes' addressing —
   [page-content](page-content.md) §Locked's GET-not-POST reasoning
   applies verbatim (a read, no body, scalar params). Query: `format`,
-  `selector`, `maxChars`, `testFilePath` (the synthetic
-  `<root>/.aiui-peek.md`), `envName?`. Error contract: reuses
-  `GET /sessions/:id/content`'s `PageCaptureError` mapping (409
-  `navigated`, 400 for the selector family), and a `targetId` that no
-  longer resolves answers 404, which the MCP side turns into the same
-  open-tabs refusal item (3)'s zero-match gives — the tab closed while
-  we reached for it.
+  `selector`, `max_chars` (the sibling content route's spelling),
+  `testFilePath` (the synthetic `<root>/.aiui-peek.md`), `envName?`.
+  Error contract: reuses `GET /sessions/:id/content`'s
+  `PageCaptureError` mapping (409 `navigated`, 400 for the selector
+  family). The gone-tab 404 has a NAMED device: the route pre-checks the
+  target with `listPageTabs` the way `focusCdpTab` produces
+  `kind: 'not_found'`, mapped by `statusForCdpFailure` to a
+  JSON-envelope 404 the MCP side turns into the open-tabs refusal — the
+  tab closed while we reached for it. A bare non-JSON 404 is the ROUTE
+  missing (`ApiRouteNotFoundError`): a server built before this story,
+  answered by a peek route-missing builder beside `cdpFocusRouteMissing`
+  saying "rebuild dist/", never "your tab is gone" — the split
+  cdp-tab-focus §6 locked and the PR #50 redirect already honours twice.
 - The matching `ApiClient` method (one round-trip, no streaming).
 - Peek-specific refusal builders in `src/mcp/errors.ts` —
   `peekTabNotFound`, `peekTabAmbiguous`, `peekSessionsAreForGetPageContent`
@@ -280,13 +314,21 @@ New, each named because round 1 caught them being assumed:
   ("nothing to borrow", "an errand DRIVES the tab") and would lecture a
   read about acting; the sharing that matters (one candidate list, one
   matcher) is pinned per item (3).
-- The `get_page_content` description + redirect edits, the `run_errand`
-  description + `CDP_NOTE` clause (§Routing 3), and the errands.md
-  edits this story names (§Routing 3 exclusivity, §Open questions
-  naming, item (8) probe widening).
-- The tool inventory (every count site [cdp-tab-focus](cdp-tab-focus.md)
-  §5 names, 14 → 15, the by-name enumeration, `usage.ts`, README, the
-  seam + dialect manifests, `argumentsFor()`).
+- The `get_page_content` description + redirect edits and the
+  `run_errand` description + `CDP_NOTE` clause (§Routing 3, pinned per
+  item 7). Of the errands.md edits this story names, §Routing 3
+  exclusivity and §Open questions naming are ALREADY APPLIED alongside
+  this draft; only the item (8) probe-widening sentence rides with the
+  build.
+- The tool inventory, increment-never-assert
+  ([cdp-tab-focus](cdp-tab-focus.md) §5's standing rule, as errands
+  complied with it): increment every tool-count sentence in
+  `mcp-server.md` — §2's "Fourteen tools" (word) and "all 14 schemas"
+  (numeral), §Tests' "**14** tools" (numeral), and the by-name
+  enumeration's "the seven added since" → eight, gaining `peek_tab` —
+  leaving §Tests' "all 14 logger stdout sites" alone (a numeral-grep
+  near-miss that is not a tool count); then `usage.ts`, the README
+  table, the seam + dialect manifests, and `argumentsFor()`.
 
 The `chrome://extensions` stall (measured 2026-08-13: a wedged
 privileged page answers no CDP query, and Playwright's connect
