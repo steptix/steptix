@@ -35,6 +35,7 @@ import {
   errandTabNotFound,
   errandsHaveNoSessions,
   listSessionsTimedOut,
+  pageContentSessionGone,
   preflightError,
   unauthorized,
   type McpToolError,
@@ -1893,7 +1894,12 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'drops it as noise.\n\n' +
         'This reads whatever is on screen right now. It does not wait for the ' +
         'page to settle, and if a run is in flight `status` comes back ' +
-        '`executing` — the page may move under you.',
+        '`executing` — the page may move under you.\n\n' +
+        'This reads a run_steps SESSION. An errand leaves no session behind, ' +
+        'so there is nothing here to read after run_errand — have the errand ' +
+        'capture what you need as a step ("read the balance, store as ' +
+        'balance"); its receipt returns the captures and the final url and ' +
+        'title.',
       inputSchema: schemas.getPageContentInput,
       outputSchema: schemas.getPageContentOutput,
     },
@@ -1931,18 +1937,37 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                 ),
               );
             }
-            return await screenshotResult(client, args.session_id, extra.signal);
+            try {
+              return await screenshotResult(client, args.session_id, extra.signal);
+            } catch (err) {
+              // The server's honest 404 reads as a mystery to a model that just
+              // watched its errand succeed — swap in the two working doors.
+              // Route-missing 404s (ApiRouteNotFoundError) fall through: "rebuild
+              // the server" and "no such session" are opposite remedies.
+              if (err instanceof ApiHttpError && !(err instanceof ApiRouteNotFoundError) && err.status === 404) {
+                return errorResult(pageContentSessionGone(args.session_id));
+              }
+              throw err;
+            }
           }
 
-          const page = await client.getPageContent(
-            args.session_id,
-            {
-              format: args.format,
-              selector: args.selector,
-              maxChars: args.max_chars,
-            },
-            extra.signal,
-          );
+          let page;
+          try {
+            page = await client.getPageContent(
+              args.session_id,
+              {
+                format: args.format,
+                selector: args.selector,
+                maxChars: args.max_chars,
+              },
+              extra.signal,
+            );
+          } catch (err) {
+            if (err instanceof ApiHttpError && !(err instanceof ApiRouteNotFoundError) && err.status === 404) {
+              return errorResult(pageContentSessionGone(args.session_id));
+            }
+            throw err;
+          }
 
           const scope = page.selector ? ` (${page.selector})` : '';
           const size = page.truncated
