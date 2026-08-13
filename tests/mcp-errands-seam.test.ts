@@ -250,11 +250,23 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
     expect(h.errands).toEqual([]);
   });
 
-  it('refuses an empty session_id too — carrying the key is the problem', async () => {
+  it('treats an empty session_id as absent — a serializer the model cannot control sends ""', async () => {
+    // Measured live (OpenCode + gpt-5.6-luna, 2026-08-13): the provider layer
+    // serializes every declared optional as "", so "call again without
+    // session_id" is an instruction the model physically cannot follow.
+    // Refusing on presence turned the wrong-door redirect into a livelock;
+    // the refusal now fires on a non-empty VALUE only.
     const h = await connect();
     const result = await errand(h, { session_id: '' });
-    expect(result.isError).toBe(true);
-    expect(h.errands).toEqual([]);
+    expect(result.isError).toBeFalsy();
+    expect(h.errands).toHaveLength(1);
+  });
+
+  it('treats a whitespace session_id the same as empty', async () => {
+    const h = await connect();
+    const result = await errand(h, { session_id: '  ' });
+    expect(result.isError).toBeFalsy();
+    expect(h.errands).toHaveLength(1);
   });
 
   it('declares session_id only to warn about it', async () => {

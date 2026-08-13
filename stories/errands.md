@@ -57,8 +57,13 @@
 > forward is confirmed by a human in the live pass, because no assertion
 > in this repo can see a screen
 > ([cdp-tab-focus](cdp-tab-focus.md)'s own rule); (6)
-> `run_errand` passing `session_id` is refused before any browser work
-> with an `isError` result naming `run_steps` as the door for sessions,
+> `run_errand` passing a NON-EMPTY `session_id` is refused before any
+> browser work with an `isError` result naming `run_steps` as the door
+> for sessions — an empty or whitespace `session_id` is treated as
+> absent, because some provider layers serialize every declared optional
+> as `""` and a model told to omit the key physically cannot (and the
+> same `""` on `run_steps`/`run_test_file` falls through to the default
+> session name rather than minting a session named the empty string),
 > and `run_steps` passing `config.cdp` onto an existing session now ends
 > its warning with a pointer to `run_errand`; (7) an errand naming a tab
 > that matches nothing is refused with the browser's open tabs listed, so
@@ -368,7 +373,9 @@ run_errand {
   keep_open?:   boolean         # leave errand-opened tabs behind (default false)
   session_id?:  string          # DECLARED ONLY TO BE REFUSED — the description says
                                 # "errands have no sessions — use run_steps"; the handler
-                                # refuses any call carrying it before any browser work
+                                # refuses any call carrying a NON-EMPTY value before any
+                                # browser work. "" is treated as absent: auto-filling
+                                # serializers send it for optionals a model cannot omit
 }
 ```
 
@@ -585,6 +592,20 @@ is correct and honest, but a fast model may never follow it — tab-first
 disambiguation would have made the first call succeed, since the named
 tab existed in only one browser) and the item (8) probe, which should
 score argument-following per model, not just tool choice.
+
+**2026-08-13, post-merge field report (Paul's live fleet, gpt-5.6-luna
+via OpenCode).** "Bring the Activity one to the front" worked
+(`focus_cdp_tab`), then "now go to Credits" looped: every `run_errand`
+call carried `session_id: ""` and was refused, and the refusal's "call
+run_errand again without session_id" could never land — the provider
+layer serializes every declared optional as `""`, so the model cannot
+omit the key. Fixed the same day: an empty/whitespace `session_id` is
+now treated as absent on all three run tools (the refusal fires on
+non-empty only), the same normalisation `profile` and `env_name`
+already had. The general lesson joins
+[mcp-tool-schema-portability]: a declared-but-refused field must refuse
+on VALUE, not presence, or auto-filling serializers turn the refusal
+into a livelock.
 
 Still to run live: the human half of item (5) (does the borrowed tab
 visibly come forward), and the item (8) routing probe matrix per host

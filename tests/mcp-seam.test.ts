@@ -343,6 +343,22 @@ describe('run_steps', () => {
     expect(harness.calls[0]?.sessionId).toBe(harness.calls[1]?.sessionId);
   });
 
+  it('treats session_id "" as absent and uses the default id', async () => {
+    // Some provider layers serialize every declared optional as "" (measured
+    // live with OpenCode + gpt-5.6-luna). Without this, "" becomes a real
+    // session literally named the empty string.
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['one'], project_root: PROJECT_ROOT, session_id: '' },
+    });
+
+    expect(harness.calls[0]?.sessionId).toMatch(/^mcp:steps-/);
+  });
+
   it('refuses a session that belongs to another client', async () => {
     // A non-mcp: id is typically a developer's open editor, and running steps
     // in it would drive their browser.
