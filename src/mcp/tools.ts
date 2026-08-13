@@ -2260,6 +2260,93 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       ),
   );
 
+  // -- log_into_site (SPEC 29) ----------------------------------------------
+  //
+  // The description is doing real work here, and two of its sentences are the
+  // feature's whole safety posture restated for the reader who will actually
+  // act on it: never ask the user to type a password into the chat, and never
+  // retry a denial. A model that does either has undone the design regardless
+  // of what the code enforces.
+  server.registerTool(
+    'log_into_site',
+    {
+      title: 'Sign in to the page you are on',
+      description:
+        'Sign in to the site in this session\'s current tab, using the ' +
+        'credential the user has saved in Bitwarden for it.\n\n' +
+        '**There is no site argument — the page you are already on IS the ' +
+        'site.** Navigate to the sign-in page first, then call this. You never ' +
+        'see the username or password: this fills the form itself and tells ' +
+        'you only what happened.\n\n' +
+        'Call it when you land on a sign-in page for a site the user asked you ' +
+        'to work in — either because they asked you to log in, or because a ' +
+        'login wall interrupted an errand. Calling it on a page with no form ' +
+        'is free and harmless: it answers `not-a-login-page` without reading ' +
+        'the vault or interrupting anyone. The user is asked to approve every ' +
+        'sign-in, once per site.\n\n' +
+        'Multi-page sign-ins (email, then password, then a code) take several ' +
+        'calls: when `continues` is true, wait for the next page to load and ' +
+        'call again.\n\n' +
+        '**If it answers `no-credential-for-this-site`, tell the user to add ' +
+        'the login to Bitwarden — never ask them to type a password to you, ' +
+        'and never type one into a page yourself. If it answers `denied`, ' +
+        'stop; do not call again for that site.**',
+      inputSchema: schemas.logIntoSiteInput,
+      outputSchema: schemas.logIntoSiteOutput,
+    },
+    async (args, extra) =>
+      withProject(
+        deps,
+        args.project_root,
+        async (client) => {
+          // The same gate `get_page_content` applies, for a stronger reason:
+          // that one discloses what a developer's session is signed in to,
+          // and this one would SIGN IT IN — driving their browser and
+          // spending an approval on a tab they are using.
+          checkSessionOwnership(
+            args.session_id,
+            args.allow_foreign_session === true,
+            'signing in would drive their browser and use their saved credentials',
+          );
+
+          const hint =
+            args.hint_username_selector || args.hint_password_selector || args.hint_otp_selector
+              ? {
+                  username: args.hint_username_selector,
+                  password: args.hint_password_selector,
+                  otp: args.hint_otp_selector,
+                }
+              : undefined;
+
+          let login;
+          try {
+            login = await client.logIntoSite(args.session_id, { hint }, extra.signal);
+          } catch (err) {
+            if (err instanceof ApiHttpError && !(err instanceof ApiRouteNotFoundError) && err.status === 404) {
+              return errorResult(pageContentSessionGone(args.session_id));
+            }
+            throw err;
+          }
+
+          // Normalised to the schema's required-and-nullable shape, the way
+          // `list_cdp_browsers` normalises: a server from a build that predates
+          // a field would otherwise fail validation and cost the agent the
+          // result of a login that already happened.
+          const value = {
+            outcome: login.outcome,
+            domain: login.domain ?? '',
+            framedBy: login.framedBy ?? null,
+            item: login.item ?? null,
+            candidates: login.candidates ?? null,
+            detail: login.detail ?? '',
+            continues: login.continues ?? false,
+          };
+          return validated(schemas.logIntoSiteOutput, value, `${login.outcome} — ${login.detail}`);
+        },
+        { signal: extra.signal },
+      ),
+  );
+
   // -- list_cdp_browsers ----------------------------------------------------
   server.registerTool(
     'list_cdp_browsers',

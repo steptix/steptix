@@ -67,6 +67,7 @@ describe('tool schemas as they go out on the wire', () => {
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
+      'log_into_site',
       'peek_tab',
       'run_errand',
       'run_steps',
@@ -161,6 +162,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['startCdpBrowserInput', schemas.startCdpBrowserInput, 'input'],
     ['closeCdpTabInput', schemas.closeCdpTabInput, 'input'],
     ['focusCdpTabInput', schemas.focusCdpTabInput, 'input'],
+    ['logIntoSiteInput', schemas.logIntoSiteInput, 'input'],
     ['peekTabInput', schemas.peekTabInput, 'input'],
     ['runResultOutput', schemas.runResultOutput, 'output'],
     ['runErrandOutput', schemas.runErrandOutput, 'output'],
@@ -175,6 +177,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['startCdpBrowserOutput', schemas.startCdpBrowserOutput, 'output'],
     ['closeCdpTabOutput', schemas.closeCdpTabOutput, 'output'],
     ['focusCdpTabOutput', schemas.focusCdpTabOutput, 'output'],
+    ['logIntoSiteOutput', schemas.logIntoSiteOutput, 'output'],
     ['peekTabOutput', schemas.peekTabOutput, 'output'],
   ];
 

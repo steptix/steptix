@@ -1176,6 +1176,87 @@ export const serverStatusOutput = toolSchema({
   idleTimeoutMinutes: z.number().nullable(),
 });
 
+// ---------------------------------------------------------------------------
+// log_into_site (SPEC 29 — the credential broker)
+//
+// Note what is NOT here: no site, no domain, no username, no password. The
+// page the session is on IS the site, and the broker reads that URL from the
+// browser. That absence is the security design, not an omission — a `site`
+// argument would let a page that says "log into the user's bank" choose which
+// credential is fetched, which is precisely what this feature exists to
+// prevent. Do not add one.
+// ---------------------------------------------------------------------------
+
+export const logIntoSiteInput = toolSchema({
+  session_id: z.string().describe('Session whose current page holds the sign-in form.'),
+  project_root: projectRoot,
+  hint_username_selector: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'CSS selector for the username field, for the rare form this cannot read ' +
+        'by itself. Only supply it after a call came back "stuck" — the ' +
+        'built-in scan handles ordinary forms, including two-step and ' +
+        'shadow-DOM ones.',
+    ),
+  hint_password_selector: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'CSS selector for the password field. Ignored unless it addresses a real ' +
+        'password input on this page: the password is never typed anywhere else, ' +
+        'whatever this says.',
+    ),
+  hint_otp_selector: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('CSS selector for a one-time-code field.'),
+  allow_foreign_session: allowForeignSession,
+});
+
+export const logIntoSiteOutput = toolSchema({
+  outcome: z
+    .enum([
+      'logged-in',
+      'username-entered-continue',
+      'otp-entered-continue',
+      'not-a-login-page',
+      'no-credential-for-this-site',
+      'multiple-matches',
+      'denied',
+      'vault-locked',
+      'vault-unavailable',
+      'stuck',
+    ])
+    .describe(
+      'What happened. `logged-in` — the form was filled and submitted; READ THE ' +
+        'PAGE to confirm the site accepted it. `username-entered-continue` / ' +
+        '`otp-entered-continue` — one page of a multi-page sign-in is done; wait ' +
+        'for the next page and call again. `not-a-login-page` — no form here, and ' +
+        'nothing was read or unlocked. `no-credential-for-this-site` — tell the ' +
+        'user to add one to Bitwarden, and NEVER ask them to type a password to ' +
+        'you. `denied` — the user said no; do not retry. `stuck` — a page this ' +
+        'will not fill (sign-up form, captcha, PIN pad); the user must do it.',
+    ),
+  domain: z.string().describe('The host the browser was actually on, which is what the vault was matched against.'),
+  framedBy: z
+    .string()
+    .nullable()
+    .describe('Set when the form was inside an iframe from a different host than the page.'),
+  item: z.string().nullable().describe('The NAME of the saved login used. Never its contents.'),
+  candidates: z
+    .array(z.string())
+    .nullable()
+    .describe('Names of the saved logins that matched, when the user was asked to choose.'),
+  detail: z.string().describe('What happened, in words you can relay to the user.'),
+  continues: z
+    .boolean()
+    .describe('True when this sign-in has more pages — advance the page, then call this tool again.'),
+});
+
 // The `*Output` schemas above are also the `safeParse` handles the handlers use
 // on their own results before returning them. The SDK would validate them
 // itself, but its failure path turns a mismatch into `isError:true` with no

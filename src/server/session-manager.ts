@@ -1227,6 +1227,23 @@ export class SessionManager {
   private static readonly LAST_RUN_INFO_LIMIT = 200;
 
   /**
+   * The session's active page, for a caller that DRIVES it rather than reads it.
+   *
+   * Deliberately narrower than handing back the `ManagedSession`: the
+   * credential broker needs a `Page` and nothing else about the session, and a
+   * whole-session accessor would let every future caller reach the tracker, the
+   * config and the run state without anyone deciding that it should.
+   *
+   * Returns null for an unknown or closed session, which the route turns into
+   * a 404 — the same shape `getPageContent` uses for the same condition.
+   */
+  activePageFor(sessionId: string): Page | null {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status === 'closed') return null;
+    return session.browserSession.pageTracker.getActive();
+  }
+
+  /**
    * Record the finalized-run info for a session (issue 021). Bounded LRU-ish:
    * re-inserting moves the key to the end; we evict the oldest once over the cap.
    */

@@ -217,6 +217,17 @@ async function connect(): Promise<Client> {
         warnings: [],
       } as never;
     },
+    async logIntoSite() {
+      // A denial, not a success. This suite asserts that structured content
+      // reaches the content blocks, and every field of THIS result is safe to
+      // have sitting in a test fixture — which a fake "logged-in" answer with
+      // an invented username would not be.
+      return {
+        outcome: 'denied',
+        domain: 'openrouter.ai',
+        item: 'OpenRouter',
+        detail: 'The user denied the sign-in to openrouter.ai.',
+        continues: false,
     async peekCdpTab(args) {
       return {
         targetId: args.targetId,
@@ -272,6 +283,7 @@ function argumentsFor(): Record<string, Record<string, unknown>> {
     start_cdp_browser: { engine: 'edge', profile: 'default', project_root: tmpDir },
     close_cdp_tab: { profile: 'default', target_id: 'A1B2C3', project_root: tmpDir },
     focus_cdp_tab: { profile: 'default', target_id: 'A1B2C3', project_root: tmpDir },
+    log_into_site: { session_id: 'mcp:a', project_root: tmpDir },
   };
 }
 
@@ -387,6 +399,9 @@ describe('every tool serializes its structured content into a content block', ()
           throw new Error('not reached');
         },
         async focusCdpTab() {
+          throw new Error('not reached');
+        },
+        async logIntoSite() {
           throw new Error('not reached');
         },
       }),

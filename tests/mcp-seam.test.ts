@@ -257,6 +257,7 @@ describe('tool registration', () => {
       'list_cdp_browsers',
       'list_sessions',
       'list_test_files',
+      'log_into_site',
       'peek_tab',
       'run_errand',
       'run_steps',

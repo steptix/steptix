@@ -28,6 +28,7 @@ import {
   type TabHolder,
 } from './types.js';
 import type { ErrandRequestBody, McpStepRequest } from './types.js';
+import type { LoginResult } from '../credentials/types.js';
 import { normalizeBaseUrl } from '../server/health.js';
 
 /** Event types we know how to fold. Anything else is recorded and dropped
@@ -556,6 +557,23 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       });
       await assertOk(res);
       return (await res.json()) as StartedCdpBrowser;
+    },
+
+    async logIntoSite(sessionId, args, signal): Promise<LoginResult> {
+      const res = await doFetch(`${base}/sessions/${encodeURIComponent(sessionId)}/login`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        // `hint` and nothing else. There is no site, username or password field
+        // on this request by design — see `ApiClient.logIntoSite`.
+        body: JSON.stringify(args.hint ? { hint: args.hint } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      // Not defaulted, for the reason `getPageContent` is not: a login answer
+      // with no `outcome` is not "nothing happened", it is an answer we failed
+      // to read — and reporting that as a no-op would tell the agent no fill
+      // occurred when one may well have.
+      await assertOk(res);
+      return (await res.json()) as LoginResult;
     },
   };
 };
