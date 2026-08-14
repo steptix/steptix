@@ -228,6 +228,8 @@ async function connect(): Promise<Client> {
         item: 'OpenRouter',
         detail: 'The user denied the sign-in to openrouter.ai.',
         continues: false,
+      } as never;
+    },
     async peekCdpTab(args) {
       return {
         targetId: args.targetId,
