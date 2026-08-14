@@ -30,6 +30,7 @@ import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
 import { capturePageContent, type PageContentOptions } from './page-capture.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
+import { createLoginBroker, type FieldHint, type LoginBroker } from '../credentials/index.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
 import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
 import { matchText } from '../parser/section-match.js';
@@ -278,6 +279,18 @@ export function createApiServer(
   // same project read the same `.env` at the same moment.
   const projectBundles = new ProjectBundleResolver(config);
   const sessionManager = new SessionManager(config, projectBundles);
+
+  /**
+   * The credential broker, built on first use and then kept (SPEC 29 §10).
+   *
+   * Lazy because constructing it is not free — it decides which approval
+   * surface this platform has — and a server that never brokers a login should
+   * not pay for one. Kept because the broker's approval grants ARE its memory
+   * of what the user already agreed to; a per-request instance would re-prompt
+   * on every page of a multi-page sign-in.
+   */
+  let brokerInstance: LoginBroker | null = null;
+  const loginBroker = (): LoginBroker => (brokerInstance ??= createLoginBroker());
   // Beside the manager, never inside it: an errand adds nothing to the sessions
   // map, which is what makes "nothing survives on the server" checkable.
   //
@@ -884,6 +897,69 @@ export function createApiServer(
       res.status(200).json(content);
     } catch (err) {
       if (respondToPageCaptureError(err, res)) return;
+      next(err);
+    }
+  });
+
+  // POST /sessions/:id/login — the credential broker (SPEC 29).
+  //
+  // The whole of the brokered-login feature reaches the browser through this
+  // one route, and it is deliberately thin: everything that decides anything
+  // lives in `src/credentials/`, where it can be tested without an HTTP server.
+  //
+  // Note what the route does NOT accept: a site, a domain, a username, or a
+  // password. There is nowhere for a caller to say which credential it wants —
+  // the page the session is already on IS the site, and the broker reads that
+  // from the browser. A `site` parameter here would hand a prompt-injected
+  // agent the one lever the design exists to withhold.
+  app.post('/sessions/:id/login', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const sessionId = String(req.params.id);
+
+      // The optional field hint (§7), validated BEFORE the session lookup —
+      // the same ordering, and the same reason, as `GET /sessions/:id/content`:
+      // a malformed request is the caller's mistake whether or not the session
+      // exists, and answering 404 to a request that also has a bad selector
+      // sends the agent off to fix the wrong thing.
+      //
+      // Validated to strings so a malformed body cannot reach a Playwright
+      // locator. The hint still cannot widen where a password goes — the broker
+      // re-checks the element itself.
+      const body = (req.body ?? {}) as { hint?: unknown };
+      let hint: FieldHint | undefined;
+      if (body.hint !== undefined) {
+        if (typeof body.hint !== 'object' || body.hint === null) {
+          res.status(400).json({ error: 'hint must be an object.' });
+          return;
+        }
+        const raw = body.hint as Record<string, unknown>;
+        for (const key of ['username', 'password', 'otp']) {
+          const value = raw[key];
+          if (value !== undefined && (typeof value !== 'string' || value === '')) {
+            res.status(400).json({ error: `hint.${key} must be a non-empty CSS selector.` });
+            return;
+          }
+        }
+        hint = {
+          username: typeof raw['username'] === 'string' ? raw['username'] : undefined,
+          password: typeof raw['password'] === 'string' ? raw['password'] : undefined,
+          otp: typeof raw['otp'] === 'string' ? raw['otp'] : undefined,
+        };
+      }
+
+      const page = sessionManager.activePageFor(sessionId);
+      if (!page) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+
+      const result = await loginBroker().attemptLogin(page, hint);
+      // Always 200. Every outcome here — denied, no credential, stuck — is a
+      // thing that legitimately happened, not a failed request, and the
+      // `outcome` field is what the caller reads. The same reasoning the MCP
+      // layer applies to `isError`.
+      res.status(200).json(result);
+    } catch (err) {
       next(err);
     }
   });

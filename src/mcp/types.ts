@@ -9,6 +9,7 @@
  */
 import type { ErrandSummary, ErrandTab, RunEvent } from '../server/session-manager.js';
 import type { TabHolder } from '../server/errand-locks.js';
+import type { LoginResult } from '../credentials/types.js';
 import type {
   CaptureMode,
   EffectiveSettings,
@@ -614,6 +615,26 @@ export interface ApiClient {
    * a JSON envelope means the tab is gone, a bare body means the route is.
    */
   peekCdpTab(args: PeekCdpTabArgs, signal?: AbortSignal): Promise<PeekedTab>;
+  /**
+   * `POST /sessions/:id/login` — the credential broker (SPEC 29).
+   *
+   * Takes no site and returns no secret. The page the session is already on IS
+   * the site: the broker reads that URL from the browser and matches the vault
+   * against it, so there is no argument here through which a caller could ask
+   * for somebody else's credential.
+   */
+  logIntoSite(sessionId: string, args: LogIntoSiteArgs, signal?: AbortSignal): Promise<LoginResult>;
+}
+
+/** The optional field hint (§7) — CSS selectors, never values. */
+export interface LogIntoSiteArgs {
+  hint?:
+    | {
+        username?: string | undefined;
+        password?: string | undefined;
+        otp?: string | undefined;
+      }
+    | undefined;
 }
 
 /**
