@@ -146,11 +146,37 @@ const USERNAME_ONLY_PAGE = `<!DOCTYPE html><html><body><form>
 <script>document.getElementById('go').addEventListener('click', function (e) { e.preventDefault(); });</script>
 </body></html>`;
 
+/**
+ * A login form whose submit button cannot be clicked — a transparent overlay
+ * covers it, so Playwright's hit test finds the overlay and the click never
+ * lands.
+ *
+ * This is the shape of the failure a live run actually produced (a click that
+ * burns its whole budget and throws), reproduced by the one mechanism that
+ * reliably causes it. The form still submits on Enter, so a login that typed
+ * both fields correctly must still be reported as a login.
+ */
+const UNCLICKABLE_SUBMIT_PAGE = `<!DOCTYPE html><html><body>
+  <form id="f">
+    <input id="u" type="text" autocomplete="username">
+    <input id="p" type="password" autocomplete="current-password">
+    <button type="submit" id="go">Sign in</button>
+  </form>
+  <div id="shield" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0)"></div>
+  <script>
+    document.getElementById('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.title = 'submitted';
+    });
+  </script>
+</body></html>`;
+
 const PAGES: Record<string, string> = {
   '/login': LOGIN_PAGE,
   '/article': ARTICLE_PAGE,
   '/register': REGISTER_PAGE,
   '/step-one': USERNAME_ONLY_PAGE,
+  '/unclickable': UNCLICKABLE_SUBMIT_PAGE,
 };
 
 let server: Server;
@@ -301,6 +327,24 @@ describe('filling, once every gate has passed', { timeout: BROWSER_TEST_TIMEOUT_
     expect(await page.locator('#u').inputValue()).toBe(SECRET_USERNAME);
     expect(await page.locator('#p').inputValue()).toBe(SECRET_PASSWORD);
     // The submit control was actually clicked, not merely located.
+    expect(await page.title()).toBe('submitted');
+  });
+
+  it('still completes the login when the submit button will not take a click', async () => {
+    // The regression this exists for: a live run reported `stuck` six times in
+    // ten on a `locator.click` timeout, throwing away logins whose fields were
+    // already correctly filled. Both fields are typed here, the button click
+    // fails, and Enter finishes the job — so the outcome is a login, not a
+    // failure.
+    await page.goto(`${origin}/unclickable`);
+    const vault = fakeVault();
+    const broker = new LoginBroker({ vault, approval: approver(true) });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(res.outcome).toBe('logged-in');
+    expect(await page.locator('#u').inputValue()).toBe(SECRET_USERNAME);
+    expect(await page.locator('#p').inputValue()).toBe(SECRET_PASSWORD);
     expect(await page.title()).toBe('submitted');
   });
 

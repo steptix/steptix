@@ -248,27 +248,64 @@ const INTERACT_TIMEOUT_MS = 15_000;
 /** Typing is per-keystroke and a long passphrase is legitimately slow. */
 const TYPE_TIMEOUT_MS = 30_000;
 
-/** Type a value into a field with real key events, after clearing it.
+/** A click on the submit control, bounded well below the field budget so a
+ *  refusal leaves time for the Enter fallback rather than failing the login. */
+const SUBMIT_CLICK_TIMEOUT_MS = 5_000;
+
+/**
+ * Type a value into a field with real key events, after clearing it.
  *
- *  `pressSequentially` rather than `fill` because sites that drive their state
- *  from `keydown` — and there are many — see nothing at all from a value
- *  assignment, then submit an empty form and report a wrong password. */
+ * `pressSequentially` rather than `fill` because sites that drive their state
+ * from `keydown` — and there are many — see nothing at all from a value
+ * assignment, then submit an empty form and report a wrong password.
+ *
+ * **`focus`, not `click`.** A live run against a CDP browser failed six times
+ * in ten with `locator.click: Timeout 15000ms exceeded` here, on a fixture page
+ * holding one visible text input. `click` waits for the whole actionability
+ * set — visible, *stable across animation frames*, and hit-testable at a point
+ * — and any of those can stall on a page we do not control. `focus` needs none
+ * of them, and typing never needed the click: `pressSequentially` focuses the
+ * element itself before sending keys.
+ *
+ * What is actually proven, since the difference matters: three controlled
+ * reproductions — a backgrounded tab in a Playwright browser, the same in a
+ * real Chrome over CDP, and an occluded/minimised Chrome window — all clicked
+ * in under 90ms, so the original failure is NOT diagnosed. What was measured is
+ * the cost of being wrong: `focus` took 6–16ms in every scenario where `click`
+ * took 86–2001ms, and it cannot fail for any reason `focus` does not share. So
+ * this deletes a step that was never load-bearing rather than fixing a
+ * understood bug, and those six failures deserve watching for again.
+ */
 export async function typeInto(frame: Frame, selector: string, value: string): Promise<void> {
   const field = frame.locator(selector).first();
-  await field.click({ timeout: INTERACT_TIMEOUT_MS });
+  await field.focus({ timeout: INTERACT_TIMEOUT_MS });
   await field.fill('');
   await field.pressSequentially(value, { delay: 12, timeout: TYPE_TIMEOUT_MS });
 }
 
-/** Submit the form: click the control the scan found, else press Enter. */
+/**
+ * Submit the form: click the control the scan found, else press Enter.
+ *
+ * The click is tried first because a submit button often carries its own
+ * handler, and it is bounded-and-non-fatal for the same reason `typeInto` no
+ * longer clicks at all: this is the one call left in the fill path needing full
+ * actionability, and a login whose fields were both typed correctly must not be
+ * reported as failed because a button would not take a click. Enter on the
+ * field submits by the browser's own rules.
+ */
 export async function submitLogin(
   frame: Frame,
   submitSelector: string | null,
   fallbackFieldSelector: string,
 ): Promise<void> {
   if (submitSelector) {
-    await frame.locator(submitSelector).first().click({ timeout: INTERACT_TIMEOUT_MS });
-    return;
+    try {
+      await frame.locator(submitSelector).first().click({ timeout: SUBMIT_CLICK_TIMEOUT_MS });
+      return;
+    } catch {
+      // Fall through. The fields are filled either way, and Enter is a second
+      // way to submit rather than a worse one.
+    }
   }
   await frame.locator(fallbackFieldSelector).first().press('Enter', { timeout: INTERACT_TIMEOUT_MS });
 }
