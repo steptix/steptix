@@ -16,6 +16,8 @@ import { createLoginBroker } from '../dist/credentials/index.js';
 import { BitwardenVault } from '../dist/credentials/vault.js';
 
 const FIXTURE_PORT = Number(process.env.FIXTURE_PORT ?? 8899);
+/** How long the browser stays open when nobody can press Enter. */
+const HOLD_SECONDS = Number(process.env.HOLD_SECONDS ?? 90);
 const target = process.argv[2];
 
 if (target !== undefined && !/^https?:\/\//i.test(target)) {
@@ -137,11 +139,20 @@ if (result.continues) {
   console.log('  advance the page and call log_into_site again.');
 }
 
-banner('Done — the browser is still open. Press Enter to close it.');
-await new Promise((resolve) => {
-  process.stdin.resume();
-  process.stdin.once('data', resolve);
-});
+// Held open so the page can be inspected. Waiting on Enter is right when a
+// person ran this; when something else did there is no Enter coming, and a
+// harness that hangs forever holding a browser is worse than one that tidies
+// up on its own.
+if (process.stdin.isTTY) {
+  banner('Done — the browser is still open. Press Enter to close it.');
+  await new Promise((resolve) => {
+    process.stdin.resume();
+    process.stdin.once('data', resolve);
+  });
+} else {
+  banner(`Done — holding the browser open for ${HOLD_SECONDS}s so you can look at it.`);
+  await new Promise((resolve) => setTimeout(resolve, HOLD_SECONDS * 1000));
+}
 await browser.close();
 if (server) await new Promise((r) => server.close(r));
 process.exit(0);
