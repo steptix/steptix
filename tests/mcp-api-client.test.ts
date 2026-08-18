@@ -508,6 +508,7 @@ describe('createApiClient other routes', () => {
     expect(seen).not.toContain('format=');
     expect(seen).not.toContain('selector=');
     expect(seen).not.toContain('max_chars=');
+    expect(seen).not.toContain('full_page=');
 
     await client.peekCdpTab({
       port: 51000,
@@ -521,6 +522,29 @@ describe('createApiClient other routes', () => {
     expect(seen).toContain('selector=%23total');
     // The sibling content route's spelling, not a camelCase invention.
     expect(seen).toContain('max_chars=500');
+
+    // The picture's own parameter (stories/cdp-tab-screenshot.md), in the same
+    // snake_case the route parses — and `false` is SENT rather than treated as
+    // a no-op, so an explicit viewport request does not depend on the server's
+    // default staying what it is today.
+    await client.peekCdpTab({
+      port: 51000,
+      targetId: 'A/B',
+      testFilePath: 'C:\\proj\\.aiui-peek.md',
+      format: 'screenshot',
+      fullPage: true,
+    });
+    expect(seen).toContain('format=screenshot');
+    expect(seen).toContain('full_page=true');
+
+    await client.peekCdpTab({
+      port: 51000,
+      targetId: 'A/B',
+      testFilePath: 'C:\\proj\\.aiui-peek.md',
+      format: 'screenshot',
+      fullPage: false,
+    });
+    expect(seen).toContain('full_page=false');
   });
 
   it('distinguishes "no such tab" from "no such route" on a peek 404 too', async () => {

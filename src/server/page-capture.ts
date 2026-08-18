@@ -134,17 +134,7 @@ export async function capturePageContent(
   const content =
     availableChars > opts.maxChars ? sliceWholeCodePoints(raw, opts.maxChars) : raw;
 
-  // Best-effort, unlike the content itself: an unreadable title is not the
-  // answer to the question that was asked, so it degrades to '' rather than
-  // failing a read that otherwise succeeded.
-  let url = '';
-  let title = '';
-  try {
-    url = page.url();
-    title = await page.title();
-  } catch {
-    // Browser may be in an intermediate state.
-  }
+  const { url, title } = await readPageIdentity(page);
 
   return {
     url,
@@ -156,6 +146,33 @@ export async function capturePageContent(
     returnedChars: content.length,
     availableChars,
   };
+}
+
+/**
+ * Which page this was, named as well as we can manage.
+ *
+ * Best-effort, unlike the content itself: an unreadable title is not the answer
+ * to the question that was asked, so it degrades to `''` rather than failing a
+ * read that otherwise succeeded.
+ *
+ * Exported so the screenshot peek names its tab the same way a text peek does
+ * (stories/cdp-tab-screenshot.md). Two copies of a best-effort read is how one
+ * of them quietly starts throwing on a page the other survives.
+ */
+export async function readPageIdentity(page: Page): Promise<{ url: string; title: string }> {
+  let url = '';
+  let title = '';
+  try {
+    // Assigned separately, and that is not style: `page.url()` is synchronous
+    // and almost never throws, while `page.title()` round-trips to a page that
+    // may be mid-navigation. Building the object in one `return` would discard
+    // a url we already had because the title after it failed.
+    url = page.url();
+    title = await page.title();
+  } catch {
+    // Browser may be in an intermediate state.
+  }
+  return { url, title };
 }
 
 /** Dispatch one capture. Failures arrive as `PageCaptureError` whichever

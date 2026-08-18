@@ -405,13 +405,27 @@ export const peekTabInput = toolSchema({
         'refused with the candidates named — so a rough name is safe to try.',
     ),
   format: z
-    .enum(['text', 'dom'])
+    .enum(['text', 'dom', 'screenshot'])
     .optional()
     .describe(
       '`text` (default) — the page\'s visible text, for what it says. `dom` — ' +
         'the cleaned DOM, for picking a selector to act on. `text` is far ' +
-        'smaller; reach for `dom` only when you need element structure. There is ' +
-        'no screenshot here — use get_page_content on a session for that.',
+        'smaller; reach for `dom` only when you need element structure. ' +
+        '`screenshot` — a PNG of the tab, for when the ask is to SEE the page ' +
+        '("show me", "what does it look like", "take a screenshot"). The picture ' +
+        'is taken where the tab sits: it is never brought forward, and works ' +
+        'with the window minimised. It costs real context and photographs a ' +
+        'live signed-in browser, so ask for it when seeing is the point, not as ' +
+        'a default.',
+    ),
+  full_page: z
+    .boolean()
+    .optional()
+    .describe(
+      'Screenshot only: capture the whole scrollable page instead of just the ' +
+        'visible viewport (default). Much larger — a long page can exceed the ' +
+        'size cap for returning an image, which is an error rather than a ' +
+        'silent drop, so reach for it when what you need is below the fold.',
     ),
   selector: z
     .string()
@@ -420,7 +434,10 @@ export const peekTabInput = toolSchema({
     .describe(
       'CSS selector to read instead of the whole page. **This is the right ' +
         'way to handle a truncated result** — narrowing beats raising ' +
-        'max_chars. A selector matching nothing is an error, not empty text.',
+        'max_chars. A selector matching nothing is an error, not empty text. ' +
+        'Does not apply to `format: "screenshot"` and is refused alongside it, ' +
+        'rather than ignored — a picture is of the whole viewport or the whole ' +
+        'page, never of one element.',
     ),
   max_chars: z
     .number()
@@ -429,7 +446,9 @@ export const peekTabInput = toolSchema({
     .optional()
     .describe(
       'Cap on returned characters (default 20000). Over-limit content comes ' +
-        'back truncated and flagged, never silently clipped.',
+        'back truncated and flagged, never silently clipped. Does not apply to ' +
+        '`format: "screenshot"` — an image is bounded by the size cap, not by ' +
+        'characters — and is refused alongside it rather than ignored.',
     ),
   profile: z
     .string()
@@ -466,29 +485,52 @@ export const peekTabInput = toolSchema({
  * `.meta({$schema: undefined})` suppression `toolSchema` applies — the emitted
  * body would regain a draft-07 `$schema`, `mcp-schema-dialect.test.ts` would
  * fail, and the opencode client would reject every result. And it would drag
- * in the screenshot-only `format` value plus field descriptions written for a
- * tool that answers screenshots, on a tool that refuses them.
+ * in field descriptions written for a tool that answers about a SESSION —
+ * `sessionId`, `status` — on a tool that addresses a tab.
+ *
+ * Both reasons survive stories/cdp-tab-screenshot.md giving the peek its own
+ * `"screenshot"` format: the two tools now answer the same three formats and
+ * still describe them differently, because their size stories differ. A
+ * session's over-cap image is one disappointing outcome of a run that still
+ * happened; a peek's is the whole of the answer.
  */
 export const peekTabOutput = toolSchema({
   targetId: z.string().describe('The tab that was read, exactly as list_cdp_browsers reports it.'),
   url: z.string(),
   title: z.string(),
-  format: z.enum(['text', 'dom']),
+  format: z.enum(['text', 'dom', 'screenshot']),
   selector: z.string().nullable(),
   content: z
     .string()
     .describe(
       'The page text or DOM, as it was at the moment of the read. An empty ' +
-        'value never means "the read failed": that is an error instead.',
+        'value never means "the read failed": that is an error instead. Empty ' +
+        'for `format: "screenshot"`, where the payload is the image block — ' +
+        '`format` tells you which half of this result to read.',
     ),
   truncated: z
     .boolean()
     .describe(
       'True when you did NOT receive the whole page — either it exceeded ' +
         'max_chars, or the capture itself hit the project\'s DOM size limit. ' +
-        'Narrow with `selector` to see the rest.',
+        'Narrow with `selector` to see the rest. Always false for a ' +
+        'screenshot: an image that did not fit is an error, never a partial ' +
+        'picture.',
     ),
-  returnedChars: z.number().describe('Characters returned.'),
+  width: z
+    .number()
+    .nullable()
+    .describe('Screenshot only: captured pixel width. Null for text and DOM reads.'),
+  height: z
+    .number()
+    .nullable()
+    .describe(
+      'Screenshot only: captured pixel height — well beyond the viewport when ' +
+        '`full_page` was set. Null for text and DOM reads.',
+    ),
+  returnedChars: z
+    .number()
+    .describe('Characters returned. For a screenshot, the base64 size of the image.'),
   availableChars: z
     .number()
     .describe(

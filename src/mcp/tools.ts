@@ -37,6 +37,9 @@ import {
   listSessionsTimedOut,
   pageContentSessionGone,
   peekRouteMissing,
+  peekScreenshotArgConflict,
+  peekScreenshotMissing,
+  peekScreenshotTooLarge,
   peekSessionsAreForGetPageContent,
   peekTabAmbiguous,
   peekTabGoneNow,
@@ -80,6 +83,7 @@ import {
   type ErrandRequestBody,
   type ErrandTab,
   type McpDeps,
+  type PeekedTab,
   type ProjectContext,
   type RunEvent,
   type RunSettings,
@@ -1055,9 +1059,11 @@ const SYNTHETIC_PEEK_BASENAME = '.aiui-peek.md';
 /** What `peek_tab` reads off its own call. */
 interface PeekArgs {
   tab: string;
-  format?: 'text' | 'dom' | undefined;
+  format?: 'text' | 'dom' | 'screenshot' | undefined;
   selector?: string | undefined;
   max_chars?: number | undefined;
+  /** Screenshot only (stories/cdp-tab-screenshot.md). */
+  full_page?: boolean | undefined;
   profile?: string | undefined;
   engine?: 'chrome' | 'edge' | undefined;
   scope?: 'project' | 'user' | undefined;
@@ -1126,6 +1132,7 @@ async function peekTab(
         ...(args.format !== undefined ? { format: args.format } : {}),
         ...(args.selector !== undefined ? { selector: args.selector } : {}),
         ...(args.max_chars !== undefined ? { maxChars: args.max_chars } : {}),
+        ...(args.full_page !== undefined ? { fullPage: args.full_page } : {}),
       },
       signal,
     );
@@ -1159,6 +1166,16 @@ async function peekTab(
     throw err;
   }
 
+  // Which half of the response to read is decided by what THIS CALL asked for,
+  // never by what came back (stories/cdp-tab-screenshot.md). A server that
+  // answered a picture request with text is a version skew, and folding its
+  // text in as the answer would quietly hand back the wrong KIND of thing — a
+  // server too old to know the format refuses the query outright instead, which
+  // arrives above as an error already.
+  if (args.format === 'screenshot') {
+    return screenshotPeek(peeked, target.targetId, where, project, args.full_page === true);
+  }
+
   // Not defaulted the way `list_cdp_browsers` defaults its optionals: a page
   // read that arrived without content has nothing usable to degrade to, and
   // substituting '' would tell the agent the page is empty when what actually
@@ -1179,6 +1196,10 @@ async function peekTab(
     selector: peeked.selector ?? null,
     content: peeked.content,
     truncated: peeked.truncated ?? false,
+    // A text or DOM read has no pixels to report, and null says that rather
+    // than 0 — which would read as a zero-sized picture.
+    width: null,
+    height: null,
     returnedChars: peeked.returnedChars ?? 0,
     availableChars: peeked.availableChars ?? 0,
     // The server's own claim about which root its capture settings came from.
@@ -1200,6 +1221,70 @@ async function peekTab(
     // does: a project-scope call that read a machine-wide browser is the one
     // thing a reader will not expect from the arguments they passed.
     `Read "${value.title || value.url}"${narrowed} in ${where} — ${value.format}, ${size}`,
+  );
+}
+
+/**
+ * The same peek, when what was asked for was a picture
+ * (stories/cdp-tab-screenshot.md).
+ *
+ * Its own function rather than a branch inside `peekTab`'s fold, because almost
+ * nothing is shared: every character field here is a constant, the payload
+ * travels in an image block instead of `content`, and the check worth making on
+ * the response is a different check.
+ */
+function screenshotPeek(
+  peeked: PeekedTab,
+  fallbackTargetId: string,
+  where: string,
+  project: ProjectContext,
+  fullPage: boolean,
+): ToolResult {
+  // Our own route sends bare base64 and `get_page_content`'s source sends a
+  // data URI. Accepting both costs one call, and means a server that starts
+  // wrapping it produces a smaller image rather than an unrenderable block.
+  const base64 = (typeof peeked.screenshot === 'string' ? peeked.screenshot : '').replace(
+    DATA_URI_PREFIX,
+    '',
+  );
+  // The sibling of the text path's `content` check, and load-bearing for the
+  // same reason: an empty image is not a blank page.
+  if (base64 === '') throw peekScreenshotMissing();
+  if (base64.length > MAX_SCREENSHOT_BASE64) {
+    return errorResult(
+      peekScreenshotTooLarge(where, base64.length, MAX_SCREENSHOT_BASE64, fullPage),
+    );
+  }
+
+  const value = {
+    targetId: peeked.targetId ?? fallbackTargetId,
+    url: peeked.url ?? '',
+    title: peeked.title ?? '',
+    format: 'screenshot' as const,
+    // Nothing narrowed this picture, and nothing could: `selector` is refused
+    // alongside a screenshot rather than ignored.
+    selector: null,
+    // Empty on purpose — the picture is in the image block, and `format` says
+    // which half of this result carries the payload. The same split
+    // `get_page_content` already makes for a session's screenshot.
+    content: '',
+    // An image that did not fit is the error above, never a partial picture.
+    truncated: false,
+    width: peeked.width ?? null,
+    height: peeked.height ?? null,
+    returnedChars: base64.length,
+    availableChars: base64.length,
+    root: peeked.root ?? project.projectRoot,
+    scope: project.scope,
+  };
+
+  const pixels = value.width !== null && value.height !== null ? `${value.width}×${value.height}, ` : '';
+  return validated(
+    schemas.peekTabOutput,
+    value,
+    `Photographed "${value.title || value.url}" in ${where} — ` +
+      `${fullPage ? 'full page' : 'viewport'}, ${pixels}${Math.round(base64.length / 1024)}KB`,
+    [{ type: 'image', data: base64, mimeType: 'image/png' }],
   );
 }
 
@@ -1472,7 +1557,8 @@ Whose browser? Ours to open — this tool opens one, or reuses one this
 framework already owns, and owns everything it touches until the session
 closes. Theirs to borrow — "my tab", "the one I have open", "my signed-in
 browser" — is not this tool, and splits by what you are doing to it: only
-READING it is peek_tab, which returns the page and changes nothing; ACTING in
+READING it is peek_tab, which returns the page — as text, or as a screenshot
+when the ask is to SEE it — and changes nothing; ACTING in
 it — clicking, typing, navigating — is run_errand, which drives an
 already-open tab for one request and hands it back. Ownership words decide it,
 not the word "test": "test the checkout on my open tab" is an errand.
@@ -1557,8 +1643,9 @@ OpenRouter tab". Ownership words decide it, not the word "test":
 "test the checkout on my open tab" is an errand.
 
 Then one more question, because borrowing splits: are you only READING that
-tab? "What's on my OpenRouter tab?" is peek_tab, which returns the page and
-changes nothing. ACTING in it — clicking, typing, navigating — is this one.
+tab? "What's on my OpenRouter tab?" — and "show me a screenshot of it" — is
+peek_tab, which returns the page and changes nothing. ACTING in it — clicking,
+typing, navigating — is this one.
 A drive-then-read is still ONE errand, because steps can capture.
 
 Name the tab and it is resolved fresh, right now, against the live tab list.
@@ -1596,11 +1683,12 @@ ${ERRAND_STEP_SYNTAX}`.trim();
  * session it never created, and had no third door to fall back to.
  */
 const PEEK_DESCRIPTION = `
-Read a tab the user ALREADY has open — its visible text, or its cleaned DOM —
-without changing anything on it.
+Read a tab the user ALREADY has open — its visible text, its cleaned DOM, or a
+SCREENSHOT of it — without changing anything on it.
 
 Three doors, one question each:
-  - Reading a tab you can name ("what's on my OpenRouter tab?") — this one.
+  - Reading a tab you can name ("what's on my OpenRouter tab?", "show me my
+    OpenRouter tab", "take a screenshot of it") — this one.
   - Driving a tab: clicking, typing, navigating — run_errand. Its steps can
     also capture ("read the balance, store as balance"), so a drive-then-read
     is ONE errand, not an errand and then a peek.
@@ -1615,7 +1703,9 @@ list_cdp_browsers reports.
 It changes nothing at all. No click, no navigation, no tab opened or closed,
 no session created, nothing written — and it does NOT bring the tab forward,
 so the user keeps looking at whatever they were looking at. Use focus_cdp_tab
-if they should see it.
+if they should see it. A screenshot is no exception: the tab is photographed
+where it sits, backgrounded or even minimised, and still comes back as a live
+frame rather than a stale one.
 
 It is safe to call on a tab something else is driving. A run in flight may
 move the page under you, so what comes back is what was there at the moment of
@@ -1627,6 +1717,14 @@ says; "dom" when you need element structure to pick a selector, and it is much
 larger. Narrow with selector rather than raising max_chars: a truncated result
 tells you it was truncated, and reading a bigger slice of the wrong part of
 the page costs context without answering anything.
+
+format "screenshot" when the ask is to SEE the page rather than read it —
+"show me", "what does it look like", anything about layout or rendering. It
+comes back as an image; full_page: true captures the whole scrollable page
+instead of the viewport, and an image too large to return is an error saying
+so, never a silent drop. selector and max_chars do not apply to a picture and
+are refused alongside it rather than quietly ignored. Prefer "text" when you
+only need to know what the page SAYS — it is a fraction of the context.
 
 This reads a real, signed-in browser belonging to a human. Say what you read
 and where you read it.`.trim();
@@ -2123,7 +2221,9 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         '`executing` — the page may move under you.\n\n' +
         'This reads a run_steps SESSION. To read a tab the user has open — one ' +
         'no session is sitting on — that is **peek_tab**, which takes the tab ' +
-        'by name and creates nothing.\n\n' +
+        'by name and creates nothing. That includes photographing it: peek_tab ' +
+        'answers `format: "screenshot"` too, so a tab with no session is never ' +
+        'a reason to reach for some other tool to get a picture.\n\n' +
         'An errand leaves no session behind either, so there is nothing here ' +
         'to read after run_errand: read the tab it drove with peek_tab. When ' +
         'the drive and the read are one job, have the errand capture what you ' +
@@ -2797,7 +2897,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
   server.registerTool(
     'peek_tab',
     {
-      title: 'Read a tab the user already has open',
+      title: 'Read or photograph a tab the user already has open',
       description: PEEK_DESCRIPTION,
       inputSchema: schemas.peekTabInput,
       outputSchema: schemas.peekTabOutput,
@@ -2815,6 +2915,15 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       // gpt-5.6-luna, 2026-08-13, on run_errand's identical argument).
       if (args.session_id !== undefined && args.session_id.trim() !== '') {
         return errorResult(peekSessionsAreForGetPageContent(args.session_id));
+      }
+
+      // Same place, same reasoning: an impossible combination should not start
+      // a server to be told no (stories/cdp-tab-screenshot.md §Locked). The
+      // route refuses these independently — it is reachable without this tool —
+      // so this is the fast copy, not the only one.
+      if (args.format === 'screenshot') {
+        if (args.selector !== undefined) return errorResult(peekScreenshotArgConflict('selector'));
+        if (args.max_chars !== undefined) return errorResult(peekScreenshotArgConflict('max_chars'));
       }
 
       return withProject(

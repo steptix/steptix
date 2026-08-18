@@ -21,6 +21,7 @@ const launchBrowserMock = vi.fn();
 const closeBrowserMock = vi.fn();
 const captureVisibleTextMock = vi.fn();
 const captureDomSnapshotMock = vi.fn();
+const captureTabScreenshotMock = vi.fn();
 
 vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/cdp-registry.js')>();
@@ -83,6 +84,18 @@ vi.mock('../src/browser/dom-cleaner.js', async (importOriginal) => {
     ...actual,
     captureVisibleText: (...args: unknown[]) => captureVisibleTextMock(...args),
     captureDomSnapshot: (...args: unknown[]) => captureDomSnapshotMock(...args),
+  };
+});
+
+// The picture's capture (stories/cdp-tab-screenshot.md). Mocked at the same
+// seam as the text one, and for the same reason: this suite owns the ROUTE's
+// contract — which arguments the capture was handed and what the route does
+// with what it answers — not Playwright's behaviour.
+vi.mock('../src/browser/screenshot.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/browser/screenshot.js')>();
+  return {
+    ...actual,
+    captureTabScreenshot: (...args: unknown[]) => captureTabScreenshotMock(...args),
   };
 });
 
@@ -216,6 +229,7 @@ beforeEach(() => {
   closeBrowserMock.mockReset();
   captureVisibleTextMock.mockReset();
   captureDomSnapshotMock.mockReset();
+  captureTabScreenshotMock.mockReset();
   knownProfilesMock.mockResolvedValue([]);
   discoverCdpPortsMock.mockResolvedValue([]);
   listPageTabsMock.mockResolvedValue([{ targetId: 'T1', title: 'Orders', url: 'https://shop/orders' }]);
@@ -223,6 +237,7 @@ beforeEach(() => {
   closeBrowserMock.mockResolvedValue(undefined);
   captureVisibleTextMock.mockResolvedValue(PAGE_TEXT);
   captureDomSnapshotMock.mockResolvedValue('<html><body>Orders</body></html>');
+  captureTabScreenshotMock.mockResolvedValue({ ok: true, image: { base64: SHOT_B64, width: 1689, height: 1277 } });
 });
 
 function del(port: number | string, targetId: string, qs = '', headers = auth) {
@@ -242,6 +257,10 @@ function focus(port: number | string, targetId: string, qs = '', headers = auth)
 // ---------------------------------------------------------------------------
 
 const PAGE_TEXT = 'Orders\n3 open\nTotal $120.00';
+
+/** What the screenshot capture answers with (stories/cdp-tab-screenshot.md).
+ *  Its identity is the point: the route must pass it through untouched. */
+const SHOT_B64 = 'c2NyZWVuc2hvdC1ieXRlcw==';
 
 /** The synthetic `<root>/.aiui-peek.md` the MCP side sends. No such file
  *  exists and none is read — it is only what a project root resolves from. */
@@ -1412,6 +1431,141 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     expect(body.truncated).toBe(true);
     expect(body.returnedChars).toBe(100);
     expect(body.availableChars).toBe(500);
+  });
+
+  // -------------------------------------------------------------------------
+  // format=screenshot (stories/cdp-tab-screenshot.md)
+  // -------------------------------------------------------------------------
+
+  it('answers a picture, its pixels, and none of the character fields', async () => {
+    const res = await peek(51000, 'T1', '&format=screenshot');
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      targetId: 'T1',
+      root: null,
+      // Read the same way a text peek reads them, through the same helper.
+      url: 'https://shop/orders',
+      title: 'Orders',
+      format: 'screenshot',
+      // Nothing narrowed it — `selector` is refused alongside a picture.
+      selector: null,
+      screenshot: SHOT_B64,
+      width: 1689,
+      height: 1277,
+    });
+    // No character fields at all: `truncated: false` and `returnedChars: 0` on
+    // a picture would be answers to a question nobody asked, and the MCP side
+    // decides what those mean for an image.
+    const body = await (await peek(51000, 'T1', '&format=screenshot')).json();
+    expect(body).not.toHaveProperty('content');
+    expect(body).not.toHaveProperty('truncated');
+  });
+
+  it('captures the viewport by default and the whole page when told', async () => {
+    await peek(51000, 'T1', '&format=screenshot');
+    expect(captureTabScreenshotMock.mock.calls[0]![1]).toBe(false);
+
+    await peek(51000, 'T1', '&format=screenshot&full_page=true');
+    expect(captureTabScreenshotMock.mock.calls[1]![1]).toBe(true);
+
+    // `false` means false. A truthiness test would read the likeliest possible
+    // spelling of "no" as yes.
+    await peek(51000, 'T1', '&format=screenshot&full_page=false');
+    expect(captureTabScreenshotMock.mock.calls[2]![1]).toBe(false);
+  });
+
+  it('refuses a full_page that is neither true nor false', async () => {
+    const res = await peek(51000, 'T1', '&format=screenshot&full_page=yes');
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('full_page must be');
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('photographs the tab without asking for it to be raised', async () => {
+    // The assertable half of story item (2): whether Chromium then declines to
+    // raise is not something this repo can assert, but that we never asked is.
+    // Pinned on the screenshot path SEPARATELY from the text path, because a
+    // picture is the one read someone might be tempted to activate for.
+    await peek(51000, 'T1', '&format=screenshot');
+
+    expect(launchBrowserMock.mock.calls[0]![1]).toEqual({
+      port: 51000,
+      tab: 'targetId:T1',
+      activate: false,
+    });
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses selector and max_chars alongside a picture, before any attach', async () => {
+    // Refused, never ignored. `selector` is the one that matters: dropping it
+    // would answer a request for one element with a picture of the whole page.
+    const withSelector = await peek(51000, 'T1', '&format=screenshot&selector=%23total');
+    expect(withSelector.status).toBe(400);
+    expect((await withSelector.json()).error).toContain('selector does not apply');
+
+    const withMax = await peek(51000, 'T1', '&format=screenshot&max_chars=500');
+    expect(withMax.status).toBe(400);
+    expect((await withMax.json()).error).toContain('max_chars does not apply');
+
+    // Neither reached the browser, so an impossible query costs no attach.
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+    expect(captureTabScreenshotMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed capture as an error, never as a blank page', async () => {
+    // The capture answers a reason rather than throwing, and an empty image
+    // would report a blank page — a claim nobody downstream can correct.
+    captureTabScreenshotMock.mockResolvedValue({ ok: false, reason: 'failed', detail: 'boom' });
+
+    const res = await peek(51000, 'T1', '&format=screenshot');
+
+    const { error } = await res.json();
+    expect(res.status).toBe(500);
+    expect(error).toContain('NOT a blank page');
+    expect(error).not.toContain('MINIMIZED');
+    // And the socket still closed: it holds the context-wide dialog guard.
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells a timeout apart from a failure, because the fix is a different one', async () => {
+    // Measured: a minimized window composes no new frame, so the SAME capture
+    // call both hangs and succeeds depending on nothing the caller controls.
+    // Reporting that as "the page may be wedged" sends someone debugging their
+    // page instead of un-minimizing their browser.
+    captureTabScreenshotMock.mockResolvedValue({
+      ok: false,
+      reason: 'timeout',
+      detail: 'no answer within 15s',
+    });
+
+    const res = await peek(51000, 'T1', '&format=screenshot');
+    const { error } = await res.json();
+
+    // 409, not 500: retrying verbatim fails the same way until the window
+    // changes, which is exactly what that status tells a client.
+    expect(res.status).toBe(409);
+    expect(error).toContain('MINIMIZED');
+    expect(error).toContain('no answer within 15s');
+    // Both remedies, and the reassurance that the tab is not the problem.
+    expect(error).toContain('Restore the window');
+    expect(error).toContain('format "text"');
+    expect(error).toContain('The tab itself is fine');
+    expect(error).not.toContain('wedged');
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the SESSION content route refusing screenshots', async () => {
+    // The shared query parser was deliberately not widened: `GET
+    // /sessions/:id/content` has no picture to give, and a parse that accepted
+    // the word would fail deeper down where the message is worse.
+    const res = await fetch(`${baseUrl}/sessions/nope/content?format=screenshot`, {
+      headers: auth,
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('Unknown format');
   });
 });
 
