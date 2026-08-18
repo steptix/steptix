@@ -928,6 +928,43 @@ export function peekTabAmbiguous(spec: string, matches: readonly CdpTab[]): McpT
  * measured live 2026-08-13). The refusal fires on VALUE, never on presence.
  */
 /**
+ * `navigate_tab`'s `target_id` was given something that is not an exact id
+ * (stories/navigate-tab.md §Locked).
+ *
+ * The refusal that keeps "navigate to openrouter in the current tab" from
+ * becoming a guess. `peek_tab` and `run_errand` take names because their
+ * zero-or-several refusals make a rough guess safe; this verb overwrites a page
+ * with no undo, so it sits with `close_cdp_tab` on exact ids — and "current" is
+ * the worst possible guess, because the tab someone is looking at is the one
+ * most likely to hold something they care about.
+ */
+export function navigateNeedsExactTarget(
+  given: string,
+  browser: string,
+  tabs: readonly CdpTab[],
+): McpToolError {
+  const looksPositional = /^(current|active|this|the current tab|front|frontmost)$/i.test(
+    given.trim(),
+  );
+  return preflightError(
+    `"${given}" is not a targetId, so this navigation is refused rather than ` +
+      'guessed at.\n' +
+      (looksPositional
+        ? 'There is no way to ask which tab is in front: nothing in the tab list ' +
+          'marks it, a window that is minimised reports none, and two open ' +
+          'windows report one each. Naming the wrong one here overwrites a page ' +
+          'that may hold unsaved work.\n'
+        : 'Names are accepted by peek_tab and run_errand because a wrong guess ' +
+          'there is recoverable. Overwriting the wrong page is not.\n') +
+      (tabs.length > 0
+        ? `Open tabs in ${browser}:\n${tabs.map((t) => `  ${describeTab(t)}`).join('\n')}\n\n` +
+          'Pass one of those ids as `target_id` — or **omit target_id entirely** ' +
+          'to open a new tab, which changes none of them.'
+        : `${browser} reports no tabs at all. Omit target_id to open a new one.`),
+  );
+}
+
+/**
  * `format: "screenshot"` arrived with an argument that only means something for
  * text (stories/cdp-tab-screenshot.md §Locked).
  *

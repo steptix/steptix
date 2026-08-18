@@ -22,6 +22,7 @@ const closeBrowserMock = vi.fn();
 const captureVisibleTextMock = vi.fn();
 const captureDomSnapshotMock = vi.fn();
 const captureTabScreenshotMock = vi.fn();
+const gotoMock = vi.fn();
 
 vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/cdp-registry.js')>();
@@ -207,10 +208,14 @@ const dormantProfile = (over: Record<string, unknown> = {}) => ({
 /** The app's own turn-lock registry — the one the errand route and the close
  *  guard both have to be reading. */
 let errandLocks: import('../src/server/errand-locks.js').ErrandLocks;
+let sessionManager: import('../src/server/session-manager.js').SessionManager;
 
 beforeAll(async () => {
   const created = createApiServer(testConfig);
   errandLocks = created.errandLocks;
+  // The navigate route asks this instance who is driving a tab; the suite has
+  // no real sessions, so the holder arm is reached by spying on it.
+  sessionManager = created.sessionManager;
   ({ server, baseUrl } = await listenOnRandomPort(created.app));
 });
 
@@ -230,6 +235,8 @@ beforeEach(() => {
   captureVisibleTextMock.mockReset();
   captureDomSnapshotMock.mockReset();
   captureTabScreenshotMock.mockReset();
+  gotoMock.mockReset();
+  gotoMock.mockResolvedValue(undefined);
   knownProfilesMock.mockResolvedValue([]);
   discoverCdpPortsMock.mockResolvedValue([]);
   listPageTabsMock.mockResolvedValue([{ targetId: 'T1', title: 'Orders', url: 'https://shop/orders' }]);
@@ -269,11 +276,49 @@ const PEEK_FILE = path.join(PROJECT, '.aiui-peek.md');
 /** A page the capture functions never actually touch (they are stubbed), but
  *  whose `url()`/`title()` the extraction really does read. */
 function attachedPage(url = 'https://shop/orders', title = 'Orders') {
-  return { url: () => url, title: async () => title };
+  return {
+    url: () => url,
+    title: async () => title,
+    // Only the navigate route calls this (stories/navigate-tab.md).
+    goto: (...args: unknown[]) => gotoMock(...args),
+  };
 }
 
 function attachedSession(page = attachedPage()) {
-  return { page, browser: {}, context: {}, cdp: true, cdpTabOpenedByUs: false };
+  return {
+    page,
+    browser: {},
+    context: {},
+    cdp: true,
+    cdpTabOpenedByUs: false,
+    // How the navigate route learns the id of a tab it just OPENED — there is
+    // no id to echo back in that arm, and inventing one would be worse.
+    pageTracker: { activeTabRef: async () => ({ targetId: 'NEWTAB1', url: page.url() }) },
+  };
+}
+
+/** The synthetic `<root>/.aiui-navigate.md`, the navigate route's twin of the
+ *  peek's. Never read from disk, never exists. */
+const NAV_FILE = path.join(PROJECT, '.aiui-navigate.md');
+
+function navigate(
+  body: Record<string, unknown>,
+  port: number | string = 51000,
+  headers: Record<string, string> = auth,
+) {
+  return fetch(`${baseUrl}/cdp/browsers/${port}/navigate`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ testFilePath: NAV_FILE, ...body }),
+  });
+}
+
+/** What Playwright throws when a navigation outruns its budget — matched by
+ *  `name`, because the class is not exported from the top-level module. */
+function timeoutError(): Error {
+  const err = new Error('page.goto: Timeout 30000ms exceeded.');
+  err.name = 'TimeoutError';
+  return err;
 }
 
 function peek(
@@ -1556,6 +1601,17 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     expect(closeBrowserMock).toHaveBeenCalledTimes(1);
   });
 
+  it('is not the route that navigates — that one is its own POST', async () => {
+    // A GET reads. Guarding this here so a future "navigate via ?url=" cannot
+    // creep onto the read verb, which is the whole reason the two are separate.
+    const res = await peek(51000, 'T1', '&url=https%3A%2F%2Fexample.com');
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.url).toBe('https://shop/orders');
+    expect(gotoMock).not.toHaveBeenCalled();
+  });
+
   it('leaves the SESSION content route refusing screenshots', async () => {
     // The shared query parser was deliberately not widened: `GET
     // /sessions/:id/content` has no picture to give, and a parse that accepted
@@ -1570,6 +1626,175 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /cdp/browsers/:port/navigate (stories/navigate-tab.md)
+//
+// The route's own contract at the layer no MCP result reaches: which arm the
+// attach was asked for, the guards that stand between a URL and someone's live
+// tab, and the two things that must NOT be failures.
+// ---------------------------------------------------------------------------
+
+describe('POST /cdp/browsers/:port/navigate', () => {
+  it('opens a NEW tab when no target is named, and touches no existing one', async () => {
+    const res = await navigate({ url: 'https://example.com/' });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    // `new`, which is the arm that destroys nothing — item (1).
+    expect(launchBrowserMock.mock.calls[0]![1]).toEqual({
+      port: 51000,
+      tab: 'new',
+      activate: false,
+    });
+    expect(gotoMock).toHaveBeenCalledWith('https://example.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    expect(body).toMatchObject({
+      requestedUrl: 'https://example.com/',
+      openedNewTab: true,
+      // Read back off the tracker, because a brand-new tab has no id to echo.
+      targetId: 'NEWTAB1',
+      warnings: [],
+    });
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('navigates exactly the tab it was given, and says it opened nothing', async () => {
+    const res = await navigate({ url: 'https://example.com/', targetId: 'T1' });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(launchBrowserMock.mock.calls[0]![1]).toEqual({
+      port: 51000,
+      tab: 'targetId:T1',
+      activate: false,
+    });
+    expect(body).toMatchObject({ openedNewTab: false, targetId: 'T1' });
+  });
+
+  it('refuses a scheme that is not http or https, before touching the browser', async () => {
+    for (const url of [
+      'javascript:alert(1)',
+      'file:///C:/Windows/win.ini',
+      'chrome://settings',
+      'data:text/html,<h1>x</h1>',
+    ]) {
+      const res = await navigate({ url });
+      expect(res.status, url).toBe(400);
+      expect((await res.json()).error).toContain('only http');
+    }
+    // Not a URL at all — the mistake an agent makes by dropping the scheme.
+    const bare = await navigate({ url: 'openrouter.ai' });
+    expect(bare.status).toBe(400);
+    expect((await bare.json()).error).toContain('including the scheme');
+
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+    expect(gotoMock).not.toHaveBeenCalled();
+  });
+
+  it('allows plain http, silently', async () => {
+    // Locked: internal tools live on cleartext http, and a warning on every one
+    // of those calls is noise nobody can act on.
+    const res = await navigate({ url: 'http://intranet.local/wiki' });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.warnings).toEqual([]);
+  });
+
+  it('refuses a target the browser does not have', async () => {
+    const res = await navigate({ url: 'https://example.com/', targetId: 'GONE' });
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toContain('GONE');
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a tab an ERRAND is driving, naming it', async () => {
+    // The exact opposite of the peek, which coexists with drivers on purpose.
+    // A read cannot spoil a run; a navigation moves the page out from under it.
+    const hold = { errandId: 'errand-nav', role: 'borrowed' as const, since: 1 };
+    expect(errandLocks.acquire(51000, 'T1', hold)).toBeNull();
+    try {
+      const res = await navigate({ url: 'https://example.com/', targetId: 'T1' });
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.error).toContain('errand-nav');
+      expect(body.holder).toEqual(hold);
+      expect(launchBrowserMock).not.toHaveBeenCalled();
+    } finally {
+      errandLocks.release('errand-nav');
+    }
+  });
+
+  it('refuses a tab a SESSION is driving, and refuses on a maybe', async () => {
+    const spy = vi
+      .spyOn(sessionManager, 'sessionsByTarget')
+      .mockResolvedValue({ byTarget: new Map([['T1', 'mcp:steps-9']]), complete: true });
+    try {
+      const held = await navigate({ url: 'https://example.com/', targetId: 'T1' });
+      expect(held.status).toBe(409);
+      expect((await held.json()).error).toContain('mcp:steps-9');
+
+      // An incomplete join cannot say "nobody holds it", and a navigation that
+      // lands on a live run is not worth the risk of assuming it does.
+      spy.mockResolvedValue({ byTarget: new Map(), complete: false });
+      const unsure = await navigate({ url: 'https://example.com/', targetId: 'T1' });
+      expect(unsure.status).toBe(409);
+      expect((await unsure.json()).error).toContain('Could not confirm');
+
+      expect(launchBrowserMock).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('treats a load timeout as a WARNING on a successful navigation', async () => {
+    // The navigation happened and the tab moved. Refusing would misreport that
+    // and leave a tab somewhere the caller does not know about.
+    gotoMock.mockRejectedValue(timeoutError());
+
+    const res = await navigate({ url: 'https://example.com/' });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.warnings).toHaveLength(1);
+    expect(body.warnings[0]).toContain('had not finished loading');
+    // The prose says what the fact means for the next call, which is the whole
+    // reason this is a sentence and not a boolean.
+    expect(body.warnings[0]).toContain('partial page');
+    expect(body.warnings[0]).toContain('peek_tab');
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still fails on a navigation error that is not a timeout', async () => {
+    gotoMock.mockRejectedValue(new Error('net::ERR_NAME_NOT_RESOLVED'));
+
+    const res = await navigate({ url: 'https://nope.invalid/' });
+
+    expect(res.status).toBe(500);
+    // And the socket still closed: it holds the context-wide dialog guard.
+    expect(closeBrowserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires an absolute testFilePath, like every project-resolving route', async () => {
+    const res = await fetch(`${baseUrl}/cdp/browsers/51000/navigate`, {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://example.com/', testFilePath: 'relative.md' }),
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('absolute');
+  });
+
+  it('is behind the api key', async () => {
+    expect((await navigate({ url: 'https://example.com/' }, 51000, {})).status).toBe(401);
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+});
+
 // Tab → session join on the listing (stories/cdp-tabs.md §1)
 // ---------------------------------------------------------------------------
 

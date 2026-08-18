@@ -50,6 +50,28 @@ import { getPackageVersion } from '../utils/version.js';
 const DEFAULT_CONTENT_MAX_CHARS = 20_000;
 
 /**
+ * How long a `navigate_tab` waits for `domcontentloaded`
+ * (stories/navigate-tab.md §Locked).
+ *
+ * 30s and `domcontentloaded` are not chosen here — they are what every other
+ * navigation in this codebase already uses (`browser/actions.ts`,
+ * `runner/step-executor.ts`, `runner/test-runner.ts`, `session-manager.ts`,
+ * `api/csrf-handler.ts`). A different number would mean this verb and a
+ * `go to X` step disagreed about when a page has arrived.
+ */
+const NAVIGATE_TIMEOUT_MS = 30_000;
+
+/**
+ * Playwright's timeouts arrive as a `TimeoutError` whose `name` says so; the
+ * class is not exported from the top-level module, so the name is the handle.
+ * Load-bearing rather than defensive: a timeout is reported as a warning on a
+ * navigation that SUCCEEDED, and every other failure has to keep propagating.
+ */
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'TimeoutError';
+}
+
+/**
  * The `format` / `selector` / `max_chars` triple both content routes take.
  *
  * Shared rather than copied when the peek route arrived (stories/tab-peek.md):
@@ -1670,7 +1692,11 @@ export function createApiServer(
             const image = shot.image;
             const identity = await readPageIdentity(attached.page);
             content = {
-              ...identity,
+              // Named, not spread: `readPageIdentity` also reports whether the
+              // read went stale, and that belongs to the navigation's warning —
+              // spreading it would put an undeclared field on this response.
+              url: identity.url,
+              title: identity.title,
               format: 'screenshot' as const,
               // Null for the same reason the argument is refused: nothing
               // narrowed this picture.
@@ -1716,6 +1742,226 @@ export function createApiServer(
         // open". Same envelope, same status, same words as the pre-check.
         if (err instanceof CdpTabNotFoundError) {
           res.status(statusForCdpFailure('not_found')).json({ error: goneTabMessage(port, targetId) });
+          return;
+        }
+        next(err);
+      }
+    },
+  );
+
+  // POST /cdp/browsers/:port/navigate (stories/navigate-tab.md)
+  //
+  // The framework's only navigation that costs no model. Everything downstream
+  // of the guards is the peek route's — same project resolution, same
+  // `activate: false` attach, same disconnect-not-kill detach — because the
+  // difference between this verb and that one is what it is ALLOWED to do, not
+  // how it reaches the browser.
+  //
+  // Not `/tabs/:targetId/navigate`: the target is optional here, and a path that
+  // requires one would make opening a new tab the awkward case rather than the
+  // default. That default is the whole safety story (§Locked).
+  app.post(
+    '/cdp/browsers/:port/navigate',
+    async (req: Request, res: Response, next: NextFunction) => {
+      const port = Number(req.params.port);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        res.status(400).json({ error: `port must be a valid TCP port (got "${req.params.port}")` });
+        return;
+      }
+
+      const body = (req.body ?? {}) as {
+        url?: unknown;
+        targetId?: unknown;
+        testFilePath?: unknown;
+        envName?: unknown;
+      };
+
+      const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
+      if (rawUrl === '') {
+        res.status(400).json({ error: 'url is required' });
+        return;
+      }
+      // Scheme first, before anything is resolved or attached. `javascript:` is
+      // code execution in a browser holding real logins, `file:` is local disk,
+      // `chrome:` is settings — and none of them is what anyone means by "open".
+      // Plain `http` IS allowed and says nothing: internal tools live there, and
+      // a warning on every call is noise nobody can act on.
+      let parsed: URL;
+      try {
+        parsed = new URL(rawUrl);
+      } catch {
+        res.status(400).json({
+          error:
+            `"${rawUrl}" is not a URL this can navigate to. Give an absolute ` +
+            'http:// or https:// address, including the scheme.',
+        });
+        return;
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        res.status(400).json({
+          error:
+            `Refusing to navigate to a "${parsed.protocol}" address — only http ` +
+            'and https are allowed.\n' +
+            'javascript: runs code in a browser holding real logins, file: reads ' +
+            'local disk, and chrome:/about: are the browser\'s own settings.',
+        });
+        return;
+      }
+
+      const targetId = typeof body.targetId === 'string' ? body.targetId.trim() : '';
+
+      // Same synthetic-path contract the peek route documents: it is the only
+      // thing a project root resolves from, and without it the attach runs under
+      // library defaults that differ from the project's.
+      const rawTestFilePath = body.testFilePath;
+      if (typeof rawTestFilePath !== 'string' || rawTestFilePath === '') {
+        res.status(400).json({ error: 'testFilePath is required' });
+        return;
+      }
+      if (!path.isAbsolute(rawTestFilePath)) {
+        res
+          .status(400)
+          .json({ error: `testFilePath must be an absolute path (got "${rawTestFilePath}")` });
+        return;
+      }
+      const rawEnvName = body.envName;
+      if (rawEnvName !== undefined && typeof rawEnvName !== 'string') {
+        res.status(400).json({ error: 'envName must be a single string value.' });
+        return;
+      }
+
+      try {
+        if (targetId !== '') {
+          // The replace path, and every guard on it lives here rather than in
+          // the caller. The pre-check first, so a tab that closed while we
+          // reached for it is our own 404 envelope (cdp-tab-focus §6).
+          const tabs = await listPageTabs(port);
+          if (tabs === null) {
+            res.status(statusForCdpFailure('launch_failed')).json({
+              error:
+                `Could not read the tab list from the browser on port ${port}. ` +
+                'It may be shutting down.\n' +
+                'Call list_cdp_browsers to see what is still running.',
+            });
+            return;
+          }
+          if (!tabs.some((tab) => tab.targetId === targetId)) {
+            res
+              .status(statusForCdpFailure('not_found'))
+              .json({ error: goneTabMessage(port, targetId) });
+            return;
+          }
+
+          // Who is driving it. The EXACT OPPOSITE of the peek, which proceeds
+          // happily alongside a driver because a read cannot spoil one — a
+          // navigation yanks the page out from under a run mid-step. Both holder
+          // kinds, same shapes `close_cdp_tab` already refuses on.
+          const errandHolder = errandLocks.holder(port, targetId);
+          if (errandHolder) {
+            res.status(statusForCdpFailure('refused')).json({
+              error:
+                `That tab is being driven by errand ${errandHolder.errandId}, so ` +
+                'navigating it now would move the page out from under a run in ' +
+                'progress.\nWait for the errand to finish, or navigate a different tab.',
+              holder: errandHolder,
+            });
+            return;
+          }
+          const { byTarget, complete } = await sessionManager.sessionsByTarget(port);
+          const sessionHolder = byTarget.get(targetId);
+          if (sessionHolder || !complete) {
+            // An incomplete join cannot say "nobody holds it", and refusing on a
+            // maybe is the right trade for a guard whose failure navigates a tab
+            // out from under a live run.
+            res.status(statusForCdpFailure('refused')).json({
+              error: sessionHolder
+                ? `That tab is being driven by session ${sessionHolder}, so ` +
+                  'navigating it now would move the page out from under a run in ' +
+                  'progress.\nClose that session first, or navigate a different tab.'
+                : 'Could not confirm whether a session is driving that tab, and a ' +
+                  'navigation that lands on a live run is not worth the risk.\n' +
+                  'Call list_sessions, then try again.',
+            });
+            return;
+          }
+        }
+
+        const bundle = await projectBundles.resolve(rawTestFilePath, rawEnvName?.trim() || null);
+
+        // `new` when no target was named — the default, and the only arm that
+        // destroys nothing. `activate: false` gates the EXISTING-tab arm only, so
+        // a tab this opens still appears: you asked for something to be opened.
+        const attached = await launchBrowser(bundle.config.browser, {
+          port,
+          tab: targetId === '' ? 'new' : `targetId:${targetId}`,
+          activate: false,
+        });
+
+        const warnings: string[] = [];
+        let identity;
+        let landedTargetId: string | null = targetId === '' ? null : targetId;
+        try {
+          try {
+            await attached.page.goto(parsed.toString(), {
+              waitUntil: 'domcontentloaded',
+              timeout: NAVIGATE_TIMEOUT_MS,
+            });
+          } catch (err) {
+            // A timeout is NOT a failure: the navigation happened and the tab
+            // moved, so refusing would misreport it and leave a tab somewhere the
+            // caller does not know about. Anything else is a real error.
+            if (!isTimeoutError(err)) throw err;
+            warnings.push(
+              `The page had not finished loading after ` +
+                `${Math.round(NAVIGATE_TIMEOUT_MS / 1000)}s (waiting for ` +
+                'domcontentloaded), so the tab is there but the document is still ' +
+                'arriving. Reading it now may show a partial page, or miss elements ' +
+                'that have not loaded yet — peek_tab again in a moment if something ' +
+                'you expect is absent.',
+            );
+          }
+
+          identity = await readPageIdentity(attached.page);
+          if (identity.stale) {
+            warnings.push(
+              'The page moved again while we were reading it, so the url and title ' +
+                'reported may be the previous page rather than where the tab ended ' +
+                'up. peek_tab to see where it actually is.',
+            );
+          }
+          if (landedTargetId === null) {
+            const ref = await attached.pageTracker.activeTabRef();
+            landedTargetId = ref?.targetId ?? null;
+          }
+        } finally {
+          // **The tab we opened is the deliverable, not scaffolding.**
+          // `closeBrowser` closes a tab the attach itself opened, which is right
+          // for a RUN — a test that opened a tab should take its coat when it
+          // leaves — and exactly wrong here, where opening the tab IS the job.
+          // Caught live: without this the new tab appeared, navigated, and
+          // vanished before the caller could ever peek at it.
+          attached.cdpTabOpenedByUs = false;
+          // Disconnect, never kill — and in a `finally` because the connection
+          // holds the context-wide dialog guard.
+          await closeBrowser(attached);
+        }
+
+        res.status(200).json({
+          requestedUrl: parsed.toString(),
+          url: identity.url,
+          title: identity.title,
+          // Null only when a brand-new tab could not be identified afterwards;
+          // the navigation still happened, and inventing an id would be worse.
+          targetId: landedTargetId,
+          openedNewTab: targetId === '',
+          root: bundle.projectRoot,
+          warnings,
+        });
+      } catch (err) {
+        if (err instanceof CdpTabNotFoundError) {
+          res
+            .status(statusForCdpFailure('not_found'))
+            .json({ error: goneTabMessage(port, targetId) });
           return;
         }
         next(err);

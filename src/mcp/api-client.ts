@@ -18,6 +18,7 @@ import {
   type FocusedCdpTab,
   type LastRunInfo,
   type PageContent,
+  type NavigatedTab,
   type PeekedTab,
   type RunEvent,
   type ServerConfigReport,
@@ -551,6 +552,28 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       // that came back without content has nothing usable to degrade to.
       await assertOk(res);
       return (await res.json()) as PeekedTab;
+    },
+
+    async navigateCdpTab(args, signal): Promise<NavigatedTab> {
+      const path = `/cdp/browsers/${args.port}/navigate`;
+      const res = await doFetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: args.url,
+          testFilePath: args.testFilePath,
+          // Omitted rather than sent empty, so "open a new tab" is expressed by
+          // absence on the wire exactly as it is in the tool's arguments.
+          ...(args.targetId !== undefined ? { targetId: args.targetId } : {}),
+        }),
+        ...(signal ? { signal } : {}),
+      });
+
+      // The same 404 split the peek makes, for the same reason: "your tab is
+      // gone" and "rebuild the server" are opposite remedies.
+      await splitTabOrRoute404(res, path);
+      await assertOk(res);
+      return (await res.json()) as NavigatedTab;
     },
 
     async startCdpBrowser(body, signal): Promise<StartedCdpBrowser> {

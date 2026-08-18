@@ -46,18 +46,35 @@ interface FakePage {
   title: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   bringToFront: ReturnType<typeof vi.fn>;
+  /** Only `navigate_tab` calls this (stories/navigate-tab.md). */
+  goto: ReturnType<typeof vi.fn>;
 }
 
 function makePage(targetId: string, url: string, title: string): FakePage {
-  return {
+  const page: FakePage = {
     targetId,
     urlText: url,
     titleText: title,
-    url: vi.fn(() => url),
-    title: vi.fn(async () => title),
+    // Read through the mutable field, so a `goto` really moves this page —
+    // which is what makes a navigate test about navigation rather than about
+    // whether we remembered to update a fixture.
+    url: vi.fn(() => page.urlText),
+    title: vi.fn(async () => page.titleText),
     close: vi.fn(async () => {}),
     bringToFront: vi.fn(async () => {}),
+    goto: vi.fn(async (to: string) => {
+      // A redirect the caller did not ask for, for the one destination that
+      // needs proving end to end: you asked for a page and got a sign-in.
+      if (to.includes('needs-login')) {
+        page.urlText = 'https://accounts.example/login';
+        page.titleText = 'Sign in';
+        return;
+      }
+      page.urlText = to;
+      page.titleText = `Page at ${to}`;
+    }),
   };
+  return page;
 }
 
 const CDP_PORT = 51000;
@@ -219,6 +236,12 @@ vi.mock('../src/browser/manager.js', () => {
 
   const closeBrowser = vi.fn(async (session: any) => {
     detaches.push(session);
+    // Faithful to the real one on the clause that matters: it CLOSES a tab the
+    // attach itself opened. Modelling that is what lets this suite fail when a
+    // caller who opened a tab on purpose forgets to disown it
+    // (stories/navigate-tab.md — found live, and only because of this line can
+    // it be found here).
+    if (session.cdp && session.cdpTabOpenedByUs) await session.page.close();
     session.browser = { isConnected: () => false };
   });
 
@@ -257,6 +280,20 @@ vi.mock('../src/browser/manager.js', () => {
       ) => {
         if (!cdp) throw new Error('this suite only attaches over CDP');
         attaches.push({ config, cdp });
+        // The `new` arm, which only `navigate_tab` asks for: a tab that did not
+        // exist a moment ago, with every pre-existing one ignored so nothing
+        // treats them as ours.
+        if (cdp.tab === 'new') {
+          const opened = makePage('tab-opened', 'about:blank', 'New Tab');
+          return {
+            browser: { isConnected: () => true },
+            context: {},
+            page: opened,
+            pageTracker: new PageTracker(opened, new Set<any>(TABS)),
+            cdp: true,
+            cdpTabOpenedByUs: true,
+          };
+        }
         const targetId = String(cdp.tab ?? '').replace(/^targetId:/, '');
         const page = TABS.find((p) => p.targetId === targetId);
         if (!page) throw new Error(`CDP: no tab matches targetId "${targetId}".`);
@@ -598,6 +635,76 @@ describe('peek_tab over the real HTTP seam', () => {
     expect(existsSync(path.join(tightDir, 'reports'))).toBe(false);
     // Nor did the synthetic path ever become a file.
     expect(existsSync(path.join(tightDir, '.aiui-peek.md'))).toBe(false);
+  }, 30_000);
+
+  it('navigates a new tab and a named one, over the same real seam', async () => {
+    // stories/navigate-tab.md, through the whole chain: tool arguments → HTTP
+    // body → route guards → the attach arm → goto → the result. The per-field
+    // reads on that path are exactly what a seam test cannot see.
+    attaches.length = 0;
+    const before = await listSessionIds();
+
+    // The default arm: a new tab, and no existing tab moved.
+    const urlsBefore = TABS.map((t) => t.urlText);
+    const opened = await client.callTool({
+      name: 'navigate_tab',
+      arguments: { url: 'https://example.com/pricing', profile: 'default', project_root: tightDir },
+    });
+
+    expect(opened.isError, content(opened)).toBeFalsy();
+    const openedValue = opened.structuredContent as Record<string, unknown>;
+    expect(openedValue.openedNewTab).toBe(true);
+    expect(openedValue.requestedUrl).toBe('https://example.com/pricing');
+    expect(openedValue.url).toBe('https://example.com/pricing');
+    expect(openedValue.targetId).toBe('tab-opened');
+    expect(attaches[0]!.cdp).toEqual({ port: CDP_PORT, tab: 'new', activate: false });
+    // Item (1) proved the only way that means anything: every tab the user had
+    // is still where it was.
+    expect(TABS.map((t) => t.urlText)).toEqual(urlsBefore);
+    // **The opened tab SURVIVES the detach.** `closeBrowser` closes a tab the
+    // attach opened, which is right for a run and exactly wrong here — opening
+    // the tab is the job. Found live, where the new tab navigated and then
+    // vanished before anything could look at it; pinned here because a detach
+    // that quietly took the deliverable with it looked like a success.
+    const openedPage = detaches.at(-1)!.page as { close: ReturnType<typeof vi.fn> };
+    expect(openedPage.close).not.toHaveBeenCalled();
+    expect(detaches.at(-1)!.cdpTabOpenedByUs).toBe(false);
+
+    // The replace arm, by exact id, and the tab really moves.
+    const cart = TABS.find((t) => t.targetId === 'tab-cart')!;
+    const replaced = await client.callTool({
+      name: 'navigate_tab',
+      arguments: {
+        url: 'https://example.com/needs-login',
+        target_id: 'tab-cart',
+        profile: 'default',
+        project_root: tightDir,
+      },
+    });
+
+    expect(replaced.isError, content(replaced)).toBeFalsy();
+    const replacedValue = replaced.structuredContent as Record<string, unknown>;
+    expect(replacedValue.openedNewTab).toBe(false);
+    expect(replacedValue.targetId).toBe('tab-cart');
+    // The redirect, end to end: asked for one page, landed on a sign-in.
+    expect(replacedValue.requestedUrl).toBe('https://example.com/needs-login');
+    expect(replacedValue.url).toBe('https://accounts.example/login');
+    expect(replacedValue.title).toBe('Sign in');
+    expect(content(replaced)).toContain('Landed on: https://accounts.example/login');
+    expect(cart.urlText).toBe('https://accounts.example/login');
+    expect(attaches[1]!.cdp).toEqual({
+      port: CDP_PORT,
+      tab: 'targetId:tab-cart',
+      activate: false,
+    });
+
+    // Still no sessions, and no report: a navigation is not a run.
+    expect(await listSessionIds()).toEqual(before);
+    expect(generateReportMock).not.toHaveBeenCalled();
+
+    // Put the fixture back, since later tests read this tab by name.
+    cart.urlText = 'https://shop.example/cart';
+    cart.titleText = 'Cart — Shop';
   }, 30_000);
 
   it('photographs the named tab, and full_page survives every layer', async () => {

@@ -19,6 +19,7 @@ import {
   expandDomSubtree,
   PageCaptureError,
 } from '../src/browser/dom-cleaner.js';
+import { readPageIdentity } from '../src/server/page-capture.js';
 
 let browser: Browser;
 let page: Page;
@@ -428,5 +429,83 @@ describe('domCaptureFailure', () => {
     // `evaluate-failed`, not `timeout`: the stub rejects with a plain Error, and
     // the marker means "capture gave up", not "the budget expired".
     expect(domCaptureFailure(snapshot, 'snapshot')?.kind).toBe('evaluate-failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readPageIdentity (stories/navigate-tab.md §Locked)
+//
+// Shared by both peeks and by a navigation, so all three describe a page the
+// same way. The retry is here because the one failure that is genuinely
+// transient — the page moved while we were reading it — usually resolves in
+// half a second, and a warning nobody can act on is worse than a short wait.
+// ---------------------------------------------------------------------------
+
+describe('readPageIdentity', () => {
+  /** A page whose `title()` fails for the first `failures` calls. */
+  function flakyPage(opts: { failures: number; urls?: string[]; title?: string }) {
+    let calls = 0;
+    const urls = opts.urls ?? ['https://shop.example/cart'];
+    return {
+      calls: () => calls,
+      page: {
+        url: () => urls[Math.min(calls, urls.length - 1)]!,
+        title: async () => {
+          const attempt = calls++;
+          if (attempt < opts.failures) throw new Error('Execution context was destroyed');
+          return opts.title ?? 'Cart';
+        },
+      } as unknown as Page,
+    };
+  }
+
+  it('reads in one go when nothing is moving', async () => {
+    const { page, calls } = flakyPage({ failures: 0 });
+
+    const identity = await readPageIdentity(page);
+
+    expect(identity).toEqual({ url: 'https://shop.example/cart', title: 'Cart', stale: false });
+    // No retry, so no 500ms spent on the overwhelmingly common path.
+    expect(calls()).toBe(1);
+  });
+
+  it('retries once and reports the page it MOVED to', async () => {
+    // The interesting case: the read lost a race with a client-side redirect,
+    // and half a second later the new page answers happily. This is why the
+    // retry exists — it turns a warning into a non-event.
+    const { page } = flakyPage({
+      failures: 1,
+      urls: ['https://shop.example/cart', 'https://accounts.example/login'],
+      title: 'Sign in',
+    });
+
+    const identity = await readPageIdentity(page);
+
+    expect(identity).toEqual({
+      url: 'https://accounts.example/login',
+      title: 'Sign in',
+      stale: false,
+    });
+  });
+
+  it('gives up after the second failure and says the url may be stale', async () => {
+    const { page } = flakyPage({ failures: 99 });
+
+    const identity = await readPageIdentity(page);
+
+    // `stale` is really a claim about the URL, not the title: `page.url()` was
+    // read BEFORE the title threw, so it is the address from before the move.
+    expect(identity.stale).toBe(true);
+    expect(identity.url).toBe('https://shop.example/cart');
+    expect(identity.title).toBe('');
+  });
+
+  it('keeps a url it salvaged rather than answering with nothing', async () => {
+    // A stale url beats an empty one — `stale` is what says which it is.
+    const { page } = flakyPage({ failures: 99, urls: ['https://shop.example/cart'] });
+
+    const identity = await readPageIdentity(page);
+
+    expect(identity.url).not.toBe('');
   });
 });

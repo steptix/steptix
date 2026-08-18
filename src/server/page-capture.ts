@@ -148,6 +148,26 @@ export async function capturePageContent(
   };
 }
 
+/** One page's identity, plus whether we actually managed to read it. */
+export interface PageIdentity {
+  url: string;
+  title: string;
+  /**
+   * True when both attempts to read this page failed.
+   *
+   * **What it really means is that `url` may be STALE**, which is the part worth
+   * acting on. `page.url()` is read first and `page.title()` second, so a title
+   * that throws leaves behind a url captured a moment earlier — on a client-side
+   * redirect, the address of the page we were on *before* it moved. The empty
+   * title is only the tripwire.
+   *
+   * Callers choose what to do with it: a peek ignores it (the page is the answer
+   * there, not its name), and `navigate_tab` turns it into a warning
+   * (stories/navigate-tab.md §Locked).
+   */
+  stale: boolean;
+}
+
 /**
  * Which page this was, named as well as we can manage.
  *
@@ -155,11 +175,36 @@ export async function capturePageContent(
  * to the question that was asked, so it degrades to `''` rather than failing a
  * read that otherwise succeeded.
  *
- * Exported so the screenshot peek names its tab the same way a text peek does
- * (stories/cdp-tab-screenshot.md). Two copies of a best-effort read is how one
- * of them quietly starts throwing on a page the other survives.
+ * Retried once, for the same reason and with the same delay `capturePageContent`
+ * retries a content read: the one failure that is genuinely transient here is a
+ * page that moved while we were reading it, and half a second later the new page
+ * usually answers. That turns the common case into a non-event rather than a
+ * warning nobody can act on.
+ *
+ * Shared so the screenshot peek names its tab the same way a text peek does
+ * (stories/cdp-tab-screenshot.md) and a navigation reports the same identity
+ * both of them would. Two copies of a best-effort read is how one of them
+ * quietly starts throwing on a page the other survives.
  */
-export async function readPageIdentity(page: Page): Promise<{ url: string; title: string }> {
+export async function readPageIdentity(page: Page): Promise<PageIdentity> {
+  const first = await tryReadIdentity(page);
+  if (!first.failed) return { url: first.url, title: first.title, stale: false };
+
+  await new Promise((r) => setTimeout(r, NAVIGATION_RETRY_DELAY_MS));
+  const second = await tryReadIdentity(page);
+  // The retry's values when it got them, else whatever the first attempt
+  // salvaged — a stale url beats an empty one, and `stale` says which this is.
+  return {
+    url: second.url || first.url,
+    title: second.title || first.title,
+    stale: second.failed,
+  };
+}
+
+/** One attempt, reporting what it salvaged and whether it fell over. */
+async function tryReadIdentity(
+  page: Page,
+): Promise<{ url: string; title: string; failed: boolean }> {
   let url = '';
   let title = '';
   try {
@@ -171,8 +216,9 @@ export async function readPageIdentity(page: Page): Promise<{ url: string; title
     title = await page.title();
   } catch {
     // Browser may be in an intermediate state.
+    return { url, title, failed: true };
   }
-  return { url, title };
+  return { url, title, failed: false };
 }
 
 /** Dispatch one capture. Failures arrive as `PageCaptureError` whichever

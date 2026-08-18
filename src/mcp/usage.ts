@@ -31,6 +31,7 @@ Tools
   get_page_content  read a session's current page as text or cleaned DOM
   peek_tab          read a tab the user already has open — text, cleaned DOM
                     or a screenshot, changing nothing
+  navigate_tab      open a URL — a new tab by default, no model involved
   list_cdp_browsers persistent CDP browsers — the project's and the user root's
   start_cdp_browser launch (or return) a CDP browser you can sign into by hand
   close_cdp_tab     close one tab in a CDP browser
