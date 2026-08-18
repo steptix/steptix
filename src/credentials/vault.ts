@@ -75,6 +75,29 @@ function resolveBinary(binary: string, env: NodeJS.ProcessEnv): string {
   return binary;
 }
 
+/** How `bw` is actually invoked. A seam, so the sync and retry rules below can
+ *  be tested without spawning anything. */
+export type BwRunner = (
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  input?: string,
+) => Promise<BwResult>;
+
+/**
+ * How long the local vault cache is trusted before another `bw sync`.
+ *
+ * `bw list` reads a cache on disk; only `sync` refreshes it from the server.
+ * This used to be "sync once per process", which is wrong for a server that
+ * runs for days: an item added or a password rotated on another device stayed
+ * invisible until restart. A stale *password* is the worse half — the site
+ * rejects a login that looks correct from here.
+ *
+ * A minute is short against how often anyone edits their vault, and long
+ * against a burst of calls inside one multi-page sign-in.
+ */
+const SYNC_TTL_MS = 60_000;
+
 export interface BitwardenOptions {
   /** The binary. Overridable so a test can point at a stub. */
   binary?: string;
@@ -82,6 +105,10 @@ export interface BitwardenOptions {
   session?: string | undefined;
   /** Ambient environment for the child. Injected so tests need not mutate `process.env`. */
   environment?: NodeJS.ProcessEnv;
+  /** Injected in tests; defaults to actually running `bw`. */
+  runner?: BwRunner;
+  /** Injected so cache expiry is testable without waiting a minute. */
+  now?: () => number;
 }
 
 /**
@@ -224,12 +251,16 @@ function toVaultItem(raw: BwItem): VaultItem | null {
 export class BitwardenVault implements VaultProvider {
   private readonly binary: string;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly run: BwRunner;
+  private readonly now: () => number;
   private session: string | undefined;
-  /** Set once a sync has run, so a burst of logins does not re-sync per call. */
-  private synced = false;
+  /** When the local cache was last refreshed. 0 = never. */
+  private lastSyncAt = 0;
 
   constructor(opts: BitwardenOptions = {}) {
     this.environment = opts.environment ?? process.env;
+    this.run = opts.runner ?? runBw;
+    this.now = opts.now ?? Date.now;
     // `AIUI_BW_BINARY` for a `bw` that is installed but not on PATH — which on
     // Windows is the normal outcome of an npm-global or Scoop install seen from
     // a service-spawned process, where PATH is not the user's shell PATH.
@@ -257,7 +288,7 @@ export class BitwardenVault implements VaultProvider {
   async status(): Promise<'unlocked' | 'locked' | 'unauthenticated' | 'cli-missing'> {
     let result: BwResult;
     try {
-      result = await runBw(this.binary, ['status', '--raw'], this.childEnv());
+      result = await this.run(this.binary, ['status', '--raw'], this.childEnv());
     } catch (err) {
       if (err instanceof VaultError && err.kind === 'cli-missing') return 'cli-missing';
       throw err;
@@ -291,7 +322,7 @@ export class BitwardenVault implements VaultProvider {
     const key = result.stdout.trim();
     if (key === '') return false;
     this.session = key;
-    this.synced = false;
+    this.lastSyncAt = 0;
     return true;
   }
 
@@ -300,18 +331,22 @@ export class BitwardenVault implements VaultProvider {
     return this.session !== undefined && this.session !== '';
   }
 
-  private async ensureSynced(): Promise<void> {
-    if (this.synced) return;
-    // Best-effort. A failed sync means the local cache is stale, not that the
-    // vault is unusable — an item added on the phone five minutes ago may be
-    // missing, which the caller will see as "no credential for this site". A
-    // hard failure here would break logins for credentials that are present.
+  /**
+   * Refresh the local cache if it is older than `SYNC_TTL_MS`, or if `force`.
+   *
+   * Best-effort: a failed sync means the cache is stale, not that the vault is
+   * unusable, and failing hard here would break logins for credentials that
+   * are present. The timestamp still advances on failure, so a `bw` that is
+   * refusing to sync cannot turn every lookup into a network round trip.
+   */
+  private async ensureSynced(force = false): Promise<void> {
+    if (!force && this.lastSyncAt !== 0 && this.now() - this.lastSyncAt < SYNC_TTL_MS) return;
     try {
-      await runBw(this.binary, ['sync'], this.childEnv());
+      await this.run(this.binary, ['sync'], this.childEnv());
     } catch {
       // Deliberately swallowed; see above.
     }
-    this.synced = true;
+    this.lastSyncAt = this.now();
   }
 
   async itemsForUrl(url: string): Promise<VaultItem[]> {
@@ -323,12 +358,27 @@ export class BitwardenVault implements VaultProvider {
     // handing an unvalidated string to a child process.
     const origin = originForLookup(url);
     if (origin === null) return [];
+
     await this.ensureSynced();
-    const result = await runBw(
-      this.binary,
-      ['list', 'items', '--url', origin],
-      this.childEnv(),
-    );
+    let items = await this.listFor(origin);
+
+    // Nothing found? Sync and ask once more before saying so.
+    //
+    // "No saved login for this site" is the one answer a user is most likely
+    // to be able to contradict — they can see the item in Bitwarden — and the
+    // most common reason for it is a cache older than the item. Paying for one
+    // extra sync on the way to a refusal is cheap; it is not on the path of any
+    // successful login.
+    if (items.length === 0) {
+      await this.ensureSynced(true);
+      items = await this.listFor(origin);
+    }
+    return items;
+  }
+
+  /** One `bw list items --url`, parsed. */
+  private async listFor(origin: string): Promise<VaultItem[]> {
+    const result = await this.run(this.binary, ['list', 'items', '--url', origin], this.childEnv());
     if (result.code !== 0) {
       throw new VaultError(classify(result), result.stderr.trim() || 'The Bitwarden CLI refused the lookup.');
     }
@@ -351,7 +401,7 @@ export class BitwardenVault implements VaultProvider {
 
   async secretFor(itemId: string): Promise<VaultSecret> {
     if (!this.unlocked) throw new VaultError('locked', 'The vault is locked.');
-    const result = await runBw(this.binary, ['get', 'item', itemId], this.childEnv());
+    const result = await this.run(this.binary, ['get', 'item', itemId], this.childEnv());
     if (result.code !== 0) {
       throw new VaultError(classify(result), 'The Bitwarden CLI would not return that item.');
     }
@@ -368,7 +418,7 @@ export class BitwardenVault implements VaultProvider {
 
   async totpFor(itemId: string): Promise<string | null> {
     if (!this.unlocked) throw new VaultError('locked', 'The vault is locked.');
-    const result = await runBw(this.binary, ['get', 'totp', itemId], this.childEnv());
+    const result = await this.run(this.binary, ['get', 'totp', itemId], this.childEnv());
     if (result.code !== 0) return null;
     const code = result.stdout.trim();
     return code === '' ? null : code;
