@@ -28,7 +28,8 @@ import {
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
 import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
-import { capturePageContent, type PageContentOptions } from './page-capture.js';
+import { capturePageContent, readPageIdentity, type PageContentOptions } from './page-capture.js';
+import { captureTabScreenshot } from '../browser/screenshot.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { createLoginBroker, type FieldHint, type LoginBroker } from '../credentials/index.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
@@ -101,6 +102,63 @@ function readContentQuery(req: Request, res: Response): PageContentOptions | nul
 
   return { format, selector, maxChars };
 }
+
+/**
+ * The query a `format: "screenshot"` peek takes, and the two it refuses
+ * (stories/cdp-tab-screenshot.md §Locked).
+ *
+ * Split from `readContentQuery` rather than folded into it, because its other
+ * caller — the session content route — has no screenshot to give: widening the
+ * shared parser would make `GET /sessions/:id/content?format=screenshot` parse
+ * cleanly and then fail somewhere deeper, where the message is worse.
+ *
+ * Answers on `res` and returns null when the query is bad, exactly as
+ * `readContentQuery` does.
+ */
+function readScreenshotQuery(req: Request, res: Response): { fullPage: boolean } | null {
+  // Refused, never ignored — and `selector` is the one that matters. Dropping
+  // it would answer a request for ONE ELEMENT with a picture of the whole page:
+  // a wrong answer wearing a right one's clothes, which the caller has no way
+  // to notice. It is the same trap `readContentQuery` already 400s on for a
+  // repeated or empty `?selector=`, in its most convincing shape.
+  if (req.query['selector'] !== undefined) {
+    res.status(400).json({
+      error:
+        'selector does not apply to format "screenshot" — a picture is of the ' +
+        'whole viewport or the whole page, never of one element. Drop it, or ' +
+        'read that element with format "text" or "dom".',
+    });
+    return null;
+  }
+  // Less dangerous and refused on the same principle: an image is bounded by
+  // the result size cap, not by characters, so honouring this would be
+  // impossible and ignoring it would be silent.
+  if (req.query['max_chars'] !== undefined) {
+    res.status(400).json({
+      error:
+        'max_chars does not apply to format "screenshot" — an image is bounded ' +
+        'by the size cap for a returned picture, not by characters. Drop it, ' +
+        'or capture less with full_page: false.',
+    });
+    return null;
+  }
+
+  const raw = req.query['full_page'];
+  if (raw === undefined) return { fullPage: false };
+  // Strings only, and only these two. A truthiness test would read
+  // `full_page=false` as true — the single most likely way to send it.
+  if (raw === 'true') return { fullPage: true };
+  if (raw === 'false') return { fullPage: false };
+  res.status(400).json({
+    error: `full_page must be "true" or "false" (got "${String(raw)}").`,
+  });
+  return null;
+}
+
+/** What one peek was asked for: the text/DOM read, or the picture. */
+type PeekPlan =
+  | { kind: 'content'; opts: PageContentOptions }
+  | { kind: 'screenshot'; fullPage: boolean };
 
 /**
  * The gone-tab refusal the peek route answers with, from either of the two
@@ -1476,7 +1534,8 @@ export function createApiServer(
     },
   );
 
-  // GET /cdp/browsers/:port/tabs/:targetId/content (stories/tab-peek.md)
+  // GET /cdp/browsers/:port/tabs/:targetId/content
+  // (stories/tab-peek.md; the picture is stories/cdp-tab-screenshot.md)
   //
   // Attach → extract → detach, in one request. A read, so GET and no body —
   // page-content.md §Locked's reasoning applies verbatim.
@@ -1492,8 +1551,21 @@ export function createApiServer(
       if (!params) return;
       const { port, targetId } = params;
 
-      const opts = readContentQuery(req, res);
-      if (!opts) return;
+      // `format: "screenshot"` takes a different query shape and a different
+      // capture, so the split happens here (stories/cdp-tab-screenshot.md).
+      // Everything downstream of it — the project bundle, the `activate: false`
+      // attach, the detach — is shared, which is the whole reason the picture
+      // lives on this route rather than a new one.
+      let plan: PeekPlan;
+      if (req.query['format'] === 'screenshot') {
+        const shot = readScreenshotQuery(req, res);
+        if (!shot) return;
+        plan = { kind: 'screenshot', fullPage: shot.fullPage };
+      } else {
+        const opts = readContentQuery(req, res);
+        if (!opts) return;
+        plan = { kind: 'content', opts };
+      }
 
       // The synthetic `<root>/.aiui-peek.md`, and it is required rather than
       // optional: it is the only thing a project root resolves from, and
@@ -1563,9 +1635,55 @@ export function createApiServer(
 
         let content;
         try {
-          // `bundle.config.browser` on BOTH sides of this: the attach above and
-          // the capture here read the project's settings, never the server's.
-          content = await capturePageContent(attached.page, bundle.config.browser, opts);
+          if (plan.kind === 'screenshot') {
+            // NOT the run pipeline's `captureScreenshot`, and the difference
+            // was measured rather than reasoned about: Playwright's viewport
+            // screenshot waits for a stable composited frame, which a MINIMIZED
+            // window never produces, so it hangs and times out. Driving
+            // `Page.captureScreenshot` directly skips that wait — see the table
+            // on `captureTabScreenshot` (stories/cdp-tab-screenshot.md W1).
+            const shot = await captureTabScreenshot(attached.page, plan.fullPage);
+            if (!shot.ok) {
+              // Never an empty picture: that would report a blank page, a claim
+              // about the page nobody downstream can correct. And the two
+              // reasons get different words because they have different fixes —
+              // a timeout is a fact about the WINDOW, and telling someone their
+              // page is wedged sends them debugging instead of un-minimizing.
+              res.status(statusForCdpFailure(shot.reason === 'timeout' ? 'refused' : 'launch_failed')).json({
+                error:
+                  shot.reason === 'timeout'
+                    ? `The tab on port ${port} did not produce a picture (${shot.detail}).\n` +
+                      'A MINIMIZED window is the usual cause: it composes no new ' +
+                      'frame, so there is nothing to photograph until something ' +
+                      'wakes it. The tab itself is fine.\n' +
+                      'Restore the window (or focus_cdp_tab) and ask again — it is ' +
+                      'instant once the window is on screen. A background tab of a ' +
+                      'VISIBLE window photographs fine as it is.\n' +
+                      'Or read the page with format "text", which works either way.'
+                    : `Could not photograph the tab on port ${port} (${shot.detail}). ` +
+                      'The tab is there but the capture failed — the browser may be ' +
+                      'mid-navigation or wedged. This is NOT a blank page. Try ' +
+                      'again, or read it with format "text".',
+              });
+              return;
+            }
+            const image = shot.image;
+            const identity = await readPageIdentity(attached.page);
+            content = {
+              ...identity,
+              format: 'screenshot' as const,
+              // Null for the same reason the argument is refused: nothing
+              // narrowed this picture.
+              selector: null,
+              screenshot: image.base64,
+              width: image.width,
+              height: image.height,
+            };
+          } else {
+            // `bundle.config.browser` on BOTH sides of this: the attach above and
+            // the capture here read the project's settings, never the server's.
+            content = await capturePageContent(attached.page, bundle.config.browser, plan.opts);
+          }
         } finally {
           // Disconnect, never kill. `closeBrowser` severs the CDP websocket and
           // closes only a tab the attach itself opened — a `targetId:` attach

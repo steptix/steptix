@@ -226,7 +226,9 @@ peek_tab {
 
 Deliberately absent: `steps` (a peek cannot act — wanting both means
 `run_errand`, whose steps can capture), `keep_open` (nothing opens),
-`format: "screenshot"` (an open question below), and any config bundle.
+`format: "screenshot"` (an open question below — **since answered by
+[cdp-tab-screenshot](cdp-tab-screenshot.md), which adds it plus
+`full_page` and changes nothing else here**), and any config bundle.
 
 The `tab` slot is the story's second name-taking tab argument, and that
 is its own **named amendment to [cdp-tabs](cdp-tabs.md) §Locked and
@@ -292,6 +294,13 @@ New, each named because round 1 caught them being assumed:
   opencode would reject the output), and would drag in the
   screenshot-only `format` value and field descriptions of a tool that
   refuses screenshots. `format` is declared `text|dom` only.
+  **Amended by [cdp-tab-screenshot](cdp-tab-screenshot.md)**: the peek
+  no longer refuses screenshots, so its own `format` gains
+  `"screenshot"` — declared on this fresh schema, which is exactly why
+  the no-derivation rule above still stands. The two tools' screenshot
+  descriptions stay separately worded because their size stories differ:
+  a session's over-cap image is one outcome of a run that still
+  happened, a peek's is the whole of the answer.
 - `activate?: boolean` on `CdpLaunchOptions` (default true) gating the
   attach path's existing-tab raise; asserted where it can actually fail,
   `tests/browser-manager-focus.test.ts`.
@@ -387,10 +396,15 @@ candidate, as a follow-up rather than a churn now.
 
 ## Open questions
 
-- **`format: "screenshot"`.** "Show me the tab" is a real ask, and
-  Playwright can screenshot an attached page. Deferred: the return-size
-  and privacy questions (`screenshots_return`'s reasoning) deserve their
-  own decision rather than a rider on v1.
+- ~~**`format: "screenshot"`.**~~ **ANSWERED** by
+  [cdp-tab-screenshot](cdp-tab-screenshot.md), which took the decision
+  this bullet asked for rather than riding along on v1: the return-size
+  question is settled by reusing `MAX_SCREENSHOT_BASE64` with an
+  over-cap image failing loudly, and the privacy question by the
+  no-`port` construction below — a photograph is strictly more
+  disclosing than a title, so it inherits the stronger posture, not
+  `allowUnowned`. `format` gains a third value and `full_page` joins it;
+  everything else on this page holds unchanged.
 - **Naming.** `peek_tab` vs `read_tab` vs `read_cdp_tab` — settled by
   the widened probe (errands item (8) as amended above) before anything
   freezes.

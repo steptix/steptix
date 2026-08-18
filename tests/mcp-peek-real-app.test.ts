@@ -300,6 +300,23 @@ const PAGE_DOM = `<html><body>${'<div>row</div>'.repeat(80)}</body></html>`;
  */
 const domCaptureOptions: { domSnapshotCharLimit?: number; maxIframeDepth?: number }[] = [];
 
+/**
+ * A real 1×1 PNG. Decodable on purpose: the MCP SDK validates an image block's
+ * `data` as base64 and rejects the whole result otherwise, so a placeholder
+ * would fail a screenshot assertion for a reason unrelated to what is on trial.
+ */
+const SHOT_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/**
+ * The `fullPage` argument each screenshot capture was handed — the screenshot
+ * twin of `domCaptureOptions`, and on trial for the same reason
+ * (stories/cdp-tab-screenshot.md). `full_page` is read out field by field at
+ * four separate layers (tool args → client query string → route parser →
+ * capture call), so widening a type compiles cleanly and drops it at runtime.
+ */
+const screenshotFullPage: boolean[] = [];
+
 vi.mock('../src/browser/dom-cleaner.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/dom-cleaner.js')>();
   return {
@@ -384,7 +401,16 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 vi.mock('../src/browser/screenshot.js', () => ({
-  captureScreenshot: vi.fn(async () => ({ base64: 'fakeBase64' })),
+  captureScreenshot: vi.fn(async () => ({ base64: SHOT_B64, width: 1440, height: 900 })),
+  // The peek's own capture, which is deliberately NOT the run pipeline's — see
+  // the measurement table on `captureTabScreenshot`. Mocked separately so a
+  // peek that quietly reverted to the run helper fails here.
+  captureTabScreenshot: vi.fn(async (_page: unknown, fullPage = false) => {
+    screenshotFullPage.push(fullPage);
+    // A taller image when the whole page was asked for, so a test can tell the
+    // two captures apart by their result and not only by this recording.
+    return { ok: true, image: { base64: SHOT_B64, width: 1689, height: fullPage ? 3361 : 1277 } };
+  }),
 }));
 
 vi.mock('../src/utils/logger.js', () => ({
@@ -572,6 +598,54 @@ describe('peek_tab over the real HTTP seam', () => {
     expect(existsSync(path.join(tightDir, 'reports'))).toBe(false);
     // Nor did the synthetic path ever become a file.
     expect(existsSync(path.join(tightDir, '.aiui-peek.md'))).toBe(false);
+  }, 30_000);
+
+  it('photographs the named tab, and full_page survives every layer', async () => {
+    // stories/cdp-tab-screenshot.md, through the whole chain this file exists
+    // for: tool arguments → client query string → route parser → capture call
+    // → response → image block. `full_page` is read out field by field at each
+    // of those, which is exactly the shape of bug a seam test cannot see.
+    attaches.length = 0;
+    detaches.length = 0;
+    screenshotFullPage.length = 0;
+    const before = await listSessionIds();
+
+    const res = await peek({ tab: 'title~Cart', profile: 'default', format: 'screenshot' });
+
+    expect(res.isError, content(res)).toBeFalsy();
+    const value = res.structuredContent as Record<string, unknown>;
+    expect(value.format).toBe('screenshot');
+    expect(value.targetId).toBe('tab-cart');
+    expect(value.title).toBe('Cart — Shop');
+    // The picture is not in the structured half — it is in an image block, and
+    // `content` being empty is what says so.
+    expect(value.content).toBe('');
+    expect(value.truncated).toBe(false);
+    expect(value.width).toBe(1689);
+    expect(value.height).toBe(1277);
+
+    const blocks = (res.content as { type: string; data?: string; mimeType?: string }[]).filter(
+      (b) => b.type === 'image',
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.data).toBe(SHOT_B64);
+    expect(blocks[0]!.mimeType).toBe('image/png');
+
+    // Viewport by default, and the whole page only when asked — read off what
+    // the capture was actually handed, four layers down.
+    expect(screenshotFullPage).toEqual([false]);
+    const whole = await peek({ tab: 'title~Cart', format: 'screenshot', full_page: true });
+    expect(whole.isError, content(whole)).toBeFalsy();
+    expect(screenshotFullPage).toEqual([false, true]);
+    expect((whole.structuredContent as Record<string, unknown>).height).toBe(3361);
+
+    // A photograph is still a peek: nothing created, and the window never asked
+    // for — the one read someone might be tempted to activate for.
+    expect(await listSessionIds()).toEqual(before);
+    expect(attaches).toHaveLength(2);
+    expect(attaches[0]!.cdp).toEqual({ port: CDP_PORT, tab: 'targetId:tab-cart', activate: false });
+    expect(detaches).toHaveLength(2);
+    expect(generateReportMock).not.toHaveBeenCalled();
   }, 30_000);
 
   it('narrows to one element with a selector, and clips at max_chars (item 2)', async () => {

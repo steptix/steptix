@@ -927,6 +927,79 @@ export function peekTabAmbiguous(spec: string, matches: readonly CdpTab[]): McpT
  * again without session_id" physically cannot (stories/errands.md item (6),
  * measured live 2026-08-13). The refusal fires on VALUE, never on presence.
  */
+/**
+ * `format: "screenshot"` arrived with an argument that only means something for
+ * text (stories/cdp-tab-screenshot.md §Locked).
+ *
+ * Refused rather than ignored, and `selector` is why the rule exists: dropping
+ * it would answer a request for ONE ELEMENT with a picture of the whole page —
+ * a wrong answer wearing a right one's clothes, which the caller has no way to
+ * notice. The route refuses these too; this copy exists so the refusal happens
+ * before a server is started to say no.
+ */
+export function peekScreenshotArgConflict(arg: 'selector' | 'max_chars'): McpToolError {
+  return preflightError(
+    arg === 'selector'
+      ? 'selector does not apply to format "screenshot", so this call is refused ' +
+          'rather than quietly widened: a picture is of the whole viewport or the ' +
+          'whole page, never of one element.\n' +
+          'Drop selector to photograph the tab, or read that one element with ' +
+          'format "text" or "dom".'
+      : 'max_chars does not apply to format "screenshot", so this call is ' +
+          'refused rather than quietly ignored: an image is bounded by the size ' +
+          'cap for a returned picture, not by characters.\n' +
+          'Drop max_chars to photograph the tab. To capture less, use ' +
+          'full_page: false (the default) — or read the page with format "text", ' +
+          'where max_chars does apply.',
+  );
+}
+
+/**
+ * The picture came back, and it is too big to hand over
+ * (stories/cdp-tab-screenshot.md §Locked).
+ *
+ * An error rather than a warning, for the reason `get_page_content`'s twin
+ * gives: unlike a run result, there is nothing else in this response worth
+ * having once the image is gone. It names the fix that actually applies —
+ * `full_page` is how a peek realistically gets here — before the fallback that
+ * abandons the picture entirely.
+ */
+export function peekScreenshotTooLarge(
+  browser: string,
+  base64Length: number,
+  capBytes: number,
+  fullPage: boolean,
+): McpToolError {
+  return preflightError(
+    `The screenshot of ${browser} is ${Math.round(base64Length / 1024)}KB of ` +
+      `base64, over the ${Math.round(capBytes / 1024)}KB cap for an image in a ` +
+      'tool result, so it cannot be returned.\n' +
+      (fullPage
+        ? 'That was a full_page capture of a long page — the usual way to hit ' +
+          'this. Retry with full_page: false for the viewport alone.'
+        : 'That was a viewport capture, so the page is unusually large or the ' +
+          'display very high-resolution — full_page: false is already set.') +
+      '\nOr read the page instead with format "text", which is far smaller.',
+  );
+}
+
+/**
+ * A screenshot peek that came back with no picture in it.
+ *
+ * The sibling of the `content` check on a text peek, and it exists for the same
+ * reason: an empty image is not a blank page, and a caller that cannot tell
+ * those apart will confidently report the second. This one is a bug in the
+ * server (a capture failure has its own 500 with its own words), so it says so
+ * rather than sending anyone to look at their browser.
+ */
+export function peekScreenshotMissing(): Error {
+  return new Error(
+    'The Sessions API returned a screenshot response with no image in it. This ' +
+      'is a bug in the server, not a blank page — a capture that failed answers ' +
+      'with an error instead.',
+  );
+}
+
 export function peekSessionsAreForGetPageContent(sessionId: string): McpToolError {
   return preflightError(
     `A peek reads a TAB, not a session, so session_id "${sessionId}" cannot be ` +

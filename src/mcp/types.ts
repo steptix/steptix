@@ -492,14 +492,29 @@ export interface PeekCdpTabArgs {
    *  a project root from — and therefore the only thing that makes the capture
    *  run under the PROJECT's dom limits rather than the library defaults. */
   testFilePath: string;
-  format?: 'text' | 'dom' | undefined;
+  format?: 'text' | 'dom' | 'screenshot' | undefined;
   selector?: string | undefined;
   maxChars?: number | undefined;
+  /** Screenshot only: the whole scrollable page instead of the viewport
+   *  (stories/cdp-tab-screenshot.md). Sending it alongside `selector` or
+   *  `maxChars` is refused by the route, not silently ignored. */
+  fullPage?: boolean | undefined;
 }
 
-/** The tab as read. `get_page_content`'s body minus `sessionId`/`status` — a
- *  peek addresses no session and carries no run status to lie with — plus the
- *  `targetId` it read and the root its settings resolved against. */
+/**
+ * The tab as read. `get_page_content`'s body minus `sessionId`/`status` — a
+ * peek addresses no session and carries no run status to lie with — plus the
+ * `targetId` it read and the root its settings resolved against.
+ *
+ * Every format-specific half is optional because **this is a cast over an
+ * untrusted wire, not a promise**: a `text`/`dom` read carries the four
+ * character fields and no picture, a `screenshot` read carries the picture and
+ * its dimensions and no characters, and a server from a build that predates
+ * either sends neither. The caller checks the half its own request asked for
+ * and refuses rather than degrading — `''` would report an empty page and `0`
+ * an empty picture, which are the two confusions this whole surface exists to
+ * prevent.
+ */
 export interface PeekedTab {
   targetId: string;
   /** Null when no `aiui.config.json` stood above the synthetic path, so the
@@ -507,12 +522,18 @@ export interface PeekedTab {
   root: string | null;
   url: string;
   title: string;
-  format: 'text' | 'dom';
+  format: 'text' | 'dom' | 'screenshot';
   selector: string | null;
-  content: string;
-  truncated: boolean;
-  returnedChars: number;
-  availableChars: number;
+  content?: string;
+  truncated?: boolean;
+  returnedChars?: number;
+  availableChars?: number;
+  /** Screenshot only: base64 PNG, with no data-URI prefix. */
+  screenshot?: string;
+  /** Screenshot only: the captured pixel size. `full_page` shows up here as a
+   *  height well beyond the viewport's. */
+  width?: number;
+  height?: number;
 }
 
 export interface GetCdpBrowsersArgs {

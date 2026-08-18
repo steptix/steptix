@@ -7,11 +7,15 @@ import { resetRegistry } from '../src/mcp/registry.js';
 import {
   describeBrowser,
   peekRouteMissing,
+  peekScreenshotArgConflict,
+  peekScreenshotTooLarge,
   peekSessionsAreForGetPageContent,
   peekTabAmbiguous,
   peekTabGoneNow,
   peekTabNotFound,
 } from '../src/mcp/errors.js';
+import { MAX_SCREENSHOT_BASE64 } from '../src/mcp/run-fold.js';
+import * as schemas from '../src/mcp/schemas.js';
 import { ApiHttpError, ApiRouteNotFoundError } from '../src/mcp/types.js';
 import type {
   ApiClient,
@@ -498,6 +502,10 @@ describe('the result', () => {
       selector: null,
       content: PAGE_TEXT,
       truncated: false,
+      // Null rather than absent or 0: a text read has no pixels, and 0 would
+      // read as a zero-sized picture (stories/cdp-tab-screenshot.md).
+      width: null,
+      height: null,
       returnedChars: PAGE_TEXT.length,
       availableChars: PAGE_TEXT.length,
       root: PROJECT_ROOT,
@@ -652,5 +660,225 @@ describe('the two readings of a 404', () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toContain('navigated');
     expect(text(result)).not.toContain('dist/');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The picture (stories/cdp-tab-screenshot.md)
+//
+// Everything about ADDRESSING a tab is the text peek's and is covered above —
+// what is new here is the second payload: which half of a result carries it,
+// what happens when it is too big, and the two arguments a picture cannot
+// honour. Those are asserted against the exported builders, the way this file
+// asserts every other refusal.
+// ---------------------------------------------------------------------------
+
+/**
+ * A real 1×1 PNG, base64.
+ *
+ * Genuinely decodable rather than a placeholder, and that is not fussiness: the
+ * MCP SDK validates an image block's `data` as base64 and rejects the whole
+ * result otherwise — so a fake string would fail every assertion here for a
+ * reason that has nothing to do with what is being tested.
+ */
+const IMAGE_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/** A screenshot response, shaped as the route builds one: the picture and its
+ *  pixels, and NONE of the character fields. */
+function shotTab(args: PeekCdpTabArgs, overrides: Partial<PeekedTab> = {}): PeekedTab {
+  return {
+    targetId: args.targetId,
+    root: PROJECT_ROOT,
+    url: 'https://shop.example/cart',
+    title: 'Cart — Checkout',
+    format: 'screenshot',
+    selector: null,
+    screenshot: IMAGE_B64,
+    width: 1689,
+    height: 1277,
+    ...overrides,
+  };
+}
+
+/** The image blocks of a result, which is where the payload lives. */
+function images(result: unknown): { data: string; mimeType: string }[] {
+  return (result as { content: { type: string; data?: string; mimeType?: string }[] }).content
+    .filter((c) => c.type === 'image')
+    .map((c) => ({ data: c.data ?? '', mimeType: c.mimeType ?? '' }));
+}
+
+describe('peek_tab photographs a tab that has no session', () => {
+  it('asks the server for a picture, and for full_page only when told', async () => {
+    const asked = await connect({ peek: shotTab });
+    await peek(asked, { format: 'screenshot', full_page: true });
+    expect(asked.peeks[0]).toMatchObject({ format: 'screenshot', fullPage: true });
+
+    // `false` is SENT, not dropped as a no-op: it is the default today, and a
+    // caller that says so explicitly should not have to depend on that
+    // staying true.
+    const viewport = await connect({ peek: shotTab });
+    await peek(viewport, { format: 'screenshot', full_page: false });
+    expect(viewport.peeks[0]).toMatchObject({ format: 'screenshot', fullPage: false });
+
+    // Omitted entirely when unasked, so a text peek's query is byte-identical
+    // to what it was before screenshots existed.
+    const bare = await connect();
+    await peek(bare);
+    expect(bare.peeks[0]).not.toHaveProperty('fullPage');
+    expect(bare.peeks[0]).not.toHaveProperty('format');
+  });
+
+  it('carries the image in an image block and the facts in the structured half', async () => {
+    const h = await connect({ peek: shotTab });
+
+    const result = await peek(h, { format: 'screenshot' });
+
+    expect(result.isError).toBeFalsy();
+    // The payload, byte for byte, as an image block — not as text, and not
+    // repeated into `content` where it would double the response.
+    expect(images(result)).toEqual([{ data: IMAGE_B64, mimeType: 'image/png' }]);
+    expect(structured(result)).toEqual({
+      targetId: 'T-CART',
+      url: 'https://shop.example/cart',
+      title: 'Cart — Checkout',
+      format: 'screenshot',
+      // Nothing narrowed it, and nothing could.
+      selector: null,
+      // Empty on purpose: `format` says which half of the result to read.
+      content: '',
+      // An image that did not fit is an error, never a partial picture.
+      truncated: false,
+      width: 1689,
+      height: 1277,
+      returnedChars: IMAGE_B64.length,
+      availableChars: IMAGE_B64.length,
+      root: PROJECT_ROOT,
+      scope: 'project',
+    });
+    // The summary names the tab and the browser, so a host rendering only text
+    // still learns what was photographed and where.
+    expect(text(result)).toContain('Photographed "Cart — Checkout"');
+    expect(text(result)).toContain(THIS_BROWSER);
+    expect(text(result)).toContain('viewport');
+    expect(text(result)).toContain('1689×1277');
+  });
+
+  it('says full page in the summary when that is what was captured', async () => {
+    const h = await connect({ peek: (a) => shotTab(a, { height: 3361 }) });
+
+    const result = await peek(h, { format: 'screenshot', full_page: true });
+
+    expect(text(result)).toContain('full page');
+    expect(text(result)).not.toContain('viewport');
+    expect(structured(result)['height']).toBe(3361);
+  });
+
+  it('reads the half THIS CALL asked for, not the half that came back', async () => {
+    // Version skew: a server answering a picture request with a text body. The
+    // text is not the answer to the question that was asked, and folding it in
+    // as one would hand back the wrong KIND of thing.
+    const h = await connect({ peek: (a) => peekedTab({ ...a, format: 'text' }) });
+
+    const result = await peek(h, { format: 'screenshot' });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/bug in the server/i);
+  });
+
+  it('refuses an empty picture rather than reporting a blank page', async () => {
+    const h = await connect({ peek: (a) => shotTab(a, { screenshot: '' }) });
+
+    const result = await peek(h, { format: 'screenshot' });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/not a blank page/i);
+  });
+
+  it('strips a data-uri prefix rather than emitting an unrenderable block', async () => {
+    const h = await connect({
+      peek: (a) => shotTab(a, { screenshot: `data:image/png;base64,${IMAGE_B64}` }),
+    });
+
+    const result = await peek(h, { format: 'screenshot' });
+
+    expect(images(result)).toEqual([{ data: IMAGE_B64, mimeType: 'image/png' }]);
+  });
+});
+
+describe('peek_tab refuses a picture it cannot hand over', () => {
+  /** One base64 character past the cap. */
+  const OVERSIZE = 'A'.repeat(MAX_SCREENSHOT_BASE64 + 1);
+
+  it('reports an over-cap image as an error naming the cap and full_page', async () => {
+    const h = await connect({ peek: (a) => shotTab(a, { screenshot: OVERSIZE }) });
+
+    const result = await peek(h, { format: 'screenshot', full_page: true });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe(
+      errorText(peekScreenshotTooLarge(THIS_BROWSER, OVERSIZE.length, MAX_SCREENSHOT_BASE64, true)),
+    );
+    // The fix that actually applies, named: full_page is how a peek gets here.
+    expect(text(result)).toContain('full_page: false');
+    // And no image block, so nothing downstream renders a truncated picture.
+    expect(images(result)).toEqual([]);
+  });
+
+  it('does not blame full_page when it was not set', async () => {
+    const h = await connect({ peek: (a) => shotTab(a, { screenshot: OVERSIZE }) });
+
+    const result = await peek(h, { format: 'screenshot' });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe(
+      errorText(peekScreenshotTooLarge(THIS_BROWSER, OVERSIZE.length, MAX_SCREENSHOT_BASE64, false)),
+    );
+    expect(text(result)).toContain('already set');
+    expect(text(result)).toContain('format "text"');
+  });
+
+  it('cannot address a foreign browser at all, because there is no port to name', async () => {
+    // Story item (5), asserted as the construction it actually is rather than
+    // as a gate that could be got wrong. A photograph discloses strictly more
+    // than a title, and titles are already withheld for foreign browsers — so
+    // the picture inherits the STRONGER posture: `peek_tab` takes no `port`,
+    // only a profile, and a profile resolves out of the registry's own running
+    // list. mcp-cdp-browser §6's `allowUnowned` gate is unreachable from here,
+    // which is why this tool has no such argument either.
+    const shape = schemas.peekTabInput.shape;
+    expect(Object.keys(shape)).not.toContain('port');
+    expect(Object.keys(shape)).not.toContain('allow_unowned');
+    // And EVERY listing it resolves against — the profile resolution's and the
+    // fresh tab re-read's — asks for owned browsers only. One of the two
+    // quietly widening is how a foreign tab becomes nameable after all.
+    const h = await connect({ peek: shotTab });
+    await peek(h, { format: 'screenshot' });
+    expect(h.listCalls.length).toBeGreaterThan(0);
+    for (const call of h.listCalls) {
+      expect(call).toEqual({ projectRoot: PROJECT_ROOT, includeForeign: false });
+    }
+  });
+
+  it('refuses selector and max_chars alongside a screenshot, before any browser work', async () => {
+    // Refused, never ignored — and before `withProject`, so an impossible
+    // combination never starts a server just to be told no.
+    const withSelector = await connect();
+    const selectorResult = await peek(withSelector, { format: 'screenshot', selector: '#total' });
+    expect(selectorResult.isError).toBe(true);
+    expect(text(selectorResult)).toBe(errorText(peekScreenshotArgConflict('selector')));
+    expect(withSelector.listCalls).toEqual([]);
+    expect(withSelector.peeks).toEqual([]);
+
+    const withMax = await connect();
+    const maxResult = await peek(withMax, { format: 'screenshot', max_chars: 500 });
+    expect(maxResult.isError).toBe(true);
+    expect(text(maxResult)).toBe(errorText(peekScreenshotArgConflict('max_chars')));
+    expect(withMax.peeks).toEqual([]);
+
+    // Both still work for the formats they belong to.
+    const reading = await connect();
+    const ok = await peek(reading, { format: 'dom', selector: '#total', max_chars: 500 });
+    expect(ok.isError).toBeFalsy();
   });
 });

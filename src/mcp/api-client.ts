@@ -530,6 +530,11 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       if (args.format !== undefined) params.set('format', args.format);
       if (args.selector !== undefined) params.set('selector', args.selector);
       if (args.maxChars !== undefined) params.set('max_chars', String(args.maxChars));
+      // Sent only when asked for, so a text peek's query is byte-identical to
+      // what it was before screenshots existed — and so `full_page: false`
+      // reaches a server that would otherwise default it (there is no such
+      // server today; there is no reason to depend on that).
+      if (args.fullPage !== undefined) params.set('full_page', String(args.fullPage));
       const path =
         `/cdp/browsers/${args.port}/tabs/${encodeURIComponent(args.targetId)}/content` +
         `?${params.toString()}`;
