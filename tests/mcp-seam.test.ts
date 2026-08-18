@@ -258,6 +258,7 @@ describe('tool registration', () => {
       'list_sessions',
       'list_test_files',
       'log_into_site',
+      'navigate_tab',
       'peek_tab',
       'run_errand',
       'run_steps',

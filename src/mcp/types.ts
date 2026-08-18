@@ -502,6 +502,45 @@ export interface PeekCdpTabArgs {
 }
 
 /**
+ * Where to send a tab (stories/navigate-tab.md).
+ *
+ * `targetId` is OPTIONAL, and its absence is the safe default rather than an
+ * oversight: omitted means "open a new tab", which destroys nothing. Naming one
+ * is the explicit request to overwrite a page that may hold unsaved work, which
+ * is why it is an exact id and never a name.
+ *
+ * No `allowUnowned` sibling and no `port` a caller can pick — the same
+ * construction that puts foreign browsers out of `peek_tab`'s reach.
+ */
+export interface NavigateCdpTabArgs {
+  port: number;
+  url: string;
+  targetId?: string | undefined;
+  /** The synthetic `<root>/.aiui-navigate.md`, resolving the project exactly as
+   *  a peek's does. */
+  testFilePath: string;
+}
+
+/** Where the tab ended up. */
+export interface NavigatedTab {
+  /** What was asked for, echoed so a redirect is a fact rather than an
+   *  inference against the caller's own argument. */
+  requestedUrl: string;
+  /** Where it actually landed — different from `requestedUrl` on any redirect,
+   *  a login bounce above all. */
+  url: string;
+  title: string;
+  /** Null only when a newly opened tab could not be identified afterwards. The
+   *  navigation still happened; inventing an id would be worse. */
+  targetId: string | null;
+  openedNewTab: boolean;
+  root: string | null;
+  /** Empty on an ordinary navigation. Carries the load-timeout and moved-again
+   *  notices, which are facts about a call that SUCCEEDED. */
+  warnings?: string[];
+}
+
+/**
  * The tab as read. `get_page_content`'s body minus `sessionId`/`status` — a
  * peek addresses no session and carries no run status to lie with — plus the
  * `targetId` it read and the root its settings resolved against.
@@ -636,6 +675,14 @@ export interface ApiClient {
    * a JSON envelope means the tab is gone, a bare body means the route is.
    */
   peekCdpTab(args: PeekCdpTabArgs, signal?: AbortSignal): Promise<PeekedTab>;
+
+  /**
+   * Point a tab at a URL, or open a new one there (stories/navigate-tab.md).
+   *
+   * A POST, unlike the peek's GET, and that is the contract rather than a
+   * convention: this one changes the browser.
+   */
+  navigateCdpTab(args: NavigateCdpTabArgs, signal?: AbortSignal): Promise<NavigatedTab>;
   /**
    * `POST /sessions/:id/login` — the credential broker (SPEC 29).
    *

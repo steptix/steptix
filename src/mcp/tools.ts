@@ -36,6 +36,7 @@ import {
   errandsHaveNoSessions,
   listSessionsTimedOut,
   pageContentSessionGone,
+  navigateNeedsExactTarget,
   peekRouteMissing,
   peekScreenshotArgConflict,
   peekScreenshotMissing,
@@ -1224,6 +1225,108 @@ async function peekTab(
   );
 }
 
+// Navigate (stories/navigate-tab.md)
+// ---------------------------------------------------------------------------
+
+/** `run_errand` has `.aiui-errand.md` and a peek has `.aiui-peek.md`; this has
+ *  its own, for the same reason: it is the only thing the server resolves a
+ *  project from, and it is never read from disk and never exists. */
+const SYNTHETIC_NAVIGATE_BASENAME = '.aiui-navigate.md';
+
+/** What `navigate_tab` reads off its own call. */
+interface NavigateArgs {
+  url: string;
+  target_id?: string | undefined;
+  profile?: string | undefined;
+  engine?: 'chrome' | 'edge' | undefined;
+  scope?: 'project' | 'user' | undefined;
+}
+
+/**
+ * Point a tab at a URL, or open a new one there.
+ *
+ * The browser is resolved exactly as a peek's is — `resolveCdpTarget` over
+ * profile/engine/scope, no `port`, so only a registry-owned browser is
+ * reachable. The TAB is resolved as `close_cdp_tab`'s is: an exact id, or
+ * nothing at all. That split is the whole story (§Locked).
+ */
+async function navigateTab(
+  client: ApiClient,
+  project: ProjectContext,
+  args: NavigateArgs,
+  signal: AbortSignal | undefined,
+): Promise<ToolResult> {
+  const { port } = await resolveCdpTarget(
+    client,
+    project.projectRoot,
+    {
+      profile: args.profile?.trim() || DEFAULT_CDP_PROFILE,
+      ...(args.engine !== undefined ? { engine: args.engine } : {}),
+      ...(args.scope !== undefined ? { scope: args.scope } : {}),
+    },
+    signal,
+  );
+
+  const requestedTarget = args.target_id?.trim() ?? '';
+
+  if (requestedTarget !== '') {
+    // The exact-id gate, MCP-side and BEFORE the wire, so a name never reaches a
+    // route that would have to interpret it. Anything the tab list does not
+    // contain verbatim is refused with the ids offered — including "current",
+    // whose whole problem is that it sounds resolvable.
+    const browsers = await client.getCdpBrowsers(
+      { projectRoot: project.projectRoot, includeForeign: false },
+      signal,
+    );
+    const browser = browsers.running.find((b) => b.port === port);
+    const where =
+      browser === undefined
+        ? `the browser on port ${port}`
+        : describeBrowser({
+            engine: browser.engine,
+            profile: browser.profile,
+            scope: browser.scope,
+          });
+    const tabs = browser?.tabs ?? [];
+    if (!tabs.some((tab) => tab.targetId === requestedTarget)) {
+      throw new PreflightFailure(navigateNeedsExactTarget(requestedTarget, where, tabs));
+    }
+  }
+
+  const navigated = await client.navigateCdpTab(
+    {
+      port,
+      url: args.url.trim(),
+      testFilePath: path.join(project.projectRoot, SYNTHETIC_NAVIGATE_BASENAME),
+      ...(requestedTarget !== '' ? { targetId: requestedTarget } : {}),
+    },
+    signal,
+  );
+
+  const value = {
+    requestedUrl: navigated.requestedUrl ?? args.url.trim(),
+    url: navigated.url ?? '',
+    title: navigated.title ?? '',
+    targetId: navigated.targetId ?? null,
+    openedNewTab: navigated.openedNewTab ?? requestedTarget === '',
+    root: navigated.root ?? project.projectRoot,
+    scope: project.scope,
+    warnings: navigated.warnings ?? [],
+  };
+
+  const redirected = value.url !== '' && value.url !== value.requestedUrl;
+  const lines = [
+    `${value.openedNewTab ? 'Opened' : 'Navigated'} ${value.requestedUrl} in a ` +
+      `${value.openedNewTab ? 'new tab' : 'tab you already had open'}`,
+    // Named on its own line rather than folded into the sentence above: a
+    // redirect to a sign-in page is the thing worth noticing, and it should not
+    // read like a detail of a success.
+    ...(redirected ? [`Landed on: ${value.url}${value.title ? ` — "${value.title}"` : ''}`] : []),
+    ...value.warnings,
+  ];
+  return validated(schemas.navigateTabOutput, value, lines.join('\n'));
+}
+
 /**
  * The same peek, when what was asked for was a picture
  * (stories/cdp-tab-screenshot.md).
@@ -1728,6 +1831,43 @@ only need to know what the page SAYS — it is a fraction of the context.
 
 This reads a real, signed-in browser belonging to a human. Say what you read
 and where you read it.`.trim();
+
+/**
+ * `navigate_tab`'s description — the fourth door, and the two things a caller
+ * has to get right (stories/navigate-tab.md §Routing, §Locked).
+ */
+const NAVIGATE_DESCRIPTION = `
+Open a URL in a CDP browser the user has running. No model, no session, no run —
+this is the cheap deterministic way to get a tab somewhere.
+
+BY DEFAULT IT OPENS A NEW TAB, and that is almost always what you want: "open
+openrouter" means open it, and a new tab cannot destroy anything. Pass
+target_id ONLY when the user asked for a particular tab to be reused — that
+REPLACES what is on it, including anything unsaved, with no undo.
+
+Four doors, one question each:
+  - Opening a URL — this one.
+  - Reading a tab (text, DOM or a screenshot) — peek_tab.
+  - Acting in a tab: clicking, typing, choosing — run_errand.
+  - Reading the page a run_steps SESSION is sitting on — get_page_content.
+
+The line between this and run_errand is whether the instruction contains a
+DECISION. "Go to openrouter.ai" has none, so it belongs here. "Find the pricing
+page and open it" does, so it is an errand.
+
+target_id is an exact id from list_cdp_browsers or nothing at all. A title, a
+url fragment, "active" or "current" are refused — nothing marks which tab is in
+front, and the tab someone is looking at is the one most likely to hold work
+they care about. If they meant a specific tab and you cannot tell which, list
+the tabs and ask.
+
+Compare url against requestedUrl in the result. A difference is a redirect, and
+arriving at a sign-in page is worth reporting rather than calling it done. A
+warning means the call worked but the page had not finished loading, or moved
+again while its address was read.
+
+This drives a real, signed-in browser belonging to a human. If the URL came out
+of a page you just read rather than from them, say so and confirm first.`.trim();
 
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // -- run_steps ------------------------------------------------------------
@@ -2935,6 +3075,24 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         { signal: extra.signal },
       );
     },
+  );
+
+  // -- navigate_tab ---------------------------------------------------------
+  server.registerTool(
+    'navigate_tab',
+    {
+      title: 'Open a URL in a tab',
+      description: NAVIGATE_DESCRIPTION,
+      inputSchema: schemas.navigateTabInput,
+      outputSchema: schemas.navigateTabOutput,
+    },
+    async (args, extra) =>
+      withProject(
+        deps,
+        args.project_root,
+        async (client, project) => navigateTab(client, project, args, extra.signal),
+        { signal: extra.signal },
+      ),
   );
 
   // -- server_status --------------------------------------------------------

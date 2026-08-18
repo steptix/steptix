@@ -68,6 +68,7 @@ describe('tool schemas as they go out on the wire', () => {
       'list_sessions',
       'list_test_files',
       'log_into_site',
+      'navigate_tab',
       'peek_tab',
       'run_errand',
       'run_steps',
@@ -164,6 +165,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['focusCdpTabInput', schemas.focusCdpTabInput, 'input'],
     ['logIntoSiteInput', schemas.logIntoSiteInput, 'input'],
     ['peekTabInput', schemas.peekTabInput, 'input'],
+    ['navigateTabInput', schemas.navigateTabInput, 'input'],
     ['runResultOutput', schemas.runResultOutput, 'output'],
     ['runErrandOutput', schemas.runErrandOutput, 'output'],
     ['listTestFilesOutput', schemas.listTestFilesOutput, 'output'],
@@ -179,6 +181,7 @@ describe('the draft-07 body is what 2020-12 would have produced', () => {
     ['focusCdpTabOutput', schemas.focusCdpTabOutput, 'output'],
     ['logIntoSiteOutput', schemas.logIntoSiteOutput, 'output'],
     ['peekTabOutput', schemas.peekTabOutput, 'output'],
+    ['navigateTabOutput', schemas.navigateTabOutput, 'output'],
   ];
 
   /** The schema minus its dialect declaration — the part that must not differ. */
