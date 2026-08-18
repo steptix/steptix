@@ -1,11 +1,26 @@
 import type { CDPSession, Page } from 'playwright';
-import { DEFAULT_BROWSER_DIMENSIONS } from '../config/browser-dimensions.js';
 import { logger } from '../utils/logger.js';
 
 export interface ScreenshotResult {
   base64: string;
   width: number;
   height: number;
+}
+
+/**
+ * A PNG's real pixel size, read out of its own IHDR header.
+ *
+ * Bytes 16–19 and 20–23, after the 8-byte signature and the IHDR length and
+ * tag. **The only trustworthy source here**, and the reason is measured: for a
+ * page obtained through `chromium.connectOverCDP` — which is every CDP browser
+ * this framework drives — `page.viewportSize()` returns `null`. Code that fell
+ * back to a default on that null reported 1440×900 as the size of an image that
+ * was really 1689×1277, and nothing downstream could tell.
+ *
+ * Shared by both captures so the two can never disagree about the same picture.
+ */
+function pngSize(buffer: Buffer): { width: number; height: number } {
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
 }
 
 /**
@@ -21,19 +36,10 @@ export async function captureScreenshot(page: Page, fullPage = false): Promise<S
       fullPage,
     });
 
-    if (fullPage) {
-      // For full-page screenshots, read actual dimensions from the PNG header
-      const width = buffer.readUInt32BE(16);
-      const height = buffer.readUInt32BE(20);
-      return { base64: buffer.toString('base64'), width, height };
-    }
-
-    const viewportSize = page.viewportSize();
-    return {
-      base64: buffer.toString('base64'),
-      width: viewportSize?.width ?? DEFAULT_BROWSER_DIMENSIONS.width,
-      height: viewportSize?.height ?? DEFAULT_BROWSER_DIMENSIONS.height,
-    };
+    // The header is read for BOTH shapes, not just the full-page one. The
+    // viewport branch used to ask Playwright for the page's viewport instead,
+    // which is null over CDP — see `pngSize`.
+    return { base64: buffer.toString('base64'), ...pngSize(buffer) };
   } catch (err) {
     logger.warn(`Screenshot capture failed: ${String(err)}`);
     return null;
@@ -86,13 +92,12 @@ export type TabScreenshot =
  * does the caller is told the window is the likely cause, because that is a
  * fact about the WINDOW rather than about the page.
  *
- * Playwright's own `page.screenshot()` is not used here for a related reason:
+ * Playwright's own `page.screenshot()` is not used here for a different reason:
  * its viewport path waits for a stable composited frame and times out on
- * exactly these windows, while `page.viewportSize()` returns **null** for a
- * CDP-attached page, so the sibling helper reports `DEFAULT_BROWSER_DIMENSIONS`
- * — 1440×900 — for an image that is nothing of the sort. Both dimensions here
- * are read out of the PNG's own IHDR header, so they describe the picture that
- * was actually taken.
+ * exactly these windows. (It used to differ on dimensions too, reporting a
+ * default size for a CDP page whose `viewportSize()` is null — both captures
+ * now read the PNG's IHDR header through `pngSize`, so they describe the
+ * picture that was actually taken.)
  *
  * Chromium-only by construction: the peek route reaches CDP browsers and
  * nothing else.
@@ -147,14 +152,9 @@ export async function captureTabScreenshot(
         detail: `no answer within ${Math.round(TAB_SCREENSHOT_TIMEOUT_MS / 1000)}s`,
       };
     }
-    const buffer = Buffer.from(shot.data, 'base64');
     return {
       ok: true,
-      image: {
-        base64: shot.data,
-        width: buffer.readUInt32BE(16),
-        height: buffer.readUInt32BE(20),
-      },
+      image: { base64: shot.data, ...pngSize(Buffer.from(shot.data, 'base64')) },
     };
   } catch (err) {
     logger.warn(`Tab screenshot capture failed: ${String(err)}`);

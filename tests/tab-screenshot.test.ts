@@ -11,17 +11,26 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { Page } from 'playwright';
-import { captureTabScreenshot, TAB_SCREENSHOT_TIMEOUT_MS } from '../src/browser/screenshot.js';
+import {
+  captureScreenshot,
+  captureTabScreenshot,
+  TAB_SCREENSHOT_TIMEOUT_MS,
+} from '../src/browser/screenshot.js';
+import { DEFAULT_BROWSER_DIMENSIONS } from '../src/config/browser-dimensions.js';
 
 /** A PNG's first 24 bytes carry the signature, the IHDR length and tag, then
  *  width and height — which is where the real dimensions are read from. */
-function pngHeader(width: number, height: number): string {
+function pngBuffer(width: number, height: number): Buffer {
   const buf = Buffer.alloc(24);
   buf.write('\x89PNG\r\n\x1a\n', 0, 'binary');
   buf.write('IHDR', 12, 'binary');
   buf.writeUInt32BE(width, 16);
   buf.writeUInt32BE(height, 20);
-  return buf.toString('base64');
+  return buf;
+}
+
+function pngHeader(width: number, height: number): string {
+  return pngBuffer(width, height).toString('base64');
 }
 
 interface FakeSession {
@@ -191,5 +200,74 @@ describe('captureTabScreenshot answers rather than hanging', () => {
     const result = await captureTabScreenshot(page);
 
     expect(result).toMatchObject({ ok: false, reason: 'failed' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The run pipeline's own capture, which shares `pngSize` with the one above.
+// ---------------------------------------------------------------------------
+
+/** A page whose `screenshot()` answers with a PNG of a known size, and whose
+ *  `viewportSize()` is null — which is what a CDP-attached page really does. */
+function screenshotPage(
+  buffer: Buffer,
+  opts: { viewportSize?: { width: number; height: number } | null } = {},
+): { page: Page; screenshot: ReturnType<typeof vi.fn> } {
+  const screenshot = vi.fn(async () => buffer);
+  const page = {
+    screenshot,
+    viewportSize: () => opts.viewportSize ?? null,
+  } as unknown as Page;
+  return { page, screenshot };
+}
+
+describe('captureScreenshot reports the size of the image it actually took', () => {
+  it('reads a VIEWPORT capture out of the PNG, not off a null viewportSize', async () => {
+    // The defect this test exists for: `page.viewportSize()` returns null for a
+    // page from `chromium.connectOverCDP`, and the old fallback answered
+    // DEFAULT_BROWSER_DIMENSIONS — 1440×900 — for an image that was 1689×1277.
+    const { page } = screenshotPage(pngBuffer(1689, 1277));
+
+    const result = await captureScreenshot(page);
+
+    expect(result).toEqual({ base64: pngHeader(1689, 1277), width: 1689, height: 1277 });
+    // Named explicitly, so a reintroduced fallback fails here rather than
+    // passing quietly on a fixture that happens to be 1440×900.
+    expect(result?.width).not.toBe(DEFAULT_BROWSER_DIMENSIONS.width);
+    expect(result?.height).not.toBe(DEFAULT_BROWSER_DIMENSIONS.height);
+  });
+
+  it('ignores a viewportSize even when the browser offers one', async () => {
+    // A non-CDP page DOES report a viewport, and it can disagree with the
+    // image — a device scale factor is enough. The picture is the fact.
+    const { page } = screenshotPage(pngBuffer(2400, 1600), {
+      viewportSize: { width: 1200, height: 800 },
+    });
+
+    const result = await captureScreenshot(page);
+
+    expect(result).toMatchObject({ width: 2400, height: 1600 });
+  });
+
+  it('still passes fullPage through, and still reads the header there', async () => {
+    const { page, screenshot } = screenshotPage(pngBuffer(1674, 3606));
+
+    const result = await captureScreenshot(page, true);
+
+    expect(screenshot).toHaveBeenCalledWith({ type: 'png', fullPage: true });
+    expect(result).toMatchObject({ width: 1674, height: 3606 });
+  });
+
+  it('stays non-fatal when the capture throws', async () => {
+    // A missing image must not fail a passing run — which is exactly why this
+    // helper answers null and the peek's does not.
+    const page = {
+      screenshot: async () => {
+        throw new Error('Target closed');
+      },
+      viewportSize: () => null,
+    } as unknown as Page;
+
+    expect(await captureScreenshot(page)).toBeNull();
   });
 });
