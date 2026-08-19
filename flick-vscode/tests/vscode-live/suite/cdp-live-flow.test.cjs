@@ -207,8 +207,19 @@ describe('Flick live CDP end-to-end against real Chrome / Edge', function () {
         // 3. Open a data: URL tab so we have a stable, AI-readable target.
         //    /json/new is the CDP HTTP shortcut for "open URL as a new tab,
         //    return its target descriptor" — no Playwright needed.
+        //
+        //    **The <title> and the <h1> deliberately carry the SAME string.**
+        //    The heading used to read "hello flick", which made the step below
+        //    ("Read the page title") ambiguous: the model consistently read the
+        //    visible heading rather than the document title, so the batch passed
+        //    while the assertion looking for "FlickLiveCdp" failed. Both
+        //    readings are defensible for "page title", and the test does not
+        //    care which one the model picks — it only needs a string unique to
+        //    THIS tab, to prove the server attached here and drove it. Making
+        //    both elements say it removes the ambiguity instead of betting on
+        //    the model resolving it a particular way.
         const newTabUrl = encodeURI(
-          'data:text/html,<title>FlickLiveCdp</title><h1>hello flick</h1>',
+          'data:text/html,<title>FlickLiveCdp</title><h1>FlickLiveCdp</h1>',
         );
         let createdTarget;
         try {
@@ -329,11 +340,15 @@ describe('Flick live CDP end-to-end against real Chrome / Edge', function () {
         );
         // AI responses vary; just look for the title-string somewhere in
         // the stringified batch (covers outputs / reasoning / action results).
+        // Both the <title> and the <h1> carry this string (see the fixture
+        // above), so this holds however the model reads "page title".
         const haystack = JSON.stringify(batch);
         assert.match(
           haystack,
           /FlickLiveCdp/i,
-          'batch must reference the page title FlickLiveCdp somewhere',
+          'batch must reference FlickLiveCdp somewhere — the string is in both ' +
+            'the document title and the visible heading of the adopted tab, so ' +
+            'its absence means the run did not read THIS tab',
         );
       } finally {
         // Restore production deps for the next test / suite.

@@ -48,7 +48,7 @@ test('two ports respond, one is unreachable; tabs filtered to page-type non-devt
     '127.0.0.1:9223': () => {
       throw new TypeError('connection refused');
     },
-    '127.0.0.1:9229/json/version': () => ({ json: { Browser: 'Edge/120.0.2210.91' } }),
+    '127.0.0.1:9229/json/version': () => ({ json: { Browser: 'Edg/151.0.4129.78' } }),
     '127.0.0.1:9229/json/list': () => ({
       json: [{ id: 'e1', type: 'page', title: 'Inbox', url: 'https://outlook.office.com/' }],
     }),
@@ -124,6 +124,11 @@ test('reachable but no pages → engine classified, tabs: [], no error', async (
 test('engine classification by Browser-field prefix', async () => {
   const cases: Array<{ browser: string; expected: string }> = [
     { browser: 'Chrome/120.0.6099.130', expected: 'chrome' },
+    // The string a real Edge actually sends. Measured against Edge
+    // 151.0.4129.78; the table used to carry only the `Edge/` spelling below,
+    // which no shipping Edge has used for years — so every case here passed
+    // while the live suite failed on `Edg/` classifying as 'unknown'.
+    { browser: 'Edg/151.0.4129.78', expected: 'edge' },
     { browser: 'Edge/120.0.2210.91', expected: 'edge' },
     { browser: 'Chromium/118.0.5993.117', expected: 'chromium' },
     { browser: 'HeadlessChrome/120.0.6099.0', expected: 'chrome' },
