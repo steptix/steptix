@@ -46,7 +46,13 @@ describe('FlickController', () => {
   });
 
   afterEach(async () => {
+    // Order matters. `dispose()` stops new work being started; `drain()` waits
+    // for work already in flight. Without the drain, a handler still inside
+    // saveHistory()'s writeFile/rename pair lands after `rmSync` has taken the
+    // directory away — and that rejection surfaces against the NEXT test, not
+    // this one. Drain before `server.stop()` so in-flight API calls can finish.
     controller?.dispose();
+    await controller?.drain();
     controller = undefined;
     await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -696,8 +702,9 @@ describe('FlickController', () => {
       assert.equal(second.sessions.length, 2, 'no duplicate');
       const cdpSession = second.sessions.find((s) => s.cdp);
       assert.equal(second.activeSessionId, cdpSession!.id);
-      // Wait for the trailing history fetch the dedupe path also kicks off,
-      // so afterEach doesn't rm the temp dir mid-write.
+      // The dedupe path re-sends history for the re-activated session; assert
+      // that it does. (Teardown safety is afterEach's drain(), not this await
+      // — waiting on the broadcast never covered the write behind it.)
       await wait(fw, 'history');
     });
 
@@ -782,9 +789,11 @@ describe('FlickController', () => {
       const persisted = await new Store(dir).loadCdpLastLaunched();
       assert.equal(persisted, 'edge');
 
-      // A cdpDiscovery message was also broadcast after the success path.
-      const discoveries = fw.allOf<Msg<'cdpDiscovery'>>('cdpDiscovery');
-      assert.ok(discoveries.length >= 1, 'expected a re-broadcast cdpDiscovery');
+      // A cdpDiscovery message is also broadcast after the success path. The
+      // controller posts it only after awaiting the rediscover, so it lands
+      // strictly AFTER cdpLaunchResult — sampling allOf() here races that
+      // broadcast. Await it instead; waitFor throws if it never arrives.
+      await wait(fw, 'cdpDiscovery');
     });
 
     test('launchBrowserCdp failure surfaces via cdpLaunchResult and skips persistence + rediscover', async () => {

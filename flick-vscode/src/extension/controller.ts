@@ -75,6 +75,10 @@ export class FlickController {
   private pingTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
 
+  /** Detached async work started by this controller — webview message
+   *  handlers, stale checks, connectivity pings. See {@link track}. */
+  private readonly inflight = new Set<Promise<void>>();
+
   private cdpPorts: readonly number[];
   private cdpDiscover: typeof realDiscoverCdpPorts;
   private cdpDetectInstalled: typeof realDetectInstalled;
@@ -123,11 +127,38 @@ export class FlickController {
     this.attachments.clear();
   }
 
+  /** Run a fire-and-forget task, keeping a handle on it so {@link drain} can
+   *  wait for it. Replaces bare `void this.x()`: the work is still detached
+   *  from its caller and a failure is still non-fatal, but it is no longer
+   *  invisible — which is what let a write outlive the thing that started it. */
+  private track(work: Promise<unknown>): void {
+    const settled = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inflight.add(settled);
+    void settled.finally(() => this.inflight.delete(settled));
+  }
+
+  /** Resolve once every task started by {@link track} has settled.
+   *
+   *  `dispose()` stops NEW work starting; this waits for work already in
+   *  flight. Callers that delete the Store's directory must do both, in that
+   *  order — otherwise a `saveHistory()` still in its writeFile/rename pair
+   *  lands after the directory is gone, and the resulting rejection surfaces
+   *  against whatever runs next. Draining can itself let a handler start more
+   *  work, so loop until the set is genuinely empty. */
+  async drain(): Promise<void> {
+    while (this.inflight.size > 0) {
+      await Promise.all([...this.inflight]);
+    }
+  }
+
   // --- webview lifecycle ---------------------------------------------------
 
   attachWebview(webview: vscode.Webview): void {
     const listener = webview.onDidReceiveMessage((msg: WebviewToHost) => {
-      void this.handleMessage(msg, webview);
+      this.track(this.handleMessage(msg, webview));
     });
     this.attachments.set(webview, {
       webview,
@@ -453,7 +484,7 @@ export class FlickController {
     });
     if (this.activeSessionId) {
       await this.sendHistory(this.activeSessionId, webview);
-      void this.checkStale(this.activeSessionId);
+      this.track(this.checkStale(this.activeSessionId));
     }
   }
 
@@ -480,7 +511,7 @@ export class FlickController {
     this.activeSessionId = sessionId;
     this.postSessions();
     await this.sendHistory(sessionId);
-    void this.checkStale(sessionId);
+    this.track(this.checkStale(sessionId));
   }
 
   private async renameSession(sessionId: string, name: string): Promise<void> {
@@ -708,7 +739,7 @@ export class FlickController {
   private schedulePing(delayMs: number): void {
     if (this.disposed) return;
     if (this.pingTimer) clearTimeout(this.pingTimer);
-    this.pingTimer = setTimeout(() => void this.ping(), delayMs);
+    this.pingTimer = setTimeout(() => this.track(this.ping()), delayMs);
   }
 
   private async ping(): Promise<void> {

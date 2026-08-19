@@ -55,19 +55,39 @@ async function main() {
     // Print whatever the JSON reporter captured. ELECTRON_RUN_AS_NODE +
     // Mocha's spec reporter don't surface to stdout reliably on Windows;
     // the report file is the source of truth.
+    // The report is also the only evidence the suite ran, AND the only place
+    // failures are visible: mocha's failure count does not reach
+    // `result.status`, so trusting the exit code alone reports a suite with
+    // failing tests as a success. A missing report, a zero-test report and a
+    // report with failures are therefore all hard failures here.
+    let report;
     try {
-      const report = JSON.parse(require('node:fs').readFileSync(reportPath, 'utf8'));
-      console.log('\n--- Test report ---');
-      for (const r of report.results) {
-        const tag = r.state === 'pass' ? '✓' : r.state === 'fail' ? '✗' : 'o';
-        console.log(`  ${tag} ${r.suite} > ${r.title}`);
-        if (r.state === 'fail' && r.err) console.log(r.err);
-      }
-      console.log(`\n${report.results.length} tests, ${report.failures} failures`);
+      report = JSON.parse(require('node:fs').readFileSync(reportPath, 'utf8'));
     } catch (err) {
       console.error('No test report written (Mocha may not have run):', err.message);
+      console.error(
+        `VS Code exited with code ${result.status}, but no suite results were ` +
+          'recorded. Failing: this run proved nothing.',
+      );
+      process.exit(1);
     }
 
+    console.log('\n--- Test report ---');
+    for (const r of report.results) {
+      const tag = r.state === 'pass' ? '✓' : r.state === 'fail' ? '✗' : 'o';
+      console.log(`  ${tag} ${r.suite} > ${r.title}`);
+      if (r.state === 'fail' && r.err) console.log(r.err);
+    }
+    console.log(`\n${report.results.length} tests, ${report.failures} failures`);
+
+    if (report.results.length === 0) {
+      console.error('Test report contains zero tests — nothing was verified.');
+      process.exit(1);
+    }
+    if (report.failures > 0) {
+      console.error(`${report.failures} test(s) failed.`);
+      process.exit(1);
+    }
     if (result.status !== 0) {
       console.error('integration tests failed with exit code', result.status);
       process.exit(result.status ?? 1);

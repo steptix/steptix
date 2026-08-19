@@ -78,23 +78,42 @@ async function main() {
       },
     });
 
+    // Same reasoning as the counted-skips note below, one level up: the report
+    // is the only evidence the suite ran. VS Code can exit 0 without ever
+    // invoking the test entry, so a missing report is a failure, not a note.
+    let report;
     try {
-      const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-      console.log('\n--- Live test report ---');
-      for (const r of report.results) {
-        const tag = r.state === 'pass' ? '✓' : r.state === 'fail' ? '✗' : 'o';
-        console.log(`  ${tag} ${r.suite} > ${r.title}`);
-        if (r.state === 'fail' && r.err) console.log(r.err);
-      }
-      const skipped = report.results.filter((r) => r.state === 'pending').length;
-      console.log(
-        `\n${report.results.length} tests, ${report.failures} failures` +
-          // Counted out loud: a skipped scenario is one nobody checked, and a
-          // silent one reads as a scenario that passed.
-          (skipped > 0 ? `, ${skipped} skipped` : ''),
-      );
+      report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
     } catch (err) {
       console.error('No live test report written:', err.message);
+      console.error(
+        `VS Code exited with code ${result.status}, but no suite results were ` +
+          'recorded. Failing: this run proved nothing.',
+      );
+      process.exit(1);
+    }
+
+    console.log('\n--- Live test report ---');
+    for (const r of report.results) {
+      const tag = r.state === 'pass' ? '✓' : r.state === 'fail' ? '✗' : 'o';
+      console.log(`  ${tag} ${r.suite} > ${r.title}`);
+      if (r.state === 'fail' && r.err) console.log(r.err);
+    }
+    const skipped = report.results.filter((r) => r.state === 'pending').length;
+    console.log(
+      `\n${report.results.length} tests, ${report.failures} failures` +
+        // Counted out loud: a skipped scenario is one nobody checked, and a
+        // silent one reads as a scenario that passed.
+        (skipped > 0 ? `, ${skipped} skipped` : ''),
+    );
+
+    if (report.results.length === 0) {
+      console.error('Live test report contains zero tests — nothing was verified.');
+      process.exit(1);
+    }
+    if (report.failures > 0) {
+      console.error(`${report.failures} live test(s) failed.`);
+      process.exit(1);
     }
 
     if (result.status !== 0) {
