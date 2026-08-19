@@ -736,6 +736,22 @@ describe('POST /cdp/browsers', () => {
     expect((await res.json()).error).toContain('use the other engine');
   });
 
+  it('forwards the registry reason onto the body, not just the status', async () => {
+    // The status collapses every not_found into 404, so a caller needing to
+    // tell "that port is not yours" from "that tab is gone" has only this
+    // field to read. The route must pass the registry's reason through rather
+    // than each call site inventing its own.
+    startCdpBrowserMock.mockResolvedValue({
+      ok: false,
+      kind: 'not_found',
+      reason: 'port_not_owned',
+      error: 'Port 1 is not a CDP browser this call can act on — …',
+    });
+    const res = await post({ projectRoot: PROJECT, engine: 'edge' });
+    expect(res.status).toBe(404);
+    expect((await res.json()).reason).toBe('port_not_owned');
+  });
+
   it('does not wedge the single-flight slot when a launch fails', async () => {
     startCdpBrowserMock.mockResolvedValueOnce({ ok: false, kind: 'launch_failed', error: 'boom' });
     startCdpBrowserMock.mockResolvedValueOnce(ok('launched_into_new_profile'));
@@ -1311,6 +1327,10 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
 
     expect(res.status).toBe(404);
     const body = await res.json();
+    // The prose is for whoever reads it and may be reworded; `reason` is the
+    // field a caller may branch on, so it is asserted here rather than left to
+    // the live suite to notice.
+    expect(body.reason).toBe('tab_vanished');
     expect(body.error).toContain('T1');
     expect(body.error).toContain('list_cdp_browsers');
     // Nothing was attached to, so nothing was detached from either.

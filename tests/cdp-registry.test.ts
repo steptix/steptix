@@ -651,7 +651,10 @@ describe('closeCdpTab', () => {
       h.deps,
     );
 
-    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    // `reason` is the part a caller branches on. `kind` only says "404", which
+    // this shares with "no such tab" — a distinction the caller needs and the
+    // status cannot carry.
+    expect(result).toMatchObject({ ok: false, kind: 'not_found', reason: 'port_not_owned' });
     // Names what we DO have, so the caller can correct itself in one step.
     expect((result as { error: string }).error).toContain('51000');
     expect(h.closeFn).not.toHaveBeenCalled();
@@ -666,7 +669,9 @@ describe('closeCdpTab', () => {
       h.deps,
     );
 
-    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    // Same `kind` as the not-ours port above, different `reason` — which is
+    // exactly why the coarse classification is not enough on its own.
+    expect(result).toMatchObject({ ok: false, kind: 'not_found', reason: 'tab_not_found' });
     const error = (result as { error: string }).error;
     expect(error).toMatch(/already been closed/i);
     expect(error).toMatch(/different browser/i);
