@@ -55,3 +55,17 @@ be maintaining the copy this story deliberately stopped maintaining.
 
 Recorded so that whoever makes the flick decision knows the copy is not
 merely stale but wrong.
+
+## Note — 2026-08-19: still open, and this is *not* the flick that was removed
+
+[049](resolved/049-remove-flick-tauri.md) deleted the Tauri `flick/`
+desktop app. That is a different tree. Everything above — the Area, the
+"flick's copies" of §10, "a decision on flick's future" — is about
+**`flick-vscode/`**, the surviving client, whose
+`src/extension/cdp-discovery.ts` still carries the wrong `Edge/` test.
+
+So 049 neither fixes nor moots this. What 049 does settle is the first
+half of the question §10 deferred: flick-vscode is the client we are
+keeping, so the copy is worth converging rather than waiting out. The
+open item is unchanged — point flick-vscode at `GET /cdp/browsers` and
+delete its local discovery.

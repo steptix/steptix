@@ -5,10 +5,10 @@
 #   .\scripts\init-worktree.ps1 -Destination ..\.claude\worktrees\foo -SkipBuilds
 #
 # Copies (rather than symlinks/junctions) so the worktree is fully independent
-# — safe when package.json / Cargo.toml diverge between branches. The trade-off
-# is disk: a full seed is ~5 GB once flick/src-tauri/target is populated.
+# — safe when package.json diverges between branches. The trade-off is disk: a
+# full seed is ~1.1 GB of node_modules.
 #
-# NOTE: this seeds node_modules + Rust target, NOT dist/. The package
+# NOTE: this seeds node_modules, NOT dist/. The package
 # self-import `ai-ui-automation/tools` resolves (via the package `exports`
 # field + nearest package.json) to dist/tools/index.js *under the worktree
 # root*, so the worktree's fixtures use the worktree's own tool code — but only
@@ -28,7 +28,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Destination,
 
-    # Skip the heavy build dirs (node_modules, Rust target). Useful if you
+    # Skip the heavy build dirs (the node_modules trees). Useful if you
     # want a fast seed and don't mind rebuilding in the worktree.
     [switch]$SkipBuilds
 )
@@ -57,8 +57,6 @@ $files = @(
 # Directories — large, copy with robocopy for speed.
 $dirs = @(
     'node_modules',
-    'flick/node_modules',
-    'flick/src-tauri/target',
     'flick-vscode/node_modules',
     'testbench-native/node_modules',
     'runner-core/node_modules'
@@ -86,7 +84,7 @@ foreach ($rel in $files) {
 
 if ($SkipBuilds) {
     Write-Host ""
-    Write-Host "Skipping build dirs (-SkipBuilds). Run 'npm install' in each project and rebuild Tauri as needed."
+    Write-Host "Skipping build dirs (-SkipBuilds). Run 'npm install' in each project as needed."
 } else {
     foreach ($rel in $dirs) {
         $src = Join-Path $source $rel
