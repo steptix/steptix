@@ -22,7 +22,8 @@ export interface FakeBrowserTab {
 export class FakeBrowserServer {
   /** Set BEFORE start() (or any time before a discovery call) to control the
    *  `Browser` field returned by /json/version. e.g. 'Chrome/120.0.6099.130'
-   *  or 'Edge/120.0.2210.91'. Empty string → engine classified as 'unknown'. */
+   *  or 'Edg/151.0.4129.78' (the spelling a real Edge sends — NOT 'Edge/').
+   *  Empty string → engine classified as 'unknown'. */
   browserField = 'Chrome/120.0.6099.130';
 
   /** Tabs returned from /json/list. Mutable so tests can swap mid-flight. */

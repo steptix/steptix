@@ -102,8 +102,22 @@ async function fetchJson(url: string, timeoutMs: number, fetchFn: typeof fetch):
   }
 }
 
+/**
+ * **Edge reports `Edg/`, not `Edge/`** — measured against Edge 151.0.4129.78,
+ * whose `/json/version` returns `Browser: "Edg/151.0.4129.78"`. Checking only
+ * `Edge/` classified every modern Edge as `unknown`, because that string
+ * matches none of the arms below either. The `Edge/` arm is kept for older
+ * builds that did use it.
+ *
+ * The ordering is load-bearing: Edge must be tested before Chrome. It is not
+ * needed for the strings above (Edge's contains no "Chrome/" prefix) but a
+ * future Edge reporting `Chrome/… Edg/…` would otherwise classify as Chrome.
+ *
+ * Kept in step with `src/browser/cdp-discovery.ts`'s copy, which carries the
+ * same table.
+ */
 function classifyEngine(browser: string): CdpEngine {
-  if (browser.startsWith('Edge/')) return 'edge';
+  if (browser.startsWith('Edg/') || browser.startsWith('Edge/')) return 'edge';
   if (browser.startsWith('HeadlessChrome/')) return 'chrome';
   if (browser.startsWith('Chrome/')) return 'chrome';
   if (browser.startsWith('Chromium/')) return 'chromium';

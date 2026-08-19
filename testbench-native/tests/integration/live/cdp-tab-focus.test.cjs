@@ -505,12 +505,41 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       await focusTab(gammaTab.targetId);
       await waitForHeadTab(gammaTab.targetId, 'Gamma Tab');
 
+      // **Every capture taken while the tab is backgrounded goes through here.**
+      // An occluded window produces no frames, so such a capture can time out —
+      // the documented limitation described on the mutation capture below, and
+      // a skip rather than a failure. Both backgrounded captures need that
+      // grading: this used to be inlined on the second one only, so a timeout on
+      // the first (a bare `await`, 29 lines earlier) failed the test outright
+      // and never let the graded catch report the known case. Returns null on
+      // the documented timeout; anything else still throws.
+      const captureBackgrounded = async () => {
+        try {
+          return await alpha.screenshot({ timeout: 20_000 });
+        } catch (err) {
+          if (!/Timeout .* exceeded/i.test(String(err))) throw err;
+          console.log(
+            '[live] the backgrounded capture timed out — the browser window is occluded, so ' +
+              'Chromium is producing no frames for it. This is the documented limitation ' +
+              '(stories/cdp-tab-focus.md §Risks), not a focus regression. Re-run with the ' +
+              'Chrome window visible to exercise the currency check.',
+          );
+          return null;
+        }
+      };
+
       // Unchanged, and behind another tab: the observation the story wanted,
       // kept as a log line rather than an assertion. "Renders identically" is a
       // nice measured fact, not an invariant the feature depends on — asserting
       // it buys nothing the currency check below does not, and costs a red run
       // the day a GPU-process restart flips rasterisation between two captures.
-      const unchanged = await alpha.screenshot({ timeout: 20_000 });
+      // It is still the baseline the currency check compares against, so a
+      // timeout here skips: without it there is nothing to compare.
+      const unchanged = await captureBackgrounded();
+      if (!unchanged) {
+        this.skip();
+        return;
+      }
       console.log(
         `[live] backgrounded, unchanged: ${unchanged.length} bytes, ` +
           `byte-identical to frontmost: ${Buffer.compare(frontmost, unchanged) === 0}`,
@@ -537,17 +566,8 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       // CURRENT picture, but no picture at all is the documented case and is
       // recorded as a skip — which the runner now reports, rather than
       // swallowing it the way it used to.
-      let afterMutation;
-      try {
-        afterMutation = await alpha.screenshot({ timeout: 20_000 });
-      } catch (err) {
-        if (!/Timeout .* exceeded/i.test(String(err))) throw err;
-        console.log(
-          '[live] the backgrounded capture timed out — the browser window is occluded, so ' +
-            'Chromium is producing no frames for it. This is the documented limitation ' +
-            '(stories/cdp-tab-focus.md §Risks), not a focus regression. Re-run with the ' +
-            'Chrome window visible to exercise the currency check.',
-        );
+      const afterMutation = await captureBackgrounded();
+      if (!afterMutation) {
         this.skip();
         return;
       }

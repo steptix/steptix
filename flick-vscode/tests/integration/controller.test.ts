@@ -559,7 +559,7 @@ describe('FlickController', () => {
       await chromeBrowser.start();
 
       edgeBrowser = new FakeBrowserServer();
-      edgeBrowser.browserField = 'Edge/120.0.2210.91';
+      edgeBrowser.browserField = 'Edg/151.0.4129.78'; // what a real Edge sends
       edgeBrowser.tabs = [
         { id: 'edge-1', type: 'page', url: 'https://outlook.office.com/', title: 'Inbox' },
       ];

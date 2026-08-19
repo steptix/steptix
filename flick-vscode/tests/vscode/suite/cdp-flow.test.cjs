@@ -122,7 +122,7 @@ describe('Flick CDP discovery + adopt flow (real VS Code host)', function () {
     await chromeServer.start();
 
     edgeServer = new FakeBrowserServer();
-    edgeServer.browserField = 'Edge/120.0.2210.91';
+    edgeServer.browserField = 'Edg/151.0.4129.78'; // what a real Edge sends
     edgeServer.tabs = [
       {
         id: 'edge-tab-inbox',
