@@ -810,7 +810,12 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
       ),
     );
     assert.equal(res.status, 404, res.raw);
-    assert.match(res.body.error, /not a CDP browser this project has running/i);
+    // Assert the code, not the sentence. The message's tail names which roots
+    // were actually swept, so it reads differently depending on whether a
+    // user-root browser happens to be open on the machine — string-matching it
+    // made this test pass or fail on machine state rather than on behaviour.
+    // `reason` is the part the server promises to keep.
+    assert.equal(res.body.reason, 'port_not_owned', res.raw);
   });
 
   it('requires the api key, like every other route', async () => {

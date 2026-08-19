@@ -1351,7 +1351,7 @@ export function createApiServer(
       const result = await pending;
 
       if (!result.ok) {
-        res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+        res.status(statusForCdpFailure(result.kind)).json({ error: result.error, reason: result.reason });
         return;
       }
 
@@ -1480,6 +1480,7 @@ export function createApiServer(
         if (!result.ok) {
           res.status(statusForCdpFailure(result.kind)).json({
             error: result.error,
+            reason: result.reason,
             // Present only on the errand refusal, so the MCP side can map it to
             // a message naming the errand rather than the generic HTTP arm.
             ...(result.holder ? { holder: result.holder } : {}),
@@ -1531,7 +1532,7 @@ export function createApiServer(
         });
 
         if (!result.ok) {
-          res.status(statusForCdpFailure(result.kind)).json({ error: result.error });
+          res.status(statusForCdpFailure(result.kind)).json({ error: result.error, reason: result.reason });
           return;
         }
 
@@ -1627,6 +1628,7 @@ export function createApiServer(
         const tabs = await listPageTabs(port);
         if (tabs === null) {
           res.status(statusForCdpFailure('launch_failed')).json({
+            reason: 'tab_list_unreadable',
             error:
               `Could not read the tab list from the browser on port ${port}. ` +
               'It may be shutting down.\n' +
@@ -1635,7 +1637,8 @@ export function createApiServer(
           return;
         }
         if (!tabs.some((tab) => tab.targetId === targetId)) {
-          res.status(statusForCdpFailure('not_found')).json({ error: goneTabMessage(port, targetId) });
+          res.status(statusForCdpFailure('not_found'))
+            .json({ error: goneTabMessage(port, targetId), reason: 'tab_vanished' });
           return;
         }
 
@@ -1672,6 +1675,8 @@ export function createApiServer(
               // a timeout is a fact about the WINDOW, and telling someone their
               // page is wedged sends them debugging instead of un-minimizing.
               res.status(statusForCdpFailure(shot.reason === 'timeout' ? 'refused' : 'launch_failed')).json({
+                reason:
+                  shot.reason === 'timeout' ? 'tab_screenshot_timeout' : 'tab_screenshot_failed',
                 error:
                   shot.reason === 'timeout'
                     ? `The tab on port ${port} did not produce a picture (${shot.detail}).\n` +
@@ -1741,7 +1746,8 @@ export function createApiServer(
         // retry when the true answer is "that tab is gone, here is what is
         // open". Same envelope, same status, same words as the pre-check.
         if (err instanceof CdpTabNotFoundError) {
-          res.status(statusForCdpFailure('not_found')).json({ error: goneTabMessage(port, targetId) });
+          res.status(statusForCdpFailure('not_found'))
+            .json({ error: goneTabMessage(port, targetId), reason: 'tab_vanished' });
           return;
         }
         next(err);
@@ -1838,6 +1844,7 @@ export function createApiServer(
           const tabs = await listPageTabs(port);
           if (tabs === null) {
             res.status(statusForCdpFailure('launch_failed')).json({
+              reason: 'tab_list_unreadable',
               error:
                 `Could not read the tab list from the browser on port ${port}. ` +
                 'It may be shutting down.\n' +
@@ -1848,7 +1855,7 @@ export function createApiServer(
           if (!tabs.some((tab) => tab.targetId === targetId)) {
             res
               .status(statusForCdpFailure('not_found'))
-              .json({ error: goneTabMessage(port, targetId) });
+              .json({ error: goneTabMessage(port, targetId), reason: 'tab_vanished' });
             return;
           }
 
@@ -1859,6 +1866,7 @@ export function createApiServer(
           const errandHolder = errandLocks.holder(port, targetId);
           if (errandHolder) {
             res.status(statusForCdpFailure('refused')).json({
+              reason: 'tab_held_by_errand',
               error:
                 `That tab is being driven by errand ${errandHolder.errandId}, so ` +
                 'navigating it now would move the page out from under a run in ' +

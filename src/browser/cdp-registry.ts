@@ -135,6 +135,54 @@ export interface StartOptions {
  */
 export type CdpFailureKind = 'invalid_input' | 'not_found' | 'refused' | 'launch_failed';
 
+/**
+ * Which specific refusal this is — the stable name for a caller to branch on.
+ *
+ * {@link CdpFailureKind} answers "what HTTP status", and is deliberately coarse:
+ * every ownership problem and every missing tab share `not_found`. That is the
+ * right granularity for a status line and the wrong one for a caller that needs
+ * to tell "the port is not yours" from "that tab is gone" — so `reason` carries
+ * the distinction that `kind` flattens away.
+ *
+ * This is the field to branch on, and the reason the prose above it is free to
+ * change. A message is written for whoever reads the failure and gets reworded
+ * whenever a clearer sentence turns up; a reason is a contract and only ever
+ * gains members. Anything matching on the message text is relying on wording
+ * nobody promised to keep — the live ownership test did exactly that, and broke
+ * the day a second search scope changed which sentence came back.
+ *
+ * Required, not optional, so a new failure site cannot quietly ship without one:
+ * omitting it is a type error, the same discipline `statusForCdpFailure` uses to
+ * stay total over `kind`.
+ */
+export type CdpFailureReason =
+  // Ports and ownership.
+  | 'port_not_listening'
+  | 'port_not_owned'
+  // Tabs.
+  | 'tab_not_found'
+  | 'tab_vanished'
+  | 'tab_list_unreadable'
+  | 'tab_held_by_errand'
+  | 'tab_held_by_session'
+  | 'tab_holder_unknown'
+  | 'tab_is_last_open'
+  | 'tab_close_refused'
+  | 'tab_close_ineffective'
+  | 'tab_focus_refused'
+  // Raised by the API server's peek route rather than this module, but named
+  // here so the whole vocabulary stays in one place for anyone branching on it.
+  | 'tab_screenshot_timeout'
+  | 'tab_screenshot_failed'
+  // Profiles.
+  | 'profile_name_invalid'
+  | 'profile_dir_is_symlink'
+  | 'profile_dir_unresolvable'
+  | 'profile_dir_outside_root'
+  | 'profile_dir_unmarked'
+  | 'profile_in_use'
+  | 'profile_reset_failed';
+
 export type StartResult =
   | {
       ok: true;
@@ -147,7 +195,7 @@ export type StartResult =
       outcome: CdpOutcome;
       warnings: string[];
     }
-  | { ok: false; kind: CdpFailureKind; error: string };
+  | { ok: false; kind: CdpFailureKind; reason: CdpFailureReason; error: string };
 
 export interface RegistryDeps extends LauncherDeps {
   /** Default: fs.readdirSync with withFileTypes. */
@@ -353,7 +401,7 @@ export async function startCdpBrowser(
 ): Promise<StartResult> {
   const profile = opts.profile ?? DEFAULT_PROFILE;
   const nameError = validateProfileName(profile);
-  if (nameError) return { ok: false, kind: 'invalid_input', error: nameError };
+  if (nameError) return { ok: false, kind: 'invalid_input', reason: 'profile_name_invalid', error: nameError };
 
   const existsSync = deps?.existsSync ?? fs.existsSync;
   const launch = deps?.launch ?? launchCdpBrowser;
@@ -365,7 +413,7 @@ export async function startCdpBrowser(
 
   if (opts.reset) {
     const reset = await resetProfile(opts.projectRoot, opts.engine, profile, deps);
-    if (!reset.ok) return { ok: false, kind: reset.kind, error: reset.error };
+    if (!reset.ok) return { ok: false, kind: reset.kind, reason: reset.reason, error: reset.error };
     warnings.push(...reset.warnings);
     outcome = 'launched_after_reset';
   } else {
@@ -414,7 +462,7 @@ export async function startCdpBrowser(
   }
 
   const launched = await launch({ engine: opts.engine, profileDir }, deps);
-  if (!launched.ok) return { ok: false, kind: 'launch_failed', error: launched.error };
+  if (!launched.ok) return { ok: false, kind: 'launch_failed', reason: 'tab_list_unreadable', error: launched.error };
 
   writeProfileMarker(profileDir, opts.engine, profile, deps);
 
@@ -595,6 +643,7 @@ export type CloseTabResult =
   | {
       ok: false;
       kind: CdpFailureKind;
+      reason: CdpFailureReason;
       error: string;
       /** Machine-readable holder for the errand refusal, so the route can put
        *  it on the 409 body and the MCP side can recognise the shape instead of
@@ -656,7 +705,7 @@ async function resolveCdpOwner(
   port: number,
   allowUnowned: boolean,
   deps?: RegistryDeps,
-): Promise<{ ok: true; owner: CdpOwner } | { ok: false; kind: CdpFailureKind; error: string }> {
+): Promise<{ ok: true; owner: CdpOwner } | { ok: false; kind: CdpFailureKind; reason: CdpFailureReason; error: string }> {
   const profiles = await knownProfilesAcross(roots, deps);
   const known = profiles.find((p) => p.live && p.port === port);
 
@@ -685,6 +734,7 @@ async function resolveCdpOwner(
       return {
         ok: false,
         kind: 'not_found',
+        reason: 'port_not_listening',
         error:
           `Nothing is listening on port ${port}.\n` +
           'Call list_cdp_browsers to see what is running.',
@@ -716,6 +766,7 @@ async function resolveCdpOwner(
   return {
     ok: false,
     kind: 'not_found',
+    reason: 'port_not_owned',
     error:
       `Port ${port} is not a CDP browser this call can act on — ${whose}.\n` +
       (running.length > 0
@@ -763,6 +814,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'launch_failed',
+      reason: 'tab_list_unreadable',
       error:
         `Could not read the tab list from ${owner.label} ` +
         `on port ${opts.port}. The browser may be shutting down.\n` +
@@ -778,6 +830,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'not_found',
+      reason: 'tab_not_found',
       error:
         `No tab with target id ${opts.targetId} is open in ${owner.label} ` +
         `(port ${opts.port}).\n\n` +
@@ -804,6 +857,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'tab_held_by_errand',
       holder: { kind: 'errand', errandId: errand.errandId, tabRole: errand.tabRole },
       error:
         `Errand ${errand.errandId} is driving that tab ("${target.title || target.url}")` +
@@ -839,6 +893,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'tab_holder_unknown',
       error:
         `Could not determine whether a session is driving "${target.title || target.url}" — ` +
         'one of this server\'s sessions took too long to report its tabs.\n\n' +
@@ -851,6 +906,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'tab_held_by_session',
       error:
         `Session "${holder}" is driving that tab ("${target.title || target.url}"). ` +
         'Closing it would break that session mid-run.\n\n' +
@@ -866,6 +922,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'tab_is_last_open',
       error:
         `"${target.title || target.url}" is the only tab open in ` +
         `${owner.label}, and closing a browser's last ` +
@@ -898,6 +955,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'not_found',
+      reason: 'tab_vanished',
       error:
         `Tab ${opts.targetId} ("${target.title || target.url}") was open a moment ago but ` +
         'the browser no longer has it — something else closed it first.\n\n' +
@@ -908,6 +966,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'launch_failed',
+      reason: 'tab_close_refused',
       error:
         `The browser refused to close that tab: ${requested.error ?? 'unknown error'}.\n` +
         'Call list_cdp_browsers to check the browser is still running, then retry.',
@@ -989,6 +1048,7 @@ export async function closeCdpTab(
     return {
       ok: false,
       kind: 'launch_failed',
+      reason: 'tab_close_ineffective',
       error:
         `The browser accepted the close for tab ${opts.targetId} but it was still open ` +
         `${CLOSE_CONFIRM_BUDGET_MS}ms later, so its state is unknown — it may be showing ` +
@@ -1104,7 +1164,7 @@ export type FocusTabResult =
       scope: ProfileScope | null;
       warnings: string[];
     }
-  | { ok: false; kind: CdpFailureKind; error: string };
+  | { ok: false; kind: CdpFailureKind; reason: CdpFailureReason; error: string };
 
 export interface FocusTabDeps extends RegistryDeps {
   activate?: typeof activateTab;
@@ -1164,6 +1224,7 @@ export async function focusCdpTab(
     return {
       ok: false,
       kind: 'launch_failed',
+      reason: 'tab_list_unreadable',
       error:
         `Could not read the tab list from ${owner.label} on port ${opts.port}. ` +
         'The browser may be shutting down.\n' +
@@ -1179,6 +1240,7 @@ export async function focusCdpTab(
     return {
       ok: false,
       kind: 'not_found',
+      reason: 'tab_not_found',
       error:
         `No tab with target id ${opts.targetId} is open in ${owner.label} ` +
         `(port ${opts.port}).\n\n` +
@@ -1198,6 +1260,7 @@ export async function focusCdpTab(
     return {
       ok: false,
       kind: 'not_found',
+      reason: 'tab_vanished',
       error:
         `Tab ${opts.targetId} ("${target.title || target.url}") was open a moment ago but ` +
         'the browser no longer has it — something else closed it first.\n\n' +
@@ -1208,6 +1271,7 @@ export async function focusCdpTab(
     return {
       ok: false,
       kind: 'launch_failed',
+      reason: 'tab_focus_refused',
       error:
         `The browser refused to bring that tab forward: ${requested.error ?? 'unknown error'}.\n` +
         'Call list_cdp_browsers to check the browser is still running, then retry.',
@@ -1234,7 +1298,7 @@ export async function focusCdpTab(
 
 export type ResetResult =
   | { ok: true; warnings: string[] }
-  | { ok: false; kind: CdpFailureKind; error: string };
+  | { ok: false; kind: CdpFailureKind; reason: CdpFailureReason; error: string };
 
 /**
  * Empty a profile so the next launch starts genuinely signed out.
@@ -1264,7 +1328,7 @@ export async function resetProfile(
   // 1. Validate the name. Rejects separators and `..` before any path is
   //    built, so nothing downstream ever sees a traversal.
   const nameError = validateProfileName(profile);
-  if (nameError) return { ok: false, kind: 'invalid_input', error: nameError };
+  if (nameError) return { ok: false, kind: 'invalid_input', reason: 'profile_name_invalid', error: nameError };
 
   const root = cdpProfilesRoot(projectRoot);
   const profileDir = profileDirFor(projectRoot, engine, profile);
@@ -1285,6 +1349,7 @@ export async function resetProfile(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'profile_dir_is_symlink',
       error:
         `Refusing to reset ${profileDir}: it is a symbolic link, and this framework ` +
         'only deletes real directories it created.\n' +
@@ -1304,6 +1369,7 @@ export async function resetProfile(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'profile_dir_unresolvable',
       error:
         `Cannot resolve the profile directory ${profileDir}: ` +
         `${err instanceof Error ? err.message : String(err)}`,
@@ -1319,6 +1385,7 @@ export async function resetProfile(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'profile_dir_outside_root',
       error:
         `Refusing to reset ${realDir}: it is not a direct child of ${realRoot}.\n` +
         'Only a single profile directory can be reset, never the profiles root ' +
@@ -1333,6 +1400,7 @@ export async function resetProfile(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'profile_dir_unmarked',
       error:
         `Refusing to reset ${realDir}: it has no ${PROFILE_MARKER} marker, so this ` +
         'framework did not create it and will not delete it.\n' +
@@ -1349,6 +1417,7 @@ export async function resetProfile(
     return {
       ok: false,
       kind: 'refused',
+      reason: 'profile_in_use',
       error:
         `Cannot reset the ${engineLabel(engine)} profile "${profile}": a browser is ` +
         `running on it (port ${existing.port}).\n` +
@@ -1378,6 +1447,7 @@ export async function resetProfile(
       // machine saying no, and the caller's next move is to close whatever
       // holds it and retry — same shape as a launch failure.
       kind: 'launch_failed',
+      reason: 'profile_reset_failed',
       error:
         `Could not reset the ${engineLabel(engine)} profile "${profile}": ` +
         `${err instanceof Error ? err.message : String(err)}\n` +
