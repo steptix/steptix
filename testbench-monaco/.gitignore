@@ -1,6 +1,0 @@
-server.*.log
-node_modules/
-dist/
-.claude/
-tests/integration/test-report.json
-.vscode-test/

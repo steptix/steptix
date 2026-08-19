@@ -56,7 +56,6 @@ const CORPUS_ROOTS = [
   'fixtures',
   'templates',
   path.join('testbench-native', 'tests', 'integration', 'fixtures'),
-  path.join('testbench-monaco', 'tests', 'integration', 'fixtures'),
 ];
 
 /**

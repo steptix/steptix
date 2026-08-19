@@ -60,7 +60,6 @@ $dirs = @(
     'flick/node_modules',
     'flick/src-tauri/target',
     'flick-vscode/node_modules',
-    'testbench-monaco/node_modules',
     'testbench-native/node_modules',
     'runner-core/node_modules'
 )
