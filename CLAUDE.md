@@ -1,20 +1,18 @@
 # Project notes
 
-## Running Flick in dev mode (Windows)
+## Flick: one client
 
-On Windows, always invoke `flick/run-dev.bat` with its **full path**, not by
-bare name:
+`flick-vscode/` is the Flick client — a chat panel inside VS Code for driving
+the Sessions API with natural-language steps. Extension ID `pkent.flick-vscode`.
 
-```
-cmd //c "c:\Projects\vibe\ai-ui-automation\flick\run-dev.bat"
-```
+There used to be a second client, `flick/`, a standalone Tauri desktop app
+(Svelte front end, Rust backend) built to [SPEC-FLICK.md](SPEC-FLICK.md). It was
+removed in favour of the VS Code extension — see
+[issue 049](issues/resolved/049-remove-flick-tauri.md). With it went the only
+reason this repo needed a Rust/MSVC toolchain.
 
-The bare-name form (`cmd //c run-dev.bat`) fails from the repo root because
-the bat lives in `flick/`, producing:
-`'run-dev.bat' is not recognized as an internal or external command`.
-
-The wrapper exists to source MSVC's `vcvarsall.bat x64` before `npm run tauri
-dev`, so Rust's linker picks up MSVC's `link.exe` instead of Git-for-Windows's.
+`SPEC-FLICK.md` stays: it is still the behavioural spec flick-vscode follows,
+with a note marking which sections described the removed desktop shell.
 
 ## TestBench: one extension
 
@@ -25,7 +23,7 @@ native editor surface and hosts the multi-test runner. Extension ID
 There used to be a second variant, `testbench-monaco/` (extension ID
 `pkent.testbench`), which hosted the editor inside a webview using Monaco.
 It was removed in favour of the native variant — see
-[issues/048-remove-testbench-monaco.md](issues/048-remove-testbench-monaco.md).
+[issue 048](issues/resolved/048-remove-testbench-monaco.md).
 If you still have `pkent.testbench` installed, uninstall it; it is no longer
 built from this repo.
 
@@ -60,9 +58,10 @@ above.
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
 tool), the new directory only contains tracked files. The repo needs several
-gitignored files/dirs to actually run — `.env` (API keys), several
-`node_modules/`, `flick/src-tauri/target/`, etc. Without them, nothing works
-and `npm install` × 6 + a Tauri rebuild costs ~10 minutes.
+gitignored files/dirs to actually run — `.env` (API keys) and the four
+`node_modules/` trees (root, `flick-vscode/`, `testbench-native/`,
+`runner-core/`). Without them, nothing works and `npm install` × 4 costs
+several minutes.
 
 Run this script once, right after the worktree is created:
 
@@ -73,7 +72,7 @@ c:\Projects\vibe\ai-ui-automation\scripts\init-worktree.ps1 `
 
 It copies (not symlinks/junctions) env files and build dirs from the main
 checkout at `c:\Projects\vibe\ai-ui-automation`, so the worktree is
-independent and safe if `package.json` / `Cargo.toml` diverge.
+independent and safe if `package.json` diverges between branches.
 
 Add `-SkipBuilds` to copy only the env files when you don't need the heavy
 build artifacts (e.g. for a docs-only change).

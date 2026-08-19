@@ -1,5 +1,21 @@
 # Flick — UI Client Specification
 
+> **Status (2026-08-19):** the Tauri desktop implementation this document was
+> written for has been removed — see
+> [issue 049](issues/resolved/049-remove-flick-tauri.md). The surviving
+> Flick client is the VS Code extension at
+> [flick-vscode/](flick-vscode/), which still follows this spec for chat
+> behaviour, session/tab lifecycle, step parsing, result cards, screenshots,
+> connection status and stale-session handling.
+>
+> The document is kept as written, so anywhere it describes the desktop shell
+> it is describing something that no longer exists: **Window Behavior**
+> (sizing, bottom-right anchoring, expansion animation, always-on-top, window
+> title), **Technology**, the project location, and the `{app_data}/flick/`
+> paths under local persistence. VS Code owns window management, and
+> flick-vscode stores its state in the extension's global storage directory —
+> its README lists every deliberate adaptation.
+
 ## Overview
 
 Flick is a lightweight desktop application for sending natural language steps to the ai-ui-automation Sessions API. It presents a chat-style interface where non-technical users can type instructions, submit them, and see results — including screenshots — from browser sessions running locally or on remote machines.

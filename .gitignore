@@ -23,11 +23,6 @@ memory/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 
-# Flick (Tauri app)
-flick/node_modules/
-flick/dist/
-flick/src-tauri/target/
-
 # TestBench (VS Code extension)
 testbench-native/.vscode-test/
 testbench-native/*.vsix
