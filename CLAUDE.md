@@ -16,35 +16,35 @@ the bat lives in `flick/`, producing:
 The wrapper exists to source MSVC's `vcvarsall.bat x64` before `npm run tauri
 dev`, so Rust's linker picks up MSVC's `link.exe` instead of Git-for-Windows's.
 
-## TestBench: two extension variants
+## TestBench: one extension
 
-There are two TestBench VS Code extension source trees living side-by-side:
+`testbench-native/` is the TestBench VS Code extension — it uses VS Code's
+native editor surface and hosts the multi-test runner. Extension ID
+`pkent.testbench-native`.
 
-- `testbench-monaco/` — original variant, hosts the editor inside the webview
-  using Monaco. Extension ID `pkent.testbench`.
-- `testbench-native/` — newer variant, uses VS Code's native editor surface
-  and adds the multi-test runner. Extension ID `pkent.testbench-native`.
-
-Both source trees live on `main`. The extension IDs differ, so both VSIXes
-can be installed side-by-side in the same VS Code profile.
+There used to be a second variant, `testbench-monaco/` (extension ID
+`pkent.testbench`), which hosted the editor inside a webview using Monaco.
+It was removed in favour of the native variant — see
+[issues/048-remove-testbench-monaco.md](issues/048-remove-testbench-monaco.md).
+If you still have `pkent.testbench` installed, uninstall it; it is no longer
+built from this repo.
 
 ## TestBench: bump the patch version on every change
 
-Whenever you change code that ends up bundled into a TestBench VS Code
-extension (anything under `testbench-monaco/` or `testbench-native/`, **and**
-anything under `runner-core/` since that's a `file:` dep bundled into each
-extension's `dist/`), bump the patch field in the affected variant's
-`package.json` (e.g. `0.1.1` → `0.1.2`) as part of the same change.
+Whenever you change code that ends up bundled into the TestBench VS Code
+extension (anything under `testbench-native/`, **and** anything under
+`runner-core/` since that's a `file:` dep bundled into the extension's
+`dist/`), bump the patch field in `testbench-native/package.json`
+(e.g. `0.1.1` → `0.1.2`) as part of the same change.
 
-The install/verify loop is then (substitute `testbench-monaco` or
-`testbench-native` for `<variant>`):
+The install/verify loop is then:
 
 ```powershell
-cd c:\Projects\vibe\ai-ui-automation\<variant>
+cd c:\Projects\vibe\ai-ui-automation\testbench-native
 npm run build
 npm run package
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
-    --install-extension testbench-<new-version>.vsix --force
+    --install-extension testbench-native-<new-version>.vsix --force
 ```
 
 Then reload the VS Code window. The Extensions panel will show the new
