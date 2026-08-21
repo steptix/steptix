@@ -316,6 +316,16 @@ function parseAction(raw: unknown, index: number): AIAction {
     }
   }
 
+  // Absolute scroll target. Guarded exactly like `direction`: an unrecognised
+  // value ("middle", "end") is dropped silently so the action falls through to
+  // its other fields, rather than failing the step over harmless noise.
+  if (typeof obj['to'] === 'string') {
+    const to = obj['to'];
+    if (to === 'top' || to === 'bottom') {
+      action.to = to;
+    }
+  }
+
   if (typeof obj['amount'] === 'number') action.amount = obj['amount'];
   if (typeof obj['timeout'] === 'number') action.timeout = obj['timeout'];
 

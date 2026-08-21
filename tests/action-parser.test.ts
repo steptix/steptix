@@ -176,6 +176,46 @@ describe('parseAIResponse', () => {
     expect(result.actions[0]?.amount).toBe(300);
   });
 
+  it('passes an absolute scroll target through for both valid values', () => {
+    for (const to of ['top', 'bottom'] as const) {
+      const raw = JSON.stringify({
+        actions: [{ action: 'scroll', description: `Scroll to the ${to}`, to }],
+        reasoning: 'Absolute scroll.',
+      });
+      expect(parseAIResponse(raw).actions[0]?.to).toBe(to);
+    }
+  });
+
+  it('drops an unrecognised scroll target without failing the action', () => {
+    const raw = JSON.stringify({
+      actions: [{ action: 'scroll', description: 'Scroll to the middle', to: 'middle' }],
+      reasoning: 'Invented target.',
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]?.to).toBeUndefined();
+    // The action itself survives — it just falls through to its other fields.
+    expect(result.actions[0]?.action).toBe('scroll');
+  });
+
+  it('keeps both "to" and "direction" when the AI sends them together', () => {
+    const raw = JSON.stringify({
+      actions: [
+        {
+          action: 'scroll',
+          description: 'Scroll down to the bottom',
+          to: 'bottom',
+          direction: 'down',
+          amount: 500,
+        },
+      ],
+      reasoning: 'Redundant, not contradictory.',
+    });
+    const action = parseAIResponse(raw).actions[0]!;
+    expect(action.to).toBe('bottom');
+    expect(action.direction).toBe('down');
+    expect(action.amount).toBe(500);
+  });
+
   it('parses assert action with expected field', () => {
     const raw = JSON.stringify({
       actions: [

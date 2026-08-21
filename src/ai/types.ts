@@ -54,6 +54,15 @@ export interface AIAction {
   direction?: 'up' | 'down' | 'left' | 'right';
   /** Scroll amount in pixels */
   amount?: number;
+  /**
+   * Absolute scroll target for "scroll" actions: "top" drives the document
+   * scroller to y=0, "bottom" to its current maximum. Pointer-independent,
+   * unlike `direction`/`amount`, and exact at any page height.
+   * Precedence within a scroll action: `selector` > `to` > `direction`.
+   * (`to` is also the key switchBrowser uses for its target label; the parser
+   * normalises that one into `browserLabel`, and only scrolls read this field.)
+   */
+  to?: 'top' | 'bottom';
   /** Type of wait to perform */
   waitType?: 'selector' | 'hidden' | 'text' | 'url' | 'load' | 'duration' | 'count' | 'attribute' | 'navigation' | 'stable';
   /** Timeout in milliseconds for wait actions */

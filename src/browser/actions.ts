@@ -1,4 +1,4 @@
-import type { Page, FrameLocator } from 'playwright';
+import type { Page, FrameLocator, Locator } from 'playwright';
 import type { AIAction } from '../ai/types.js';
 import { logger } from '../utils/logger.js';
 
@@ -164,8 +164,7 @@ export async function executeAction(
         break;
 
       case 'scroll':
-        // Scroll operates on the page viewport, not a frame element
-        await executeScroll(page, eff);
+        await executeScroll(page, root, eff);
         break;
 
       case 'switchFrame':
@@ -654,7 +653,181 @@ function inferWaitType(condition: string): NonNullable<AIAction['waitType']> {
   return 'text';
 }
 
-async function executeScroll(page: Page, action: AIAction): Promise<void> {
+// ─── Absolute scrolling ──────────────────────────────────────────────────────
+//
+// The numbers behind the eased glide, in one place. Deliberately constants and
+// not a `browser.*` config knob: a per-project value would have to be threaded
+// through the server's per-project bundle to actually apply, and nothing
+// justifies that plumbing yet.
+
+/** Fixed cost of any glide, before distance is considered. */
+const SCROLL_BASE_MS = 250;
+/** Pixels of travel per additional millisecond of duration. */
+const SCROLL_PX_PER_MS = 4;
+/** Hard cap — a 40,000px page still stops gliding after this long. */
+const SCROLL_MAX_MS = 1200;
+/**
+ * Grace period after `duration` before the deadline timer snaps to the target
+ * and resolves. requestAnimationFrame is throttled to zero on hidden, occluded
+ * or backgrounded pages, so the frame loop cannot be the only thing that ends
+ * the animation.
+ */
+const SCROLL_DEADLINE_MARGIN_MS = 500;
+/** How long to wait for a scroll target to become measurable before giving up
+ *  on the glide and letting `scrollIntoViewIfNeeded` do the work alone. */
+const SCROLL_BOX_TIMEOUT_MS = 5_000;
+
+/**
+ * Duration of an eased scroll across `distancePx`, in milliseconds.
+ *
+ * A pure Node-side mirror of the formula the browser-side animator computes for
+ * itself. It has to be a mirror rather than a shared call: `page.evaluate`
+ * serializes its callback, so the animator cannot reach back into this module.
+ * Exported so tests can pin the cap and the distance scaling without a browser
+ * — keep the two in step.
+ */
+export function scrollDurationMs(distancePx: number): number {
+  return Math.min(SCROLL_MAX_MS, SCROLL_BASE_MS + Math.abs(distancePx) / SCROLL_PX_PER_MS);
+}
+
+/**
+ * Ease-out cubic: fast off the mark, decelerating into the stop.
+ *
+ * Same mirroring caveat as `scrollDurationMs` — the animator carries its own
+ * inline copy of this one line. Exported so the deceleration property can be
+ * asserted as arithmetic instead of by watching a video.
+ */
+export function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+/** Where an absolute scroll is aimed. A `deltaY` is relative to the scroller's
+ *  position when the animation starts (used to bring an element into view). */
+type ScrollTargetSpec = 'top' | 'bottom' | { deltaY: number };
+
+/**
+ * Drive `document.scrollingElement` to a target with an ease-out curve, and
+ * resolve only once motion has ended.
+ *
+ * Neither `behavior: "smooth"` nor `behavior: "instant"` would do. Smooth
+ * cannot be awaited — completion needs the `scrollend` event, which WebKit
+ * doesn't fire, and the browser picks the duration. Instant teleports: it
+ * dispatches no intermediate scroll positions, so IntersectionObserver-driven
+ * lazy-loaders and scroll-linked UI never see the journey, on exactly the long
+ * pages "scroll to the bottom" exists for. Owning the animation means
+ * completion is our own promise, so the caller awaits actual arrival and a
+ * follow-up screenshot can never catch a mid-animation frame.
+ */
+async function animateScrollTo(page: Page, target: ScrollTargetSpec): Promise<void> {
+  await page.evaluate(
+    (args: {
+      target: ScrollTargetSpec;
+      baseMs: number;
+      pxPerMs: number;
+      maxMs: number;
+      marginMs: number;
+    }) =>
+      new Promise<void>((resolve) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = globalThis as any;
+        const el = g.document.scrollingElement ?? g.document.documentElement;
+        // The maximum is scrollHeight − clientHeight, NOT scrollHeight. A plain
+        // scrollTo gets away with overshooting because the browser clamps; an
+        // animation must not, or the visible deceleration compresses against
+        // the clamp and dies early.
+        const maxScroll = (): number => Math.max(0, el.scrollHeight - el.clientHeight);
+        const start: number = el.scrollTop;
+        // Re-read every frame so "bottom" tracks a page that grows mid-glide —
+        // within the duration cap.
+        const targetY = (): number => {
+          if (args.target === 'top') return 0;
+          if (args.target === 'bottom') return maxScroll();
+          return Math.min(Math.max(0, start + args.target.deltaY), maxScroll());
+        };
+        const duration = Math.min(
+          args.maxMs,
+          args.baseMs + Math.abs(targetY() - start) / args.pxPerMs,
+        );
+        // Races the frame loop: when frames stop coming, this snaps to the
+        // target and resolves, so the action always terminates.
+        const deadline = setTimeout(() => {
+          el.scrollTop = targetY();
+          resolve();
+        }, duration + args.marginMs);
+        const t0: number = g.performance.now();
+        const tick = (now: number): void => {
+          const t = Math.min(1, (now - t0) / duration);
+          el.scrollTop = start + (targetY() - start) * (1 - Math.pow(1 - t, 3)); // ease-out cubic
+          if (t < 1) {
+            g.requestAnimationFrame(tick);
+            return;
+          }
+          clearTimeout(deadline);
+          resolve();
+        };
+        g.requestAnimationFrame(tick);
+      }),
+    {
+      target,
+      baseMs: SCROLL_BASE_MS,
+      pxPerMs: SCROLL_PX_PER_MS,
+      maxMs: SCROLL_MAX_MS,
+      marginMs: SCROLL_DEADLINE_MARGIN_MS,
+    },
+  );
+}
+
+/**
+ * Glide the document scroller to wherever `locator` sits.
+ *
+ * `boundingBox()` reports main-frame viewport coordinates even for an element
+ * inside an iframe, so the delta it yields is the right one for the document
+ * scroller. Best-effort by design: an element that can't be measured (detached,
+ * hidden, still rendering) simply gets no glide, and the
+ * `scrollIntoViewIfNeeded` backstop at the call site still puts it in view.
+ */
+async function animateScrollToLocator(page: Page, locator: Locator): Promise<void> {
+  const box = await locator
+    .boundingBox({ timeout: SCROLL_BOX_TIMEOUT_MS })
+    .catch(() => null);
+  if (!box) {
+    logger.debug('scroll: target not measurable — skipping the glide, relying on scrollIntoViewIfNeeded');
+    return;
+  }
+  await animateScrollTo(page, { deltaY: box.y });
+}
+
+/**
+ * Scroll the page. Three forms, in precedence order:
+ *
+ *   1. `selector` — bring an element into view. The eased glide aimed at the
+ *      element, then Playwright's `scrollIntoViewIfNeeded` as the correctness
+ *      backstop (a no-op when the glide already landed, and the thing that
+ *      handles elements inside *nested* scrollable containers — where the
+ *      backstop is instant). Routed through `root`, so `frame` works.
+ *   2. `to` — absolute and pointer-independent: the top or the current bottom.
+ *   3. `direction` + `amount` — the mouse-wheel path, unchanged. The only form
+ *      that can reach an inner scrollable pane under the pointer, and so the
+ *      fallback for layouts that fix the body and scroll a `<main>`.
+ *
+ * Precedence rather than rejection: a model that sends both `to` and
+ * `direction` is being redundant, not contradictory, and every combination has
+ * one sensible reading. Failing here would burn a paid retry turn to punish
+ * harmless noise.
+ */
+async function executeScroll(page: Page, root: Page | FrameLocator, action: AIAction): Promise<void> {
+  if (action.selector) {
+    const target = root.locator(action.selector).first();
+    await animateScrollToLocator(page, target);
+    await target.scrollIntoViewIfNeeded({ timeout: 10_000 });
+    return;
+  }
+
+  if (action.to) {
+    await animateScrollTo(page, action.to);
+    return;
+  }
+
   const direction = action.direction ?? 'down';
   const amount = action.amount ?? 300;
 
