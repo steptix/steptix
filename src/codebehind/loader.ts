@@ -1,0 +1,374 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { matchText } from '../parser/section-match.js';
+import type { ExpandedFrame, ExpandedStepOrigin } from '../skills/expander.js';
+import { bundleAndImport } from '../tools/reload.js';
+import { logger } from '../utils/logger.js';
+import type { StepCodeEntry } from './types.js';
+
+/**
+ * Code-behind resolution: which `.steps.ts` each expanded step binds into,
+ * which entry it matches, and the variable scope its code runs under.
+ * See stories/step-codebehind.md ("Sections and skills", "Execution").
+ *
+ * Everything here runs once at test load, after skill/section expansion,
+ * where both the authored raw text and the origin frames are still in hand.
+ * The result is a registry carried into the executor like `stepCache`.
+ */
+
+/** Name of the temp-module cache directory created beside a `.steps.ts`. */
+export const CODEBEHIND_CACHE_DIRNAME = '.aiui-codebehind-cache';
+
+/**
+ * Where to write temp code-behind modules for a `.steps.ts`: a dot-directory
+ * **beside the source file**, for the reason spelled out in
+ * [resolveToolCacheDir](../tools/reload.ts) — a `node_modules` path segment
+ * makes Node's `LOOKUP_PACKAGE_SCOPE` return null, and the package
+ * self-reference `ai-ui-automation/codebehind` becomes unresolvable.
+ */
+export function resolveCodeBehindCacheDir(stepsFile: string): string {
+  return path.join(path.dirname(path.resolve(stepsFile)), CODEBEHIND_CACHE_DIRNAME);
+}
+
+/** `tests/github.md` → `tests/github.steps.ts`. */
+export function codeBehindPathFor(markdownFile: string): string {
+  const resolved = path.resolve(markdownFile);
+  const dir = path.dirname(resolved);
+  const base = path.basename(resolved, path.extname(resolved));
+  return path.join(dir, `${base}.steps.ts`);
+}
+
+/**
+ * The variable view a code-behind entry runs under.
+ *
+ * `renames` is the executing skill frame's `varScope` — authored name to the
+ * `__skill<N>_`/alias name the expander rewrote the step text to. `inputs` is
+ * that frame's caller-supplied parameter values, which the expander
+ * interpolated straight into the text and so exist under no name at all.
+ * Both empty for a step at the top level or in a plain section.
+ */
+export interface CodeBehindVarScope {
+  renames: Record<string, string>;
+  inputs: Record<string, string>;
+}
+
+const EMPTY_SCOPE: CodeBehindVarScope = { renames: {}, inputs: {} };
+
+/**
+ * One expanded step's code-behind binding. Mutable in exactly one way: the
+ * executor clears `entry` when the code throws, which discards it for the rest
+ * of the run (the registry hands out the same object on every lookup, so a
+ * re-executed step stays healed).
+ */
+export interface CodeBehindBinding {
+  /** Absolute path of the `.steps.ts` this step's entry lives in. */
+  file: string;
+  /** `section` scope an entry must carry to match, or undefined for none. */
+  section?: string;
+  /** The step's authored raw text — an entry's `source`. */
+  source: string;
+  /**
+   * 0-based occurrence of this (section, source) pair **within this step's
+   * own frame instance**. A section or skill body is defined once and inlined
+   * many times; every invocation is its own frame and matching restarts, so
+   * all invocations bind to the same entries in body order.
+   */
+  occurrence: number;
+  scope: CodeBehindVarScope;
+  /** The matched entry, or undefined (no entry, or discarded after failure). */
+  entry?: StepCodeEntry | undefined;
+}
+
+/**
+ * Per-run code-behind lookup, parallel to the expanded step list.
+ *
+ * A binding exists for every step whose defining file is known — even when no
+ * entry matched, because generation needs the target file, scope and
+ * occurrence to write to.
+ */
+export class CodeBehindRegistry {
+  constructor(private readonly bindings: (CodeBehindBinding | undefined)[]) {}
+
+  /** The binding for expanded step `index` (0-based), if any. */
+  bindingFor(index: number): CodeBehindBinding | undefined {
+    return this.bindings[index];
+  }
+
+  /** True when at least one step matched an executable entry. */
+  get hasEntries(): boolean {
+    return this.bindings.some((b) => b?.entry !== undefined);
+  }
+
+  /** Empty registry — nothing binds. Used where code-behind is not wired. */
+  static empty(): CodeBehindRegistry {
+    return new CodeBehindRegistry([]);
+  }
+}
+
+/** The expansion facts binding needs. Satisfied by `SkillExpansion` and by
+ *  `ParsedTest.expansion` + `steps`. */
+export interface CodeBehindExpansion {
+  steps: string[];
+  /** Parallel to `steps` — authored match-side text (`SkillExpansion.rawSteps`). */
+  rawSteps: string[];
+  origins: ExpandedStepOrigin[];
+  frames: Record<string, ExpandedFrame>;
+}
+
+export interface BuildRegistryOptions {
+  /** Absolute path of the test file. Steps at the top level bind into its
+   *  sibling `.steps.ts`; without it those steps get no binding. */
+  testFilePath?: string | undefined;
+  /** Warning sink; defaults to `logger.warn`. */
+  onWarn?: ((message: string) => void) | undefined;
+}
+
+/**
+ * Resolve every expanded step to its defining file + scope, load each distinct
+ * `.steps.ts` once, and align entries to steps.
+ *
+ * Never throws for a missing or broken code-behind file: a file that won't
+ * load is reported and the whole test falls back to AI, which is the same
+ * outcome as not having written one.
+ */
+export async function buildCodeBehindRegistry(
+  expansion: CodeBehindExpansion,
+  options: BuildRegistryOptions = {},
+): Promise<CodeBehindRegistry> {
+  const warn = options.onWarn ?? ((m: string) => logger.warn(m));
+  const testFilePath = options.testFilePath
+    ? path.resolve(options.testFilePath)
+    : undefined;
+
+  // Pass 1 — target (file, section, occurrence, scope) per step. Occurrence
+  // counting is keyed by the frame INSTANCE, so it restarts for every
+  // inlining of a section or skill body (issue 037's instability, avoided by
+  // construction).
+  const perFrameCounts = new Map<string, number>();
+  const targets: (Omit<CodeBehindBinding, 'entry'> | undefined)[] = [];
+  const filesNeeded = new Set<string>();
+
+  for (let i = 0; i < expansion.steps.length; i++) {
+    const origin = expansion.origins[i];
+    const frameId = origin?.frameId ?? '';
+    const site = resolveDefiningSite(frameId, expansion.frames, testFilePath);
+    if (!site) {
+      targets.push(undefined);
+      continue;
+    }
+    const source = (expansion.rawSteps[i] ?? expansion.steps[i] ?? '').trim();
+    const scopeKey = site.section ? matchText(site.section) : '';
+    const counterKey = `${frameId}\u0000${scopeKey}\u0000${source}`;
+    const occurrence = perFrameCounts.get(counterKey) ?? 0;
+    perFrameCounts.set(counterKey, occurrence + 1);
+
+    const stepsFile = codeBehindPathFor(site.file);
+    filesNeeded.add(stepsFile);
+    targets.push({
+      file: stepsFile,
+      ...(site.section !== undefined && { section: site.section }),
+      source,
+      occurrence,
+      scope: varScopeFor(frameId, expansion.frames),
+    });
+  }
+
+  // Pass 2 — load each distinct file once, however many frames resolve to it.
+  const loaded = new Map<string, LoadedCodeBehind>();
+  for (const file of filesNeeded) {
+    loaded.set(file, await loadCodeBehindFile(file, warn));
+  }
+
+  // Pass 3 — align. An entry is claimed at most once per (frame, scope,
+  // source, occurrence); leftovers are reported so a renamed step doesn't
+  // leave dead code sitting unnoticed in a committed file.
+  const claimed = new Map<string, Set<StepCodeEntry>>();
+  const bindings: (CodeBehindBinding | undefined)[] = targets.map((target) => {
+    if (!target) return undefined;
+    const file = loaded.get(target.file);
+    const entry = file?.lookup(target.section, target.source, target.occurrence);
+    if (entry) {
+      let set = claimed.get(target.file);
+      if (!set) { set = new Set(); claimed.set(target.file, set); }
+      set.add(entry);
+    }
+    return { ...target, ...(entry !== undefined && { entry }) };
+  });
+
+  for (const [file, load] of loaded) {
+    const used = claimed.get(file) ?? new Set<StepCodeEntry>();
+    for (const entry of load.entries) {
+      if (used.has(entry)) continue;
+      warn(
+        `Code-behind entry in ${file} matches no step: ${describeEntry(entry)}. ` +
+          `It is ignored at runtime and never deleted — if the step text was ` +
+          `edited, the entry is stale and can be removed by hand.`,
+      );
+    }
+  }
+
+  return new CodeBehindRegistry(bindings);
+}
+
+/**
+ * The nearest-enclosing-frame rule (stories/step-codebehind.md):
+ *
+ * | Nearest frame | Defining file | Scope |
+ * |---|---|---|
+ * | top level (`''`) | the test file | none |
+ * | `kind: 'skill'`  | that skill's file | none |
+ * | `kind: 'section'`| the frame's `uri` | the section's name |
+ *
+ * A section frame's `uri` is already the file that *defines* it — the test
+ * file, or the skill file for a skill-internal section — so nothing extra is
+ * needed to make a skill-internal section land in the skill's `.steps.ts`.
+ */
+function resolveDefiningSite(
+  frameId: string,
+  frames: Record<string, ExpandedFrame>,
+  testFilePath: string | undefined,
+): { file: string; section?: string } | undefined {
+  const frame = frameId ? frames[frameId] : undefined;
+  if (!frame) {
+    // Top level, or a frame id with no record (a caller that supplied origins
+    // without frames). Either way the step belongs to the test file.
+    return testFilePath ? { file: testFilePath } : undefined;
+  }
+  if (frame.kind === 'section') {
+    return frame.skillName !== undefined
+      ? { file: frame.uri, section: frame.skillName }
+      : { file: frame.uri };
+  }
+  return { file: frame.uri };
+}
+
+/** Variable view for a step: the nearest ancestor **skill** frame's scope. */
+function varScopeFor(
+  frameId: string,
+  frames: Record<string, ExpandedFrame>,
+): CodeBehindVarScope {
+  let current: ExpandedFrame | undefined = frameId ? frames[frameId] : undefined;
+  const seen = new Set<string>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    if (current.kind === 'skill') {
+      return {
+        renames: current.varScope ?? {},
+        inputs: current.inputs ?? {},
+      };
+    }
+    current = current.parentId ? frames[current.parentId] : undefined;
+  }
+  return EMPTY_SCOPE;
+}
+
+interface LoadedCodeBehind {
+  entries: StepCodeEntry[];
+  lookup(
+    section: string | undefined,
+    source: string,
+    occurrence: number,
+  ): StepCodeEntry | undefined;
+}
+
+const EMPTY_LOAD: LoadedCodeBehind = { entries: [], lookup: () => undefined };
+
+/**
+ * Import one `.steps.ts` and index its entries by (section scope, source).
+ *
+ * Uses the tool layer's esbuild bundle-per-load so an edited file on a
+ * long-lived server is re-read rather than served from tsx's path-keyed
+ * transpile cache (issue 033), and so sourcemaps let a debugger step into the
+ * author's `.ts`.
+ */
+async function loadCodeBehindFile(
+  file: string,
+  warn: (message: string) => void,
+): Promise<LoadedCodeBehind> {
+  // Stat first. Most tests have no code-behind, and without this every step
+  // batch would pay an esbuild load to discover that — and `bundleToolModule`
+  // would create an `.aiui-codebehind-cache` dir beside every test file on the
+  // way to failing.
+  try {
+    await fs.access(file);
+  } catch {
+    return EMPTY_LOAD;
+  }
+
+  let entries: StepCodeEntry[];
+  try {
+    const { module } = await bundleAndImport(file, resolveCodeBehindCacheDir(file));
+    const exported = module['default'];
+    if (!Array.isArray(exported)) {
+      warn(
+        `Code-behind file ${file} must default-export defineSteps([...]) — ` +
+          `got ${exported === undefined ? 'no default export' : typeof exported}. Ignoring it.`,
+      );
+      return EMPTY_LOAD;
+    }
+    entries = exported as StepCodeEntry[];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // A missing sibling file is the normal case, not a problem: most tests
+    // have no code-behind. Anything else is worth saying out loud.
+    if (!isMissingFile(err)) {
+      warn(`Failed to load code-behind file ${file}: ${message}. Steps fall back to AI.`);
+    }
+    return EMPTY_LOAD;
+  }
+
+  const index = new Map<string, StepCodeEntry[]>();
+  const kept: StepCodeEntry[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || typeof entry.source !== 'string') {
+      warn(`Ignoring malformed code-behind entry in ${file} (no string \`source\`).`);
+      continue;
+    }
+    if (entry.ai !== true && typeof entry.run !== 'function') {
+      // Half-written entry: no code and no opt-out. Dropping it from the
+      // index makes the step miss, so it runs under AI and regenerates —
+      // strictly better than executing nothing and calling the step done.
+      warn(
+        `Code-behind entry in ${file} for "${entry.source}" has neither a ` +
+          `\`run\` function nor \`ai: true\` — ignoring it, so the step runs under AI.`,
+      );
+      continue;
+    }
+    kept.push(entry);
+    const key = entryKey(entry);
+    const bucket = index.get(key);
+    if (bucket) bucket.push(entry);
+    else index.set(key, [entry]);
+  }
+
+  return {
+    entries: kept,
+    lookup(section, source, occurrence) {
+      const key = `${section ? matchText(section) : ''}\u0000${source}`;
+      return index.get(key)?.[occurrence];
+    },
+  };
+}
+
+/** Index key: section scope (via the contract's `matchText`) + exact source.
+ *  Source comparison is case-SENSITIVE after trimming — an edited step should
+ *  miss and regenerate, not fuzzily match. NUL joins the parts because it is
+ *  the one character neither a section name nor step text can contain. */
+function entryKey(entry: StepCodeEntry): string {
+  const scope = entry.section ? matchText(entry.section) : '';
+  return `${scope}\u0000${entry.source.trim()}`;
+}
+
+function describeEntry(entry: StepCodeEntry): string {
+  return entry.section
+    ? `{ section: "${entry.section}", source: "${entry.source}" }`
+    : `"${entry.source}"`;
+}
+
+function isMissingFile(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    (err as NodeJS.ErrnoException)?.code === 'ENOENT' ||
+    /ENOENT|no such file or directory|could not resolve/i.test(message)
+  );
+}

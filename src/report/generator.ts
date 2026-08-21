@@ -390,6 +390,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     : '';
 
   const toolHtml = step.toolStep ? renderToolStep(step.toolStep) : '';
+  const codeBehindHtml = step.codeBehind ? renderCodeBehind(step.codeBehind) : '';
 
   // Skip when this is a tool step: a `[tool: ... out.x="y"]` binding is
   // already shown in the purple Outputs section above via `toolStep.outputs`
@@ -435,6 +436,15 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ? `<span class="badge badge-skill" title="Step expanded from skill ${escapeHtml(step.sourceSkill)}">${escapeHtml(step.sourceSkill)}</span>`
     : '';
 
+  // ⚙ for code-behind, ⚡ for the action cache — two different ways a step
+  // avoided the model, and which one it was is the first thing you want to
+  // know when the step did something surprising.
+  const originBadge = step.fromCodeBehind
+    ? '<span class="badge badge-codebehind" title="Ran this step\'s code-behind — no AI call">⚙ code</span>'
+    : step.fromCache
+      ? '<span class="badge badge-cached" title="Replayed from the action cache — no AI call">⚡ cached</span>'
+      : '';
+
   // Alongside the skill chip, not instead of it: a skill invoked from inside
   // a section carries both.
   const sourceSectionBadge = step.sourceSection
@@ -464,6 +474,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
     ${sourceSectionBadge}
     ${sourceSkillBadge}
+    ${originBadge}
     ${tabBadge}
     ${retryBadge}
     <span class="step-duration">${duration}</span>
@@ -472,6 +483,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   </div>
   <div class="step-body">
     ${domHtml}
+    ${codeBehindHtml}
     ${toolHtml}
     ${turnsHtml}
     ${capturesHtml}
@@ -484,6 +496,36 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
 /** Exported for unit-test use; not part of the report's public API. */
 export { renderStep };
+
+/**
+ * The code-behind block: which `.steps.ts` ran, the entry's code in a
+ * collapsed `<details>` (same treatment `assertionCode` gets), and any `log`
+ * output the entry emitted.
+ *
+ * Exported for unit-test use; not part of the report's public API.
+ */
+export function renderCodeBehind(cb: NonNullable<StepResult['codeBehind']>): string {
+  const logsHtml = cb.logs.length === 0
+    ? ''
+    : `<div class="tool-section">
+        <div class="tool-section-label">Logs</div>
+        <div class="tool-logs">${cb.logs
+          .map((l) => `<div class="tool-log-line tool-log-${l.level}">[${l.level}] ${escapeHtml(l.message)}</div>`)
+          .join('')}</div>
+       </div>`;
+
+  return `<div class="tool-block codebehind-block">
+  <div class="tool-header">
+    <span class="tool-title">⚙ Code-behind</span>
+    <span class="tool-name">${escapeHtml(cb.file)}</span>
+  </div>
+  <details class="assertion-code">
+    <summary>Step code</summary>
+    <pre><code>${escapeHtml(cb.code)}</code></pre>
+  </details>
+  ${logsHtml}
+</div>`;
+}
 
 /** Render the tool-invocation block for a `[tool: ...]` step.
  *  Surfaces args, captured outputs, and tool logs alongside the existing

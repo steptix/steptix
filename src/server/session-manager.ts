@@ -32,7 +32,13 @@ import { interpolate } from '../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { resolveDataSourcePath } from '../parser/markdown.js';
 import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
-import { clearSkillCache, expandSkills, type ExpandedStepOrigin } from '../skills/expander.js';
+import {
+  clearSkillCache,
+  expandSkills,
+  type ExpandedFrame,
+  type ExpandedStepOrigin,
+} from '../skills/expander.js';
+import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
@@ -1777,6 +1783,14 @@ export class SessionManager {
     let effectiveSourceLines: number[] | undefined = request.sourceLines;
     let expansionOrigins: ExpandedStepOrigin[] | null = null;
     let expansionFrames: Record<string, FrameInfo> | null = null;
+    /** The expander's own frame records (not the wire `FrameInfo`), kept for
+     *  code-behind: resolving which `.steps.ts` a step binds into needs
+     *  `kind`/`uri` plus the skill scope tables the wire shape doesn't carry. */
+    let expandedFrames: Record<string, ExpandedFrame> = {};
+    /** Parallel to `effectiveSteps` — each step's authored match-side text.
+     *  Absent expansion, the request's steps are already that (contract §2.1). */
+    let expansionRawSteps: string[] = request.steps;
+    let codeBehind: CodeBehindRegistry = CodeBehindRegistry.empty();
     // Per-skill-frame snapshot of the caller-supplied parameter values
     // recorded by the expander. Merged into `frame:scope` on entry so
     // a debugger pause inside the skill shows what was passed in.
@@ -2113,6 +2127,8 @@ export class SessionManager {
         effectiveSteps = expansion.steps;
         stepsTotal = effectiveSteps.length;
         expansionOrigins = expansion.origins;
+        expandedFrames = expansion.frames;
+        expansionRawSteps = expansion.rawSteps;
         // Translate ExpandedFrame (parser shape) into FrameInfo (wire shape):
         // the parser uses `invocationLine | null`, the wire carries a non-null
         // line. We pin the test-frame line to 0 when absent; consumers treat
@@ -2177,6 +2193,32 @@ export class SessionManager {
         };
       }
     }
+
+    // ─── Code-behind registry ────────────────────────────────────────────
+    //
+    // Resolved per request, after expansion, from the test file's own project
+    // — a `.steps.ts` sits beside the markdown, so it rides the same
+    // per-request project resolution as `aiui.config.json` and `.env`.
+    //
+    // Unlike the action cache, this is safe on a subset batch: an entry is
+    // bound by the step's authored text within its frame INSTANCE, so it does
+    // not depend on which frame counter a batch happened to mint (issue 037).
+    if (request.testFilePath) {
+      codeBehind = await buildCodeBehindRegistry(
+        {
+          steps: effectiveSteps,
+          rawSteps: expansionRawSteps,
+          origins: expansionOrigins ?? effectiveSteps.map((_, i) => ({ inputIndex: i, frameId: '' })),
+          frames: expandedFrames,
+        },
+        { testFilePath: request.testFilePath },
+      );
+    }
+    // `projectConfig`, NOT `runConfig`: the latter is spread from the server's
+    // startup config with only the run-settings fields re-sourced, so reading
+    // it here would silently ignore a project's own `codebehind.generate` —
+    // the exact per-project-value-read-off-startup-config trap.
+    const codeBehindGenerate = projectConfig.codebehind?.generate === true;
 
     // ─── StepCache initialization ────────────────────────────────────────
     //
@@ -3247,6 +3289,8 @@ export class SessionManager {
                   // across batches, so neither read nor write is safe here.
                   !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== ''),
                 cacheKey: stepCacheKey,
+                ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
+                codeBehindGenerate,
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.

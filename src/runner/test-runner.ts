@@ -27,6 +27,7 @@ import { resolveProjectRoot } from '../server/project-root.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { executeToolStep } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
+import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -295,6 +296,23 @@ export async function runTest(
     throw err;
   }
 
+  // Code-behind: resolve each expanded step to its `.steps.ts` entry once, up
+  // front, and carry the result into the executor like `stepCache`. A missing
+  // or broken file is a warning and an empty registry — the test then runs
+  // exactly as it did before this feature existed.
+  const codeBehind = test.expansion
+    ? await buildCodeBehindRegistry(
+        {
+          steps: test.steps,
+          rawSteps: test.expansion.rawSteps,
+          origins: test.expansion.origins,
+          frames: test.expansion.frames,
+        },
+        { testFilePath: test.filePath },
+      )
+    : CodeBehindRegistry.empty();
+  const codeBehindGenerate = config.codebehind?.generate === true;
+
   // Hoisted so the `finally` can read the run outcome + mutate the report after
   // the browser is closed (to attach `videoRelPath`). `report` is assigned the
   // SAME object that's returned, so the in-`finally` mutation is visible to the
@@ -316,6 +334,21 @@ export async function runTest(
     let timeoutDeadline = Date.now() + testTimeout;
     let bail = false;
     let humanIntervened = false;
+
+    /**
+     * The code-behind slice of `StepExecutorOptions` for expanded step `i`.
+     * Spread rather than assigned so a step with no binding adds no key —
+     * `exactOptionalPropertyTypes` refuses an explicit `undefined`.
+     */
+    const codeBehindOptionsFor = (
+      i: number,
+    ): Pick<StepExecutorOptions, 'codeBehind' | 'codeBehindGenerate'> => {
+      const binding = codeBehind.bindingFor(i);
+      return {
+        ...(binding && { codeBehind: binding }),
+        codeBehindGenerate,
+      };
+    };
 
     /**
      * Run a `[tool: ...]` invocation and shape the outcome as a StepResult.
@@ -705,6 +738,7 @@ export async function runTest(
           cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
+          ...codeBehindOptionsFor(i),
         });
         if (stepResult.status === 'passed') {
           logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
@@ -731,6 +765,7 @@ export async function runTest(
           cacheEnabled: config.cache.enabled,
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
+          ...codeBehindOptionsFor(i),
         });
       }
 

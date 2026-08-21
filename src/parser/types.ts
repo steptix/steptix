@@ -192,6 +192,23 @@ export interface ParsedTest {
    * whether a step is a section call. See `ParsedSection.rawSteps`.
    */
   rawSteps: string[];
+  /**
+   * Post-expansion binding metadata, parallel to `steps` — what step
+   * code-behind needs and nothing else can reconstruct once expansion has
+   * flattened the call tree (stories/step-codebehind.md, "Execution").
+   *
+   * `rawSteps` here is the **post**-expansion authored match-side text, one
+   * per entry in `steps`. Distinct from the sibling top-level `rawSteps`,
+   * which is parallel to the *pre*-expansion main flow.
+   *
+   * Always populated by `parseTestFile`; absent on the raw
+   * `parseTestContent` path, which does no expansion.
+   */
+  expansion?: {
+    rawSteps: string[];
+    origins: import('../skills/expander.js').ExpandedStepOrigin[];
+    frames: Record<string, import('../skills/expander.js').ExpandedFrame>;
+  };
   /** Pre/post-step hook instructions (skills already expanded). */
   hooks: TestHooks;
   /** Parallel to `hooks` — tool-call markers per hook instruction. */

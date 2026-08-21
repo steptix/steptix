@@ -1,4 +1,4 @@
-import type { ChatMessage, MessageContentBlock } from './types.js';
+import type { AIAction, ChatMessage, MessageContentBlock } from './types.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 
@@ -841,4 +841,118 @@ export function formatStepHistoryEntry(
   const status = passed ? '✓ PASSED' : '✗ FAILED';
   const urlInfo = pageUrl ? ` (now at: ${pageUrl})` : '';
   return `Step ${index}: [${status}] ${instruction}${urlInfo}`;
+}
+
+/** What `buildStepCodePrompt` needs to describe a successful step to the model. */
+export interface StepCodePromptInput {
+  /** The step's raw markdown text, `{{param}}` placeholders intact. */
+  rawStepText: string;
+  /** Parameter names and their resolved values for this run, so the model can
+   *  map literals it sees in the transcript back to `step.getVar` calls. */
+  parameters: Array<{ name: string; value: string }>;
+  /** The successful run's action transcript — the same `AIAction[]` the step
+   *  cache stores, selectors included. */
+  actions: AIAction[];
+  /** Assertions the step evaluated, with what they saw. */
+  assertions?: Array<{
+    condition: string;
+    expected?: string | undefined;
+    actual?: string | undefined;
+    pass: boolean;
+  }>;
+  /** `[as: x]` / `[store as: x]` capture names the step is expected to write. */
+  captures?: string[];
+  /** `formatTestInfo(...)` output, when the caller has it. */
+  testInfoSection?: string | undefined;
+}
+
+/**
+ * Ask the model to turn one successful step into its code-behind entry
+ * (stories/step-codebehind.md, "Generation").
+ *
+ * The model returns `{"entry": "<object literal>"}` — the client forces JSON
+ * mode, so this is the assertion-code envelope pattern, not a fenced block.
+ * It is never asked for the `section` field: scope comes from the step's
+ * frame and the runner stamps it, so a model that guesses wrong cannot put an
+ * entry in the wrong scope.
+ */
+export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
+  const testInfoBlock = input.testInfoSection ? `${input.testInfoSection}\n\n` : '';
+
+  const paramBlock = input.parameters.length === 0
+    ? '(this step uses no parameters)'
+    : input.parameters
+        .map((p) => `- {{${p.name}}} resolved to ${JSON.stringify(p.value)} on this run`)
+        .join('\n');
+
+  const actionBlock = input.actions.length === 0
+    ? '(no actions recorded)'
+    : `\`\`\`json\n${JSON.stringify(input.actions, null, 2)}\n\`\`\``;
+
+  const assertionBlock = (input.assertions ?? []).length === 0
+    ? ''
+    : `\n\n## Assertions this step made\n${(input.assertions ?? [])
+        .map(
+          (a) =>
+            `- condition: ${a.condition}` +
+            (a.expected !== undefined ? `\n  expected: ${JSON.stringify(a.expected)}` : '') +
+            (a.actual !== undefined ? `\n  actual on this run: ${JSON.stringify(a.actual)}` : '') +
+            `\n  result: ${a.pass ? 'passed' : 'failed'}`,
+        )
+        .join('\n')}`;
+
+  const captureBlock = (input.captures ?? []).length === 0
+    ? ''
+    : `\n\n## Values this step must capture\n${(input.captures ?? [])
+        .map((c) => `- \`step.setVar('${c}', ...)\``)
+        .join('\n')}`;
+
+  const textContent = `${testInfoBlock}A natural-language test step just passed under AI control. Write the Playwright TypeScript that reproduces it deterministically, so future runs need no model call.
+
+## The step, exactly as authored
+${input.rawStepText}
+
+## Parameters in scope
+${paramBlock}
+
+## The actions the AI performed (this run's transcript)
+${actionBlock}${assertionBlock}${captureBlock}
+
+## What to return
+
+Respond with ONLY this JSON — the code-behind entry as a single string field (standard JSON string encoding):
+
+{
+  "entry": "{ source: ..., async run({ page, step, log }) { ... } }"
+}
+
+The "entry" string holds one TypeScript object literal with exactly this shape:
+
+{
+  source: ${JSON.stringify(input.rawStepText)},
+  async run({ page, step, log }) {
+    // ...
+  },
+}
+
+\`run\` receives one context object:
+- \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
+- \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown.
+- \`step.expect(condition, message)\` — a failed expectation fails the step.
+- \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
+- \`baseUrl\` — the test's configured base URL, when it has one.
+
+Rules — all of them are enforced:
+
+1. **Read parameters via \`step.getVar\`, never inline them.** Write \`step.getVar('username')\`, not the value it happened to have on this run. Generated code containing a resolved parameter value as a literal is REJECTED — this is what keeps secrets out of a committed file.
+2. **Compute dynamic values at runtime.** If the step describes a computation (today's date, a derived code, a formatted number), do the computation in the code. Never freeze this run's answer as a literal.
+3. **Write the step's outputs** with \`step.setVar\`, using the capture name from the step text.
+4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
+5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
+6. **No imports.** Everything you need arrives via the context object.
+7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.
+
+Respond with ONLY the JSON object — no prose around it.`;
+
+  return { role: 'user', content: textContent };
 }

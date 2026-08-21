@@ -17,6 +17,11 @@
       "types": "./dist/tools/index.d.ts",
       "import": "./dist/tools/index.js",
       "default": "./dist/tools/index.js"
+    },
+    "./codebehind": {
+      "types": "./dist/codebehind/index.d.ts",
+      "import": "./dist/codebehind/index.js",
+      "default": "./dist/codebehind/index.js"
     }
   },
   "scripts": {

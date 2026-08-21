@@ -6,6 +6,7 @@ import { parseFrontmatter } from './frontmatter.js';
 import type { ParsedSection, ParsedSkill, ParsedTest, TestConfig, TestHooks } from './types.js';
 import {
   NO_HOOKS_MARKER,
+  matchInput,
   matchText,
   validateSectionName,
 } from './section-match.js';
@@ -124,7 +125,21 @@ export async function parseTestFile(
     parsed.skipHooks = stepsExp.origins.map(
       (o) => preExpansionSkipHooks[o.inputIndex] ?? false,
     );
+    parsed.expansion = {
+      rawSteps: stepsExp.rawSteps,
+      origins: stepsExp.origins,
+      frames: stepsExp.frames,
+    };
   }
+
+  // A file with neither skills nor sections never enters the expander, but
+  // code-behind binding needs the same shape either way: every step is
+  // top-level (frame `''`) and its own match side is `matchInput`.
+  parsed.expansion ??= {
+    rawSteps: parsed.steps.map((_, i) => matchInput(parsed, i)),
+    origins: parsed.steps.map((_, i) => ({ inputIndex: i, frameId: '' })),
+    frames: {},
+  };
 
   if (options.envData) {
     const extraData = await loadFrontmatterDataSources(

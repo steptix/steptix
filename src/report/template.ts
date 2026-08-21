@@ -186,6 +186,10 @@ export function getReportTemplate(): string {
        from .badge-skill because the prefix below is baked into the rule. */
     .badge-section { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .badge-section::before { content: 'section: '; opacity: 0.6; }
+    /* How a step avoided the model: ⚙ its own code-behind, ⚡ the action
+       cache. Same shape as the provenance chips beside them. */
+    .badge-codebehind { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+    .badge-cached { background: #e0f2fe; color: #075985; border: 1px solid #bae6fd; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     /* Which tab a step drove. Deliberately quiet — it is on every step, so a
        loud colour would compete with the pass/fail badge for attention. The
        unexpected variant is the one meant to catch the eye. */
@@ -213,6 +217,11 @@ export function getReportTemplate(): string {
     .tool-kv-row { display: flex; gap: 8px; padding: 2px 0; align-items: baseline; }
     .tool-kv-key { color: #6d28d9; flex-shrink: 0; min-width: 80px; }
     .tool-kv-value { color: var(--text); word-break: break-all; }
+    /* Code-behind reuses the tool block's chrome in its own colour — same
+       kind of thing (deterministic code, live page), different author. */
+    .codebehind-block { background: #fefce8; border-color: #fde68a; }
+    .codebehind-block .tool-title, .codebehind-block .tool-name { color: #854d0e; }
+    .codebehind-block .tool-name { background: #fef3c7; }
     .tool-empty { font-style: italic; color: var(--muted); font-size: 0.8rem; }
     .tool-logs { margin: 0; padding: 8px 12px; background: var(--code-bg); border-radius: 4px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.78rem; color: var(--text); white-space: pre-wrap; max-height: 240px; overflow-y: auto; }
     .tool-log-info { color: var(--text); }

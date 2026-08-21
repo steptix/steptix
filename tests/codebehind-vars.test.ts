@@ -1,0 +1,247 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { Page, BrowserContext, Browser } from 'playwright';
+import { parseTestFile } from '../src/parser/markdown.js';
+import { clearSkillCache } from '../src/skills/expander.js';
+import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
+import { runCodeBehindEntry } from '../src/codebehind/execute.js';
+import type { CodeBehindContext } from '../src/codebehind/types.js';
+
+/**
+ * Frame-aware variables (stories/step-codebehind.md, "Skill variables").
+ *
+ * A skill's code-behind is written ONCE and reused by every invocation, so it
+ * keeps using the name the author wrote. The runtime maps that name through
+ * the invocation's own scope — the `__skill<N>_` renames the expander applied
+ * to the step text, the caller's output aliases, and the declared parameters
+ * the expander interpolated straight into the text.
+ */
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-vars');
+
+const noPage = {} as unknown as Page;
+const noContext = {} as unknown as BrowserContext;
+const noBrowser = {} as unknown as Browser;
+
+let counter = 0;
+let dir: string;
+
+beforeEach(async () => {
+  clearSkillCache();
+  dir = path.join(tmpBase, `t${counter++}`);
+  await fs.mkdir(dir, { recursive: true });
+});
+
+afterAll(async () => {
+  await fs.rm(tmpBase, { recursive: true, force: true });
+});
+
+async function write(rel: string, contents: string): Promise<string> {
+  const abs = path.join(dir, rel);
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+  await fs.writeFile(abs, contents, 'utf-8');
+  return abs;
+}
+
+/**
+ * The skill under test. `username` is a declared parameter (interpolated into
+ * the text), `token` a declared output (aliased by the caller), `scratch` an
+ * internal name (namespaced per invocation).
+ */
+const LOGIN_SKILL = [
+  '---', 'type: skill', '---', '# login', '',
+  '## Parameters', '- username: who to sign in as', '',
+  '## Outputs', '- token', '',
+  '## Steps',
+  '1. Sign in as {{username}}',
+  '2. Read the session token [store as: token]',
+  '3. Note the scratch value [store as: scratch] then reuse {{scratch}}',
+].join('\n');
+
+async function bindingsFor(testMd: string): Promise<CodeBehindBinding[]> {
+  await write('skills/login.md', LOGIN_SKILL);
+  const testPath = await write('t.md', testMd);
+  const parsed = await parseTestFile(testPath, { skillsDir: path.join(dir, 'skills') });
+  const registry = await buildCodeBehindRegistry(
+    {
+      steps: parsed.steps,
+      rawSteps: parsed.expansion!.rawSteps,
+      origins: parsed.expansion!.origins,
+      frames: parsed.expansion!.frames,
+    },
+    { testFilePath: parsed.filePath, onWarn: () => {} },
+  );
+  return parsed.steps.map((_, i) => registry.bindingFor(i)!);
+}
+
+/** Run `body` as the entry for `binding`, against `params`. */
+async function runEntry(
+  binding: CodeBehindBinding,
+  params: Record<string, string>,
+  body: (ctx: CodeBehindContext) => Promise<void> | void,
+): Promise<Awaited<ReturnType<typeof runCodeBehindEntry>>> {
+  return runCodeBehindEntry({
+    binding: { ...binding, entry: { source: binding.source, run: body } },
+    page: noPage,
+    context: noContext,
+    browser: noBrowser,
+    resolvedParameters: params,
+    label: 'test',
+  });
+}
+
+describe('code-behind variables inside a skill frame', () => {
+  const oneCall = ['# T', '', '## Steps', '1. [skill: login username="alice" out.token="session"]'].join('\n');
+
+  it('reads a declared parameter by its AUTHORED name', async () => {
+    const [first] = await bindingsFor(oneCall);
+    const params: Record<string, string> = {};
+    let seen: string | undefined;
+    await runEntry(first!, params, ({ step }) => { seen = step.getVar('username'); });
+    expect(seen).toBe('alice');
+  });
+
+  it('reads an internal name through the frame\'s __skill<N>_ namespace', async () => {
+    const bindings = await bindingsFor(oneCall);
+    const scratchStep = bindings[2]!;
+    const namespaced = scratchStep.scope.renames['scratch']!;
+    expect(namespaced).toMatch(/^__skill\d+_scratch$/);
+
+    const params: Record<string, string> = { [namespaced]: 'namespaced value', scratch: 'bare value' };
+    let seen: string | undefined;
+    await runEntry(scratchStep, params, ({ step }) => { seen = step.getVar('scratch'); });
+    // The frame's namespace wins over the bare name — an outer variable that
+    // happens to share the skill's internal name must not leak in.
+    expect(seen).toBe('namespaced value');
+  });
+
+  it('falls back to the bare name for anything the frame does not rename', async () => {
+    const [first] = await bindingsFor(oneCall);
+    let seen: string | undefined;
+    await runEntry(first!, { unrelated: 'outer' }, ({ step }) => { seen = step.getVar('unrelated'); });
+    expect(seen).toBe('outer');
+  });
+
+  it('writes a declared output through the caller\'s alias', async () => {
+    const bindings = await bindingsFor(oneCall);
+    const params: Record<string, string> = {};
+    const outcome = await runEntry(bindings[1]!, params, ({ step }) => { step.setVar('token', 'T-1'); });
+    expect(outcome.status).toBe('passed');
+    expect(params['session']).toBe('T-1');
+    expect(params['token']).toBeUndefined();
+    expect(outcome.outputs).toEqual({ session: 'T-1' });
+  });
+
+  it('writes an internal name into the frame\'s namespace', async () => {
+    const bindings = await bindingsFor(oneCall);
+    const namespaced = bindings[2]!.scope.renames['scratch']!;
+    const params: Record<string, string> = {};
+    await runEntry(bindings[2]!, params, ({ step }) => { step.setVar('scratch', 'S'); });
+    expect(params[namespaced]).toBe('S');
+    expect(params['scratch']).toBeUndefined();
+  });
+
+  it('gives two invocations of one skill their own values from the SAME entry', async () => {
+    const bindings = await bindingsFor([
+      '# T', '', '## Steps',
+      '1. [skill: login username="alice" out.token="a_session"]',
+      '2. [skill: login username="bob" out.token="b_session"]',
+    ].join('\n'));
+
+    // One entry body, reused: exactly what a shared `.steps.ts` would hold.
+    const body = ({ step }: CodeBehindContext): void => {
+      step.setVar('token', `token-for-${step.getVar('username')}`);
+    };
+
+    const params: Record<string, string> = {};
+    await runEntry(bindings[0]!, params, body);   // alice's step 1
+    await runEntry(bindings[3]!, params, body);   // bob's step 1
+
+    expect(params['a_session']).toBe('token-for-alice');
+    expect(params['b_session']).toBe('token-for-bob');
+    // Different frames, so the internal namespaces are distinct too.
+    expect(bindings[2]!.scope.renames['scratch']).not.toBe(bindings[5]!.scope.renames['scratch']);
+  });
+
+  it('resolves a caller argument that is itself a {{placeholder}}', async () => {
+    const bindings = await bindingsFor([
+      '# T', '', '## Steps', '1. [skill: login username="{{outer_user}}" out.token="session"]',
+    ].join('\n'));
+    let seen: string | undefined;
+    await runEntry(bindings[0]!, { outer_user: 'carol' }, ({ step }) => { seen = step.getVar('username'); });
+    expect(seen).toBe('carol');
+  });
+});
+
+describe('code-behind variables outside a skill frame', () => {
+  it('uses bare names for a top-level step', async () => {
+    const testPath = await write('plain.md', ['# T', '', '## Steps', '1. Read the balance'].join('\n'));
+    const parsed = await parseTestFile(testPath);
+    const registry = await buildCodeBehindRegistry(
+      {
+        steps: parsed.steps,
+        rawSteps: parsed.expansion!.rawSteps,
+        origins: parsed.expansion!.origins,
+        frames: parsed.expansion!.frames,
+      },
+      { testFilePath: parsed.filePath, onWarn: () => {} },
+    );
+    const binding = registry.bindingFor(0)!;
+    expect(binding.scope).toEqual({ renames: {}, inputs: {} });
+
+    const params: Record<string, string> = { seed: 'in' };
+    const outcome = await runEntry(binding, params, ({ step }) => {
+      step.setVar('balance', step.getVar('seed') ?? 'missing');
+    });
+    expect(outcome.status).toBe('passed');
+    expect(params['balance']).toBe('in');
+  });
+
+  it('reports a failed step.expect distinctly from a thrown error', async () => {
+    const testPath = await write('plain.md', ['# T', '', '## Steps', '1. Verify the total'].join('\n'));
+    const parsed = await parseTestFile(testPath);
+    const registry = await buildCodeBehindRegistry(
+      {
+        steps: parsed.steps,
+        rawSteps: parsed.expansion!.rawSteps,
+        origins: parsed.expansion!.origins,
+        frames: parsed.expansion!.frames,
+      },
+      { testFilePath: parsed.filePath, onWarn: () => {} },
+    );
+    const binding = registry.bindingFor(0)!;
+
+    const failedExpect = await runEntry(binding, {}, ({ step }) => {
+      step.expect(false, 'total was 5, wanted 7');
+    });
+    expect(failedExpect.status).toBe('failed');
+    expect(failedExpect.expectationFailed).toBe(true);
+    expect(failedExpect.error).toBe('total was 5, wanted 7');
+
+    const threw = await runEntry(binding, {}, () => { throw new Error('selector went away'); });
+    expect(threw.status).toBe('failed');
+    expect(threw.expectationFailed).toBe(false);
+  });
+
+  it('JSON-encodes an array value so it round-trips through the string map', async () => {
+    const testPath = await write('plain.md', ['# T', '', '## Steps', '1. List the repos'].join('\n'));
+    const parsed = await parseTestFile(testPath);
+    const registry = await buildCodeBehindRegistry(
+      {
+        steps: parsed.steps,
+        rawSteps: parsed.expansion!.rawSteps,
+        origins: parsed.expansion!.origins,
+        frames: parsed.expansion!.frames,
+      },
+      { testFilePath: parsed.filePath, onWarn: () => {} },
+    );
+    const params: Record<string, string> = {};
+    await runEntry(registry.bindingFor(0)!, params, ({ step }) => {
+      step.setVar('repos', ['a', 'b']);
+    });
+    expect(params['repos']).toBe('["a","b"]');
+  });
+});

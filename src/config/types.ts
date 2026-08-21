@@ -222,6 +222,22 @@ export interface CacheConfig {
 }
 
 /**
+ * Step code-behind (stories/step-codebehind.md).
+ *
+ * There is deliberately no `enabled` flag for *execution*: a `.steps.ts` file
+ * sitting next to a test IS the author's intent, the same way a `tools/`
+ * directory is. Only generation is gated, because generation writes files
+ * into the author's project.
+ */
+export interface CodeBehindConfig {
+  /**
+   * After a step passes under AI with no valid code-behind entry, make one
+   * extra model call and write the entry for next time. Default false.
+   */
+  generate: boolean;
+}
+
+/**
  * Logging configuration. Controls what gets emitted to the console / SSE
  * output panel and what gets written to the per-run log file under
  * `reports/logs/`.
@@ -357,6 +373,7 @@ export interface Config {
   api: ApiConfig;
   server: ServerConfig;
   cache: CacheConfig;
+  codebehind: CodeBehindConfig;
   logging: LoggingConfig;
   /**
    * MCP-only settings. Optional, and deliberately without a `defaults.ts`

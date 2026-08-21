@@ -449,3 +449,94 @@ function parseAction(raw: unknown, index: number): AIAction {
 
   return action;
 }
+
+/**
+ * Extract the code-behind entry from a `buildStepCodePrompt` response
+ * (stories/step-codebehind.md, "Generation").
+ *
+ * `AiClient.complete` forces `responseFormat: json_object`, so the model
+ * CANNOT return a bare fenced block — the primary shape is the assertion-code
+ * envelope, `{"entry": "<object literal as a string>"}`. The fence/raw paths
+ * below remain as fallbacks for clients without JSON mode, and for models
+ * that nest a fence inside the envelope string.
+ */
+export function parseStepCode(rawResponse: string): string {
+  let body = rawResponse;
+  try {
+    const parsed: unknown = JSON.parse(extractJson(rawResponse));
+    if (typeof parsed === 'object' && parsed !== null) {
+      const entry = (parsed as Record<string, unknown>)['entry'];
+      if (typeof entry === 'string' && entry.trim()) {
+        body = decodeDoubleEscapedNewlines(entry);
+      }
+    }
+  } catch {
+    // Not a JSON envelope — treat the raw response as the body.
+  }
+
+  const fenced = /```(?:ts|typescript|js|javascript)?\s*\n([\s\S]*?)```/i.exec(body);
+  const inner = (fenced?.[1] ?? body).trim();
+
+  // Some models wrap the entry in `export default defineSteps([...])` despite
+  // being asked for one entry; take the first object literal in that case.
+  const open = inner.indexOf('{');
+  if (open === -1) {
+    throw new Error('Step code response contains no object literal');
+  }
+  const entry = inner.slice(open).trim().replace(/[,;]+$/, '');
+  if (!entry.startsWith('{')) {
+    throw new Error('Step code response is not an object literal');
+  }
+  if (!/\bsource\s*:/.test(entry)) {
+    throw new Error('Step code entry is missing a `source` property');
+  }
+  if (!/\brun\s*[(:]/.test(entry)) {
+    throw new Error('Step code entry is missing a `run` function');
+  }
+  return entry;
+}
+
+/**
+ * Undo a model double-escaping the envelope: `"entry": "{ ... \\n ... }"`
+ * parses to an entry whose CODE positions hold literal backslash-n, which can
+ * only ever be a syntax error. Decode `\n`/`\t` sequences — but only when the
+ * entry has no real newlines at all, so genuinely multi-line code that uses a
+ * legitimate `'\n'` string literal is never touched. A wrong guess here is
+ * caught by the writer's esbuild validation, which refuses the write.
+ */
+function decodeDoubleEscapedNewlines(entry: string): string {
+  if (entry.includes('\n') || !entry.includes('\\n')) return entry;
+  return entry.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+}
+
+/**
+ * Shortest resolved parameter value the leak guard will look for.
+ *
+ * A one- or two-character value ("1", "AU") occurs incidentally in almost any
+ * code — matching on it would reject every generation and teach nobody
+ * anything. Nothing that short is a secret worth keeping out of a file.
+ */
+const MIN_GUARDED_VALUE_LENGTH = 3;
+
+/**
+ * The post-generation guard: refuse code that inlines a resolved parameter
+ * value (stories/step-codebehind.md, rule 1). This is what keeps
+ * `{{password}}` out of a committed `.steps.ts`.
+ *
+ * Returns the offending parameter's name, or undefined when the code is
+ * clean. Deliberately a plain substring test over the whole entry — a value
+ * that appears in a comment, a selector or a template literal is just as
+ * committed as one in a string literal.
+ */
+export function findInlinedParameterValue(
+  code: string,
+  parameters: Array<{ name: string; value: string }>,
+): string | undefined {
+  for (const { name, value } of parameters) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed.length < MIN_GUARDED_VALUE_LENGTH) continue;
+    if (code.includes(trimmed)) return name;
+  }
+  return undefined;
+}
