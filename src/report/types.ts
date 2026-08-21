@@ -149,6 +149,22 @@ export interface StepResult {
    *  no AI call was made. Surfaces in the step:pass event so clients can
    *  paint a distinct glyph and log the run line as `(cached)`. */
   fromCache?: boolean;
+  /**
+   * True when this step ran its **code-behind** — the committed `.steps.ts`
+   * entry beside the test — instead of calling the AI. Sibling of
+   * `fromCache`, rendered with its own glyph (⚙ next to the cache's ⚡).
+   * See stories/step-codebehind.md.
+   */
+  fromCodeBehind?: boolean;
+  /** The code-behind entry that ran, for the report's collapsed code block.
+   *  Present only when `fromCodeBehind` is true. */
+  codeBehind?: {
+    /** Absolute path of the `.steps.ts` the entry lives in. */
+    file: string;
+    /** The entry's `run` function source. */
+    code: string;
+    logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }>;
+  };
   /** True when this step was typed into the interactive REPL rather than being part of the test file. */
   interactiveAdHoc?: boolean;
   /** True when this step is a user-typed command captured inside an [interactive] step. */

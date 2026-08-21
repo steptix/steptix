@@ -1,6 +1,7 @@
 import type { Page, BrowserContext, Browser } from 'playwright';
 import { interpolate } from '../parser/parameters.js';
 import { logger } from '../utils/logger.js';
+import { createCapturingLog } from './step-api.js';
 import type { ToolCatalogue } from './registry.js';
 import type {
   ToolCall,
@@ -111,23 +112,7 @@ export async function executeToolStep(
   }
 
   const declaredOutputs = new Set(Object.keys(def.outputs));
-  const log: ToolLog = {
-    info: (...args) => {
-      const msg = formatLog(args);
-      logs.push({ level: 'info', message: msg });
-      logger.info(`[tool:${call.name}] ${msg}`);
-    },
-    warn: (...args) => {
-      const msg = formatLog(args);
-      logs.push({ level: 'warn', message: msg });
-      logger.warn(`[tool:${call.name}] ${msg}`);
-    },
-    error: (...args) => {
-      const msg = formatLog(args);
-      logs.push({ level: 'error', message: msg });
-      logger.error(`[tool:${call.name}] ${msg}`);
-    },
-  };
+  const log: ToolLog = createCapturingLog(`tool:${call.name}`, logs);
 
   const stepApi: ToolStepApi<typeof def.outputs> = {
     getVar(name) {
@@ -328,8 +313,3 @@ function validateOutputAliases(def: ToolDefinition, call: ToolCall): void {
   }
 }
 
-function formatLog(args: unknown[]): string {
-  return args
-    .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-    .join(' ');
-}

@@ -449,3 +449,67 @@ function parseAction(raw: unknown, index: number): AIAction {
 
   return action;
 }
+
+/**
+ * Extract the code-behind entry from a `buildStepCodePrompt` response
+ * (stories/step-codebehind.md, "Generation").
+ *
+ * The model is asked for a fenced `ts` block holding a single object literal.
+ * A response with no fence is accepted as long as it is itself an object
+ * literal — models drop the fence often enough that refusing would cost a
+ * generation for no gain.
+ */
+export function parseStepCode(rawResponse: string): string {
+  const fenced = /```(?:ts|typescript|js|javascript)?\s*\n([\s\S]*?)```/i.exec(rawResponse);
+  const body = (fenced?.[1] ?? rawResponse).trim();
+
+  // Some models wrap the entry in `export default defineSteps([...])` despite
+  // being asked for one entry; take the first object literal in that case.
+  const open = body.indexOf('{');
+  if (open === -1) {
+    throw new Error('Step code response contains no object literal');
+  }
+  const entry = body.slice(open).trim().replace(/[,;]+$/, '');
+  if (!entry.startsWith('{')) {
+    throw new Error('Step code response is not an object literal');
+  }
+  if (!/\bsource\s*:/.test(entry)) {
+    throw new Error('Step code entry is missing a `source` property');
+  }
+  if (!/\brun\s*[(:]/.test(entry)) {
+    throw new Error('Step code entry is missing a `run` function');
+  }
+  return entry;
+}
+
+/**
+ * Shortest resolved parameter value the leak guard will look for.
+ *
+ * A one- or two-character value ("1", "AU") occurs incidentally in almost any
+ * code — matching on it would reject every generation and teach nobody
+ * anything. Nothing that short is a secret worth keeping out of a file.
+ */
+const MIN_GUARDED_VALUE_LENGTH = 3;
+
+/**
+ * The post-generation guard: refuse code that inlines a resolved parameter
+ * value (stories/step-codebehind.md, rule 1). This is what keeps
+ * `{{password}}` out of a committed `.steps.ts`.
+ *
+ * Returns the offending parameter's name, or undefined when the code is
+ * clean. Deliberately a plain substring test over the whole entry — a value
+ * that appears in a comment, a selector or a template literal is just as
+ * committed as one in a string literal.
+ */
+export function findInlinedParameterValue(
+  code: string,
+  parameters: Array<{ name: string; value: string }>,
+): string | undefined {
+  for (const { name, value } of parameters) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed.length < MIN_GUARDED_VALUE_LENGTH) continue;
+    if (code.includes(trimmed)) return name;
+  }
+  return undefined;
+}

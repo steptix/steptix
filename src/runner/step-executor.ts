@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import type { Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import type { Config } from '../config/types.js';
 import type { AIAction, BranchedAIResponse } from '../ai/types.js';
 import type { StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from '../report/types.js';
@@ -33,6 +33,9 @@ import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
 import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cache.js';
 import { fingerprintAssertion } from '../cache/step-cache.js';
+import type { CodeBehindBinding } from '../codebehind/loader.js';
+import { entrySourceText, runCodeBehindEntry } from '../codebehind/execute.js';
+import { generateCodeBehind } from '../codebehind/generate.js';
 import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
 
@@ -114,6 +117,20 @@ export interface StepExecutorOptions {
    *  stopped step stops spawning turns, and consulted in the catch so an aborted
    *  step reports as aborted (not a spurious failure). See issues/020. */
   signal?: AbortSignal;
+  /**
+   * This step's code-behind binding, resolved at test load
+   * (stories/step-codebehind.md). When it carries an entry, the entry runs in
+   * place of the AI; when it doesn't, it names where a generated entry would
+   * go. Mutable: a failing entry is discarded here for the rest of the run.
+   */
+  codeBehind?: CodeBehindBinding;
+  /**
+   * `codebehind.generate` for the project this test belongs to. On the server
+   * path this MUST come from the per-request project bundle, not the server's
+   * startup config — a per-project value read off startup config silently
+   * no-ops (the trap `resolveProjectBundle` exists to avoid).
+   */
+  codeBehindGenerate?: boolean;
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -302,6 +319,21 @@ export async function executeStep(
   // Cache files are named by the frame-scoped key when the server supplies one
   // (skill-body steps, repeated invocations); otherwise by stepIndex (CLI path).
   const cacheKey: StepCacheKey = opts.cacheKey ?? stepIndex;
+
+  // --- Code-behind attempt (ahead of the cache) ---
+  //
+  // Order matters and is the story's: a step with an entry runs as code with
+  // no model call, no DOM snapshot and no stall detection — the same bypasses
+  // a cache hit gets — and it neither reads nor writes the action cache.
+  const binding = opts.codeBehind;
+  if (binding?.entry && binding.entry.ai !== true) {
+    const codeResult = await runCodeBehindStep(stepIndex, instruction, binding, opts, startTime);
+    if (codeResult) return codeResult;
+    // Fell through: the entry threw and has been discarded for this run. The
+    // page is already in the right state, so the AI flow below starts clean —
+    // exactly the contract the cache's invalidate-and-fall-through has.
+  }
+
   // --- Cache attempt (before normal AI flow) ---
   if (opts.stepCache && opts.cacheEnabled) {
     const cached = await opts.stepCache.read(cacheKey, opts.resolvedParameters ?? {});
@@ -379,6 +411,24 @@ export async function executeStep(
       );
     }
 
+    // Write the step's code-behind, when generation is on and the step has no
+    // valid entry — a new step, an edited one, or one whose entry just failed
+    // and was healed above. An `ai: true` entry leaves `binding.entry` set, so
+    // the author's opt-out is honoured here too.
+    if (opts.codeBehindGenerate && binding && !binding.entry) {
+      await generateCodeBehind({
+        binding,
+        turns: cacheCapture.turns,
+        ...(result.assertions && { assertions: result.assertions }),
+        resolvedParameters: opts.resolvedParameters ?? {},
+        aiClient: opts.aiClient,
+        contextContent: opts.contextContent,
+        testName: opts.testName,
+        ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
+        ...(opts.signal && { signal: opts.signal }),
+      });
+    }
+
     // If a prior attempt failed, merge its turns into the successful result
     // so the report shows all attempts, not just the one that succeeded
     if (priorAttemptTurns.length > 0) {
@@ -438,6 +488,101 @@ export async function executeStep(
       aiExplanation: `Failed to execute step after ${opts.config.execution.retries + 1} attempts. Last error: ${errorMessage}`,
     };
   }
+}
+
+/** The tracker's active browser session, or undefined when there is no
+ *  tracker (single-browser paths and the tests that synthesize a session). */
+function tryGetActiveSession(
+  opts: StepExecutorOptions,
+): { browser: Browser; context: BrowserContext } | undefined {
+  try {
+    return opts.browserTracker?.getActive();
+  } catch {
+    // `getActive` throws once `closeBrowser` has left zero browsers tracked.
+    return undefined;
+  }
+}
+
+/**
+ * Run a step's code-behind entry.
+ *
+ * Returns a `StepResult` when the step is decided — passed, or failed by a
+ * `step.expect` — and `null` when the entry threw, which discards it for the
+ * rest of the run and hands the step to the AI flow with a clean slate.
+ *
+ * The `expect` distinction is the assertion code cache's rule, lifted: broken
+ * code heals, a failed assertion fails.
+ */
+async function runCodeBehindStep(
+  stepIndex: number,
+  instruction: string,
+  binding: CodeBehindBinding,
+  opts: StepExecutorOptions,
+  startTime: number,
+): Promise<StepResult | null> {
+  const entry = binding.entry;
+  if (!entry) return null;
+  const page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
+  const code = entrySourceText(entry);
+  // Ask the tracker for the browser when there is one: `context.browser()` is
+  // null for a persistent context, which is what the CDP path can hand us.
+  // The `!` is the same shape `executeToolStep`'s callers already rely on for
+  // the tracker-less paths.
+  const active = tryGetActiveSession(opts);
+
+  const outcome = await runCodeBehindEntry({
+    binding,
+    page,
+    context: active?.context ?? page.context(),
+    browser: active?.browser ?? page.context().browser()!,
+    resolvedParameters: opts.resolvedParameters ?? {},
+    ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
+    label: `codebehind:${stepIndex}`,
+  });
+
+  if (outcome.status === 'failed' && !outcome.expectationFailed) {
+    logger.warn(
+      `Code-behind failed for step ${stepIndex} — falling through to AI: ${outcome.error ?? 'unknown error'}`,
+    );
+    binding.entry = undefined;
+    return null;
+  }
+
+  // Same capture policy as any other step end: no DOM snapshot (nothing reads
+  // it when no AI call is made), screenshot only when the user asked for
+  // per-action captures or the step failed.
+  const wantShot = opts.config.browser.captureScreenshotsPerAction !== false
+    || outcome.status === 'failed';
+  const shot = wantShot
+    ? await captureScreenshot(page, opts.config.browser.fullPageScreenshots)
+    : null;
+
+  const base: StepResult = {
+    index: stepIndex,
+    instruction,
+    status: outcome.status,
+    turns: [],
+    durationMs: Date.now() - startTime,
+    retried: false,
+    pageUrl: page.url(),
+    ...(shot?.base64 !== undefined && { screenshotBase64: shot.base64 }),
+    fromCodeBehind: true,
+    codeBehind: { file: binding.file, code, logs: outcome.logs },
+  };
+
+  if (outcome.status === 'passed') {
+    logger.success(`Step ${stepIndex} passed (code-behind)`);
+    return { ...base, aiExplanation: 'Ran this step\'s code-behind — no AI call.' };
+  }
+
+  logger.error(`Step ${stepIndex} FAILED (code-behind assertion): ${outcome.error ?? ''}`);
+  return {
+    ...base,
+    error: outcome.error ?? 'Code-behind expectation failed',
+    aiExplanation:
+      'A `step.expect` in this step\'s code-behind failed. That is a real ' +
+      'assertion failure, not broken code, so the step was not re-run under AI.',
+  };
 }
 
 async function executeStepAttempt(

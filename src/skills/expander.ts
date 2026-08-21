@@ -16,6 +16,29 @@ import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
 const STORE_AS_RE = /\[store\s+as:\s*(\w+)\]/g;
 const PLACEHOLDER_RE = /\{\{(\w+)\}\}/g;
 
+/**
+ * Every variable name a step's text references — `{{X}}` reads and
+ * `[store as: X]` writes, in source order and deduped per bucket.
+ *
+ * The skill scoper uses this to decide which names need namespacing; step
+ * code-behind uses it to decide which parameters go into the generation
+ * prompt (and therefore which values the secret-literal guard looks for).
+ * One copy, so the two can't drift over what counts as a reference.
+ */
+export function referencedVariableNames(
+  text: string,
+): { placeholders: string[]; captures: string[] } {
+  const placeholders: string[] = [];
+  const captures: string[] = [];
+  for (const m of text.matchAll(PLACEHOLDER_RE)) {
+    if (m[1] && !placeholders.includes(m[1])) placeholders.push(m[1]);
+  }
+  for (const m of text.matchAll(STORE_AS_RE)) {
+    if (m[1] && !captures.includes(m[1])) captures.push(m[1]);
+  }
+  return { placeholders, captures };
+}
+
 const MAX_DEPTH = 10;
 
 /**
@@ -99,6 +122,19 @@ export interface ExpandedFrame {
    * (root) frame.
    */
   outputs?: string[];
+  /**
+   * Authored variable name → the effective runtime name for this invocation:
+   * the `__skill<N>_` renames plus the caller's output aliases that
+   * `applySkillScope` applied to this frame's step *text*.
+   *
+   * Step code-behind is generated once per skill, not per invocation, so
+   * generated code keeps using the authored name and the runtime maps it
+   * through this table (stories/step-codebehind.md, "Skill variables"). A
+   * declared *parameter* is deliberately absent — the expander interpolates
+   * its value straight into the step text, so `inputs` above is where it
+   * lives. Absent for section and test frames, which share the caller's scope.
+   */
+  varScope?: Record<string, string>;
 }
 
 /**
@@ -143,6 +179,17 @@ export interface SkillExpansion {
    * Both this and `sourceSkills` can be set for the same step.
    */
   sourceSections: (string | null)[];
+  /**
+   * Parallel to `steps` — each expanded step's **authored** match-side text,
+   * i.e. `matchInput` of the list it was emitted from (contract §2.1). Not
+   * derivable from `steps` afterwards: by then the text has been through
+   * `extractPlainText`, `applySkillScope` and caller interpolation.
+   *
+   * This is what step code-behind binds entries against, and what the
+   * generation prompt is shown — so an entry written for a skill body matches
+   * every invocation of it (stories/step-codebehind.md, "Binding").
+   */
+  rawSteps: string[];
   origins: ExpandedStepOrigin[];
   frames: Record<string, ExpandedFrame>;
 }
@@ -389,6 +436,7 @@ async function expandRecursive(
   const out: string[] = [];
   const sources: (string | null)[] = [];
   const sourceSecs: (string | null)[] = [];
+  const raws: string[] = [];
   const origins: ExpandedStepOrigin[] = [];
 
   for (let i = 0; i < steps.length; i++) {
@@ -469,6 +517,7 @@ async function expandRecursive(
         out.push(...recursed.steps);
         sources.push(...recursed.sourceSkills);
         sourceSecs.push(...recursed.sourceSections);
+        raws.push(...recursed.rawSteps);
         origins.push(...recursed.origins);
         continue;
       }
@@ -476,6 +525,10 @@ async function expandRecursive(
       out.push(step);
       sources.push(sourceSkill);
       sourceSecs.push(sourceSection);
+      // The authored match side for this emitted step. `matchInput` (never
+      // `steps[i]`) for the same reason section resolution uses it: inside a
+      // skill body `steps[i]` has already been interpolated and namespaced.
+      raws.push(matchInput({ steps, rawSteps: ctx.rawSteps }, i));
       // Inline-emit attribution: at top level the caller is the test
       // (inputIndex = our own index, no skill origin); inside a skill body
       // we record the skill's file + its own per-step line.
@@ -550,6 +603,10 @@ async function expandRecursive(
       // each mapped through the caller's alias (or the declared name when
       // unaliased). Lets the server tag these variables as 'toolOutput'.
       outputs: skill.outputs.map((o) => call.outputAliases[o] ?? o),
+      // The same renames applied to this invocation's step text, kept as a
+      // table so step code-behind can resolve authored variable names at
+      // runtime instead of being regenerated per invocation.
+      varScope: scoped.varScope,
     };
 
     // Outermost-skill attribution: keep the first skill we entered as the
@@ -585,10 +642,17 @@ async function expandRecursive(
     out.push(...recursed.steps);
     sources.push(...recursed.sourceSkills);
     sourceSecs.push(...recursed.sourceSections);
+    raws.push(...recursed.rawSteps);
     origins.push(...recursed.origins);
   }
 
-  return { steps: out, sourceSkills: sources, sourceSections: sourceSecs, origins };
+  return {
+    steps: out,
+    sourceSkills: sources,
+    sourceSections: sourceSecs,
+    rawSteps: raws,
+    origins,
+  };
 }
 
 /** Cycle key for a section. Namespaced by file so two files' same-named
@@ -761,7 +825,12 @@ function applySkillScope(
   skill: ParsedSkill,
   call: SkillCall,
   instanceId: number,
-): { steps: string[]; rawSteps: string[]; sections: SectionDefs } {
+): {
+  steps: string[];
+  rawSteps: string[];
+  sections: SectionDefs;
+  varScope: Record<string, string>;
+} {
   const paramNames = new Set(Object.keys(skill.parameters));
   const outputNames = new Set(skill.outputs);
 
@@ -770,12 +839,9 @@ function applySkillScope(
   // a section would escape namespacing and leak into the caller's scope.
   const usedNames = new Set<string>();
   const scanForNames = (step: string): void => {
-    for (const m of step.matchAll(PLACEHOLDER_RE)) {
-      if (m[1]) usedNames.add(m[1]);
-    }
-    for (const m of step.matchAll(STORE_AS_RE)) {
-      if (m[1]) usedNames.add(m[1]);
-    }
+    const { placeholders, captures } = referencedVariableNames(step);
+    for (const name of placeholders) usedNames.add(name);
+    for (const name of captures) usedNames.add(name);
   };
   for (const step of skill.steps) scanForNames(step);
   for (const section of Object.values(skill.sections)) {
@@ -836,10 +902,20 @@ function applySkillScope(
     };
   }
 
+  // Authored name → effective runtime name, for this invocation. Output
+  // aliases and internal renames are disjoint by construction
+  // (`internalRenames` skips declared params and outputs), so the merge order
+  // can't drop an entry. Parameters are absent on purpose: their values are
+  // interpolated into the text, never stored under a name.
+  const varScope: Record<string, string> = {};
+  for (const [from, to] of outputRenames) varScope[from] = to;
+  for (const [from, to] of internalRenames) varScope[from] = to;
+
   return {
     steps: skill.steps.map(apply),
     rawSteps: [...skill.rawSteps],
     sections,
+    varScope,
   };
 }
 

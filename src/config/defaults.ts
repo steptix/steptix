@@ -70,6 +70,12 @@ export const DEFAULT_CONFIG: Config = {
     enabled: false,
     dir: '.cache',
   },
+  codebehind: {
+    // Execution needs no flag — a `.steps.ts` beside a test is the author's
+    // intent. Generation writes files into the author's project, so it is
+    // opt-in. See stories/step-codebehind.md.
+    generate: false,
+  },
   logging: {
     consoleLogLevel: 'info',
     serverFileLogLevel: 'compact',
