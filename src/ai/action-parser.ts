@@ -454,22 +454,36 @@ function parseAction(raw: unknown, index: number): AIAction {
  * Extract the code-behind entry from a `buildStepCodePrompt` response
  * (stories/step-codebehind.md, "Generation").
  *
- * The model is asked for a fenced `ts` block holding a single object literal.
- * A response with no fence is accepted as long as it is itself an object
- * literal — models drop the fence often enough that refusing would cost a
- * generation for no gain.
+ * `AiClient.complete` forces `responseFormat: json_object`, so the model
+ * CANNOT return a bare fenced block — the primary shape is the assertion-code
+ * envelope, `{"entry": "<object literal as a string>"}`. The fence/raw paths
+ * below remain as fallbacks for clients without JSON mode, and for models
+ * that nest a fence inside the envelope string.
  */
 export function parseStepCode(rawResponse: string): string {
-  const fenced = /```(?:ts|typescript|js|javascript)?\s*\n([\s\S]*?)```/i.exec(rawResponse);
-  const body = (fenced?.[1] ?? rawResponse).trim();
+  let body = rawResponse;
+  try {
+    const parsed: unknown = JSON.parse(extractJson(rawResponse));
+    if (typeof parsed === 'object' && parsed !== null) {
+      const entry = (parsed as Record<string, unknown>)['entry'];
+      if (typeof entry === 'string' && entry.trim()) {
+        body = decodeDoubleEscapedNewlines(entry);
+      }
+    }
+  } catch {
+    // Not a JSON envelope — treat the raw response as the body.
+  }
+
+  const fenced = /```(?:ts|typescript|js|javascript)?\s*\n([\s\S]*?)```/i.exec(body);
+  const inner = (fenced?.[1] ?? body).trim();
 
   // Some models wrap the entry in `export default defineSteps([...])` despite
   // being asked for one entry; take the first object literal in that case.
-  const open = body.indexOf('{');
+  const open = inner.indexOf('{');
   if (open === -1) {
     throw new Error('Step code response contains no object literal');
   }
-  const entry = body.slice(open).trim().replace(/[,;]+$/, '');
+  const entry = inner.slice(open).trim().replace(/[,;]+$/, '');
   if (!entry.startsWith('{')) {
     throw new Error('Step code response is not an object literal');
   }
@@ -480,6 +494,19 @@ export function parseStepCode(rawResponse: string): string {
     throw new Error('Step code entry is missing a `run` function');
   }
   return entry;
+}
+
+/**
+ * Undo a model double-escaping the envelope: `"entry": "{ ... \\n ... }"`
+ * parses to an entry whose CODE positions hold literal backslash-n, which can
+ * only ever be a syntax error. Decode `\n`/`\t` sequences — but only when the
+ * entry has no real newlines at all, so genuinely multi-line code that uses a
+ * legitimate `'\n'` string literal is never touched. A wrong guess here is
+ * caught by the writer's esbuild validation, which refuses the write.
+ */
+function decodeDoubleEscapedNewlines(entry: string): string {
+  if (entry.includes('\n') || !entry.includes('\\n')) return entry;
+  return entry.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
 }
 
 /**

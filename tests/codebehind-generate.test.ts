@@ -85,6 +85,28 @@ describe('parseStepCode', () => {
     expect(entry).toBe(`{ source: 'A', async run() {} }`);
   });
 
+  it('unwraps the JSON envelope the JSON-mode client produces', () => {
+    const literal =
+      "{\n  source: 'Click Sign in',\n  async run({ page }) { await page.click('#signin'); },\n}";
+    expect(parseStepCode(JSON.stringify({ entry: literal }))).toBe(literal);
+    // A fence the model nested inside the envelope string is stripped too.
+    expect(parseStepCode(JSON.stringify({ entry: '```ts\n' + literal + '\n```' }))).toBe(literal);
+  });
+
+  it('rejects a JSON response that is not the envelope (e.g. an action reply)', () => {
+    expect(() => parseStepCode('{"reasoning": "done", "actions": []}')).toThrow(/source/);
+  });
+
+  it('decodes a double-escaped single-line envelope entry', () => {
+    // The model wrote \\n in the JSON, so after JSON.parse the entry holds
+    // literal backslash-n in code position — a guaranteed syntax error unless
+    // the parser restores real newlines.
+    const doubleEscaped = "{ source: 'X',\\n  async run({ page }) { await page.goto('/'); },\\n}";
+    const entry = parseStepCode(JSON.stringify({ entry: doubleEscaped }));
+    expect(entry).toContain('\n');
+    expect(entry).not.toContain('\\n');
+  });
+
   it('refuses a response with no object literal, no source, or no run', () => {
     expect(() => parseStepCode('I could not write this step.')).toThrow(/no object literal/);
     expect(() => parseStepCode(`{ async run() {} }`)).toThrow(/source/);
@@ -141,16 +163,17 @@ describe('buildStepCodePrompt', () => {
 
 describe('generateCodeBehind', () => {
   it('writes the entry the model returned', async () => {
-    const { client, calls } = stubClient([
-      '```ts',
-      `{`,
-      `  source: 'Enter the username {{username}}',`,
-      `  async run({ page, step }) {`,
-      `    await page.locator('#login_field').fill(step.getVar('username'));`,
-      `  },`,
-      `}`,
-      '```',
-    ].join('\n'));
+    // The primary live shape: the JSON envelope a json_object-mode client emits.
+    const { client, calls } = stubClient(JSON.stringify({
+      entry: [
+        `{`,
+        `  source: 'Enter the username {{username}}',`,
+        `  async run({ page, step }) {`,
+        `    await page.locator('#login_field').fill(step.getVar('username'));`,
+        `  },`,
+        `}`,
+      ].join('\n'),
+    }));
 
     const binding = bindingFor('Enter the username {{username}}');
     const action = await generateCodeBehind({

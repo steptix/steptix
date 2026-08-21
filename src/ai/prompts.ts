@@ -870,7 +870,8 @@ export interface StepCodePromptInput {
  * Ask the model to turn one successful step into its code-behind entry
  * (stories/step-codebehind.md, "Generation").
  *
- * The model returns a fenced TypeScript block holding the whole entry object.
+ * The model returns `{"entry": "<object literal>"}` — the client forces JSON
+ * mode, so this is the assertion-code envelope pattern, not a fenced block.
  * It is never asked for the `section` field: scope comes from the step's
  * frame and the runner stamps it, so a model that guesses wrong cannot put an
  * entry in the wrong scope.
@@ -919,16 +920,20 @@ ${actionBlock}${assertionBlock}${captureBlock}
 
 ## What to return
 
-A single TypeScript object literal — the code-behind entry — in a fenced \`ts\` block:
+Respond with ONLY this JSON — the code-behind entry as a single string field (standard JSON string encoding):
 
-\`\`\`ts
+{
+  "entry": "{ source: ..., async run({ page, step, log }) { ... } }"
+}
+
+The "entry" string holds one TypeScript object literal with exactly this shape:
+
 {
   source: ${JSON.stringify(input.rawStepText)},
   async run({ page, step, log }) {
     // ...
   },
 }
-\`\`\`
 
 \`run\` receives one context object:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
@@ -947,7 +952,7 @@ Rules — all of them are enforced:
 6. **No imports.** Everything you need arrives via the context object.
 7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.
 
-Return ONLY the fenced \`ts\` block.`;
+Respond with ONLY the JSON object — no prose around it.`;
 
   return { role: 'user', content: textContent };
 }

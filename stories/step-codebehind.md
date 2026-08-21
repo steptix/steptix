@@ -302,8 +302,11 @@ The prompt contains:
 - assertion conditions and results, if the step had any,
 - the `run(ctx)` contract and the rules below.
 
-The model returns a fenced TypeScript block containing the full entry
-(`{ source, async run(ctx) {...} }`); the runner stamps the `section` field
+The model returns `{"entry": "<the full entry object literal, as a string>"}`
+— the AI client forces `responseFormat: json_object`, so the response is the
+same JSON envelope the assertion code cache uses, never a bare fenced block
+(a live-run lesson: the first cut asked for fenced TS and every generation
+was refused); the runner stamps the `section` field
 itself from the step's frame — the model never chooses scope. For a
 frame-scoped step, generation targets the *defining* file's `.steps.ts`
 (skill or test), so healing a skill step from one test fixes it for every

@@ -566,6 +566,7 @@ async function runCodeBehindStep(
     retried: false,
     pageUrl: page.url(),
     ...(shot?.base64 !== undefined && { screenshotBase64: shot.base64 }),
+    ...(Object.keys(outcome.outputs).length > 0 && { outputs: outcome.outputs }),
     fromCodeBehind: true,
     codeBehind: { file: binding.file, code, logs: outcome.logs },
   };

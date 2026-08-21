@@ -158,6 +158,9 @@ export default defineSteps([
     expect(results.every((r) => r.fromCodeBehind === true)).toBe(true);
     expect(results.every((r) => r.turns.length === 0)).toBe(true);
     expect(resolvedParameters).toEqual({ code: '220826', confirmed: 'yes' });
+    // `setVar` writes surface on the step result, so the report shows them.
+    expect(results[0]!.outputs).toEqual({ code: '220826' });
+    expect(results[1]!.outputs).toEqual({ confirmed: 'yes' });
     // The report gets the code and the logs.
     expect(results[0]!.codeBehind?.file).toContain('booking.steps.ts');
     expect(results[1]!.codeBehind?.logs).toEqual([{ level: 'info', message: 'confirming' }]);
