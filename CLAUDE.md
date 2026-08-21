@@ -67,23 +67,102 @@ Run this script once, right after the worktree is created:
 
 ```powershell
 c:\Projects\vibe\ai-ui-automation\scripts\init-worktree.ps1 `
-    -Destination <full-path-to-new-worktree>
+    -Destination <full-path-to-new-worktree> -AutoPort
 ```
 
 It copies (not symlinks/junctions) env files and build dirs from the main
 checkout at `c:\Projects\vibe\ai-ui-automation`, so the worktree is
-independent and safe if `package.json` diverges between branches.
+independent and safe if `package.json` diverges between branches. It then
+re-points the runner-core junction, builds `dist/` in all three projects, and
+rewrites `SERVER_URL` in the worktree's `.env` files to the port it allocated.
 
-Add `-SkipBuilds` to copy only the env files when you don't need the heavy
-build artifacts (e.g. for a docs-only change).
+`-AutoPort` takes the lowest free port from 3101 up, treating a port any other
+registered worktree was seeded with as taken even when nothing is listening on
+it — a stopped server still owns its port. Re-running on an already-ported
+worktree keeps the port it had. Use `-Port <n>` instead to pick by hand; the
+two are mutually exclusive.
 
-**Then build `dist/` in the worktree** — the script does not copy it:
+Other switches: `-SkipBuilds` copies only the env files (docs-only changes);
+`-Install` runs `npm install` when the branch changed dependencies;
+`-SeedVSCodeTest` copies the cached VS Code build (~390 MB) so the first
+`npm run test:integration` doesn't re-download it.
+
+To recall a worktree's port later, read it back off the file that decides it:
+`grep SERVER_URL .env`.
+
+### Which server does the worktree talk to?
+
+`aiui.config.json` pins port 3100 and is tracked, so two checkouts can't both
+serve on the default; the second dies on EADDRINUSE. You only need a second
+server when you changed `src/` — a running server resolves each request's
+project bundle from the test file's path
+([src/server/project-bundle.ts](src/server/project-bundle.ts)), so it already
+honours a worktree's own `aiui.config.json` and `.env`, but it executes
+whatever `src/` build it booted from. `-AutoPort` (or `-Port <n>`) plus
+`node dist/index.js serve -p <n>` gives the worktree its own.
+
+TestBench won't auto-start that server for you:
+`testbench-native.serverAutoStart.cwd` is machine-scoped (User settings only,
+by design — a workspace-settable value would let any cloned repo run arbitrary
+code on Run), so a worktree window auto-starts the server from whichever
+checkout that setting names. Start the worktree's server yourself. On a
+non-default port that's not optional: the auto-start command carries no `-p`,
+so it would start the *other* checkout's server on 3100, keep polling your
+port, and fail with TB028 — leaving a stray server behind.
+
+### Live integration tests in a worktree
+
+They work. Two manual commands, because the run has *two* independent notions
+of where the server is and both have to point at this worktree's:
 
 ```powershell
-cd <full-path-to-new-worktree>; npm run build
+# 1. this worktree's server, on its own port — leave it running
+cd <worktree>
+node dist/index.js serve -p <n> --idle-timeout 60
 ```
 
-This matters because the package self-import `ai-ui-automation/tools` (used
+```powershell
+# 2. the live suite, told to assert against that same server
+cd <worktree>\testbench-native
+$env:LIVE_SERVER_URL = "http://localhost:<n>"
+$env:TESTBENCH_LIVE_GREP = "step cache replay"   # optional; full suite is >10 min
+npm run test:live
+```
+
+The extension reads `SERVER_URL` by walking up from the test file to
+`templates/.env` (seeded and port-rewritten by the script). The test
+assertions read `LIVE_SERVER_URL`, which falls back to `:3100` in every
+suite regardless. Set only one and the tests assert against a different
+server than the extension is driving.
+
+`serve` needs no `--env-file`: `%LOCALAPPDATA%\aiui\.env` carries
+`AIUI_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` machine-wide, and its key
+matches the one in `.env` and `templates/.env`.
+
+Without `-Port` there is no env var to set — but then nothing else may be
+listening on 3100, or the suite silently tests the *other* checkout's `src/`.
+That silence is why `-Port` is the better default for a worktree.
+
+The rest is already handled: `templates/.env` is both the live workspace and
+the source of `GITHUB_USERNAME`/`GITHUB_PASSWORD`, and Playwright's browsers
+live in `%LOCALAPPDATA%\ms-playwright`, machine-wide, so no worktree
+re-downloads them.
+
+### Why the junction repair matters
+
+`testbench-native/node_modules/ai-ui-automation-runner-core` is the
+`file:../runner-core` dep, which npm materialises as a junction holding an
+**absolute** path to whichever checkout ran `npm install`. robocopy follows it
+and writes a real directory, so a naively-seeded worktree holds a frozen copy
+of main's runner-core. `npm run build` then reports success while esbuild
+bundles the stale code — it resolves through `node_modules`, whereas
+`build:runner-core` compiles `../runner-core`, a different place. The script
+re-points the junction after copying; `npm install` in `testbench-native/`
+also fixes it.
+
+### Why `dist/` has to be built in the worktree
+
+The package self-import `ai-ui-automation/tools` (used
 by the fixture tools) resolves via the `exports` field + the *nearest*
 `package.json` to `dist/tools/index.js` **under whichever package root the
 importing file lives in**. For a worktree fixture that's the worktree's own
