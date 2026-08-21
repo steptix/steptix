@@ -15,7 +15,7 @@ import {
   buildBranchedStepMessage,
   formatTestInfo,
 } from '../ai/prompts.js';
-import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome } from '../ai/prompts.js';
+import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo } from '../ai/prompts.js';
 import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
@@ -229,6 +229,32 @@ function buildActiveBrowserInfo(tracker: BrowserTracker | undefined) {
     ...(active.channel !== undefined && { channel: active.channel }),
     others,
   };
+}
+
+/**
+ * Read the document scroller's geometry, for the scroll-position line in the
+ * step/continuation messages.
+ *
+ * Non-fatal by the same policy as screenshot capture: a page mid-navigation (or
+ * one that has gone away) yields `undefined`, and the message simply carries no
+ * position line that turn rather than the step failing over it.
+ */
+async function captureScrollPosition(page: Page): Promise<ScrollPositionInfo | undefined> {
+  try {
+    return await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const doc = (globalThis as any).document;
+      const el = doc.scrollingElement ?? doc.documentElement;
+      return {
+        scrollTop: el.scrollTop,
+        clientHeight: el.clientHeight,
+        scrollHeight: el.scrollHeight,
+      };
+    }) as ScrollPositionInfo;
+  } catch (err) {
+    logger.debug(`Scroll position capture failed: ${String(err)}`);
+    return undefined;
+  }
 }
 
 /** Determine if a step instruction is asking to extract, read, or capture values from the page.
@@ -550,6 +576,16 @@ async function executeStepAttempt(
       : null;
     const screenshotBase64 = screenshot?.base64;
     const currentUrl = page.url();
+    // Where the viewport actually is, in text. The DOM snapshot carries no
+    // coordinates, so this is the model's only evidence that a scroll landed
+    // when screenshots are off — or when they're full-page, and therefore
+    // identical at every scroll position. Skipped on cache hits for the same
+    // reason as the DOM snapshot: no AI call, so no consumer.
+    const scrollPosition = cachedTurnForCapture
+      ? undefined
+      : await traceOp(`captureScrollPosition (turn ${currentTurn})`, () =>
+          captureScrollPosition(page),
+        );
 
     if (currentTurn === 1) {
       firstTurnDomSnapshot = domSnapshot;
@@ -638,6 +674,7 @@ async function executeStepAttempt(
         conversationHistory,
         openPages,
         testInfo,
+        scrollPosition,
       );
     } else {
       userMessage = buildContinuationMessage(
@@ -651,6 +688,7 @@ async function executeStepAttempt(
         openPages,
         explorationResults.length > 0 ? explorationResults : undefined,
         testInfo,
+        scrollPosition,
       );
     }
 

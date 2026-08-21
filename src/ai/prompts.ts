@@ -184,6 +184,14 @@ Plan your next action based on the observed result — do not batch multiple act
    - waitType "stable": wait for the page to fully stabilise (network idle and no DOM changes) — no condition needed
    Optional "timeout": the maximum number of MILLISECONDS to wait before the wait fails (default 10000). Raise it when the step states or implies the wait may be slow — e.g. "wait up to 60 seconds", "this can take a while", a known-slow navigation, upload, or background-processing step. Pick a value comfortably above the expected duration (e.g. "timeout": 90000 for a wait that "may take up to 60 seconds"). The framework caps it at 600000 (10 minutes). Only set "timeout" when a longer-than-default wait is warranted; omit it otherwise. Example — step "Click Continue and wait up to 90 seconds for /newurl": { "actions": [ { "action": "click", "selector": "#continue", "description": "Click Continue" }, { "action": "wait", "waitType": "url", "condition": "**/newurl", "timeout": 90000, "description": "Wait up to 90s for navigation to /newurl" } ], "needs_reeval": false }
    If the screenshot shows the page is loading or transitioning (visible spinner, blank content, partially loaded), return a "wait" action to let it settle before proceeding
+12a. For "scroll" actions there are THREE forms — pick the one that matches what the step names:
+   - A named target ("scroll down to the reviews section") → set "selector" to that element: { "action": "scroll", "selector": "#reviews", "description": "Bring the reviews section into view" }. PREFER this form whenever the step names something to scroll to — it involves no pixel arithmetic at all. Add "frame" when the target is inside an iframe (rule 16); the scroll follows it
+   - A page extreme ("scroll to the bottom of the page", "scroll back up to the top") → set "to" to "bottom" or "top": { "action": "scroll", "to": "bottom", "description": "Scroll to the bottom of the page" }. This is absolute and exact at any page height
+   - A relative nudge ("scroll down a bit") → set "direction" ("up"|"down"|"left"|"right") and "amount" in pixels: { "action": "scroll", "direction": "down", "amount": 300, "description": "Scroll down a bit" }. This is also the only form that scrolls an inner scrollable pane under the pointer instead of the page — use it as the fallback on layouts that fix the body and scroll an inner element, where "to" will not move
+   Sizing a relative scroll: "a bit"/"a little"/"slightly" ≈ 300px; "a page"/"a screenful" ≈ the viewport height given in Test Information. Never approximate an extreme with a large "amount" — use "to" instead, which lands exactly
+   Precedence when several fields are present: "selector" wins over "to", and "to" wins over "direction"/"amount". The ignored fields are not an error, so don't retry over them
+   VERIFYING A SCROLL. A "Scroll position: <top>–<bottom> of <total>px" line accompanies the DOM snapshot, with "(at top)" / "(at bottom)" / "(page does not scroll)" markers. It is present whether or not screenshots are enabled — read it rather than the image to confirm a scroll landed
+   LAZY-LOADING PAGES. "to": "bottom" reaches the CURRENT bottom, which is not the final bottom on a page that loads more content as you scroll. Set "needs_reeval": true, compare the "of <total>px" figure on the next turn, and repeat the same scroll until that total stops growing — then stop
 13. For "read" actions, set "selector" to the CSS selector of the element to read and "as" to a snake_case variable name. Use "read" when a step asks you to capture, note, remember, store, or take note of a value from the page (e.g. "capture the residential address", "take note of the balance", "note the email"). If the step specifies a variable name via [store as: name], use that name exactly. Otherwise derive a concise snake_case name from what is being captured (e.g. "residential address" → "residential_address", "account balance" → "account_balance"). Captured values become available as {{variable_name}} in later steps. By default "read" returns the element's value (for inputs) or its textContent. If the step asks for an attribute — most commonly an href, src, or a URL — set "attribute" to the attribute name (e.g. "href"). The displayed text on a link or breadcrumb often differs from the underlying URL, so always use "attribute": "href" when capturing a link URL rather than reading the visible text
 13a. CAPTURING A LIST. When a step asks for "every", "all", "each" matching value (e.g. "capture every link under section 1", "read all the row IDs", "get every product's price"), add "multiple": true to the read action. The framework iterates the selector across every match and stores the values as a JSON-encoded array in the variable. Combine with "attribute" to scrape e.g. every href: { "action": "read", "selector": "section.section-1 a[href]", "attribute": "href", "as": "section1_links", "multiple": true, "description": "Capture every link href under section 1" }. The variable can then be passed to a tool that declares an array-typed parameter — for example "[tool: visit-each urls={{section1_links}}]" — which receives a typed string[] and can loop in code. Without "multiple": true, only the first match is captured (single-string behaviour).
 13b. EXTRACTING A SUBSTRING from a read. When the step wants only PART of an element's text — e.g. the account number (the digits after the "Account number:" label), just the price, or the order id inside a link URL — add a "pattern" field to the read action: a JavaScript regular expression with ONE capture group around the wanted substring. The framework applies it to the captured text and stores the first capture group (or the whole match when the pattern has no group). Example: an element showing "Account number: 1234 1234 1234 OIN:12345678" → capture just the number with { "action": "read", "selector": "div.account", "as": "account_number", "pattern": "Account number: ([0-9]{4} [0-9]{4} [0-9]{4})" }. Full JavaScript regex syntax is supported. The step FAILS if the pattern is invalid or matches nothing — so only add "pattern" when the step asks for a sub-portion, and make the regex match the actual text. Combine with "attribute" to slice an href/data value, or with "multiple": true to apply the pattern to each element (non-matching elements are dropped)
@@ -258,6 +266,48 @@ IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "htt
 }
 
 /**
+ * The document scroller's geometry, captured beside the URL each turn.
+ * All three values are CSS pixels, as read off `document.scrollingElement`.
+ */
+export interface ScrollPositionInfo {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+}
+
+/** Fractional scroll positions never land on an exact integer — treat anything
+ *  within a pixel of an extreme as being at it. */
+const SCROLL_EDGE_TOLERANCE_PX = 1;
+
+/**
+ * Render the scroll-position line the model reads to tell where the viewport is.
+ *
+ * The DOM snapshot carries no coordinates, so without this line a scroll has no
+ * observable effect in two real configurations: `ai.sendScreenshots: false`
+ * (no image at all) and `fullPageScreenshots: true` (the image renders the whole
+ * page regardless of scroll position). It is also what lets an infinite-scroll
+ * loop terminate — the model watches the total height stop growing.
+ */
+export function formatScrollPosition(pos: ScrollPositionInfo): string {
+  const top = Math.round(pos.scrollTop);
+  const total = Math.round(pos.scrollHeight);
+  const bottom = Math.min(total, Math.round(pos.scrollTop + pos.clientHeight));
+
+  const markers: string[] = [];
+  if (pos.scrollHeight - pos.clientHeight <= 0) {
+    markers.push('page does not scroll');
+  } else {
+    if (pos.scrollTop <= SCROLL_EDGE_TOLERANCE_PX) markers.push('at top');
+    if (pos.scrollTop + pos.clientHeight >= pos.scrollHeight - SCROLL_EDGE_TOLERANCE_PX) {
+      markers.push('at bottom');
+    }
+  }
+  const suffix = markers.length > 0 ? ` (${markers.join(', ')})` : '';
+
+  return `Scroll position: ${top}–${bottom} of ${total}px${suffix}`;
+}
+
+/**
  * Format the open pages section when multiple pages are tracked.
  */
 function formatOpenPagesSection(openPages?: PageInfo[]): string {
@@ -289,6 +339,7 @@ export function buildStepMessage(
   conversationHistory: string[],
   openPages?: PageInfo[],
   testInfoSection?: string,
+  scrollPosition?: ScrollPositionInfo,
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -299,13 +350,17 @@ export function buildStepMessage(
 
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
+  // Capture can fail (page mid-navigation) — then there is simply no line,
+  // rather than a line that says "undefined".
+  const scrollBlock = scrollPosition ? `\n${formatScrollPosition(scrollPosition)}\n` : '';
+
   const screenshotNote = screenshotBase64
     ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]'
     : '';
 
   const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
-
+${scrollBlock}
 ## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
@@ -617,6 +672,7 @@ export function buildContinuationMessage(
   openPages?: PageInfo[],
   explorationResults?: string[],
   testInfoSection?: string,
+  scrollPosition?: ScrollPositionInfo,
 ): ChatMessage {
   const actionLines = completedActions.length > 0
     ? completedActions.map((a) => `  - ${a.description}`).join('\n')
@@ -634,6 +690,11 @@ export function buildContinuationMessage(
 
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
+  // Sits directly under Current URL — the two together are the whole of "where
+  // am I" for a turn that has no usable screenshot. Absent, not "undefined",
+  // when the capture failed.
+  const scrollLine = scrollPosition ? `\n${formatScrollPosition(scrollPosition)}` : '';
+
   const textContent = `${testInfoBlock}You are continuing the execution of a step.
 
 Original instruction: "${originalInstruction}"
@@ -644,7 +705,7 @@ ${actionLines}
 Variables captured so far:
 ${variableLines}
 
-Current URL: ${currentUrl}
+Current URL: ${currentUrl}${scrollLine}
 
 ${openPagesSection}${explorationSection}## DOM Snapshot
 \`\`\`html
