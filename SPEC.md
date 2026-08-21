@@ -399,22 +399,23 @@ Full DOM is too large for AI context. The cleaner produces a simplified represen
 - Semantic landmarks (`<nav>`, `<main>`, `<header>`, `<footer>`)
 - `data-testid` and `id` attributes
 - Element visibility state
-- **Bounding rect position annotations** on interactive elements: `[pos:x,y w×h]` from `getBoundingClientRect()`. Zero-size elements are annotated as `[pos:hidden]`. This helps the AI disambiguate duplicate elements (e.g. mobile vs desktop nav) by their position relative to the viewport.
+- **Hidden-element placeholders**: elements hidden via `display: none` or `aria-hidden="true"` (and `input[type=hidden]`) are collapsed to a tag-only placeholder with a `<!-- hidden: reason -->` comment, attributes dropped. This keeps sibling positions (`nth-of-type`) stable while making non-rendered duplicates (e.g. a mobile nav on desktop) untargetable.
 
 **Excluded:**
 - Inline styles and CSS classes (unless semantically meaningful)
 - Script and style tags
 - SVG paths and complex SVG internals
-- Hidden elements (`display: none`, `visibility: hidden`)
+- Hidden elements' attributes and content (collapsed to the tag-only placeholders above)
 - Decorative elements without text or interaction
 
-**Output format:** Indented, annotated HTML-like structure with stable selectors and position annotations.
+**Output format:** Indented HTML-like structure; iframes carry a selector comment for the `frame` field, hidden elements collapse to placeholders, and long repetitive runs collapse to omission markers.
 
 **Example output:**
 ```
 <nav role="navigation">
-  <a href="/login" role="button"> Log In <!-- a[role='button'][href='/login'] --> [pos:950,24 120x40]
+  <a href="/login" role="button"> Log In </a>
 </nav>
+<nav role="navigation"><!-- hidden: display:none --></nav>
 ```
 
 ### 6.3 Obstacle Handling
@@ -466,12 +467,13 @@ Many web applications render duplicate elements for mobile and desktop layouts (
    - `<768px` width → `mobile`
    - Example: `Viewport: 1280×720px (desktop view)`
 
-2. **Position annotations in DOM snapshot** — Interactive elements include their bounding rectangle from `getBoundingClientRect()`. Off-screen or zero-size elements are clearly marked, allowing the AI to distinguish:
-   - Desktop nav at `[pos:950,24 120x40]` — visible in viewport
-   - Mobile nav at `[pos:-300,0 120x40]` — off-screen, should be ignored
-   - Hidden duplicate at `[pos:hidden]` — zero-size, should be ignored
+2. **Hidden-duplicate placeholders in the DOM snapshot** — Elements hidden via `display: none` or `aria-hidden="true"` are collapsed to tag-only placeholders with a `<!-- hidden: reason -->` comment and their attributes dropped, so a non-rendered duplicate offers nothing to target:
+   - Desktop nav rendered in full, with attributes and text
+   - Mobile duplicate as `<nav><!-- hidden: display:none --></nav>`
 
-3. **AI prompt rule** — The system prompt explicitly instructs the AI to use viewport size and position annotations to disambiguate, preferring elements within the visible viewport.
+   A duplicate hidden by off-screen positioning or `visibility: hidden` is *not* collapsed and appears fully in the snapshot; the screenshot is the disambiguator there.
+
+3. **AI prompt rule** — The system prompt explicitly instructs the AI to use viewport size and device mode to disambiguate, never to target hidden placeholders, and to confirm against the screenshot which variant is actually visible.
 
 ### 6.7 Retry Context Enrichment
 
@@ -889,7 +891,7 @@ Execute the following test step by returning a JSON object with an array of acti
 1. Return ONLY valid JSON — no markdown, no explanation outside JSON
 2. Each action must have: { "action": string, "description": string } plus relevant fields
 3. Use CSS selectors. Prefer data-testid > id > aria-label > name > visible text
-4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, elements are annotated with their position (e.g. [pos:x,y w×h]) — prefer elements whose position is within the visible viewport and ignore off-screen or zero-size duplicates
+4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. Duplicates hidden with display:none or aria-hidden appear only as tag-only placeholders marked <!-- hidden: ... --> — never target those; use the screenshot to confirm which variant is visible
 5. If the step requires an assertion, include an "assert" action as the last action
 6. If you encounter an unexpected popup/modal/banner, include a "dismiss" action BEFORE your main actions
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
