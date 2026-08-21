@@ -20,8 +20,12 @@
  * body lines:
  *
  *  - main flow only  — `extractSteps`, `resolveRunLines`,
- *    `classifySelectedSteps`, `nearestStepAtOrBelow|Above`. Body lines are
- *    `section-step`, so every one of these filters them out by construction.
+ *    `nearestStepAtOrBelow|Above`. Body lines are `section-step`, so every one
+ *    of these filters them out by construction.
+ *  - caller's choice — `resolveRunSelection` and `classifySelectedSteps`,
+ *    whose `scope` argument defaults to main-flow. `resolveRunSelection` is
+ *    the only function allowed to *pick* the scope; see
+ *    testbench-native/stories/specs/sections-run-and-resume.md §4.1.
  *  - main + body     — `extractStepLineIds`, which lives in the extension
  *    hosts and webviews, not here.
  */
@@ -256,6 +260,43 @@ export function extractSections(
 }
 
 /**
+ * Every section body step in the document, flattened in document order.
+ *
+ * Sourced from `extractSections` rather than a fresh scan so the §3.1 cull
+ * rule applies: a body item that is empty after the `N. ` and `[no-hooks]`
+ * strips is not a runnable step and must not be selectable as one.
+ */
+function sectionBodySteps(text: string): { line: number; instruction: string }[] {
+  return extractSections(text).flatMap((s) => s.steps);
+}
+
+/**
+ * Body step lines of the inline section whose span contains 1-based `line`,
+ * or `[]` when `line` sits in no section body.
+ *
+ * The span deliberately runs **heading to next heading**, not first-body-step
+ * to last. The caller is the resume anchor's snap-forward: it asks this
+ * question about a line whose own step may have just been deleted, and a span
+ * measured from the surviving steps would stop covering it at exactly that
+ * moment. Measuring from the heading keeps the answer stable for any edit
+ * short of deleting the heading itself.
+ *
+ * The last section's span is unbounded below. A `line` past the end of the
+ * `## Steps` span is therefore attributed to it — harmless, because the only
+ * consumer then looks for a body step at or after `line`, finds none, and
+ * clears the anchor, which is the same answer an exact bound would give.
+ */
+export function sectionBodyLinesAt(text: string, line: number): number[] {
+  const sections = extractSections(text);
+  for (let i = 0; i < sections.length; i++) {
+    const start = sections[i]!.headingLine;
+    const end = i + 1 < sections.length ? sections[i + 1]!.headingLine - 1 : Infinity;
+    if (line >= start && line <= end) return sections[i]!.steps.map((s) => s.line);
+  }
+  return [];
+}
+
+/**
  * Whether the step at 0-based `index` is a list item that **wraps** onto
  * following lines.
  *
@@ -357,19 +398,87 @@ export type ClassifiedStep =
   | { kind: 'interactive'; line: number; hint: string };
 
 /**
+ * Which step list a run is drawn from. `'section-body'` runs body steps
+ * **detached** — at the root frame, with no enclosing invocation — which is
+ * sound because a section shares its caller's scope rather than owning one.
+ * See sections-run-and-resume.md §4.2.
+ */
+export type RunScope = 'main-flow' | 'section-body';
+
+export interface RunSelection {
+  scope: RunScope;
+  /** 1-based lines to execute, ascending. */
+  lines: number[];
+}
+
+/**
+ * Translate a user's line selection into the steps that should run, and say
+ * which list they came from.
+ *
+ * Resolution order, which is the whole of the design (§4.1):
+ *
+ *  1. Empty request → every main-flow step. "Run everything" never means a
+ *     body: a body executes at its call site, so running it inline as well
+ *     would run the flow twice.
+ *  2. Any selected line is a main-flow step → those, main-flow scope. **Body
+ *     lines in the same selection are dropped.** A drag from the main flow
+ *     down through a `### Login` body selects both the invocation and the
+ *     body it expands to; running both is that same double-run bug wearing a
+ *     selection as a disguise. This rung is also what keeps every selection
+ *     that worked before sections existed behaving identically.
+ *  3. Any selected line is a section-body step → those, section-body scope.
+ *     Reachable only when the selection names no main-flow step at all.
+ *  4. Otherwise (a heading, prose, a blank) → every main-flow step at or
+ *     below the lowest selected line, so clicking `## Steps` and pressing Run
+ *     still runs the file.
+ *  5. Nothing left → `[]`, and the caller reports TB025.
+ */
+export function resolveRunSelection(
+  text: string,
+  requestedLines: number[],
+): RunSelection {
+  const mainFlow = extractSteps(text);
+  if (requestedLines.length === 0) {
+    return { scope: 'main-flow', lines: mainFlow.map((s) => s.line) };
+  }
+
+  const requested = new Set(requestedLines);
+
+  const mainMatches = mainFlow.filter((s) => requested.has(s.line)).map((s) => s.line);
+  if (mainMatches.length > 0) return { scope: 'main-flow', lines: mainMatches };
+
+  const bodyMatches = sectionBodySteps(text)
+    .filter((s) => requested.has(s.line))
+    .map((s) => s.line);
+  if (bodyMatches.length > 0) return { scope: 'section-body', lines: bodyMatches };
+
+  const minSelected = Math.min(...requestedLines);
+  return {
+    scope: 'main-flow',
+    lines: mainFlow.filter((s) => s.line >= minSelected).map((s) => s.line),
+  };
+}
+
+/**
  * Pull out the steps the user wants to run, classifying each one as a normal
  * step, an `[input: var]` placeholder, or an `[interactive]` REPL handoff.
  *
- * If `requestedLines` is empty, every **main-flow** step in the document is
- * returned. Otherwise, only main-flow steps whose source line is in the set,
- * preserving order. A requested line that names a section body step matches
- * nothing here — section bodies run only through their call site.
+ * If `requestedLines` is empty, every step in `scope` is returned. Otherwise,
+ * only steps in `scope` whose source line is in the set, preserving document
+ * order.
+ *
+ * `scope` is trailing and defaults to `'main-flow'` so every call site that
+ * predates sections keeps its old contract: a requested line naming a body
+ * step matches nothing. Callers that want body steps must have been handed
+ * `'section-body'` by `resolveRunSelection`, which is the only place the
+ * choice is made.
  */
 export function classifySelectedSteps(
   text: string,
   requestedLines: number[],
+  scope: RunScope = 'main-flow',
 ): ClassifiedStep[] {
-  const all = extractSteps(text);
+  const all = scope === 'section-body' ? sectionBodySteps(text) : extractSteps(text);
   const filtered =
     requestedLines.length === 0
       ? all
@@ -393,22 +502,24 @@ export function classifySelectedSteps(
  *    return `[]` — caller decides how to surface that.
  *
  * "Step" means **main-flow step** throughout: selecting a section body line
- * resolves to the main-flow steps at or below it, and a selection entirely
- * below the last main-flow step resolves to `[]`. Callers must distinguish
- * that empty result from the empty-request case, which means "run
- * everything" — the condition is `requested.length > 0 && resolved.length
- * === 0`, never `resolved.length === 0` alone.
+ * resolves to `[]`, and a selection entirely below the last main-flow step
+ * resolves to `[]`. Callers must distinguish that empty result from the
+ * empty-request case, which means "run everything" — the condition is
+ * `requested.length > 0 && resolved.length === 0`, never `resolved.length
+ * === 0` alone.
+ *
+ * Now expressed as `resolveRunSelection` narrowed to the main flow, so the
+ * two cannot drift. The narrowing is byte-identical to the standalone version
+ * this replaced, not merely close: sections are defined below the main flow
+ * inside the `## Steps` span, so a body-only selection's fallback ("main-flow
+ * steps at or below the lowest selected line") was already always empty.
+ *
+ * Kept main-flow-only on purpose — this is what `runLines([])` and the
+ * breakpoint trimmer read, and a body step must never appear there.
  */
 export function resolveRunLines(text: string, requestedLines: number[]): number[] {
-  const all = extractSteps(text);
-  if (requestedLines.length === 0) return all.map((s) => s.line);
-
-  const requested = new Set(requestedLines);
-  const matched = all.filter((s) => requested.has(s.line)).map((s) => s.line);
-  if (matched.length > 0) return matched;
-
-  const minSelected = Math.min(...requestedLines);
-  return all.filter((s) => s.line >= minSelected).map((s) => s.line);
+  const selection = resolveRunSelection(text, requestedLines);
+  return selection.scope === 'main-flow' ? selection.lines : [];
 }
 
 function classifyOne(step: { line: number; instruction: string }): ClassifiedStep {

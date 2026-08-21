@@ -64,6 +64,14 @@ correctness floor plus full debug parity for testbench-native.
   smaller.
 - Monaco feature support.
 
+> **Superseded in part.** Two of this spec's consequences turned out to be
+> authoring gaps rather than acceptable limits, and are lifted by
+> [sections-run-and-resume.md](sections-run-and-resume.md): a selection made
+> entirely of body lines now runs those steps (detached, at the root frame),
+> and a pause or failure inside a top-level section body now parks its resume
+> marker on the **body** line and resumes from there. Where that spec and the
+> §3 / §6 text below disagree, that one wins.
+
 ## 3. Line model — two new kinds, six call sites, split consumers
 
 `classifyLines` (runner-core) gains two kinds:
@@ -90,7 +98,11 @@ explicit because their call sites pull in three directions:
 
 - `extractSteps` / `resolveRunLines` / `classifySelectedSteps` /
   `nearestStepAtOrBelow|Above` operate on `kind === 'step'` only — **main
-  flow only**. This mechanically fixes §1.1: run-line resolution, the
+  flow only**. (`classifySelectedSteps` later grew a trailing `scope`
+  argument, defaulting to main-flow; `resolveRunSelection` is the only caller
+  that passes anything else. See
+  [sections-run-and-resume.md](sections-run-and-resume.md) §4.1.) This
+  mechanically fixes §1.1: run-line resolution, the
   native breakpoint trimmer (`trimAtBreakpoint` in
   [src/extension/run-controller.ts](../../src/extension/run-controller.ts),
   which consumes `classifySelectedSteps` output), and resume-anchor math
@@ -391,6 +403,14 @@ continue`), checking only skill-file entries and pausing via
 Section-body breakpoints break that dichotomy: they are test-file lines the
 client *cannot* trim (body lines are never in the runnable main-flow list —
 §3 guarantees that). Rule change, one on each side:
+
+> **Amended.** "Never in the runnable list" now holds for every run *except*
+> a detached body run — one whose whole selection is body lines
+> ([sections-run-and-resume.md](sections-run-and-resume.md) §4.2). There the
+> body steps ARE the runnable list, so `trimAtBreakpoint` does see them and
+> pauses client-side. No double trigger results: those steps execute at the
+> root frame, and the server's per-step check below skips a test-file
+> breakpoint exactly when the step's frame is the root.
 
 - **Client** (native): F9 validation in `commands/index.ts` accepts
   `section-step` lines (it validates against `extractStepLineIds`, which

@@ -206,3 +206,91 @@ test('changesTouchAnchor: a replace spanning into the anchor line IS a touch', (
     true,
   );
 });
+
+// ---- section-body resume: lazy, target-dependent snap candidates ---------------
+//
+// A body anchor snaps among the body lines of ITS OWN section, and the
+// invocation it runs under shifts in the same event. Both are expressed by
+// passing a FUNCTION for `stepLines` — called only when a change actually
+// touches the line being shifted, and given the post-edit target so it can
+// answer per-section. See stories/specs/sections-run-and-resume.md §5.4.
+
+test('function candidates are not consulted when nothing touches the anchor', () => {
+  let calls = 0;
+  const next = shiftAnchorForChanges(
+    9,
+    [{ startLine: 3, endLine: 3, endCharacter: 0, addedLines: 1 }],
+    () => {
+      calls++;
+      return [];
+    },
+  );
+  assert.equal(next, 10, 'plain shift, no snap');
+  assert.equal(calls, 0, 'a pure shift must not re-parse the document');
+});
+
+test('function candidates receive the post-edit target line, 1-based', () => {
+  const seen = [];
+  shiftAnchorForChanges(
+    9,
+    [
+      { startLine: 3, endLine: 3, endCharacter: 0, addedLines: 2 }, // above: +2
+      { startLine: 9, endLine: 9, endCharacter: 4, addedLines: 0 }, // touches
+    ],
+    (target) => {
+      seen.push(target);
+      return [12];
+    },
+  );
+  // touchStart 9 + deltaAbove 2 → 0-based 11 → 1-based 12.
+  assert.deepEqual(seen, [12]);
+});
+
+test('a deleted body step snaps to the next step of the SAME section', () => {
+  // `### Login` body on 1-based 24, 25, 29; `### Cleanup` body on 33.
+  // Delete the anchor line (0-based 23 == 1-based 24). The candidates the
+  // tracker supplies are Login's post-edit body only, so the snap can reach
+  // 25 but can never reach 33.
+  const next = shiftAnchorForChanges(
+    23,
+    [{ startLine: 23, endLine: 24, endCharacter: 0, addedLines: 0 }],
+    (target) => [24, 28].filter((l) => l >= target),
+  );
+  assert.equal(next, 23, 'snapped to the next Login body step (1-based 24)');
+});
+
+test('deleting the LAST body step of a section clears rather than crossing into the next', () => {
+  // Anchor on Login's last body step (0-based 28 == 1-based 29), deleted.
+  // Login has no surviving step at or after it; Cleanup's line 33 is NOT a
+  // candidate, because the tracker scopes candidates to the anchor's own
+  // section. Clearing is the correct answer — resuming into a different
+  // section's body would silently run a different flow.
+  const next = shiftAnchorForChanges(
+    28,
+    [{ startLine: 28, endLine: 29, endCharacter: 0, addedLines: 0 }],
+    () => [24, 25],
+  );
+  assert.equal(next, null);
+});
+
+test('the call position shifts on an insert above while the body anchor does not', () => {
+  // Insert one line above the invocation (0-based 16 == 1-based 17) but below
+  // nothing else relevant. Run the same change set through both positions the
+  // way maintainAnchor does.
+  const changes = [{ startLine: 12, endLine: 12, endCharacter: 0, addedLines: 1 }];
+  const call = shiftAnchorForChanges(16, changes, () => [14, 18, 19]);
+  const body = shiftAnchorForChanges(23, changes, () => [25, 26, 30]);
+  assert.equal(call, 17, 'invocation moved down one line');
+  assert.equal(body, 24, 'body step moved down one line too');
+});
+
+test('deleting the invocation clears the call position, which clears the resume point', () => {
+  // maintainAnchor treats either half returning null as "the whole resume
+  // point is gone" — a body line with no invocation is not resumable.
+  const call = shiftAnchorForChanges(
+    16,
+    [{ startLine: 16, endLine: 17, endCharacter: 0, addedLines: 0 }],
+    () => [],
+  );
+  assert.equal(call, null);
+});

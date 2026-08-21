@@ -173,4 +173,109 @@ describe('TestBench live — inline sections expand server-side', function () {
     await waitFor('stopped', () => !hooks.isRunning(), 30_000);
     void BODY_LAST;
   });
+
+  // ---------------------------------------------------------------------
+  // The two authoring gaps (stories/specs/sections-run-and-resume.md).
+  //
+  // Both are client-side decisions, but each rests on a server behaviour the
+  // mocha suite cannot see: that a body instruction sent as an ordinary step
+  // executes, and that `startAt` on a test-file BODY line anchors inside the
+  // right invocation. Only a real request proves either.
+  // ---------------------------------------------------------------------
+
+  it('a selected body step runs on its own, detached from any invocation', async () => {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'sections-live.md');
+    const testUri = vscode.Uri.file(testFile);
+
+    await vscode.commands.executeCommand('vscode.open', testUri);
+    await waitFor(
+      'test file active',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),
+    );
+    await vscode.commands.executeCommand('testbench-native.clearStatuses');
+
+    // Select the FIRST body line only. Nothing invokes the section in this
+    // run — the step is sent at the root frame with its own body line as its
+    // source line, and the server has to execute it as written.
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(BODY_FIRST - 1, 0),
+      new vscode.Position(BODY_FIRST - 1, 5),
+    );
+
+    console.log(`[live] running body line ${BODY_FIRST} detached`);
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('run started', () => hooks.isRunning(), 30_000);
+
+    await waitFor(
+      `body line ${BODY_FIRST} has a status`,
+      () => {
+        const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+        return statuses[BODY_FIRST] !== undefined;
+      },
+      120_000,
+    );
+
+    await waitFor('run finished', () => !hooks.isRunning(), 60_000);
+
+    const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    console.log('[live] detached-run statuses:', JSON.stringify(statuses));
+    // ONE step ran. The call line stayed blank because nothing invoked the
+    // section, and the second body line was never selected.
+    assert.equal(statuses[CALL_LINE], undefined, 'no invocation should have run');
+    assert.equal(statuses[BODY_LAST], undefined, 'only the selected body step should run');
+  });
+
+  it('a resume anchored at a body line skips the body steps before it', async () => {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'sections-live.md');
+    const testUri = vscode.Uri.file(testFile);
+    const LAST_CALL = 20; // `3. Check the page` — the second invocation
+
+    await vscode.commands.executeCommand('vscode.open', testUri);
+    await waitFor(
+      'test file active',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),
+    );
+    // Statuses first: a resume is a continuation, which deliberately does NOT
+    // clear them, so a previous test's marks would be indistinguishable from
+    // this run's. Clearing also drops any parked marker, so park after.
+    await vscode.commands.executeCommand('testbench-native.clearStatuses');
+
+    // Park the marker the way a failure on the LAST body step would, under
+    // the LAST invocation. Resuming there sends line 20 alone, whose whole
+    // expansion is one body — so if the anchor works, body line 24 never runs.
+    hooks.tracker.setBreakpointStop(testUri, BODY_LAST, {
+      kind: 'section-body',
+      callLine: LAST_CALL,
+    });
+    await waitFor('marker parked', () => hooks.tracker.snapshot().breakpointStop === BODY_LAST);
+
+    console.log(`[live] resuming at body line ${BODY_LAST} under call line ${LAST_CALL}`);
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('resume started', () => hooks.isRunning(), 30_000);
+
+    await waitFor(
+      `body line ${BODY_LAST} has a status`,
+      () => {
+        const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+        return statuses[BODY_LAST] !== undefined;
+      },
+      120_000,
+    );
+    await waitFor('resume finished', () => !hooks.isRunning(), 60_000);
+
+    const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    console.log('[live] resume statuses:', JSON.stringify(statuses));
+    // THE assertion: the step before the anchor, inside the same body, did
+    // not re-execute. Without exact-line anchoring the server's `>=` scan
+    // lands on the body's first step and re-runs work that already passed.
+    assert.equal(
+      statuses[BODY_FIRST],
+      undefined,
+      `body line ${BODY_FIRST} ran again — the resume anchor did not hold`,
+    );
+    assert.ok(statuses[BODY_LAST] !== undefined, 'the anchored step should have run');
+  });
 });
