@@ -313,6 +313,20 @@ export interface HostRunningMsg {
 export interface HostBreakpointStopMsg {
   type: 'breakpointStop';
   line: number | null;
+  /**
+   * Set only when `line` is a section-body line **and** the host knows how to
+   * resume from it — i.e. it also knows the invocation that body is running
+   * under (`callLine`), or knows there isn't one because the body was run
+   * detached (`callLine: null`).
+   *
+   * Its absence on a body line is meaningful, not a default: it marks a
+   * marker we cannot resume — one left behind by a dropped stream or a
+   * restarted server — which Continue must refuse rather than guess at. See
+   * testbench-native/stories/specs/sections-run-and-resume.md §5.1.
+   *
+   * The webview ignores this field; only the tracker reads it.
+   */
+  resumeContext?: { kind: 'section-body'; callLine: number | null };
 }
 
 /**

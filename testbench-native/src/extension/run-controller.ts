@@ -9,7 +9,8 @@ import {
   classifySelectedSteps,
   composeEnv,
   extractSteps,
-  resolveRunLines,
+  resolveRunSelection,
+  sectionBodyLinesAt,
   interpretReplCommand,
   maskIfSecret,
   parseConfig,
@@ -452,6 +453,14 @@ export class RunController {
     return { failed, root };
   }
 
+  /** The test-file invocation a frame descends from, or null if unknown.
+   *  Recorded on every `frame:push` and kept until run end, so it answers
+   *  for popped frames too. The event router reads it to pair a section-body
+   *  pause with the invocation Continue has to re-enter through. */
+  rootOfFrame(frameId: string): { testUri: vscode.Uri; testLine: number } | null {
+    return this.frameRoot.get(frameId) ?? null;
+  }
+
   /** Mark a frame as having had a failed descendant step. Walks the parent
    *  chain via the persistent `frameParents` map so the root frame (the one
    *  anchored on the test file's `[skill:]` line) inherits the failure even
@@ -466,6 +475,38 @@ export class RunController {
       cur = this.frameParents.get(cur) ?? null;
     }
     return this.frameRoot.get(frameId) ?? null;
+  }
+
+  /**
+   * Where a user Pause should resume from when it landed inside a section
+   * body, or null when it didn't (in which case the caller keeps the
+   * pre-existing invocation-line behaviour).
+   *
+   * The pause path is the odd producer out: it reads the live frame stack
+   * rather than a parked failure, so it needs its own derivation rather than
+   * reuse of `recordSkillFailure`'s. Both halves of the test are load-bearing:
+   *
+   *  - the frame gate (`section`, top-level, defined by THIS file) keeps
+   *    nested sections and skill-file sections on today's path, where line
+   *    anchors aren't safe;
+   *  - re-checking `lastStepStartLine` against the buffer closes the window
+   *    where a frame has been pushed but its first step has not started. In
+   *    that window the last `step:start` was still a MAIN-FLOW line, and
+   *    calling it a body line would resume a completely different step.
+   */
+  private sectionPauseAt(
+    topFrame: FrameInfo | undefined,
+    text: string,
+  ): { bodyLine: number; callLine: number } | null {
+    if (!topFrame) return null;
+    if (topFrame.kind !== 'section' || topFrame.parentId !== null) return null;
+    if (topFrame.uri !== this.document.uri.fsPath) return null;
+    const root = this.frameRoot.get(topFrame.id);
+    if (!root) return null;
+    const bodyLine = this.lastStepStartLine;
+    if (bodyLine == null) return null;
+    if (!sectionBodyLinesAt(text, bodyLine).includes(bodyLine)) return null;
+    return { bodyLine, callLine: root.testLine };
   }
 
   /** Reset the frame stack — called on run start so a fresh run never
@@ -1448,27 +1489,34 @@ export class RunController {
       return this.fail(payload, log);
     }
 
-    const effectiveLines = resolveRunLines(text, lines);
+    // What the caller's line selection means. `scope` is the new half: a
+    // selection made entirely of section-body lines resolves to those lines
+    // and runs them DETACHED, at the root frame (see
+    // stories/specs/sections-run-and-resume.md §4.2). A selection naming any
+    // main-flow step resolves to the main flow only, body lines dropped —
+    // which keeps a drag that spans a call and its body from running the body
+    // twice.
+    const selection = resolveRunSelection(text, lines);
+    const effectiveLines = selection.lines;
 
-    // "No lines requested" means run everything, and `resolveRunLines`
-    // returns `[]` for that. It ALSO returns `[]` when specific lines were
-    // requested and none resolve — which is what a cursor on a section body
-    // line produces, since bodies trail the main flow and there is no
-    // main-flow step at or below them. Those two cases are indistinguishable
-    // downstream, so without this guard "run from my cursor" inside a
-    // section silently runs the WHOLE test against the live session.
+    // An empty resolution means the selection named no step of EITHER kind
+    // and no main-flow step sits below it (a heading, prose, a blank past the
+    // end). That is indistinguishable downstream from the "no lines
+    // requested" convention, which means run everything — so without this
+    // guard "run from my cursor" would silently run the WHOLE test against
+    // the live session.
     //
     // Every user gesture funnels through here — the webview run message,
     // runSelected, runStepHere, Continue and both re-run flows — which is why
     // the guard lives at this choke point rather than in commands/index.ts.
     // Legitimate flows can't trip it: batch mode passes `[]`, and
-    // continuations and re-runs pass explicit main-flow lines.
+    // continuations and re-runs pass explicit step lines.
     if (lines.length > 0 && effectiveLines.length === 0) {
       const payload = reportError('TB025', {});
       return this.fail(payload, log);
     }
 
-    const allClassified = classifySelectedSteps(text, effectiveLines);
+    const allClassified = classifySelectedSteps(text, effectiveLines, selection.scope);
     if (allClassified.length === 0) {
       const payload = reportError('TB021', {});
       return this.fail(payload, log);
@@ -1482,6 +1530,15 @@ export class RunController {
       breakpoints,
       skipFirstBreakpoint,
     );
+
+    // A pause inside a DETACHED body run parks on a body line, so it needs a
+    // resume context or Continue would read it as a stale marker and refuse.
+    // `callLine: null` says "detached" — nothing invoked this body, so the
+    // resume re-runs the rest of it the same way, with no anchor.
+    const detachedBodyContext =
+      selection.scope === 'section-body'
+        ? ({ kind: 'section-body', callLine: null } as const)
+        : undefined;
 
     // Stale pause was already cleared at the top of runLines. The *new*
     // pause indicator (if any) is posted only when execution actually
@@ -1498,7 +1555,11 @@ export class RunController {
       // indicator now and treat it as a successful "paused at start"
       // outcome.
       if (pausedAt !== null) {
-        this.post({ type: 'breakpointStop', line: pausedAt });
+        this.post({
+          type: 'breakpointStop',
+          line: pausedAt,
+          ...(detachedBodyContext && { resumeContext: detachedBodyContext }),
+        });
         // This branch leaves the UI paused just like the two in-loop pause
         // sites, so it needs the same pin — and it is the one that most
         // needs it, since a run that sends nothing generates no traffic at
@@ -1594,6 +1655,14 @@ export class RunController {
     let anyFailed = false;
     const batchMode = options.batchMode === true;
 
+    // `rerun` belongs to the FIRST block only. Its `startAt` names a line
+    // inside the expansion of the steps that block sends; a later block —
+    // which exists whenever an `[input:]` or `[interactive]` step splits the
+    // run — expands to something that no longer contains it, and the server
+    // would refuse with "Re-run anchor not found". Invisible before section
+    // resumes, because every earlier re-run flow sent exactly one step.
+    let pendingRerun = options.rerun;
+
     try {
       let i = 0;
       while (i < classified.length) {
@@ -1620,8 +1689,9 @@ export class RunController {
             log,
             ...(options.stepMode && { stepMode: options.stepMode }),
             ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
-            ...(options.rerun && { rerun: options.rerun }),
+            ...(pendingRerun && { rerun: pendingRerun }),
           });
+          pendingRerun = undefined;
           if (!ok) {
             anyFailed = true;
             break;
@@ -1712,7 +1782,11 @@ export class RunController {
       // failure/abort — the user didn't reach the pause point, so the
       // arrow would be misleading.
       if (status === 'passed' && pausedAt !== null) {
-        this.post({ type: 'breakpointStop', line: pausedAt });
+        this.post({
+          type: 'breakpointStop',
+          line: pausedAt,
+          ...(detachedBodyContext && { resumeContext: detachedBodyContext }),
+        });
         // The batch is done and the session now sits with no run in flight —
         // invisible to the server's idle accounting while the user thinks.
         this.startKeepAlive();
@@ -1737,6 +1811,11 @@ export class RunController {
           // every frame:push. Continue from there re-runs the whole
           // skill, which is the closest honest semantic.
           //
+          // Pause-inside-SECTION is the exception, and the reason
+          // `sectionPauseAt` exists: a section body lives in the test file
+          // and the server can re-enter it at an exact line, so anchoring on
+          // the invocation would re-run steps the user already watched pass.
+          //
           // Pause-at-top-level: fall back to the line of the most recent
           // step:start. If pause fired before any step:start (e.g. the
           // user hit Pause immediately after Run), fall back to the first
@@ -1745,11 +1824,23 @@ export class RunController {
           const topFrame = this._frameStack[this._frameStack.length - 1];
           const root = topFrame ? this.frameRoot.get(topFrame.id) : undefined;
           const firstStepLine = classified.find((c) => c.kind === 'step')?.line ?? null;
-          const resumeLine = root
-            ? root.testLine
-            : this.lastStepStartLine ?? firstStepLine;
+          const sectionPause = this.sectionPauseAt(topFrame, text);
+          const resumeLine = sectionPause
+            ? sectionPause.bodyLine
+            : root
+              ? root.testLine
+              : this.lastStepStartLine ?? firstStepLine;
           if (resumeLine != null) {
-            this.post({ type: 'breakpointStop', line: resumeLine });
+            this.post({
+              type: 'breakpointStop',
+              line: resumeLine,
+              ...(sectionPause && {
+                resumeContext: { kind: 'section-body', callLine: sectionPause.callLine },
+              }),
+              ...(!sectionPause && detachedBodyContext && {
+                resumeContext: detachedBodyContext,
+              }),
+            });
             // Same as the breakpoint case: paused is invisible to the server.
             this.startKeepAlive();
             this.emitRunEvent({ type: 'done', status: 'aborted' });

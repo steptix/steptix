@@ -493,6 +493,25 @@ export function extractSections(
 // missed ones.
 export function findWrappedStepLines(text: string): number[];
 
+// runner-core/src/step-lines.ts
+// What a user's line selection means. `scope` is part of the answer because
+// body lines and main-flow lines execute differently (see
+// testbench-native/stories/specs/sections-run-and-resume.md §4.2).
+// Resolution order is fixed: main-flow matches win over body matches, so a
+// selection spanning both runs the main flow only and never double-runs a
+// body alongside its own invocation.
+export type RunScope = 'main-flow' | 'section-body';
+export function resolveRunSelection(
+  text: string,
+  requestedLines: number[],
+): { scope: RunScope; lines: number[] };
+
+// runner-core/src/step-lines.ts — body step lines of the section whose span
+// contains 1-based `line`, or `[]` when it sits in no section body. The span
+// runs heading-to-next-heading, NOT first-body-step-to-last, so a resume
+// anchor whose own step was just deleted still resolves to its section.
+export function sectionBodyLinesAt(text: string, line: number): number[];
+
 // runner-core/src/section-index.ts
 export function buildSectionIndex(text: string): SectionIndex;
 
@@ -567,8 +586,15 @@ empty-name section each, not one section with a merged body.
 Consumer split (runtime spec §3):
 
 - **main flow only** — `extractSteps`, `resolveRunLines`,
-  `classifySelectedSteps`, `nearestStepAtOrBelow|Above`. These are
-  runner-core's API.
+  `nearestStepAtOrBelow|Above`. These are runner-core's API. `resolveRunLines`
+  keeps this contract precisely so `runLines([])` cannot grow a body step.
+- **main flow, or body — the caller says which** — `resolveRunSelection` and
+  `classifySelectedSteps`, whose trailing `scope` argument defaults to
+  `'main-flow'` so every existing call site keeps the old contract.
+  `resolveRunSelection` is the only function permitted to choose the scope,
+  and it chooses `'section-body'` only for a selection that names body lines
+  and no main-flow line. See
+  [sections-run-and-resume.md](../testbench-native/stories/specs/sections-run-and-resume.md).
 - **main + body** — `extractStepLineIds`, which exists in **three** files: the
   native host [step-lines.ts](../testbench-native/src/extension/step-lines.ts)
   and both webview `step-lines-inline.js`. runner-core has no such export.
@@ -662,6 +688,11 @@ Before opening any PR that touches sections:
       (§3.1) — the authored-text match side is pinned by the §2.3 scenario
 - [ ] the §3.1 cull rule drops empty-after-strip items from all three arrays,
       and `extractSections` culls the same way
+- [ ] a selection spanning main flow and a body resolves to `'main-flow'`
+      (never runs a body inline alongside its own invocation)
+- [ ] `startAt` into a test-file body line is accompanied by a `steps` list
+      that **begins at that body's invocation** — an anchor sent with a
+      narrower range can match a different invocation of the same section
 
 **Server seam**
 - [ ] `sections` is added to api-server's **per-field forwarding** — a

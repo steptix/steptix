@@ -440,7 +440,13 @@ class RunControllerRegistry implements vscode.Disposable {
           // run-control. Paint the yellow ▶ on the next step's
           // line+frame so the user sees where execution will resume.
           const target = this.targetUriFor(uri, ev.frame);
-          this.tracker.setBreakpointStop(target, ev.line);
+          // A server-side pause inside a top-level section body already
+          // paints on the body line (targetUriFor resolves a section frame to
+          // the test file). Park the invocation alongside it so that IF this
+          // stream drops, the marker left behind is one Continue can resume
+          // rather than one it has to refuse as stale.
+          const awaitingSection = this.sectionResumeContext(uri, ev.frame);
+          this.tracker.setBreakpointStop(target, ev.line, awaitingSection ?? undefined);
           this.stepPausedAt.set(uri.toString(), { uri: target, line: ev.line });
           void vscode.commands.executeCommand(
             'setContext',
@@ -492,7 +498,26 @@ class RunControllerRegistry implements vscode.Disposable {
           // run-start clear wipes it before any fresh run, and Stop clears
           // it explicitly. If the user does nothing, it stays parked but
           // is harmless (the run is idle).
-          if (root) {
+          //
+          // A top-level SECTION failure is the exception: its body lives in
+          // the test file and the server can re-enter it at an exact line, so
+          // parking on the invocation would make Continue re-run steps the
+          // user already watched pass. Park on the failed BODY line instead,
+          // carrying the invocation as the resume context.
+          const failure = ev.frame
+            ? this.controllers.get(uri.toString())?.lastSkillFailure
+            : null;
+          const sectionFailure =
+            failure && failure.kind === 'section' && failure.frameId === ev.frame?.id
+              ? failure
+              : null;
+          if (sectionFailure) {
+            this.tracker.setBreakpointStop(
+              sectionFailure.testUri,
+              sectionFailure.skillLine,
+              { kind: 'section-body', callLine: sectionFailure.testLine },
+            );
+          } else if (root) {
             this.tracker.setBreakpointStop(root.testUri, root.testLine);
           } else {
             this.tracker.setBreakpointStop(uri, ev.line);
@@ -589,7 +614,7 @@ class RunControllerRegistry implements vscode.Disposable {
       return;
     }
     if (msg.type === 'breakpointStop') {
-      this.tracker.setBreakpointStop(uri, msg.line);
+      this.tracker.setBreakpointStop(uri, msg.line, msg.resumeContext);
     }
   }
 
@@ -603,6 +628,25 @@ class RunControllerRegistry implements vscode.Disposable {
   private targetUriFor(testUri: vscode.Uri, frame: import('ai-ui-automation-runner-core').FrameInfo | undefined): vscode.Uri {
     if (!frame) return testUri;
     return vscode.Uri.file(frame.uri);
+  }
+
+  /**
+   * The resume context for a pause reported inside `frame`, or null when the
+   * frame is not a top-level section body of this test file.
+   *
+   * Same gate as the failure path (`recordSkillFailure`): top-level only, so
+   * a nested section — where a line anchor cannot be resolved unambiguously —
+   * keeps the invocation-line resume it has today.
+   */
+  private sectionResumeContext(
+    testUri: vscode.Uri,
+    frame: import('ai-ui-automation-runner-core').FrameInfo | undefined,
+  ): { kind: 'section-body'; callLine: number } | null {
+    if (!frame || frame.kind !== 'section' || frame.parentId !== null) return null;
+    if (vscode.Uri.file(frame.uri).toString() !== testUri.toString()) return null;
+    const root = this.controllers.get(testUri.toString())?.rootOfFrame(frame.id);
+    if (!root) return null;
+    return { kind: 'section-body', callLine: root.testLine };
   }
 
   /**

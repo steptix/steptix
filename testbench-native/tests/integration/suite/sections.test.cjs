@@ -358,20 +358,78 @@ describe('TestBench inline sections', function () {
   // Refusals
   // -------------------------------------------------------------------------
 
-  it('refuses to run from a cursor parked on a body line', async () => {
-    // `resolveRunLines` finds no main-flow step at or below a body line, and
-    // returns `[]` — the same value that means "run everything". Without the
-    // guard this silently ran the WHOLE test against the live session.
+  it('runs a selected body step detached, at the root frame', async () => {
+    // 0-based 16 == 1-based 17, the first step of `### Sign in`. It is sent
+    // as an ordinary step carrying its own body line — no invocation, no
+    // `startAt`. Sound because a section shares its caller's scope rather
+    // than owning one, so the step sees the same variables either way.
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(
       new vscode.Position(16, 0),
       new vscode.Position(16, 8),
     );
 
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const request = fake.requests[0];
+    assert.deepEqual(request.steps, ['Type the username']);
+    assert.deepEqual(request.sourceLines, [17]);
+    assert.equal(request.startAt, undefined, 'a detached body run must not anchor');
+    // The definitions still ride along: a body step that names a sibling
+    // section has to expand server-side exactly as it would at a call site.
+    assert.ok(request.sections, 'the sections map must still be sent');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a selection spanning the main flow and a body runs the main flow only', async () => {
+    // Lines 10-18 cover the `Sign in` call AND the body it expands into.
+    // Running both would execute the body twice — once inline, once at the
+    // call site. Main-flow matches win; the body lines are dropped.
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(9, 0),
+      new vscode.Position(17, 8),
+    );
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    assert.deepEqual(fake.requests[0].sourceLines, [10, 11, 12, 13]);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('"Run This Step" on a body line runs that one step', async () => {
+    void vscode.commands.executeCommand('testbench-native.runStepHere', { lineNumber: 23 });
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    assert.deepEqual(fake.requests[0].steps, ['Click add to cart']);
+    assert.deepEqual(fake.requests[0].sourceLines, [23]);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('still refuses a selection that names no step of either kind', async () => {
+    // Line 15 (0-based 14) is the `### Sign in` heading. It names no step,
+    // and no main-flow step sits below it — bodies trail the main flow. The
+    // empty resolution is indistinguishable from "no lines requested"
+    // downstream, so the guard has to catch it or "run from my cursor" runs
+    // the WHOLE test against a live session.
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(14, 0),
+      new vscode.Position(14, 3),
+    );
+
     await vscode.commands.executeCommand('testbench-native.runSelected');
     await sleep(300);
 
-    assert.equal(fake.requests.length, 0, 'a body-line cursor must not start a run');
+    assert.equal(fake.requests.length, 0, 'a non-step line must not start a run');
     assert.equal(hooks.isRunning(), false);
   });
 
@@ -461,12 +519,150 @@ describe('TestBench inline sections — debug parity', function () {
     );
   });
 
-  it('Continue refuses a stale pause marker parked on a body line', async () => {
+  it('a body-step failure parks the marker on the BODY line, not the call line', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const frame = signInFrame('f1', 10, testPath);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:fail', line: 18, error: 'nope', frame });
+
+    await waitFor('marker on the failed body line', () => {
+      return hooks.tracker.snapshot().breakpointStop === 18;
+    });
+    assert.deepEqual(hooks.tracker.resumeContextFor(testUri), {
+      kind: 'section-body',
+      callLine: 10,
+    });
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('Continue after a body-step failure resumes THAT step, then the rest of the test', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const frame = signInFrame('f1', 10, testPath);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:fail', line: 18, error: 'nope', frame });
+    await waitFor('marker parked', () => hooks.tracker.snapshot().breakpointStop === 18);
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('resume started', () => fake.requests.length === 2);
+
+    const resume = fake.requests[1];
+    // The invocation AND everything after it: the server expands the call
+    // into the whole body, anchors at the failed step, and runs on into the
+    // rest of the test. Sending the invocation alone would stop at the end of
+    // the section instead of continuing the run.
+    assert.deepEqual(resume.sourceLines, [10, 11, 12, 13]);
+    assert.deepEqual(resume.startAt, { uri: testPath, line: 18 });
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a failure in the SECOND invocation anchors inside that one', async () => {
+    // Lines 10 and 12 both call `Sign in`. The sent range starts at the
+    // failing call, so the server's first exact match for line 18 can only
+    // be the second invocation's — the steps of the first stay passed.
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const second = signInFrame('f2', 12, testPath);
+    fake.push({ type: 'frame:push', frame: second });
+    fake.push({ type: 'step:fail', line: 18, error: 'nope', frame: second });
+    await waitFor('marker parked', () => hooks.tracker.snapshot().breakpointStop === 18);
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('resume started', () => fake.requests.length === 2);
+
+    assert.deepEqual(fake.requests[1].sourceLines, [12, 13]);
+    assert.deepEqual(fake.requests[1].startAt, { uri: testPath, line: 18 });
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a NESTED section failure still parks on the top-level invocation', async () => {
+    // v1 gate: only `parentId === null` frames are line-anchorable. A nested
+    // body keeps the invocation-line resume it has always had.
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const outer = signInFrame('f1', 10, testPath);
+    const inner = { ...signInFrame('f2', 17, testPath), parentId: 'f1', skillName: 'Add an item' };
+    fake.push({ type: 'frame:push', frame: outer });
+    fake.push({ type: 'frame:push', frame: inner });
+    fake.push({ type: 'step:fail', line: 22, error: 'nope', frame: inner });
+
+    await waitFor('marker on the top-level call line', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10;
+    });
+    assert.equal(hooks.tracker.resumeContextFor(testUri), null);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('Pause inside a section body resumes that body step', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const frame = signInFrame('f1', 10, testPath);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: 17, frame });
+    await waitFor('body step running', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[17] === 'running';
+    });
+
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('paused on the body line', () => {
+      return hooks.tracker.snapshot().breakpointStop === 17 && !hooks.isRunning();
+    });
+    assert.deepEqual(hooks.tracker.resumeContextFor(testUri), {
+      kind: 'section-body',
+      callLine: 10,
+    });
+
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('resume started', () => fake.requests.length === 2);
+    assert.deepEqual(fake.requests[1].startAt, { uri: testPath, line: 17 });
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('Pause before the body’s first step falls back to the invocation line', async () => {
+    // The frame is pushed before its first `step:start`. In that window the
+    // last step:start was still a MAIN-FLOW line, so calling it a body line
+    // would resume a completely different step. Fall back, no context.
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'frame:push', frame: signInFrame('f1', 10, testPath) });
+    await waitFor('frame pushed', () => hooks.runningFrameStack().length === 1);
+
+    await vscode.commands.executeCommand('testbench-native.pause');
+    await waitFor('paused on the call line', () => {
+      return hooks.tracker.snapshot().breakpointStop === 10 && !hooks.isRunning();
+    });
+    assert.equal(hooks.tracker.resumeContextFor(testUri), null);
+  });
+
+  it('Continue still refuses a body-line marker with NO resume context', async () => {
     // Nothing clears a marker except Stop, a new run, or the next
-    // `step:start`, so a dropped stream leaves one behind. Resuming from a
-    // body line computes an EMPTY resume list, and `runLines([])` is the
-    // literal "run everything" convention — it would silently re-run the
-    // whole test against a live session.
+    // `step:start`, so a dropped stream or a restarted server leaves one
+    // behind. The context's ABSENCE is what marks it unresumable — without
+    // that discriminator this would compute an empty resume list, and
+    // `runLines([])` is the literal "run everything" convention.
     hooks.tracker.setBreakpointStop(testUri, 18);
     await waitFor('marker parked on the body line', () => {
       return hooks.tracker.snapshot().breakpointStop === 18;
@@ -475,7 +671,7 @@ describe('TestBench inline sections — debug parity', function () {
     await vscode.commands.executeCommand('testbench-native.continueRun');
     await sleep(400);
 
-    assert.equal(fake.requests.length, 0, 'a body-line marker must not start a run');
+    assert.equal(fake.requests.length, 0, 'a contextless body marker must not start a run');
     assert.equal(hooks.isRunning(), false);
     assert.equal(
       hooks.tracker.snapshot().breakpointStop,
@@ -484,7 +680,7 @@ describe('TestBench inline sections — debug parity', function () {
     );
   });
 
-  it('Step from a stale body-line marker refuses too', async () => {
+  it('Step from a contextless body-line marker refuses too', async () => {
     hooks.tracker.setBreakpointStop(testUri, 17);
     await waitFor('marker parked', () => hooks.tracker.snapshot().breakpointStop === 17);
 
@@ -493,6 +689,72 @@ describe('TestBench inline sections — debug parity', function () {
 
     assert.equal(fake.requests.length, 0, 'a body-line marker must not start a stepping run');
     assert.equal(hooks.isRunning(), false);
+  });
+
+  it('Step from a body-line marker WITH a context resumes, carrying the mode', async () => {
+    hooks.tracker.setBreakpointStop(testUri, 18, { kind: 'section-body', callLine: 10 });
+    await waitFor('marker parked', () => hooks.tracker.snapshot().breakpointStop === 18);
+
+    void vscode.commands.executeCommand('testbench-native.stepOver');
+    await waitFor('resume started', () => fake.requests.length === 1);
+
+    assert.deepEqual(fake.requests[0].startAt, { uri: testPath, line: 18 });
+    assert.equal(fake.requests[0].stepMode, 'over');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a resume whose tail prompts sends startAt on the FIRST block only', async () => {
+    // `sections-input-tail.md`: main flow 9 (`Sign in`), 10 (`[interactive]`),
+    // 11; `### Sign in` body on 15 and 16. An interactive step splits the run
+    // into two requests, and `startAt` names a line inside the FIRST one's
+    // expansion. Re-sending it on the second — whose expansion no longer
+    // contains that line — makes the server refuse with "Re-run anchor not
+    // found". Invisible before section resumes: every earlier re-run flow
+    // sent exactly one step, so there was never a second block.
+    //
+    // `[interactive]` rather than `[input:]` because the two prompt through
+    // different surfaces: `[input:]` opens VS Code's native InputBox, which
+    // the harness cannot answer, while `[interactive]` uses the webview
+    // composer that `dispatchWebviewMessage` drives. Both split the run the
+    // same way, which is the only property under test here.
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    const uri = fixtureUri('sections-input-tail.md');
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
+
+    hooks.tracker.setBreakpointStop(uri, 16, { kind: 'section-body', callLine: 9 });
+    await waitFor('marker parked', () => hooks.tracker.snapshot().breakpointStop === 16);
+
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('first block sent', () => fake.requests.length === 1);
+    assert.deepEqual(fake.requests[0].sourceLines, [9]);
+    assert.deepEqual(fake.requests[0].startAt, { uri: uri.fsPath, line: 16 });
+
+    fake.end();
+    // The `[interactive]` step blocks on the composer. There is no hook for
+    // "the prompt is open", and answering early is a silent no-op, so keep
+    // sending `/continue` (leave interactive mode, run the next step) until
+    // the run moves on.
+    await waitFor('second block sent', async () => {
+      if (fake.requests.length === 2) return true;
+      await hooks.dispatchWebviewMessage({ type: 'promptResponse', text: '/continue' });
+      return fake.requests.length === 2;
+    });
+    assert.deepEqual(fake.requests[1].sourceLines, [11]);
+    assert.equal(
+      fake.requests[1].startAt,
+      undefined,
+      'the anchor must not ride along on a later block',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
   });
 
   it('Continue still resumes normally from a MAIN-FLOW marker', async () => {

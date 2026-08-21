@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { extractSteps, type StepMode } from 'ai-ui-automation-runner-core';
+import { extractSteps, sectionBodyLinesAt, type StepMode } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { RunController, SkillDebugContext } from '../run-controller.js';
@@ -288,9 +288,36 @@ export function registerCommands(
       // current line (not the raw pause-time line) so edits made while paused
       // resume the step the user actually paused on.
       const startLine = tracker.breakpointStopFor(controller.document.uri);
+      const sectionCtx = tracker.resumeContextFor(controller.document.uri);
       if (startLine != null && !controller.isRunning) {
         tracker.setBreakpointStop(controller.document.uri, null);
         const breakpoints = tracker.breakpoints(controller.document.uri);
+        // A marker parked inside a section body resumes THAT step, not the
+        // invocation above it. The context is also the discriminator: a body
+        // line without one is a marker we can't resume (dropped stream,
+        // restarted server) and still falls through to the refusal below.
+        if (sectionCtx) {
+          const plan = sectionResumePlan(
+            editor.document.getText(),
+            startLine,
+            sectionCtx.callLine,
+            controller.document.uri.fsPath,
+          );
+          if (!plan) {
+            refuseStaleResume(tracker, controller.document.uri);
+            return;
+          }
+          registry.notifyRunning(true);
+          await controller
+            .runLines(plan.lines, {
+              breakpoints,
+              skipBreakpointAtStart: true,
+              isContinuation: true,
+              ...(plan.rerun && { rerun: plan.rerun }),
+            })
+            .finally(() => registry.notifyRunning(false));
+          return;
+        }
         // Continue runs from startLine to end-of-document. Passing
         // `[startLine]` alone would collapse through resolveRunLines
         // to a one-step run — useful for Step Over but not Continue.
@@ -624,9 +651,35 @@ async function dispatchStep(
   // (2) Breakpoint-paused: relaunch from that line with the chosen mode.
   // Anchor-derived current line — see continueRun above.
   const startLine = tracker.breakpointStopFor(controller.document.uri);
+  const sectionCtx = tracker.resumeContextFor(controller.document.uri);
   if (startLine != null) {
     tracker.setBreakpointStop(controller.document.uri, null);
     const breakpoints = tracker.breakpoints(controller.document.uri);
+    // Same section-body branch as `continueRun` — this is the second consumer
+    // of the resume marker, and the one that gets forgotten.
+    if (sectionCtx) {
+      const plan = sectionResumePlan(
+        editor.document.getText(),
+        startLine,
+        sectionCtx.callLine,
+        controller.document.uri.fsPath,
+      );
+      if (!plan) {
+        refuseStaleResume(tracker, controller.document.uri);
+        return;
+      }
+      registry.notifyRunning(true);
+      await controller
+        .runLines(plan.lines, {
+          breakpoints,
+          skipBreakpointAtStart: true,
+          isContinuation: true,
+          stepMode: mode,
+          ...(plan.rerun && { rerun: plan.rerun }),
+        })
+        .finally(() => registry.notifyRunning(false));
+      return;
+    }
     const resumeLines = extractSteps(editor.document.getText())
       .map((s) => s.line)
       .filter((line) => line >= startLine);
@@ -696,6 +749,45 @@ async function dispatchStep(
  * leaves one behind — and resuming from it would silently re-run the whole
  * test against a live session.
  */
+/**
+ * How to resume a marker parked inside a section body, or null when it can't
+ * be resumed from where it sits.
+ *
+ * Two shapes, decided by whether an invocation was recorded with the marker:
+ *
+ *  - **Anchored** (`callLine` set) — the body was running under a call. Send
+ *    that call line *and every main-flow step after it*, with `startAt` on
+ *    the body line. The server expands the invocation into the whole body,
+ *    anchors at the failed step, and runs on into the rest of the test — so
+ *    Continue means the same thing here as it does in the main flow. Sending
+ *    the whole tail rather than the invocation alone is also what
+ *    disambiguates a section invoked twice: the first exact match inside an
+ *    expansion that STARTS at this call can only be this invocation's.
+ *  - **Detached** (`callLine` null) — nothing invoked the body; it was run
+ *    directly from a selection. Re-run the rest of that section's body the
+ *    same way, with no anchor. `runLines` re-derives section-body scope from
+ *    the lines themselves.
+ *
+ * Null when the file has changed out from under the marker — no main-flow
+ * step at the call line, or no body step left at the anchor.
+ */
+function sectionResumePlan(
+  text: string,
+  bodyLine: number,
+  callLine: number | null,
+  testFilePath: string,
+): { lines: number[]; rerun?: { startAt: { uri: string; line: number } } } | null {
+  if (callLine == null) {
+    const lines = sectionBodyLinesAt(text, bodyLine).filter((line) => line >= bodyLine);
+    return lines.length > 0 ? { lines } : null;
+  }
+  const lines = extractSteps(text)
+    .map((s) => s.line)
+    .filter((line) => line >= callLine);
+  if (lines.length === 0) return null;
+  return { lines, rerun: { startAt: { uri: testFilePath, line: bodyLine } } };
+}
+
 function refuseStaleResume(tracker: ActiveFileTracker, uri: vscode.Uri): void {
   tracker.setBreakpointStop(uri, null);
   vscode.window.setStatusBarMessage(

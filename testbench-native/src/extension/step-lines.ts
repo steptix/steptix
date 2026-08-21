@@ -75,14 +75,21 @@ export function changesTouchAnchor(
  * @param anchorLine  the anchor's current 0-based line
  * @param changes     the event's content changes (any order; non-overlapping)
  * @param stepLines   the post-edit document's step lines, 1-based, ascending
- *                    (as returned by `extractSteps(...).map(s => s.line)`)
+ *                    (as returned by `extractSteps(...).map(s => s.line)`), or
+ *                    a function returning them for a given 1-based target
+ *                    line. The function form exists for two reasons: it is
+ *                    only called when a change actually touches the anchor, so
+ *                    plain typing never re-parses the document; and a
+ *                    section-body anchor's candidates depend on the target
+ *                    line, because it must snap among the body lines of *its
+ *                    own* section rather than slide into the next one.
  * @returns the anchor's new 0-based line, or null when no step survives at or
  *          after a touched-line edit (caller clears the anchor)
  */
 export function shiftAnchorForChanges(
   anchorLine: number,
   changes: ReadonlyArray<AnchorChange>,
-  stepLines: number[],
+  stepLines: number[] | ((targetLine: number) => number[]),
 ): number | null {
   let deltaAbove = 0;
   let touchStart: number | null = null;
@@ -108,7 +115,8 @@ export function shiftAnchorForChanges(
   // edits above it, is a stable point in the post-edit document; snap from
   // there to the first surviving step at/after it (1-based for stepLines).
   const target = touchStart + deltaAbove + 1;
-  const next = stepLines.find((sl) => sl >= target);
+  const candidates = typeof stepLines === 'function' ? stepLines(target) : stepLines;
+  const next = candidates.find((sl) => sl >= target);
   return next === undefined ? null : next - 1;
 }
 

@@ -1,9 +1,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { isTestFile, extractSections, extractSteps } from 'ai-ui-automation-runner-core';
+import {
+  isTestFile,
+  extractSections,
+  extractSteps,
+  sectionBodyLinesAt,
+} from 'ai-ui-automation-runner-core';
 import type { ErrorPayload } from 'ai-ui-automation-runner-core';
-import { extractStepLineIds, shiftAnchorForChanges, changesTouchAnchor } from './step-lines.js';
+import { extractStepLineIds, shiftAnchorForChanges } from './step-lines.js';
 
 export type LineStatus = 'running' | 'pass' | 'pass-cached' | 'fail' | 'skip' | 'stopped';
 
@@ -111,6 +116,25 @@ export class ActiveFileTracker {
    * stories/specs/resume-position-anchor.md.
    */
   private breakpointAnchor: { uri: string; position: vscode.Position } | null = null;
+  /**
+   * What the resume marker is anchored *inside*, when that is a section body.
+   *
+   * A body line alone is not enough to resume from: the server needs the
+   * invocation the body executes under so it can expand the section and
+   * anchor within that expansion. `callPosition` is that invocation, held as
+   * a position for the same reason the anchor is — it has to survive the user
+   * editing the file before pressing Continue. `null` means the body was run
+   * detached (nothing invoked it), which resumes differently.
+   *
+   * Its ABSENCE is load-bearing. A body-line marker with no context is one we
+   * cannot resume — left behind by a dropped stream or a restarted server —
+   * and Continue refuses it. Before this field existed the two were
+   * indistinguishable and both were refused. See
+   * stories/specs/sections-run-and-resume.md §5.1.
+   */
+  private resumeContext:
+    | { uri: string; kind: 'section-body'; callPosition: vscode.Position | null }
+    | null = null;
 
   constructor() {
     // Restore persisted run state before wiring listeners or painting, then
@@ -325,6 +349,7 @@ export class ActiveFileTracker {
    *  `setBreakpointStop`. */
   private clearAnchorFor(uri: vscode.Uri): void {
     if (this.breakpointAnchor?.uri === uri.toString()) this.breakpointAnchor = null;
+    if (this.resumeContext?.uri === uri.toString()) this.resumeContext = null;
   }
 
   /** Single-line variant used by the webview's per-step "Clear status here"
@@ -380,7 +405,11 @@ export class ActiveFileTracker {
     this.emit();
   }
 
-  setBreakpointStop(uri: vscode.Uri, line: number | null): void {
+  setBreakpointStop(
+    uri: vscode.Uri,
+    line: number | null,
+    context?: { kind: 'section-body'; callLine: number | null },
+  ): void {
     const state = this.state(uri);
     state.breakpointStop = line;
     // Capture (or clear) the position anchor alongside the raw line. The
@@ -390,6 +419,19 @@ export class ActiveFileTracker {
     // the current line.
     this.breakpointAnchor =
       line != null ? { uri: uri.toString(), position: new vscode.Position(line - 1, 0) } : null;
+    // The context rides the anchor exactly — set together, cleared together,
+    // in one statement each — so no code path can leave a context describing
+    // a marker that is gone, or a body-line marker whose context was dropped
+    // (which Continue would then read as "stale, refuse").
+    this.resumeContext =
+      line != null && context
+        ? {
+            uri: uri.toString(),
+            kind: context.kind,
+            callPosition:
+              context.callLine != null ? new vscode.Position(context.callLine - 1, 0) : null,
+          }
+        : null;
     // `paused` is derived from the *active* file's resume point inside emit(),
     // not set globally here — a stop parked on one test must not light up the
     // Continue button on a different test you switch to. See
@@ -406,6 +448,27 @@ export class ActiveFileTracker {
    */
   breakpointStopFor(uri: vscode.Uri): number | null {
     return this.derivedBreakpointStop(uri.toString(), this.state(uri));
+  }
+
+  /**
+   * What the parked resume marker for `uri` sits inside, or null when it is
+   * an ordinary main-flow marker (or there is no marker at all).
+   *
+   * `callLine` is anchor-derived like `breakpointStopFor`, so both Continue
+   * consumers see the invocation's current line rather than its pause-time
+   * one. `callLine: null` inside a non-null result means "detached" — the
+   * body ran with no invocation — which is a different resume, not a missing
+   * one. See stories/specs/sections-run-and-resume.md §5.3.
+   */
+  resumeContextFor(
+    uri: vscode.Uri,
+  ): { kind: 'section-body'; callLine: number | null } | null {
+    const ctx = this.resumeContext;
+    if (!ctx || ctx.uri !== uri.toString()) return null;
+    return {
+      kind: ctx.kind,
+      callLine: ctx.callPosition ? ctx.callPosition.line + 1 : null,
+    };
   }
 
   /**
@@ -436,29 +499,58 @@ export class ActiveFileTracker {
       addedLines: countNewlines(c.text),
     }));
 
-    // The post-edit step lines (1-based) are only consulted by the snap-forward
-    // branch — i.e. when some change replaces content on the anchor line. Parse
-    // them only then so plain typing above/below the anchor doesn't re-extract
-    // steps on every keystroke. Uses the same extractor the Continue/Step
-    // consumers use so there's no parallel parser to drift.
-    const stepLines = changesTouchAnchor(changes, before)
-      ? extractSteps(event.document.getText()).map((s) => s.line)
-      : [];
+    // Snap candidates are resolved lazily — `shiftAnchorForChanges` calls
+    // these only when a change actually replaces content on the line being
+    // shifted, so plain typing above or below never re-parses the document.
+    // Both use the same extractors the Continue/Step consumers use, so there
+    // is no parallel parser to drift.
+    //
+    // The two positions snap against DIFFERENT sets, because they are
+    // different kinds of step. A body anchor snaps among the body lines of
+    // its OWN section (`sectionBodyLinesAt`, which spans heading-to-heading so
+    // a just-deleted step still resolves): snapping among all body lines would
+    // let a deleted last-step-of-a-section slide the resume point into the
+    // next section's body — a different flow entirely, run silently.
+    const inSectionBody = this.resumeContext?.uri === anchor.uri;
+    const anchorCandidates = inSectionBody
+      ? (target: number) => sectionBodyLinesAt(event.document.getText(), target)
+      : () => extractSteps(event.document.getText()).map((s) => s.line);
 
-    const line = shiftAnchorForChanges(before, changes, stepLines);
+    const line = shiftAnchorForChanges(before, changes, anchorCandidates);
 
-    if (line === before) return; // anchor unmoved — no repaint needed
+    // The invocation the body runs under shifts in the same pass, against the
+    // same original coordinates. It is a main-flow step, so it snaps among
+    // main-flow lines. Computed BEFORE the early return below: an edit can
+    // move the call line while leaving the body anchor untouched (inserting a
+    // step above the invocation does exactly that), and a stale call line
+    // resumes the wrong invocation.
+    const ctx = this.resumeContext;
+    let callLine: number | null | undefined;
+    if (ctx?.uri === anchor.uri && ctx.callPosition) {
+      callLine = shiftAnchorForChanges(ctx.callPosition.line, changes, () =>
+        extractSteps(event.document.getText()).map((s) => s.line),
+      );
+    }
+
+    if (line === before && callLine === undefined) return; // nothing moved
 
     const uri = event.document.uri;
     const state = this.state(uri);
-    if (line === null) {
+    if (line === null || callLine === null) {
+      // Either half gone is the whole resume point gone: a body line with no
+      // invocation, or an invocation whose body step was deleted, is not
+      // something to guess about. Continue then refuses and offers Run All.
       this.breakpointAnchor = null;
+      this.resumeContext = null;
       state.breakpointStop = null;
       // `paused` is recomputed from the active file in emit()/updateContextKey
       // (both run after this returns), so no direct setContext here.
     } else {
       anchor.position = new vscode.Position(line, 0);
       state.breakpointStop = line + 1;
+      if (ctx && callLine !== undefined) {
+        ctx.callPosition = new vscode.Position(callLine, 0);
+      }
     }
     // Repaint the arrow at its new home. When the edited document is the
     // current editor the change handler already emits; emit here only
@@ -743,6 +835,7 @@ export class ActiveFileTracker {
     // surface via `derivedBreakpointStop` in the next case (the idle Continue
     // no-op test would see a phantom pause and hang opening a stream).
     this.breakpointAnchor = null;
+    this.resumeContext = null;
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       try {
         fs.rmSync(this.runStateFilePath(folder), { force: true });
