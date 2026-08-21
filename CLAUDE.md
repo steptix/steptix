@@ -54,6 +54,53 @@ Plain `code` from PowerShell on this machine resolves to the GUI exe, which
 rejects `--install-extension`. Always invoke the CLI shim at the full path
 above.
 
+### Install from one checkout only
+
+`~/.vscode/extensions/` is per-user, not per-window, so this loop is
+machine-global — run it from exactly one checkout, normally the main one.
+Installing from two (a worktree and main, or two worktrees) collides:
+
+- **Same version in both** — the likely case, since two branches off one
+  commit read the same version until someone bumps — and they extract into
+  the *same* `pkent.testbench-native-<version>/` directory. Last writer wins,
+  `--force` suppresses any prompt, and the Extensions panel shows that version
+  either way: no signal about whose code is live. Genuinely concurrent
+  installs are worse than last-write-wins, since two processes unzipping into
+  one directory can leave a mix of both builds. Both also rewrite the shared
+  `extensions.json`, so a race there can drop an entry.
+- **Different versions** — both directories survive, but VS Code activates
+  only the highest version of an extension ID, in *every* window. The worktree
+  on the lower patch number then silently runs the other checkout's build
+  while the Extensions panel truthfully reports the higher one.
+
+Note the second case defeats the bump rule rather than being saved by it: the
+version number is honest about what is loaded and still says nothing about
+which checkout it came from.
+
+To work on the extension in a worktree, don't install it — run an Extension
+Development Host from that worktree instead:
+
+```powershell
+cd <worktree>\testbench-native
+npm run build
+& "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
+    --extensionDevelopmentPath=.
+```
+
+The dev host loads from `--extensionDevelopmentPath` in place of the installed
+copy, for that window only, so two worktrees can drive their own builds at the
+same time without touching `~/.vscode/extensions/`.
+
+`npm run dev` is the same two steps, but shells out to plain `code`. Unlike
+`--install-extension`, the GUI exe does accept `--extensionDevelopmentPath` —
+it is what VS Code's own generated launch configs pass via `${execPath}` — so
+the script should work; it just hasn't been exercised in this repo, and the
+shim above is the form already known to behave here.
+
+The live integration tests were never affected: their harness passes its own
+`--extensions-dir` under the worktree's `.vscode-test/`, so the installed
+extension isn't on the path at all.
+
 ## Seed gitignored files into a new worktree
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
@@ -147,6 +194,45 @@ The rest is already handled: `templates/.env` is both the live workspace and
 the source of `GITHUB_USERNAME`/`GITHUB_PASSWORD`, and Playwright's browsers
 live in `%LOCALAPPDATA%\ms-playwright`, machine-wide, so no worktree
 re-downloads them.
+
+### Running live suites in two worktrees at once
+
+Seven of the nine live suites are safe to run concurrently. Everything they
+contend on is per-worktree:
+
+- **Servers** — distinct ports, via `-AutoPort`.
+- **VS Code** — each run gets its own `--user-data-dir` and `--extensions-dir`
+  under that worktree's `.vscode-test/`, so the instances don't forward to
+  each other. (Same mechanism as the orphaned-`Code.exe` hijack, working in
+  your favour: that bug needs a *shared* user-data-dir.)
+- **Extension code** — `--extensionDevelopmentPath` per worktree, so the
+  installed `.vsix` is not on the path in either run.
+- **CDP browsers** — profiles resolve to
+  `<project_root>/.aiui/cdp-profiles/<engine>-<name>/`
+  (`profileDirFor`, src/browser/cdp-registry.ts) and the launcher passes
+  `--remote-debugging-port=0`, so the OS assigns the port and it is read back
+  from `DevToolsActivePort`. Concurrency-safe by construction.
+- **Playwright** — shared binaries, per-launch temp profiles.
+- **`reports/` and `.cache/`** — resolved against the project root.
+
+**The exception is the GitHub account.** `templates/init/tests/github.md` is a
+real login flow — sign in, list repos, then *sign out* — and both worktrees
+would run it with the same credentials from the same IP. One run's sign-out
+can invalidate the other's session mid-test, and GitHub may challenge or
+rate-limit simultaneous logins. No amount of worktree isolation fixes a shared
+external account.
+
+That hits exactly two suites, `pause-resume` and `stop-report`. So either
+scope concurrent runs away from those two with `TESTBENCH_LIVE_GREP` and
+serialize them, or give one worktree a second GitHub account in its own
+`templates/.env` — already per-worktree and gitignored, so that works today
+with no code change.
+
+The AI gateway key is shared too. Not a correctness problem, but concurrent
+runs share whatever rate limit it carries, so a flake there is not
+automatically a regression.
+
+Traced by reading, not yet proven by running two suites at once.
 
 ### Why the junction repair matters
 
