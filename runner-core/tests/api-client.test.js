@@ -217,3 +217,122 @@ test('getLastRun: throws connect-failed on transport error', async () => {
   const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => { throw new Error('ECONNREFUSED'); } });
   await assert.rejects(() => client.getLastRun('id'), (err) => err instanceof ApiClientError && err.kind === 'connect-failed');
 });
+
+// ── compileCodeBehind (stories/codebehind-compile.md §Server) ──────────────
+
+test('compileCodeBehind: posts the compile route with the request body', async () => {
+  let captured;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return streamingResponse([
+      'event: compile:done\ndata: {"type":"compile:done","status":"green","message":"ok"}\n\n',
+    ]);
+  };
+  const client = new ApiClient({ serverUrl: 'http://x:1', apiKey: 'k', fetch: fetchImpl });
+
+  const events = await collect(
+    client.compileCodeBehind(
+      { testFilePath: '/p/tests/a.md', select: { steps: [3] }, envName: 'ci' },
+      new AbortController().signal,
+    ),
+  );
+
+  assert.equal(captured.init.method, 'POST');
+  assert.equal(captured.init.headers['x-api-key'], 'k');
+  assert.equal(captured.init.headers['Accept'], 'text/event-stream');
+  assert.match(captured.url, /\/codebehind\/compile$/);
+  const body = JSON.parse(captured.init.body);
+  assert.equal(body.testFilePath, '/p/tests/a.md');
+  assert.deepEqual(body.select, { steps: [3] });
+  assert.equal(body.envName, 'ci');
+  assert.equal(events.length, 1);
+});
+
+test('compileCodeBehind: yields phases, steps and the final result in order', async () => {
+  const chunks = [
+    'event: compile:phase\ndata: {"type":"compile:phase","phase":"select","message":"2 step(s) to generate"}\n\n',
+    'event: compile:phase\ndata: {"type":"compile:phase","phase":"generate","message":"2 step(s)"}\n\n',
+    'event: compile:step\ndata: {"type":"compile:step","phase":"generate","step":2,"message":"generated"}\n\n',
+    'event: compile:phase\ndata: {"type":"compile:phase","phase":"replay","round":1,"message":"2/2 passed as code"}\n\n',
+    'event: compile:done\ndata: {"type":"compile:done","status":"green","message":"Compiled"}\n\n',
+    'event: compile:result\ndata: {"type":"compile:result","status":"green","files":{"/p/tests/a.steps.ts":"export default 1"},"summary":{"test":"/p/tests/a.md","compiled":2}}\n\n',
+  ];
+  const client = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async () => streamingResponse(chunks),
+  });
+
+  const events = await collect(
+    client.compileCodeBehind({ testFilePath: '/p/tests/a.md' }, new AbortController().signal),
+  );
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['compile:phase', 'compile:phase', 'compile:step', 'compile:phase', 'compile:done', 'compile:result'],
+  );
+  const result = events.at(-1);
+  assert.equal(result.status, 'green');
+  assert.equal(result.files['/p/tests/a.steps.ts'], 'export default 1');
+  assert.equal(result.summary.compiled, 2);
+  // The round survives the wire — the panel labels "Replay 1" from it.
+  assert.equal(events[3].round, 1);
+});
+
+test('compileCodeBehind: 409 is a conflict carrying the server reason, not a server-error', async () => {
+  const client = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async () => jsonErrorResponse(409, '{"error":"A compile of a.md is already running."}'),
+  });
+  await assert.rejects(
+    () => collect(client.compileCodeBehind({ testFilePath: '/p/tests/a.md' }, new AbortController().signal)),
+    (err) =>
+      err instanceof ApiClientError &&
+      err.kind === 'conflict' &&
+      err.status === 409 &&
+      err.message === 'A compile of a.md is already running.',
+  );
+});
+
+test('compileCodeBehind: 401 still throws unauthorized', async () => {
+  const client = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async () => jsonErrorResponse(401, '{"error":"bad key"}'),
+  });
+  await assert.rejects(
+    () => collect(client.compileCodeBehind({ testFilePath: '/p/a.md' }, new AbortController().signal)),
+    (err) => err instanceof ApiClientError && err.kind === 'unauthorized',
+  );
+});
+
+test('compileCodeBehind: aborting the signal surfaces as an abort, not a transport fault', async () => {
+  const controller = new AbortController();
+  const client = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async (_url, init) => {
+      controller.abort();
+      throw Object.assign(new Error('aborted'), { name: 'AbortError', signal: init.signal });
+    },
+  });
+  await assert.rejects(
+    () => collect(client.compileCodeBehind({ testFilePath: '/p/a.md' }, controller.signal)),
+    (err) => isUserAbort(err),
+  );
+});
+
+test('streamSteps still works after the shared SSE refactor', async () => {
+  const client = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async () =>
+      streamingResponse([
+        'event: step:pass\ndata: {"type":"step:pass","line":4,"fromCodeBehind":true}\n\n',
+        'event: done\ndata: {"type":"done","status":"passed"}\n\n',
+      ]),
+  });
+  const events = await collect(client.streamSteps('id', { steps: ['x'] }, new AbortController().signal));
+  assert.deepEqual(events.map((e) => e.type), ['step:pass', 'done']);
+  assert.equal(events[0].fromCodeBehind, true);
+});

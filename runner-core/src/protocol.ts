@@ -69,6 +69,20 @@ export interface StepPassEvent {
    *  client uses this to paint a ⚡ glyph instead of the standard ✓ and
    *  to mark the run-log line as `(cached)`. */
   fromCache?: boolean;
+  /**
+   * True when the step ran its code-behind entry instead of calling the AI
+   * (stories/codebehind-compile.md §What the author sees). Painted ⚙, logged
+   * `(code-behind)`. Distinct from `fromCache`: that one replays a recorded AI
+   * transcript, this one runs TypeScript the author can read.
+   */
+  fromCodeBehind?: boolean;
+  /**
+   * Present when the step's entry threw and the step then passed under AI.
+   * Painted ⚠ — "ran under AI; recompile" — and `file` is what Open
+   * Code-behind opens. On a pass event because the STEP passed; it is the
+   * entry that failed.
+   */
+  codeBehindStale?: { file: string; error: string };
 }
 
 export interface StepFailEvent {
@@ -222,6 +236,122 @@ export type RunEvent =
   | FrameScopeEvent
   | StepAwaitingEvent
   | ToolAwaitingDebuggerEvent;
+
+// ---------------------------------------------------------------------------
+// Compile stream (stories/codebehind-compile.md §Server)
+// ---------------------------------------------------------------------------
+
+/**
+ * The compile pipeline's phases, in order.
+ *
+ * Mirrors `CompilePhase` in the framework's `src/codebehind/compile.ts`. Named
+ * again here because `runner-core` is the wire contract and must not import
+ * from the server it talks to.
+ */
+export type CompilePhase =
+  | 'record'
+  | 'select'
+  | 'generate'
+  | 'review'
+  | 'replay'
+  | 'repair'
+  | 'write';
+
+export type CompileStatus = 'green' | 'failed';
+
+/** A phase started, or reported its result. */
+export interface CompilePhaseEvent {
+  type: 'compile:phase';
+  phase: CompilePhase;
+  /** 1-based replay round, when the phase repeats. */
+  round?: number;
+  message: string;
+}
+
+/** Something happened to one step, 1-based. */
+export interface CompileStepEvent {
+  type: 'compile:step';
+  phase: CompilePhase;
+  step: number;
+  message: string;
+}
+
+/** Terminal narrative event. The result follows separately. */
+export interface CompileDoneEvent {
+  type: 'compile:done';
+  status: CompileStatus;
+  message: string;
+}
+
+export interface CompileSummary {
+  /** Absolute path of the test file. */
+  test: string;
+  totalSteps: number;
+  /** Steps whose entries this pass generated. */
+  compiled: number;
+  /** Steps whose existing entries were kept verbatim. */
+  kept: number;
+  /** Steps that stay AI — existing `ai: true` entries plus new declines. */
+  keptAi: number;
+  rounds: number;
+  tokensUsed: number;
+  /** Absolute paths written. Always empty from the server, which never writes
+   *  under the project — the client applies. */
+  written: string[];
+  /** Where the candidate was left when nothing was written. */
+  candidatePath?: string;
+  /** Why the compile is not green. */
+  error?: string;
+}
+
+/**
+ * The last frame of a compile stream: what to diff, and what to say about it.
+ *
+ * `files` is the whole proposed content of each `.steps.ts`, not a patch — the
+ * client renders it as the right-hand side of a diff and writes it on Apply.
+ * Several files when the test invokes skills, whose entries compile into the
+ * skill's own file.
+ */
+export interface CompileResultEvent {
+  type: 'compile:result';
+  status: CompileStatus;
+  files: Record<string, string>;
+  summary: CompileSummary;
+}
+
+export type CompileEvent =
+  | CompilePhaseEvent
+  | CompileStepEvent
+  | CompileDoneEvent
+  | CompileResultEvent
+  | OutputEvent;
+
+export function isCompileEvent(value: unknown): value is CompileEvent {
+  if (!value || typeof value !== 'object') return false;
+  const t = (value as { type?: unknown }).type;
+  return (
+    t === 'compile:phase' ||
+    t === 'compile:step' ||
+    t === 'compile:done' ||
+    t === 'compile:result' ||
+    t === 'output'
+  );
+}
+
+/** `POST /codebehind/compile` (stories/codebehind-compile.md §Server). */
+export interface CompileRequest {
+  /** Absolute path of the test file to compile. */
+  testFilePath: string;
+  /** The editor's steps, for the server's saved-file guard. */
+  steps?: string[];
+  sections?: Record<string, { name: string; headingLine: number; steps: string[]; stepLines: number[] }>;
+  envName?: string;
+  /** Compile from this open session's last run instead of recording. */
+  fromSessionId?: string;
+  select?: { onlyStale?: boolean; all?: boolean; steps?: number[] };
+  maxRounds?: number;
+  dryRun?: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)

@@ -39,6 +39,7 @@ import {
   type ExpandedStepOrigin,
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
+import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
@@ -368,7 +369,21 @@ export interface ErrandSummary {
 
 export type RunEvent =
   | { type: 'step:start'; line: number; frame?: FrameInfo; tab?: TabInfo }
-  | { type: 'step:pass'; line: number; output?: string; screenshot?: string; frame?: FrameInfo; fromCache?: boolean; tab?: TabInfo }
+  | {
+      type: 'step:pass';
+      line: number;
+      output?: string;
+      screenshot?: string;
+      frame?: FrameInfo;
+      fromCache?: boolean;
+      tab?: TabInfo;
+      /** The step ran its code-behind entry instead of calling the AI
+       *  (stories/codebehind-compile.md §What the author sees). Drives ⚙. */
+      fromCodeBehind?: boolean;
+      /** The entry threw and the step then passed under AI. Drives ⚠ and the
+       *  "recompile" prompt; the file is what "Open Code-behind" opens. */
+      codeBehindStale?: { file: string; error: string };
+    }
   | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo; tab?: TabInfo }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' }
@@ -411,6 +426,58 @@ export type RunEvent =
   | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo };
 
 export type RunEventListener = (event: RunEvent) => void;
+
+/**
+ * What one server-driven run left behind, beyond the folded `StepResponse`.
+ *
+ * The HTTP response deliberately reduces each step to `StepResultResponse`;
+ * the compiler needs the whole thing — turns, DOM either side, assertions — so
+ * an in-process caller can ask for it. Never serialized.
+ */
+export interface RunDetails {
+  /** Full per-step records, in execution order. */
+  steps: StepResult[];
+  /** The run's final parameter map, captures included. */
+  parameters: Record<string, string>;
+  tokens: number;
+}
+
+/**
+ * Knobs no HTTP client can set (stories/codebehind-compile.md §Server).
+ *
+ * The compile endpoint drives this same session machinery in-process, and
+ * needs four things from a run that no test author ever asks for. They are
+ * kept off `StepRequest` on purpose: that type is the wire, and a field there
+ * is a field the world can set.
+ */
+export interface InternalRunOptions {
+  codeBehind?: {
+    /**
+     * The expansion the caller has already computed — used to build the
+     * code-behind registry instead of the server's own re-expansion.
+     *
+     * Compile sends its steps pre-expanded (no `skillsDir`), so the server has
+     * no frames of its own to bind through; without this every skill-body step
+     * would bind into the *test's* `.steps.ts` rather than the skill's.
+     */
+    expansion?: {
+      steps: string[];
+      rawSteps: string[];
+      origins: ExpandedStepOrigin[];
+      frames: Record<string, ExpandedFrame>;
+    };
+    /** Canonical `.steps.ts` path → the path to load instead (replay). */
+    candidateFiles?: Record<string, string>;
+    /** Ignore every entry, so all steps run under AI (record). */
+    disabled?: boolean;
+    /** An entry that throws fails the step instead of healing under AI. */
+    strict?: boolean;
+    /** Capture DOM + URL either side of every step (record). */
+    captureContext?: boolean;
+  };
+  /** Receives the full step records the `StepResponse` folds away. */
+  onRunDetails?: (details: RunDetails) => void;
+}
 
 export interface StepResultResponse {
   step: string;
@@ -669,6 +736,13 @@ interface ManagedSession {
    * session has run once.
    */
   lastEffectiveSettings?: EffectiveSettings;
+  /**
+   * The last completed run, in full — what `POST /codebehind/compile` with
+   * `fromSessionId` compiles from instead of recording a fresh run
+   * (stories/codebehind-compile.md §Server). Absent until the session has run
+   * once, and gone the moment the session is.
+   */
+  lastRunDetails?: RunDetails & { status: 'passed' | 'failed' };
   outputs: Record<string, string>;
   /**
    * Provenance label for each key in `outputs`. Written at each variable
@@ -1002,6 +1076,8 @@ export class SessionManager {
     request: StepRequest,
     onEvent?: RunEventListener,
     signal?: AbortSignal,
+    /** In-process only — see `InternalRunOptions`. */
+    internal?: InternalRunOptions,
   ): Promise<StepResponse> {
     // `runsInFlight` pins the idle-shutdown timer (story server-lifecycle §3).
     // Incremented at the very entry of a run — before session creation and
@@ -1011,7 +1087,7 @@ export class SessionManager {
     // silently disable the idle timeout for the rest of the process's life.
     this.activeRuns++;
     try {
-      return await this.executeStepsUncounted(sessionId, request, onEvent, signal);
+      return await this.executeStepsUncounted(sessionId, request, onEvent, signal, internal);
     } finally {
       this.activeRuns--;
     }
@@ -1054,6 +1130,7 @@ export class SessionManager {
     request: StepRequest,
     onEvent?: RunEventListener,
     signal?: AbortSignal,
+    internal?: InternalRunOptions,
   ): Promise<StepResponse> {
     // Clear the module-level skill cache at the start of every request so
     // disk edits to skill files between batches are picked up. The API
@@ -1116,7 +1193,14 @@ export class SessionManager {
       session.queueTail = session.queueTail
         .then(async () => {
           try {
-            return await this.executeStepsInternal(session, sessionId, request, onEvent, signal);
+            return await this.executeStepsInternal(
+              session,
+              sessionId,
+              request,
+              onEvent,
+              signal,
+              internal,
+            );
           } finally {
             // Guarantee a FINALIZED last-run record on EVERY run exit — including
             // early run-setup failures (malformed bundle, missing skill,
@@ -1270,6 +1354,17 @@ export class SessionManager {
    * hasn't finalized), so the client polls until `finalized` rather than
    * guessing a timeout. Survives session deletion (a browser-closing stop).
    */
+  /**
+   * The last completed run of an OPEN session, in full — the `fromSessionId`
+   * input to a compile. Null when the session is gone, closed, or has not run,
+   * which is the compile endpoint's cue to record instead.
+   */
+  lastRunDetails(sessionId: string): (RunDetails & { status: 'passed' | 'failed' }) | null {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status === 'closed') return null;
+    return session.lastRunDetails ?? null;
+  }
+
   getLastRun(sessionId: string): LastRunInfo {
     return (
       this.lastRunInfo.get(sessionId) ?? {
@@ -1691,6 +1786,7 @@ export class SessionManager {
     request: StepRequest,
     onEvent?: RunEventListener,
     signal?: AbortSignal,
+    internal?: InternalRunOptions,
   ): Promise<StepResponse> {
     session.status = 'executing';
 
@@ -2203,15 +2299,26 @@ export class SessionManager {
     // Unlike the action cache, this is safe on a subset batch: an entry is
     // bound by the step's authored text within its frame INSTANCE, so it does
     // not depend on which frame counter a batch happened to mint (issue 037).
-    if (request.testFilePath) {
+    //
+    // A compile-driven run overrides all of it: `disabled` for the Record (an
+    // entry that serves its step leaves no transcript to generate from), and a
+    // caller-supplied expansion + candidate paths for the Replay, so the
+    // registry binds through the compiler's frames rather than a second
+    // expansion the server would have to reproduce exactly.
+    const cb = internal?.codeBehind;
+    if (request.testFilePath && !cb?.disabled) {
+      const supplied = cb?.expansion;
       codeBehind = await buildCodeBehindRegistry(
-        {
+        supplied ?? {
           steps: effectiveSteps,
           rawSteps: expansionRawSteps,
           origins: expansionOrigins ?? effectiveSteps.map((_, i) => ({ inputIndex: i, frameId: '' })),
           frames: expandedFrames,
         },
-        { testFilePath: request.testFilePath },
+        {
+          testFilePath: request.testFilePath,
+          ...(cb?.candidateFiles && { candidateFiles: cb.candidateFiles }),
+        },
       );
     }
     // ─── StepCache initialization ────────────────────────────────────────
@@ -3284,6 +3391,8 @@ export class SessionManager {
                   !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== ''),
                 cacheKey: stepCacheKey,
                 ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
+                ...(cb?.strict !== undefined && { codeBehindStrict: cb.strict }),
+                ...(cb?.captureContext !== undefined && { captureStepContext: cb.captureContext }),
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.
@@ -3493,6 +3602,16 @@ export class SessionManager {
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
             ...(stepResult.fromCache && { fromCache: true }),
+            // How the step passed, for the gutter: as code (⚙), or under AI
+            // after its entry threw (⚠). Both ride the pass event because a
+            // stale step DID pass — the entry is what failed.
+            ...(stepResult.fromCodeBehind && { fromCodeBehind: true }),
+            ...(stepResult.codeBehindStale && {
+              codeBehindStale: {
+                file: stepResult.codeBehindStale.file,
+                error: stepResult.codeBehindStale.error,
+              },
+            }),
             ...tabAfterStep,
           });
 
@@ -3746,6 +3865,63 @@ export class SessionManager {
         logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);
       }
     }
+
+    // The code-behind last-run sidecar (stories/codebehind-compile.md §The
+    // runtime stops generating). The CLI runner writes its own; without this
+    // one a TestBench run — the way most people run a test — leaves
+    // `--only-stale` and the gutter nothing to read.
+    //
+    // Only for a run that describes the whole test as it stands: a subset batch
+    // (breakpoint continuation, `[input:]` split, partial re-run) knows about
+    // some of the steps, and a sidecar covering some of the steps reads as one
+    // covering all of them. A compile's own runs are excluded for the reason
+    // the CLI excludes them — a Record (code-behind off) or a Replay
+    // (candidate, not the real file) would stamp its own shape over the
+    // findings the compile is acting on.
+    if (
+      request.testFilePath &&
+      !isSubsetBatch &&
+      request.startAt === undefined &&
+      !cb?.disabled &&
+      !cb?.candidateFiles
+    ) {
+      const lastRunSteps: LastRunStep[] = [];
+      for (const result of fullStepResults) {
+        if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
+        const i = result.index - 1;
+        const binding = codeBehind.bindingFor(i);
+        const stale = result.codeBehindStale;
+        lastRunSteps.push({
+          index: result.index,
+          source: binding?.source ?? expansionRawSteps[i] ?? effectiveSteps[i] ?? '',
+          ...(binding?.section !== undefined && { section: binding.section }),
+          status: result.status,
+          fromCodeBehind: result.fromCodeBehind === true,
+          stale: stale !== undefined,
+          ...(stale && { error: stale.error }),
+        });
+      }
+      if (lastRunSteps.length > 0) await writeLastRun(request.testFilePath, lastRunSteps);
+    }
+
+    // Hand the whole run to an in-process caller (the compiler). After the
+    // sidecar, so a compile that reuses this run sees the same disk state a
+    // fresh one would.
+    internal?.onRunDetails?.({
+      steps: fullStepResults,
+      parameters: { ...resolvedParameters },
+      tokens: runTokens.total,
+    });
+    // Retained for `POST /codebehind/compile` with `fromSessionId` — "compile
+    // from this run", which skips the Record phase entirely. Kept on the
+    // session rather than the manager's `lastRunInfo` because it dies with the
+    // session, which is exactly the window the story says the id is valid for.
+    session.lastRunDetails = {
+      steps: fullStepResults,
+      parameters: { ...resolvedParameters },
+      tokens: runTokens.total,
+      status: overallStatus === 'passed' ? 'passed' : 'failed',
+    };
 
     // Record the finalized run so a client that STOPPED the run — and so closed
     // the SSE stream before the final `done` event — can recover the report path

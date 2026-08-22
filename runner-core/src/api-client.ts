@@ -6,7 +6,7 @@
  */
 
 import { SseParser, type SseFrame } from './sse-parser.js';
-import type { RunEvent, StepMode } from './protocol.js';
+import type { CompileEvent, CompileRequest, RunEvent, StepMode } from './protocol.js';
 
 export type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
 export type LogFileMode = 'off' | 'compact' | 'full';
@@ -189,6 +189,8 @@ export type ApiErrorKind =
   | 'connect-failed'
   | 'unauthorized'
   | 'not-found'
+  /** The server refused because the same work is already running (409). */
+  | 'conflict'
   | 'server-error'
   | 'stream-dropped'
   | 'aborted';
@@ -258,7 +260,48 @@ export class ApiClient {
     request: StreamStepsRequest,
     signal: AbortSignal,
   ): AsyncIterable<RunEvent> {
-    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    yield* this.postSse<RunEvent>(
+      `/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`,
+      request,
+      signal,
+    );
+  }
+
+  /**
+   * Compile a test's code-behind and stream the phases
+   * (stories/codebehind-compile.md §Server).
+   *
+   * The same SSE framing as `streamSteps` over a different route and a
+   * different event vocabulary. The stream's last frame is `compile:result`,
+   * carrying the proposed file content — the server writes nothing under the
+   * project, so a caller that stops iterating before that frame has thrown the
+   * compile away.
+   *
+   * A 409 means a compile of this test file is already running; it surfaces as
+   * an `ApiClientError` of kind `conflict` so the caller can say so rather than
+   * reporting a server fault.
+   */
+  async *compileCodeBehind(
+    request: CompileRequest,
+    signal: AbortSignal,
+  ): AsyncIterable<CompileEvent> {
+    yield* this.postSse<CompileEvent>('/codebehind/compile', request, signal);
+  }
+
+  /**
+   * POST a JSON body, read the SSE response, yield one parsed event per frame.
+   *
+   * Shared by the two streaming clients rather than written twice: the error
+   * mapping, the abort handling and the reader teardown are all load-bearing in
+   * ways that are not obvious from reading them, and two copies is how one of
+   * them quietly loses a fix.
+   */
+  private async *postSse<T>(
+    route: string,
+    request: unknown,
+    signal: AbortSignal,
+  ): AsyncIterable<T> {
+    const url = `${this.serverUrl}${route}`;
     let response: Response;
 
     try {
@@ -283,6 +326,16 @@ export class ApiClient {
     }
     if (response.status === 404) {
       throw new ApiClientError('not-found', 'Not Found', { status: 404 });
+    }
+    // 409 is a refusal with a reason the caller can act on — a compile of this
+    // test is already running. Kept out of the `server-error` bucket so the UI
+    // can say "already compiling" rather than "the server broke".
+    if (response.status === 409) {
+      const body = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('conflict', errorFrom(body) ?? 'Conflict', {
+        status: 409,
+        ...(body !== undefined && { bodyExcerpt: body }),
+      });
     }
     if (response.status >= 500 || (response.status >= 400 && response.status !== 401 && response.status !== 404)) {
       const body = await safeReadBodyExcerpt(response);
@@ -318,7 +371,7 @@ export class ApiClient {
         if (chunk.done) break;
         const frames = parser.push(decoder.decode(chunk.value, { stream: true }));
         for (const frame of frames) {
-          const event = frameToRunEvent(frame);
+          const event = frameToEvent<T>(frame);
           if (event) yield event;
         }
       }
@@ -508,7 +561,7 @@ function stripTrailingSlash(url: string): string {
   return url.endsWith('/') ? url.slice(0, -1) : url;
 }
 
-function frameToRunEvent(frame: SseFrame): RunEvent | null {
+function frameToEvent<T>(frame: SseFrame): T | null {
   if (frame.data === '') return null;
   let parsed: unknown;
   try {
@@ -520,7 +573,19 @@ function frameToRunEvent(frame: SseFrame): RunEvent | null {
   // The server is the source of truth for shape; we trust it but fall through if `type` missing.
   const obj = parsed as { type?: string };
   if (typeof obj.type !== 'string') return null;
-  return obj as RunEvent;
+  return obj as T;
+}
+
+/** The `{ "error": "..." }` an express route sends with a 4xx, when it did. */
+function errorFrom(bodyExcerpt: string | undefined): string | undefined {
+  if (!bodyExcerpt) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(bodyExcerpt);
+    const message = (parsed as { error?: unknown })?.error;
+    return typeof message === 'string' ? message : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function safeReadBodyExcerpt(response: Response): Promise<string | undefined> {
