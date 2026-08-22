@@ -21,7 +21,7 @@ import {
 } from './generate.js';
 import { buildRepairPrompt } from './repair.js';
 import { buildFileReviewPrompt, parseFileRevision } from './review.js';
-import { readLastRun } from './last-run.js';
+import { clearStale, readLastRun } from './last-run.js';
 import {
   createFile,
   spliceEntry,
@@ -108,6 +108,12 @@ export interface CompileRunRequest {
   round?: number;
   /** Canonical `.steps.ts` path → the path to load instead. */
   candidateFiles?: Record<string, string>;
+  /**
+   * Ignore existing entries entirely (Record only). A step served by its own
+   * code-behind leaves no transcript, and generation would then have nothing
+   * to work from.
+   */
+  disableCodeBehind?: boolean;
   strict: boolean;
   /** Capture DOM + URL either side of each step (record only). */
   captureContext: boolean;
@@ -203,33 +209,15 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     };
   };
 
-  // ─── 1. Record ────────────────────────────────────────────────────────────
-  let record = options.recorded;
-  if (record) {
-    emit({ kind: 'phase', phase: 'record', message: 'reusing the supplied run' });
-  } else {
-    emit({ kind: 'phase', phase: 'record', message: `running ${test.steps.length} step(s) under AI` });
-    record = await runner({
-      purpose: 'record',
-      strict: false,
-      captureContext: true,
-      ...(options.signal && { signal: options.signal }),
-    });
-    runTokens += record.tokensUsed;
-  }
-  if (record.status !== 'passed') {
-    const failed = record.steps.find((s) => s?.status === 'failed');
-    const detail = failed ? ` — step ${failed.index}: ${failed.error ?? 'failed'}` : '';
-    return finish(
-      'failed',
-      { compiled: 0, kept: 0, keptAi: 0, written: [], error: `the recording run did not pass${detail}` },
-      `Record failed${detail}. There is nothing to compile until the test passes under AI.`,
-    );
-  }
-
-  // ─── 2. Select ────────────────────────────────────────────────────────────
+  // ─── 1. Select ────────────────────────────────────────────────────────────
+  //
+  // Ahead of Record, not after it as the story's phase order suggests: Record
+  // is a full AI run of the test, and running one to discover there was nothing
+  // to compile is the most expensive way to learn that. Everything selection
+  // needs — which steps have entries, and which a previous run flagged — is
+  // already on disk in the file and the last-run sidecar.
   const steps = await describeSteps(test);
-  const staleKeys = await collectStaleKeys(test, record, steps);
+  const staleKeys = await collectStaleKeys(test, options.recorded, steps);
   const selection = selectSteps(steps, options.select ?? {}, staleKeys);
   if (selection.errors.length > 0) {
     return finish(
@@ -249,13 +237,46 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       `${selection.order.length} step(s) to generate, ` +
       `${keptExisting} kept, ${keptAiExisting} already AI`,
   });
-  if (selection.order.length === 0 && !options.select?.all) {
+  if (selection.order.length === 0) {
     // Nothing to do is a green outcome, not a failure — `compile` after a clean
     // run should say "already compiled", not exit 1.
     return finish(
       'green',
       { compiled: 0, kept: keptExisting, keptAi: keptAiExisting, written: [] },
       'Nothing to compile — every step already has code-behind.',
+    );
+  }
+
+  // ─── 2. Record ────────────────────────────────────────────────────────────
+  let record = options.recorded;
+  if (record) {
+    emit({ kind: 'phase', phase: 'record', message: 'reusing the supplied run' });
+  } else {
+    emit({ kind: 'phase', phase: 'record', message: `running ${test.steps.length} step(s) under AI` });
+    record = await runner({
+      purpose: 'record',
+      strict: false,
+      captureContext: true,
+      // Under AI, all of it. A step served by its existing entry produces no
+      // transcript, and generation would have nothing to work from.
+      disableCodeBehind: true,
+      ...(options.signal && { signal: options.signal }),
+    });
+    runTokens += record.tokensUsed;
+  }
+  if (record.status !== 'passed') {
+    const failed = record.steps.find((s) => s?.status === 'failed');
+    const detail = failed ? ` — step ${failed.index}: ${failed.error ?? 'failed'}` : '';
+    return finish(
+      'failed',
+      {
+        compiled: 0,
+        kept: keptExisting,
+        keptAi: keptAiExisting,
+        written: [],
+        error: `the recording run did not pass${detail}`,
+      },
+      `Record failed${detail}. There is nothing to compile until the test passes under AI.`,
     );
   }
 
@@ -281,9 +302,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       candidateFile: (await candidate.read(step.binding!.file)) ?? undefined,
       ...contextOf(result),
     });
-    applyGenerated(candidate, step, generated, emit, 'generate');
-    if (generated.kind === 'declined') declined++;
-    if (generated.kind === 'error') {
+    const applied = applyGenerated(candidate, step, generated, emit, 'generate');
+    if (applied.kind === 'declined') declined++;
+    if (applied.kind === 'error') {
       return finish(
         'failed',
         {
@@ -292,9 +313,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           keptAi: keptAiExisting,
           written: [],
           candidatePath: await candidate.persist(),
-          error: `generation failed for step ${step.number}: ${generated.message}`,
+          error: `generation failed for step ${step.number}: ${applied.message}`,
         },
-        `Generate failed at step ${step.number}: ${generated.message}`,
+        `Generate failed at step ${step.number}: ${applied.message}`,
       );
     }
   }
@@ -377,9 +398,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       number: round,
       max: maxRounds,
     });
-    applyGenerated(candidate, failedStep, repaired, emit, 'repair');
-    if (repaired.kind === 'declined') declined++;
-    if (repaired.kind === 'error') {
+    const applied = applyGenerated(candidate, failedStep, repaired, emit, 'repair');
+    if (applied.kind === 'declined') declined++;
+    if (applied.kind === 'error') {
       return finish(
         'failed',
         {
@@ -388,9 +409,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           keptAi: keptAiExisting + declined,
           written: [],
           candidatePath: await candidate.persist(),
-          error: `repair failed for step ${failedStep.number}: ${repaired.message}`,
+          error: `repair failed for step ${failedStep.number}: ${applied.message}`,
         },
-        `Repair failed at step ${failedStep.number}: ${repaired.message}`,
+        `Repair failed at step ${failedStep.number}: ${applied.message}`,
       );
     }
   }
@@ -479,6 +500,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     emit({ kind: 'phase', phase: 'write', message: `${path.basename(file)}` });
   }
   await candidate.discardPersisted();
+  // The flag the author acted on has been acted on. Leaving it set would make
+  // the next `--only-stale` regenerate the same steps for no reason.
+  await clearStale(
+    test.filePath,
+    steps.filter((s) => s.key && selection.keys.has(s.key)).map((s) => s.number),
+  );
   return finish(
     'green',
     { compiled, kept: keptExisting, keptAi: keptAiExisting + declined, written },
@@ -531,20 +558,23 @@ function entryKeyOf(binding: CodeBehindBinding): string {
   return `${binding.file} ${binding.section ?? ''} ${binding.source} ${binding.occurrence}`;
 }
 
-/** Keys of entries a run — this record, or the last-run sidecar — flagged. */
+/**
+ * Keys of entries a run flagged as stale.
+ *
+ * Normally that is the last-run sidecar — the author ran the test, saw a ⚠,
+ * and came here. Compile's own Record cannot contribute: it deliberately runs
+ * with code-behind off, so no entry gets the chance to fail. A supplied run
+ * ("Compile from this run") can, because that one did use code-behind.
+ */
 async function collectStaleKeys(
   test: ParsedTest,
-  record: CompileRunOutcome,
+  recorded: CompileRunOutcome | undefined,
   steps: CompileStep[],
 ): Promise<Set<string>> {
   const keys = new Set<string>();
   for (const step of steps) {
-    if (step.key && record.steps[step.index]?.codeBehindStale) keys.add(step.key);
+    if (step.key && recorded?.steps[step.index]?.codeBehindStale) keys.add(step.key);
   }
-  // The sidecar covers the common flow: run the test, see a ⚠, compile
-  // `--only-stale`. Compile re-records first, so this record would normally
-  // flag the same step again — but not if the AI happened to fix the page's
-  // state, and the author's intent is what the flag recorded.
   const sidecar = await readLastRun(test.filePath);
   for (const entry of sidecar?.steps ?? []) {
     if (!entry.stale) continue;
@@ -651,21 +681,37 @@ function contextOf(result: StepResult | undefined): {
   };
 }
 
+/**
+ * Splice one generation answer into the candidate and say what happened.
+ *
+ * Returns the answer, except that a splice the writer refuses — an entry that
+ * is not an object literal, a file with no `defineSteps([...])` to append to —
+ * becomes an `error`, which every caller already treats as "stop, leave the
+ * candidate, report". A throw here would escape `compileTest` entirely.
+ */
 function applyGenerated(
   candidate: Candidate,
   step: CompileStep,
   generated: GeneratedEntry,
   emit: (event: CompileEvent) => void,
   phase: CompilePhase,
-): void {
-  if (generated.kind === 'entry') {
-    candidate.apply(step, generated.code);
-    emit({ kind: 'step', phase, step: step.number, message: phase === 'repair' ? 'repaired' : 'generated' });
-    return;
-  }
-  if (generated.kind === 'declined') {
-    candidate.apply(step, aiEntryFor(step.text, generated.reason));
-    emit({ kind: 'step', phase, step: step.number, message: `kept as AI: ${generated.reason}` });
+): GeneratedEntry {
+  try {
+    if (generated.kind === 'entry') {
+      candidate.apply(step, generated.code);
+      emit({
+        kind: 'step',
+        phase,
+        step: step.number,
+        message: phase === 'repair' ? 'repaired' : 'generated',
+      });
+    } else if (generated.kind === 'declined') {
+      candidate.apply(step, aiEntryFor(step.text, generated.reason));
+      emit({ kind: 'step', phase, step: step.number, message: `kept as AI: ${generated.reason}` });
+    }
+    return generated;
+  } catch (err) {
+    return { kind: 'error', message: (err as Error).message };
   }
 }
 
@@ -945,6 +991,7 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
       undefined,
       {
         ...(request.candidateFiles && { codeBehindCandidates: request.candidateFiles }),
+        ...(request.disableCodeBehind && { codeBehindDisabled: true }),
         codeBehindStrict: request.strict,
         captureStepContext: request.captureContext,
         ...(request.signal && { signal: request.signal }),

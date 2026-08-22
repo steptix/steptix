@@ -69,6 +69,40 @@ export async function writeLastRun(
   }
 }
 
+/**
+ * Clear the stale flag on steps a green compile just regenerated.
+ *
+ * Without this the flag outlives the fix: the sidecar is written by *runs*,
+ * and a compile writes files rather than running the test for real, so a
+ * second `--only-stale` would regenerate the same steps again. Never throws,
+ * and does nothing when there is no sidecar to amend.
+ */
+export async function clearStale(
+  markdownFile: string,
+  stepIndices: Iterable<number>,
+): Promise<void> {
+  const sidecar = await readLastRun(markdownFile);
+  if (!sidecar) return;
+  const fixed = new Set(stepIndices);
+  let changed = false;
+  for (const step of sidecar.steps) {
+    if (!step.stale || !fixed.has(step.index)) continue;
+    step.stale = false;
+    delete step.error;
+    changed = true;
+  }
+  if (!changed) return;
+  try {
+    await fs.writeFile(
+      lastRunPathFor(markdownFile),
+      `${JSON.stringify(sidecar, null, 2)}\n`,
+      'utf-8',
+    );
+  } catch (err) {
+    logger.debug(`Could not update the code-behind last-run sidecar: ${String(err)}`);
+  }
+}
+
 /** Read the sidecar, or null when there is none / it is unreadable. */
 export async function readLastRun(markdownFile: string): Promise<LastRunSidecar | null> {
   try {

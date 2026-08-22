@@ -197,6 +197,15 @@ export interface RunTestExtras {
    * its candidate; the real file is untouched.
    */
   codeBehindCandidates?: Record<string, string>;
+  /**
+   * Ignore every code-behind entry, so all steps run under AI.
+   *
+   * Compile's Record phase needs this: a step served by its existing entry
+   * produces no transcript, and generation would then have nothing to work
+   * from — which is how "recompile step 3" turned into "step 3 performed no
+   * page actions".
+   */
+  codeBehindDisabled?: boolean;
   /** An entry that throws fails the step instead of healing under AI. */
   codeBehindStrict?: boolean;
   /** Capture DOM + URL either side of every step (compile's Record input). */
@@ -324,22 +333,27 @@ export async function runTest(
   // front, and carry the result into the executor like `stepCache`. A missing
   // or broken file is a warning and an empty registry — the test then runs
   // exactly as it did before this feature existed.
-  const codeBehind = test.expansion
-    ? await buildCodeBehindRegistry(
-        {
-          steps: test.steps,
-          rawSteps: test.expansion.rawSteps,
-          origins: test.expansion.origins,
-          frames: test.expansion.frames,
-        },
-        {
-          testFilePath: test.filePath,
-          ...(extras.codeBehindCandidates && { candidateFiles: extras.codeBehindCandidates }),
-        },
-      )
-    : CodeBehindRegistry.empty();
-  /** Per-expanded-step facts for the last-run sidecar, filled as steps run. */
+  const codeBehind =
+    extras.codeBehindDisabled || !test.expansion
+      ? CodeBehindRegistry.empty()
+      : await buildCodeBehindRegistry(
+          {
+            steps: test.steps,
+            rawSteps: test.expansion.rawSteps,
+            origins: test.expansion.origins,
+            frames: test.expansion.frames,
+          },
+          {
+            testFilePath: test.filePath,
+            ...(extras.codeBehindCandidates && { candidateFiles: extras.codeBehindCandidates }),
+          },
+        );
+  /** Per-expanded-step facts for the last-run sidecar, filled as steps run.
+   *  Not written when this run deliberately bypassed code-behind: a compile's
+   *  Record would otherwise stamp "0 code-behind, all AI" over the real run's
+   *  findings, including the stale flags the compile is acting on. */
   const lastRunSteps: LastRunStep[] = [];
+  const keepLastRun = !extras.codeBehindDisabled && !extras.codeBehindCandidates;
 
   // Hoisted so the `finally` can read the run outcome + mutate the report after
   // the browser is closed (to attach `videoRelPath`). `report` is assigned the
@@ -1008,7 +1022,7 @@ export async function runTest(
     // The code-behind last-run sidecar. Runs no longer write code-behind, so
     // this is the only thing they leave for the next compile — which steps ran
     // as code, and which had an entry that broke and healed under AI.
-    if (lastRunSteps.length > 0) {
+    if (keepLastRun && lastRunSteps.length > 0) {
       await writeLastRun(test.filePath, lastRunSteps);
     }
 

@@ -23,13 +23,21 @@ The Runner panel shows:
 
 ```
 Compile github.md
+  Select      7 step(s) to generate, 2 kept, 0 already AI
   Record      reusing session 4f2a (9 steps, green 2 min ago)
-  Generate    9 steps → github.steps.ts (2 entries kept, 7 generated)
-  Review      2 fixes: step 2 froze a literal date; step 6 lacked a post-condition
+  Generate    7 step(s)
+              step 2 generated
+              …
+  Review      revised github.steps.ts
   Replay 1    ✗ step 5 — locator timeout on input[name="commit"]
-  Repair      step 5 regenerated from the failure
-  Replay 2    ✓ 9/9 passed as code, 0 AI calls, 6.1s
-  Write       github.steps.ts — 7 entries added, 2 unchanged
+              step 5 regenerating from the failure
+  Replay 2    9/9 passed as code
+  Write       github.steps.ts
+
+✓ Compiled github.md: 7 of 9 step(s) as code, 2 unchanged
+  Written:  tests/github.steps.ts
+  Rounds:   2
+  Tokens:   91,204
 ```
 
 then a notification: *"Compiled github.md: 9 of 9 steps as code. Used 91k
@@ -89,25 +97,39 @@ no longer anything for it to gate.
 Every run also writes `.aiui-codebehind-cache/<name>.last-run.json` beside
 the test — per step: `source`, `section`, `status`, `fromCodeBehind`,
 `stale` — so `--only-stale` and the TestBench gutter have something to read
-without re-running.
+without re-running. A run compile drove is excluded: a Record (code-behind
+off, everything AI) or a Replay (candidate, not the real file) would stamp
+its own shape over the findings the compile is acting on. A green compile
+clears the `stale` flags it just fixed, so the next `--only-stale` doesn't
+regenerate them again.
 
 ### The compile pipeline
 
 `compileTest(options)` in `src/codebehind/compile.ts`, one core used by the
 CLI in-process and by the server for TestBench. Phases, in order:
 
-**1. Record.** Run the test under AI, in a fresh session, keeping each
+**1. Select.** Decide which steps get (re)generated — the set **S**:
+steps with no entry, steps flagged stale (from the last-run sidecar, or from
+a supplied run), and steps the author named (`--steps`, "Compile This Step",
+or `--all`). Existing passing entries and every `ai: true` entry are kept
+verbatim. Section-call lines, `[skill:]`, `[tool:]` and bracket-marker steps
+(`[output:]`, `[input:]`, `[interactive]`) are never in S.
+
+Selection runs **first**, ahead of Record, even though Record is the more
+natural place to start: Record is a full AI run of the test, and running one
+to discover there was nothing to compile is the most expensive possible way
+to learn that. Everything selection needs is already on disk. An empty S is
+a green "nothing to compile" that costs zero tokens.
+
+**2. Record.** Run the test under AI, in a fresh session, keeping each
 step's `StepResult` — the action transcript, DOM snapshot and URL *before*
 the step (captured at turn 1) and *after* it (the post-step capture),
-resolved parameters, outputs, assertions. TestBench may instead pass a
+resolved parameters, outputs, assertions. Code-behind is **off** for this
+run: a step served by its existing entry produces no transcript, so
+recompiling it would have nothing to work from. TestBench may instead pass a
 `sessionId` of a completed, green run whose results still carry DOM
-snapshots ("Compile from this run"); then this phase is skipped.
-
-**2. Select.** Decide which steps get (re)generated — the set **S**:
-steps with no entry, steps flagged stale, and steps the author named
-(`--steps`, "Compile This Step", or `--all`). Existing passing entries and
-every `ai: true` entry are kept verbatim. Section-call lines, `[skill:]` and
-`[tool:]` steps are never in S.
+snapshots ("Compile from this run"); then this phase is skipped, and because
+that run *did* use code-behind, its `codeBehindStale` flags feed selection.
 
 **3. Generate.** One model call per step in S, in step order, each given:
 
@@ -126,10 +148,15 @@ every `ai: true` entry are kept verbatim. Section-call lines, `[skill:]` and
 The model may decline — `{"entry": null, "reason": "..."}` — for steps that
 need framework actions, interactive input, or a judgment code can't
 express. A declined step becomes an `ai: true` entry with the reason as a
-comment, so the author sees exactly what stayed AI and why.
+comment, so the author sees exactly what stayed AI and why. The framework
+declines on the model's behalf, before spending the call, for the three cases
+it can already see: a bracket-marker step, a transcript containing a
+runner-state action (`openBrowser`, `prompt`, …), and a step the recording
+performed no page actions for.
 
 The response shape is the `{"entry": ...}` JSON envelope (the client forces
-`json_object`), parsed by `parseStepCode` as today.
+`json_object`), parsed by `parseStepCodeOrDecline`, which is `parseStepCode`
+plus the decline arm.
 
 **4. Review.** One model call over the complete candidate file with a
 checklist: dynamic values computed at runtime, not frozen; parameters via
@@ -138,6 +165,10 @@ ones; outputs written; no imports. It returns the revised file in a
 `{"file": "..."}` envelope. The revision is esbuild-validated and the leak
 guard runs over it; if either fails, the pre-review candidate stands and the
 log says so.
+
+The reviewer is also told to leave `source`, `section` and `ai: true` entries
+alone: the first two are how an entry binds to its step, and an `ai: true`
+entry is a decision something already took, not an omission to fill in.
 
 **5. Replay.** Run the test as code in a fresh session with the loader
 pointed at the candidate (an override path the loader accepts for this
@@ -156,10 +187,17 @@ step stale, stops, and says "existing entry for step *k* fails; recompile it
 with `--steps k` (or Compile This Step)".
 
 **6. Write.** On green, the CLI writes the file(s) and prints the summary;
-TestBench receives the proposed content and opens a diff. Nothing is written
-on a non-green compile: the candidate is left at
-`.aiui-codebehind-cache/<name>.steps.ts.candidate` and the summary says
-where, so entries can be salvaged by hand.
+TestBench receives the proposed content and opens a diff. Every file is
+esbuild-validated before it lands, so a file that would not compile is never
+written at all. Nothing is written on a non-green compile: the candidate is
+left at `.aiui-codebehind-cache/<name>.steps.ts.candidate` and the summary
+says where, so entries can be salvaged by hand. A green compile deletes any
+candidate a previous red one left, which would otherwise read as current.
+
+The candidate the *replay* loads is a separate, transient `.ts` in the same
+gitignored directory, deleted after each round: esbuild picks its loader by
+file extension, so the durable `.candidate` artifact — deliberately named
+so nobody mistakes it for a source file — cannot be the one imported.
 
 Skills: a test that invokes skills compiles entries into the skill's own
 `.steps.ts`, so the candidate — and the diff — can span several files.
@@ -242,6 +280,27 @@ is silently dropped.
 `fromSessionId` is valid while that session is open and only if its step
 results carry DOM snapshots; otherwise the server records.
 
+The core it calls is already shaped for it:
+
+```ts
+compileTest({
+  test,                 // ParsedTest, already expanded
+  config, contextContent, aiClient, tokenTracker,
+  select,               // { onlyStale?, all?, steps?: number[] }
+  maxRounds, dryRun,
+  recorded,             // a CompileRunOutcome, for `fromSessionId`
+  onEvent,              // (e: CompileEvent) => void — phase / step / done
+  signal,
+  runner,               // optional CompileRunner, to drive the server's session
+}): Promise<{ status: 'green' | 'failed'; files: Record<path, content>; summary }>
+```
+
+It prints nothing and writes nothing under the project except the gitignored
+candidate (and, when `dryRun` is false, the `.steps.ts` files themselves — the
+server should pass `dryRun: true` and apply through TestBench). A server that
+wants compile to drive its own browser session supplies `runner`; without one
+the default runs `runTest` in-process.
+
 ## Amendments to step-codebehind.md
 
 - Generation section: superseded by this story; inline generation and
@@ -250,13 +309,17 @@ results carry DOM snapshots; otherwise the server records.
 
 ## Implementation outline
 
+Phase A (the core, the CLI, the runtime policy) is built. The server
+endpoint, `runner-core` and `testbench-native` are phase B.
+
 New:
 
 - `src/codebehind/compile.ts` — the pipeline; `src/codebehind/review.ts`
   (review prompt + `parseFileRevision`); `src/codebehind/repair.ts` (failure
-  prompt); `buildStepCodePrompt` grows the whole-test, candidate-file and
+  prompt); `src/codebehind/last-run.ts` (the sidecar);
+  `buildStepCodePrompt` grows the whole-test, candidate-file and
   before/after-DOM sections and the post-condition rule; the
-  `{"entry": null, "reason"}` decline.
+  `{"entry": null, "reason"}` decline, parsed by `parseStepCodeOrDecline`.
 - `src/cli/commands/compile.ts` — `aiui compile`.
 - `src/server/api-server.ts` + `session-manager.ts` — the compile endpoint,
   streaming, candidate override, strict mode, per-file lock.
@@ -270,22 +333,38 @@ New:
 Modified:
 
 - `src/runner/step-executor.ts` — remove the generation hook; add
-  `codeBehindStale`, the `strict` option, and the last-run sidecar write.
+  `codeBehindStale`, the `codeBehindStrict` option, and `captureStepContext`
+  (the DOM + URL either side of a step, off for ordinary runs).
+- `src/runner/test-runner.ts` — a `RunTestExtras` argument carrying the four
+  knobs compile needs (candidate override, strict, disable, capture), and the
+  last-run sidecar write. The sidecar is a per-*run* artifact assembled from
+  every step, so it is written here rather than in `executeStep`, which only
+  ever sees one step.
 - `src/codebehind/loader.ts` — candidate override path.
-- `src/config/*`, `schema/` — drop `codebehind.generate`.
-- `src/report/*` — ⚠ stale rendering and the code/AI/stale counts.
+- `src/codebehind/generate.ts` — repurposed from the inline generator into
+  the compiler's generation step: same prompt inputs, guard and refusals, but
+  it returns an entry instead of writing one.
+- `src/codebehind/writer.ts` — `writeCodeBehindFile` (validate, then write a
+  whole generated file) and `validateCodeBehindSource` (esbuild-check
+  proposed content without touching its destination).
+- `src/config/*`, `schema/` — drop `codebehind.generate`. It was the only
+  field in `CodeBehindConfig`, so the whole `codebehind` config section goes.
+- `src/report/*` — ⚠ stale rendering and the code/AI/stale counts (in the
+  HTML summary bar, and in the CLI's run summary).
 
 ## Tests
 
 - Unit: selection set S (no-entry, stale, named, `ai: true` kept); strict
   mode fails instead of falling through; stale flag on heal; sidecar
-  written; candidate override loading; review revision validated and
-  rejected correctly; decline → `ai: true` with reason; repair prompt carries
-  entry + error + DOM.
+  written, read and cleared; candidate override loading; review revision
+  validated and rejected correctly (broken code, and a leaked parameter);
+  decline → `ai: true` with reason; repair prompt carries entry + error +
+  DOM + screenshot.
 - Pipeline with a stub client and fake page: green first round; failure →
   repair → green; never-converging step → `ai: true` + confirming round;
   failure on a non-S entry stops with the stale message; nothing written on
-  failure; multi-file candidates for skills.
+  failure; multi-file candidates for skills; a red record compiles nothing;
+  a fully-compiled test never records at all.
 - Server: POST through the real `api-server` entry (the seam that silently
   drops fields), streaming events, per-file lock, `fromSessionId` reuse and
   fallback to record.
