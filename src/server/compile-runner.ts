@@ -51,8 +51,11 @@ export interface CompileRequest {
   fromSessionId?: string;
   select?: CompileSelect;
   maxRounds?: number;
-  /** Accepted and echoed, but the server always compiles dry — see the class
-   *  comment. A client asking for `dryRun: false` gets the files, not a write. */
+  /**
+   * Accepted for parity with `aiui compile --dry-run`, and ignored: the server
+   * always compiles dry because it never writes under the project. A client
+   * asking for `dryRun: false` gets the proposed files, not a write.
+   */
   dryRun?: boolean;
 }
 
@@ -79,7 +82,14 @@ export type CompileWireEvent =
 
 export type CompileEventListener = (event: CompileWireEvent) => void;
 
-/** Refusals the route turns into a status code rather than a stream. */
+/**
+ * A refusal with a status code attached.
+ *
+ * The code is honoured only for a refusal the route can see BEFORE it opens
+ * the stream — in practice the 409, which is why the route asks
+ * `isCompiling` itself. Anything raised once the compile is under way arrives
+ * as an error frame instead: the headers are long gone by then.
+ */
 export class CompileRefused extends Error {
   constructor(
     readonly status: number,
@@ -88,6 +98,20 @@ export class CompileRefused extends Error {
     super(message);
     this.name = 'CompileRefused';
   }
+}
+
+/**
+ * The lock key for a test file.
+ *
+ * `path.resolve` alone is not enough on Windows, where it preserves the
+ * drive-letter case it was handed: TestBench's paths come from `uri.fsPath`,
+ * which lower-cases the drive, while a CLI or MCP caller's usually does not.
+ * Two spellings of one file would then take two locks and compile the same
+ * test twice, concurrently, each proposing a whole `.steps.ts` for it.
+ */
+function lockKey(testFilePath: string): string {
+  const resolved = pathResolve(testFilePath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 export class CodeBehindCompiler {
@@ -109,7 +133,7 @@ export class CodeBehindCompiler {
    * two callers can both read false.
    */
   isCompiling(testFilePath: string): boolean {
-    return this.inFlight.has(pathResolve(testFilePath));
+    return this.inFlight.has(lockKey(testFilePath));
   }
 
   /**
@@ -126,14 +150,15 @@ export class CodeBehindCompiler {
     signal?: AbortSignal,
   ): Promise<CompileResult> {
     const testFilePath = pathResolve(request.testFilePath);
-    if (this.inFlight.has(testFilePath)) {
+    const key = lockKey(testFilePath);
+    if (this.inFlight.has(key)) {
       throw new CompileRefused(
         409,
         `A compile of ${basename(testFilePath)} is already running. ` +
           'One compile per test file at a time.',
       );
     }
-    this.inFlight.add(testFilePath);
+    this.inFlight.add(key);
     // Counted as a run in flight for the whole compile, exactly as an errand is
     // (stories/errands.md §The wheel): a compile drives browsers and spends
     // tokens for minutes, and a server that reaped itself halfway through would
@@ -143,7 +168,7 @@ export class CodeBehindCompiler {
       return await this.compileLocked(testFilePath, request, emit, signal);
     } finally {
       releaseRun();
-      this.inFlight.delete(testFilePath);
+      this.inFlight.delete(key);
     }
   }
 

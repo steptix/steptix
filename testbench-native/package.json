@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.73",
+  "version": "0.5.74",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -145,6 +145,29 @@
         "command": "testbench-native.revealSectionLine",
         "title": "TestBench: Go to Section",
         "enablement": "false"
+      },
+      {
+        "command": "testbench-native.compileCodeBehind",
+        "title": "TestBench: Compile Code-behind",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "testbench-native.compileStepCodeBehind",
+        "title": "TestBench: Compile This Step"
+      },
+      {
+        "command": "testbench-native.openCodeBehind",
+        "title": "TestBench: Open Code-behind"
+      },
+      {
+        "command": "testbench-native.applyCodeBehind",
+        "title": "TestBench: Apply Compiled Code-behind",
+        "icon": "$(check)"
+      },
+      {
+        "command": "testbench-native.discardCodeBehind",
+        "title": "TestBench: Discard Compiled Code-behind",
+        "icon": "$(discard)"
       },
       {
         "command": "testbench-native.startServer",
@@ -330,6 +353,21 @@
           "command": "testbench-native.restartSession",
           "when": "testbench-native.activeFile",
           "group": "navigation@6"
+        },
+        {
+          "command": "testbench-native.compileCodeBehind",
+          "when": "testbench-native.activeFile && !testbench-native.running",
+          "group": "navigation@7"
+        },
+        {
+          "command": "testbench-native.applyCodeBehind",
+          "when": "testbench-native.codeBehindProposal",
+          "group": "navigation@8"
+        },
+        {
+          "command": "testbench-native.discardCodeBehind",
+          "when": "testbench-native.codeBehindProposal",
+          "group": "navigation@9"
         }
       ],
       "editor/lineNumber/context": [
@@ -342,6 +380,16 @@
           "command": "testbench-native.runStepHere",
           "when": "testbench-native.activeFile",
           "group": "2_run@1"
+        },
+        {
+          "command": "testbench-native.compileStepCodeBehind",
+          "when": "testbench-native.activeFile",
+          "group": "2_run@2"
+        },
+        {
+          "command": "testbench-native.openCodeBehind",
+          "when": "testbench-native.activeFile",
+          "group": "2_run@3"
         },
         {
           "command": "testbench-native.clearBreakpoints",
@@ -370,6 +418,14 @@
         {
           "command": "testbench-native.runSkillStepsOnStoppedSession",
           "when": "testbench-native.skillDebugActive"
+        },
+        {
+          "command": "testbench-native.applyCodeBehind",
+          "when": "testbench-native.codeBehindProposal"
+        },
+        {
+          "command": "testbench-native.discardCodeBehind",
+          "when": "testbench-native.codeBehindProposal"
         }
       ]
     },

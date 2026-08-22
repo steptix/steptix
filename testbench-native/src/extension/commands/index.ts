@@ -1,10 +1,16 @@
 import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { extractSteps, sectionBodyLinesAt, type StepMode } from 'ai-ui-automation-runner-core';
+import {
+  extractSections,
+  extractSteps,
+  sectionBodyLinesAt,
+  type StepMode,
+} from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { RunController, SkillDebugContext } from '../run-controller.js';
+import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
 import { getOutputChannel } from '../output-channel.js';
 import { cacheDirsForTestAllEnvs } from '../cache-paths.js';
 import { sectionedSkillRefusal } from '../sections.js';
@@ -53,7 +59,100 @@ interface Registry {
 export function registerCommands(
   registry: Registry,
   tracker: ActiveFileTracker,
+  diffs: CodeBehindDiffs,
 ): vscode.Disposable[] {
+  /**
+   * Compile the active test's code-behind and offer the result as a diff
+   * (stories/codebehind-compile.md §What the author runs).
+   *
+   * Shared by the whole-test command, the one-step command and the panel's
+   * "Compile from this run": the three differ only in what they select and
+   * whether they record.
+   */
+  const compile = async (options: {
+    select?: { steps?: number[] };
+    fromSessionId?: string;
+  } = {}): Promise<void> => {
+    const controller = registry.active();
+    if (!controller) return notifyNoActive();
+    // Compile parses the file from disk — it needs the whole expansion, and the
+    // replay runs the file itself. An unsaved buffer would compile something
+    // the author is not looking at.
+    if (controller.document.isDirty) {
+      await controller.document.save();
+    }
+    const label = path.basename(controller.document.uri.fsPath);
+    const scope = options.select?.steps?.length
+      ? `step ${options.select.steps.join(', ')} of ${label}`
+      : label;
+
+    const outcome = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Compiling ${scope}…`, cancellable: true },
+      (_progress, token) => {
+        const aborter = new AbortController();
+        token.onCancellationRequested(() => aborter.abort());
+        return controller.compileCodeBehind({
+          ...(options.select && { select: options.select }),
+          ...(options.fromSessionId && { fromSessionId: options.fromSessionId }),
+          signal: aborter.signal,
+        });
+      },
+    );
+
+    // The summary notification is never awaited — a compile is finished when
+    // the diff is on screen, and blocking the command on a click would leave
+    // the caller (and every test) waiting on the user.
+    if (!outcome.ok) {
+      const s = outcome.summary;
+      const actions = s?.candidatePath ? ['Show log', 'Open candidate'] : ['Show log'];
+      void vscode.window
+        .showErrorMessage(
+          `Compile failed for ${label}: ${outcome.error ?? 'unknown error'}`,
+          ...actions,
+        )
+        .then(async (choice) => {
+          if (choice === 'Show log') getOutputChannel().show(true);
+          if (choice === 'Open candidate' && s?.candidatePath) {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.candidatePath));
+            await vscode.window.showTextDocument(doc, { preview: false });
+          }
+        });
+      return;
+    }
+
+    const files = outcome.files ?? {};
+    const summary = outcome.summary;
+    if (Object.keys(files).length === 0) {
+      vscode.window.showInformationMessage(
+        `Nothing to compile in ${label} — every step already has code-behind.`,
+      );
+      return;
+    }
+
+    await diffs.open({ testFilePath: controller.document.uri.fsPath, files });
+    const tokens = summary ? summary.tokensUsed.toLocaleString() : '?';
+    const compiled = summary?.compiled ?? 0;
+    const total = summary?.totalSteps ?? 0;
+    const keptAi = summary?.keptAi ?? 0;
+    void vscode.window
+      .showInformationMessage(
+        `Compiled ${label}: ${compiled} of ${total} step(s) as code` +
+          (keptAi > 0 ? `, ${keptAi} kept AI` : '') +
+          `. Used ${tokens} tokens; these steps now cost 0.`,
+        'Apply',
+        'Open diff',
+        'Show log',
+      )
+      .then(async (choice) => {
+        if (choice === 'Apply') {
+          await vscode.commands.executeCommand('testbench-native.applyCodeBehind');
+        }
+        if (choice === 'Open diff') {
+          await diffs.open({ testFilePath: controller.document.uri.fsPath, files });
+        }
+        if (choice === 'Show log') getOutputChannel().show(true);
+      });
+  };
   const runSelected = async (): Promise<void> => {
     const controller = registry.active();
     const editor = tracker.activeEditor;
@@ -470,6 +569,107 @@ export function registerCommands(
       vscode.window.setStatusBarMessage(`TestBench: cleared cache for ${fileLabel}`, 3000);
     }),
 
+    vscode.commands.registerCommand(
+      'testbench-native.compileCodeBehind',
+      (args?: { fromSessionId?: string }) =>
+        compile(args?.fromSessionId ? { fromSessionId: args.fromSessionId } : {}),
+    ),
+
+    // "Compile This Step" — a full compile with S = {k}
+    // (stories/codebehind-compile.md §What the author runs). The paused-session
+    // variant, which generates from the live DOM before executing, is deferred.
+    vscode.commands.registerCommand(
+      'testbench-native.compileStepCodeBehind',
+      async (target?: { lineNumber?: number }) => {
+        const editor = tracker.activeEditor;
+        if (!editor) return notifyNoActive();
+        const line =
+          typeof target?.lineNumber === 'number'
+            ? target.lineNumber
+            : editor.selection.active.line + 1;
+        const number = authoredStepNumber(editor.document.getText(), line);
+        if (number === null) {
+          vscode.window.showWarningMessage(
+            'TestBench: that line is not a step. Put the cursor on a numbered step.',
+          );
+          return;
+        }
+        if (number === 'expanded') {
+          // Step numbers in a compile are positions in the EXPANDED test, and a
+          // skill or section call above this line makes those differ from the
+          // authored ones. Compiling by a number we cannot compute would
+          // compile a different step, silently.
+          const choice = await vscode.window.showWarningMessage(
+            'Compile This Step cannot number a step below a skill or section call — ' +
+              'their bodies expand into extra steps. Compile the whole test instead.',
+            'Compile Code-behind',
+          );
+          if (choice === 'Compile Code-behind') await compile();
+          return;
+        }
+        await compile({ select: { steps: [number] } });
+      },
+    ),
+
+    // "Open Code-behind" — the counterpart of Go to Section: from a step, to
+    // the entry that implements it in the sibling `.steps.ts`.
+    vscode.commands.registerCommand(
+      'testbench-native.openCodeBehind',
+      async (target?: { lineNumber?: number }) => {
+        const editor = tracker.activeEditor;
+        if (!editor) return notifyNoActive();
+        const line =
+          typeof target?.lineNumber === 'number'
+            ? target.lineNumber
+            : editor.selection.active.line + 1;
+        const step = extractSteps(editor.document.getText()).find((s) => s.line === line);
+        if (!step) {
+          vscode.window.showWarningMessage(
+            'TestBench: that line is not a step, so it has no code-behind.',
+          );
+          return;
+        }
+        const file = codeBehindPathFor(editor.document.uri.fsPath);
+        if (!fs.existsSync(file)) {
+          const choice = await vscode.window.showInformationMessage(
+            `No code-behind yet for ${path.basename(editor.document.uri.fsPath)}.`,
+            'Compile Code-behind',
+          );
+          if (choice === 'Compile Code-behind') await compile();
+          return;
+        }
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+        const entryLine = findEntryLine(doc.getText(), step.instruction);
+        const shown = await vscode.window.showTextDocument(doc, { preview: false });
+        if (entryLine === null) {
+          vscode.window.setStatusBarMessage(
+            'TestBench: this step has no entry yet — compile it',
+            3000,
+          );
+          return;
+        }
+        const pos = new vscode.Position(entryLine - 1, 0);
+        shown.selection = new vscode.Selection(pos, pos);
+        shown.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+      },
+    ),
+
+    vscode.commands.registerCommand('testbench-native.applyCodeBehind', async () => {
+      const written = await diffs.apply();
+      if (written.length === 0) {
+        vscode.window.setStatusBarMessage('TestBench: nothing to apply', 2000);
+        return;
+      }
+      const names = written.map((f) => path.basename(f)).join(', ');
+      getOutputChannel().appendLine(`Applied code-behind: ${written.join(', ')}`);
+      vscode.window.setStatusBarMessage(`TestBench: applied ${names}`, 3000);
+    }),
+
+    vscode.commands.registerCommand('testbench-native.discardCodeBehind', async () => {
+      await diffs.discard();
+      vscode.window.setStatusBarMessage('TestBench: discarded the compiled code-behind', 2000);
+    }),
+
     vscode.commands.registerCommand('testbench-native.revealEnvFile', async () => {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
@@ -548,6 +748,30 @@ function notifyNoActive(): void {
     'TestBench: open a Markdown file with a "## Steps" heading first',
     2500,
   );
+}
+
+/**
+ * The 1-based step number a compile would use for `line`, or why it cannot be
+ * known (stories/codebehind-compile.md §Select).
+ *
+ * A compile numbers steps in the EXPANDED test, so the authored position only
+ * answers for a flat one. Anything above this line that expands into more than
+ * itself — a `[skill: ...]` invocation, a bare section call — breaks the
+ * correspondence, and there is no way to recover it from the document alone.
+ * `'expanded'` says so rather than returning a number that means a different
+ * step.
+ */
+export function authoredStepNumber(text: string, line: number): number | 'expanded' | null {
+  const steps = extractSteps(text);
+  const sectionNames = new Set(extractSections(text).map((s) => s.name.trim().toLowerCase()));
+  const at = steps.findIndex((s) => s.line === line);
+  if (at === -1) return null;
+  for (const step of steps.slice(0, at)) {
+    const instruction = step.instruction.trim();
+    if (/^\[\s*skill\s*:/i.test(instruction)) return 'expanded';
+    if (sectionNames.has(instruction.toLowerCase())) return 'expanded';
+  }
+  return at + 1;
 }
 
 /**

@@ -368,7 +368,21 @@ export interface FileStateSnapshot {
   isTestFile: boolean;
   text: string;
   breakpoints: number[];
-  statuses: Array<[number, 'running' | 'pass' | 'pass-cached' | 'fail' | 'skip' | 'stopped']>;
+  statuses: Array<
+    [
+      number,
+      | 'running'
+      | 'pass'
+      | 'pass-cached'
+      /** Passed by running its code-behind entry — ⚙. */
+      | 'pass-code-behind'
+      /** Passed under AI after its entry threw — ⚠, recompile. */
+      | 'pass-stale'
+      | 'fail'
+      | 'skip'
+      | 'stopped',
+    ]
+  >;
   errors: Array<[number, ErrorPayload]>;
   breakpointStop: number | null;
   selectedLines: number[];
@@ -497,6 +511,35 @@ export interface HostSkillRerunAvailableMsg {
   } | null;
 }
 
+/**
+ * A compile is running, or has stopped (stories/codebehind-compile.md §What
+ * the author sees). The panel shows the phase lines while `running`, and
+ * disables Compile so a second one cannot be started against the same file —
+ * the server would refuse it anyway.
+ */
+export interface HostCompileStateMsg {
+  type: 'compileState';
+  running: boolean;
+  /** Absolute path of the test being compiled. Present on start. */
+  file?: string;
+}
+
+/** One already-formatted compile log line, for the panel to append. */
+export interface HostCompileEventMsg {
+  type: 'compileEvent';
+  line: string;
+}
+
+/**
+ * Offer (or withdraw) "Compile from this run" — the action that skips the
+ * Record phase by compiling from the run that just finished. Sent with a
+ * session id after a green run, `sessionId: null` to withdraw.
+ */
+export interface HostCompileFromRunAvailableMsg {
+  type: 'compileFromRunAvailable';
+  sessionId: string | null;
+}
+
 export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
@@ -507,7 +550,10 @@ export type HostToWebviewMsg =
   | HostRunningMsg
   | HostBreakpointStopMsg
   | HostBatchBannerMsg
-  | HostSkillRerunAvailableMsg;
+  | HostSkillRerunAvailableMsg
+  | HostCompileStateMsg
+  | HostCompileEventMsg
+  | HostCompileFromRunAvailableMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -620,7 +666,18 @@ export interface WebviewRerunSkillStepMsg {
   edits: Record<string, string>;
 }
 
+/**
+ * User pressed Compile in the runner panel. `fromSessionId` is set by the
+ * "Compile from this run" action, which skips the Record phase by compiling
+ * from the run that just finished (stories/codebehind-compile.md).
+ */
+export interface WebviewCompileMsg {
+  type: 'compile';
+  fromSessionId?: string;
+}
+
 export type WebviewToHostMsg =
+  | WebviewCompileMsg
   | WebviewReadyMsg
   | WebviewRunMsg
   | WebviewRunAllMsg
@@ -654,7 +711,10 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'running' ||
     t === 'breakpointStop' ||
     t === 'batchBanner' ||
-    t === 'skillRerunAvailable'
+    t === 'skillRerunAvailable' ||
+    t === 'compileState' ||
+    t === 'compileEvent' ||
+    t === 'compileFromRunAvailable'
   );
 }
 
@@ -676,7 +736,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'focusTestResults' ||
     t === 'clearStatus' ||
     t === 'webviewState' ||
-    t === 'rerunSkillStep'
+    t === 'rerunSkillStep' ||
+    t === 'compile'
   );
 }
 

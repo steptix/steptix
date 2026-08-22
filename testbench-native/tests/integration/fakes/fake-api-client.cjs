@@ -51,6 +51,16 @@ class FakeApiClient {
     };
     /** Optional scripted sequence to exercise the not-finalized-then-finalized race. */
     this.lastRunSequence = null;
+    /** Each compile request body passed to compileCodeBehind(), in call order. */
+    this.compileRequests = [];
+    /**
+     * What the next compile streams. Replaced per test. The default is a green
+     * one-file compile, which is the shape every caller has to handle; a test
+     * that wants a red one sets its own.
+     */
+    this.compileEvents = null;
+    /** Set to an ApiClientError kind to make the next compile throw. */
+    this.compileThrows = null;
   }
 
   /** Liveness probe used by the re-run pre-flight (GET /sessions/:id). */
@@ -131,6 +141,44 @@ class FakeApiClient {
     } finally {
       signal.removeEventListener('abort', onAbort);
       if (this.activeStream === stream) this.activeStream = null;
+    }
+  }
+
+  /**
+   * Async generator matching ApiClient.compileCodeBehind. Streams whatever
+   * `compileEvents` holds and finishes — a compile is not interactive, so
+   * unlike streamSteps there is nothing for a test to push mid-flight.
+   */
+  async *compileCodeBehind(request, signal) {
+    this.compileRequests.push(request);
+    if (this.compileThrows) {
+      throw new ApiClientError(this.compileThrows, `fake compile error: ${this.compileThrows}`);
+    }
+    const events = this.compileEvents ?? [
+      { type: 'compile:phase', phase: 'select', message: '1 step(s) to generate, 0 kept, 0 already AI' },
+      { type: 'compile:phase', phase: 'record', message: 'running 1 step(s) under AI' },
+      { type: 'compile:step', phase: 'generate', step: 1, message: 'generated' },
+      { type: 'compile:phase', phase: 'replay', round: 1, message: '1/1 passed as code' },
+      { type: 'compile:done', status: 'green', message: 'Compiled' },
+      {
+        type: 'compile:result',
+        status: 'green',
+        files: {},
+        summary: {
+          test: request.testFilePath,
+          totalSteps: 1,
+          compiled: 1,
+          kept: 0,
+          keptAi: 0,
+          rounds: 1,
+          tokensUsed: 1234,
+          written: [],
+        },
+      },
+    ];
+    for (const event of events) {
+      if (signal.aborted) throw new ApiClientError('aborted', 'aborted');
+      yield event;
     }
   }
 

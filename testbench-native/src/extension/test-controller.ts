@@ -450,7 +450,19 @@ export class TestBenchTestController implements vscode.Disposable {
           emit(`▶ step on line ${event.line}`);
           break;
         case 'step:pass':
-          emit(`✓ step on line ${event.line} passed${event.fromCache ? '  (cached)' : ''}`);
+          // Same vocabulary as the interactive run log, so the two surfaces
+          // never disagree about how a step passed.
+          if (event.codeBehindStale) {
+            emit(
+              `⚠ step on line ${event.line} passed under AI — code-behind failed: ` +
+                event.codeBehindStale.error,
+            );
+          } else {
+            emit(
+              `✓ step on line ${event.line} passed` +
+                (event.fromCodeBehind ? '  (code-behind)' : event.fromCache ? '  (cached)' : ''),
+            );
+          }
           if (event.output) emit(`  ${event.output}`);
           break;
         case 'step:fail':
