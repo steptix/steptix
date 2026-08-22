@@ -553,9 +553,15 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
   });
 }
 
+/** Joins the parts of an entry key. NUL because it is the one character
+ *  neither a path, a section name nor step text can contain — the same choice
+ *  the loader's own index makes, and written as an escape so the file stays
+ *  text as far as git is concerned. */
+const KEY_SEP = '\u0000';
+
 /** Identifies the entry a step binds to. Two inlinings of one body share it. */
 function entryKeyOf(binding: CodeBehindBinding): string {
-  return `${binding.file} ${binding.section ?? ''} ${binding.source} ${binding.occurrence}`;
+  return [binding.file, binding.section ?? '', binding.source, binding.occurrence].join(KEY_SEP);
 }
 
 /**
