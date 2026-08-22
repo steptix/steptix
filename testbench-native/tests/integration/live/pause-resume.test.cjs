@@ -1,19 +1,29 @@
 /**
  * Live end-to-end pause/resume/pause test.
  *
- * Drives github.md against the REAL ai-ui-automation Sessions API server
+ * Drives securebank.md against the REAL ai-ui-automation Sessions API server
  * (SERVER_URL from templates/.env, expected to be running on
  * http://localhost:3100). A real browser actually opens, real AI calls
  * happen, real network requests fly. Validates the spec promise that the
  * user can pause mid-step, resume, and pause again — through the
  * testbench command surface, not the controller internals.
  *
+ * The site under test is fixtures/test-app (SecureBank), booted on :8787 by
+ * runLiveTest.cjs. This used to drive github.md against real github.com,
+ * which made the test depend on a shared external account: a concurrent run
+ * signing out could invalidate this one's session mid-test, GitHub could
+ * challenge or rate-limit the login, and it eventually stopped working
+ * altogether once the account began 2FA-challenging. None of those failures
+ * were TestBench regressions — which is exactly the problem, because they
+ * were indistinguishable from ones that would be. The fixture app has
+ * static markup, fixed credentials and no rate limit, so a failure here now
+ * means something in the pause/resume path actually broke.
+ *
  * NOT part of the fast integration suite. Run via:
  *   node tests/integration/runLiveTest.cjs
  *
  * Required env (from templates/.env, picked up via walkup):
- *   SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY,
- *   GITHUB_USERNAME, GITHUB_PASSWORD
+ *   SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -72,12 +82,12 @@ describe('TestBench live pause/resume against real server', function () {
   it('pauses mid-step, resumes, pauses again', async () => {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(workspaceRoot, 'no workspace folder open — runLiveTest.cjs must pass templates/ as workspace');
-    const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'github.md');
-    assert.ok(fs.existsSync(testFile), `github.md not found at ${testFile}`);
+    const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'securebank.md');
+    assert.ok(fs.existsSync(testFile), `securebank.md not found at ${testFile}`);
 
     const uri = vscode.Uri.file(testFile);
     await vscode.commands.executeCommand('vscode.open', uri);
-    await waitFor('github.md becomes active editor', () => {
+    await waitFor('securebank.md becomes active editor', () => {
       const editor = vscode.window.activeTextEditor;
       return editor && editor.document.uri.toString() === uri.toString();
     });
@@ -95,11 +105,13 @@ describe('TestBench live pause/resume against real server', function () {
       10_000,
     );
 
-    // Cursor on step 1 (line 16: "1. Navigate to the baseUrl"). Run from
-    // top via runAll so we get all 9 steps in order.
+    // Cursor on step 1 so runSelected runs the whole file from the top,
+    // giving us all 9 steps in order. securebank.md line 17 is
+    // `1. Navigate to the baseUrl`; Position is 0-based, hence the -1.
+    const STEP_1_LINE = 17;
     editor.selection = new vscode.Selection(
-      new vscode.Position(15, 0),
-      new vscode.Position(15, 0),
+      new vscode.Position(STEP_1_LINE - 1, 0),
+      new vscode.Position(STEP_1_LINE - 1, 0),
     );
 
     console.log('[live] tracker before run:', JSON.stringify({

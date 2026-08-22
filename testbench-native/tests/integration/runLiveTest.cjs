@@ -1,8 +1,10 @@
 // Live integration runner. Like runTest.cjs, but:
 //  - workspace = ../../templates so .env walk-up from
-//    init/tests/github.md reaches templates/.env
+//    init/tests/securebank.md reaches templates/.env
 //  - test entry = tests/integration/live/index.cjs
 //  - much longer timeouts; the run actually opens a real browser
+//  - boots fixtures/test-app on :8787, the site the browser-driving live
+//    suites point at (see startTestApp below)
 //
 // Prereq: ai-ui-automation Sessions API server is running locally
 // (e.g. `npm run dev` from the repo root, listening on
@@ -14,13 +16,96 @@ const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
 
 const VERSION = '1.95.0';
 
+// The fixture app's port is baked into each fixture's `## Config` baseUrl
+// (and into every tests/integration/*.md in the repo root), so it is pinned
+// rather than allocated. That is also why we adopt an already-listening
+// server instead of failing on EADDRINUSE: a developer with the app already
+// running — or a concurrent live run in another worktree — is serving the
+// same static fixture, and two runs sharing it is harmless. It holds no
+// per-run state that one run could corrupt for another.
+const TEST_APP_PORT = 8787;
+const TEST_APP_URL = `http://127.0.0.1:${TEST_APP_PORT}`;
+
+async function isTestAppUp() {
+  try {
+    const res = await fetch(`${TEST_APP_URL}/api/csrf-token`);
+    return res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Start fixtures/test-app unless something is already serving it.
+ *
+ * Returns a stop() that kills only a server WE spawned — adopting someone
+ * else's and then killing it would break the session they were using.
+ */
+async function startTestApp(repoRoot) {
+  if (await isTestAppUp()) {
+    console.log(`  test app:  already running at ${TEST_APP_URL} (adopted)`);
+    return () => {};
+  }
+
+  const serverPath = path.join(repoRoot, 'fixtures', 'test-app', 'server.ts');
+  if (!fs.existsSync(serverPath)) {
+    throw new Error(`fixture test app not found at ${serverPath}`);
+  }
+
+  const proc = cp.spawn(process.execPath, ['--import', 'tsx', serverPath], {
+    cwd: repoRoot,
+    env: { ...process.env, PORT: String(TEST_APP_PORT) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  proc.stderr?.on('data', (b) => process.stderr.write(`[test-app] ${b}`));
+
+  // A spawned child and its stdio pipes each hold a ref on our event loop.
+  // Without these unrefs the runner never exits after a PASSING run: the
+  // suite finishes, the report is written, and then node sits forever with
+  // nothing to do but a live child handle — which also means the
+  // process.on('exit') cleanup below never fires, so the app leaks too.
+  // Only bites when we spawned the app; an adopted one has no child handle,
+  // which is why this hid behind whichever suite ran second.
+  proc.unref();
+  proc.stderr?.unref();
+
+  // Surface an immediate spawn failure (missing tsx, syntax error) as itself
+  // rather than as an opaque 30s readiness timeout.
+  let exited = null;
+  proc.on('exit', (code, signal) => { exited = { code, signal }; });
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (exited) {
+      throw new Error(
+        `test app exited before becoming ready (code=${exited.code} signal=${exited.signal})`,
+      );
+    }
+    if (await isTestAppUp()) {
+      console.log(`  test app:  started at ${TEST_APP_URL} (pid ${proc.pid})`);
+      return () => {
+        if (proc.killed || exited) return;
+        proc.kill('SIGTERM');
+      };
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  proc.kill('SIGKILL');
+  throw new Error(`test app did not become ready at ${TEST_APP_URL} within 30s`);
+}
+
+/** Set once the fixture app is up; invoked on every exit path. */
+let stopTestApp = () => {};
+process.on('exit', () => stopTestApp());
+
 async function main() {
   try {
     const extensionDevelopmentPath = path.resolve(__dirname, '..', '..');
     const extensionTestsPath = path.resolve(__dirname, 'live', 'index.cjs');
-    // Workspace = repo's templates/ directory. github.md sits in
-    // templates/init/tests/, .env sits in templates/. With this workspace
-    // the env walkup terminates at templates/ and finds the .env.
+    // Workspace = repo's templates/ directory. The fixtures the live suites
+    // drive sit in templates/init/tests/, .env sits in templates/. With this
+    // workspace the env walkup terminates at templates/ and finds the .env.
     const workspacePath = path.resolve(
       __dirname,
       '..',
@@ -28,15 +113,19 @@ async function main() {
       '..',
       'templates',
     );
+    const repoRoot = path.resolve(__dirname, '..', '..', '..');
 
     if (!fs.existsSync(path.join(workspacePath, '.env'))) {
       console.error(
         `templates/.env not found at ${workspacePath}. The live test ` +
-          `requires SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY, ` +
-          `GITHUB_USERNAME, GITHUB_PASSWORD in that file.`,
+          `requires SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY in that file.`,
       );
       process.exit(2);
     }
+
+    // Before VS Code, so a fixture-app failure reports as itself rather than
+    // as nine browser steps timing out against a dead port.
+    stopTestApp = await startTestApp(repoRoot);
 
     const codeExe = await downloadAndUnzipVSCode(VERSION);
     const installRoot = path.dirname(codeExe);
@@ -77,6 +166,13 @@ async function main() {
         LIVE_SERVER_URL: process.env.LIVE_SERVER_URL || 'http://localhost:3100',
       },
     });
+
+    // VS Code has exited, so nothing needs the fixture app any more. Stop it
+    // here rather than leaving it to the exit hook: this path is the common
+    // one, and an explicit call keeps teardown deterministic instead of
+    // depending on how node happens to drain its handles.
+    stopTestApp();
+    stopTestApp = () => {};
 
     // Same reasoning as the counted-skips note below, one level up: the report
     // is the only evidence the suite ran. VS Code can exit 0 without ever
