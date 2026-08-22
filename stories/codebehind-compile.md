@@ -103,6 +103,21 @@ its own shape over the findings the compile is acting on. A green compile
 clears the `stale` flags it just fixed, so the next `--only-stale` doesn't
 regenerate them again.
 
+Server runs write it too — the same sidecar, from the batched step loop —
+because a TestBench run is how most people run a test, and without it the
+only runs `--only-stale` could see were CLI ones. Only for a batch that covers
+the whole test as it stands: a subset batch (a breakpoint continuation, an
+`[input:]` split, a partial re-run) knows about some of the steps, and a
+sidecar covering some of the steps reads as one covering all of them.
+
+**On the server path the flags clear on the next run, not at the compile.**
+Clearing is the Write phase's job, and the server never writes — the author's
+Apply does, and the server does not see it. The next run rewrites the sidecar
+wholesale, which is the author's very next act; between Apply and that run, a
+compile would re-select the step it just fixed. Closing that properly means
+either the summary naming the steps it compiled and the client clearing them,
+or an "applied" call back to the server.
+
 ### The compile pipeline
 
 `compileTest(options)` in `src/codebehind/compile.ts`, one core used by the
@@ -219,8 +234,20 @@ on green, 1 otherwise.
 step text, parameters and the *live* DOM, run the entry on the live session,
 and if it passes, offer it in the diff. If it throws, report the error and
 warn that the page may have changed. No record and no replay rounds — the
-real execution just happened. Without a paused session, Compile This Step
-is a full compile with `S = {k}`.
+real execution just happened.
+
+**Deferred.** Compile This Step is always a full compile with `S = {k}`,
+paused session or not. The generate-first variant needs a generation path that
+takes a live session rather than a recording, which is a second generator, and
+the value it adds over `S = {k}` is speed rather than a different answer.
+
+Compile This Step also **refuses** below a `[skill:]` invocation or a section
+call, rather than guessing. A compile numbers steps in the *expanded* test,
+and a body that expands into several steps breaks the correspondence with the
+authored numbering — which the editor is the only thing that can see. There is
+no way to recover the expanded number from the document alone, so the command
+says so and offers the whole-test compile instead. Compiling by a number that
+means a different step would be silent and wrong.
 
 ### What the author sees
 
@@ -235,6 +262,14 @@ is a full compile with `S = {k}`.
   **Apply** and **Discard**. Apply writes through the workspace API so it is
   undoable and shows in Source Control like any edit. The CLI writes
   directly because it is the scriptable path.
+
+  Apply returns focus to the test file. Every TestBench command works against
+  the active editor, and the diff it was pressed in is not a test file — so
+  without that, the author's next act (Run, to see the ⚙ marks) silently does
+  nothing. A file being created for the first time is written with
+  `WorkspaceEdit.createFile`'s `contents`, not an insert, so the bytes the
+  compiler produced are the bytes that land: an inserted string is re-ended to
+  the new document's EOL, which on Windows turns the CLI's LF into CRLF.
 - **In the gutter, after runs** — ⚙ the step passed as code, ⚠ its entry
   failed and the step ran under AI (recompile), ✓/✗/⚡ as today. Same
   decoration mechanism and per-file persistence as the existing marks, fed by
@@ -278,7 +313,48 @@ time. The project bundle is resolved per request, as for any run; the
 is silently dropped.
 
 `fromSessionId` is valid while that session is open and only if its step
-results carry DOM snapshots; otherwise the server records.
+results carry DOM snapshots; otherwise the server records. Every refusal is
+said out loud on the stream — "its step results carry no DOM snapshots.
+Recording instead." — because the alternative is a silent extra AI run of the
+whole test.
+
+In practice that is the usual answer today: capturing the DOM either side of
+every step is compile's own Record setting, and an ordinary run does not pay
+for it. So **Compile from this run** is a fast path the server honours when a
+client asks for a run with context, not something a plain Run leaves lying
+around. Making it engage means either a "record for compile" run mode or
+capturing context on ordinary runs, and both are their own decision.
+
+The events are their own vocabulary — `compile:phase`, `compile:step`,
+`compile:done`, `compile:result`, plus `output` for the narration above — not
+the run stream's `step:pass` / `done`. Same SSE framing, different names: a
+client that painted "step 4 generated" in the gutter would be wrong, and
+nothing in a compile has a line number.
+
+The compile's own AI client is built from the **server's** `ai` config with
+the project's env over it — the client a session builds, not the project
+config's `ai` block. A compile is a run plus some prompts, and one that called
+a different model or gateway than the run it is compiling would be generating
+code for a recording it could not have made. Caught live: a project pinning a
+placeholder `gatewayUrl` recorded fine through the session and then failed at
+Generate with "Connection error".
+
+Record and Replay drive the session machinery — a fresh session each, closed
+after — and they send the compiler's **own expansion** with them rather than
+letting the server expand a second time. Two answers to "which `.steps.ts`
+does step 7 bind into" only have to disagree once for a skill's entries to
+land in the test's file. For the same reason the server parses the test **from
+disk**: the pipeline needs the whole expansion, and the replay runs the file
+itself. The `steps` the client sends are a guard — a length mismatch says so
+on the stream — and TestBench saves the buffer before compiling.
+
+`dryRun` is accepted for parity with the CLI flag and ignored: the server
+never writes under the project, so a client asking for `dryRun: false` gets
+the proposed files, not a write.
+
+The per-file lock folds case on Windows. `uri.fsPath` lower-cases the drive
+letter and a CLI path usually does not, so two spellings of one file would
+otherwise take two locks and compile the same test twice, concurrently.
 
 The core it calls is already shaped for it:
 
@@ -309,8 +385,8 @@ the default runs `runTest` in-process.
 
 ## Implementation outline
 
-Phase A (the core, the CLI, the runtime policy) is built. The server
-endpoint, `runner-core` and `testbench-native` are phase B.
+Both phases are built. Phase A was the core, the CLI and the runtime policy;
+phase B the server endpoint, `runner-core` and `testbench-native`.
 
 New:
 
@@ -321,14 +397,33 @@ New:
   before/after-DOM sections and the post-condition rule; the
   `{"entry": null, "reason"}` decline, parsed by `parseStepCodeOrDecline`.
 - `src/cli/commands/compile.ts` — `aiui compile`.
-- `src/server/api-server.ts` + `session-manager.ts` — the compile endpoint,
-  streaming, candidate override, strict mode, per-file lock.
-- `runner-core/src/api-client.ts` — `compileCodeBehind(...)` stream; step
-  event fields `fromCodeBehind`, `codeBehindStale`.
+- `src/server/compile-runner.ts` — `CodeBehindCompiler`: the per-file lock,
+  the project resolution, the `fromSessionId` decision, and the
+  `CompileRunner` that drives the session machinery. Beside the errand runner
+  and shaped like it — no state in the sessions map, the shared project
+  resolver, and the manager's run counter borrowed for the duration.
+- `runner-core/src/api-client.ts` — `compileCodeBehind(...)` stream, on a
+  shared `postSse` the step stream now uses too; step event fields
+  `fromCodeBehind`, `codeBehindStale`; `ApiErrorKind` gains `conflict` so a
+  409 reads as "already compiling" rather than a server fault.
+- `testbench-native/src/extension/codebehind-diff.ts` — the virtual-document
+  provider, the proposal, Apply/Discard.
+
+Modified in phase B:
+
+- `src/server/api-server.ts` — the route, and `parseCompileRequest`: the
+  per-field allow-list, refusing rather than degrading wherever a wrong value
+  would change what compiles.
+- `src/server/session-manager.ts` — `InternalRunOptions` (the four code-behind
+  knobs plus `onRunDetails`), the last-run sidecar write, the retained
+  `lastRunDetails` behind `fromSessionId`, and the two new fields on
+  `step:pass`.
 - `testbench-native` — commands `compileCodeBehind`, `compileStepCodeBehind`,
-  `openCodeBehind`; diff preview with Apply/Discard; ⚙/⚠ decorations;
-  Runner-panel phases and the **Compile from this run** action; summary
-  notification. Patch version bump per CLAUDE.md (runner-core changes too).
+  `openCodeBehind`, `applyCodeBehind`, `discardCodeBehind`; ⚙/⚠ decorations
+  and the `pass-code-behind` / `pass-stale` statuses; both run logs and the
+  editor summary counting them; the panel's Compile button and the
+  **Compile from this run** action. Patch version bump per CLAUDE.md
+  (runner-core changed too).
 
 Modified:
 
@@ -367,12 +462,25 @@ Modified:
   a fully-compiled test never records at all.
 - Server: POST through the real `api-server` entry (the seam that silently
   drops fields), streaming events, per-file lock, `fromSessionId` reuse and
-  fallback to record.
+  fallback to record. The compile core is mocked at `compileTest`, so the
+  suite asserts what reaches it — which is the only way to catch a field the
+  allow-list dropped — and cannot launch a browser.
+- Runner-core: the compile stream client (route, body, frame order, the 409 as
+  a `conflict`, abort), and the narrower over the new frames.
 - CLI: flags, exit codes, `--dry-run` output.
 - Extension integration (FakeApiClient): the command, phase lines, diff open,
   Apply writes the file, ⚙/⚠ marks from step events.
-- Live: compile the local smoke test from step-codebehind's verification to
-  green, then replay with an invalid AI key — 0 tokens.
+- Live, over HTTP: compile the local smoke test to green through
+  `POST /codebehind/compile`, apply the returned file by hand (what Apply
+  does), then replay with an invalid AI key — 0 tokens. Plus the 409 under a
+  genuinely concurrent second request, both `fromSessionId` refusals, and the
+  three-weeks-later loop: break an entry, run, watch the ⚠ arrive on
+  `step:pass` and in the sidecar, then `--only-stale` recompiles that step
+  alone and leaves the others byte-identical.
+- Live, through the extension: `templates/init/tests/compile-codebehind.md`
+  against `fixtures/test-app` — Compile, the diff, Apply, and a run that
+  paints ⚙ on every step. The fixture app is started by the test and killed
+  after, so nothing depends on an external site or a shared account.
 
 ## Non-goals
 

@@ -213,8 +213,15 @@ export class CodeBehindCompiler {
 
     const context = await loadContextFiles(pathResolve(projectRoot, bundle.config.tests.contextDir));
     const tokenTracker = new TokenTracker();
+    // The server's own `ai` config, with the project's env over it — the same
+    // client a session builds, and deliberately NOT the project config's `ai`
+    // block. A compile is a run plus some prompts, and a compile that called a
+    // different model (or gateway) than the run it is compiling would be
+    // generating code for a recording it could not have made. Caught live:
+    // a project pinning a placeholder gatewayUrl recorded fine through the
+    // session and then failed at Generate with "Connection error".
     const aiClient = new AiClient(
-      applyEnvToAiConfig(bundle.config.ai, bundle.envBundle?.env),
+      applyEnvToAiConfig(this.config.ai, bundle.envBundle?.env),
       tokenTracker,
     );
 

@@ -655,6 +655,8 @@ export function registerCommands(
     ),
 
     vscode.commands.registerCommand('testbench-native.applyCodeBehind', async () => {
+      // Read before applying — `apply` consumes the proposal.
+      const testFilePath = diffs.pending?.testFilePath;
       const written = await diffs.apply();
       if (written.length === 0) {
         vscode.window.setStatusBarMessage('TestBench: nothing to apply', 2000);
@@ -662,6 +664,14 @@ export function registerCommands(
       }
       const names = written.map((f) => path.basename(f)).join(', ');
       getOutputChannel().appendLine(`Applied code-behind: ${written.join(', ')}`);
+      // Back to the test. Every TestBench command works against the active
+      // editor, and the diff this was invoked from is not a test file — so
+      // without this the author's next act (Run, to see the ⚙ marks) silently
+      // does nothing.
+      if (testFilePath) {
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(testFilePath));
+        await vscode.window.showTextDocument(doc, { preview: false });
+      }
       vscode.window.setStatusBarMessage(`TestBench: applied ${names}`, 3000);
     }),
 
