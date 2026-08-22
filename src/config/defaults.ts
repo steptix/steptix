@@ -70,12 +70,10 @@ export const DEFAULT_CONFIG: Config = {
     enabled: false,
     dir: '.cache',
   },
-  codebehind: {
-    // Execution needs no flag — a `.steps.ts` beside a test is the author's
-    // intent. Generation writes files into the author's project, so it is
-    // opt-in. See stories/step-codebehind.md.
-    generate: false,
-  },
+  // Code-behind has no config section. Execution needs no flag — a `.steps.ts`
+  // beside a test is the author's intent, like a `tools/` directory — and
+  // generation is no longer something a run does, so there is nothing left to
+  // gate (stories/codebehind-compile.md).
   logging: {
     consoleLogLevel: 'info',
     serverFileLogLevel: 'compact',

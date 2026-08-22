@@ -87,6 +87,53 @@ export async function writeCodeBehindEntry(
   return action;
 }
 
+/**
+ * Write a complete code-behind file the compiler produced
+ * (stories/codebehind-compile.md, "Write").
+ *
+ * Validated before it lands, so a file that would not compile is never written
+ * at all — the same invariant the entry writer has, reached the other way
+ * round because here the whole file is new rather than one span of an existing
+ * one.
+ */
+export async function writeCodeBehindFile(file: string, contents: string): Promise<void> {
+  const target = path.resolve(file);
+  const invalid = await validateCodeBehindSource(target, contents);
+  if (invalid) {
+    throw new Error(
+      `Refusing to write ${target}: the proposed content does not compile: ${invalid}`,
+    );
+  }
+  await atomicWrite(target, contents);
+}
+
+/**
+ * esbuild-validate proposed content **without** touching the file it is
+ * destined for. Returns the error message, or null when it compiles.
+ *
+ * Bundled from a temp `.ts` inside the cache dir beside the destination, so
+ * `ai-ui-automation/codebehind` resolves by the same walk-up the real file
+ * would use. A code-behind file has no relative imports (the generator's rule
+ * 6), which is what makes bundling from a different directory equivalent.
+ */
+export async function validateCodeBehindSource(
+  file: string,
+  contents: string,
+): Promise<string | null> {
+  const dir = resolveCodeBehindCacheDir(file);
+  const temp = path.join(dir, `validate-${randomUUID()}.ts`);
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(temp, contents, 'utf-8');
+    await bundleToolModule(temp, dir);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    await fs.rm(temp, { force: true }).catch(() => {});
+  }
+}
+
 /** Byte-for-byte restore-safe write: temp file in the same directory, then
  *  rename over the target (same filesystem, so the rename is atomic). */
 async function atomicWrite(file: string, contents: string): Promise<void> {

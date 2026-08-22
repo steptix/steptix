@@ -121,6 +121,20 @@ export interface BuildRegistryOptions {
   testFilePath?: string | undefined;
   /** Warning sink; defaults to `logger.warn`. */
   onWarn?: ((message: string) => void) | undefined;
+  /**
+   * Load some code-behind from somewhere else: canonical `.steps.ts` path →
+   * the path to import in its place (stories/codebehind-compile.md, "Replay").
+   *
+   * Compile's replay proves a candidate runs as pure code *before* anything is
+   * written, so it needs the registry pointed at a file the author's tree does
+   * not contain. Bindings keep reporting the canonical `file`, because that is
+   * where an entry would be written and what the report should name — only the
+   * import target moves.
+   *
+   * The override must be a `.ts` path esbuild can bundle, and must not sit
+   * under a `node_modules` segment (see `resolveCodeBehindCacheDir`).
+   */
+  candidateFiles?: Record<string, string> | undefined;
 }
 
 /**
@@ -174,9 +188,21 @@ export async function buildCodeBehindRegistry(
   }
 
   // Pass 2 — load each distinct file once, however many frames resolve to it.
+  // A candidate override swaps only what gets imported; every binding still
+  // names the canonical file.
   const loaded = new Map<string, LoadedCodeBehind>();
   for (const file of filesNeeded) {
-    loaded.set(file, await loadCodeBehindFile(file, warn));
+    const from = options.candidateFiles?.[file];
+    loaded.set(
+      file,
+      await loadCodeBehindFile(
+        from ? path.resolve(from) : file,
+        warn,
+        // Temp modules always land in the CANONICAL file's cache dir, so a
+        // candidate living inside that dir doesn't nest another one.
+        resolveCodeBehindCacheDir(file),
+      ),
+    );
   }
 
   // Pass 3 — align. An entry is claimed at most once per (frame, scope,
@@ -284,6 +310,7 @@ const EMPTY_LOAD: LoadedCodeBehind = { entries: [], lookup: () => undefined };
 async function loadCodeBehindFile(
   file: string,
   warn: (message: string) => void,
+  cacheDir: string = resolveCodeBehindCacheDir(file),
 ): Promise<LoadedCodeBehind> {
   // Stat first. Most tests have no code-behind, and without this every step
   // batch would pay an esbuild load to discover that — and `bundleToolModule`
@@ -297,7 +324,7 @@ async function loadCodeBehindFile(
 
   let entries: StepCodeEntry[];
   try {
-    const { module } = await bundleAndImport(file, resolveCodeBehindCacheDir(file));
+    const { module } = await bundleAndImport(file, cacheDir);
     const exported = module['default'];
     if (!Array.isArray(exported)) {
       warn(

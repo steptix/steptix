@@ -11,16 +11,18 @@ import { parseTestFile } from '../src/parser/markdown.js';
 import { clearSkillCache } from '../src/skills/expander.js';
 import { executeStep } from '../src/runner/step-executor.js';
 import { buildCodeBehindRegistry, type CodeBehindRegistry } from '../src/codebehind/loader.js';
-import { renderStep } from '../src/report/generator.js';
+import { countStepOrigins, renderStep } from '../src/report/generator.js';
 
 /**
- * The three end-to-end behaviours the story names, driven through the real
+ * The end-to-end behaviours the stories name, driven through the real
  * `executeStep` seam with a stubbed AI client and a fake page:
  *
  *  1. a test with a complete hand-written `.steps.ts` runs with zero AI calls;
- *  2. an entry that throws falls through to AI and the step still passes;
- *  3. with `generate: true`, run 1 writes the `.steps.ts` and run 2 replays it
- *     with zero AI calls.
+ *  2. an entry that throws falls through to AI, the step still passes, and the
+ *     result carries `codeBehindStale` — a run flags the failure instead of
+ *     rewriting the file (stories/codebehind-compile.md);
+ *  3. under `codeBehindStrict`, that same throw fails the step instead;
+ *  4. a run never writes a `.steps.ts`, whatever happened.
  *
  * A fake page rather than a browser: none of these turn on what the page
  * does, and the point is the executor's decision order.
@@ -195,16 +197,18 @@ export default defineSteps([
     expect(result.fromCodeBehind).toBe(true);
   });
 
-  it('falls through to AI when the entry throws, and discards it for the rest of the run', async () => {
-    const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+  const BROKEN_STEPS = `import { defineSteps } from 'ai-ui-automation/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
     async run() { throw new Error('#booking-code went away in a redesign'); },
   },
 ]);
-`);
+`;
+
+  it('falls through to AI when the entry throws, flags it stale, and discards it', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', BROKEN_STEPS);
 
     const { steps, registry } = await registryFor(md);
     const { client, calls } = scriptedClient([ACTION_PLAN]);
@@ -226,51 +230,24 @@ export default defineSteps([
     expect(result.status).toBe('passed');
     expect(result.fromCodeBehind).toBeUndefined();
     expect(calls).toHaveLength(1);
+    // The failure is flagged for the next compile rather than repaired here.
+    expect(result.codeBehindStale).toEqual({
+      file: binding.file,
+      source: 'Enter the booking code',
+      error: '#booking-code went away in a redesign',
+    });
     // Discarded for the rest of the run — a re-execution won't re-run the
     // broken code and pay the failure again.
     expect(binding.entry).toBeUndefined();
   });
 
-  it('generates on run 1 and replays with zero AI calls on run 2', async () => {
+  it('fails the step instead of healing under codeBehindStrict — compile replay', async () => {
     const md = await write('booking.md', TEST_MD);
-    const stepsFile = path.join(dir, 'booking.steps.ts');
+    await write('booking.steps.ts', BROKEN_STEPS);
 
-    // Run 1 — no code-behind file at all. Two AI calls for step 1: the action
-    // plan, then the code-behind generation.
-    const generated = [
-      '```ts',
-      `{`,
-      `  source: 'Enter the booking code',`,
-      `  async run({ step }) { step.setVar('code', '220826'); },`,
-      `}`,
-      '```',
-    ].join('\n');
-    const { client, calls } = scriptedClient([ACTION_PLAN, generated]);
-
-    const first = await registryFor(md);
-    const run1 = await executeStep(1, first.steps.length, first.steps[0]!, {
-      page: fakePage(),
-      config: CONFIG,
-      aiClient: client,
-      contextContent: '',
-      testName: 'booking',
-      conversationHistory: [],
-      csrfTokens: {},
-      resolvedParameters: {},
-      codeBehind: first.registry.bindingFor(0)!,
-      codeBehindGenerate: true,
-    });
-
-    expect(run1.status).toBe('passed');
-    expect(run1.fromCodeBehind).toBeUndefined();
-    expect(calls).toHaveLength(2);
-    const written = await fs.readFile(stepsFile, 'utf-8');
-    expect(written).toContain(`source: 'Enter the booking code'`);
-
-    // Run 2 — same test, fresh registry, an AI client that must not be called.
-    const second = await registryFor(md);
-    const resolvedParameters: Record<string, string> = {};
-    const run2 = await executeStep(1, second.steps.length, second.steps[0]!, {
+    const { steps, registry } = await registryFor(md);
+    const binding = registry.bindingFor(0)!;
+    const result = await executeStep(1, steps.length, steps[0]!, {
       page: fakePage(),
       config: CONFIG,
       aiClient: forbiddenClient(),
@@ -278,19 +255,22 @@ export default defineSteps([
       testName: 'booking',
       conversationHistory: [],
       csrfTokens: {},
-      resolvedParameters,
-      codeBehind: second.registry.bindingFor(0)!,
-      codeBehindGenerate: true,
+      resolvedParameters: {},
+      codeBehind: binding,
+      codeBehindStrict: true,
     });
 
-    expect(run2.status).toBe('passed');
-    expect(run2.fromCodeBehind).toBe(true);
-    expect(resolvedParameters['code']).toBe('220826');
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('#booking-code went away in a redesign');
+    expect(result.fromCodeBehind).toBe(true);
+    expect(result.codeBehindStale).toBeUndefined();
+    // The entry stays bound: a strict replay is not healing anything.
+    expect(binding.entry).toBeDefined();
   });
 
-  it('does not generate when the config gate is off', async () => {
+  it('never writes a .steps.ts from a run — generation is `aiui compile`', async () => {
     const md = await write('booking.md', TEST_MD);
-    const { client } = scriptedClient([ACTION_PLAN]);
+    const { client, calls } = scriptedClient([ACTION_PLAN]);
     const { steps, registry } = await registryFor(md);
 
     const result = await executeStep(1, steps.length, steps[0]!, {
@@ -303,10 +283,11 @@ export default defineSteps([
       csrfTokens: {},
       resolvedParameters: {},
       codeBehind: registry.bindingFor(0)!,
-      // codeBehindGenerate omitted — defaults to off, per config.
     });
 
     expect(result.status).toBe('passed');
+    // One call: the action plan. There is no second, generating call any more.
+    expect(calls).toHaveLength(1);
     await expect(fs.access(path.join(dir, 'booking.steps.ts'))).rejects.toThrow();
   });
 
@@ -345,7 +326,7 @@ export default defineSteps([
     expect(plain).not.toContain('⚙');
   });
 
-  it('leaves an `ai: true` step to the AI, and never generates over it', async () => {
+  it('leaves an `ai: true` step to the AI, and never rewrites the file', async () => {
     const md = await write('booking.md', TEST_MD);
     await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
 export default defineSteps([
@@ -366,13 +347,43 @@ export default defineSteps([
       csrfTokens: {},
       resolvedParameters: {},
       codeBehind: registry.bindingFor(0)!,
-      codeBehindGenerate: true,
     });
 
     expect(result.status).toBe('passed');
     expect(result.fromCodeBehind).toBeUndefined();
-    // One call: the action plan. No second call for generation.
     expect(calls).toHaveLength(1);
     expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).toBe(before);
+  });
+
+  it('renders ⚠ and the recompile hint for a stale step, and counts it in the summary', () => {
+    const html = renderStep({
+      index: 1,
+      instruction: 'Enter the booking code',
+      status: 'passed',
+      turns: [],
+      durationMs: 42,
+      retried: false,
+      codeBehindStale: {
+        file: '/p/tests/booking.steps.ts',
+        source: 'Enter the booking code',
+        error: 'locator.fill: Timeout 30000ms exceeded',
+      },
+    });
+    expect(html).toContain('⚠ ran under AI — code-behind failed');
+    expect(html).toContain('locator.fill: Timeout 30000ms exceeded');
+    expect(html).toContain('aiui compile /p/tests/booking.md --only-stale');
+    // ⚠ outranks ⚙: the step did NOT run as code.
+    expect(html).not.toContain('⚙ code');
+
+    const base = { instruction: 'x', status: 'passed' as const, turns: [], durationMs: 1, retried: false };
+    expect(
+      countStepOrigins([
+        { ...base, index: 1, fromCodeBehind: true },
+        { ...base, index: 2 },
+        { ...base, index: 3, codeBehindStale: { file: 'f', source: 's', error: 'e' } },
+        // Hook rows are not steps of the test and must not be counted.
+        { ...base, index: 3, hookScope: 'afterEach' },
+      ]),
+    ).toEqual({ code: 1, ai: 1, stale: 1 });
   });
 });

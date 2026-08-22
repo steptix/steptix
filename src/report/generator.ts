@@ -83,8 +83,15 @@ export function renderReport(report: TestReport): string {
   const diagnosisHtml = report.diagnosis ? renderDiagnosis(report.diagnosis) : '';
   const modelSummary = summarizeModels(report);
   const scriptText = buildScriptText(report.steps);
+  const origins = countStepOrigins(report.steps);
 
   return template({
+    codeBehindSteps: origins.code,
+    aiSteps: origins.ai,
+    staleSteps: origins.stale,
+    // The row is noise on a test with no code-behind at all, which is most of
+    // them — shown only once there is something to say.
+    showOrigins: origins.code > 0 || origins.stale > 0,
     testName: report.testName,
     status,
     statusClass,
@@ -110,6 +117,32 @@ export function renderReport(report: TestReport): string {
     tabTimelineHtml: new Handlebars.SafeString(renderTabTimeline(report.steps)),
     scriptText,
   });
+}
+
+/**
+ * How each step got done: as code-behind, under AI, or under AI *because* its
+ * code-behind broke (stories/codebehind-compile.md — "9 steps: 7 code-behind,
+ * 1 AI, 1 stale").
+ *
+ * Counted over real steps only: hook rows and interactive ad-hoc rows are not
+ * steps of the test, and including them would make the three numbers fail to
+ * add up to the step count.
+ */
+export function countStepOrigins(steps: StepResult[]): {
+  code: number;
+  ai: number;
+  stale: number;
+} {
+  let code = 0;
+  let ai = 0;
+  let stale = 0;
+  for (const step of steps) {
+    if (step.hookScope || step.interactiveAdHoc || step.interactiveChild) continue;
+    if (step.codeBehindStale) stale++;
+    else if (step.fromCodeBehind) code++;
+    else ai++;
+  }
+  return { code, ai, stale };
 }
 
 /**
@@ -391,6 +424,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
   const toolHtml = step.toolStep ? renderToolStep(step.toolStep) : '';
   const codeBehindHtml = step.codeBehind ? renderCodeBehind(step.codeBehind) : '';
+  const staleHtml = step.codeBehindStale ? renderCodeBehindStale(step.codeBehindStale) : '';
 
   // Skip when this is a tool step: a `[tool: ... out.x="y"]` binding is
   // already shown in the purple Outputs section above via `toolStep.outputs`
@@ -439,11 +473,15 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   // ⚙ for code-behind, ⚡ for the action cache — two different ways a step
   // avoided the model, and which one it was is the first thing you want to
   // know when the step did something surprising.
-  const originBadge = step.fromCodeBehind
-    ? '<span class="badge badge-codebehind" title="Ran this step\'s code-behind — no AI call">⚙ code</span>'
-    : step.fromCache
-      ? '<span class="badge badge-cached" title="Replayed from the action cache — no AI call">⚡ cached</span>'
-      : '';
+  // ⚠ outranks both: the step ran under AI *because* its committed code broke,
+  // and that is the one thing about the step's origin worth acting on.
+  const originBadge = step.codeBehindStale
+    ? '<span class="badge badge-codebehind-stale" title="Its code-behind entry failed and the step healed under AI — recompile">⚠ ran under AI — code-behind failed</span>'
+    : step.fromCodeBehind
+      ? '<span class="badge badge-codebehind" title="Ran this step\'s code-behind — no AI call">⚙ code</span>'
+      : step.fromCache
+        ? '<span class="badge badge-cached" title="Replayed from the action cache — no AI call">⚡ cached</span>'
+        : '';
 
   // Alongside the skill chip, not instead of it: a skill invoked from inside
   // a section carries both.
@@ -483,6 +521,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   </div>
   <div class="step-body">
     ${domHtml}
+    ${staleHtml}
     ${codeBehindHtml}
     ${toolHtml}
     ${turnsHtml}
@@ -524,6 +563,34 @@ export function renderCodeBehind(cb: NonNullable<StepResult['codeBehind']>): str
     <pre><code>${escapeHtml(cb.code)}</code></pre>
   </details>
   ${logsHtml}
+</div>`;
+}
+
+/**
+ * The ⚠ block: this step's committed code-behind broke, the AI carried the
+ * step, and nothing was rewritten.
+ *
+ * Says what to do about it, because the whole point of flagging rather than
+ * regenerating is that the author decides when files change
+ * (stories/codebehind-compile.md).
+ *
+ * Exported for unit-test use; not part of the report's public API.
+ */
+export function renderCodeBehindStale(
+  stale: NonNullable<StepResult['codeBehindStale']>,
+): string {
+  return `<div class="tool-block codebehind-stale-block">
+  <div class="tool-header">
+    <span class="tool-title">⚠ Code-behind failed — ran under AI</span>
+    <span class="tool-name">${escapeHtml(stale.file)}</span>
+  </div>
+  <div class="failure-message">${escapeHtml(stale.error)}</div>
+  <div class="tool-section">
+    <div class="tool-section-label">Recompile</div>
+    <div class="tool-logs"><div class="tool-log-line">aiui compile ${escapeHtml(
+      stale.file.replace(/\.steps\.ts$/, '.md'),
+    )} --only-stale</div></div>
+  </div>
 </div>`;
 }
 

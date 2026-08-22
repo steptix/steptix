@@ -2214,12 +2214,6 @@ export class SessionManager {
         { testFilePath: request.testFilePath },
       );
     }
-    // `projectConfig`, NOT `runConfig`: the latter is spread from the server's
-    // startup config with only the run-settings fields re-sourced, so reading
-    // it here would silently ignore a project's own `codebehind.generate` —
-    // the exact per-project-value-read-off-startup-config trap.
-    const codeBehindGenerate = projectConfig.codebehind?.generate === true;
-
     // ─── StepCache initialization ────────────────────────────────────────
     //
     // Per-request: clear the skill cache (already done at the top of
@@ -3290,7 +3284,6 @@ export class SessionManager {
                   !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== ''),
                 cacheKey: stepCacheKey,
                 ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
-                codeBehindGenerate,
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.

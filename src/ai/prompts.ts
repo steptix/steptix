@@ -864,6 +864,21 @@ export interface StepCodePromptInput {
   captures?: string[];
   /** `formatTestInfo(...)` output, when the caller has it. */
   testInfoSection?: string | undefined;
+  /**
+   * Every step in the test, marked with whether it is being compiled in this
+   * pass. Compile's whole-test context: a step cannot reuse step 2's selector
+   * in step 5 without seeing step 2 (stories/codebehind-compile.md, "Generate").
+   */
+  wholeTest?: Array<{ index: number; text: string; inScope: boolean; isThisStep: boolean }>;
+  /** The candidate `.steps.ts` as it stands — existing entries plus the ones
+   *  generated earlier in this pass — so selectors and helpers stay consistent. */
+  candidateFile?: string | undefined;
+  /** Page state before the step ran. */
+  domBefore?: string | undefined;
+  urlBefore?: string | undefined;
+  /** Page state after the step ran — what a post-condition must assert. */
+  domAfter?: string | undefined;
+  urlAfter?: string | undefined;
 }
 
 /**
@@ -907,16 +922,41 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
         .map((c) => `- \`step.setVar('${c}', ...)\``)
         .join('\n')}`;
 
+  const wholeTestBlock = (input.wholeTest ?? []).length === 0
+    ? ''
+    : `\n\n## The whole test\n${(input.wholeTest ?? [])
+        .map((s) => {
+          const marks = [
+            s.isThisStep ? '← THIS STEP' : '',
+            !s.isThisStep && s.inScope ? '(also being compiled)' : '',
+            !s.inScope && !s.isThisStep ? '(already has code, or stays AI)' : '',
+          ].filter(Boolean).join(' ');
+          return `${s.index}. ${s.text}${marks ? `   ${marks}` : ''}`;
+        })
+        .join('\n')}`;
+
+  const candidateBlock = input.candidateFile
+    ? `\n\n## The code-behind file as it stands\nReuse its selectors and helpers where they fit; stay consistent with its style.\n\n\`\`\`ts\n${input.candidateFile}\n\`\`\``
+    : '';
+
+  const domBlock = (dom: string | undefined, url: string | undefined, when: string): string =>
+    !dom && !url
+      ? ''
+      : `\n\n## Page ${when} the step${url ? `\nURL: ${url}` : ''}${
+          dom ? `\n\n\`\`\`html\n${dom}\n\`\`\`` : ''
+        }`;
+
   const textContent = `${testInfoBlock}A natural-language test step just passed under AI control. Write the Playwright TypeScript that reproduces it deterministically, so future runs need no model call.
 
 ## The step, exactly as authored
 ${input.rawStepText}
+${wholeTestBlock}
 
 ## Parameters in scope
 ${paramBlock}
 
 ## The actions the AI performed (this run's transcript)
-${actionBlock}${assertionBlock}${captureBlock}
+${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}
 
 ## What to return
 
@@ -924,6 +964,13 @@ Respond with ONLY this JSON — the code-behind entry as a single string field (
 
 {
   "entry": "{ source: ..., async run({ page, step, log }) { ... } }"
+}
+
+If this step cannot be expressed as code — it needs a framework action (opening or switching a browser or tab), interactive input, or a judgement code cannot make — decline instead, and say why in one sentence:
+
+{
+  "entry": null,
+  "reason": "needs a human to read the confirmation screen"
 }
 
 The "entry" string holds one TypeScript object literal with exactly this shape:
@@ -951,6 +998,7 @@ Rules — all of them are enforced:
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
 6. **No imports.** Everything you need arrives via the context object.
 7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.
+8. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
 
 Respond with ONLY the JSON object — no prose around it.`;
 
