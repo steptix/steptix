@@ -43,8 +43,13 @@ export interface CompileRequest {
    * against something the author cannot see.
    */
   steps?: string[];
-  /** Inline section bodies, same shape as the step route's. Accepted for the
-   *  same guard; the parse reads the file's own sections. */
+  /**
+   * Inline section bodies, same shape as the step route's. Accepted and
+   * validated, and then not used: the parse above reads the file's own
+   * sections, so a client that sends these is describing the same thing. On
+   * the allow-list because the story's request shape names it and a field the
+   * route silently swallowed would be worse than one it declares.
+   */
   sections?: Record<string, { name: string; headingLine: number; steps: string[]; stepLines: number[] }>;
   envName?: string;
   /** Compile from this open session's last run instead of recording. */
