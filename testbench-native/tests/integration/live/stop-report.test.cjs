@@ -1,7 +1,7 @@
 /**
  * Live end-to-end STOP → report test (issue 021).
  *
- * Drives github.md against the REAL ai-ui-automation Sessions API server
+ * Drives securebank.md against the REAL ai-ui-automation Sessions API server
  * (SERVER_URL from templates/.env, expected on http://localhost:3100). A real
  * browser opens, real AI calls happen. Validates that after a user STOP:
  *   - the run halts promptly (ties to issue 020's fast-stop),
@@ -15,11 +15,15 @@
  * assertions test stale server code. (vitest server tests run against src and
  * are unaffected.)
  *
+ * The site under test is fixtures/test-app (SecureBank), booted on :8787 by
+ * runLiveTest.cjs — see the same note in pause-resume.test.cjs for why this
+ * no longer drives real github.com.
+ *
  * NOT part of the fast suite. Run via: node tests/integration/runLiveTest.cjs
  * (auto-discovered by the glob — no wiring needed).
  *
  * Required env (from templates/.env, picked up via walkup):
- *   SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY, GITHUB_USERNAME, GITHUB_PASSWORD
+ *   SERVER_URL, AIUI_SERVER_API_KEY, AI_API_KEY
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -75,12 +79,12 @@ describe('TestBench live STOP → report recovery against real server', function
   it('stops promptly, recovers the aborted report path + tokens, marks the interrupted step', async () => {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(workspaceRoot, 'no workspace folder — runLiveTest.cjs must pass templates/ as workspace');
-    const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'github.md');
-    assert.ok(fs.existsSync(testFile), `github.md not found at ${testFile}`);
+    const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'securebank.md');
+    assert.ok(fs.existsSync(testFile), `securebank.md not found at ${testFile}`);
 
     const uri = vscode.Uri.file(testFile);
     await vscode.commands.executeCommand('vscode.open', uri);
-    await waitFor('github.md becomes active editor', () => {
+    await waitFor('securebank.md becomes active editor', () => {
       const editor = vscode.window.activeTextEditor;
       return editor && editor.document.uri.toString() === uri.toString();
     });
@@ -90,9 +94,14 @@ describe('TestBench live STOP → report recovery against real server', function
     }
     await waitFor('testbench detects test file', () => hooks.tracker.snapshot().isTestFile === true, 10_000);
 
-    // Run the whole test from the top.
+    // Run the whole test from the top. securebank.md line 17 is
+    // `1. Navigate to the baseUrl`; Position is 0-based, hence the -1.
+    const STEP_1_LINE = 17;
     const editor = vscode.window.activeTextEditor;
-    editor.selection = new vscode.Selection(new vscode.Position(15, 0), new vscode.Position(15, 0));
+    editor.selection = new vscode.Selection(
+      new vscode.Position(STEP_1_LINE - 1, 0),
+      new vscode.Position(STEP_1_LINE - 1, 0),
+    );
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('isRunning becomes true', () => hooks.isRunning(), 30_000);
 

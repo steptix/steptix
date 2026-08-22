@@ -190,10 +190,11 @@ Without `-Port` there is no env var to set — but then nothing else may be
 listening on 3100, or the suite silently tests the *other* checkout's `src/`.
 That silence is why `-Port` is the better default for a worktree.
 
-The rest is already handled: `templates/.env` is both the live workspace and
-the source of `GITHUB_USERNAME`/`GITHUB_PASSWORD`, and Playwright's browsers
-live in `%LOCALAPPDATA%\ms-playwright`, machine-wide, so no worktree
-re-downloads them.
+The rest is already handled: `templates/.env` is the live workspace,
+`runLiveTest.cjs` boots the `fixtures/test-app` site the browser-driving
+suites point at, and Playwright's browsers live in
+`%LOCALAPPDATA%\ms-playwright`, machine-wide, so no worktree re-downloads
+them.
 
 ### Running live suites in two worktrees at once
 
@@ -215,24 +216,26 @@ contend on is per-worktree:
 - **Playwright** — shared binaries, per-launch temp profiles.
 - **`reports/` and `.cache/`** — resolved against the project root.
 
-**The exception is the GitHub account.** `templates/init/tests/github.md` is a
-real login flow — sign in, list repos, then *sign out* — and both worktrees
-would run it with the same credentials from the same IP. One run's sign-out
-can invalidate the other's session mid-test, and GitHub may challenge or
-rate-limit simultaneous logins. No amount of worktree isolation fixes a shared
-external account.
+- **The fixture app** — `fixtures/test-app` on the pinned port 8787, booted
+  by `runLiveTest.cjs`. First run in wins the port; later runs probe it,
+  adopt it, and leave it alone on exit. Safe to share because it serves
+  static markup and holds no per-run state.
 
-That hits exactly two suites, `pause-resume` and `stop-report`. So either
-scope concurrent runs away from those two with `TESTBENCH_LIVE_GREP` and
-serialize them, or give one worktree a second GitHub account in its own
-`templates/.env` — already per-worktree and gitignored, so that works today
-with no code change.
+There used to be an exception here: `templates/init/tests/github.md` drove a
+real github.com login, so two worktrees ran it with the same credentials from
+the same IP, and one run's sign-out could invalidate the other's session
+mid-test. That is gone — `pause-resume` and `stop-report` now drive
+`templates/init/tests/securebank.md` against the fixture app instead. Same
+shape of flow (navigate, sign in, read a list, sign out), no external account,
+no rate limit, no 2FA challenge. `github.md` itself stays on disk: the fast
+suite opens it as a parse fixture, and it remains a worked example of testing
+a real site.
 
-The AI gateway key is shared too. Not a correctness problem, but concurrent
+The AI gateway key is still shared. Not a correctness problem, but concurrent
 runs share whatever rate limit it carries, so a flake there is not
 automatically a regression.
 
-Traced by reading, not yet proven by running two suites at once.
+Traced by reading, not yet proven by running two full suites at once.
 
 ### Why the junction repair matters
 
