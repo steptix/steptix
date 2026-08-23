@@ -1,3 +1,4 @@
+import { formatParameterBlock } from '../ai/prompts.js';
 import type { ChatMessage, MessageContentBlock } from '../ai/types.js';
 
 /**
@@ -24,16 +25,14 @@ export interface RepairPromptInput {
   screenshotBase64?: string | undefined;
   /** Parameter names and their resolved values, as for generation. */
   parameters: Array<{ name: string; value: string }>;
+  /** The step's environment references with their values, as for generation. */
+  envRefs?: Array<{ ref: string; value: string }> | undefined;
   /** Which round this is, and how many there are. */
   round?: { number: number; max: number } | undefined;
 }
 
 export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
-  const paramBlock = input.parameters.length === 0
-    ? '(this step uses no parameters)'
-    : input.parameters
-        .map((p) => `- {{${p.name}}} resolves to ${JSON.stringify(p.value)}`)
-        .join('\n');
+  const paramBlock = formatParameterBlock(input.parameters, input.envRefs ?? []);
 
   const roundLine = input.round
     ? `\nThis is repair round ${input.round.number} of ${input.round.max}. If you cannot make this step work as code, say so with {"entry": null, "reason": "..."} rather than guessing again.\n`
@@ -71,7 +70,7 @@ Rules:
 
 1. Keep \`source\` **byte-identical** to the authored text above — it is how the entry binds to the step.
 2. Fix the cause the error and the DOM actually show. A locator that timed out usually means the selector is wrong or the code raced the page, not that it needs a longer timeout.
-3. Read parameters via \`step.getVar\`, never inline their values.
+3. Read parameters via \`step.getVar\`, never inline their values — and an environment placeholder by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`. Its value is this environment's; the file must run against the others.
 4. Compute dynamic values (dates, derived codes) at runtime.
 5. End with a post-condition — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page.
 6. No imports; everything arrives via the context object.

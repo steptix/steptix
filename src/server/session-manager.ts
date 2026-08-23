@@ -29,7 +29,11 @@ import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
-import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
+import {
+  envDataSecretValues,
+  interpolateEnvData,
+  type EnvDataContext,
+} from '../parser/interpolate-env-data.js';
 import { resolveDataSourcePath } from '../parser/markdown.js';
 import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
 import {
@@ -3425,6 +3429,9 @@ export class SessionManager {
                   !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== ''),
                 cacheKey: stepCacheKey,
                 ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
+                // What `${data.url}` in the step text was resolved against,
+                // so the entry's `step.getVar('data.url')` reads the same value.
+                ...(envDataCtx && { envData: envDataCtx }),
                 ...(cb?.strict !== undefined && { codeBehindStrict: cb.strict }),
                 ...(request.captureStepContext === true && { captureStepContext: true }),
                 // No interactive console attached to a server-driven run —
@@ -3952,6 +3959,7 @@ export class SessionManager {
         status: overallStatus === 'passed' ? 'passed' : 'failed',
         startedAt: new Date(runStartTime).toISOString(),
         parameters: resolvedParameters,
+        ...(envDataCtx && { secrets: envDataSecretValues(envDataCtx) }),
         source: 'server',
       });
     }

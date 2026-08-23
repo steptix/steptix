@@ -35,6 +35,7 @@ import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cach
 import { fingerprintAssertion } from '../cache/step-cache.js';
 import type { CodeBehindBinding } from '../codebehind/loader.js';
 import { entrySourceText, runCodeBehindEntry } from '../codebehind/execute.js';
+import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
 
@@ -123,6 +124,13 @@ export interface StepExecutorOptions {
    * go. Mutable: a failing entry is discarded here for the rest of the run.
    */
   codeBehind?: CodeBehindBinding;
+  /**
+   * The run's env/data context — what `${data.url}` in the step text was
+   * resolved against. A code-behind entry reads the same references through
+   * `step.getVar('data.url')` (stories/codebehind-env-data.md). Absent when
+   * the run has no environment.
+   */
+  envData?: EnvDataContext;
   /**
    * Strict code-behind: an entry that throws **fails the step** instead of
    * falling through to AI (stories/codebehind-compile.md, "Replay").
@@ -541,6 +549,7 @@ async function runCodeBehindStep(
     context: active?.context ?? page.context(),
     browser: active?.browser ?? page.context().browser()!,
     resolvedParameters: opts.resolvedParameters ?? {},
+    ...(opts.envData && { envData: opts.envData }),
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
     label: `codebehind:${stepIndex}`,
   });

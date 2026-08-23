@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AIAction } from '../ai/types.js';
 import type { AssertionResult, StepResult, StepStatus } from '../report/types.js';
 import { logger } from '../utils/logger.js';
+import { isSecretName } from '../parser/parameters.js';
 import { resolveCodeBehindCacheDir } from './loader.js';
 
 /**
@@ -20,7 +21,10 @@ import { resolveCodeBehindCacheDir } from './loader.js';
  * from the actions and the DOM before anything is written — the recording is
  * gitignored with the rest of the cache dir, but readable by anyone with the
  * checkout, and a generator reading a redacted value writes `step.getVar`
- * anyway, which is what it is told to do.
+ * anyway, which is what it is told to do. The environment's secrets — a
+ * secret-named env var, a data leaf under a secret-named key — are redacted
+ * by the same name rule; the caller passes them as `secrets`
+ * (stories/codebehind-env-data.md).
  */
 
 export interface RecordingManifest {
@@ -65,6 +69,9 @@ export interface RecordingInput {
   /** The resolved parameter map. Names go in the manifest; values whose name
    *  looks secret are redacted wherever they appear. */
   parameters: Record<string, string>;
+  /** Further values to redact: the environment's secrets, from
+   *  `envDataSecretValues`. Never named in the manifest. */
+  secrets?: string[] | undefined;
   source: 'cli' | 'server';
 }
 
@@ -77,16 +84,15 @@ export function recordingDirFor(testFilePath: string): string {
   return path.join(resolveCodeBehindCacheDir(resolved), `${base}${DIR_SUFFIX}`);
 }
 
-/** Names that mark a parameter as a secret — the rule `maskSecret` applies to logs. */
-export function isSecretName(name: string): boolean {
-  return /password|secret|token|key/i.test(name);
-}
+export { isSecretName };
 
-/** The values to redact from a recording: those of secret-named parameters. */
-export function secretValues(parameters: Record<string, string>): string[] {
-  return Object.entries(parameters)
+/** The values to redact from a recording: those of secret-named parameters,
+ *  plus any the caller names (the environment's secrets). */
+export function secretValues(parameters: Record<string, string>, extra: string[] = []): string[] {
+  const fromParameters = Object.entries(parameters)
     .filter(([name, value]) => isSecretName(name) && value.length > 0)
     .map(([, value]) => value);
+  return [...new Set([...fromParameters, ...extra.filter((v) => v.length > 0)])];
 }
 
 /** Every occurrence of a secret value, replaced. Longest first, so a value
@@ -108,7 +114,7 @@ export function redact(text: string, secrets: string[]): string {
  */
 export async function writeRecording(testFilePath: string, input: RecordingInput): Promise<string | null> {
   const dir = recordingDirFor(testFilePath);
-  const secrets = secretValues(input.parameters);
+  const secrets = secretValues(input.parameters, input.secrets);
   try {
     await fs.rm(dir, { recursive: true, force: true });
     await fs.mkdir(dir, { recursive: true });
@@ -189,9 +195,10 @@ export async function writeReplayFailure(
   testFilePath: string,
   failure: ReplayFailure,
   parameters: Record<string, string> = {},
+  extraSecrets: string[] = [],
 ): Promise<void> {
   const dir = recordingDirFor(testFilePath);
-  const secrets = secretValues(parameters);
+  const secrets = secretValues(parameters, extraSecrets);
   const name = `replay-${failure.round}.failure`;
   try {
     await fs.mkdir(dir, { recursive: true });

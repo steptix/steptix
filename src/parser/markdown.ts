@@ -153,6 +153,9 @@ export async function parseTestFile(
       filePath: absPath,
     };
     applyEnvDataInterpolation(parsed, ctx);
+    // Kept for the run: the same context answers `step.getVar('data.url')`
+    // from code-behind, and tells a compile what `${data.url}` resolved to.
+    parsed.envData = ctx;
   }
 
   return parsed;

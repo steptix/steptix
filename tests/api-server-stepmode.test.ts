@@ -670,6 +670,99 @@ type: skill
       if (defaultImpl) exec.mockImplementation(defaultImpl);
     });
 
+    it('hands the step the env/data context a code-behind entry reads ${data.url} through, and redacts its secrets from the recording', async () => {
+      // The context is assembled on the server from the request's `envName`
+      // and the project's files (stories/codebehind-env-data.md). It has to
+      // reach `executeStep` as `envData` for `step.getVar('data.url')` to
+      // answer — and the step text the executor gets is the interpolated one,
+      // which is the same context doing the same job one layer up.
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const exec = vi.mocked(executeStep);
+      const defaultImpl = exec.getMockImplementation();
+
+      await fs.writeFile(
+        path.join(cacheRoot, '.env.uat'),
+        ['GITHUB_USERNAME=octocat', 'GITHUB_PASSWORD=hunter2-uat-secret', ''].join('\n'),
+      );
+      await fs.mkdir(path.join(cacheRoot, 'data'), { recursive: true });
+      await fs.writeFile(
+        path.join(cacheRoot, 'data', 'uat.json'),
+        JSON.stringify({ url: 'https://uat.example/', users: { admin: { password: '$GITHUB_PASSWORD' } } }),
+      );
+
+      let observedOpts: any;
+      let observedInstruction: string | undefined;
+      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
+        observedOpts = opts;
+        observedInstruction = instr;
+        return {
+          index: idx, instruction: instr, status: 'passed',
+          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
+          stepContext: {
+            domBefore: '<input value="hunter2-uat-secret">',
+            urlBefore: 'about:blank',
+            domAfter: '<p>signed in as octocat</p>',
+            urlAfter: 'https://uat.example/',
+          },
+        };
+      });
+
+      try {
+        const sessionId = 'env-data-context-' + Date.now();
+        const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+        for await (const ev of sseEvents(url, {
+          steps: ['Navigate to ${data.url}'],
+          sourceLines: [1],
+          testFilePath: cacheTestFile,
+          envName: 'uat',
+          captureStepContext: true,
+        })) {
+          if (ev.type === 'done') break;
+        }
+
+        expect(observedInstruction).toBe('Navigate to https://uat.example/');
+        expect(observedOpts.envData).toBeDefined();
+        expect(observedOpts.envData.envName).toBe('uat');
+        expect(observedOpts.envData.data.url).toBe('https://uat.example/');
+        expect(observedOpts.envData.env.GITHUB_USERNAME).toBe('octocat');
+        // The `$VAR` leaf in the data file resolved against the same env.
+        expect(observedOpts.envData.data.users.admin.password).toBe('hunter2-uat-secret');
+
+        // The recording beside the test carries neither the env var's value
+        // nor the data leaf's — same value here, secret by both names.
+        const { recordingDirFor } = await import('../src/codebehind/recording.js');
+        const before = await fs.readFile(path.join(recordingDirFor(cacheTestFile), 'step-01.before.html'), 'utf-8');
+        const after = await fs.readFile(path.join(recordingDirFor(cacheTestFile), 'step-01.after.html'), 'utf-8');
+        expect(before).toBe('<input value="***">');
+        expect(after).toBe('<p>signed in as octocat</p>');
+      } finally {
+        exec.mockReset();
+        if (defaultImpl) exec.mockImplementation(defaultImpl);
+      }
+    });
+
+    it('hands the step no context when the request names no environment', async () => {
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const exec = vi.mocked(executeStep);
+      const defaultImpl = exec.getMockImplementation();
+      let observedOpts: any;
+      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
+        observedOpts = opts;
+        return { index: idx, instruction: instr, status: 'passed', turns: [], durationMs: 1, retried: false, aiExplanation: 'ok' };
+      });
+      try {
+        const sessionId = 'env-data-none-' + Date.now();
+        const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+        for await (const ev of sseEvents(url, { steps: ['just one step'], sourceLines: [1], testFilePath: cacheTestFile })) {
+          if (ev.type === 'done') break;
+        }
+        expect(observedOpts.envData).toBeUndefined();
+      } finally {
+        exec.mockReset();
+        if (defaultImpl) exec.mockImplementation(defaultImpl);
+      }
+    });
+
     it('absent cacheEnabled with testFilePath leaves the cache OFF (opt-in default)', async () => {
       // Caching is opt-in: a request that says nothing about caching gets
       // none, even with a resolvable testFilePath. This is the default that

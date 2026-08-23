@@ -76,10 +76,19 @@ async function resolveValue(
   return '';
 }
 
+/**
+ * Names that mark a value as a secret: hidden at the prompt, masked in logs,
+ * redacted from a compile's recording. One rule, so a name the prompt hides
+ * is a name the recording redacts.
+ */
+export function isSecretName(name: string): boolean {
+  return /password|secret|token|key/i.test(name);
+}
+
 async function promptForValue(key: string): Promise<string> {
   const rl = readline.createInterface({ input, output });
   try {
-    const isSecret = /password|secret|token|key/i.test(key);
+    const isSecret = isSecretName(key);
     const hint = isSecret ? ' (input hidden)' : '';
     const answer = await rl.question(`  Enter value for "${key}"${hint}: `);
     return answer.trim();
@@ -147,7 +156,7 @@ function parseCsv(content: string): Array<Record<string, string>> {
 }
 
 function maskSecret(key: string, value: string): string {
-  if (/password|secret|token|key/i.test(key)) {
+  if (isSecretName(key)) {
     return value.length > 0 ? '***' : '(empty)';
   }
   return value;

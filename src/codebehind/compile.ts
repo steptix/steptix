@@ -15,7 +15,10 @@ import {
 import {
   aiEntryFor,
   askForEntry,
+  describeGuardedName,
   generateStepEntry,
+  guardedValues,
+  stepEnvRefs,
   stepParameters,
   type GeneratedEntry,
 } from './generate.js';
@@ -32,6 +35,11 @@ import {
   type WriteEntryRequest,
 } from './writer.js';
 import { findInlinedParameterValue } from '../ai/action-parser.js';
+import {
+  envDataRefsIn,
+  envDataSecretValues,
+  resolveEnvDataRef,
+} from '../parser/interpolate-env-data.js';
 import { loadDataFile } from '../parser/parameters.js';
 import { recordingDirFor, writeReplayFailure } from './recording.js';
 
@@ -470,6 +478,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       actions: actionsOf(result),
       ...(result?.assertions && { assertions: result.assertions }),
       resolvedParameters: record.resolvedParameters,
+      // What `${data.url}` and kin resolved to, so the generator can say
+      // "read it with step.getVar('data.url')" and the guard can catch the
+      // value inlined (stories/codebehind-env-data.md).
+      ...(test.envData && { envData: test.envData }),
       aiClient: options.aiClient,
       contextContent: options.contextContent,
       testName: test.title,
@@ -621,6 +633,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         ...(failed.result?.domSnapshot !== undefined && { dom: failed.result.domSnapshot }),
       },
       parameters,
+      test.envData ? envDataSecretValues(test.envData) : [],
     );
     if (round === maxRounds) break;
 
@@ -1017,6 +1030,9 @@ async function repairStep(
   round: { number: number; max: number },
 ): Promise<GeneratedEntry> {
   const parameters = stepParameters(step.binding!, record.resolvedParameters);
+  // The step passed Generate, so every reference it makes resolved there;
+  // the repair sees the same list, and the same guard.
+  const envRefs = stepEnvRefs(step.binding!, options.test.envData).resolved;
   const prompt = buildRepairPrompt({
     rawStepText: step.text,
     stepIndex: step.number,
@@ -1028,13 +1044,14 @@ async function repairStep(
       screenshotBase64: failedResult.screenshotBase64,
     }),
     parameters,
+    ...(envRefs.length > 0 && { envRefs }),
     round,
   });
   return askForEntry(
     options.aiClient,
     options.contextContent,
     prompt,
-    parameters,
+    guardedValues(parameters, envRefs),
     options.signal,
   );
 }
@@ -1061,7 +1078,11 @@ async function reviewCandidate(
           buildFileReviewPrompt({
             markdownName: path.basename(test.filePath),
             file: before,
-            steps: test.steps,
+            // The authored text, not the interpolated: it is what every
+            // `source` in the file has to match, and the interpolated text
+            // would put resolved `${env.X}` values in front of a reviewer
+            // that has no business seeing them.
+            steps: test.expansion?.rawSteps ?? test.steps,
           }),
         ],
         options.signal,
@@ -1081,12 +1102,15 @@ async function reviewCandidate(
       continue;
     }
 
-    const leaked = findInlinedParameterValue(revised, allParameters(parameters));
+    const leaked = findInlinedParameterValue(revised, [
+      ...allParameters(parameters),
+      ...allEnvRefs(test),
+    ]);
     if (leaked) {
       emit({
         kind: 'phase',
         phase: 'review',
-        message: `rejected: the revision inlines {{${leaked}}} — the generated file stands`,
+        message: `rejected: the revision inlines ${describeGuardedName(leaked)} — the generated file stands`,
       });
       continue;
     }
@@ -1148,6 +1172,24 @@ function describeEntryChange(
  *  password through. */
 function allParameters(parameters: Record<string, string>): Array<{ name: string; value: string }> {
   return Object.entries(parameters).map(([name, value]) => ({ name, value }));
+}
+
+/** Every environment value the test's steps reference, for the same guard:
+ *  `${env.GITHUB_PASSWORD}` resolved is as much a secret as `{{password}}`,
+ *  and `${data.url}` resolved is a file that runs in one environment only. */
+function allEnvRefs(test: ParsedTest): Array<{ name: string; value: string }> {
+  if (!test.envData) return [];
+  const out: Array<{ name: string; value: string }> = [];
+  const seen = new Set<string>();
+  for (const text of test.expansion?.rawSteps ?? test.steps) {
+    for (const ref of envDataRefsIn(text)) {
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      const value = resolveEnvDataRef(ref, test.envData);
+      if (value !== undefined) out.push({ name: `\${${ref}}`, value });
+    }
+  }
+  return out;
 }
 
 // ───────────────────────────────────────────────────────────────────────────

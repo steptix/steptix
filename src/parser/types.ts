@@ -209,6 +209,16 @@ export interface ParsedTest {
     origins: import('../skills/expander.js').ExpandedStepOrigin[];
     frames: Record<string, import('../skills/expander.js').ExpandedFrame>;
   };
+  /**
+   * The env/data context the `${env.X}` / `${data.X}` / `${<source>.X}`
+   * placeholders were resolved against — the caller's env bundle plus the
+   * test's own `dataSources`, loaded from frontmatter. Code-behind reads the
+   * same references at run time through `step.getVar('data.url')`
+   * (stories/codebehind-env-data.md), and a compile's generator is told
+   * what each one resolved to. Absent when the parse ran without an
+   * environment, in which case those placeholders are still literal text.
+   */
+  envData?: import('./interpolate-env-data.js').EnvDataContext;
   /** Pre/post-step hook instructions (skills already expanded). */
   hooks: TestHooks;
   /** Parallel to `hooks` — tool-call markers per hook instruction. */

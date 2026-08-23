@@ -30,6 +30,7 @@ import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
+import { envDataSecretValues } from '../parser/interpolate-env-data.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -404,11 +405,14 @@ export async function runTest(
       i: number,
     ): Pick<
       StepExecutorOptions,
-      'codeBehind' | 'codeBehindStrict' | 'captureStepContext' | 'signal'
+      'codeBehind' | 'codeBehindStrict' | 'captureStepContext' | 'signal' | 'envData'
     > => {
       const binding = codeBehind.bindingFor(i);
       return {
         ...(binding && { codeBehind: binding }),
+        // The context the parser resolved `${data.url}` with, so the entry's
+        // `step.getVar('data.url')` reads the same value.
+        ...(test.envData && { envData: test.envData }),
         ...(extras.codeBehindStrict !== undefined && { codeBehindStrict: extras.codeBehindStrict }),
         ...(extras.captureStepContext !== undefined && {
           captureStepContext: extras.captureStepContext,
@@ -1072,6 +1076,7 @@ export async function runTest(
         status: overallStatus,
         startedAt: new Date(startTime).toISOString(),
         parameters: resolvedParameters,
+        ...(test.envData && { secrets: envDataSecretValues(test.envData) }),
         source: 'cli',
       });
     }

@@ -850,6 +850,14 @@ export interface StepCodePromptInput {
   /** Parameter names and their resolved values for this run, so the model can
    *  map literals it sees in the transcript back to `step.getVar` calls. */
   parameters: Array<{ name: string; value: string }>;
+  /**
+   * The environment references the step makes — `${data.url}`, `${env.X}`,
+   * `${<source>.path}` — each with what it resolved to on this run. The name
+   * inside the braces is the `step.getVar` name that reads it at run time
+   * (stories/codebehind-env-data.md); the value is this environment's, and
+   * is as much a literal to keep out of the file as a parameter's.
+   */
+  envRefs?: Array<{ ref: string; value: string }>;
   /** The successful run's action transcript — the same `AIAction[]` the step
    *  cache stores, selectors included. */
   actions: AIAction[];
@@ -882,6 +890,27 @@ export interface StepCodePromptInput {
 }
 
 /**
+ * The "Parameters in scope" block of the generation and repair prompts: each
+ * `{{name}}` with its value on this run, then each environment reference with
+ * its value and the `step.getVar` call that reads it. One formatter, so the
+ * two prompts cannot describe the same reference two ways.
+ */
+export function formatParameterBlock(
+  parameters: Array<{ name: string; value: string }>,
+  envRefs: Array<{ ref: string; value: string }>,
+): string {
+  if (parameters.length === 0 && envRefs.length === 0) return '(this step uses no parameters)';
+  return [
+    ...parameters.map((p) => `- {{${p.name}}} resolved to ${JSON.stringify(p.value)} on this run`),
+    ...envRefs.map(
+      (r) =>
+        `- \${${r.ref}} resolved to ${JSON.stringify(r.value)} on this run — read it with ` +
+        `step.getVar(${JSON.stringify(r.ref)}); the value differs per environment`,
+    ),
+  ].join('\n');
+}
+
+/**
  * Ask the model to turn one successful step into its code-behind entry
  * (stories/step-codebehind.md, "Generation").
  *
@@ -894,11 +923,7 @@ export interface StepCodePromptInput {
 export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
   const testInfoBlock = input.testInfoSection ? `${input.testInfoSection}\n\n` : '';
 
-  const paramBlock = input.parameters.length === 0
-    ? '(this step uses no parameters)'
-    : input.parameters
-        .map((p) => `- {{${p.name}}} resolved to ${JSON.stringify(p.value)} on this run`)
-        .join('\n');
+  const paramBlock = formatParameterBlock(input.parameters, input.envRefs ?? []);
 
   const actionBlock = input.actions.length === 0
     ? '(no actions recorded)'
@@ -984,14 +1009,14 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 
 \`run\` receives one context object:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
-- \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown.
+- \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown: \`{{username}}\` is \`step.getVar('username')\`. An environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`, \`\${env.BASE_URL}\` is \`step.getVar('env.BASE_URL')\`. It returns a string (or undefined).
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
 - \`baseUrl\` — the test's configured base URL, when it has one.
 
 Rules — all of them are enforced:
 
-1. **Read parameters via \`step.getVar\`, never inline them.** Write \`step.getVar('username')\`, not the value it happened to have on this run. Generated code containing a resolved parameter value as a literal is REJECTED — this is what keeps secrets out of a committed file.
+1. **Read parameters via \`step.getVar\`, never inline them.** Write \`step.getVar('username')\`, not the value it happened to have on this run. Environment placeholders are the same rule with a different name: \`\${data.url}\` is \`step.getVar('data.url')\`, and its value is THIS environment's — the URL this run navigated to belongs to the environment, not to the step, and the same file must run against the others. Generated code containing a resolved parameter or environment value as a literal is REJECTED — this is what keeps secrets and environment-specific values out of a committed file.
 2. **Compute dynamic values at runtime.** If the step describes a computation (today's date, a derived code, a formatted number), do the computation in the code. Never freeze this run's answer as a literal.
 3. **Write the step's outputs** with \`step.setVar\`, using the capture name from the step text.
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.

@@ -394,7 +394,7 @@ describe('buildRepairPrompt', () => {
     expect(text).toContain('<button id="signin">Sign in</button>');
     expect(text).toContain('https://app.test/login');
     expect(text).toContain('repair round 2 of 3');
-    expect(text).toContain('{{username}} resolves to "octocat"');
+    expect(text).toContain('{{username}} resolved to "octocat" on this run');
     // The screenshot rides as an image block, not as text.
     expect(Array.isArray(msg.content)).toBe(true);
     expect((msg.content as Array<{ type: string }>).some((b) => b.type === 'image_url')).toBe(true);
