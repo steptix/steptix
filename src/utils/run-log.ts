@@ -1,6 +1,7 @@
 import { mkdirSync, createWriteStream, type WriteStream } from 'node:fs';
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { addLogCallback, addTraceCallback, logger } from './logger.js';
+import { redact, redactDeep } from './secrets.js';
 
 export interface RunLog {
   stream: WriteStream;
@@ -45,18 +46,28 @@ export function openRunLogFile(id: string, reportsDir: string): RunLog | null {
  *
  * The file always captures every level regardless of the console threshold,
  * so a quiet console still produces a complete forensic trail.
+ *
+ * `secrets` is the run's must-never-print list (stories/secret-redaction.md),
+ * read at each write because it grows as the run captures values. Log lines
+ * are masked as text; a trace payload is masked as an object *before* it is
+ * serialized, so a secret that JSON would escape (a `"` or `\` in it) is
+ * still found.
  */
-export function attachRunLogBridges(runLog: RunLog, fileMode: RunLogFileMode): () => void {
+export function attachRunLogBridges(
+  runLog: RunLog,
+  fileMode: RunLogFileMode,
+  secrets: () => string[] = () => [],
+): () => void {
   const removeLog = addLogCallback((level, message) => {
     const ts = new Date().toISOString();
-    runLog.stream.write(`[${ts}] [${level.toUpperCase().padEnd(5)}] ${message}\n`);
+    runLog.stream.write(`[${ts}] [${level.toUpperCase().padEnd(5)}] ${redact(message, secrets())}\n`);
   });
   const removeTrace = fileMode === 'full'
     ? addTraceCallback((label, payload) => {
         const ts = new Date().toISOString();
         let body: string;
         try {
-          body = JSON.stringify(payload, null, 2);
+          body = JSON.stringify(redactDeep(payload, secrets()), null, 2);
         } catch (err) {
           body = `<unserializable: ${String(err)}>`;
         }

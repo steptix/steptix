@@ -159,6 +159,10 @@ from the actions and the DOM snapshots before writing — the same rule
 `maskSecret` applies to logs. A generator reading a redacted value would
 write it as `step.getVar(...)` anyway, which is what it is told to do.
 
+> Extended by [secret-redaction.md](secret-redaction.md): the rule and the
+> masking moved to `src/utils/secrets.ts`, shared with the console step
+> line, the report and the per-run log file, which now mask the same values.
+
 ### The candidate trail
 
 `.aiui-codebehind-cache/<name>.steps.ts.candidate` is written after

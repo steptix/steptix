@@ -23,6 +23,7 @@ import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
 import { loadContextFiles } from '../../context/loader.js';
 import { interpolate } from '../../parser/parameters.js';
+import { redactReport, runSecrets } from '../../utils/secrets.js';
 import { AiClient } from '../../ai/client.js';
 import { formatStepHistoryEntry } from '../../ai/prompts.js';
 import { TokenTracker } from '../../utils/tokens.js';
@@ -526,7 +527,10 @@ export class UIRunnerAdapter {
           ...(parsedTest.config.baseUrl !== undefined && { baseUrl: parsedTest.config.baseUrl }),
           ...(Object.keys(this.resolvedParameters).length > 0 && { parameters: this.resolvedParameters }),
         };
-        reportPath = await generateReport(report, this.config.reports.outputDir);
+        reportPath = await generateReport(
+          redactReport(report, runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData })),
+          this.config.reports.outputDir,
+        );
       } catch {
         // Report generation failure should not affect run result
       }

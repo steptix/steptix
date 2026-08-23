@@ -31,6 +31,7 @@ import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loade
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues } from '../parser/interpolate-env-data.js';
+import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -311,8 +312,12 @@ export async function runTest(
     );
     logger.info(`Run log: ${runLog.path}`);
   }
+  // What this run must never print (stories/secret-redaction.md): the values
+  // of its secret-named parameters and of the env/data secrets its `${…}`
+  // references resolved against. Read fresh each time — captures add to it.
+  const secretsNow = (): string[] => runSecrets({ parameters: resolvedParameters, envData: test.envData });
   const removeFileBridges = runLog
-    ? attachRunLogBridges(runLog, fileMode)
+    ? attachRunLogBridges(runLog, fileMode, secretsNow)
     : () => {};
 
   const cdpOptions = parseCdpOptionsFromTestConfig(test.config);
@@ -690,7 +695,10 @@ export async function runTest(
       // Interpolate {{placeholders}} in step text
       const instruction = interpolate(rawInstruction, resolvedParameters);
 
-      logger.step(i + 1, test.steps.length, instruction);
+      // The one log line that ignores the log level — so the one place the
+      // resolved password would always print. Masked; the step itself runs
+      // with the real value.
+      logger.step(i + 1, test.steps.length, redact(instruction, secretsNow()));
 
       // Handle [input: variable_name] steps — pause for user input
       const inputStep = parseInputStep(instruction);
@@ -1085,7 +1093,11 @@ export async function runTest(
     logger.info(`Tokens used: ${tokenTracker.getSummary()}`);
 
     const dataRowVal = dataRowIndex !== undefined ? dataRowIndex + 1 : undefined;
-    report = {
+    // Everything downstream of here — the HTML report, the diagnosis prompt,
+    // the run-history line, `aiui run`'s failed-steps summary — sees the
+    // masked copy. The step results themselves (and the recording written
+    // above, which masks on its own) keep the values the run used.
+    report = redactReport({
       testName: test.title,
       filePath: test.filePath,
       tags: test.frontmatter.tags,
@@ -1105,7 +1117,7 @@ export async function runTest(
       ...(dataRowVal !== undefined && { dataRow: dataRowVal }),
       ...(humanIntervened && { humanIntervened: true }),
       ...(strictLoadError !== undefined && { error: strictLoadError }),
-    };
+    }, secretsNow());
 
     if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
       logger.info('Running failure diagnosis…');
@@ -1115,7 +1127,9 @@ export async function runTest(
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
       });
       if (diagnosis) {
-        report.diagnosis = diagnosis;
+        // The diagnosis reads the live page, where a typed secret can still
+        // sit in an input — so its prose is masked like the rest.
+        report.diagnosis = redactDeep(diagnosis, secretsNow());
         report.tokensUsed = tokenTracker.total;
         report.inputTokens = tokenTracker.inputTotal;
         report.outputTokens = tokenTracker.outputTotal;

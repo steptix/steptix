@@ -18,6 +18,7 @@ import { ApiResponseStore } from '../api/response-store.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
+import { redact, runSecrets } from '../utils/secrets.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { ProjectBundleResolver } from './project-bundle.js';
@@ -682,7 +683,13 @@ export class ErrandRunner {
           ? buildEnrichedInstruction(cleanedInstruction, outputVars)
           : interpolated;
 
-      logger.step(line, steps.length, instruction);
+      // Under `aiui mcp` this line goes to stderr — the host's MCP log — so
+      // it is masked like the runners' (stories/secret-redaction.md).
+      logger.step(
+        line,
+        steps.length,
+        redact(instruction, runSecrets({ parameters: scope, envData: args.envDataCtx })),
+      );
       emit({ type: 'step:start', line, ...(await tabSpread()) });
 
       let stepResult: StepResult;

@@ -253,7 +253,10 @@ showed, and the few places the build went beyond the outline:
   was copied in the parameter prompt, the log masker and the recording; it
   is now exported once from `src/parser/parameters.ts` and the others use it,
   so the environment values the recording redacts are chosen by the same
-  rule that hides a parameter at the prompt.
+  rule that hides a parameter at the prompt. (Since
+  [secret-redaction.md](secret-redaction.md), the masking itself also lives
+  in one place, `src/utils/secrets.ts`, and the console step line and the
+  report use it too.)
 - **The two prompts share one parameter block.** `formatParameterBlock` in
   `src/ai/prompts.ts` writes the "Parameters in scope" section for both
   generation and repair, so the repair prompt's wording changed from
