@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildSelect, parseStepRange } from '../src/cli/commands/compile.js';
+import { buildSelect, exitCodeFor, parseStepRange } from '../src/cli/commands/compile.js';
 import { createCli } from '../src/cli/index.js';
 
 /**
@@ -63,6 +63,14 @@ describe('buildSelect', () => {
     expect(buildSelect({ all: true })).toEqual({ all: true });
     expect(buildSelect({ steps: '3-4' })).toEqual({ steps: [3, 4] });
     expect(buildSelect({})).toEqual({});
+  });
+
+  it('exits 0 on green, 2 on partial (files written), 1 on failed', () => {
+    // A script needs to tell "everything compiled" from "some did" from
+    // "nothing did" (stories/codebehind-compile-as-a-run.md §Write what passed).
+    expect(exitCodeFor('green')).toBe(0);
+    expect(exitCodeFor('partial')).toBe(2);
+    expect(exitCodeFor('failed')).toBe(1);
   });
 
   it('refuses a non-positive --max-rounds', () => {

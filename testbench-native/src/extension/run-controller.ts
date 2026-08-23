@@ -132,7 +132,11 @@ export interface RunOutcome {
  * how many rounds it spent, what it cost, and where it left the candidate.
  */
 export interface CompileOutcome {
+  /** True when there is something to propose — green or partial. */
   ok: boolean;
+  /** `green`, `partial` (some entries proven, some not — see the summary),
+   *  or `failed`. Absent when the stream never produced a result. */
+  status?: 'green' | 'partial' | 'failed';
   files?: Record<string, string>;
   summary?: CompileSummary;
   error?: string;
@@ -164,8 +168,32 @@ export function compileLogLine(event: CompileEvent): string | null {
     }
     case 'compile:step':
       return `  ${' '.repeat(11)} step ${event.step} ${event.message}`;
+    case 'compile:run': {
+      // The run's own pass/fail lines, indented under the phase they belong
+      // to. Starts and the run's `done` say nothing the phase line did not.
+      const inner = event.event;
+      if (inner.type === 'step:pass') {
+        const how = inner.codeBehindStale
+          ? ` ⚠ under AI — code-behind failed: ${inner.codeBehindStale.error}`
+          : inner.fromCodeBehind
+            ? ' (code-behind)'
+            : inner.fromCache
+              ? ' (cached)'
+              : '';
+        return `  ${' '.repeat(11)} ✓ step on line ${inner.line}${how}`;
+      }
+      if (inner.type === 'step:fail') {
+        return `  ${' '.repeat(11)} ✗ step on line ${inner.line} — ${inner.error}`;
+      }
+      if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${inner.msg}`;
+      return null;
+    }
     case 'compile:done':
-      return event.status === 'green' ? `✓ ${event.message}` : `✗ ${event.message}`;
+      return event.status === 'green'
+        ? `✓ ${event.message}`
+        : event.status === 'partial'
+          ? `◐ ${event.message}`
+          : `✗ ${event.message}`;
     case 'output':
       return `[${event.kind}] ${event.msg}`;
     default:
@@ -1215,8 +1243,6 @@ export class RunController {
    */
   async compileCodeBehind(options: {
     select?: { onlyStale?: boolean; all?: boolean; steps?: number[] };
-    /** Compile from a completed run instead of recording a fresh one. */
-    fromSessionId?: string;
     maxRounds?: number;
     signal?: AbortSignal;
   } = {}): Promise<CompileOutcome> {
@@ -1241,7 +1267,11 @@ export class RunController {
       testFilePath: filePath,
       steps: extractSteps(this.document.getText()).map((s) => s.instruction),
       ...(envName && { envName }),
-      ...(options.fromSessionId && { fromSessionId: options.fromSessionId }),
+      // Always this document's session (stories/codebehind-compile-as-a-run.md
+      // §Record is a run): the server compiles from its last run when that can
+      // be the recording, and records in it — the browser the author watches,
+      // left open where the run ended — when it cannot.
+      sessionId: resolved.sessionId,
       ...(options.select && { select: options.select }),
       ...(options.maxRounds !== undefined && { maxRounds: options.maxRounds }),
     };
@@ -1252,8 +1282,34 @@ export class RunController {
     this.post({ type: 'compileState', running: true, file: filePath });
 
     let result: CompileOutcome = { ok: false, error: 'the compile stream ended with no result' };
+    /** `phase:round` of the run whose events are flowing, to spot a new one. */
+    let currentRun: string | null = null;
     try {
       for await (const event of resolved.client.compileCodeBehind(request, controller.signal)) {
+        if (event.type === 'compile:run') {
+          const key = `${event.phase}:${event.round ?? 0}`;
+          if (key !== currentRun) {
+            currentRun = key;
+            // A run of the test is starting: the marks of the previous one —
+            // the last replay round, or the author's own run — come off, as
+            // they do when any run starts. Replay marks land on the same
+            // lines, so without this a ✗ from round 1 would outlive round 2.
+            this.clearStatusesForUris?.([this.document.uri]);
+            // A Record runs in THIS document's session, opening it if need
+            // be, with the test's config. The next Run must not send config
+            // again — the server refuses config on an existing session.
+            if (event.phase === 'record') this.configSentForSession = true;
+          }
+          this.post({
+            type: 'compileRunEvent',
+            phase: event.phase,
+            ...(event.round !== undefined && { round: event.round }),
+            event: event.event,
+          });
+        }
+        if (event.type === 'compile:step' && event.line !== undefined) {
+          this.post({ type: 'compileStep', line: event.line });
+        }
         const line = compileLogLine(event);
         if (line) {
           log(line);
@@ -1261,10 +1317,11 @@ export class RunController {
         }
         if (event.type === 'compile:result') {
           result =
-            event.status === 'green'
-              ? { ok: true, files: event.files, summary: event.summary }
+            event.status !== 'failed'
+              ? { ok: true, status: event.status, files: event.files, summary: event.summary }
               : {
                   ok: false,
+                  status: 'failed',
                   error: event.summary.error ?? 'the compile did not go green',
                   summary: event.summary,
                 };
@@ -1937,14 +1994,6 @@ export class RunController {
       }
       this.emitRunEvent({ type: 'done', status });
       log(`run ${status}`);
-      // "Compile from this run" (stories/codebehind-compile.md §What the author
-      // runs) — offered only after a green run, because a compile has nothing
-      // to work from otherwise, and only for an interactive one, whose session
-      // stays open. A batch run's session is closed in the `finally` below.
-      this.post({
-        type: 'compileFromRunAvailable',
-        sessionId: status === 'passed' && !batchMode ? sessionId : null,
-      });
       return { ok: !anyFailed };
     } catch (err) {
       if (isUserAbort(err)) {
@@ -2136,6 +2185,10 @@ export class RunController {
         steps: stepInstructions,
         fullSteps: fullStepInstructions,
         sourceLines: stepLines,
+        // Every run keeps the DOM either side of its steps, so the run the
+        // author just watched is what Compile compiles from — no second run of
+        // the test (stories/codebehind-compile-as-a-run.md).
+        captureStepContext: true,
         env,
         ...(envName && { envName }),
         ...(dataSources && Object.keys(dataSources).length > 0 && { dataSources }),

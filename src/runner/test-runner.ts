@@ -210,6 +210,16 @@ export interface RunTestExtras {
   codeBehindStrict?: boolean;
   /** Capture DOM + URL either side of every step (compile's Record input). */
   captureStepContext?: boolean;
+  /**
+   * Run only the first N steps, then finish as a passed run.
+   *
+   * A prefix compile (stories/codebehind-compile-as-a-run.md §Write what
+   * passed) replays the steps it compiled and not the ones the recording never
+   * reached — which would run under AI, cost tokens, and fail where the
+   * recording did. Hooks still run; the report's `totalSteps` is still the
+   * test's, so the compiler indexes it as it would any run.
+   */
+  stopAfterStep?: number;
   /** Abort signal, threaded into every step. */
   signal?: AbortSignal;
 }
@@ -558,7 +568,14 @@ export async function runTest(
     // Detect conditional step groups for multi-outcome branching
     const stepGroups = identifyStepGroups(test.steps);
 
-    for (let i = 0; i < test.steps.length; i++) {
+    // The last expanded step this run executes (exclusive). A prefix replay
+    // stops short of the whole test on purpose; see `RunTestExtras.stopAfterStep`.
+    const stepLimit =
+      extras.stopAfterStep !== undefined
+        ? Math.max(0, Math.min(test.steps.length, extras.stopAfterStep))
+        : test.steps.length;
+
+    for (let i = 0; i < stepLimit; i++) {
       if (bail) break;
 
       if (Date.now() > timeoutDeadline) {
@@ -1030,7 +1047,7 @@ export async function runTest(
     const passedSteps = stepResults.filter((s) => s.status === 'passed').length;
     const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
-    const timedOut = stepResults.length < test.steps.length && !bail;
+    const timedOut = stepResults.length < stepLimit && !bail;
     overallStatus = failedSteps > 0 || timedOut ? 'failed' : 'passed';
 
     logger.testEnd(test.title, overallStatus === 'passed', durationMs);

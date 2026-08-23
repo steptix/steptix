@@ -24,6 +24,7 @@ import { buildFileReviewPrompt, parseFileRevision } from './review.js';
 import { clearStale, readLastRun } from './last-run.js';
 import {
   createFile,
+  listEntries,
   spliceEntry,
   validateCodeBehindSource,
   writeCodeBehindFile,
@@ -53,12 +54,19 @@ export type CompilePhase =
 export type CompileEvent =
   /** A phase started, or reported its result. */
   | { kind: 'phase'; phase: CompilePhase; round?: number; message: string }
-  /** Something happened to one step, 1-based. */
-  | { kind: 'step'; phase: CompilePhase; step: number; message: string }
+  /** Something happened to one step, 1-based. `line` is the step's source
+   *  line in the test file when the test knows it — a client paints ▶ on it
+   *  while the model works on that step. */
+  | { kind: 'step'; phase: CompilePhase; step: number; line?: number; message: string }
   /** Terminal. Always emitted exactly once. */
   | { kind: 'done'; status: CompileStatus; message: string };
 
-export type CompileStatus = 'green' | 'failed';
+/**
+ * `partial` (stories/codebehind-compile-as-a-run.md §Write what passed): the
+ * compile proposes what it has — proven entries, write-offs, entries no round
+ * reached — and the summary says which is which. `failed` proposes nothing.
+ */
+export type CompileStatus = 'green' | 'partial' | 'failed';
 
 /** Which steps get (re)generated. Empty selects "no entry, or flagged stale". */
 export interface CompileSelect {
@@ -90,6 +98,22 @@ export interface CompileSummary {
   candidatePath?: string | undefined;
   /** Why the compile is not green. */
   error?: string | undefined;
+  /**
+   * Steps (1-based) whose new entries no replay round executed to a pass.
+   * Proposed as code all the same: the next run proves each one (⚙) or flags
+   * it (⚠), which is the loop that already handles entries that rot.
+   */
+  unproven: number[];
+  /** Steps (1-based) this compile wrote off as `ai: true` after a replay
+   *  failure — with the error as the entry's comment. */
+  writtenOffAi: number[];
+  /** Where the recording stopped, when it did not reach the end of the test.
+   *  The compile was then a prefix compile of the steps before it. */
+  stoppedAt?: { step: number; error: string } | undefined;
+  /** Selected steps the prefix never reached, so nothing was generated for
+   *  them. They have no entry, and the next compile's default selection takes
+   *  them. */
+  notAttempted: number[];
 }
 
 export interface CompileResult {
@@ -117,6 +141,11 @@ export interface CompileRunRequest {
   strict: boolean;
   /** Capture DOM + URL either side of each step (record only). */
   captureContext: boolean;
+  /**
+   * Run the first N steps only (replay of a prefix compile). The outcome is
+   * still indexed by expanded step, sparse from N on.
+   */
+  throughStep?: number;
   signal?: AbortSignal | undefined;
 }
 
@@ -147,7 +176,11 @@ export interface CompileOptions {
   maxRounds?: number | undefined;
   /** Run everything but Write. */
   dryRun?: boolean | undefined;
-  /** A green run to compile from, instead of recording a fresh one. */
+  /**
+   * A run to compile from, instead of recording a fresh one. Green, or red or
+   * stopped: a run that did not reach the end is a recording of the steps it
+   * did reach, and the compile is a prefix compile of those.
+   */
   recorded?: CompileRunOutcome | undefined;
   onEvent?: ((event: CompileEvent) => void) | undefined;
   signal?: AbortSignal | undefined;
@@ -189,21 +222,41 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   let runTokens = 0;
   let rounds = 0;
 
+  /** A step event, with the step's source line when the test knows it. */
+  const stepEvent = (phase: CompilePhase, step: CompileStep, message: string): void => {
+    const line = test.stepLines[step.index];
+    emit({
+      kind: 'step',
+      phase,
+      step: step.number,
+      ...(typeof line === 'number' && line > 0 && { line }),
+      message,
+    });
+  };
+
   const tokens = (): number => (options.tokenTracker?.total ?? 0) + runTokens;
   const finish = (
     status: CompileStatus,
-    summary: Omit<CompileSummary, 'test' | 'totalSteps' | 'tokensUsed' | 'rounds'>,
+    summary: Partial<Omit<CompileSummary, 'test' | 'totalSteps' | 'tokensUsed' | 'rounds'>> &
+      Pick<CompileSummary, 'compiled' | 'kept' | 'keptAi' | 'written'>,
     message: string,
   ): CompileResult => {
     emit({ kind: 'done', status, message });
     return {
       status,
-      files: status === 'green' ? candidate.changedFiles() : {},
+      // What passed is proposed (stories/codebehind-compile-as-a-run.md §Write
+      // what passed): a partial compile hands back the candidate as it stands,
+      // and only a failed one — nothing generated, or nothing trustworthy —
+      // hands back nothing.
+      files: status === 'failed' ? {} : candidate.changedFiles(),
       summary: {
         test: test.filePath,
         totalSteps: test.steps.length,
         rounds,
         tokensUsed: tokens(),
+        unproven: [],
+        writtenOffAi: [],
+        notAttempted: [],
         ...summary,
       },
     };
@@ -218,7 +271,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // already on disk in the file and the last-run sidecar.
   const steps = await describeSteps(test);
   const staleKeys = await collectStaleKeys(test, options.recorded, steps);
-  const selection = selectSteps(steps, options.select ?? {}, staleKeys);
+  let selection = selectSteps(steps, options.select ?? {}, staleKeys);
   if (selection.errors.length > 0) {
     return finish(
       'failed',
@@ -227,9 +280,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     );
   }
   const keptAiExisting = steps.filter((s) => s.isAiEntry).length;
-  const keptExisting = steps.filter(
-    (s) => s.hasEntry && !s.isAiEntry && s.key !== undefined && !selection.keys.has(s.key),
-  ).length;
+  const keptExistingFor = (sel: Selection): number =>
+    steps.filter((s) => s.hasEntry && !s.isAiEntry && s.key !== undefined && !sel.keys.has(s.key))
+      .length;
+  let keptExisting = keptExistingFor(selection);
   emit({
     kind: 'phase',
     phase: 'select',
@@ -248,41 +302,106 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   }
 
   // ─── 2. Record ────────────────────────────────────────────────────────────
+  //
+  // Code-behind stays ON unless the selection includes a step that already has
+  // a working entry (`--all`, or `--steps` naming one): only then does a step
+  // served by its entry hide the transcript generation needs. With it on, a
+  // Record of a half-compiled test runs the compiled half as code — and is an
+  // ordinary run in every respect, sidecar included.
   let record = options.recorded;
   if (record) {
     emit({ kind: 'phase', phase: 'record', message: 'reusing the supplied run' });
   } else {
-    emit({ kind: 'phase', phase: 'record', message: `running ${test.steps.length} step(s) under AI` });
+    const needsAllTranscripts = selection.order.some((s) => s.hasEntry && !s.isAiEntry);
+    emit({
+      kind: 'phase',
+      phase: 'record',
+      message: needsAllTranscripts
+        ? `running ${test.steps.length} step(s) under AI (code-behind off)`
+        : `running ${test.steps.length} step(s)`,
+    });
     record = await runner({
       purpose: 'record',
       strict: false,
       captureContext: true,
-      // Under AI, all of it. A step served by its existing entry produces no
-      // transcript, and generation would have nothing to work from.
-      disableCodeBehind: true,
+      ...(needsAllTranscripts && { disableCodeBehind: true }),
       ...(options.signal && { signal: options.signal }),
     });
     runTokens += record.tokensUsed;
   }
-  if (record.status !== 'passed') {
-    const failed = record.steps.find((s) => s?.status === 'failed');
-    const detail = failed ? ` — step ${failed.index}: ${failed.error ?? 'failed'}` : '';
-    return finish(
-      'failed',
-      {
-        compiled: 0,
-        kept: keptExisting,
-        keptAi: keptAiExisting,
-        written: [],
-        error: `the recording run did not pass${detail}`,
-      },
-      `Record failed${detail}. There is nothing to compile until the test passes under AI.`,
-    );
+
+  // A Record with code-behind on can flag an entry stale — it threw and the
+  // step healed under AI — and that step now has a transcript to regenerate
+  // from. It joins the selection the way a sidecar flag would have, which the
+  // modes honour as they do any stale flag: the default and `--only-stale`
+  // take it, `--steps` ignores it.
+  const recordStale = new Set(staleKeys);
+  for (const step of steps) {
+    if (step.key && record.steps[step.index]?.codeBehindStale) recordStale.add(step.key);
+  }
+  if (recordStale.size > staleKeys.size) {
+    const widened = selectSteps(steps, options.select ?? {}, recordStale);
+    for (const step of widened.order) {
+      if (!selection.keys.has(step.key!)) {
+        stepEvent('select', step, 'joined the selection: its entry failed during Record');
+      }
+    }
+    selection = widened;
+    keptExisting = keptExistingFor(selection);
+  }
+
+  // Where the recording stopped. A run that failed or was stopped at step k is
+  // a recording of steps 1..k-1, and the compile is a prefix compile: what
+  // those steps produced is worth keeping, and the rest has no transcript at
+  // all (stories/codebehind-compile-as-a-run.md §Write what passed).
+  const prefixEnd = leadingPassed(record.steps);
+  let stoppedAt: CompileSummary['stoppedAt'];
+  let notAttempted: number[] = [];
+  /** How many steps a replay runs — the prefix, or the whole test. */
+  let throughStep: number | undefined;
+  if (prefixEnd < test.steps.length) {
+    const stoppedStep = record.steps[prefixEnd];
+    const error =
+      stoppedStep?.error ??
+      (record.status === 'passed'
+        ? 'the run stopped before this step'
+        : 'the run failed before this step');
+    stoppedAt = { step: prefixEnd + 1, error };
+    const inPrefix = selection.order.filter((s) => s.number <= prefixEnd);
+    notAttempted = selection.order.filter((s) => s.number > prefixEnd).map((s) => s.number);
+    if (inPrefix.length === 0) {
+      return finish(
+        'failed',
+        {
+          compiled: 0,
+          kept: keptExisting,
+          keptAi: keptAiExisting,
+          written: [],
+          stoppedAt,
+          notAttempted,
+          error: `the recording stopped at step ${stoppedAt.step} (${error}) and no step before it needs compiling`,
+        },
+        `Record stopped at step ${stoppedAt.step} — ${error}. Nothing before it needs compiling; ` +
+          'fix that step, run, and compile again.',
+      );
+    }
+    emit({
+      kind: 'phase',
+      phase: 'record',
+      message:
+        `stopped at step ${stoppedAt.step} — ${error}; compiling ${inPrefix.length} step(s) before it` +
+        (notAttempted.length > 0 ? ` (${listSteps(notAttempted)} not attempted)` : ''),
+    });
+    selection = { keys: new Set(inPrefix.map((s) => s.key!)), order: inPrefix, errors: [] };
+    keptExisting = keptExistingFor(selection);
+    throughStep = prefixEnd;
   }
 
   // ─── 3. Generate ──────────────────────────────────────────────────────────
   emit({ kind: 'phase', phase: 'generate', message: `${selection.order.length} step(s)` });
   let declined = 0;
+  /** Steps this compile wrote off as `ai: true` after a replay failure. */
+  const writtenOffAi: number[] = [];
   for (const step of selection.order) {
     if (options.signal?.aborted) {
       return finish('failed', { compiled: 0, kept: keptExisting, keptAi: keptAiExisting, written: [], error: 'aborted' }, 'Compile aborted.');
@@ -302,7 +421,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       candidateFile: (await candidate.read(step.binding!.file)) ?? undefined,
       ...contextOf(result),
     });
-    const applied = applyGenerated(candidate, step, generated, emit, 'generate');
+    const applied = applyGenerated(candidate, step, generated, stepEvent, 'generate');
     if (applied.kind === 'declined') declined++;
     if (applied.kind === 'error') {
       return finish(
@@ -324,41 +443,83 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   await reviewCandidate(candidate, test, options, emit);
 
   // ─── 5. Replay ────────────────────────────────────────────────────────────
+  //
+  // Every entry in S ends up proven (passed as code in the last round that
+  // reached it, not regenerated since), written off (`ai: true` with the
+  // error), or unreached. All three are proposed; the summary says which is
+  // which (stories/codebehind-compile-as-a-run.md §Write what passed).
   let green = false;
   let lastFailure: { step: CompileStep; error: string; result?: StepResult | undefined } | undefined;
-
-  for (let round = 1; round <= maxRounds; round++) {
+  /** Why the compile is not green, when it is not. */
+  let failure: string | undefined;
+  const proven = new Set<string>();
+  const stepsInS = (): CompileStep[] => steps.filter((s) => s.key && selection.keys.has(s.key));
+  const markRound = (outcome: CompileRunOutcome): void => {
+    for (const step of stepsInS()) {
+      if (outcome.steps[step.index]?.status === 'passed') proven.add(step.key!);
+    }
+  };
+  const replay = async (round: number): Promise<CompileRunOutcome> => {
     rounds = round;
     const overrides = await candidate.materialise();
+    emit({
+      kind: 'phase',
+      phase: 'replay',
+      round,
+      message: `running ${throughStep ?? test.steps.length} step(s) as code`,
+    });
     const outcome = await runner({
       purpose: 'replay',
       round,
       strict: true,
       captureContext: false,
       candidateFiles: overrides,
+      ...(throughStep !== undefined && { throughStep }),
       ...(options.signal && { signal: options.signal }),
     });
     runTokens += outcome.tokensUsed;
     await candidate.clearMaterialised();
+    markRound(outcome);
+    return outcome;
+  };
+  const replayTotal = throughStep ?? test.steps.length;
+  /** Where a replay failed, or undefined when the run failed without a step. */
+  const failureOf = (
+    outcome: CompileRunOutcome,
+  ): { step: CompileStep | undefined; result: StepResult | undefined; error: string } => {
+    const failedAt = outcome.steps.findIndex((s) => s?.status === 'failed');
+    const result = failedAt >= 0 ? outcome.steps[failedAt] : undefined;
+    return {
+      step: failedAt >= 0 ? steps[failedAt] : undefined,
+      result,
+      error: result?.error ?? 'the run failed without naming a step',
+    };
+  };
+  const writeOff = (step: CompileStep, error: string, after: string): void => {
+    stepEvent('replay', step, `kept as AI ${after}: ${error}`);
+    candidate.apply(step, aiEntryFor(step.text, `replay kept failing — ${error}`));
+    proven.delete(step.key!);
+    declined++;
+    writtenOffAi.push(step.number);
+  };
 
+  for (let round = 1; round <= maxRounds; round++) {
+    const outcome = await replay(round);
     if (outcome.status === 'passed') {
-      emit({ kind: 'phase', phase: 'replay', round, message: `${test.steps.length}/${test.steps.length} passed as code` });
+      emit({ kind: 'phase', phase: 'replay', round, message: `${replayTotal}/${replayTotal} passed as code` });
       green = true;
       break;
     }
 
-    const failedAt = outcome.steps.findIndex((s) => s?.status === 'failed');
-    const failedStep = failedAt >= 0 ? steps[failedAt] : undefined;
-    const failedResult = failedAt >= 0 ? outcome.steps[failedAt] : undefined;
-    const error = failedResult?.error ?? 'the run failed without naming a step';
+    const failed = failureOf(outcome);
     emit({
       kind: 'phase',
       phase: 'replay',
       round,
-      message: failedStep ? `✗ step ${failedStep.number} — ${error}` : `✗ ${error}`,
+      message: failed.step ? `✗ step ${failed.step.number} — ${failed.error}` : `✗ ${failed.error}`,
     });
 
-    if (!failedStep || !failedStep.key) {
+    if (!failed.step || !failed.step.key) {
       return finish(
         'failed',
         {
@@ -367,38 +528,31 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           keptAi: keptAiExisting + declined,
           written: [],
           candidatePath: await candidate.persist(),
-          error,
+          error: failed.error,
         },
-        `Replay failed and no step owns the failure: ${error}`,
+        `Replay failed and no step owns the failure: ${failed.error}`,
       );
     }
 
     // A failure on an entry the author owns is not the compiler's to rewrite.
-    if (!selection.keys.has(failedStep.key)) {
-      return finish(
-        'failed',
-        {
-          compiled: selection.order.length,
-          kept: keptExisting,
-          keptAi: keptAiExisting + declined,
-          written: [],
-          candidatePath: await candidate.persist(),
-          error: `existing entry for step ${failedStep.number} fails`,
-        },
-        `existing entry for step ${failedStep.number} fails; recompile it with ` +
-          `\`--steps ${failedStep.number}\` (or Compile This Step)`,
-      );
+    // The rounds stop here; what was proven before it is still proposed.
+    if (!selection.keys.has(failed.step.key)) {
+      failure =
+        `existing entry for step ${failed.step.number} fails; recompile it with ` +
+        `\`--steps ${failed.step.number}\` (or Compile This Step)`;
+      break;
     }
 
-    lastFailure = { step: failedStep, error, result: failedResult };
+    lastFailure = { step: failed.step, error: failed.error, result: failed.result };
     if (round === maxRounds) break;
 
-    emit({ kind: 'step', phase: 'repair', step: failedStep.number, message: 'regenerating from the failure' });
-    const repaired = await repairStep(failedStep, error, failedResult, record, options, candidate, {
+    stepEvent('repair', failed.step, 'regenerating from the failure');
+    const repaired = await repairStep(failed.step, failed.error, failed.result, record, options, candidate, {
       number: round,
       max: maxRounds,
     });
-    const applied = applyGenerated(candidate, failedStep, repaired, emit, 'repair');
+    proven.delete(failed.step.key);
+    const applied = applyGenerated(candidate, failed.step, repaired, stepEvent, 'repair');
     if (applied.kind === 'declined') declined++;
     if (applied.kind === 'error') {
       return finish(
@@ -409,72 +563,98 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           keptAi: keptAiExisting + declined,
           written: [],
           candidatePath: await candidate.persist(),
-          error: `repair failed for step ${failedStep.number}: ${applied.message}`,
+          error: `repair failed for step ${failed.step.number}: ${applied.message}`,
         },
-        `Repair failed at step ${failedStep.number}: ${applied.message}`,
+        `Repair failed at step ${failed.step.number}: ${applied.message}`,
       );
     }
   }
 
   // A step that failed every round is written off: `ai: true` with the last
   // error as its comment, then one round to confirm the rest still passes.
-  if (!green && lastFailure) {
+  if (!green && !failure && lastFailure) {
     const { step, error } = lastFailure;
-    emit({
-      kind: 'step',
-      phase: 'replay',
-      step: step.number,
-      message: `kept as AI after ${maxRounds} round(s): ${error}`,
-    });
-    candidate.apply(step, aiEntryFor(step.text, `replay kept failing — ${error}`));
-    declined++;
-    rounds++;
-    const overrides = await candidate.materialise();
-    const outcome = await runner({
-      purpose: 'replay',
-      round: rounds,
-      strict: true,
-      captureContext: false,
-      candidateFiles: overrides,
-      ...(options.signal && { signal: options.signal }),
-    });
-    runTokens += outcome.tokensUsed;
-    await candidate.clearMaterialised();
+    writeOff(step, error, `after ${maxRounds} round(s)`);
+    const outcome = await replay(rounds + 1);
     green = outcome.status === 'passed';
-    emit({
-      kind: 'phase',
-      phase: 'replay',
-      round: rounds,
-      message: green
-        ? `${test.steps.length}/${test.steps.length} passed (step ${step.number} under AI)`
-        : `✗ still failing after keeping step ${step.number} as AI`,
-    });
-  }
-
-  const compiled = selection.order.length - declined;
-  if (!green) {
-    return finish(
-      'failed',
-      {
-        compiled,
-        kept: keptExisting,
-        keptAi: keptAiExisting + declined,
-        written: [],
-        candidatePath: await candidate.persist(),
-        error: lastFailure ? lastFailure.error : 'replay never went green',
-      },
-      'Replay never went green — nothing was written.',
-    );
+    if (green) {
+      emit({
+        kind: 'phase',
+        phase: 'replay',
+        round: rounds,
+        message: `${replayTotal}/${replayTotal} passed (step ${step.number} under AI)`,
+      });
+    } else {
+      // The confirming round failed somewhere else. No further rounds — the
+      // budget is spent — but the step it failed on gets the same answer the
+      // first one did, and everything proven stays proven.
+      const failed = failureOf(outcome);
+      emit({
+        kind: 'phase',
+        phase: 'replay',
+        round: rounds,
+        message: failed.step
+          ? `✗ step ${failed.step.number} — ${failed.error} (after keeping step ${step.number} as AI)`
+          : `✗ ${failed.error}`,
+      });
+      if (!failed.step || !failed.step.key) {
+        return finish(
+          'failed',
+          {
+            compiled: selection.order.length - declined,
+            kept: keptExisting,
+            keptAi: keptAiExisting + declined,
+            written: [],
+            candidatePath: await candidate.persist(),
+            error: failed.error,
+          },
+          `Replay failed and no step owns the failure: ${failed.error}`,
+        );
+      }
+      if (!selection.keys.has(failed.step.key)) {
+        failure =
+          `existing entry for step ${failed.step.number} fails; recompile it with ` +
+          `\`--steps ${failed.step.number}\` (or Compile This Step)`;
+      } else {
+        if (failed.step.key !== step.key) writeOff(failed.step, failed.error, 'in the confirming round');
+        failure = `step ${failed.step.number} still fails as code: ${failed.error}`;
+      }
+    }
   }
 
   // ─── 6. Write ─────────────────────────────────────────────────────────────
+  const compiled = selection.order.length - declined;
+  const unproven = selection.order
+    .filter((s) => !proven.has(s.key!) && !writtenOffAi.includes(s.number))
+    .map((s) => s.number);
+  // Green means the whole test replayed as code. A prefix compile that went
+  // green only proved the prefix; the rest of the test is still to do.
+  const status: CompileStatus = green && !stoppedAt ? 'green' : 'partial';
+  const keptAi = keptAiExisting + declined;
+  const tail = [
+    writtenOffAi.length > 0 ? `${writtenOffAi.length} kept AI after replay failures` : '',
+    unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
+    stoppedAt ? `stopped at step ${stoppedAt.step}` : '',
+  ].filter((s) => s !== '');
+  const headline =
+    `Compiled ${test.title}: ${compiled} step(s) as code, ${keptAi} kept AI` +
+    (tail.length > 0 ? ` — ${tail.join(', ')}` : '') +
+    '.';
+  const extras = {
+    unproven,
+    writtenOffAi,
+    ...(stoppedAt && { stoppedAt }),
+    notAttempted,
+    ...(failure !== undefined && { error: failure }),
+  };
+
   const files = candidate.changedFiles();
   if (options.dryRun) {
     emit({ kind: 'phase', phase: 'write', message: 'dry run — nothing written' });
     return finish(
-      'green',
-      { compiled, kept: keptExisting, keptAi: keptAiExisting + declined, written: [] },
-      'Compiled (dry run) — nothing written.',
+      status,
+      { compiled, kept: keptExisting, keptAi, written: [], ...extras },
+      green ? 'Compiled (dry run) — nothing written.' : `${headline} Dry run — nothing written.`,
     );
   }
 
@@ -488,7 +668,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         {
           compiled,
           kept: keptExisting,
-          keptAi: keptAiExisting + declined,
+          keptAi,
           written,
           candidatePath: await candidate.persist(),
           error: (err as Error).message,
@@ -500,17 +680,39 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     emit({ kind: 'phase', phase: 'write', message: `${path.basename(file)}` });
   }
   await candidate.discardPersisted();
-  // The flag the author acted on has been acted on. Leaving it set would make
-  // the next `--only-stale` regenerate the same steps for no reason.
+  // The flags the compile acted on have been acted on: a proven entry replaced
+  // the broken one, and a write-off is an `ai: true` entry the selection skips
+  // anyway. An unproven entry keeps its flag — the next run decides.
   await clearStale(
     test.filePath,
-    steps.filter((s) => s.key && selection.keys.has(s.key)).map((s) => s.number),
+    steps
+      .filter(
+        (s) => s.key && selection.keys.has(s.key) && (proven.has(s.key) || writtenOffAi.includes(s.number)),
+      )
+      .map((s) => s.number),
   );
-  return finish(
-    'green',
-    { compiled, kept: keptExisting, keptAi: keptAiExisting + declined, written },
-    `Compiled ${test.title}: ${compiled} step(s) as code, ${keptAiExisting + declined} kept AI.`,
-  );
+  return finish(status, { compiled, kept: keptExisting, keptAi, written, ...extras }, headline);
+}
+
+/** How many leading steps of a run passed — the recording's usable prefix. */
+function leadingPassed(steps: (StepResult | undefined)[]): number {
+  let n = 0;
+  for (const step of steps) {
+    if (step?.status !== 'passed') break;
+    n++;
+  }
+  return n;
+}
+
+/** "steps 6–9", "step 4", "steps 2, 5" — for messages. */
+function listSteps(numbers: number[]): string {
+  if (numbers.length === 0) return 'no steps';
+  if (numbers.length === 1) return `step ${numbers[0]}`;
+  const sorted = [...numbers].sort((a, b) => a - b);
+  const contiguous = sorted.every((n, i) => i === 0 || n === sorted[i - 1]! + 1);
+  return contiguous
+    ? `steps ${sorted[0]}–${sorted[sorted.length - 1]}`
+    : `steps ${sorted.join(', ')}`;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -568,9 +770,9 @@ function entryKeyOf(binding: CodeBehindBinding): string {
  * Keys of entries a run flagged as stale.
  *
  * Normally that is the last-run sidecar — the author ran the test, saw a ⚠,
- * and came here. Compile's own Record cannot contribute: it deliberately runs
- * with code-behind off, so no entry gets the chance to fail. A supplied run
- * ("Compile from this run") can, because that one did use code-behind.
+ * and came here — or the supplied run, when the client passed one. Compile's
+ * own Record is too late for this pass (selection runs first) and contributes
+ * its flags afterwards, in `compileTest`.
  */
 async function collectStaleKeys(
   test: ParsedTest,
@@ -699,21 +901,16 @@ function applyGenerated(
   candidate: Candidate,
   step: CompileStep,
   generated: GeneratedEntry,
-  emit: (event: CompileEvent) => void,
+  stepEvent: (phase: CompilePhase, step: CompileStep, message: string) => void,
   phase: CompilePhase,
 ): GeneratedEntry {
   try {
     if (generated.kind === 'entry') {
       candidate.apply(step, generated.code);
-      emit({
-        kind: 'step',
-        phase,
-        step: step.number,
-        message: phase === 'repair' ? 'repaired' : 'generated',
-      });
+      stepEvent(phase, step, phase === 'repair' ? 'repaired' : 'generated');
     } else if (generated.kind === 'declined') {
       candidate.apply(step, aiEntryFor(step.text, generated.reason));
-      emit({ kind: 'step', phase, step: step.number, message: `kept as AI: ${generated.reason}` });
+      stepEvent(phase, step, `kept as AI: ${generated.reason}`);
     }
     return generated;
   } catch (err) {
@@ -803,6 +1000,19 @@ async function reviewCandidate(
       });
       continue;
     }
+    // The reviewer edits entries; it does not decide which steps have one.
+    // Caught live: given the whole test, it wrote an entry for the step a
+    // prefix compile had deliberately left alone — code for a step nobody
+    // recorded, which the next compile would then skip as "already has one".
+    const entriesChanged = describeEntryChange(listEntries(before), listEntries(revised));
+    if (entriesChanged) {
+      emit({
+        kind: 'phase',
+        phase: 'review',
+        message: `rejected: the revision ${entriesChanged} — the generated file stands`,
+      });
+      continue;
+    }
     const invalid = await validateCodeBehindSource(file, revised);
     if (invalid) {
       emit({
@@ -815,6 +1025,30 @@ async function reviewCandidate(
     candidate.replaceFile(file, revised);
     emit({ kind: 'phase', phase: 'review', message: `revised ${path.basename(file)}` });
   }
+}
+
+/**
+ * How a revision changed the SET of entries, or null when it did not. Order
+ * and code are the reviewer's to change; which steps have an entry is not.
+ */
+function describeEntryChange(
+  before: Array<{ source: string; section: string }>,
+  after: Array<{ source: string; section: string }>,
+): string | null {
+  const key = (e: { source: string; section: string }): string => `${e.section}\u0000${e.source}`;
+  const was = new Map<string, number>();
+  for (const e of before) was.set(key(e), (was.get(key(e)) ?? 0) + 1);
+  const now = new Map<string, number>();
+  for (const e of after) now.set(key(e), (now.get(key(e)) ?? 0) + 1);
+  const added = after.filter((e) => (now.get(key(e)) ?? 0) > (was.get(key(e)) ?? 0)).map((e) => e.source);
+  const removed = before.filter((e) => (was.get(key(e)) ?? 0) > (now.get(key(e)) ?? 0)).map((e) => e.source);
+  const quote = (sources: string[]): string => [...new Set(sources)].map((s) => JSON.stringify(s)).join(', ');
+  if (added.length > 0 && removed.length > 0) {
+    return `adds an entry for ${quote(added)} and removes ${quote(removed)}`;
+  }
+  if (added.length > 0) return `adds an entry for ${quote(added)}`;
+  if (removed.length > 0) return `removes the entry for ${quote(removed)}`;
+  return null;
 }
 
 /** Every parameter value in play, for the review's leak guard. Unlike the
@@ -1000,6 +1234,7 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
         ...(request.disableCodeBehind && { codeBehindDisabled: true }),
         codeBehindStrict: request.strict,
         captureStepContext: request.captureContext,
+        ...(request.throughStep !== undefined && { stopAfterStep: request.throughStep }),
         ...(request.signal && { signal: request.signal }),
       },
     );

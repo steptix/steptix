@@ -110,7 +110,23 @@ describe('TestBench code-behind compile', function () {
     // No selection means "steps with no entry, or flagged stale" — the server
     // decides. Sending an empty select would mean something else.
     assert.equal(request.select, undefined);
-    assert.equal(request.fromSessionId, undefined);
+    // Always this document's session: the server compiles from its last run
+    // when it can, and records in it when it cannot
+    // (stories/codebehind-compile-as-a-run.md §Record is a run).
+    assert.equal(typeof request.sessionId, 'string');
+    assert.ok(request.sessionId.length > 0, 'sessionId must name the document\'s session');
+  });
+
+  it('every run asks the server to keep step context, so Compile can use it', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    assert.equal(fake.requests[0].captureStepContext, true);
+    // And the compile names the same session the run used.
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    await waitFor('compile requested', () => fake.compileRequests.length > 0);
+    assert.equal(fake.compileRequests[0].sessionId, fake.streamSessionIds[0]);
   });
 
   it('a green compile opens a diff of the proposed file without writing it', async () => {
@@ -153,6 +169,38 @@ describe('TestBench code-behind compile', function () {
     assert.equal(fs.existsSync(stepsPath), false);
   });
 
+  it('a partial compile opens the diff like a green one', async () => {
+    // What passed is proposed (stories/codebehind-compile-as-a-run.md §Write
+    // what passed): a prefix compile's files reach the diff, and the summary
+    // carries what the notification says about the rest.
+    const proposed = 'export default defineSteps([{ source: "Navigate", async run() {} }]);\n';
+    fake.compileEvents = [
+      { type: 'compile:phase', phase: 'select', message: '2 step(s) to generate, 0 kept, 0 already AI' },
+      { type: 'compile:phase', phase: 'record', message: 'stopped at step 2 — no such button; compiling 1 step(s) before it' },
+      { type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' },
+      { type: 'compile:phase', phase: 'replay', round: 1, message: '1/1 passed as code' },
+      { type: 'compile:done', status: 'partial', message: 'Compiled Compile Me: 1 step(s) as code — stopped at step 2.' },
+      {
+        type: 'compile:result',
+        status: 'partial',
+        get files() {
+          return { [stepsPath]: proposed };
+        },
+        summary: {
+          test: 'compile-me.md', totalSteps: 2, compiled: 1, kept: 0, keptAi: 0, rounds: 1,
+          tokensUsed: 4_000, written: [], unproven: [], writtenOffAi: [],
+          stoppedAt: { step: 2, error: 'no such button' }, notAttempted: [2],
+        },
+      },
+    ];
+
+    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
+    const pending = hooks.pendingCodeBehind();
+    assert.equal(pending.files[stepsPath], proposed);
+    assert.equal(fs.existsSync(stepsPath), false, 'compile must not write the file itself');
+  });
+
   it('a red compile leaves no proposal to apply', async () => {
     fake.compileEvents = [
       { type: 'compile:phase', phase: 'select', message: '2 step(s) to generate' },
@@ -171,6 +219,9 @@ describe('TestBench code-behind compile', function () {
           rounds: 3,
           tokensUsed: 900,
           written: [],
+          unproven: [],
+          writtenOffAi: [],
+          notAttempted: [],
           error: 'locator timeout',
           candidatePath: '/x/.aiui-codebehind-cache/compile-me.steps.ts.candidate',
         },
@@ -259,9 +310,66 @@ describe('TestBench code-behind compile', function () {
   });
 
   it('the webview compile message reaches the same command', async () => {
-    await hooks.dispatchWebviewMessage({ type: 'compile', fromSessionId: 'sess-9' });
+    await hooks.dispatchWebviewMessage({ type: 'compile' });
     await waitFor('compile requested', () => fake.compileRequests.length > 0);
-    assert.equal(fake.compileRequests[0].fromSessionId, 'sess-9');
+    assert.equal(typeof fake.compileRequests[0].sessionId, 'string');
+  });
+
+  it('paints the compile\'s runs in the gutter — ▶ then ⚙ / ✗ — and resets between rounds', async () => {
+    // stories/codebehind-compile-as-a-run.md §Every run is on the stream: the
+    // Record and each Replay round paint as a run would, and a new round
+    // starts from a clean gutter so round 1's ✗ does not outlive round 2.
+    const proposed = 'export default defineSteps([]);\n';
+    const run = (phase, round, event) => ({ type: 'compile:run', phase, ...(round && { round }), event });
+    fake.compileEvents = [
+      { type: 'compile:phase', phase: 'record', message: 'running 2 step(s)' },
+      run('record', undefined, { type: 'step:start', line: 8 }),
+      run('record', undefined, { type: 'step:pass', line: 8 }),
+      run('record', undefined, { type: 'step:start', line: 9 }),
+      run('record', undefined, { type: 'step:pass', line: 9, fromCache: true }),
+      run('record', undefined, { type: 'done', status: 'passed' }),
+      { type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' },
+      { type: 'compile:phase', phase: 'replay', round: 1, message: 'running 2 step(s) as code' },
+      run('replay', 1, { type: 'step:start', line: 8 }),
+      run('replay', 1, { type: 'step:pass', line: 8, fromCodeBehind: true }),
+      run('replay', 1, { type: 'step:start', line: 9 }),
+      run('replay', 1, { type: 'step:fail', line: 9, error: 'locator timeout' }),
+      run('replay', 1, { type: 'done', status: 'failed' }),
+      { type: 'compile:step', phase: 'repair', step: 2, line: 9, message: 'regenerating from the failure' },
+      { type: 'compile:phase', phase: 'replay', round: 2, message: 'running 2 step(s) as code' },
+      run('replay', 2, { type: 'step:start', line: 8 }),
+      run('replay', 2, { type: 'step:pass', line: 8, fromCodeBehind: true }),
+      run('replay', 2, { type: 'step:start', line: 9 }),
+      // Round 2 stops here on purpose: line 9 must read ▶ (this round), not
+      // ✗ (last round), which is what the reset between rounds buys.
+    ];
+    // The stream ends without a result, so the compile reports "no result" —
+    // fine for a test about the gutter.
+    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    await waitFor('compile ran', () => fake.compileRequests.length > 0);
+    await waitFor('round 2 painted', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[8] === 'pass-code-behind' && statuses[9] === 'running';
+    });
+    void proposed;
+  });
+
+  it('a compile\'s replay failure does not park a breakpoint stop', async () => {
+    // A Replay's session is the compile's own and is closed after the round —
+    // there is nothing to Continue into, so the ✗ stays a mark and no more.
+    const run = (phase, round, event) => ({ type: 'compile:run', phase, ...(round && { round }), event });
+    fake.compileEvents = [
+      { type: 'compile:phase', phase: 'replay', round: 1, message: 'running 2 step(s) as code' },
+      run('replay', 1, { type: 'step:start', line: 8 }),
+      run('replay', 1, { type: 'step:fail', line: 8, error: 'locator timeout' }),
+      run('replay', 1, { type: 'done', status: 'failed' }),
+    ];
+    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    await waitFor('fail painted', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[8] === 'fail';
+    });
+    assert.equal(hooks.tracker.snapshot().breakpointStop, null);
   });
 });
 
@@ -291,6 +399,9 @@ function greenCompile(file, content) {
         rounds: 1,
         tokensUsed: 12_345,
         written: [],
+        unproven: [],
+        writtenOffAi: [],
+        notAttempted: [],
       },
     },
   ];

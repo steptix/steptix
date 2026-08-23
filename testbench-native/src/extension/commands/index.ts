@@ -63,15 +63,16 @@ export function registerCommands(
 ): vscode.Disposable[] {
   /**
    * Compile the active test's code-behind and offer the result as a diff
-   * (stories/codebehind-compile.md §What the author runs).
+   * (stories/codebehind-compile.md §What the author runs, amended by
+   * stories/codebehind-compile-as-a-run.md).
    *
    * Shared by the whole-test command, the one-step command and the panel's
-   * "Compile from this run": the three differ only in what they select and
-   * whether they record.
+   * Compile button: they differ only in what they select. Every compile runs
+   * against the document's own session — from its last run when that can be
+   * the recording, recording in it otherwise.
    */
   const compile = async (options: {
     select?: { steps?: number[] };
-    fromSessionId?: string;
   } = {}): Promise<void> => {
     const controller = registry.active();
     if (!controller) return notifyNoActive();
@@ -93,7 +94,6 @@ export function registerCommands(
         token.onCancellationRequested(() => aborter.abort());
         return controller.compileCodeBehind({
           ...(options.select && { select: options.select }),
-          ...(options.fromSessionId && { fromSessionId: options.fromSessionId }),
           signal: aborter.signal,
         });
       },
@@ -134,11 +134,18 @@ export function registerCommands(
     const compiled = summary?.compiled ?? 0;
     const total = summary?.totalSteps ?? 0;
     const keptAi = summary?.keptAi ?? 0;
-    void vscode.window
-      .showInformationMessage(
+    // A partial compile says what is missing and what to do about it
+    // (stories/codebehind-compile-as-a-run.md §What the author sees): the
+    // step the recording stopped at, the steps written off after replay
+    // failures, the entries the next run will prove.
+    const partial = outcome.status === 'partial' && summary ? partialNotes(summary) : '';
+    const show = outcome.status === 'partial'
+      ? vscode.window.showWarningMessage
+      : vscode.window.showInformationMessage;
+    void show(
         `Compiled ${label}: ${compiled} of ${total} step(s) as code` +
           (keptAi > 0 ? `, ${keptAi} kept AI` : '') +
-          `. Used ${tokens} tokens; these steps now cost 0.`,
+          `.${partial} Used ${tokens} tokens; the compiled steps now cost 0.`,
         'Apply',
         'Open diff',
         'Show log',
@@ -569,11 +576,7 @@ export function registerCommands(
       vscode.window.setStatusBarMessage(`TestBench: cleared cache for ${fileLabel}`, 3000);
     }),
 
-    vscode.commands.registerCommand(
-      'testbench-native.compileCodeBehind',
-      (args?: { fromSessionId?: string }) =>
-        compile(args?.fromSessionId ? { fromSessionId: args.fromSessionId } : {}),
-    ),
+    vscode.commands.registerCommand('testbench-native.compileCodeBehind', () => compile()),
 
     // "Compile This Step" — a full compile with S = {k}
     // (stories/codebehind-compile.md §What the author runs). The paused-session
@@ -1028,4 +1031,44 @@ function refuseStaleResume(tracker: ActiveFileTracker, uri: vscode.Uri): void {
     'TestBench: the paused step is no longer runnable on its own — use Run All',
     4000,
   );
+}
+
+/**
+ * The sentence a partial compile adds to its notification: where the run
+ * stopped, what was written off, what is unproven. Each part only when it
+ * applies, so a plain prefix compile reads as one short instruction.
+ */
+export function partialNotes(summary: {
+  stoppedAt?: { step: number; error: string };
+  notAttempted: number[];
+  writtenOffAi: number[];
+  unproven: number[];
+}): string {
+  const parts: string[] = [];
+  if (summary.stoppedAt) {
+    parts.push(
+      ` Step ${summary.stoppedAt.step} failed under AI — ${summary.stoppedAt.error}.` +
+        (summary.notAttempted.length > 0 ? ` ${listSteps(summary.notAttempted)} not attempted.` : '') +
+        ' Fix it, run, and compile again for the rest.',
+    );
+  }
+  if (summary.writtenOffAi.length > 0) {
+    parts.push(
+      ` ${listSteps(summary.writtenOffAi)} kept AI after replay failures — fix the cause, then Compile This Step.`,
+    );
+  }
+  if (summary.unproven.length > 0) {
+    parts.push(` ${listSteps(summary.unproven)} unproven — the next run proves or flags them.`);
+  }
+  return parts.join('');
+}
+
+/** "Steps 6–9", "Step 4", "Steps 2, 5". */
+function listSteps(numbers: number[]): string {
+  if (numbers.length === 1) return `Step ${numbers[0]}`;
+  const sorted = [...numbers].sort((a, b) => a - b);
+  const contiguous = sorted.every((n, i) => i === 0 || n === sorted[i - 1]! + 1);
+  return contiguous
+    ? `Steps ${sorted[0]}–${sorted[sorted.length - 1]}`
+    : `Steps ${sorted.join(', ')}`;
 }

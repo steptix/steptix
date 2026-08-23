@@ -195,4 +195,78 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
 
     await vscode.commands.executeCommand('testbench-native.restartSession');
   });
+
+  it('compiles from the run the author just did — no Record — and paints ⚙ as it replays', async () => {
+    // stories/codebehind-compile-as-a-run.md: an ordinary run captures the
+    // DOM either side of its steps, so it IS the recording. Press Run, then
+    // Compile: the server says it is compiling from the session's last run,
+    // never records, and the Replay round's events paint ⚙ in the gutter —
+    // before anything is applied.
+    fs.rmSync(stepsFile, { force: true });
+    const uri = vscode.Uri.file(testFile);
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor(
+      'compile-codebehind.md becomes the active editor',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
+    );
+    await waitFor('tracker recognises the test file', () => hooks.tracker.snapshot().isTestFile);
+
+    // ===== Run, under AI (no entries on disk), with context captured =====
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+    await sleep(1_000);
+    const logBefore = readLiveLog()?.length ?? 0;
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('the AI run starts', () => hooks.isRunning(), 60_000);
+    await waitFor('the AI run finishes', () => !hooks.isRunning(), 240_000);
+    const afterRun = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    for (const line of [16, 17]) {
+      assert.equal(afterRun[line], 'pass', `the AI run should pass line ${line} plainly, got "${afterRun[line]}"`);
+    }
+
+    // ===== Compile, from that run =====
+    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    await waitFor('the compile proposes files', () => hooks.pendingCodeBehind() !== null, 480_000);
+
+    const proposal = hooks.pendingCodeBehind();
+    const content = Object.values(proposal.files)[0];
+    assert.match(content, /source: "Navigate to the baseUrl"/, 'step 1 must have an entry');
+    assert.equal(fs.existsSync(stepsFile), false, 'a compile must not write the file itself');
+
+    // The Replay round ran as code and said so, step by step, on the stream;
+    // the gutter shows it without a run of our own. The snapshot is the
+    // ACTIVE editor's, and the proposal just opened a diff — so look at the
+    // test file again first.
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor(
+      'the test file is active again',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
+      15_000,
+    );
+    const afterCompile = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    for (const line of [16, 17]) {
+      assert.equal(
+        afterCompile[line],
+        'pass-code-behind',
+        `line ${line} should show ⚙ from the compile's replay, got "${afterCompile[line]}"`,
+      );
+    }
+
+    const log = readLiveLog();
+    if (log !== null) {
+      const thisRun = log.slice(logBefore);
+      assert.match(thisRun, /Compiling from session .* last run/, 'the compile must reuse the run');
+      assert.doesNotMatch(thisRun, /Recording in session/, 'the compile must not record');
+      assert.doesNotMatch(thisRun, /Record\s+running \d+ step/, 'no Record phase');
+    }
+
+    await vscode.commands.executeCommand('testbench-native.discardCodeBehind');
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+  });
 });
+
+/** The extension's output channel, when the harness is teeing it to a file. */
+function readLiveLog() {
+  const file = process.env.TESTBENCH_LIVE_LOG;
+  if (!file || !fs.existsSync(file)) return null;
+  return fs.readFileSync(file, 'utf-8');
+}

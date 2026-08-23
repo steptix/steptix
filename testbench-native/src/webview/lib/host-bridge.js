@@ -70,9 +70,7 @@ export const hostBridge = {
   /** Re-run the failed skill step (identified by its test URI) with the user's
    *  edited captured vars. */
   postRerunSkillStep(testUri, edits) { post({ type: 'rerunSkillStep', testUri, edits }); },
-  /** Compile this test's code-behind. `fromSessionId` skips the Record phase
-   *  by compiling from the run that just finished. */
-  postCompile(fromSessionId) {
-    post(fromSessionId ? { type: 'compile', fromSessionId } : { type: 'compile' });
-  },
+  /** Compile this test's code-behind — from this file's last run when it can
+   *  be the recording, recording in this file's session otherwise. */
+  postCompile() { post({ type: 'compile' }); },
 };

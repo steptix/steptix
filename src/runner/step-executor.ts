@@ -732,7 +732,14 @@ async function executeStepAttempt(
     // setting only feeds the AI, so it's irrelevant when we're not calling AI.
     const turnTimestamp = new Date().toISOString();
     const cachedTurnForCapture = cachedTurns?.[currentTurn - 1];
-    const domSnapshot = cachedTurnForCapture
+    // Compile's Record input (stories/codebehind-compile-as-a-run.md §Ordinary
+    // runs capture what a compile needs): when the caller asked for step
+    // context, a cache hit still takes the turn-1 snapshot — it is `domBefore`.
+    // Code-behind executes ahead of the cache, so a cached step is by
+    // definition an uncompiled one, and the cost ends when it is compiled.
+    const wantTurnDom =
+      !cachedTurnForCapture || (opts.captureStepContext === true && currentTurn === 1);
+    const domSnapshot = !wantTurnDom
       ? ''
       : await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
           captureDomSnapshot(page, {

@@ -623,6 +623,47 @@ class RunControllerRegistry implements vscode.Disposable {
     }
     if (msg.type === 'breakpointStop') {
       this.tracker.setBreakpointStop(uri, msg.line, msg.resumeContext);
+      return;
+    }
+    // A compile's runs paint the gutter the way a run does
+    // (stories/codebehind-compile-as-a-run.md §Every run is on the stream):
+    // ▶ while a step runs, then ✓ / ⚡ / ⚙ / ⚠ / ✗ by how it ended. What they
+    // do NOT do is park a breakpoint stop on a failure or capture a skill
+    // failure for re-run: a Replay's session is the compile's own and is
+    // closed after the round, so there is nothing to continue into. The
+    // compile's own Record runs pre-expanded, so its events carry no frames
+    // and the marks land on the test file.
+    if (msg.type === 'compileRunEvent') {
+      const ev = msg.event;
+      switch (ev.type) {
+        case 'step:start':
+          this.tracker.setStatus(uri, ev.line, 'running');
+          break;
+        case 'step:pass':
+          this.tracker.setStatus(
+            uri,
+            ev.line,
+            ev.codeBehindStale
+              ? 'pass-stale'
+              : ev.fromCodeBehind
+                ? 'pass-code-behind'
+                : ev.fromCache
+                  ? 'pass-cached'
+                  : 'pass',
+          );
+          break;
+        case 'step:fail':
+          this.tracker.setStatus(uri, ev.line, 'fail');
+          break;
+        default:
+          break;
+      }
+      return;
+    }
+    // The model is working on this step (Generate / Repair): ▶ walks the test
+    // during the phases that do not execute it.
+    if (msg.type === 'compileStep') {
+      this.tracker.setStatus(uri, msg.line, 'running');
     }
   }
 
@@ -1436,12 +1477,7 @@ async function handleWebviewMessage(
       return;
     }
     case 'compile': {
-      // "Compile from this run" passes the session id so the compile skips
-      // Record; the plain Compile button sends none and the compile records.
-      await vscode.commands.executeCommand(
-        'testbench-native.compileCodeBehind',
-        msg.fromSessionId ? { fromSessionId: msg.fromSessionId } : undefined,
-      );
+      await vscode.commands.executeCommand('testbench-native.compileCodeBehind');
       return;
     }
     case 'promptResponse': {
