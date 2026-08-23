@@ -6,10 +6,10 @@
  * server records the test under AI, generates an entry per step, reviews the
  * file, replays it as pure code, and streams the phases back; the extension
  * opens a diff; Apply writes the `.steps.ts`; and the run that follows serves
- * every step from that file — which is what ⚙ in the gutter means.
+ * every step from that file — which is what </> in the gutter means.
  *
  * That last assertion is the one that cannot be faked at any lower layer. The
- * integration suite proves the extension paints ⚙ when told to; only a live
+ * integration suite proves the extension paints </> when told to; only a live
  * run proves the code the compiler wrote actually executes and that the server
  * says so.
  *
@@ -165,7 +165,7 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
     assert.equal(fs.readFileSync(stepsFile, 'utf-8'), content, 'Apply must write it verbatim');
     assert.equal(hooks.pendingCodeBehind(), null, 'Apply must consume the proposal');
     // Apply is invoked from the diff, which is not a test file. Focus has to
-    // come back or the author's next act — Run, to see the ⚙ marks — silently
+    // come back or the author's next act — Run, to see the </> marks — silently
     // does nothing, which is exactly how this test first failed.
     await waitFor(
       'focus returns to the test file after Apply',
@@ -188,7 +188,7 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
       assert.equal(
         statuses[line],
         'pass-code-behind',
-        `line ${line} should have run as code (⚙), got "${statuses[line]}". ` +
+        `line ${line} should have run as code (</>), got "${statuses[line]}". ` +
           `A "pass" means the entry did not bind; a "pass-stale" means it threw and the AI covered.`,
       );
     }
@@ -196,11 +196,11 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
     await vscode.commands.executeCommand('testbench-native.restartSession');
   });
 
-  it('records again after a run — in the same session — paints ⚙ as it replays, and leaves the recording on disk', async () => {
+  it('records again after a run — in the same session — paints </> as it replays, and leaves the recording on disk', async () => {
     // stories/codebehind-recording-on-disk.md: an ordinary run captures
     // nothing; the compile's own Record, in this session, is the recording —
     // written beside the test as files, with the candidate next to it, all of
-    // it there before anything is applied. The Replay round's events paint ⚙
+    // it there before anything is applied. The Replay round's events paint </>
     // in the gutter.
     fs.rmSync(stepsFile, { force: true });
     const uri = vscode.Uri.file(testFile);
@@ -247,7 +247,7 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
       assert.equal(
         afterCompile[line],
         'pass-code-behind',
-        `line ${line} should show ⚙ from the compile's replay, got "${afterCompile[line]}"`,
+        `line ${line} should show </> from the compile's replay, got "${afterCompile[line]}"`,
       );
     }
 

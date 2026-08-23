@@ -289,12 +289,12 @@ means a different step would be silent and wrong.
 
   Apply returns focus to the test file. Every TestBench command works against
   the active editor, and the diff it was pressed in is not a test file — so
-  without that, the author's next act (Run, to see the ⚙ marks) silently does
+  without that, the author's next act (Run, to see the `</>` marks) silently does
   nothing. A file being created for the first time is written with
   `WorkspaceEdit.createFile`'s `contents`, not an insert, so the bytes the
   compiler produced are the bytes that land: an inserted string is re-ended to
   the new document's EOL, which on Windows turns the CLI's LF into CRLF.
-- **In the gutter, after runs** — ⚙ the step passed as code, ⚠ its entry
+- **In the gutter, after runs** — `</>` the step passed as code, ⚠ its entry
   failed and the step ran under AI (recompile), ✓/✗/⚡ as today. Same
   decoration mechanism and per-file persistence as the existing marks, fed by
   `fromCodeBehind` / `codeBehindStale` on the step events.
@@ -456,7 +456,7 @@ Modified in phase B:
   `lastRunDetails` behind `fromSessionId`, and the two new fields on
   `step:pass`.
 - `testbench-native` — commands `compileCodeBehind`, `compileStepCodeBehind`,
-  `openCodeBehind`, `applyCodeBehind`, `discardCodeBehind`; ⚙/⚠ decorations
+  `openCodeBehind`, `applyCodeBehind`, `discardCodeBehind`; `</>`/⚠ decorations
   and the `pass-code-behind` / `pass-stale` statuses; both run logs and the
   editor summary counting them; the panel's Compile button and the
   **Compile from this run** action. Patch version bump per CLAUDE.md
@@ -506,7 +506,7 @@ Modified:
   a `conflict`, abort), and the narrower over the new frames.
 - CLI: flags, exit codes, `--dry-run` output.
 - Extension integration (FakeApiClient): the command, phase lines, diff open,
-  Apply writes the file, ⚙/⚠ marks from step events.
+  Apply writes the file, `</>`/⚠ marks from step events.
 - Live, over HTTP: compile the local smoke test to green through
   `POST /codebehind/compile`, apply the returned file by hand (what Apply
   does), then replay with an invalid AI key — 0 tokens. Plus the 409 under a
@@ -516,12 +516,12 @@ Modified:
   alone and leaves the others byte-identical.
 - Live, through the extension: `templates/init/tests/compile-codebehind.md`
   against `fixtures/test-app` — Compile, the diff, Apply, and a run that
-  paints ⚙ on every step. The fixture app is started by the test and killed
+  paints `</>` on every step. The fixture app is started by the test and killed
   after, so nothing depends on an external site or a shared account.
 
 ## Non-goals
 
-- A static ⚙ mark before any run (needs a bindings query; later).
+- A static `</>` mark before any run (needs a bindings query; later).
 - An MCP `compile_test` tool (natural follow-on once the server endpoint
   exists).
 - Auto-compile on save, or compiling a skill in isolation — skills compile

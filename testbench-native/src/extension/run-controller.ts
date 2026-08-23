@@ -2226,7 +2226,7 @@ export class RunController {
     for await (const event of events) {
       this.configSentForSession = true;
       // How the step passed — the textual half of what the gutter glyphs say.
-      // ⚡ replayed a recorded transcript, ⚙ ran compiled code, ⚠ healed under
+      // ⚡ replayed a recorded transcript, </> ran compiled code, ⚠ healed under
       // AI because the compiled entry threw.
       if (event.type === 'step:pass') {
         passCount += 1;

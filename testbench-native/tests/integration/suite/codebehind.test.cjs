@@ -10,7 +10,7 @@
  *     is on what they were opened WITH (`pendingCodeBehind`) plus, for Apply,
  *     the bytes on disk afterwards.
  *   - the gutter — do `fromCodeBehind` / `codeBehindStale` on a step:pass
- *     reach the tracker as ⚙ / ⚠ rather than a plain ✓? That mapping lives in
+ *     reach the tracker as </> / ⚠ rather than a plain ✓? That mapping lives in
  *     one `switch` on the event, and a wrong branch there is invisible until
  *     someone looks at a real run.
  *
@@ -260,7 +260,7 @@ describe('TestBench code-behind compile', function () {
     assert.match(log, /Replay 1\s+2\/2 passed as code/);
   });
 
-  it('paints ⚙ for a step that passed as code and ⚠ for a stale one', async () => {
+  it('paints </> for a step that passed as code and ⚠ for a stale one', async () => {
     void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
 
@@ -319,7 +319,7 @@ describe('TestBench code-behind compile', function () {
     assert.equal(typeof fake.compileRequests[0].sessionId, 'string');
   });
 
-  it('paints the compile\'s runs in the gutter — ▶ then ⚙ / ✗ — and resets between rounds', async () => {
+  it('paints the compile\'s runs in the gutter — ▶ then </> / ✗ — and resets between rounds', async () => {
     // stories/codebehind-compile-as-a-run.md §Every run is on the stream: the
     // Record and each Replay round paint as a run would, and a new round
     // starts from a clean gutter so round 1's ✗ does not outlive round 2.

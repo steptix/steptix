@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.76",
+  "version": "0.5.77",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -149,7 +149,7 @@
       {
         "command": "testbench-native.compileCodeBehind",
         "title": "TestBench: Compile Code-behind",
-        "icon": "$(gear)"
+        "icon": "$(code)"
       },
       {
         "command": "testbench-native.compileStepCodeBehind",

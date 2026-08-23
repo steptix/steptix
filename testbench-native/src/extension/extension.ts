@@ -465,7 +465,7 @@ class RunControllerRegistry implements vscode.Disposable {
           // How the step passed decides the glyph. `codeBehindStale` outranks
           // everything: the step DID pass, but its compiled entry threw and the
           // AI covered for it, and ⚠ is the only mark that asks for a recompile.
-          // Then ⚙ (ran as code), then ⚡ (every AI turn served from StepCache),
+          // Then the code mark (ran as code), then ⚡ (every AI turn served from StepCache),
           // then the plain ✓.
           const status = ev.codeBehindStale
             ? 'pass-stale'
@@ -627,7 +627,7 @@ class RunControllerRegistry implements vscode.Disposable {
     }
     // A compile's runs paint the gutter the way a run does
     // (stories/codebehind-compile-as-a-run.md §Every run is on the stream):
-    // ▶ while a step runs, then ✓ / ⚡ / ⚙ / ⚠ / ✗ by how it ended. What they
+    // ▶ while a step runs, then ✓ / ⚡ / </> / ⚠ / ✗ by how it ended. What they
     // do NOT do is park a breakpoint stop on a failure or capture a skill
     // failure for re-run: a Replay's session is the compile's own and is
     // closed after the round, so there is nothing to continue into. The

@@ -280,7 +280,7 @@ failure is a *real* step failure, not a fall-through — same rule as the
 assertion code cache: broken code heals, a failed assertion fails.
 
 **Reporting.** The step result carries `fromCodeBehind: true` (sibling of
-`fromCache`), rendered with its own glyph (`⚙` next to the cache's `⚡`), plus
+`fromCache`), rendered with its own glyph (`</>` next to the cache's `⚡`), plus
 the entry's code in a collapsed block (as `assertionCode` renders today) and
 any `log` output — the tool-step outcome shape already covers this.
 
@@ -433,7 +433,7 @@ Modified code:
 - `src/config/defaults.ts` + config types — `codebehind: { generate: false }`.
 - `src/server/project-bundle.ts` — carry `codebehind` per project.
 - `src/report/types.ts` / `generator.ts` / `template.ts` —
-  `fromCodeBehind`, code block, `⚙` glyph.
+  `fromCodeBehind`, code block, `</>` glyph.
 - `package.json` — `"./codebehind"` export subpath.
 
 ## Tests

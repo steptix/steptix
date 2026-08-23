@@ -8,6 +8,16 @@ import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
 
 /**
+ * The code-behind mark — `</>` — the same drawing TestBench paints in the
+ * gutter and on its Compile button. Inline SVG in `currentColor`, so it takes
+ * the badge's or title's colour; `.cb-mark` in template.ts sets the baseline.
+ */
+export const CODE_BEHIND_MARK =
+  '<svg class="cb-mark" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">' +
+  '<path d="M5.4 4.3L1.9 8l3.5 3.7M10.6 4.3L14.1 8l-3.5 3.7M9.4 2.6L6.6 13.4" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+/**
  * Generate an HTML report for a single test run and write it to disk.
  * Returns the absolute path of the written file.
  */
@@ -470,15 +480,15 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ? `<span class="badge badge-skill" title="Step expanded from skill ${escapeHtml(step.sourceSkill)}">${escapeHtml(step.sourceSkill)}</span>`
     : '';
 
-  // ⚙ for code-behind, ⚡ for the action cache — two different ways a step
-  // avoided the model, and which one it was is the first thing you want to
-  // know when the step did something surprising.
+  // The code mark for code-behind, ⚡ for the action cache — two different
+  // ways a step avoided the model, and which one it was is the first thing
+  // you want to know when the step did something surprising.
   // ⚠ outranks both: the step ran under AI *because* its committed code broke,
   // and that is the one thing about the step's origin worth acting on.
   const originBadge = step.codeBehindStale
     ? '<span class="badge badge-codebehind-stale" title="Its code-behind entry failed and the step healed under AI — recompile">⚠ ran under AI — code-behind failed</span>'
     : step.fromCodeBehind
-      ? '<span class="badge badge-codebehind" title="Ran this step\'s code-behind — no AI call">⚙ code</span>'
+      ? `<span class="badge badge-codebehind" title="Ran this step's code-behind — no AI call">${CODE_BEHIND_MARK} code</span>`
       : step.fromCache
         ? '<span class="badge badge-cached" title="Replayed from the action cache — no AI call">⚡ cached</span>'
         : '';
@@ -555,7 +565,7 @@ export function renderCodeBehind(cb: NonNullable<StepResult['codeBehind']>): str
 
   return `<div class="tool-block codebehind-block">
   <div class="tool-header">
-    <span class="tool-title">⚙ Code-behind</span>
+    <span class="tool-title">${CODE_BEHIND_MARK} Code-behind</span>
     <span class="tool-name">${escapeHtml(cb.file)}</span>
   </div>
   <details class="assertion-code">

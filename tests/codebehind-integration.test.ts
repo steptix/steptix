@@ -11,7 +11,7 @@ import { parseTestFile } from '../src/parser/markdown.js';
 import { clearSkillCache } from '../src/skills/expander.js';
 import { executeStep } from '../src/runner/step-executor.js';
 import { buildCodeBehindRegistry, type CodeBehindRegistry } from '../src/codebehind/loader.js';
-import { countStepOrigins, renderStep } from '../src/report/generator.js';
+import { countStepOrigins, renderStep, CODE_BEHIND_MARK } from '../src/report/generator.js';
 
 /**
  * The end-to-end behaviours the stories name, driven through the real
@@ -321,7 +321,7 @@ export default defineSteps([
     await expect(fs.access(path.join(dir, 'booking.steps.ts'))).rejects.toThrow();
   });
 
-  it('renders the ⚙ glyph and a collapsed code block in the report', () => {
+  it('renders the code mark and a collapsed code block in the report', () => {
     const html = renderStep({
       index: 1,
       instruction: 'Enter the booking code',
@@ -337,8 +337,8 @@ export default defineSteps([
       },
     });
 
-    expect(html).toContain('⚙ code');
-    expect(html).toContain('⚙ Code-behind');
+    expect(html).toContain(`${CODE_BEHIND_MARK} code</span>`);
+    expect(html).toContain(`${CODE_BEHIND_MARK} Code-behind`);
     expect(html).toContain('/p/tests/booking.steps.ts');
     expect(html).toContain('<summary>Step code</summary>');
     expect(html).toContain('[info] confirming');
@@ -353,7 +353,7 @@ export default defineSteps([
     expect(renderStep({ ...base, fromCache: true })).toContain('⚡ cached');
     const plain = renderStep(base);
     expect(plain).not.toContain('⚡');
-    expect(plain).not.toContain('⚙');
+    expect(plain).not.toContain('cb-mark');
   });
 
   it('leaves an `ai: true` step to the AI, and never rewrites the file', async () => {
@@ -402,8 +402,8 @@ export default defineSteps([
     expect(html).toContain('⚠ ran under AI — code-behind failed');
     expect(html).toContain('locator.fill: Timeout 30000ms exceeded');
     expect(html).toContain('aiui compile /p/tests/booking.md --only-stale');
-    // ⚠ outranks ⚙: the step did NOT run as code.
-    expect(html).not.toContain('⚙ code');
+    // ⚠ outranks the code mark: the step did NOT run as code.
+    expect(html).not.toContain('cb-mark');
 
     const base = { instruction: 'x', status: 'passed' as const, turns: [], durationMs: 1, retried: false };
     expect(

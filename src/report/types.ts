@@ -152,7 +152,7 @@ export interface StepResult {
   /**
    * True when this step ran its **code-behind** — the committed `.steps.ts`
    * entry beside the test — instead of calling the AI. Sibling of
-   * `fromCache`, rendered with its own glyph (⚙ next to the cache's ⚡).
+   * `fromCache`, rendered with its own glyph (the `</>` code mark next to the cache's ⚡).
    * See stories/step-codebehind.md.
    */
   fromCodeBehind?: boolean;

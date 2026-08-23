@@ -45,7 +45,8 @@ const STATUS = {
   // from disk. Painted ⚡ instead of ✓ but counted as a pass for the
   // run-summary tally and rendered with the same green color.
   PASS_CACHED: "pass-cached",
-  // Ran its compiled code-behind entry — no model call at all. ⚙.
+  // Ran its compiled code-behind entry — no model call at all. Painted
+  // with the code mark (`CodeBehindIcon`, the gutter's status-code-behind.svg).
   PASS_CODE_BEHIND: "pass-code-behind",
   // Passed under AI because the compiled entry threw. ⚠ — recompile.
   PASS_STALE: "pass-stale",
@@ -58,6 +59,32 @@ function statusFromTuple(tuples) {
   const map = {};
   for (const [line, status] of tuples) map[line] = status;
   return map;
+}
+
+/**
+ * The code-behind mark: `</>` — the same drawing as the gutter's
+ * status-code-behind.svg and the editor-title button's `$(code)`, so "ran as
+ * code" and "make it code" look the same everywhere. Inherits the text colour.
+ */
+function CodeBehindIcon({ size = 13, style }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={size}
+      height={size}
+      aria-hidden="true"
+      style={{ verticalAlign: "-0.15em", flexShrink: 0, ...style }}
+    >
+      <path
+        d="M5.4 4.3L1.9 8l3.5 3.7M10.6 4.3L14.1 8l-3.5 3.7M9.4 2.6L6.6 13.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function ChevronIcon({ open }) {
@@ -744,13 +771,14 @@ function TestBenchRunner() {
             disabled={running || compiling}
             title="Generate this test's code-behind from its last run (recording it here first if there is none), replay it as code, and offer the result as a diff"
           >
-            {compiling ? "⚙ Compiling…" : "⚙ Compile"}
+            <CodeBehindIcon style={{ marginRight: 5 }} />
+            {compiling ? "Compiling…" : "Compile"}
           </button>
         </div>
         {(passCount > 0 || failCount > 0) && (
           <div style={{ display: "flex", gap: 12, fontSize: "0.85em" }}>
             {passCount > 0 && <span style={{ color: "var(--vscode-testing-iconPassed, #22c55e)" }}>✓ {passCount} passed</span>}
-            {codeBehindCount > 0 && <span style={{ opacity: 0.75 }}>⚙ {codeBehindCount} code-behind</span>}
+            {codeBehindCount > 0 && <span style={{ opacity: 0.75 }}><CodeBehindIcon size={12} style={{ marginRight: 3 }} /> {codeBehindCount} code-behind</span>}
             {staleCount > 0 && <span style={{ color: "var(--vscode-editorWarning-foreground, #f59e0b)" }}>⚠ {staleCount} stale</span>}
             {failCount > 0 && <span style={{ color: "var(--vscode-testing-iconFailed, #f87171)" }}>✗ {failCount} failed</span>}
           </div>
@@ -940,7 +968,7 @@ function TestBenchRunner() {
                     onMouseLeave={(e) => { if (!hasBreakpoint) e.currentTarget.style.opacity = 0.25; }}
                   >●</span>
                   <span style={{ width: 14, textAlign: "center" }}>
-                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? "⚙" : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
+                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? <CodeBehindIcon /> : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
                   </span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>

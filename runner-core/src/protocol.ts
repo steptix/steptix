@@ -71,7 +71,7 @@ export interface StepPassEvent {
   fromCache?: boolean;
   /**
    * True when the step ran its code-behind entry instead of calling the AI
-   * (stories/codebehind-compile.md §What the author sees). Painted ⚙, logged
+   * (stories/codebehind-compile.md §What the author sees). Painted with the code mark, logged
    * `(code-behind)`. Distinct from `fromCache`: that one replays a recorded AI
    * transcript, this one runs TypeScript the author can read.
    */
@@ -288,7 +288,7 @@ export interface CompileStepEvent {
  * One event of a run the compile drove — Record, or a Replay round — untouched
  * inside the wrapper (stories/codebehind-compile-as-a-run.md §Every run is on
  * the stream). A client folds `event` as it folds a run's own: ▶ on
- * `step:start`, ⚙ on a `step:pass` with `fromCodeBehind`, ✗ with the error
+ * `step:start`, the code mark on a `step:pass` with `fromCodeBehind`, ✗ with the error
  * and screenshot on `step:fail`.
  */
 export interface CompileRunEvent {
@@ -417,7 +417,7 @@ export interface FileStateSnapshot {
       | 'running'
       | 'pass'
       | 'pass-cached'
-      /** Passed by running its code-behind entry — ⚙. */
+      /** Passed by running its code-behind entry — the `</>` code mark. */
       | 'pass-code-behind'
       /** Passed under AI after its entry threw — ⚠, recompile. */
       | 'pass-stale'
