@@ -78,6 +78,14 @@ at the end. That is a compiler with a test suite, and it gets to iterate.
 
 ## Design
 
+> **Amended by [codebehind-compile-as-a-run.md](codebehind-compile-as-a-run.md).**
+> Ordinary TestBench runs capture the step context a compile needs, so the
+> run the author just watched is the recording and Record — when one is still
+> needed — runs in the editor's own session. Record and Replay events ride the
+> compile stream and paint the gutter like a run. A compile proposes what
+> passed (`partial`) instead of nothing. The sections marked below say which
+> sentences that story withdraws; the pipeline, prompts and review pass stand.
+
 ### The runtime stops generating
 
 In `executeStep`, the success-path generation hook is removed. The code-behind
@@ -209,6 +217,13 @@ left at `.aiui-codebehind-cache/<name>.steps.ts.candidate` and the summary
 says where, so entries can be salvaged by hand. A green compile deletes any
 candidate a previous red one left, which would otherwise read as current.
 
+> **Withdrawn by [codebehind-compile-as-a-run.md](codebehind-compile-as-a-run.md).**
+> "Nothing is written on a non-green compile" becomes a third status,
+> `partial`: a Record that fails at step *k* compiles 1..*k*−1, and a Replay
+> that never goes green proposes what it proved, writes the failing step off
+> as `ai: true`, and names what it never reached. The candidate file remains
+> for aborts and writer errors only.
+
 The candidate the *replay* loads is a separate, transient `.ts` in the same
 gitignored directory, deleted after each round: esbuild picks its loader by
 file extension, so the durable `.candidate` artifact — deliberately named
@@ -325,11 +340,24 @@ client asks for a run with context, not something a plain Run leaves lying
 around. Making it engage means either a "record for compile" run mode or
 capturing context on ordinary runs, and both are their own decision.
 
+> **Decided by [codebehind-compile-as-a-run.md](codebehind-compile-as-a-run.md):**
+> ordinary TestBench runs capture context (`StepRequest.captureStepContext`),
+> so a plain Run *is* what the compile reuses — green, or red as a prefix.
+> `fromSessionId` becomes `sessionId`, which is also the session a Record
+> runs in when one is still needed.
+
 The events are their own vocabulary — `compile:phase`, `compile:step`,
 `compile:done`, `compile:result`, plus `output` for the narration above — not
 the run stream's `step:pass` / `done`. Same SSE framing, different names: a
 client that painted "step 4 generated" in the gutter would be wrong, and
 nothing in a compile has a line number.
+
+> **Withdrawn in part by [codebehind-compile-as-a-run.md](codebehind-compile-as-a-run.md).**
+> Record and Replay run the actual test, and their events now ride the
+> compile stream unchanged inside a `compile:run` frame, where a client paints
+> them exactly as a run's. `compile:step` carries a `line` too, for a ▶ while
+> the model works on that step. The vocabulary stays separate; the claim that
+> nothing in it has a line number does not.
 
 The compile's own AI client is built from the **server's** `ai` config with
 the project's env over it — the client a session builds, not the project
