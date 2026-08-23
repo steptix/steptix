@@ -46,6 +46,10 @@ interface Registry {
   clearSkillDebug(): void;
   /** Clear the skill-debug context only if it is owned by `testUri`. */
   clearSkillDebugIfOwnedBy(testUri: string): void;
+  /** Test-only: what the most recent compile failed with, or null when it
+   *  did not fail. The notification it went into is not readable from the
+   *  extension host. */
+  lastCompileError: string | null;
 }
 
 /**
@@ -87,6 +91,7 @@ export function registerCommands(
       ? `step ${options.select.steps.join(', ')} of ${label}`
       : label;
 
+    registry.lastCompileError = null;
     const outcome = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Compiling ${scope}…`, cancellable: true },
       (_progress, token) => {
@@ -103,6 +108,7 @@ export function registerCommands(
     // the diff is on screen, and blocking the command on a click would leave
     // the caller (and every test) waiting on the user.
     if (!outcome.ok) {
+      registry.lastCompileError = outcome.error ?? 'unknown error';
       const s = outcome.summary;
       const actions = ['Show log', ...(s?.recordingDir ? ['Open recording'] : [])];
       if (s?.candidatePath) actions.push('Open candidate');

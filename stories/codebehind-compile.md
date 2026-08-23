@@ -275,6 +275,18 @@ means a different step would be silent and wrong.
 
 ### What the author sees
 
+- **Before** — the run log names the server and checks it is there, exactly
+  as a Run does (stories/server-lifecycle.md §5): `server http://localhost:3100
+  (SERVER_URL in C:\AITests\.env)`, then `server healthy at … (v0.9.1)` — or
+  a spawn when `serverAutoStart` is configured and nothing answers, or a
+  refusal (TB027) when the port belongs to something else. A compile that
+  still cannot get through is reported in the catalogue's words with the
+  transport reason attached — *TB010: Cannot reach the ai-ui-automation
+  server at http://localhost:3100 (fetch failed: connect ECONNREFUSED
+  127.0.0.1:3100). Start it with 'npx aiui serve' …* — never a bare "fetch failed", which
+  is what Node says for every kind of transport failure (refused,
+  unresolvable host, bad certificate) with the actual reason hidden on the
+  error's `cause`. See [issue 050](../issues/resolved/050-codebehind-compile-fetch-failed.md).
 - **During** — the Runner panel and run log show the phases above, one line
   per step event: "step 4 generated", "step 6 replay failed (locator
   timeout) → regenerated → passed", "step 8 kept as AI: needs interactive

@@ -23,6 +23,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
+const { ApiClientError } = require('ai-ui-automation-runner-core');
 
 const EXT_ID = 'pkent.testbench-native';
 const FIXTURES_DIR =
@@ -374,6 +375,114 @@ describe('TestBench code-behind compile', function () {
       return statuses[8] === 'fail';
     });
     assert.equal(hooks.tracker.snapshot().breakpointStop, null);
+  });
+
+  // ── Reaching the server (issue: "compile failed: fetch failed") ──────────
+  //
+  // A compile gets to the server the way a Run does: probe SERVER_URL first,
+  // auto-start it when that is configured, refuse a port that belongs to
+  // something else, and when the request still cannot get through, say which
+  // URL was tried and why it did not answer — in the catalogue's words, with
+  // the fix attached — rather than echoing the client's bare "fetch failed".
+  describe('reaching the server', () => {
+    const HEALTHY = () => ({
+      kind: 'healthy',
+      health: { service: 'ai-ui-automation', version: '9.9.9', inspector: null },
+    });
+    /** What the probe answers; a single mutable value, as in the lifecycle suite. */
+    let probeResult;
+    /** Every spawn attempted. */
+    let spawns;
+
+    async function setAutoStart({ command, cwd }) {
+      const cfg = vscode.workspace.getConfiguration('testbench-native');
+      await cfg.update('serverAutoStart.command', command, vscode.ConfigurationTarget.Global);
+      await cfg.update('serverAutoStart.cwd', cwd, vscode.ConfigurationTarget.Global);
+    }
+
+    beforeEach(() => {
+      spawns = [];
+      probeResult = { kind: 'down', detail: 'fetch failed: connect ECONNREFUSED 127.0.0.1:39917' };
+      hooks.setServerHooks({
+        healthProbe: async () => probeResult,
+        spawnServer: (args) => {
+          spawns.push(args);
+          probeResult = HEALTHY();
+        },
+      });
+    });
+
+    // Global settings outlive this suite; a command left set would make every
+    // later run in the host try to spawn a server.
+    afterEach(async () => {
+      await setAutoStart({ command: '', cwd: '' });
+    });
+
+    it('a server that does not answer is reported as TB010 naming the URL and the refusal, not "fetch failed"', async () => {
+      // Nothing listening and auto-start not configured: the probe's "skip"
+      // lets the request go out (as a Run's does), and it is the request's
+      // failure — carrying the cause Node hides behind "fetch failed" — that
+      // the author sees, with the catalogue's fix.
+      fake.compileThrows = new ApiClientError(
+        'connect-failed',
+        'fetch failed: connect ECONNREFUSED 127.0.0.1:39917',
+      );
+      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      await waitFor('compile reported', () => hooks.lastCompileError() !== null);
+
+      const error = hooks.lastCompileError();
+      assert.match(error, /^TB010: /);
+      assert.match(error, /http:\/\/127\.0\.0\.1:39917/, 'names the URL it tried');
+      assert.match(error, /connect ECONNREFUSED 127\.0\.0\.1:39917/, 'carries the transport cause');
+      assert.match(error, /serverAutoStart/, 'points at the setting that would have started it');
+    });
+
+    it('a server that rejects the key is TB011, with the .env the key chain started from', async () => {
+      probeResult = HEALTHY();
+      fake.compileThrows = new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      await waitFor('compile reported', () => hooks.lastCompileError() !== null);
+
+      const error = hooks.lastCompileError();
+      assert.match(error, /^TB011: /);
+      assert.match(error, /AIUI_SERVER_API_KEY/);
+      assert.match(error, /\.env/);
+    });
+
+    it('a down server is auto-started before the request goes out, as it is for a Run', async () => {
+      await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR });
+      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      await waitFor('compile requested', () => fake.compileRequests.length > 0);
+
+      assert.equal(spawns.length, 1, 'one spawn, before the request');
+      assert.equal(hooks.lastCompileError(), null);
+    });
+
+    it('a port held by something else refuses the compile (TB027) before any request is sent', async () => {
+      probeResult = { kind: 'foreign', service: 'grafana' };
+      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      await waitFor('compile reported', () => hooks.lastCompileError() !== null);
+
+      assert.match(hooks.lastCompileError(), /^TB027: /);
+      assert.match(hooks.lastCompileError(), /grafana/);
+      assert.equal(fake.compileRequests.length, 0, 'nothing was sent to a server that is not ours');
+    });
+
+    it('a compile while a run of the test is in progress is refused without touching the server', async () => {
+      // The panel greys Compile out during a run; the palette and gutter
+      // commands do not, and a compile records in the session the run is using.
+      probeResult = HEALTHY();
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+
+      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      await waitFor('compile refused', () => hooks.lastCompileError() !== null);
+      assert.match(hooks.lastCompileError(), /run of this test is in progress/);
+      assert.equal(fake.compileRequests.length, 0);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
   });
 });
 

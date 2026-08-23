@@ -238,6 +238,60 @@ export function isUserAbort(err: unknown): boolean {
   return e.name === 'ApiClientError' && e.kind === 'aborted';
 }
 
+/**
+ * What a `fetch()` rejection actually says, with the cause Node hides.
+ *
+ * Undici reports every transport failure — connection refused, DNS miss, TLS
+ * rejection, proxy failure — as `TypeError: fetch failed` and parks the real
+ * error on `cause`. A log line carrying only the outer message leaves the
+ * reader with nothing to act on (which host? refused, or unresolvable, or a
+ * bad certificate?). This walks the `cause` chain and joins each link with
+ * `: `, so the line reads `fetch failed: connect ECONNREFUSED 127.0.0.1:3100`
+ * or `fetch failed: getaddrinfo ENOTFOUND build-box`.
+ *
+ * A `localhost` URL is the common case and the awkward one: Node connects to
+ * `::1` and `127.0.0.1` in turn and wraps both failures in an `AggregateError`
+ * whose own message is EMPTY, so the chain has to descend into `errors[]`
+ * (`connect ECONNREFUSED ::1:3100; connect ECONNREFUSED 127.0.0.1:3100`)
+ * or the line would end in a bare `fetch failed: `.
+ *
+ * Mid-stream drops take the same shape (`terminated` with a `SocketError`
+ * cause), so the stream-dropped path uses it too. Non-Error values stringify.
+ */
+export function describeFetchError(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  let cursor: unknown = err;
+  // Depth-capped: a cause chain is one or two links long in practice, and a
+  // cyclic one (seen on some hand-built errors) must not spin.
+  while (cursor !== undefined && cursor !== null && !seen.has(cursor) && parts.length < 6) {
+    seen.add(cursor);
+    parts.push(describeOneError(cursor));
+    cursor = typeof cursor === 'object' ? (cursor as { cause?: unknown }).cause : undefined;
+  }
+  return parts.join(': ');
+}
+
+function describeOneError(err: unknown): string {
+  if (!err || typeof err !== 'object') return String(err);
+  const e = err as { name?: unknown; message?: unknown; code?: unknown; errors?: unknown };
+  if (Array.isArray(e.errors) && e.errors.length > 0) {
+    // AggregateError: the members carry the story; the wrapper's message is
+    // empty (dual-stack connect) or generic ("All promises were rejected").
+    return e.errors.map(describeFetchError).join('; ');
+  }
+  const message =
+    typeof e.message === 'string' && e.message !== ''
+      ? e.message
+      : typeof e.name === 'string'
+        ? e.name
+        : String(err);
+  // A `code` not already in the message (undici's UND_ERR_* codes pair with
+  // prose like "Connect Timeout Error") is the greppable part — keep it.
+  const code = typeof e.code === 'string' ? e.code : '';
+  return code !== '' && !message.includes(code) ? `${code}: ${message}` : message;
+}
+
 export interface ApiClientOptions {
   serverUrl: string;
   apiKey: string;
@@ -324,7 +378,7 @@ export class ApiClient {
       });
     } catch (err) {
       if (signal.aborted) throw new ApiClientError('aborted', 'aborted');
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeFetchError(err);
       throw new ApiClientError('connect-failed', reason);
     }
 
@@ -371,7 +425,7 @@ export class ApiClient {
           chunk = await reader.read();
         } catch (err) {
           if (signal.aborted) throw new ApiClientError('aborted', 'aborted');
-          const reason = err instanceof Error ? err.message : String(err);
+          const reason = describeFetchError(err);
           throw new ApiClientError('stream-dropped', reason);
         }
 
@@ -409,7 +463,7 @@ export class ApiClient {
         headers: { 'x-api-key': this.apiKey },
       });
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeFetchError(err);
       throw new ApiClientError('connect-failed', reason);
     }
     if (response.status === 401) {
@@ -439,7 +493,7 @@ export class ApiClient {
         headers: { 'x-api-key': this.apiKey },
       });
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeFetchError(err);
       throw new ApiClientError('connect-failed', reason);
     }
     if (response.status === 401) {
@@ -503,7 +557,7 @@ export class ApiClient {
         }),
       });
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeFetchError(err);
       throw new ApiClientError('connect-failed', reason);
     }
     if (response.status === 401) {
@@ -541,7 +595,7 @@ export class ApiClient {
         headers: { 'x-api-key': this.apiKey },
       });
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeFetchError(err);
       throw new ApiClientError('connect-failed', reason);
     }
     if (response.status === 401) {
