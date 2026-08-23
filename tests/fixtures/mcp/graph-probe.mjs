@@ -10,8 +10,11 @@ const req = createRequire(import.meta.url);
 
 process.on('exit', () => {
   const keys = Object.keys(req.cache);
-  const browsery = keys.filter(
-    (k) => k.includes('playwright') || k.includes('puppeteer'),
+  // Anchored to a node_modules path segment: a bare substring match counts
+  // every module in a checkout whose own path contains "playwright" (e.g. a
+  // worktree named playwright-typescript-tests-*) as browsery.
+  const browsery = keys.filter((k) =>
+    /[\\/]node_modules[\\/](playwright|puppeteer)/.test(k),
   );
   process.stderr.write(
     `\n__GRAPH_PROBE__ ${JSON.stringify({ cjs: keys.length, browsery: browsery.length })}\n`,
