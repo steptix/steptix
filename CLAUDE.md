@@ -105,10 +105,11 @@ extension isn't on the path at all.
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
 tool), the new directory only contains tracked files. The repo needs several
-gitignored files/dirs to actually run — `.env` (API keys) and the four
+gitignored files/dirs to actually run — `.env` (API keys) and the five
 `node_modules/` trees (root, `flick-vscode/`, `testbench-native/`,
-`runner-core/`). Without them, nothing works and `npm install` × 4 costs
-several minutes.
+`runner-core/`, and `fixtures/tools/`, without which every fixture tool's
+`import 'ai-ui-automation/tools'` fails and 22 root tests go red). Without
+them, nothing works and `npm install` × 5 costs several minutes.
 
 Run this script once, right after the worktree is created:
 
@@ -248,6 +249,12 @@ bundles the stale code — it resolves through `node_modules`, whereas
 `build:runner-core` compiles `../runner-core`, a different place. The script
 re-points the junction after copying; `npm install` in `testbench-native/`
 also fixes it.
+
+`fixtures/tools/node_modules/ai-ui-automation` is the second such junction
+(the `file:../..` dep), but its target is the whole repo root — following it
+during a copy would recurse the entire checkout into itself — so the script
+excludes it from the robocopy outright and creates it fresh, pointed at the
+worktree.
 
 ### Why `dist/` has to be built in the worktree
 

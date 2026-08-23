@@ -8,7 +8,8 @@
 # A fresh worktree contains only tracked files, so it is missing:
 #
 #   .env, templates/.env       API keys, SERVER_URL, site credentials
-#   node_modules x4            root, flick-vscode, testbench-native, runner-core
+#   node_modules x5            root, flick-vscode, testbench-native, runner-core,
+#                              fixtures/tools
 #   dist/                      the compiled server, and the target of the package
 #                              self-import `ai-ui-automation/tools`
 #   testbench-native/dist/     the built extension
@@ -27,6 +28,16 @@
 # resolves the import through node_modules, whereas `build:runner-core` compiles
 # `../runner-core` — a different place. This script re-points the junction at
 # the worktree's own runner-core after copying.
+#
+# `fixtures/tools/node_modules/ai-ui-automation` is the second such junction —
+# the `file:../..` dep — but its target is the WHOLE repo root, whose tree
+# contains this very node_modules. Letting robocopy follow it would recurse
+# the entire source checkout into the copy, so unlike runner-core's it is
+# EXCLUDED from the copy (/XD by name) and created fresh, pointed at the
+# worktree. Without this tree, every fixture tool's
+# `import 'ai-ui-automation/tools'` fails to resolve (fixtures/tools has its
+# own package.json, so the package self-reference resolves against THAT
+# package and falls through to a node_modules lookup) and 22 root tests fail.
 #
 # THE PORT
 # `aiui.config.json` pins 127.0.0.1:3100 and is tracked, so two checkouts cannot
@@ -339,6 +350,34 @@ if ($SkipBuilds) {
         }
         New-Item -ItemType Junction -Path $linkPath -Target $linkTarget | Out-Null
         Write-Host "  link  testbench-native/node_modules/ai-ui-automation-runner-core -> $linkTarget"
+    }
+
+    # --- 3b. fixture tools tree (see THE JUNCTION above: this one is
+    #         excluded from the copy, never followed-then-repaired) ----------
+
+    $ftRel = 'fixtures\tools\node_modules'
+    $ftSrc = Join-Path $source $ftRel
+    $ftDst = Join-Path $dest $ftRel
+    if (Test-Path $ftSrc) {
+        Write-Host ""
+        Write-Host "Fixture tools dependency tree:"
+        Write-Host "  copy  fixtures/tools/node_modules/ ..."
+        # /XD by bare name so the junction is skipped in the source AND left
+        # alone in the destination on a /MIR re-run.
+        $roboArgs = @($ftSrc, $ftDst, '/MIR', '/MT:16', '/NFL', '/NDL', '/NJH', '/NJS', '/NP',
+            '/XD', 'ai-ui-automation')
+        $null = & robocopy @roboArgs
+        if ($LASTEXITCODE -ge 8) {
+            throw "robocopy failed for $ftSrc -> $ftDst (exit $LASTEXITCODE)"
+        }
+        $copied++
+        $ftLink = Join-Path $ftDst 'ai-ui-automation'
+        Remove-DirOrLink -Path $ftLink
+        New-Item -ItemType Junction -Path $ftLink -Target $dest | Out-Null
+        Write-Host "  link  fixtures/tools/node_modules/ai-ui-automation -> $dest"
+    } else {
+        Write-Host "  skip  fixtures/tools/node_modules/ (not in source — run npm install in fixtures/tools first)"
+        $skipped++
     }
 
     # --- 4. optional: cached VS Code for the integration tests --------------
