@@ -155,7 +155,7 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
       'the proposal must name the sibling .steps.ts',
     );
     assert.match(content, /defineSteps\(\[/, 'the proposed file must be a code-behind file');
-    assert.match(content, /source: "Navigate to the baseUrl"/, 'step 1 must have an entry');
+    assert.match(content, /source: ['"]Navigate to the baseUrl['"]/, 'step 1 must have an entry');
     // Nothing on disk yet — the diff is the whole point.
     assert.equal(fs.existsSync(stepsFile), false, 'a compile must not write the file itself');
 
@@ -229,7 +229,7 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
 
     const proposal = hooks.pendingCodeBehind();
     const content = Object.values(proposal.files)[0];
-    assert.match(content, /source: "Navigate to the baseUrl"/, 'step 1 must have an entry');
+    assert.match(content, /source: ['"]Navigate to the baseUrl['"]/, 'step 1 must have an entry');
     assert.equal(fs.existsSync(stepsFile), false, 'a compile must not write the file itself');
 
     // The Replay round ran as code and said so, step by step, on the stream;

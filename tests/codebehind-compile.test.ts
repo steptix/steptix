@@ -243,9 +243,23 @@ describe('compileTest — the happy path', () => {
     ]);
 
     const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
-    expect(written).toContain(`source: "Enter the booking code"`);
-    expect(written).toContain(`source: "Confirm the booking"`);
+    expect(written).toContain(`source: 'Enter the booking code'`);
+    expect(written).toContain(`source: 'Confirm the booking'`);
     expect(written).toContain(`import { defineSteps } from 'ai-ui-automation/codebehind';`);
+    // Formatted as an author would write it, not the model's one line per
+    // entry: the entry's fields and its body on their own lines, no line past
+    // 100 columns.
+    expect(written).toContain(
+      [
+        '  {',
+        "    source: 'Enter the booking code',",
+        '    async run({ page, step, log }) {',
+        "      await page.locator('#code').waitFor();",
+        '    },',
+        '  },',
+      ].join('\n'),
+    );
+    expect(written.split('\n').every((line) => line.length <= 100)).toBe(true);
     expect(result.summary.compiled).toBe(2);
     expect(result.summary.written).toEqual([path.join(dir, 'booking.steps.ts')]);
     // The candidate trail survives a green compile: it is the proposal, and it
@@ -633,7 +647,7 @@ export default defineSteps([
     expect(result.summary.writtenOffAi).toEqual([]);
     const proposed = result.files[path.join(dir, 'booking.steps.ts')]!;
     expect(proposed).toContain('#hand-written');
-    expect(proposed).toContain('source: "Confirm the booking"');
+    expect(proposed).toContain("source: 'Confirm the booking'");
     // And only one replay round: the author's code is not the compiler's to repair.
     expect(result.summary.rounds).toBe(1);
     // Nothing reached disk — dry run — and the author's file is as they left it.
@@ -759,7 +773,7 @@ export default defineSteps([
     // Generation still saw the whole test — it is the context — but only step 1 in scope.
     expect(prompts[0]).toContain('Read the reference');
     const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
-    expect(written).toContain('source: "Enter the booking code"');
+    expect(written).toContain("source: 'Enter the booking code'");
     expect(written).not.toContain('Confirm the booking');
     expect(
       events.some((e) => e.kind === 'phase' && e.phase === 'record' && e.message.includes('stopped at step 2')),

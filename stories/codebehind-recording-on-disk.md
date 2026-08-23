@@ -173,6 +173,22 @@ A replay round that fails writes `replay-N.failure.json` (`{ round, step,
 line?, error, url }`) and `replay-N.failure.png` into the recording dir — the
 evidence the repair prompt is given, for the author to see too.
 
+**The code is formatted.** The model emits each entry on one line — a JSON
+envelope invites that — and a file of 300-character lines is not code anyone
+reads in a diff or edits by hand. The candidate is run through Prettier every
+time it changes, so the generate prompt, the trail, the replay, the diff and
+the applied file all see the same text: single quotes, 100 columns, trailing
+commas — unless the project has a Prettier config of its own, found upward
+from the `.steps.ts` the way Prettier finds it, in which case that wins and
+the compiled file does not churn under the author's formatter. Prettier is a
+runtime dependency of the framework for this: the alternatives are a
+hand-rolled splitter that breaks on the first string containing a semicolon,
+TypeScript's own formatter (whitespace only, and 60 MB at runtime), or asking
+the model, which is neither deterministic nor free. Binding is by each
+`source` string's *value*, so the quoting Prettier picks changes nothing.
+Code Prettier cannot parse is left as it was, and the esbuild validation that
+follows reports the real error.
+
 ### What the author sees
 
 - The compile stream and the gutter: unchanged. The Record line reads
