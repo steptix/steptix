@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { format as prettierFormat, resolveConfig as prettierResolveConfig } from 'prettier';
 import { matchText } from '../parser/section-match.js';
 import { bundleToolModule } from '../tools/reload.js';
 import { logger } from '../utils/logger.js';
@@ -105,6 +106,42 @@ export async function writeCodeBehindFile(file: string, contents: string): Promi
     );
   }
   await atomicWrite(target, contents);
+}
+
+/**
+ * A code-behind file as an author would write it.
+ *
+ * The model emits each entry on one line — a JSON envelope invites that — and
+ * nothing downstream cares, but a file of 300-character lines is not code
+ * anyone can read in a diff or edit by hand. So the candidate is formatted
+ * with Prettier every time it changes: the generate prompt, the trail, the
+ * replay, the diff and the applied file all see the same text. House style —
+ * single quotes, 100 columns. Binding is by each `source` string's value, so
+ * the quoting Prettier picks changes nothing.
+ *
+ * A project that runs Prettier itself has a config, and the file is theirs:
+ * when `file` is given, its project's Prettier config (found the way
+ * Prettier finds it, upward from the file) wins over the house style, so the
+ * compiled file does not churn under the author's own formatter.
+ *
+ * Never throws: code Prettier cannot parse comes back as it was, and the
+ * esbuild validation that follows reports the real error.
+ */
+export async function formatCodeBehindSource(source: string, file?: string): Promise<string> {
+  try {
+    const projectConfig = file ? await prettierResolveConfig(file).catch(() => null) : null;
+    return await prettierFormat(source, {
+      singleQuote: true,
+      printWidth: 100,
+      trailingComma: 'all',
+      ...(projectConfig ?? {}),
+      parser: 'typescript',
+      ...(file && { filepath: file }),
+    });
+  } catch (err) {
+    logger.debug(`Could not format the code-behind file: ${String(err)}`);
+    return source;
+  }
 }
 
 /**

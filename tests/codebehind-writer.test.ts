@@ -7,6 +7,7 @@ import {
   spliceEntry,
   stampSection,
   findEntrySpans,
+  formatCodeBehindSource,
   writeCodeBehindEntry,
 } from '../src/codebehind/writer.js';
 import { scan } from '../src/codebehind/tokenizer.js';
@@ -319,5 +320,62 @@ describe('code-behind writer — files on disk', () => {
       entryCode: `{ source: 'Alpha', async run() { const x = ; } }`,
     })).rejects.toThrow(/did not compile/);
     await expect(fs.access(file)).rejects.toThrow();
+  });
+});
+
+describe('formatCodeBehindSource', () => {
+  it('turns a one-line entry into code an author would write', async () => {
+    const oneLine = [
+      "import { defineSteps } from 'ai-ui-automation/codebehind';",
+      'export default defineSteps([',
+      `  { source: "Enter the code", async run({ page, step, log }) { const code = step.getVar('code'); await page.locator('#code').fill(code); step.expect(await page.locator('#code').inputValue() === code, 'code entered'); } },`,
+      ']);',
+      '',
+    ].join('\n');
+    const formatted = await formatCodeBehindSource(oneLine);
+    expect(formatted).toBe(
+      [
+        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        'export default defineSteps([',
+        '  {',
+        "    source: 'Enter the code',",
+        '    async run({ page, step, log }) {',
+        "      const code = step.getVar('code');",
+        "      await page.locator('#code').fill(code);",
+        // Prettier parenthesises the awaited operand — the one change it makes
+        // beyond whitespace and quotes, and a clarifying one.
+        "      step.expect((await page.locator('#code').inputValue()) === code, 'code entered');",
+        '    },',
+        '  },',
+        ']);',
+        '',
+      ].join('\n'),
+    );
+    // Idempotent: formatting the formatted file changes nothing.
+    expect(await formatCodeBehindSource(formatted)).toBe(formatted);
+  });
+
+  it("follows the project's own Prettier config when the file has one above it", async () => {
+    // A project that runs Prettier has a style; the compiled file is theirs
+    // and must not churn under their formatter. Double quotes and 60 columns
+    // here, against the house single quotes and 100.
+    await fs.writeFile(path.join(dir, '.prettierrc'), JSON.stringify({ singleQuote: false, printWidth: 60 }));
+    const file = path.join(dir, 'tests', 'checkout.steps.ts');
+    const formatted = await formatCodeBehindSource(
+      "export default defineSteps([{ source: 'Enter the code', async run({ page }) { await page.locator('#code').fill('x'); } }]);\n",
+      file,
+    );
+    expect(formatted).toContain('source: "Enter the code"');
+    expect(formatted).toContain("await page.locator(\"#code\").fill(\"x\");");
+    // And without a file to anchor on, the house style stands.
+    const house = await formatCodeBehindSource(
+      "export default defineSteps([{ source: 'Enter the code', async run({ page }) { await page.locator('#code').fill('x'); } }]);\n",
+    );
+    expect(house).toContain("source: 'Enter the code'");
+  });
+
+  it('hands back code it cannot parse unchanged, for the validator to report', async () => {
+    const broken = "export default defineSteps([{ source: 'x', async run() { const y = ; } }]);";
+    expect(await formatCodeBehindSource(broken)).toBe(broken);
   });
 });

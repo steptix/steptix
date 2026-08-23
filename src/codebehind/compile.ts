@@ -24,6 +24,7 @@ import { buildFileReviewPrompt, parseFileRevision } from './review.js';
 import { clearStale, readLastRun } from './last-run.js';
 import {
   createFile,
+  formatCodeBehindSource,
   listEntries,
   spliceEntry,
   validateCodeBehindSource,
@@ -475,7 +476,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       candidateFile: (await candidate.read(step.binding!.file)) ?? undefined,
       ...contextOf(result),
     });
-    const applied = applyGenerated(candidate, step, generated, stepEvent, 'generate');
+    const applied = await applyGenerated(candidate, step, generated, stepEvent, 'generate');
     if (applied.kind === 'declined') declined++;
     if (applied.kind === 'error') {
       return finish(
@@ -557,7 +558,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   };
   const writeOff = async (step: CompileStep, error: string, after: string): Promise<void> => {
     stepEvent('replay', step, `kept as AI ${after}: ${error}`);
-    candidate.apply(step, aiEntryFor(step.text, `replay kept failing — ${error}`));
+    await candidate.apply(step, aiEntryFor(step.text, `replay kept failing — ${error}`));
     await candidate.persist();
     proven.delete(step.key!);
     declined++;
@@ -626,7 +627,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       max: maxRounds,
     });
     proven.delete(failed.step.key);
-    const applied = applyGenerated(candidate, failed.step, repaired, stepEvent, 'repair');
+    const applied = await applyGenerated(candidate, failed.step, repaired, stepEvent, 'repair');
     await candidate.persist();
     if (applied.kind === 'declined') declined++;
     if (applied.kind === 'error') {
@@ -982,19 +983,19 @@ function contextOf(result: StepResult | undefined): {
  * becomes an `error`, which every caller already treats as "stop, leave the
  * candidate, report". A throw here would escape `compileTest` entirely.
  */
-function applyGenerated(
+async function applyGenerated(
   candidate: Candidate,
   step: CompileStep,
   generated: GeneratedEntry,
   stepEvent: (phase: CompilePhase, step: CompileStep, message: string) => void,
   phase: CompilePhase,
-): GeneratedEntry {
+): Promise<GeneratedEntry> {
   try {
     if (generated.kind === 'entry') {
-      candidate.apply(step, generated.code);
+      await candidate.apply(step, generated.code);
       stepEvent(phase, step, phase === 'repair' ? 'repaired' : 'generated');
     } else if (generated.kind === 'declined') {
-      candidate.apply(step, aiEntryFor(step.text, generated.reason));
+      await candidate.apply(step, aiEntryFor(step.text, generated.reason));
       stepEvent(phase, step, `kept as AI: ${generated.reason}`);
     }
     return generated;
@@ -1108,7 +1109,7 @@ async function reviewCandidate(
       });
       continue;
     }
-    candidate.replaceFile(file, revised);
+    await candidate.replaceFile(file, revised);
     emit({ kind: 'phase', phase: 'review', message: `revised ${path.basename(file)}` });
   }
 }
@@ -1243,9 +1244,10 @@ class Candidate {
     return [...this.current.keys()];
   }
 
-  /** Splice one entry in (or create the file). The section scope is the
-   *  runner's, stamped by the writer — never the model's. */
-  apply(step: CompileStep, entryCode: string): void {
+  /** Splice one entry in (or create the file), then format the whole file
+   *  (`formatCodeBehindSource`). The section scope is the runner's, stamped
+   *  by the writer — never the model's. */
+  async apply(step: CompileStep, entryCode: string): Promise<void> {
     const binding = step.binding!;
     const request: WriteEntryRequest = {
       file: binding.file,
@@ -1260,7 +1262,10 @@ class Candidate {
     const before = this.current.get(binding.file) ?? this.original.get(binding.file) ?? null;
     this.current.set(
       binding.file,
-      before === null ? createFile(request) : spliceEntry(before, request).text,
+      await formatCodeBehindSource(
+        before === null ? createFile(request) : spliceEntry(before, request).text,
+        binding.file,
+      ),
     );
     this.entryText.set(entryKeyOf(binding), entryCode);
   }
@@ -1270,8 +1275,8 @@ class Candidate {
     return step.key ? this.entryText.get(step.key) : undefined;
   }
 
-  replaceFile(file: string, content: string): void {
-    this.current.set(file, content);
+  async replaceFile(file: string, content: string): Promise<void> {
+    this.current.set(file, await formatCodeBehindSource(content, file));
   }
 
   /** Files whose content differs from what is on disk today. */
