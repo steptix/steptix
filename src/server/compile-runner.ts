@@ -391,11 +391,14 @@ export class CodeBehindCompiler {
       };
 
       let details: CompileRunOutcome | undefined;
+      /** The run's own error line, when it failed before any step could. */
+      let runError: string | undefined;
       try {
         const response = await this.sessions.executeSteps(
           sessionId,
           stepRequest,
           (event) => {
+            if (event.type === 'output' && event.kind === 'error') runError = event.msg;
             emit({
               type: 'compile:run',
               phase: run.purpose,
@@ -429,6 +432,7 @@ export class CodeBehindCompiler {
         );
         return {
           status: response.status === 'passed' ? 'passed' : 'failed',
+          ...(response.status !== 'passed' && runError !== undefined && { error: runError }),
           steps: details?.steps ?? [],
           resolvedParameters: details?.resolvedParameters ?? {},
           tokensUsed: details?.tokensUsed ?? 0,

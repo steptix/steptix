@@ -117,6 +117,36 @@ async function registryFor(testPath: string): Promise<{ steps: string[]; registr
 
 const TEST_MD = ['# Booking', '', '## Steps', '1. Enter the booking code', '2. Confirm the booking'].join('\n');
 
+describe('a code-behind file that does not load', () => {
+  it('is recorded on the registry, not only warned about', async () => {
+    // The steps fall back to AI, as before — but a strict replay needs to know
+    // the file never loaded, or it would report "passed as code" for code
+    // that never ran (stories/codebehind-recording-on-disk.md §What was built).
+    const md = await write('booking.md', TEST_MD);
+    const stepsFile = await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: 'Enter the booking code', async run({ page }) { const x = ; } },
+]);
+`);
+    const warnings: string[] = [];
+    const parsed = await parseTestFile(md);
+    const registry = await buildCodeBehindRegistry(
+      {
+        steps: parsed.steps,
+        rawSteps: parsed.expansion!.rawSteps,
+        origins: parsed.expansion!.origins,
+        frames: parsed.expansion!.frames,
+      },
+      { testFilePath: parsed.filePath, onWarn: (m) => warnings.push(m) },
+    );
+    expect(registry.bindingFor(0)?.entry).toBeUndefined();
+    expect(registry.loadErrors).toHaveLength(1);
+    expect(registry.loadErrors[0]!.file).toBe(stepsFile);
+    expect(registry.loadErrors[0]!.error).toMatch(/Expected|Unexpected|syntax/i);
+    expect(warnings.some((w) => w.includes('Failed to load code-behind file'))).toBe(true);
+  });
+});
+
 describe('code-behind end to end', () => {
   it('runs a fully covered test with zero AI calls', async () => {
     const md = await write('booking.md', TEST_MD);

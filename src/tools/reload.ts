@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { logger } from '../utils/logger.js';
 
 /**
  * Hot-reload mechanism for tool files on the long-lived server (issue 033).
@@ -45,6 +46,127 @@ export interface BundledOutput {
 // esbuild ships as a transitive dependency (via tsx) and is directly
 // resolvable. Import it lazily the first time a reload is needed so the
 // one-shot CLI path — which never hot-reloads — doesn't pay the load cost.
+/** The framework's own package name — what generated files import. */
+const FRAMEWORK_PACKAGE = 'ai-ui-automation';
+
+/**
+ * Resolve `ai-ui-automation` and its subpaths to the running framework when
+ * the project cannot.
+ *
+ * A generated `.steps.ts` (or a tool) imports `ai-ui-automation/codebehind`,
+ * and `packages: 'external'` leaves that for Node to resolve from the temp
+ * module's location — which is the project's cache dir. A tests-only project
+ * driven from TestBench has no `node_modules` and no reason to have one, and
+ * the import then fails, the loader warns, and every step falls back to AI.
+ * Caught live on a project with a freshly compiled, correct `.steps.ts`.
+ *
+ * The server (or CLI) loading the file IS the framework, and knows where its
+ * own modules are. So: when the package resolves from the cache dir — a real
+ * install, or the framework's own checkout self-referencing — the bare
+ * specifier stays and Node resolves it as before. When it does not, the
+ * specifier is rewritten to the file URL of the framework's own export, read
+ * off its `package.json`. One module instance either way; a project with a
+ * `package.json` dependency still gets editor types, and a project without
+ * one still runs as code.
+ */
+function frameworkSelfResolvePlugin(cacheDir: string): import('esbuild').Plugin {
+  return {
+    name: 'ai-ui-automation-self-resolve',
+    setup(build) {
+      build.onResolve({ filter: /^ai-ui-automation(\/.*)?$/ }, async (args) => {
+        if (await frameworkResolvesFrom(cacheDir)) return undefined;
+        const target = await frameworkExportPath(args.path);
+        if (!target) return undefined;
+        logger.debug(
+          `${args.path} does not resolve from ${cacheDir}; using the framework's own ${target}`,
+        );
+        return { path: pathToFileURL(target).href, external: true };
+      });
+    },
+  };
+}
+
+/**
+ * Would Node find `ai-ui-automation` from `dir`? True for an installed (or
+ * linked) package in any `node_modules` above it, and for the framework's own
+ * checkout, where the nearest `package.json` IS the package (self-reference
+ * through `exports`).
+ */
+async function frameworkResolvesFrom(dir: string): Promise<boolean> {
+  let current = path.resolve(dir);
+  for (let i = 0; i < 64; i++) {
+    if (await exists(path.join(current, 'node_modules', FRAMEWORK_PACKAGE, 'package.json'))) return true;
+    const manifest = path.join(current, 'package.json');
+    if (await exists(manifest)) {
+      try {
+        const { name } = JSON.parse(await fs.readFile(manifest, 'utf-8')) as { name?: string };
+        if (name === FRAMEWORK_PACKAGE) return true;
+      } catch {
+        // An unreadable package.json on the way up is not ours to judge.
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+  return false;
+}
+
+let frameworkRootPromise: Promise<string | null> | undefined;
+
+/** The framework's own package root: the nearest `package.json` above this
+ *  module named `ai-ui-automation`. Works from `dist/` and from `src/`. */
+function frameworkRoot(): Promise<string | null> {
+  if (!frameworkRootPromise) {
+    frameworkRootPromise = (async () => {
+      let current = path.dirname(fileURLToPath(import.meta.url));
+      for (let i = 0; i < 16; i++) {
+        const manifest = path.join(current, 'package.json');
+        if (await exists(manifest)) {
+          try {
+            const { name } = JSON.parse(await fs.readFile(manifest, 'utf-8')) as { name?: string };
+            if (name === FRAMEWORK_PACKAGE) return current;
+          } catch {
+            // keep walking
+          }
+        }
+        const parent = path.dirname(current);
+        if (parent === current) return null;
+        current = parent;
+      }
+      return null;
+    })();
+  }
+  return frameworkRootPromise;
+}
+
+/** The absolute path the framework's `package.json` exports for a specifier —
+ *  `ai-ui-automation/codebehind` → `<root>/dist/codebehind/index.js`. */
+async function frameworkExportPath(specifier: string): Promise<string | null> {
+  const root = await frameworkRoot();
+  if (!root) return null;
+  const subpath = specifier === FRAMEWORK_PACKAGE ? '.' : `./${specifier.slice(FRAMEWORK_PACKAGE.length + 1)}`;
+  try {
+    const manifest = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf-8')) as {
+      exports?: Record<string, string | Record<string, string>>;
+    };
+    const entry = manifest.exports?.[subpath];
+    const target = typeof entry === 'string' ? entry : (entry?.['import'] ?? entry?.['default']);
+    return target ? path.resolve(root, target) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 let esbuildPromise: Promise<typeof import('esbuild')> | undefined;
 function getEsbuild(): Promise<typeof import('esbuild')> {
   if (!esbuildPromise) esbuildPromise = import('esbuild');
@@ -146,6 +268,7 @@ export async function bundleToolModule(
     // signature's file set (so helper edits are detected too).
     metafile: true,
     logLevel: 'silent',
+    plugins: [frameworkSelfResolvePlugin(cacheDir)],
   });
 
   const output = result.outputFiles[0]!;

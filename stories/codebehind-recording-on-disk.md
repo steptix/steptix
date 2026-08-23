@@ -227,6 +227,27 @@ the transcript and the DOM before and after for each of the two steps, and a
 anything is applied. A server-side compile over HTTP on the same fixture
 showed the same directory, with the stream naming it ("Recording to …").
 
+Two things the first real project found, the same day:
+
+- **A project that never installed the framework ran every step under AI.**
+  The generated file imports `ai-ui-automation/codebehind`, and the bundler
+  left that for Node to resolve from the project's cache dir — which, in a
+  tests-only project driven from TestBench, has no `node_modules` above it.
+  The loader warned and fell back. The server (or CLI) loading the file *is*
+  the framework and knows where its own modules are, so the bundler now
+  resolves `ai-ui-automation` and its subpaths to the running framework's
+  export — read off its `package.json` — whenever the project cannot resolve
+  it, and leaves the bare specifier alone when it can (an install, or the
+  framework's own checkout). A `package.json` dependency is still the right
+  thing for editor types; the run no longer depends on it.
+- **The compile's replay said "passed as code" for code that never ran.**
+  Strict mode fails an entry that throws, but a *file* that fails to load
+  yields no entries, and strict never saw it: the replay ran under AI, passed,
+  and the compile went green. The loader now records load failures on the
+  registry, and a strict run — both runners — fails before its first step with
+  the file and the reason, which the compile reports as "the candidate could
+  not be loaded" rather than "no step owns the failure".
+
 One thing the build did not do: the recording is written once, when the run
 ends, not streamed per step. A Record the author stops mid-run writes what
 it has up to the stop because the run's results are assembled as it goes and

@@ -145,9 +145,12 @@ let server: Server;
 let baseUrl: string;
 let skillsDir: string;
 let testFilePath: string;
+let sessionManager: import('../src/server/session-manager.js').SessionManager;
 
 beforeAll(async () => {
-  const { app } = createApiServer(cfg);
+  const created = createApiServer(cfg);
+  const { app } = created;
+  sessionManager = created.sessionManager;
   server = createServer(app);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const addr = server.address();
@@ -573,6 +576,50 @@ type: skill
 
       exec.mockReset();
       if (defaultImpl) exec.mockImplementation(defaultImpl);
+    });
+
+    it('a strict run refuses before its first step when the code-behind file does not load', async () => {
+      // A compile's replay runs strict: its question is whether the code works
+      // on its own. A file that never loaded has no code, so the answer is a
+      // failure before any step — not "passed" under AI, which is what a
+      // project without node_modules got live. Strict is an in-process knob,
+      // so this drives the manager directly.
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const exec = vi.mocked(executeStep);
+      const defaultImpl = exec.getMockImplementation();
+      exec.mockImplementation(async (idx, _total, instr) => ({
+        index: idx, instruction: instr, status: 'passed',
+        turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
+      }));
+      const stepsFile = cacheTestFile.replace(/.md$/, '.steps.ts');
+      await fs.writeFile(
+        stepsFile,
+        [
+          "import { defineSteps } from 'ai-ui-automation/codebehind';",
+          "export default defineSteps([{ source: 'just one step', async run() { const x = ; } }]);",
+          '',
+        ].join('\n'),
+      );
+      try {
+        const events: any[] = [];
+        const response = await sessionManager.executeSteps(
+          'strict-load-' + Date.now(),
+          { steps: ['just one step'], sourceLines: [1], testFilePath: cacheTestFile },
+          (e) => events.push(e),
+          undefined,
+          { codeBehind: { strict: true } },
+        );
+        expect(response.status).toBe('failed');
+        expect(response.error?.message).toContain('could not be loaded');
+        expect(response.error?.message).toContain('test.steps.ts');
+        expect(events.some((e) => e.type === 'output' && e.kind === 'error' && e.msg.includes('could not be loaded'))).toBe(true);
+        expect(events.at(-1)).toMatchObject({ type: 'done', status: 'failed' });
+        expect(exec).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(stepsFile, { force: true });
+        exec.mockReset();
+        if (defaultImpl) exec.mockImplementation(defaultImpl);
+      }
     });
 
     it('captureStepContext on the request reaches the step, and its absence leaves it off', async () => {

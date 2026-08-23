@@ -169,6 +169,9 @@ export interface CompileRunRequest {
 
 export interface CompileRunOutcome {
   status: 'passed' | 'failed';
+  /** Why the run failed when no step did — a candidate that could not be
+   *  loaded. The compile reports it instead of "no step owns the failure". */
+  error?: string;
   /** One entry per expanded step, indexed by `step.index - 1`. Sparse when a
    *  run bailed early. */
   steps: (StepResult | undefined)[];
@@ -553,7 +556,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     return {
       step: failedAt >= 0 ? steps[failedAt] : undefined,
       result,
-      error: result?.error ?? 'the run failed without naming a step',
+      error: result?.error ?? outcome.error ?? 'the run failed without naming a step',
     };
   };
   const writeOff = async (step: CompileStep, error: string, after: string): Promise<void> => {
@@ -1404,6 +1407,7 @@ export function reportToOutcome(report: TestReport, totalSteps: number): Compile
   }
   return {
     status: report.status === 'passed' ? 'passed' : 'failed',
+    ...(report.error !== undefined && { error: report.error }),
     steps,
     resolvedParameters: report.parameters ?? {},
     tokensUsed: report.tokensUsed,

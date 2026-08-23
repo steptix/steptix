@@ -780,6 +780,37 @@ export default defineSteps([
     ).toBe(true);
   });
 
+  it('reports a replay that could not load the candidate as that, not as a step failure', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const requests: CompileRunRequest[] = [];
+    const runner: CompileRunner = async (request) => {
+      requests.push(request);
+      if (request.purpose === 'record') return recordOutcome(2);
+      // The strict replay refused before its first step: the file did not load.
+      return {
+        status: 'failed',
+        error: "code-behind file booking.steps.ts could not be loaded: Cannot find package 'ai-ui-automation'",
+        steps: [],
+        resolvedParameters: {},
+        tokensUsed: 0,
+      };
+    };
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner });
+
+    expect(result.status).toBe('failed');
+    expect(result.files).toEqual({});
+    expect(result.summary.error).toContain("Cannot find package 'ai-ui-automation'");
+    expect(result.summary.error).toContain('could not be loaded');
+    expect(requests.filter((r) => r.purpose === 'replay')).toHaveLength(1);
+  });
+
   it('fails with nothing to compile when the recording stops at step 1', async () => {
     const md = await write('booking.md', TEST_MD);
     const test = await parseTestFile(md);
