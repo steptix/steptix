@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { isHostMsg, isRunEvent, isWebviewMsg } from '../dist/protocol.js';
+import { isCompileEvent, isHostMsg, isRunEvent, isWebviewMsg } from '../dist/protocol.js';
 
 test('isHostMsg: accepts every host variant', () => {
   // Keep in sync with HostToWebviewMsg / isHostMsg in src/protocol.ts.
@@ -119,4 +119,47 @@ test('isRunEvent: accepts frame:push/pop/scope payloads', () => {
   );
   assert.equal(isRunEvent({ type: 'frame:pop', frameId: 'f1', outputs: {} }), true);
   assert.equal(isRunEvent({ type: 'frame:scope', frameId: 'f1', scope: {} }), true);
+});
+
+// ── Compile stream (stories/codebehind-compile.md §Server) ─────────────────
+
+test('isCompileEvent: accepts every compile frame the server sends', () => {
+  assert.equal(isCompileEvent({ type: 'compile:phase', phase: 'select', message: '3 to generate' }), true);
+  assert.equal(isCompileEvent({ type: 'compile:phase', phase: 'replay', round: 2, message: 'ok' }), true);
+  assert.equal(isCompileEvent({ type: 'compile:step', phase: 'generate', step: 4, message: 'generated' }), true);
+  assert.equal(isCompileEvent({ type: 'compile:done', status: 'green', message: 'done' }), true);
+  assert.equal(
+    isCompileEvent({ type: 'compile:result', status: 'green', files: {}, summary: { test: '/a.md' } }),
+    true,
+  );
+  // `output` rides the compile stream too — the server uses it for the
+  // fromSessionId decline and for run noise.
+  assert.equal(isCompileEvent({ type: 'output', msg: 'x', kind: 'info' }), true);
+});
+
+test('isCompileEvent: rejects run events and junk', () => {
+  assert.equal(isCompileEvent({ type: 'step:pass', line: 3 }), false);
+  assert.equal(isCompileEvent({ type: 'done', status: 'passed' }), false);
+  assert.equal(isCompileEvent(null), false);
+  assert.equal(isCompileEvent('compile:phase'), false);
+  assert.equal(isCompileEvent({}), false);
+});
+
+test('isRunEvent: does not accept compile frames', () => {
+  assert.equal(isRunEvent({ type: 'compile:phase', phase: 'select', message: 'x' }), false);
+  assert.equal(isRunEvent({ type: 'compile:result', status: 'green', files: {}, summary: {} }), false);
+});
+
+test('step:pass carries the code-behind flags through the narrower', () => {
+  const asCode = { type: 'step:pass', line: 12, fromCodeBehind: true };
+  assert.equal(isRunEvent(asCode), true);
+  assert.equal(asCode.fromCodeBehind, true);
+
+  const stale = {
+    type: 'step:pass',
+    line: 12,
+    codeBehindStale: { file: '/p/tests/a.steps.ts', error: 'locator timeout' },
+  };
+  assert.equal(isRunEvent(stale), true);
+  assert.equal(stale.codeBehindStale.file, '/p/tests/a.steps.ts');
 });

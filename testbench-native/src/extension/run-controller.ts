@@ -24,6 +24,9 @@ import {
   resolveSection,
   userRootEnvPath,
   type ClassifiedStep,
+  type CompileEvent,
+  type CompileRequest,
+  type CompileSummary,
   type ErrorPayload,
   type FrameInfo,
   type HostToWebviewMsg,
@@ -81,6 +84,10 @@ export interface ApiClientLike {
    *  `done` event would have carried. Absent on older clients/fakes → the stop
    *  path simply skips recovery. Returns null on an older server (404). */
   getLastRun?(sessionId: string): Promise<LastRunInfoLike | null>;
+  /** Optional (stories/codebehind-compile.md): stream a code-behind compile.
+   *  Absent on older fakes, which makes Compile refuse with a clear message
+   *  rather than throw. */
+  compileCodeBehind?(request: CompileRequest, signal: AbortSignal): AsyncIterable<CompileEvent>;
 }
 
 /** Shape returned by {@link ApiClientLike.getLastRun} (mirrors runner-core). */
@@ -114,6 +121,56 @@ type ServerReadiness =
 export interface RunOutcome {
   ok: boolean;
   error?: ErrorPayload;
+}
+
+/**
+ * What a compile came back with (stories/codebehind-compile.md).
+ *
+ * `files` is present only on a green compile, and is the whole proposed
+ * content of each `.steps.ts` — the diff's right-hand side. `summary` rides
+ * along on both outcomes because a red compile still has something to say:
+ * how many rounds it spent, what it cost, and where it left the candidate.
+ */
+export interface CompileOutcome {
+  ok: boolean;
+  files?: Record<string, string>;
+  summary?: CompileSummary;
+  error?: string;
+}
+
+/** Phase labels for the run log, matching `aiui compile`'s output. */
+const COMPILE_PHASE_LABEL: Record<string, string> = {
+  record: 'Record',
+  select: 'Select',
+  generate: 'Generate',
+  review: 'Review',
+  replay: 'Replay',
+  repair: 'Repair',
+  write: 'Write',
+};
+
+/**
+ * One run-log line per compile event, or null for the ones that say nothing a
+ * reader needs — `compile:result` is the payload, and its narrative already
+ * arrived as `compile:done`.
+ */
+export function compileLogLine(event: CompileEvent): string | null {
+  switch (event.type) {
+    case 'compile:phase': {
+      const label = event.round
+        ? `${COMPILE_PHASE_LABEL[event.phase] ?? event.phase} ${event.round}`
+        : COMPILE_PHASE_LABEL[event.phase] ?? event.phase;
+      return `  ${label.padEnd(11)} ${event.message}`;
+    }
+    case 'compile:step':
+      return `  ${' '.repeat(11)} step ${event.step} ${event.message}`;
+    case 'compile:done':
+      return event.status === 'green' ? `✓ ${event.message}` : `✗ ${event.message}`;
+    case 'output':
+      return `[${event.kind}] ${event.msg}`;
+    default:
+      return null;
+  }
 }
 
 /** Everything the "re-run this skill step with its variables" action needs,
@@ -1136,9 +1193,96 @@ export class RunController {
       return null;
     }
     const serverUrl = env['SERVER_URL']?.trim();
-    const apiKey = env['AIUI_SERVER_API_KEY']?.trim();
+    // Same chain as the run path (stories/machine-key.md): the project's .env,
+    // the extension host's environment, then the machine key. Without the last
+    // two, Compile would refuse on a machine where Run works.
+    const apiKey =
+      env['AIUI_SERVER_API_KEY']?.trim() ||
+      process.env['AIUI_SERVER_API_KEY']?.trim() ||
+      readMachineKey() ||
+      '';
     if (!serverUrl || !apiKey) return null;
     return { client: this.clientFactory({ serverUrl, apiKey }), sessionId };
+  }
+
+  /**
+   * Compile this test's code-behind (stories/codebehind-compile.md).
+   *
+   * Streams the pipeline's phases into the run log as they happen and returns
+   * the proposal for the caller to diff. Nothing is written here: the server
+   * compiles dry and hands back file content, and Apply is a separate,
+   * deliberate act.
+   */
+  async compileCodeBehind(options: {
+    select?: { onlyStale?: boolean; all?: boolean; steps?: number[] };
+    /** Compile from a completed run instead of recording a fresh one. */
+    fromSessionId?: string;
+    maxRounds?: number;
+    signal?: AbortSignal;
+  } = {}): Promise<CompileOutcome> {
+    const out = getOutputChannel();
+    const log = (line: string): void => out.appendLine(`[${timestamp()}] ${line}`);
+    const filePath = this.document.uri.fsPath;
+
+    const resolved = await this.resolveClient();
+    if (!resolved) {
+      const message = 'Cannot compile: no .env with SERVER_URL was found for this test.';
+      log(message);
+      return { ok: false, error: message };
+    }
+    if (!resolved.client.compileCodeBehind) {
+      const message = 'Cannot compile: this server client does not support compiling.';
+      log(message);
+      return { ok: false, error: message };
+    }
+
+    const envName = (EnvSelector.activeEnv() ?? '').trim() || undefined;
+    const request: CompileRequest = {
+      testFilePath: filePath,
+      steps: extractSteps(this.document.getText()).map((s) => s.instruction),
+      ...(envName && { envName }),
+      ...(options.fromSessionId && { fromSessionId: options.fromSessionId }),
+      ...(options.select && { select: options.select }),
+      ...(options.maxRounds !== undefined && { maxRounds: options.maxRounds }),
+    };
+
+    const controller = new AbortController();
+    options.signal?.addEventListener('abort', () => controller.abort());
+    log(`compile requested for ${filePath}`);
+    this.post({ type: 'compileState', running: true, file: filePath });
+
+    let result: CompileOutcome = { ok: false, error: 'the compile stream ended with no result' };
+    try {
+      for await (const event of resolved.client.compileCodeBehind(request, controller.signal)) {
+        const line = compileLogLine(event);
+        if (line) {
+          log(line);
+          this.post({ type: 'compileEvent', line });
+        }
+        if (event.type === 'compile:result') {
+          result =
+            event.status === 'green'
+              ? { ok: true, files: event.files, summary: event.summary }
+              : {
+                  ok: false,
+                  error: event.summary.error ?? 'the compile did not go green',
+                  summary: event.summary,
+                };
+        }
+      }
+    } catch (err) {
+      if (isUserAbort(err)) {
+        log('compile aborted by user');
+        result = { ok: false, error: 'aborted' };
+      } else {
+        const message = err instanceof ApiClientError ? err.message : String(err);
+        log(`compile failed: ${message}`);
+        result = { ok: false, error: message };
+      }
+    } finally {
+      this.post({ type: 'compileState', running: false });
+    }
+    return result;
   }
 
   /**
@@ -1793,6 +1937,14 @@ export class RunController {
       }
       this.emitRunEvent({ type: 'done', status });
       log(`run ${status}`);
+      // "Compile from this run" (stories/codebehind-compile.md §What the author
+      // runs) — offered only after a green run, because a compile has nothing
+      // to work from otherwise, and only for an interactive one, whose session
+      // stays open. A batch run's session is closed in the `finally` below.
+      this.post({
+        type: 'compileFromRunAvailable',
+        sessionId: status === 'passed' && !batchMode ? sessionId : null,
+      });
       return { ok: !anyFailed };
     } catch (err) {
       if (isUserAbort(err)) {
@@ -2019,15 +2171,23 @@ export class RunController {
 
     let sawFail = false;
     let cachedCount = 0;
+    let codeBehindCount = 0;
+    let staleCount = 0;
     let passCount = 0;
     for await (const event of events) {
       this.configSentForSession = true;
-      // step:pass cache marker — user-visible signal that a step skipped
-      // the AI call. The decoration ⚡ glyph is the in-editor signal; this
-      // log line is the textual one for the Output channel.
+      // How the step passed — the textual half of what the gutter glyphs say.
+      // ⚡ replayed a recorded transcript, ⚙ ran compiled code, ⚠ healed under
+      // AI because the compiled entry threw.
       if (event.type === 'step:pass') {
         passCount += 1;
-        if (event.fromCache) {
+        if (event.codeBehindStale) {
+          staleCount += 1;
+          log(`⚠ step ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`);
+        } else if (event.fromCodeBehind) {
+          codeBehindCount += 1;
+          log(`✓ step ${event.line} passed (code-behind)`);
+        } else if (event.fromCache) {
           cachedCount += 1;
           log(`✓ step ${event.line} passed (cached)`);
         } else {
@@ -2058,8 +2218,16 @@ export class RunController {
       this.emitRunEvent(event);
     }
     if (passCount > 0) {
-      const suffix = cachedCount > 0 ? ` (${cachedCount} cached)` : '';
+      const notes = [
+        codeBehindCount > 0 ? `${codeBehindCount} code-behind` : '',
+        staleCount > 0 ? `${staleCount} stale` : '',
+        cachedCount > 0 ? `${cachedCount} cached` : '',
+      ].filter((n) => n !== '');
+      const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
       log(`✓ ${passCount} passed${suffix}`);
+      if (staleCount > 0) {
+        log(`  ${staleCount} step(s) ran under AI because their code-behind failed — recompile.`);
+      }
     }
     return !sawFail;
   }

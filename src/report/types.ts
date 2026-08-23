@@ -165,6 +165,37 @@ export interface StepResult {
     code: string;
     logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }>;
   };
+  /**
+   * This step's entry threw and the step then passed under AI
+   * (stories/codebehind-compile.md, "The runtime stops generating").
+   *
+   * Runs no longer rewrite the file, so the failure has to be *flagged*
+   * instead: the report renders ⚠, the summary counts it, and `aiui compile
+   * --only-stale` regenerates exactly these steps.
+   */
+  codeBehindStale?: {
+    /** Absolute path of the `.steps.ts` the failing entry lives in. */
+    file: string;
+    /** The entry's authored `source` — what binds it to this step. */
+    source: string;
+    /** What the entry threw. */
+    error: string;
+  };
+  /**
+   * Page state either side of the step, captured only when the caller asked
+   * for it (`captureStepContext`). This is compile's Record phase input — the
+   * generator writes far better selectors with the DOM in front of it — and it
+   * is deliberately off for ordinary runs, where two more DOM snapshots per
+   * step would bloat every report for nobody's benefit.
+   */
+  stepContext?: {
+    /** DOM at turn 1, before the step acted. */
+    domBefore?: string;
+    urlBefore?: string;
+    /** DOM after the step's last action. */
+    domAfter?: string;
+    urlAfter?: string;
+  };
   /** True when this step was typed into the interactive REPL rather than being part of the test file. */
   interactiveAdHoc?: boolean;
   /** True when this step is a user-typed command captured inside an [interactive] step. */

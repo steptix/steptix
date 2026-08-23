@@ -26,6 +26,13 @@ import {
   type StepRequest,
 } from './session-manager.js';
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
+import {
+  CodeBehindCompiler,
+  CompileRefused,
+  type CompileEventListener,
+  type CompileRequest,
+  type CompileWireEvent,
+} from './compile-runner.js';
 import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
 import { capturePageContent, readPageIdentity, type PageContentOptions } from './page-capture.js';
@@ -232,7 +239,7 @@ function respondToPageCaptureError(err: unknown, res: Response): boolean {
 }
 
 /** Write a single SSE frame. */
-function writeSseEvent(res: Response, event: RunEvent): void {
+function writeSseEvent(res: Response, event: RunEvent | CompileWireEvent): void {
   res.write(`event: ${event.type}\n`);
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
@@ -241,7 +248,7 @@ function writeSseEvent(res: Response, event: RunEvent): void {
  *  left. */
 interface SseStream {
   /** Write one frame, unless the client has already gone. */
-  emit: RunEventListener;
+  emit: RunEventListener & CompileEventListener;
   /** Aborted on client disconnect, so a run can stop instead of burning
    *  through every remaining step. */
   signal: AbortSignal;
@@ -303,7 +310,7 @@ function openSseStream(res: Response): SseStream {
   }, 25_000);
 
   return {
-    emit: (event) => {
+    emit: (event: RunEvent | CompileWireEvent) => {
       if (clientGone) return;
       writeSseEvent(res, event);
     },
@@ -379,6 +386,10 @@ export function createApiServer(
   // errand is driving (stories/errands.md §The wheel, amending cdp-tabs §2).
   const errandLocks = new ErrandLocks();
   const errandRunner = new ErrandRunner(config, sessionManager, projectBundles, errandLocks);
+  // Same shape as the errand runner beside it: no state in the sessions map, the
+  // shared project resolver, and the manager's run counter borrowed for the
+  // duration (stories/codebehind-compile.md §Server).
+  const compiler = new CodeBehindCompiler(config, sessionManager, projectBundles);
   const version = getPackageVersion();
   const startedAt = new Date().toISOString();
   let shuttingDown = false;
@@ -810,6 +821,78 @@ export function createApiServer(
       }
 
       next(err);
+    }
+  });
+
+  // POST /codebehind/compile (stories/codebehind-compile.md §Server)
+  //
+  // Always SSE: a compile records, generates, reviews and replays, which is
+  // minutes of work, and a client that gets one JSON body at the end has no way
+  // to show any of it. The final `{ status, files, summary }` rides the stream
+  // as the last frame rather than as the response body for the same reason.
+  //
+  // Errors before the stream opens are status codes (400 malformed, 409 a
+  // compile of this file already running); everything after is a frame, because
+  // the headers are long gone by then.
+  app.post('/codebehind/compile', async (req: Request, res: Response) => {
+    const parsed = parseCompileRequest(req.body);
+    if (typeof parsed === 'string') {
+      res.status(400).json({ error: parsed });
+      return;
+    }
+
+    // The 409 has to be decided BEFORE the stream opens, so the lock is taken
+    // here rather than inside `compile`: once `flushHeaders` has run the answer
+    // is a 200 whatever happens next.
+    if (compiler.isCompiling(parsed.testFilePath)) {
+      res.status(409).json({
+        error:
+          `A compile of ${path.basename(parsed.testFilePath)} is already running. ` +
+          'One compile per test file at a time.',
+      });
+      return;
+    }
+
+    const sse = openSseStream(res);
+    try {
+      const result = await compiler.compile(parsed, sse.emit, sse.signal);
+      sse.emit({
+        type: 'compile:result',
+        status: result.status,
+        files: result.files,
+        summary: result.summary,
+      });
+    } catch (err) {
+      if (sse.clientGone) {
+        sse.close();
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof CompileRefused) {
+        sse.emit({ type: 'output', msg: message, kind: 'error' });
+      } else {
+        logger.error(`Compile failed: ${message}`);
+        sse.emit({ type: 'output', msg: `Server error: ${message}`, kind: 'error' });
+      }
+      sse.emit({ type: 'compile:done', status: 'failed', message });
+      sse.emit({
+        type: 'compile:result',
+        status: 'failed',
+        files: {},
+        summary: {
+          test: parsed.testFilePath,
+          totalSteps: 0,
+          compiled: 0,
+          kept: 0,
+          keptAi: 0,
+          rounds: 0,
+          tokensUsed: 0,
+          written: [],
+          error: message,
+        },
+      });
+    } finally {
+      sse.close();
     }
   });
 
@@ -1340,7 +1423,7 @@ export function createApiServer(
 
       // Single-flight. The key is built from the validated values so two
       // spellings of the same request share a slot.
-      const key = `${projectRoot} ${engine} ${profile}`;
+      const key = `${projectRoot}\u0000${engine}\u0000${profile}`;
       let pending = cdpLaunchesInFlight.get(key);
       if (!pending) {
         pending = startCdpBrowser({ projectRoot, engine, profile, reset }).finally(() => {
@@ -2270,6 +2353,117 @@ function parseRunSettings(raw: unknown): RunSettings | string {
  * behind it, so a caller that guessed a field name has nothing to inspect
  * afterwards; the refusal is the only feedback there is.
  */
+/**
+ * The compile request's per-field allow-list (stories/codebehind-compile.md
+ * §Server).
+ *
+ * Built field by field, like `StepRequest` and for the same reason: widening
+ * the TYPE alone compiles cleanly and drops the field at runtime, which is
+ * exactly how `envName` was lost once. Every field this endpoint accepts is
+ * named here, and anything else the caller sends is discarded on purpose.
+ *
+ * A refusal, not a fallback, wherever a wrong value would change what compiles:
+ * `select.steps` naming step 0 is a typo with a plausible reading, and quietly
+ * compiling something else would be worse than saying no.
+ */
+export function parseCompileRequest(raw: unknown): CompileRequest | string {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return 'Request body must be an object';
+  }
+  const body = raw as Record<string, unknown>;
+
+  const testFilePath = body.testFilePath;
+  if (typeof testFilePath !== 'string' || testFilePath === '') {
+    return '"testFilePath" is required — the test to compile';
+  }
+  if (!path.isAbsolute(testFilePath)) {
+    return `"testFilePath" must be an absolute path (got "${testFilePath}")`;
+  }
+
+  const request: CompileRequest = { testFilePath };
+
+  if (body.steps !== undefined) {
+    if (!Array.isArray(body.steps) || !body.steps.every((s) => typeof s === 'string')) {
+      return '"steps" must be an array of strings';
+    }
+    request.steps = body.steps as string[];
+  }
+
+  if (body.sections !== undefined && body.sections !== null) {
+    if (typeof body.sections !== 'object' || Array.isArray(body.sections)) {
+      return '"sections" must be an object keyed by section name';
+    }
+    const sections = Object.create(null) as NonNullable<CompileRequest['sections']>;
+    for (const [key, value] of Object.entries(body.sections as Record<string, unknown>)) {
+      const invalid = validateSectionEntry(key, value);
+      if (invalid) return invalid;
+      const entry = value as { name: string; headingLine: number; steps: string[]; stepLines: number[] };
+      sections[key] = {
+        name: entry.name,
+        headingLine: entry.headingLine,
+        steps: entry.steps,
+        stepLines: entry.stepLines,
+      };
+    }
+    if (Object.keys(sections).length > 0) request.sections = sections;
+  }
+
+  if (body.envName !== undefined) {
+    if (typeof body.envName !== 'string') return '"envName" must be a string';
+    request.envName = body.envName;
+  }
+
+  if (body.fromSessionId !== undefined) {
+    if (typeof body.fromSessionId !== 'string' || body.fromSessionId === '') {
+      return '"fromSessionId" must be a non-empty string';
+    }
+    request.fromSessionId = body.fromSessionId;
+  }
+
+  if (body.select !== undefined && body.select !== null) {
+    if (typeof body.select !== 'object' || Array.isArray(body.select)) {
+      return '"select" must be an object';
+    }
+    const raw2 = body.select as Record<string, unknown>;
+    const select: NonNullable<CompileRequest['select']> = {};
+    if (raw2.onlyStale !== undefined) {
+      if (typeof raw2.onlyStale !== 'boolean') return '"select.onlyStale" must be a boolean';
+      select.onlyStale = raw2.onlyStale;
+    }
+    if (raw2.all !== undefined) {
+      if (typeof raw2.all !== 'boolean') return '"select.all" must be a boolean';
+      select.all = raw2.all;
+    }
+    if (raw2.steps !== undefined) {
+      if (
+        !Array.isArray(raw2.steps) ||
+        !raw2.steps.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 1)
+      ) {
+        return '"select.steps" must be an array of 1-based step numbers';
+      }
+      select.steps = raw2.steps as number[];
+    }
+    if (select.onlyStale && select.all) {
+      return '"select.onlyStale" and "select.all" select opposite things; pick one';
+    }
+    request.select = select;
+  }
+
+  if (body.maxRounds !== undefined) {
+    if (typeof body.maxRounds !== 'number' || !Number.isInteger(body.maxRounds) || body.maxRounds < 1) {
+      return '"maxRounds" must be a positive integer';
+    }
+    request.maxRounds = body.maxRounds;
+  }
+
+  if (body.dryRun !== undefined) {
+    if (typeof body.dryRun !== 'boolean') return '"dryRun" must be a boolean';
+    request.dryRun = body.dryRun;
+  }
+
+  return request;
+}
+
 function parseErrandRequest(raw: unknown): ErrandRequest | string {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return 'Request body must be an object';

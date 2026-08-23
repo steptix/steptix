@@ -4,18 +4,26 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
-import { findInlinedParameterValue, parseStepCode } from '../src/ai/action-parser.js';
+import {
+  findInlinedParameterValue,
+  parseStepCode,
+  parseStepCodeOrDecline,
+} from '../src/ai/action-parser.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
-import { generateCodeBehind } from '../src/codebehind/generate.js';
+import { aiEntryFor, generateStepEntry, refuseReason } from '../src/codebehind/generate.js';
+import { buildRepairPrompt } from '../src/codebehind/repair.js';
+import { buildFileReviewPrompt, parseFileRevision } from '../src/codebehind/review.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 
 /**
- * Generation: the prompt's parse, the secret-literal guard, and the two
- * refusals that keep the writer from being asked to write the wrong thing
- * (stories/step-codebehind.md, "Generation").
+ * Generation, review and repair as the compiler uses them: the prompts' inputs,
+ * the envelopes' parses, the secret-literal guard, and the refusals that keep
+ * the compiler from asking for code it could not use
+ * (stories/codebehind-compile.md, "Generate" / "Review" / "Replay").
  *
  * No real model is involved — the AI client is a stub that returns whatever
- * the case is about.
+ * the case is about. Nothing here writes a `.steps.ts`: generation hands the
+ * compiler an entry, and only a green replay reaches the writer.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -55,14 +63,10 @@ function bindingFor(source: string, overrides: Partial<CodeBehindBinding> = {}):
   };
 }
 
-const PASSING_TURN = {
-  rawResponse: '{}',
-  reasoning: 'typed the password',
-  actions: [
-    { action: 'type' as const, selector: '#password', value: 'hunter2-correct-horse' },
-    { action: 'click' as const, selector: 'button[type=submit]' },
-  ],
-};
+const PASSING_ACTIONS = [
+  { action: 'type' as const, selector: '#password', value: 'hunter2-correct-horse' },
+  { action: 'click' as const, selector: 'button[type=submit]' },
+];
 
 describe('parseStepCode', () => {
   it('extracts the entry from a fenced ts block', () => {
@@ -114,6 +118,35 @@ describe('parseStepCode', () => {
   });
 });
 
+describe('parseStepCodeOrDecline', () => {
+  it('reads the decline envelope and keeps the reason', () => {
+    const answer = parseStepCodeOrDecline(
+      JSON.stringify({ entry: null, reason: 'needs a human to read the confirmation screen' }),
+    );
+    expect(answer).toEqual({
+      kind: 'declined',
+      reason: 'needs a human to read the confirmation screen',
+    });
+  });
+
+  it('treats an empty entry string as a decline', () => {
+    const answer = parseStepCodeOrDecline(JSON.stringify({ entry: '   ', reason: 'no idea' }));
+    expect(answer.kind).toBe('declined');
+  });
+
+  it('supplies a reason when the model declines without one', () => {
+    const answer = parseStepCodeOrDecline(JSON.stringify({ entry: null }));
+    expect(answer).toEqual({ kind: 'declined', reason: 'the model declined without giving a reason' });
+  });
+
+  it('still returns code for a normal envelope', () => {
+    const answer = parseStepCodeOrDecline(
+      JSON.stringify({ entry: `{ source: 'A', async run() {} }` }),
+    );
+    expect(answer).toEqual({ kind: 'entry', entry: `{ source: 'A', async run() {} }` });
+  });
+});
+
 describe('the inlined-parameter guard', () => {
   const params = [
     { name: 'password', value: 'hunter2-correct-horse' },
@@ -148,7 +181,7 @@ describe('buildStepCodePrompt', () => {
     const msg = buildStepCodePrompt({
       rawStepText: 'Enter the username {{username}}',
       parameters: [{ name: 'username', value: 'octocat' }],
-      actions: PASSING_TURN.actions,
+      actions: PASSING_ACTIONS,
       captures: ['entered'],
     });
     const text = contentBlocksToText(msg.content);
@@ -159,159 +192,255 @@ describe('buildStepCodePrompt', () => {
     // The model is never asked to choose scope.
     expect(text).not.toContain('section:');
   });
+
+  it('carries the whole test, the candidate file and the DOM either side', () => {
+    const msg = buildStepCodePrompt({
+      rawStepText: 'Click Sign in',
+      parameters: [],
+      actions: PASSING_ACTIONS,
+      wholeTest: [
+        { index: 1, text: 'Open the login page', inScope: false, isThisStep: false },
+        { index: 2, text: 'Click Sign in', inScope: true, isThisStep: true },
+      ],
+      candidateFile: `export default defineSteps([{ source: 'Open the login page' }]);`,
+      domBefore: '<form id="login"></form>',
+      urlBefore: 'https://app.test/login',
+      domAfter: '<h1>Dashboard</h1>',
+      urlAfter: 'https://app.test/dashboard',
+    });
+    const text = contentBlocksToText(msg.content);
+    expect(text).toContain('## The whole test');
+    expect(text).toContain('1. Open the login page');
+    expect(text).toContain('← THIS STEP');
+    expect(text).toContain('## The code-behind file as it stands');
+    expect(text).toContain("source: 'Open the login page'");
+    expect(text).toContain('<form id="login"></form>');
+    expect(text).toContain('<h1>Dashboard</h1>');
+    expect(text).toContain('https://app.test/dashboard');
+  });
+
+  it('states the post-condition rule and offers the decline envelope', () => {
+    const text = contentBlocksToText(
+      buildStepCodePrompt({ rawStepText: 'x', parameters: [], actions: [] }).content,
+    );
+    expect(text).toContain('End with a post-condition');
+    expect(text).toContain('"entry": null');
+  });
 });
 
-describe('generateCodeBehind', () => {
-  it('writes the entry the model returned', async () => {
-    // The primary live shape: the JSON envelope a json_object-mode client emits.
+describe('refuseReason', () => {
+  it('refuses a transcript that changed runner state rather than the page', () => {
+    expect(refuseReason('Open a second browser', [
+      { action: 'openBrowser', value: 'worker' },
+      { action: 'click', selector: '#x' },
+    ])).toMatch(/openBrowser/);
+  });
+
+  it('refuses a bracket-token step — code-behind for those is a stated non-goal', () => {
+    for (const source of ['[output: balance] Read the balance', '[input: pin] Enter your PIN']) {
+      expect(refuseReason(source, [{ action: 'read', selector: '#b', as: 'balance' }]))
+        .toMatch(/bracket marker/);
+    }
+  });
+
+  it('refuses a step with no recorded page actions', () => {
+    expect(refuseReason('Nothing happened', [])).toMatch(/no page actions/);
+  });
+
+  it('allows an ordinary step', () => {
+    expect(refuseReason('Click Sign in', PASSING_ACTIONS)).toBeUndefined();
+  });
+});
+
+describe('generateStepEntry', () => {
+  it('returns the entry the model produced', async () => {
     const { client, calls } = stubClient(JSON.stringify({
       entry: [
         `{`,
         `  source: 'Enter the username {{username}}',`,
         `  async run({ page, step }) {`,
         `    await page.locator('#login_field').fill(step.getVar('username'));`,
+        `    await page.locator('#login_field').waitFor();`,
         `  },`,
         `}`,
       ].join('\n'),
     }));
 
-    const binding = bindingFor('Enter the username {{username}}');
-    const action = await generateCodeBehind({
-      binding,
-      turns: [PASSING_TURN],
+    const result = await generateStepEntry({
+      binding: bindingFor('Enter the username {{username}}'),
+      actions: PASSING_ACTIONS,
       resolvedParameters: { username: 'octocat' },
       aiClient: client,
       contextContent: '',
       testName: 'demo',
     });
 
-    expect(action).toBe('created');
+    expect(result.kind).toBe('entry');
     expect(calls).toHaveLength(1);
-    const written = await fs.readFile(binding.file, 'utf-8');
-    expect(written).toContain(`import { defineSteps } from 'ai-ui-automation/codebehind';`);
-    expect(written).toContain("step.getVar('username')");
-    expect(written).not.toContain('octocat');
+    expect(result.kind === 'entry' && result.code).toContain("step.getVar('username')");
+    expect(result.kind === 'entry' && result.code).not.toContain('octocat');
   });
 
-  it('stamps the runner\'s section scope, not the model\'s', async () => {
-    const { client } = stubClient(
-      "```ts\n{ section: 'GuessedWrong', source: 'Click Pay now', async run({ page }) { await page.click('#pay'); } }\n```",
-    );
-    const binding = bindingFor('Click Pay now', { section: 'Checkout' });
-    expect(await generateCodeBehind({
-      binding,
-      turns: [{ rawResponse: '{}', reasoning: '', actions: [{ action: 'click', selector: '#pay' }] }],
+  it('turns a model decline into a declined result carrying the reason', async () => {
+    const { client } = stubClient(JSON.stringify({
+      entry: null,
+      reason: 'needs the operator to choose from a list',
+    }));
+    const result = await generateStepEntry({
+      binding: bindingFor('Pick the right account'),
+      actions: PASSING_ACTIONS,
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
       testName: 'demo',
-    })).toBe('created');
-
-    const written = await fs.readFile(binding.file, 'utf-8');
-    expect(written).toContain('section: "Checkout"');
-    expect(written).not.toContain('GuessedWrong');
+    });
+    expect(result).toEqual({ kind: 'declined', reason: 'needs the operator to choose from a list' });
   });
 
-  it('refuses — and writes NOTHING — when the code inlines a parameter value', async () => {
-    const { client } = stubClient([
-      '```ts',
-      `{`,
-      `  source: 'Enter the password {{password}}',`,
-      `  async run({ page }) { await page.fill('#password', 'hunter2-correct-horse'); },`,
-      `}`,
-      '```',
-    ].join('\n'));
-
-    const binding = bindingFor('Enter the password {{password}}');
-    const action = await generateCodeBehind({
-      binding,
-      turns: [PASSING_TURN],
+  it('refuses code that inlines a parameter value, and never calls it an entry', async () => {
+    const { client } = stubClient(JSON.stringify({
+      entry: `{ source: 'Enter the password {{password}}', async run({ page }) { await page.fill('#password', 'hunter2-correct-horse'); } }`,
+    }));
+    const result = await generateStepEntry({
+      binding: bindingFor('Enter the password {{password}}'),
+      actions: PASSING_ACTIONS,
       resolvedParameters: { password: 'hunter2-correct-horse' },
       aiClient: client,
       contextContent: '',
       testName: 'demo',
     });
-
-    expect(action).toBeNull();
-    await expect(fs.access(binding.file)).rejects.toThrow();
+    expect(result.kind).toBe('error');
+    expect(result.kind === 'error' && result.message).toMatch(/{{password}}/);
   });
 
-  it('skips a step whose transcript changed runner state rather than the page', async () => {
+  it('declines before the model call when the step can never be code', async () => {
     const { client, calls } = stubClient('should never be asked');
-    const action = await generateCodeBehind({
+    const result = await generateStepEntry({
       binding: bindingFor('Open a second browser and sign in there'),
-      turns: [{
-        rawResponse: '{}',
-        reasoning: '',
-        actions: [{ action: 'openBrowser', value: 'worker' }, { action: 'click', selector: '#x' }],
-      }],
+      actions: [{ action: 'openBrowser', value: 'worker' }],
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
       testName: 'demo',
     });
-    expect(action).toBeNull();
+    expect(result.kind).toBe('declined');
     expect(calls).toHaveLength(0);
   });
 
-  it('skips a bracket-token step — code-behind for those is a stated non-goal', async () => {
-    const { client, calls } = stubClient('should never be asked');
-    for (const source of ['[output: balance] Read the balance', '[input: pin] Enter your PIN']) {
-      expect(await generateCodeBehind({
-        binding: bindingFor(source),
-        turns: [{ rawResponse: '{}', reasoning: '', actions: [{ action: 'read', selector: '#b', as: 'balance' }] }],
-        resolvedParameters: {},
-        aiClient: client,
-        contextContent: '',
-        testName: 'demo',
-      })).toBeNull();
-    }
-    expect(calls).toHaveLength(0);
-  });
-
-  it('skips a step with no recorded actions', async () => {
-    const { client, calls } = stubClient('should never be asked');
-    expect(await generateCodeBehind({
-      binding: bindingFor('Nothing happened'),
-      turns: [],
-      resolvedParameters: {},
-      aiClient: client,
-      contextContent: '',
-      testName: 'demo',
-    })).toBeNull();
-    expect(calls).toHaveLength(0);
-  });
-
-  it('swallows an unparseable response — a step that passed must not fail here', async () => {
+  it('reports an unparseable response as an error rather than throwing', async () => {
     const { client } = stubClient('I am afraid I cannot do that.');
-    const binding = bindingFor('Click Sign in');
-    expect(await generateCodeBehind({
-      binding,
-      turns: [{ rawResponse: '{}', reasoning: '', actions: [{ action: 'click', selector: '#x' }] }],
+    const result = await generateStepEntry({
+      binding: bindingFor('Click Sign in'),
+      actions: PASSING_ACTIONS,
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
       testName: 'demo',
-    })).toBeNull();
-    await expect(fs.access(binding.file)).rejects.toThrow();
+    });
+    expect(result.kind).toBe('error');
   });
 
   it('resolves a skill-frame parameter through the frame scope before guarding it', async () => {
-    const { client, calls } = stubClient(
-      "```ts\n{ source: 'Sign in as {{username}}', async run({ page, step }) { await page.fill('#u', step.getVar('username')); } }\n```",
-    );
-    const binding = bindingFor('Sign in as {{username}}', {
-      scope: { renames: {}, inputs: { username: 'alice-from-the-caller' } },
-    });
-    expect(await generateCodeBehind({
-      binding,
-      turns: [{ rawResponse: '{}', reasoning: '', actions: [{ action: 'type', selector: '#u', value: 'alice-from-the-caller' }] }],
+    const { client, calls } = stubClient(JSON.stringify({
+      entry: `{ source: 'Sign in as {{username}}', async run({ page, step }) { await page.fill('#u', step.getVar('username')); } }`,
+    }));
+    const result = await generateStepEntry({
+      binding: bindingFor('Sign in as {{username}}', {
+        scope: { renames: {}, inputs: { username: 'alice-from-the-caller' } },
+      }),
+      actions: [{ action: 'type', selector: '#u', value: 'alice-from-the-caller' }],
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
       testName: 'demo',
-    })).toBe('created');
+    });
+    expect(result.kind).toBe('entry');
     // The prompt was told the frame's value, so the guard covers it.
     expect(contentBlocksToText(calls[0]![1]!.content)).toContain('alice-from-the-caller');
+  });
+});
+
+describe('aiEntryFor', () => {
+  it('writes an ai: true entry with the reason as a comment', () => {
+    const entry = aiEntryFor('Verify the dashboard looks right', 'needs a judgement code cannot make');
+    expect(entry).toContain('ai: true');
+    expect(entry).toContain('needs a judgement code cannot make');
+    expect(entry).toContain(`source: "Verify the dashboard looks right"`);
+  });
+
+  it('keeps a multi-line reason on one line and cannot close the comment early', () => {
+    const entry = aiEntryFor('X', 'line one\nline two */ still the reason');
+    expect(entry.split('\n').filter((l) => l.includes('line two'))).toHaveLength(1);
+    expect(entry).not.toContain('*/');
+  });
+});
+
+describe('buildRepairPrompt', () => {
+  it('carries the entry, the error, the DOM and the screenshot', () => {
+    const msg = buildRepairPrompt({
+      rawStepText: 'Click Sign in',
+      stepIndex: 5,
+      entryCode: `{ source: 'Click Sign in', async run({ page }) { await page.click('#nope'); } }`,
+      error: 'locator.click: Timeout 30000ms exceeded',
+      dom: '<button id="signin">Sign in</button>',
+      url: 'https://app.test/login',
+      screenshotBase64: 'AAAA',
+      parameters: [{ name: 'username', value: 'octocat' }],
+      round: { number: 2, max: 3 },
+    });
+    const text = contentBlocksToText(msg.content);
+    expect(text).toContain(`await page.click('#nope')`);
+    expect(text).toContain('Timeout 30000ms exceeded');
+    expect(text).toContain('<button id="signin">Sign in</button>');
+    expect(text).toContain('https://app.test/login');
+    expect(text).toContain('repair round 2 of 3');
+    expect(text).toContain('{{username}} resolves to "octocat"');
+    // The screenshot rides as an image block, not as text.
+    expect(Array.isArray(msg.content)).toBe(true);
+    expect((msg.content as Array<{ type: string }>).some((b) => b.type === 'image_url')).toBe(true);
+  });
+
+  it('sends a plain text message when there is no screenshot', () => {
+    const msg = buildRepairPrompt({
+      rawStepText: 'x',
+      stepIndex: 1,
+      entryCode: '{}',
+      error: 'boom',
+      parameters: [],
+    });
+    expect(typeof msg.content).toBe('string');
+  });
+});
+
+describe('the review envelope', () => {
+  it('asks about frozen dates, post-conditions and binding fields', () => {
+    const text = contentBlocksToText(
+      buildFileReviewPrompt({
+        markdownName: 'smoke.md',
+        file: 'export default defineSteps([]);',
+        steps: ['Navigate to the baseUrl'],
+      }).content,
+    );
+    expect(text).toContain('computed at runtime, not frozen');
+    expect(text).toContain('post-condition');
+    expect(text).toContain('1. Navigate to the baseUrl');
+    expect(text).toContain('"file"');
+  });
+
+  it('reads the revised file out of the {"file": ...} envelope', () => {
+    const file = `import { defineSteps } from 'ai-ui-automation/codebehind';\nexport default defineSteps([]);`;
+    expect(parseFileRevision(JSON.stringify({ file }))).toBe(`${file}\n`);
+  });
+
+  it('decodes a double-escaped revision', () => {
+    const escaped = `import { defineSteps } from 'x';\\nexport default defineSteps([]);`;
+    const revised = parseFileRevision(JSON.stringify({ file: escaped }));
+    expect(revised).toContain('\n');
+    expect(revised).not.toContain('\\n');
+  });
+
+  it('refuses a revision that is not a code-behind file', () => {
+    expect(() => parseFileRevision(JSON.stringify({ file: 'const x = 1;' }))).toThrow(/defineSteps/);
+    expect(() => parseFileRevision('sorry, no')).toThrow(/no revised file|defineSteps/);
   });
 });

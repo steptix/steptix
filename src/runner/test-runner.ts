@@ -28,6 +28,7 @@ import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { executeToolStep } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
+import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -183,6 +184,37 @@ export function cacheDirForRun(
 }
 
 /**
+ * The code-behind knobs `aiui compile` needs from a run, and nothing else.
+ *
+ * Kept off the positional parameters so ordinary callers are unaffected, and
+ * shaped for the compiler rather than for users: none of these has a config
+ * key or a CLI flag on the `run` path.
+ */
+export interface RunTestExtras {
+  /**
+   * Load these code-behind files from somewhere else: canonical `.steps.ts`
+   * path → the path to import instead. Compile's replay points the loader at
+   * its candidate; the real file is untouched.
+   */
+  codeBehindCandidates?: Record<string, string>;
+  /**
+   * Ignore every code-behind entry, so all steps run under AI.
+   *
+   * Compile's Record phase needs this: a step served by its existing entry
+   * produces no transcript, and generation would then have nothing to work
+   * from — which is how "recompile step 3" turned into "step 3 performed no
+   * page actions".
+   */
+  codeBehindDisabled?: boolean;
+  /** An entry that throws fails the step instead of healing under AI. */
+  codeBehindStrict?: boolean;
+  /** Capture DOM + URL either side of every step (compile's Record input). */
+  captureStepContext?: boolean;
+  /** Abort signal, threaded into every step. */
+  signal?: AbortSignal;
+}
+
+/**
  * Run a single test instance (ParsedTest with resolved parameters).
  * Handles browser lifecycle, step execution, and report generation.
  */
@@ -191,6 +223,7 @@ export async function runTest(
   config: Config,
   contextContent: string,
   runEnvName?: string,
+  extras: RunTestExtras = {},
 ): Promise<TestReport> {
   const { test, resolvedParameters, dataRowIndex } = instance;
   const startTime = Date.now();
@@ -300,18 +333,27 @@ export async function runTest(
   // front, and carry the result into the executor like `stepCache`. A missing
   // or broken file is a warning and an empty registry — the test then runs
   // exactly as it did before this feature existed.
-  const codeBehind = test.expansion
-    ? await buildCodeBehindRegistry(
-        {
-          steps: test.steps,
-          rawSteps: test.expansion.rawSteps,
-          origins: test.expansion.origins,
-          frames: test.expansion.frames,
-        },
-        { testFilePath: test.filePath },
-      )
-    : CodeBehindRegistry.empty();
-  const codeBehindGenerate = config.codebehind?.generate === true;
+  const codeBehind =
+    extras.codeBehindDisabled || !test.expansion
+      ? CodeBehindRegistry.empty()
+      : await buildCodeBehindRegistry(
+          {
+            steps: test.steps,
+            rawSteps: test.expansion.rawSteps,
+            origins: test.expansion.origins,
+            frames: test.expansion.frames,
+          },
+          {
+            testFilePath: test.filePath,
+            ...(extras.codeBehindCandidates && { candidateFiles: extras.codeBehindCandidates }),
+          },
+        );
+  /** Per-expanded-step facts for the last-run sidecar, filled as steps run.
+   *  Not written when this run deliberately bypassed code-behind: a compile's
+   *  Record would otherwise stamp "0 code-behind, all AI" over the real run's
+   *  findings, including the stale flags the compile is acting on. */
+  const lastRunSteps: LastRunStep[] = [];
+  const keepLastRun = !extras.codeBehindDisabled && !extras.codeBehindCandidates;
 
   // Hoisted so the `finally` can read the run outcome + mutate the report after
   // the browser is closed (to attach `videoRelPath`). `report` is assigned the
@@ -342,12 +384,39 @@ export async function runTest(
      */
     const codeBehindOptionsFor = (
       i: number,
-    ): Pick<StepExecutorOptions, 'codeBehind' | 'codeBehindGenerate'> => {
+    ): Pick<
+      StepExecutorOptions,
+      'codeBehind' | 'codeBehindStrict' | 'captureStepContext' | 'signal'
+    > => {
       const binding = codeBehind.bindingFor(i);
       return {
         ...(binding && { codeBehind: binding }),
-        codeBehindGenerate,
+        ...(extras.codeBehindStrict !== undefined && { codeBehindStrict: extras.codeBehindStrict }),
+        ...(extras.captureStepContext !== undefined && {
+          captureStepContext: extras.captureStepContext,
+        }),
+        ...(extras.signal && { signal: extras.signal }),
       };
+    };
+
+    /**
+     * Record one expanded step's outcome for the last-run sidecar.
+     *
+     * Called at the single point every non-hook step result passes through, so
+     * the sidecar describes the run whichever branch produced the step.
+     */
+    const recordLastRun = (i: number, result: StepResult): void => {
+      const binding = codeBehind.bindingFor(i);
+      const stale = result.codeBehindStale;
+      lastRunSteps.push({
+        index: i + 1,
+        source: binding?.source ?? test.expansion?.rawSteps[i] ?? test.steps[i] ?? '',
+        ...(binding?.section !== undefined && { section: binding.section }),
+        status: result.status,
+        fromCodeBehind: result.fromCodeBehind === true,
+        stale: stale !== undefined,
+        ...(stale && { error: stale.error }),
+      });
     };
 
     /**
@@ -700,6 +769,7 @@ export async function runTest(
           // computation — the common tail's doesn't run for it.
           const resumeCaptures = computeStepCaptures(stepResult, resolvedParameters);
           if (resumeCaptures) stepResult.outputs = resumeCaptures;
+          recordLastRun(i, stepResult);
           stepResults.push(stepResult);
           stepResults.push(...interactiveResults);
           conversationHistory.push(
@@ -780,6 +850,7 @@ export async function runTest(
       const stepCaptures = computeStepCaptures(stepResult, resolvedParameters);
       if (stepCaptures) stepResult.outputs = stepCaptures;
 
+      recordLastRun(i, stepResult);
       stepResults.push(stepResult);
       if (interactiveStep) {
         stepResults.push(...interactiveResults);
@@ -946,6 +1017,13 @@ export async function runTest(
       if (afterResult.failed) {
         logger.warn(`'after' hook failed (test status unchanged): ${afterResult.error}`);
       }
+    }
+
+    // The code-behind last-run sidecar. Runs no longer write code-behind, so
+    // this is the only thing they leave for the next compile — which steps ran
+    // as code, and which had an entry that broke and healed under AI.
+    if (keepLastRun && lastRunSteps.length > 0) {
+      await writeLastRun(test.filePath, lastRunSteps);
     }
 
     const durationMs = Date.now() - startTime;

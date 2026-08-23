@@ -7,6 +7,7 @@ import { parseTestFile, discoverTestFiles } from '../../parser/markdown.js';
 import { filterByTags, runTests } from '../../runner/test-runner.js';
 import { setVerbose, logger } from '../../utils/logger.js';
 import type { RunSummary } from '../../report/types.js';
+import { countStepOrigins } from '../../report/generator.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 
 export interface RunOptions {
@@ -205,6 +206,31 @@ function printSummary(summary: RunSummary): void {
   console.log(`  ${chalk.red('Failed:')}   ${chalk.red(String(summary.failedTests))}`);
   console.log(`  Duration: ${(summary.totalDurationMs / 1000).toFixed(1)}s`);
   console.log(`  Tokens:   ${summary.totalTokensUsed.toLocaleString()}`);
+
+  // How the steps got done. Shown only once code-behind is in play — on a test
+  // with none, "0 code-behind, 9 AI, 0 stale" is a line that says nothing.
+  const origins = summary.reports
+    .map((r) => countStepOrigins(r.steps))
+    .reduce(
+      (acc, o) => ({ code: acc.code + o.code, ai: acc.ai + o.ai, stale: acc.stale + o.stale }),
+      { code: 0, ai: 0, stale: 0 },
+    );
+  if (origins.code > 0 || origins.stale > 0) {
+    const total = origins.code + origins.ai + origins.stale;
+    const staleText = `${origins.stale} stale`;
+    console.log(
+      `  Steps:    ${total} — ${origins.code} code-behind, ${origins.ai} AI, ` +
+        (origins.stale > 0 ? chalk.yellow(staleText) : staleText),
+    );
+    if (origins.stale > 0) {
+      console.log(
+        chalk.yellow(
+          `            ${origins.stale} step(s) ran under AI because their code-behind failed — ` +
+            `recompile with \`aiui compile <test.md> --only-stale\`.`,
+        ),
+      );
+    }
+  }
 
   if (summary.failedTests > 0) {
     console.log();

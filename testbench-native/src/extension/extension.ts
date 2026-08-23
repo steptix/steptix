@@ -9,6 +9,7 @@ import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
 import { registerCommands } from './commands/index.js';
+import { CodeBehindDiffs } from './codebehind-diff.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { workspaceFolderFor } from './workspace.js';
@@ -461,12 +462,19 @@ class RunControllerRegistry implements vscode.Disposable {
         }
         case 'step:pass': {
           const target = this.targetUriFor(uri, ev.frame);
-          // The server marks a step:pass with `fromCache: true` when every
-          // AI turn for that step was served from StepCache (no AI call
-          // happened). The gutter painter renders that with a ⚡ glyph and
-          // the run-log marks the line `(cached)`. Absent / false flows
-          // through the standard ✓ path.
-          this.tracker.setStatus(target, ev.line, ev.fromCache ? 'pass-cached' : 'pass');
+          // How the step passed decides the glyph. `codeBehindStale` outranks
+          // everything: the step DID pass, but its compiled entry threw and the
+          // AI covered for it, and ⚠ is the only mark that asks for a recompile.
+          // Then ⚙ (ran as code), then ⚡ (every AI turn served from StepCache),
+          // then the plain ✓.
+          const status = ev.codeBehindStale
+            ? 'pass-stale'
+            : ev.fromCodeBehind
+              ? 'pass-code-behind'
+              : ev.fromCache
+                ? 'pass-cached'
+                : 'pass';
+          this.tracker.setStatus(target, ev.line, status);
           break;
         }
         case 'step:fail': {
@@ -1040,6 +1048,10 @@ export interface TestBenchTestHooks {
    *  recently finalized run (incl. a STOPPED one, issue 021), or null. Backs the
    *  live stop-report test's token assertion. */
   lastRunTokens: () => { total: number; input: number; output: number } | null;
+  /** The compile proposal waiting for Apply or Discard, or null. Backs the
+   *  code-behind tests: the diff editors themselves are not readable from the
+   *  extension host, but what they were opened WITH is. */
+  pendingCodeBehind: () => { testFilePath: string; files: Record<string, string> } | null;
 }
 
 export interface TestBenchExports {
@@ -1060,6 +1072,9 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
 
   const tracker = new ActiveFileTracker();
   const decorations = new DecorationManager(context, tracker);
+  // Holds a green compile's proposed files until the author applies or
+  // discards them (stories/codebehind-compile.md §What the author sees).
+  const codeBehindDiffs = new CodeBehindDiffs();
   const view = new TestBenchRunnerView(context, tracker);
   const serverStatusBar = new ServerStatusBar(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
   const registry = new RunControllerRegistry(view, tracker, serverLogPath, serverStatusBar);
@@ -1240,7 +1255,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
       },
     ),
-    ...registerCommands(registry, tracker),
+    ...registerCommands(registry, tracker, codeBehindDiffs),
+    codeBehindDiffs,
     serverStatusBar,
     // The probe/spawn are delegated through the registry rather than defaulted
     // inside the command module, so a `setServerHooks` swap reaches the
@@ -1362,6 +1378,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       },
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
       lastRunTokens: () => registry.active()?.lastRunTokens ?? null,
+      pendingCodeBehind: () => codeBehindDiffs.pending,
     },
   };
 }
@@ -1416,6 +1433,15 @@ async function handleWebviewMessage(
     }
     case 'restartSession': {
       await vscode.commands.executeCommand('testbench-native.restartSession');
+      return;
+    }
+    case 'compile': {
+      // "Compile from this run" passes the session id so the compile skips
+      // Record; the plain Compile button sends none and the compile records.
+      await vscode.commands.executeCommand(
+        'testbench-native.compileCodeBehind',
+        msg.fromSessionId ? { fromSessionId: msg.fromSessionId } : undefined,
+      );
       return;
     }
     case 'promptResponse': {

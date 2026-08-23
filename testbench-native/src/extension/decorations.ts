@@ -18,21 +18,30 @@ import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
 export function computeStepsSummary(snap: FileStateSnapshot): {
   passed: number;
   passedCached: number;
+  /** Passed by running compiled code — no model call. */
+  passedCodeBehind: number;
+  /** Passed under AI after the compiled entry threw. */
+  stale: number;
   total: number;
   mainFlowLines: number[];
 } {
   const mainFlowLines = extractSteps(snap.text).map((s) => s.line);
   const mainFlowSet = new Set(mainFlowLines);
-  // Both 'pass' and 'pass-cached' count as passed — a cache hit is still a
-  // successful step.
-  const passed = snap.statuses.filter(
-    ([line, status]) =>
-      (status === 'pass' || status === 'pass-cached') && mainFlowSet.has(line),
-  ).length;
-  const passedCached = snap.statuses.filter(
-    ([line, status]) => status === 'pass-cached' && mainFlowSet.has(line),
-  ).length;
-  return { passed, passedCached, total: mainFlowLines.length, mainFlowLines };
+  const count = (...wanted: string[]): number =>
+    snap.statuses.filter(([line, status]) => wanted.includes(status) && mainFlowSet.has(line))
+      .length;
+  // Every 'pass*' counts as passed — a cache hit, a code-behind entry and a
+  // step that healed under AI are all successful steps. What differs is what
+  // it cost and whether it needs attention, which is what the breakdown says.
+  const passed = count('pass', 'pass-cached', 'pass-code-behind', 'pass-stale');
+  return {
+    passed,
+    passedCached: count('pass-cached'),
+    passedCodeBehind: count('pass-code-behind'),
+    stale: count('pass-stale'),
+    total: mainFlowLines.length,
+    mainFlowLines,
+  };
 }
 
 /**
@@ -50,6 +59,8 @@ export class DecorationManager implements vscode.Disposable {
   private readonly breakpointStopped: vscode.TextEditorDecorationType;
   private readonly statusPass: vscode.TextEditorDecorationType;
   private readonly statusPassCached: vscode.TextEditorDecorationType;
+  private readonly statusCodeBehind: vscode.TextEditorDecorationType;
+  private readonly statusStale: vscode.TextEditorDecorationType;
   private readonly statusFail: vscode.TextEditorDecorationType;
   private readonly statusRunning: vscode.TextEditorDecorationType;
   private readonly statusSkip: vscode.TextEditorDecorationType;
@@ -81,6 +92,12 @@ export class DecorationManager implements vscode.Disposable {
     );
     this.statusPassCached = vscode.window.createTextEditorDecorationType(
       statusIcon('status-pass-cached.svg'),
+    );
+    this.statusCodeBehind = vscode.window.createTextEditorDecorationType(
+      statusIcon('status-code-behind.svg'),
+    );
+    this.statusStale = vscode.window.createTextEditorDecorationType(
+      statusIcon('status-code-behind-stale.svg'),
     );
     this.statusFail = vscode.window.createTextEditorDecorationType(
       statusIcon('status-fail.svg'),
@@ -128,6 +145,8 @@ export class DecorationManager implements vscode.Disposable {
     this.breakpointStopped.dispose();
     this.statusPass.dispose();
     this.statusPassCached.dispose();
+    this.statusCodeBehind.dispose();
+    this.statusStale.dispose();
     this.statusFail.dispose();
     this.statusRunning.dispose();
     this.statusSkip.dispose();
@@ -176,6 +195,8 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.breakpointStopped, []);
     editor.setDecorations(this.statusPass, []);
     editor.setDecorations(this.statusPassCached, []);
+    editor.setDecorations(this.statusCodeBehind, []);
+    editor.setDecorations(this.statusStale, []);
     editor.setDecorations(this.statusFail, []);
     editor.setDecorations(this.statusRunning, []);
     editor.setDecorations(this.statusSkip, []);
@@ -209,6 +230,8 @@ export class DecorationManager implements vscode.Disposable {
     // on the same line during a re-run.
     const passRanges: vscode.Range[] = [];
     const passCachedRanges: vscode.Range[] = [];
+    const codeBehindRanges: vscode.Range[] = [];
+    const staleRanges: vscode.Range[] = [];
     const failRanges: vscode.Range[] = [];
     const runningRanges: vscode.Range[] = [];
     const skipRanges: vscode.Range[] = [];
@@ -221,6 +244,8 @@ export class DecorationManager implements vscode.Disposable {
       switch (status) {
         case 'pass': passRanges.push(r); break;
         case 'pass-cached': passCachedRanges.push(r); break;
+        case 'pass-code-behind': codeBehindRanges.push(r); break;
+        case 'pass-stale': staleRanges.push(r); break;
         case 'fail': failRanges.push(r); break;
         case 'running': runningRanges.push(r); break;
         case 'skip': skipRanges.push(r); break;
@@ -255,9 +280,17 @@ export class DecorationManager implements vscode.Disposable {
     // "0/4 passed" while it's still executing, and a skill the user
     // never wrote a test for shouldn't carry a passed-count signal at
     // all. Phase 2.1 cleanup.
+    // "12/12 passed (7 code-behind, 1 stale, 2 cached)" — one parenthesis
+    // listing only what actually happened, so an ordinary all-AI run reads
+    // exactly as it did before this feature existed.
+    const notes = [
+      summary.passedCodeBehind > 0 ? `${summary.passedCodeBehind} code-behind` : '',
+      summary.stale > 0 ? `${summary.stale} stale` : '',
+      passedCached > 0 ? `${passedCached} cached` : '',
+    ].filter((n) => n !== '');
     const summaryText =
-      passedCached > 0
-        ? `${passed}/${summaryLines.length} passed (${passedCached} cached)`
+      notes.length > 0
+        ? `${passed}/${summaryLines.length} passed (${notes.join(', ')})`
         : `${passed}/${summaryLines.length} passed`;
     const summaryRanges: vscode.DecorationOptions[] =
       snap.isTestFile && headingLine && summaryLines.length > 0
@@ -274,6 +307,8 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.breakpointStopped, stopped);
     editor.setDecorations(this.statusPass, passRanges);
     editor.setDecorations(this.statusPassCached, passCachedRanges);
+    editor.setDecorations(this.statusCodeBehind, codeBehindRanges);
+    editor.setDecorations(this.statusStale, staleRanges);
     editor.setDecorations(this.statusFail, failRanges);
     editor.setDecorations(this.statusRunning, runningRanges);
     editor.setDecorations(this.statusSkip, skipRanges);

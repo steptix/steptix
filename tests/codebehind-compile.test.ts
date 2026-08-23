@@ -1,0 +1,910 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { AiClient } from '../src/ai/client.js';
+import type { ChatMessage } from '../src/ai/types.js';
+import type { Config } from '../src/config/types.js';
+import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+import { parseTestFile } from '../src/parser/markdown.js';
+import { clearSkillCache } from '../src/skills/expander.js';
+import type { StepResult } from '../src/report/types.js';
+import {
+  compileTest,
+  reportToOutcome,
+  type CompileEvent,
+  type CompileRunOutcome,
+  type CompileRunRequest,
+  type CompileRunner,
+} from '../src/codebehind/compile.js';
+import { buildCodeBehindRegistry } from '../src/codebehind/loader.js';
+import { lastRunPathFor, readLastRun, writeLastRun } from '../src/codebehind/last-run.js';
+
+/**
+ * The compile pipeline (stories/codebehind-compile.md, "The compile
+ * pipeline"), driven with a stub AI client and a scripted runner.
+ *
+ * No browser: what is under test is the pipeline's decisions — which steps get
+ * generated, what a replay failure does, when an entry becomes `ai: true`, and
+ * what reaches disk — and every one of those is decided before a page is
+ * touched. The `.steps.ts` files are real, though, because splicing entries
+ * into an existing file and esbuild-validating the result is exactly the part
+ * that must not be faked.
+ */
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-compile');
+
+let counter = 0;
+let dir: string;
+
+beforeEach(async () => {
+  clearSkillCache();
+  dir = path.join(tmpBase, `t${counter++}`);
+  await fs.mkdir(dir, { recursive: true });
+});
+
+afterAll(async () => {
+  await fs.rm(tmpBase, { recursive: true, force: true });
+});
+
+async function write(rel: string, contents: string): Promise<string> {
+  const abs = path.join(dir, rel);
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+  await fs.writeFile(abs, contents, 'utf-8');
+  return abs;
+}
+
+const CONFIG: Config = { ...DEFAULT_CONFIG };
+
+const TEST_MD = [
+  '# Booking',
+  '',
+  '## Steps',
+  '1. Enter the booking code',
+  '2. Confirm the booking',
+].join('\n');
+
+/**
+ * A review response that hands the candidate back verbatim.
+ *
+ * Echoing the prompt's own file is the only way a stub can be a genuine no-op
+ * review: the candidate is assembled inside the pipeline, so the test cannot
+ * know it in advance, and any fixed string would exercise the *rejection* path
+ * instead of the accept-with-no-change one.
+ */
+const REVIEW_NOOP = '<<review: echo the file back>>';
+
+/** An AI client that answers from a queue and records every prompt. */
+function scriptedClient(responses: string[]): {
+  client: AiClient;
+  prompts: string[];
+} {
+  const prompts: string[] = [];
+  const client = {
+    complete: async (messages: ChatMessage[]) => {
+      const last = messages[messages.length - 1];
+      const prompt = typeof last?.content === 'string'
+        ? last.content
+        : (last?.content ?? []).map((b) => (b.type === 'text' ? b.text : '[image]')).join('\n');
+      prompts.push(prompt);
+      const text = responses.shift();
+      if (text === undefined) throw new Error('AI called more times than the test scripted');
+      if (text === REVIEW_NOOP) {
+        const file = /```ts\n([\s\S]*?)```/.exec(prompt)?.[1];
+        if (!file) throw new Error('review prompt carried no file to echo');
+        return { text: JSON.stringify({ file }), model: 'stub-model' };
+      }
+      return { text, model: 'stub-model' };
+    },
+  } as unknown as AiClient;
+  return { client, prompts };
+}
+
+/** `{"entry": "..."}` for a one-liner that fills a field and waits for it. */
+function entryEnvelope(source: string, body = `await page.locator('#code').waitFor();`): string {
+  return JSON.stringify({
+    entry: `{\n  source: ${JSON.stringify(source)},\n  async run({ page, step, log }) {\n    ${body}\n  },\n}`,
+  });
+}
+
+function stepResult(index: number, over: Partial<StepResult> = {}): StepResult {
+  return {
+    index,
+    instruction: `step ${index}`,
+    status: 'passed',
+    turns: [
+      {
+        turnNumber: 1,
+        attemptNumber: 1,
+        timestamp: new Date().toISOString(),
+        aiInteractions: [],
+        subActions: [
+          {
+            index: 1,
+            action: { action: 'type', selector: '#code', value: '220826' },
+            durationMs: 5,
+          },
+        ],
+      },
+    ],
+    durationMs: 10,
+    retried: false,
+    pageUrl: 'https://app.test/booking',
+    stepContext: {
+      domBefore: '<input id="code">',
+      urlBefore: 'https://app.test/booking',
+      domAfter: '<input id="code" value="220826">',
+      urlAfter: 'https://app.test/booking',
+    },
+    ...over,
+  };
+}
+
+function recordOutcome(count: number, over: Record<number, Partial<StepResult>> = {}): CompileRunOutcome {
+  return {
+    status: 'passed',
+    steps: Array.from({ length: count }, (_, i) => stepResult(i + 1, over[i + 1] ?? {})),
+    resolvedParameters: {},
+    tokensUsed: 1_000,
+  };
+}
+
+type RunScript = Array<'pass' | { failAt: number; error: string }>;
+
+/** A runner that plays a script: one entry per run the compiler asks for. */
+function scriptedRunner(
+  totalSteps: number,
+  script: RunScript,
+  record?: CompileRunOutcome,
+): { runner: CompileRunner; requests: CompileRunRequest[] } {
+  const requests: CompileRunRequest[] = [];
+  const queue = [...script];
+  const runner: CompileRunner = async (request) => {
+    requests.push(request);
+    if (request.purpose === 'record') return record ?? recordOutcome(totalSteps);
+    const next = queue.shift();
+    if (next === undefined) throw new Error('replayed more times than the test scripted');
+    if (next === 'pass') {
+      return {
+        status: 'passed',
+        steps: Array.from({ length: totalSteps }, (_, i) =>
+          stepResult(i + 1, { fromCodeBehind: true }),
+        ),
+        resolvedParameters: {},
+        tokensUsed: 0,
+      };
+    }
+    return {
+      status: 'failed',
+      steps: Array.from({ length: totalSteps }, (_, i) =>
+        stepResult(i + 1, {
+          fromCodeBehind: true,
+          ...(i + 1 === next.failAt && {
+            status: 'failed' as const,
+            error: next.error,
+            domSnapshot: '<input id="code">',
+            screenshotBase64: 'AAAA',
+          }),
+        }),
+      ),
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+  };
+  return { runner, requests };
+}
+
+function collect(): { events: CompileEvent[]; onEvent: (e: CompileEvent) => void } {
+  const events: CompileEvent[] = [];
+  return { events, onEvent: (e) => events.push(e) };
+}
+
+const generatedSteps = (events: CompileEvent[]): number[] =>
+  events
+    .filter((e) => e.kind === 'step' && e.phase === 'generate' && e.message === 'generated')
+    .map((e) => (e as { step: number }).step);
+
+describe('compileTest — the happy path', () => {
+  it('records, generates, reviews, replays green, and writes', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client, prompts } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking', `await page.locator('#confirmed').waitFor();`),
+      REVIEW_NOOP,
+    ]);
+    const { runner, requests } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    expect(generatedSteps(events)).toEqual([1, 2]);
+    // Record ran under AI with code-behind off and captured the page state
+    // either side of each step; the replay ran the candidate as strict code.
+    expect(requests[0]).toMatchObject({
+      purpose: 'record',
+      strict: false,
+      captureContext: true,
+      disableCodeBehind: true,
+    });
+    expect(requests[1]).toMatchObject({ purpose: 'replay', strict: true, round: 1 });
+    // …and the replay was pointed at a candidate, never the real file.
+    expect(Object.keys(requests[1]!.candidateFiles ?? {})).toEqual([
+      path.join(dir, 'booking.steps.ts'),
+    ]);
+
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written).toContain(`source: "Enter the booking code"`);
+    expect(written).toContain(`source: "Confirm the booking"`);
+    expect(written).toContain(`import { defineSteps } from 'ai-ui-automation/codebehind';`);
+    expect(result.summary.compiled).toBe(2);
+    expect(result.summary.written).toEqual([path.join(dir, 'booking.steps.ts')]);
+    // Step 2's prompt saw the whole test and step 1's entry in the candidate.
+    expect(prompts[1]).toContain('## The whole test');
+    expect(prompts[1]).toContain('## The code-behind file as it stands');
+    expect(prompts[1]).toContain('Enter the booking code');
+    // Review ran over the assembled file and changed nothing.
+    expect(
+      events.some((e) => e.kind === 'phase' && e.phase === 'review' && e.message.startsWith('no changes')),
+    ).toBe(true);
+    // Tokens: the record run's, plus whatever the prompts cost (0 with a stub).
+    expect(result.summary.tokensUsed).toBe(1_000);
+  });
+
+  it('gives generation the DOM either side of the step', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client, prompts } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner });
+    expect(prompts[0]).toContain('<input id="code">');
+    expect(prompts[0]).toContain('<input id="code" value="220826">');
+  });
+
+  it('writes nothing on --dry-run but still reports the files', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { runner } = scriptedRunner(2, ['pass']);
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true,
+    });
+
+    expect(result.status).toBe('green');
+    expect(result.summary.written).toEqual([]);
+    expect(Object.keys(result.files)).toEqual([path.join(dir, 'booking.steps.ts')]);
+    await expect(fs.access(path.join(dir, 'booking.steps.ts'))).rejects.toThrow();
+  });
+});
+
+describe('compileTest — selection', () => {
+  const EXISTING = `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  {
+    source: 'Enter the booking code',
+    async run({ page }) { await page.locator('#code').waitFor(); },
+  },
+]);
+`;
+
+  it('generates only the steps with no entry', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Confirm the booking'), REVIEW_NOOP]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    expect(generatedSteps(events)).toEqual([2]);
+    expect(result.summary.kept).toBe(1);
+    // The kept entry survived byte-for-byte inside the rewritten file.
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written).toContain(`source: 'Enter the booking code',`);
+  });
+
+  /** A stale flag as a *supplied* run carries it — "Compile from this run".
+   *  Compile's own Record can't produce one: it runs with code-behind off, so
+   *  no entry gets the chance to fail. */
+  const staleRecord = (): CompileRunOutcome =>
+    recordOutcome(2, {
+      1: {
+        codeBehindStale: {
+          file: path.join(dir, 'booking.steps.ts'),
+          source: 'Enter the booking code',
+          error: '#code went away',
+        },
+      },
+    });
+
+  it('adds a step the supplied run flagged stale to the default selection', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { runner, requests } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+      recorded: staleRecord(),
+    });
+    expect(generatedSteps(events)).toEqual([1, 2]);
+    // The supplied run replaced Record entirely.
+    expect(requests.map((r) => r.purpose)).toEqual(['replay']);
+  });
+
+  it('--only-stale regenerates just the flagged step', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Enter the booking code'), REVIEW_NOOP]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+      recorded: staleRecord(),
+      select: { onlyStale: true },
+    });
+    expect(result.status).toBe('green');
+    expect(generatedSteps(events)).toEqual([1]);
+  });
+
+  it('reads stale steps off the last-run sidecar, and clears the flag once written', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    await writeLastRun(md, [
+      {
+        index: 1,
+        source: 'Enter the booking code',
+        status: 'passed',
+        fromCodeBehind: false,
+        stale: true,
+        error: '#code went away',
+      },
+    ]);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Enter the booking code'), REVIEW_NOOP]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+      select: { onlyStale: true },
+    });
+    expect(generatedSteps(events)).toEqual([1]);
+    // Otherwise the next `--only-stale` would regenerate the same step again.
+    const after = await readLastRun(md);
+    expect(after?.steps[0]?.stale).toBe(false);
+    expect(after?.steps[0]?.error).toBeUndefined();
+  });
+
+  it('--steps names the steps, and --all takes every eligible one', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    const test = await parseTestFile(md);
+
+    const named = scriptedClient([entryEnvelope('Enter the booking code'), REVIEW_NOOP]);
+    const a = collect();
+    await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: named.client,
+      runner: scriptedRunner(2, ['pass']).runner, onEvent: a.onEvent, select: { steps: [1] },
+    });
+    expect(generatedSteps(a.events)).toEqual([1]);
+
+    const all = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const b = collect();
+    await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: all.client,
+      runner: scriptedRunner(2, ['pass']).runner, onEvent: b.onEvent, select: { all: true },
+    });
+    expect(generatedSteps(b.events)).toEqual([1, 2]);
+  });
+
+  it('never compiles over an `ai: true` entry, even with --all', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: 'Enter the booking code', ai: true },
+]);
+`);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Confirm the booking'), REVIEW_NOOP]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client,
+      runner: scriptedRunner(2, ['pass']).runner, onEvent, select: { all: true },
+    });
+    expect(result.status).toBe('green');
+    expect(generatedSteps(events)).toEqual([2]);
+    expect(result.summary.keptAi).toBe(1);
+  });
+
+  it('is green — and never records — when every step already has code', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: 'Enter the booking code', async run({ page }) { await page.locator('#a').waitFor(); } },
+  { source: 'Confirm the booking', async run({ page }) { await page.locator('#b').waitFor(); } },
+]);
+`);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([]);
+    const { runner, requests } = scriptedRunner(2, []);
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner,
+    });
+    expect(result.status).toBe('green');
+    expect(result.summary.compiled).toBe(0);
+    expect(result.summary.kept).toBe(2);
+    // Never ran anything. Record is a full AI run of the test, and running one
+    // to discover there was nothing to compile is the worst way to learn that.
+    expect(requests).toEqual([]);
+    expect(result.summary.tokensUsed).toBe(0);
+  });
+
+  it('refuses a --steps number the test does not have', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: scriptedClient([]).client,
+      runner: scriptedRunner(2, []).runner, select: { steps: [7] },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.summary.error).toContain('--steps names step 7');
+  });
+});
+
+describe('compileTest — replay, repair and the never-converging step', () => {
+  it('repairs a failing step from the failure and goes green next round', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client, prompts } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+      entryEnvelope('Confirm the booking', `await page.locator('#confirm-v2').waitFor();`),
+    ]);
+    const { runner } = scriptedRunner(2, [
+      { failAt: 2, error: 'locator.click: Timeout 30000ms exceeded' },
+      'pass',
+    ]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    expect(result.summary.rounds).toBe(2);
+    expect(
+      events.some((e) => e.kind === 'step' && e.phase === 'repair' && e.step === 2),
+    ).toBe(true);
+    // The repair prompt carried the entry, the error, the DOM and a screenshot.
+    const repairPrompt = prompts[3]!;
+    expect(repairPrompt).toContain('Timeout 30000ms exceeded');
+    expect(repairPrompt).toContain('<input id="code">');
+    expect(repairPrompt).toContain('A screenshot of the page at the failure is attached');
+    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).toContain('#confirm-v2');
+  });
+
+  it('writes a step off as `ai: true` after the rounds run out, then confirms the rest', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+      entryEnvelope('Confirm the booking', `await page.locator('#try2').waitFor();`),
+    ]);
+    // Rounds 1 and 2 fail at step 2; the confirming round (3) passes.
+    const { runner, requests } = scriptedRunner(2, [
+      { failAt: 2, error: 'still nothing there' },
+      { failAt: 2, error: 'still nothing there' },
+      'pass',
+    ]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+      maxRounds: 2,
+    });
+
+    expect(result.status).toBe('green');
+    expect(requests.filter((r) => r.purpose === 'replay')).toHaveLength(3);
+    expect(
+      events.some((e) => e.kind === 'step' && e.message.startsWith('kept as AI after 2 round')),
+    ).toBe(true);
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written).toContain('ai: true');
+    expect(written).toContain('replay kept failing — still nothing there');
+    expect(result.summary.compiled).toBe(1);
+    expect(result.summary.keptAi).toBe(1);
+  });
+
+  it('stops on a failure in an entry it did not generate, and says how to recompile it', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: 'Enter the booking code', async run({ page }) { await page.locator('#hand-written').waitFor(); } },
+]);
+`);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Confirm the booking'), REVIEW_NOOP]);
+    const { runner } = scriptedRunner(2, [{ failAt: 1, error: 'the author\'s selector broke' }]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('failed');
+    const done = events.find((e) => e.kind === 'done')!;
+    expect(done.kind === 'done' && done.message).toContain('existing entry for step 1 fails');
+    expect(done.kind === 'done' && done.message).toContain('--steps 1');
+    // The author's file is exactly as they left it.
+    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).toContain('#hand-written');
+    expect(result.files).toEqual({});
+  });
+
+  it('writes nothing when replay never goes green, and leaves the candidate for salvage', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+      entryEnvelope('Confirm the booking', `await page.locator('#retry').waitFor();`),
+    ]);
+    const { runner } = scriptedRunner(2, [
+      { failAt: 2, error: 'nope' },
+      { failAt: 2, error: 'nope' },
+      { failAt: 1, error: 'and now step 1 too' },
+    ]);
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, maxRounds: 2,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.files).toEqual({});
+    await expect(fs.access(path.join(dir, 'booking.steps.ts'))).rejects.toThrow();
+    const candidate = path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate');
+    expect(result.summary.candidatePath).toBe(candidate);
+    expect(await fs.readFile(candidate, 'utf-8')).toContain('Enter the booking code');
+  });
+
+  it('fails without compiling when the recording run is red', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const record: CompileRunOutcome = {
+      status: 'failed',
+      steps: [stepResult(1), stepResult(2, { status: 'failed', error: 'the page never loaded' })],
+      resolvedParameters: {},
+      tokensUsed: 500,
+    };
+    const { client } = scriptedClient([]);
+    const { runner } = scriptedRunner(2, [], record);
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner,
+    });
+    expect(result.status).toBe('failed');
+    expect(result.summary.error).toContain('the recording run did not pass');
+    expect(result.summary.error).toContain('the page never loaded');
+  });
+});
+
+describe('compileTest — declines and review', () => {
+  it('turns a decline into an `ai: true` entry carrying the reason', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      JSON.stringify({ entry: null, reason: 'needs the operator to read the confirmation' }),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written).toContain('ai: true');
+    expect(written).toContain('needs the operator to read the confirmation');
+    expect(result.summary.keptAi).toBe(1);
+    expect(result.summary.compiled).toBe(1);
+    expect(
+      events.some((e) => e.kind === 'step' && e.message.startsWith('kept as AI:')),
+    ).toBe(true);
+  });
+
+  it('applies a review revision that compiles', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const revised = `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: "Enter the booking code", async run({ page }) { await page.locator('#reviewed').waitFor(); } },
+  { source: "Confirm the booking", async run({ page }) { await page.locator('#b').waitFor(); } },
+]);
+`;
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      JSON.stringify({ file: revised }),
+    ]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).toContain('#reviewed');
+    expect(
+      events.some((e) => e.kind === 'phase' && e.phase === 'review' && e.message.startsWith('revised')),
+    ).toBe(true);
+  });
+
+  it('rejects a review revision that does not compile, and the generated file stands', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const broken = `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: "Enter the booking code", async run({ page }) { await page.locator('#x'.waitFor(); } },
+]);
+`;
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      JSON.stringify({ file: broken }),
+    ]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written).not.toContain(`'#x'.waitFor`);
+    expect(written).toContain('Confirm the booking');
+    expect(
+      events.some(
+        (e) => e.kind === 'phase' && e.phase === 'review' && e.message.includes('does not compile'),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a review revision that inlines a parameter value', async () => {
+    const md = await write('booking.md', [
+      '# Booking',
+      '',
+      '## Parameters',
+      '- password: hunter2-correct-horse',
+      '',
+      '## Steps',
+      '1. Enter the booking code',
+    ].join('\n'));
+    const test = await parseTestFile(md);
+    const leaky = `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: "Enter the booking code", async run({ page }) { await page.fill('#p', 'hunter2-correct-horse'); } },
+]);
+`;
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      JSON.stringify({ file: leaky }),
+    ]);
+    const { runner } = scriptedRunner(1, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8'))
+      .not.toContain('hunter2-correct-horse');
+    expect(
+      events.some((e) => e.kind === 'phase' && e.message.includes('inlines {{password}}')),
+    ).toBe(true);
+  });
+
+  it('survives an unparseable review and keeps the generated file', async () => {
+    const md = await write('booking.md', TEST_MD);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      'I have reviewed the file and it looks fine.',
+    ]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+    expect(result.status).toBe('green');
+    expect(
+      events.some((e) => e.kind === 'phase' && e.phase === 'review' && e.message.startsWith('skipped')),
+    ).toBe(true);
+  });
+});
+
+describe('compileTest — skills span several files', () => {
+  it('writes a skill body\'s entry into the skill\'s own .steps.ts', async () => {
+    await write('skills/login.md', [
+      '---',
+      'type: skill',
+      '---',
+      '# Login',
+      '',
+      '## Steps',
+      '1. Click the sign-in button',
+    ].join('\n'));
+    const md = await write('tests/booking.md', [
+      '# Booking',
+      '',
+      '## Steps',
+      '1. [skill: login]',
+      '2. Enter the booking code',
+    ].join('\n'));
+    const test = await parseTestFile(md, { skillsDir: path.join(dir, 'skills') });
+    expect(test.steps).toHaveLength(2);
+
+    const { client } = scriptedClient([
+      entryEnvelope('Click the sign-in button'),
+      entryEnvelope('Enter the booking code'),
+      REVIEW_NOOP,
+      REVIEW_NOOP,
+    ]);
+    const { runner, requests } = scriptedRunner(2, ['pass']);
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner,
+    });
+
+    expect(result.status).toBe('green');
+    expect(Object.keys(result.files).sort()).toEqual([
+      path.join(dir, 'skills', 'login.steps.ts'),
+      path.join(dir, 'tests', 'booking.steps.ts'),
+    ].sort());
+    // Both files were offered to the replay as candidates.
+    expect(Object.keys(requests[1]!.candidateFiles ?? {})).toHaveLength(2);
+    const skillFile = await fs.readFile(path.join(dir, 'skills', 'login.steps.ts'), 'utf-8');
+    expect(skillFile).toContain('code-behind for login.md');
+    expect(skillFile).toContain('Click the sign-in button');
+  });
+});
+
+describe('the candidate override', () => {
+  it('loads entries from the override path and leaves the real file alone', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: 'Enter the booking code', async run({ step }) { step.setVar('from', 'real'); } },
+]);
+`);
+    const override = await write('.aiui-codebehind-cache/candidate.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: 'Enter the booking code', async run({ step }) { step.setVar('from', 'candidate'); } },
+]);
+`);
+    const test = await parseTestFile(md);
+    const canonical = path.join(dir, 'booking.steps.ts');
+
+    const registry = await buildCodeBehindRegistry(
+      {
+        steps: test.steps,
+        rawSteps: test.expansion!.rawSteps,
+        origins: test.expansion!.origins,
+        frames: test.expansion!.frames,
+      },
+      {
+        testFilePath: md,
+        onWarn: () => {},
+        candidateFiles: { [canonical]: override },
+      },
+    );
+
+    const binding = registry.bindingFor(0)!;
+    // The binding still names the canonical file — that is where an entry
+    // would be written, and what the report should show.
+    expect(binding.file).toBe(canonical);
+    const vars: Record<string, string> = {};
+    await binding.entry!.run!({
+      step: {
+        getVar: () => undefined,
+        setVar: (n, v) => { vars[n] = String(v); },
+        expect: () => {},
+      },
+    } as never);
+    expect(vars['from']).toBe('candidate');
+  });
+});
+
+describe('the last-run sidecar', () => {
+  it('round-trips beside the test, in the gitignored cache dir', async () => {
+    const md = await write('booking.md', TEST_MD);
+    expect(lastRunPathFor(md)).toBe(
+      path.join(dir, '.aiui-codebehind-cache', 'booking.last-run.json'),
+    );
+
+    await writeLastRun(md, [
+      { index: 1, source: 'Enter the booking code', status: 'passed', fromCodeBehind: true, stale: false },
+      { index: 2, source: 'Confirm the booking', status: 'passed', fromCodeBehind: false, stale: true, error: 'boom' },
+    ]);
+
+    const read = await readLastRun(md);
+    expect(read?.test).toBe(path.resolve(md));
+    expect(read?.steps.map((s) => s.stale)).toEqual([false, true]);
+    expect(read?.steps[1]?.error).toBe('boom');
+  });
+
+  it('reads as nothing-known when there is no sidecar or it is corrupt', async () => {
+    const md = await write('booking.md', TEST_MD);
+    expect(await readLastRun(md)).toBeNull();
+    await write('.aiui-codebehind-cache/booking.last-run.json', 'not json');
+    expect(await readLastRun(md)).toBeNull();
+  });
+});
+
+describe('reportToOutcome', () => {
+  it('indexes real steps and drops hook and ad-hoc rows', () => {
+    const outcome = reportToOutcome(
+      {
+        testName: 't', filePath: 'x.md', tags: [], status: 'passed',
+        steps: [
+          stepResult(0, { hookScope: 'before' }),
+          stepResult(1),
+          stepResult(2, { interactiveAdHoc: true }),
+          stepResult(2),
+        ],
+        totalSteps: 2, passedSteps: 2, failedSteps: 0, totalSubActions: 0,
+        durationMs: 1, tokensUsed: 42, inputTokens: 20, outputTokens: 22,
+        date: new Date().toISOString(), parameters: { a: 'b' },
+      },
+      2,
+    );
+    expect(outcome.status).toBe('passed');
+    expect(outcome.steps).toHaveLength(2);
+    expect(outcome.steps[0]?.index).toBe(1);
+    expect(outcome.steps[1]?.interactiveAdHoc).toBeUndefined();
+    expect(outcome.resolvedParameters).toEqual({ a: 'b' });
+    expect(outcome.tokensUsed).toBe(42);
+  });
+});

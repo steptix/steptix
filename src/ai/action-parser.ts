@@ -461,18 +461,56 @@ function parseAction(raw: unknown, index: number): AIAction {
  * that nest a fence inside the envelope string.
  */
 export function parseStepCode(rawResponse: string): string {
+  const decoded = parseStepCodeOrDecline(rawResponse);
+  if (decoded.kind === 'declined') {
+    throw new Error(`Step code response declined: ${decoded.reason}`);
+  }
+  return decoded.entry;
+}
+
+/** A generation answer: code, or a reasoned refusal. */
+export type StepCodeAnswer =
+  | { kind: 'entry'; entry: string }
+  | { kind: 'declined'; reason: string };
+
+/**
+ * `parseStepCode`, plus the compiler's decline case
+ * (stories/codebehind-compile.md, "Generate").
+ *
+ * `{"entry": null, "reason": "..."}` is how the model says a step needs a
+ * framework action, interactive input, or a judgement code can't express. The
+ * compiler turns that into an `ai: true` entry carrying the reason, so the
+ * author sees exactly what stayed AI and why — strictly better than a silent
+ * omission, which is indistinguishable from the model failing.
+ */
+export function parseStepCodeOrDecline(rawResponse: string): StepCodeAnswer {
   let body = rawResponse;
   try {
     const parsed: unknown = JSON.parse(extractJson(rawResponse));
     if (typeof parsed === 'object' && parsed !== null) {
-      const entry = (parsed as Record<string, unknown>)['entry'];
-      if (typeof entry === 'string' && entry.trim()) {
+      const obj = parsed as Record<string, unknown>;
+      const entry = obj['entry'];
+      if (entry === null || (typeof entry === 'string' && !entry.trim())) {
+        const reason = obj['reason'];
+        return {
+          kind: 'declined',
+          reason: typeof reason === 'string' && reason.trim()
+            ? reason.trim()
+            : 'the model declined without giving a reason',
+        };
+      }
+      if (typeof entry === 'string') {
         body = decodeDoubleEscapedNewlines(entry);
       }
     }
   } catch {
     // Not a JSON envelope — treat the raw response as the body.
   }
+  return { kind: 'entry', entry: parseEntryLiteral(body) };
+}
+
+/** Pull the entry object literal out of a decoded response body. */
+function parseEntryLiteral(body: string): string {
 
   const fenced = /```(?:ts|typescript|js|javascript)?\s*\n([\s\S]*?)```/i.exec(body);
   const inner = (fenced?.[1] ?? body).trim();
@@ -503,8 +541,11 @@ export function parseStepCode(rawResponse: string): string {
  * entry has no real newlines at all, so genuinely multi-line code that uses a
  * legitimate `'\n'` string literal is never touched. A wrong guess here is
  * caught by the writer's esbuild validation, which refuses the write.
+ *
+ * Exported because every envelope carrying code has the same problem — the
+ * compiler's review (`{"file": ...}`) and repair passes reuse it.
  */
-function decodeDoubleEscapedNewlines(entry: string): string {
+export function decodeDoubleEscapedNewlines(entry: string): string {
   if (entry.includes('\n') || !entry.includes('\\n')) return entry;
   return entry.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
 }

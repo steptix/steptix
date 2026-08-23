@@ -279,6 +279,14 @@ any `log` output — the tool-step outcome shape already covers this.
 
 ### Generation
 
+> **Superseded by [codebehind-compile.md](codebehind-compile.md).** Inline
+> generation during runs and the `codebehind.generate` key are removed;
+> generation becomes an explicit compile with whole-test context, a review
+> pass and replay-to-green. A failed entry now heals through AI and is
+> flagged `codeBehindStale` for the next compile. The mechanics below
+> (prompt inputs, rules, the leak guard, the writer) survive as building
+> blocks of the compiler; the trigger does not.
+
 Gated by config, default off:
 
 ```json

@@ -27,6 +27,9 @@ const HOST_MSG_TYPES = new Set([
   "breakpointStop",
   "batchBanner",
   "skillRerunAvailable",
+  "compileState",
+  "compileEvent",
+  "compileFromRunAvailable",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -41,6 +44,10 @@ const STATUS = {
   // from disk. Painted ⚡ instead of ✓ but counted as a pass for the
   // run-summary tally and rendered with the same green color.
   PASS_CACHED: "pass-cached",
+  // Ran its compiled code-behind entry — no model call at all. ⚙.
+  PASS_CODE_BEHIND: "pass-code-behind",
+  // Passed under AI because the compiled entry threw. ⚠ — recompile.
+  PASS_STALE: "pass-stale",
   FAIL: "fail",
   SKIP: "skip",
   STOPPED: "stopped",
@@ -207,6 +214,14 @@ function TestBenchRunner() {
    * banner doesn't need to linger.
    */
   const [batchBanner, setBatchBanner] = useState(null);
+  /** True while a code-behind compile is running for this file. */
+  const [compiling, setCompiling] = useState(false);
+  /**
+   * Session id of the last green interactive run, or null. Non-null turns
+   * Compile into "Compile from this run", which skips the Record phase —
+   * a whole AI run of the test saved (stories/codebehind-compile.md).
+   */
+  const [compileFromRun, setCompileFromRun] = useState(null);
   /**
    * Per-step right-click menu. Non-null carries cursor coords + the row's
    * state (line, hasBreakpoint, hasStatus) so the menu can label items
@@ -268,6 +283,9 @@ function TestBenchRunner() {
             // captured scope is wiped on the host side too).
             setSkillRerun(null);
             setRerunEdits({});
+            // Same reasoning for "Compile from this run": the run it named is
+            // no longer the last one.
+            setCompileFromRun(null);
           }
           runningRef.current = msg.running;
           setRunning(msg.running);
@@ -296,6 +314,18 @@ function TestBenchRunner() {
           setSkillRerun(msg.failure);
           setRerunEdits({});
           break;
+        case "compileState":
+          setCompiling(msg.running);
+          // A compile that just started is a fresh narrative; a compile that
+          // just finished has already said everything it has to say.
+          if (msg.running) log(`Compiling ${msg.file ?? "code-behind"}…`, "info");
+          break;
+        case "compileEvent":
+          log(msg.line, "info");
+          break;
+        case "compileFromRunAvailable":
+          setCompileFromRun(msg.sessionId);
+          break;
         default:
           break;
       }
@@ -311,7 +341,17 @@ function TestBenchRunner() {
         setRunning(true);
         break;
       case "step:pass":
-        log(`✓ Step on line ${event.line} passed`, "pass");
+        if (event.codeBehindStale) {
+          log(
+            `⚠ Step on line ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`,
+            "info",
+          );
+        } else {
+          log(
+            `✓ Step on line ${event.line} passed${event.fromCodeBehind ? " (code-behind)" : ""}`,
+            "pass",
+          );
+        }
         if (event.output) log(event.output, "info");
         break;
       case "step:fail":
@@ -386,7 +426,11 @@ function TestBenchRunner() {
 
   const isTestFile = snapshot?.isTestFile === true;
   const statuses = useMemo(() => statusFromTuple(snapshot?.statuses ?? []), [snapshot]);
-  const passCount = Object.values(statuses).filter((s) => s === "pass" || s === "pass-cached").length;
+  const passCount = Object.values(statuses).filter(
+    (s) => s === "pass" || s === "pass-cached" || s === "pass-code-behind" || s === "pass-stale",
+  ).length;
+  const codeBehindCount = Object.values(statuses).filter((s) => s === "pass-code-behind").length;
+  const staleCount = Object.values(statuses).filter((s) => s === "pass-stale").length;
   const failCount = Object.values(statuses).filter((s) => s === "fail").length;
   const errorMap = useMemo(() => {
     const m = {};
@@ -427,6 +471,10 @@ function TestBenchRunner() {
   const handleRunAll = () => {
     if (!isTestFile) return;
     hostBridge.postRunAll();
+  };
+  const handleCompile = () => {
+    if (!isTestFile) return;
+    hostBridge.postCompile(compileFromRun ?? undefined);
   };
   const handleStop = () => hostBridge.postStop();
   const handleCloseSession = () => hostBridge.postRestartSession();
@@ -684,10 +732,24 @@ function TestBenchRunner() {
           >
             Close Session
           </button>
+          <button
+            className="tb-btn"
+            onClick={handleCompile}
+            disabled={running || compiling}
+            title={
+              compileFromRun
+                ? "Compile this test's code-behind from the run that just passed — no re-record"
+                : "Record this test under AI, generate its code-behind, and replay it as code"
+            }
+          >
+            {compiling ? "⚙ Compiling…" : compileFromRun ? "⚙ Compile from this run" : "⚙ Compile"}
+          </button>
         </div>
         {(passCount > 0 || failCount > 0) && (
           <div style={{ display: "flex", gap: 12, fontSize: "0.85em" }}>
             {passCount > 0 && <span style={{ color: "var(--vscode-testing-iconPassed, #22c55e)" }}>✓ {passCount} passed</span>}
+            {codeBehindCount > 0 && <span style={{ opacity: 0.75 }}>⚙ {codeBehindCount} code-behind</span>}
+            {staleCount > 0 && <span style={{ color: "var(--vscode-editorWarning-foreground, #f59e0b)" }}>⚠ {staleCount} stale</span>}
             {failCount > 0 && <span style={{ color: "var(--vscode-testing-iconFailed, #f87171)" }}>✗ {failCount} failed</span>}
           </div>
         )}
@@ -833,6 +895,10 @@ function TestBenchRunner() {
               // is the only visual difference. Counted as pass in the
               // run summary too (see passCount filter above).
               status === STATUS.PASS_CACHED ? "tb-step--pass" : "",
+              // Code-behind and stale are passes too — the glyph carries the
+              // difference, the colour stays green.
+              status === STATUS.PASS_CODE_BEHIND ? "tb-step--pass" : "",
+              status === STATUS.PASS_STALE ? "tb-step--pass" : "",
               status === STATUS.FAIL ? "tb-step--fail" : "",
               status === STATUS.RUNNING ? "tb-step--running" : "",
               status === STATUS.STOPPED ? "tb-step--stopped" : "",
@@ -872,7 +938,7 @@ function TestBenchRunner() {
                     onMouseLeave={(e) => { if (!hasBreakpoint) e.currentTarget.style.opacity = 0.25; }}
                   >●</span>
                   <span style={{ width: 14, textAlign: "center" }}>
-                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
+                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? "⚙" : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
                   </span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>

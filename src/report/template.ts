@@ -189,6 +189,9 @@ export function getReportTemplate(): string {
     /* How a step avoided the model: ⚙ its own code-behind, ⚡ the action
        cache. Same shape as the provenance chips beside them. */
     .badge-codebehind { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+    .badge-codebehind-stale { background: #ffedd5; color: #9a3412; border: 1px solid #fdba74; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+    .stat-codebehind { color: #854d0e; }
+    .stat-stale { color: #9a3412; }
     .badge-cached { background: #e0f2fe; color: #075985; border: 1px solid #bae6fd; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     /* Which tab a step drove. Deliberately quiet — it is on every step, so a
        loud colour would compete with the pass/fail badge for attention. The
@@ -220,6 +223,9 @@ export function getReportTemplate(): string {
     /* Code-behind reuses the tool block's chrome in its own colour — same
        kind of thing (deterministic code, live page), different author. */
     .codebehind-block { background: #fefce8; border-color: #fde68a; }
+    .codebehind-stale-block { background: #fff7ed; border-color: #fdba74; }
+    .codebehind-stale-block .tool-title, .codebehind-stale-block .tool-name { color: #9a3412; }
+    .codebehind-stale-block .tool-name { background: #ffedd5; }
     .codebehind-block .tool-title, .codebehind-block .tool-name { color: #854d0e; }
     .codebehind-block .tool-name { background: #fef3c7; }
     .tool-empty { font-style: italic; color: var(--muted); font-size: 0.8rem; }
@@ -362,6 +368,20 @@ export function getReportTemplate(): string {
       <span class="number">{{totalSubActions}}</span>
       <span class="label">Sub-actions</span>
     </div>
+    {{#if showOrigins}}
+    <div class="summary-stat">
+      <span class="number stat-codebehind">{{codeBehindSteps}}</span>
+      <span class="label">Code-behind</span>
+    </div>
+    <div class="summary-stat">
+      <span class="number">{{aiSteps}}</span>
+      <span class="label">AI</span>
+    </div>
+    <div class="summary-stat">
+      <span class="number stat-stale">{{staleSteps}}</span>
+      <span class="label">Stale</span>
+    </div>
+    {{/if}}
     <div class="summary-stat">
       <span class="number">{{inputTokens}}</span>
       <span class="label">Input Tokens</span>

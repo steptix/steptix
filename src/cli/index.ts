@@ -5,6 +5,7 @@ warnIfDeprecatedDataDirEnv();
 import { Command } from 'commander';
 import { getPackageVersion } from '../utils/version.js';
 import { registerRunCommand } from './commands/run.js';
+import { registerCompileCommand } from './commands/compile.js';
 import { registerInitCommand } from './commands/init.js';
 import { registerListCommand } from './commands/list.js';
 import { registerSpecsCommand } from './commands/specs.js';
@@ -22,6 +23,7 @@ export function createCli(): Command {
     .version(getPackageVersion());
 
   registerRunCommand(program);
+  registerCompileCommand(program);
   registerInitCommand(program);
   registerListCommand(program);
   registerSpecsCommand(program);

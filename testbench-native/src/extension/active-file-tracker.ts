@@ -10,7 +10,23 @@ import {
 import type { ErrorPayload } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, shiftAnchorForChanges } from './step-lines.js';
 
-export type LineStatus = 'running' | 'pass' | 'pass-cached' | 'fail' | 'skip' | 'stopped';
+/**
+ * What the gutter says about one step line.
+ *
+ * `pass-code-behind` (⚙) and `pass-stale` (⚠) are both passes — the step
+ * succeeded either way (stories/codebehind-compile.md §What the author sees).
+ * They differ in what ran: compiled TypeScript, or the AI after the compiled
+ * entry threw. The second is the one that wants a recompile.
+ */
+export type LineStatus =
+  | 'running'
+  | 'pass'
+  | 'pass-cached'
+  | 'pass-code-behind'
+  | 'pass-stale'
+  | 'fail'
+  | 'skip'
+  | 'stopped';
 
 /**
  * Run statuses + errors are persisted to a `.testbench/run-state.json` file
