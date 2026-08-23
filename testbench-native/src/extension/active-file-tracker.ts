@@ -13,7 +13,7 @@ import { extractStepLineIds, shiftAnchorForChanges } from './step-lines.js';
 /**
  * What the gutter says about one step line.
  *
- * `pass-code-behind` (⚙) and `pass-stale` (⚠) are both passes — the step
+ * `pass-code-behind` (the `</>` code mark) and `pass-stale` (⚠) are both passes — the step
  * succeeded either way (stories/codebehind-compile.md §What the author sees).
  * They differ in what ran: compiled TypeScript, or the AI after the compiled
  * entry threw. The second is the one that wants a recompile.

@@ -394,7 +394,7 @@ export type RunEvent =
       fromCache?: boolean;
       tab?: TabInfo;
       /** The step ran its code-behind entry instead of calling the AI
-       *  (stories/codebehind-compile.md §What the author sees). Drives ⚙. */
+       *  (stories/codebehind-compile.md §What the author sees). Drives the code mark. */
       fromCodeBehind?: boolean;
       /** The entry threw and the step then passed under AI. Drives ⚠ and the
        *  "recompile" prompt; the file is what "Open Code-behind" opens. */
@@ -3643,7 +3643,7 @@ export class SessionManager {
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
             ...(stepResult.fromCache && { fromCache: true }),
-            // How the step passed, for the gutter: as code (⚙), or under AI
+            // How the step passed, for the gutter: as code (the code mark), or under AI
             // after its entry threw (⚠). Both ride the pass event because a
             // stale step DID pass — the entry is what failed.
             ...(stepResult.fromCodeBehind && { fromCodeBehind: true }),

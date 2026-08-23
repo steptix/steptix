@@ -673,7 +673,7 @@ export function registerCommands(
       getOutputChannel().appendLine(`Applied code-behind: ${written.join(', ')}`);
       // Back to the test. Every TestBench command works against the active
       // editor, and the diff this was invoked from is not a test file — so
-      // without this the author's next act (Run, to see the ⚙ marks) silently
+      // without this the author's next act (Run, to see the code marks) silently
       // does nothing.
       if (testFilePath) {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(testFilePath));

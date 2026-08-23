@@ -21,7 +21,7 @@ never goes green throws away every entry that *did* replay, into a gitignored
 After this story, a compile looks and behaves like a run:
 
 - **The gutter moves.** ▶ walks the steps while the model generates them,
-  the Record run paints ✓/✗ as any run does, and each Replay round paints ⚙
+  the Record run paints ✓/✗ as any run does, and each Replay round paints `</>`
   on every step that passed as code and ✗ where it stopped, with the error.
 - **The browser is yours.** Record runs in the editor's own session, so the
   window is the one you always watch, and it stays open where the run ended —
@@ -48,7 +48,7 @@ Compile checkout.md
               step 4 generated
   Review      revised checkout.steps.ts
   Replay 1    running 4 step(s) as code
-              ✓ step 1 (line 12) code-behind     ⚙ lands in the gutter
+              ✓ step 1 (line 12) code-behind     </> lands in the gutter
               ✓ step 2 (line 13) code-behind
               ✓ step 3 (line 14) code-behind
               ✓ step 4 (line 15) code-behind
@@ -61,7 +61,7 @@ Compile checkout.md
 ```
 
 The diff opens for steps 1–4; they **Apply**. They fix the label on step 5
-and press Run: 1–4 paint ⚙ in about a second and cost nothing, 5–9 run under
+and press Run: 1–4 paint `</>` in about a second and cost nothing, 5–9 run under
 AI, the run is green. They press Compile again:
 
 ```
@@ -216,9 +216,9 @@ Each inner run's events ride the compile stream as they happen:
 ```
 
 Every event, `done` included, unchanged inside the wrapper. TestBench folds
-`event` through the same path as a run's — ▶ on the running step, ✓ ⚡ ⚙ ✗ as
+`event` through the same path as a run's — ▶ on the running step, ✓ ⚡ `</>` ✗ as
 they land, captures into the Variables panel, the step lines into the panel.
-⚙ comes for free: a strict replay's `step:pass` already carries
+`</>` comes for free: a strict replay's `step:pass` already carries
 `fromCodeBehind`. So does the failure screenshot: the strict path already
 takes one and `step:fail` already carries it. Between replay rounds the marks
 reset the way they do when a new run starts, so the gutter shows *this*
@@ -281,7 +281,7 @@ it with `--steps k` (or Compile This Step)". Partial.
 
 **Why unproven code is written.** An unreached entry was generated from a
 green recording with the whole test in view and reviewed; what it lacks is
-one execution. The next run supplies it: the entry passes as code (⚙) or
+one execution. The next run supplies it: the entry passes as code (`</>`) or
 throws, heals under AI, and is flagged ⚠ for the next compile — the loop
 codebehind-compile.md built for entries that rot. The post-condition rule
 guards the remaining case, an entry that runs without throwing and does the
@@ -310,14 +310,14 @@ and has no diff — and exits **2**, so a script can tell "everything compiled"
   **Compile**. The stream's Record line says which it was: reused, prefix, or
   recording in this session.
 - **During** — the gutter: ▶ walks Generate; Record paints as a run; each
-  Replay round paints ⚙ per step and ✗ where it stopped. The panel: the phase
+  Replay round paints `</>` per step and ✗ where it stopped. The panel: the phase
   lines as today, with the step lines under them.
 - **At the end** — green: as today. Partial: *"Compiled checkout.md: 4 of 9
   steps as code. Step 5 failed under AI — fix it, run, and compile again for
   the rest."* with **Open diff** / **Show log**. Failed: as today.
 - **The diff** — unchanged. Apply writes through the workspace API, returns
   focus to the test file.
-- **After Apply** — the next Run proves the unproven entries (⚙) or flags
+- **After Apply** — the next Run proves the unproven entries (`</>`) or flags
   them (⚠), exactly as it does for entries that rot.
 
 ### Server
@@ -340,7 +340,7 @@ string }` for the prefix case.
 
 Record in the caller's session goes through `executeSteps` with that session
 id and is **not** closed after. The per-session queue already serialises a
-Run pressed during it, and the panel already shows "⚙ Compiling…". The
+Run pressed during it, and the panel's Compile button already reads "Compiling…". The
 per-file compile lock is unchanged.
 
 `InternalRunOptions.codeBehind` keeps `expansion`, `candidateFiles`,
@@ -431,7 +431,7 @@ unit 223 and integration 186; live through the extension against
 `fixtures/test-app` — Compile with no prior run records in the editor's
 session and the next run serves every step as code, and Run-then-Compile
 reuses the run ("Compiling from session …'s last run (2 step(s), green, 2
-with page context)"), records nothing, and paints ⚙ from the replay before
+with page context)"), records nothing, and paints `</>` from the replay before
 anything is applied; and the prefix compile over HTTP — a run red at step 3,
 then `partial` with `stoppedAt: 3`, steps 1–2 proven, and a proposed file of
 exactly two entries. The cached-run slowdown with capture on is still
@@ -482,12 +482,12 @@ unmeasured.
   `compile:step` carries `line`; a paused session is refused.
 - Runner-core: the narrower admits `compile:run` and `partial`.
 - Extension integration (FakeApiClient): a run sends `captureStepContext`;
-  fake `compile:run` replay frames paint ⚙ then ✗ and reset between rounds;
+  fake `compile:run` replay frames paint `</>` then ✗ and reset between rounds;
   `compile:step` paints ▶ on its line; a partial result opens the diff with
   the partial notification.
 - Live, through the extension against `fixtures/test-app`: Run, then Compile —
   the stream says it used the run and the log shows no Record. Break a step,
-  Run (red at *k*), Compile — the prefix proposal; Apply; fix; Run — ⚙ on the
+  Run (red at *k*), Compile — the prefix proposal; Apply; fix; Run — `</>` on the
   prefix, AI on the rest; Compile — the rest only, the prefix byte-identical.
   Plant a failing entry and watch the replay's ✗ land in the gutter.
 - Measure, not just read: the cached-run slowdown with capture on, over the

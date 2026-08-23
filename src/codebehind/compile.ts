@@ -115,7 +115,7 @@ export interface CompileSummary {
   error?: string | undefined;
   /**
    * Steps (1-based) whose new entries no replay round executed to a pass.
-   * Proposed as code all the same: the next run proves each one (⚙) or flags
+   * Proposed as code all the same: the next run proves each one (the code mark) or flags
    * it (⚠), which is the loop that already handles entries that rot.
    */
   unproven: number[];

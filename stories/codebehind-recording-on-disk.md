@@ -220,7 +220,7 @@ runner-core 435, testbench-native unit 223 and the code-behind integration
 group 15; live through the extension against `fixtures/test-app` — Compile
 with no prior run records in the editor's session, Apply, and the next run
 serves every step as code; and Run then Compile, where the stream now shows
-"Recording in session …" and a Record phase, no run is reused, ⚙ is painted
+"Recording in session …" and a Record phase, no run is reused, `</>` is painted
 from the replay, and beside the test there is `recording.json`, a JSON with
 the transcript and the DOM before and after for each of the two steps, and a
 `.steps.ts.candidate` byte-identical to what the diff proposes — all before
