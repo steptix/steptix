@@ -6,6 +6,7 @@ import {
   readDevToolsPort,
   searchedPaths,
   manualCommand,
+  AUTOMATION_CONTROLLED_FLAG,
   type LauncherDeps,
 } from '../src/browser/cdp-launcher.js';
 import {
@@ -373,6 +374,59 @@ describe('launchCdpBrowser', () => {
     expect(args).toContain('--remote-debugging-port=0');
     // The whole design rests on never choosing a port ourselves.
     expect(args.some((a) => /--remote-debugging-port=[1-9]/.test(a))).toBe(false);
+  });
+
+  // Measured on Chrome 151: `--remote-debugging-port` alone makes every page
+  // read `navigator.webdriver === true`, with nothing attached, and this flag
+  // is what turns that back off. It is opt-in (browser.cdp.hideAutomation),
+  // so the default launch must NOT carry it, and the manual command must
+  // mirror the launch either way or a human reproducing it by hand gets a
+  // different browser.
+  it('does not pass the AutomationControlled flag unless asked', async () => {
+    let args: string[] = [];
+    const spawn = vi.fn((_bin: string, a: string[]) => {
+      args = a;
+      return { pid: 1, unref() {} };
+    }) as unknown as LauncherDeps['spawn'];
+
+    await launchCdpBrowser({ engine: 'edge', profileDir: 'C:\\p' }, stubDeps({ spawn }));
+
+    expect(AUTOMATION_CONTROLLED_FLAG).toBe('--disable-blink-features=AutomationControlled');
+    expect(args).not.toContain(AUTOMATION_CONTROLLED_FLAG);
+    expect(manualCommand('edge', 'C:\\p')).not.toContain(AUTOMATION_CONTROLLED_FLAG);
+    expect(manualCommand('edge', 'C:\\p', { hideAutomation: false })).not.toContain(
+      AUTOMATION_CONTROLLED_FLAG,
+    );
+  });
+
+  it('passes the AutomationControlled flag when hideAutomation is on', async () => {
+    let args: string[] = [];
+    const spawn = vi.fn((_bin: string, a: string[]) => {
+      args = a;
+      return { pid: 1, unref() {} };
+    }) as unknown as LauncherDeps['spawn'];
+
+    await launchCdpBrowser(
+      { engine: 'edge', profileDir: 'C:\\p', hideAutomation: true },
+      stubDeps({ spawn }),
+    );
+
+    expect(args).toContain(AUTOMATION_CONTROLLED_FLAG);
+    // The port flag is untouched — the two are independent.
+    expect(args).toContain('--remote-debugging-port=0');
+    expect(manualCommand('edge', 'C:\\p', { hideAutomation: true })).toContain(
+      AUTOMATION_CONTROLLED_FLAG,
+    );
+  });
+
+  it('the missing-binary message shows the manual command with the same flags', async () => {
+    const result = await launchCdpBrowser(
+      { engine: 'chrome', profileDir: 'C:\\p', hideAutomation: true },
+      stubDeps({ existsSync: () => false }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain(AUTOMATION_CONTROLLED_FLAG);
   });
 
   it('spawns in array form — a profile dir with spaces stays one argument', async () => {

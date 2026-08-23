@@ -21,6 +21,13 @@
  *    yet, and the caller's first `connectOverCDP` fails against a browser that
  *    was perfectly healthy.
  *
+ * One optional flag was added later, after the extension's set was ported:
+ * `--disable-blink-features=AutomationControlled`, because a Chrome started
+ * with `--remote-debugging-port` otherwise tells every page it is automated
+ * (`navigator.webdriver === true`). It is opt-in through
+ * `browser.cdp.hideAutomation` in `aiui.config.json` — see
+ * `AUTOMATION_CONTROLLED_FLAG` and `LaunchOptions.hideAutomation`.
+ *
  * All deps are injectable so tests can stub fs / spawn / fetch / sleep without
  * touching the real machine.
  */
@@ -64,6 +71,9 @@ export interface LaunchOptions {
   engine: LaunchableEngine;
   /** Absolute path to the profile dir. Created if absent. */
   profileDir: string;
+  /** Add `AUTOMATION_CONTROLLED_FLAG` to the launch. Off unless the config
+   *  that governs this launch says otherwise (`browser.cdp.hideAutomation`). */
+  hideAutomation?: boolean | undefined;
 }
 
 export type LaunchResult =
@@ -209,10 +219,22 @@ export function engineLabel(engine: LaunchableEngine): string {
   return engine === 'chrome' ? 'Chrome' : 'Edge';
 }
 
-/** The command a human can paste to do this by hand. */
-export function manualCommand(engine: LaunchableEngine, profileDir: string): string {
+/**
+ * Keeps `navigator.webdriver` at `false` in a remote-debuggable Chrome. See
+ * the comment at the spawn site for why it exists and what it costs.
+ */
+export const AUTOMATION_CONTROLLED_FLAG = '--disable-blink-features=AutomationControlled';
+
+/** The command a human can paste to do this by hand — the same flags the
+ *  launch would use, so a hand-started browser is not a different browser. */
+export function manualCommand(
+  engine: LaunchableEngine,
+  profileDir: string,
+  opts?: { hideAutomation?: boolean | undefined },
+): string {
   const cmd = engine === 'chrome' ? 'chrome' : 'msedge';
-  return `${cmd} --remote-debugging-port=0 --user-data-dir="${profileDir}"`;
+  const flag = opts?.hideAutomation === true ? ` ${AUTOMATION_CONTROLLED_FLAG}` : '';
+  return `${cmd} --remote-debugging-port=0 --user-data-dir="${profileDir}"${flag}`;
 }
 
 /**
@@ -258,7 +280,7 @@ export async function launchCdpBrowser(
         `${label} is not installed, or is not where this framework looks for it.\n` +
         `Searched:\n${searchedPaths(opts.engine, deps).map((p) => `  ${p}`).join('\n')}\n\n` +
         `Install ${label}, or use the other engine. To check by hand:\n` +
-        `  ${manualCommand(opts.engine, opts.profileDir)}`,
+        `  ${manualCommand(opts.engine, opts.profileDir, { hideAutomation: opts.hideAutomation })}`,
     };
   }
 
@@ -291,6 +313,17 @@ export async function launchCdpBrowser(
     // Chrome 122+/Edge workaround for `--remote-debugging-port` being rejected
     // on the default profile, which is why attaching to someone's everyday
     // browser is impossible and this whole module exists.
+    //
+    // `--disable-blink-features=AutomationControlled` exists because
+    // `--remote-debugging-port` on its own makes every page read
+    // `navigator.webdriver === true` — measured on Chrome 151 with nothing
+    // attached, where the same profile without the port flag reads `false`.
+    // Some sites refuse a browser that says that, and a CDP browser exists to
+    // be a real browser the user signs into by hand. It is opt-in
+    // (`browser.cdp.hideAutomation`) rather than the default: whether a
+    // browser should stop announcing itself is the user's call to make in
+    // their config, not this module's — and it costs Chrome's yellow
+    // "unsupported command-line flag" bar on launch, which they can dismiss.
     const child = spawn(
       binary,
       [
@@ -298,6 +331,7 @@ export async function launchCdpBrowser(
         `--user-data-dir=${opts.profileDir}`,
         '--no-first-run',
         '--no-default-browser-check',
+        ...(opts.hideAutomation === true ? [AUTOMATION_CONTROLLED_FLAG] : []),
       ],
       { detached: true, stdio: 'ignore' },
     );

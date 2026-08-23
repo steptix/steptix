@@ -25,6 +25,7 @@ import {
   launchCdpBrowser,
   readDevToolsPort,
   DEVTOOLS_PORT_FILE,
+  AUTOMATION_CONTROLLED_FLAG,
   engineLabel,
   type LauncherDeps,
   type LaunchableEngine,
@@ -113,6 +114,10 @@ export interface StartOptions {
   engine: LaunchableEngine;
   profile?: string;
   reset?: boolean;
+  /** `browser.cdp.hideAutomation` from the config of the root this launch
+   *  goes into. Applies at launch only; the reuse branch can merely report
+   *  whether the running browser matches. */
+  hideAutomation?: boolean | undefined;
 }
 
 /**
@@ -181,7 +186,11 @@ export type CdpFailureReason =
   | 'profile_dir_outside_root'
   | 'profile_dir_unmarked'
   | 'profile_in_use'
-  | 'profile_reset_failed';
+  | 'profile_reset_failed'
+  // Raised by the API server's start route: the aiui.config.json of the root a
+  // launch was asked into could not be loaded, so the launch settings it
+  // governs (browser.cdp.*) are unknowable and nothing was started.
+  | 'config_invalid';
 
 export type StartResult =
   | {
@@ -421,6 +430,16 @@ export async function startCdpBrowser(
 
     // --- reuse branch: return the live browser, spawn nothing ---------------
     if (existing?.live && existing.port !== null) {
+      // The flag is a launch-time thing, so all this branch can do is say
+      // whether the running browser matches what the config now asks for.
+      // Silence here would be the trap: a user who turns the setting on, calls
+      // start, and gets `reused_running_browser` has a browser that still
+      // announces itself, with nothing telling them why the site still says no.
+      const mismatch = hideAutomationMismatch(
+        opts.hideAutomation === true,
+        readProfileMarker(existing.profileDir, deps).hideAutomation,
+      );
+      if (mismatch) warnings.push(mismatch);
       return {
         ok: true,
         engine: opts.engine,
@@ -461,10 +480,21 @@ export async function startCdpBrowser(
     deleteStalePortFile(profileDir, deps);
   }
 
-  const launched = await launch({ engine: opts.engine, profileDir }, deps);
+  const hideAutomation = opts.hideAutomation === true;
+  const launched = await launch({ engine: opts.engine, profileDir, hideAutomation }, deps);
   if (!launched.ok) return { ok: false, kind: 'launch_failed', reason: 'tab_list_unreadable', error: launched.error };
 
-  writeProfileMarker(profileDir, opts.engine, profile, deps);
+  writeProfileMarker(profileDir, opts.engine, profile, hideAutomation, deps);
+  if (hideAutomation) {
+    // The one visible side effect of the flag, said once, at the launch that
+    // caused it — the bar is Chrome's, and a user who did not know to expect
+    // it reads it as something having gone wrong.
+    warnings.push(
+      `Started with ${AUTOMATION_CONTROLLED_FLAG} (browser.cdp.hideAutomation), so pages ` +
+        'read navigator.webdriver as false. Chrome shows an "unsupported command-line ' +
+        'flag" bar at the top of the window because of it; dismiss it.',
+    );
+  }
 
   const probed = await probe(launched.port);
   if (!probed.reachable) {
@@ -497,19 +527,78 @@ function writeProfileMarker(
   profileDir: string,
   engine: LaunchableEngine,
   profile: string,
+  hideAutomation: boolean,
   deps?: RegistryDeps,
 ): void {
   const writeFile = deps?.writeFile ?? ((p: string, d: string) => fs.writeFileSync(p, d, 'utf8'));
   try {
+    // `hideAutomation` records what THIS launch was started with, which is the
+    // only way the reuse branch can later say whether the running browser
+    // matches the config — the flag is not visible on the port, and the
+    // marker is rewritten by every launch, so it always describes the live one.
     writeFile(
       path.join(profileDir, PROFILE_MARKER),
-      `${JSON.stringify({ engine, profile, createdBy: 'ai-ui-automation' }, null, 2)}\n`,
+      `${JSON.stringify({ engine, profile, createdBy: 'ai-ui-automation', hideAutomation }, null, 2)}\n`,
     );
   } catch {
     // A profile without a marker still works; it just cannot be `reset`
     // (§12 guard 4 refuses it), which fails loudly and safely later rather
     // than failing the launch the caller actually asked for now.
   }
+}
+
+/**
+ * What the marker says the last launch on this profile was started with.
+ * `null` when there is no marker, it is unreadable, or it predates the field
+ * — a claim we cannot make rather than a default we would be inventing.
+ */
+export function readProfileMarker(
+  profileDir: string,
+  deps?: RegistryDeps,
+): { hideAutomation: boolean | null } {
+  const readFileSync = deps?.readFileSync ?? ((p: string) => fs.readFileSync(p, 'utf8'));
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path.join(profileDir, PROFILE_MARKER)));
+    const value =
+      typeof parsed === 'object' && parsed !== null
+        ? (parsed as Record<string, unknown>)['hideAutomation']
+        : undefined;
+    return { hideAutomation: typeof value === 'boolean' ? value : null };
+  } catch {
+    return { hideAutomation: null };
+  }
+}
+
+/**
+ * The warning for a running browser whose launch flags no longer match the
+ * config, or `null` when they agree. Pure, so the three cases are unit-testable
+ * without a browser: wanted-but-absent, wanted-but-unknown, unwanted-but-on.
+ */
+export function hideAutomationMismatch(
+  wanted: boolean,
+  launchedWith: boolean | null,
+): string | null {
+  if (wanted && launchedWith !== true) {
+    const was =
+      launchedWith === false
+        ? 'was started without it'
+        : 'has no record of being started with it';
+    return (
+      `browser.cdp.hideAutomation is on in aiui.config.json, but this browser was already ` +
+      `running and ${was} — the flag only applies at launch, so pages in it may still read ` +
+      'navigator.webdriver as true. Close the browser and start it again for the setting ' +
+      'to take effect.'
+    );
+  }
+  if (!wanted && launchedWith === true) {
+    return (
+      'browser.cdp.hideAutomation is off in aiui.config.json, but this browser was already ' +
+      'running and was started with it on — the flag only applies at launch, so pages in it ' +
+      'read navigator.webdriver as false. Close the browser and start it again for the ' +
+      'setting to take effect.'
+    );
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

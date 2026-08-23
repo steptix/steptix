@@ -13,6 +13,8 @@ import {
   UNKNOWN_HOLDER,
   resetProfile,
   PROFILE_MARKER,
+  readProfileMarker,
+  hideAutomationMismatch,
   type RegistryDeps,
 } from '../src/browser/cdp-registry.js';
 import { listPageTabs } from '../src/browser/cdp-discovery.js';
@@ -110,9 +112,12 @@ function probeFor(live: Record<number, 'chrome' | 'edge'>, tabs: unknown[] = [])
  * relies on that to put the directory back.
  */
 function launcherStub(port = 40000) {
-  const calls: { engine: string; profileDir: string }[] = [];
+  const calls: { engine: string; profileDir: string; hideAutomation?: boolean | undefined }[] = [];
   const launch = vi.fn(
-    async (opts: { engine: string; profileDir: string }, deps?: RegistryDeps) => {
+    async (
+      opts: { engine: string; profileDir: string; hideAutomation?: boolean | undefined },
+      deps?: RegistryDeps,
+    ) => {
       calls.push(opts);
       deps?.mkdirSync?.(opts.profileDir, { recursive: true });
       return { ok: true as const, port, pid: 1, binary: 'C:\\chrome.exe' };
@@ -369,6 +374,132 @@ describe('startCdpBrowser', () => {
       unknown as RegistryDeps['launch'];
     const result = await startCdpBrowser({ projectRoot: ROOT, engine: 'edge' }, { ...deps, launch });
     expect(result).toMatchObject({ ok: false, error: 'Edge is not installed' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// browser.cdp.hideAutomation — a launch-time flag, recorded in the marker
+// ---------------------------------------------------------------------------
+
+describe('startCdpBrowser with hideAutomation', () => {
+  const portFile = (dir: string) => path.join(dir, 'DevToolsActivePort');
+  const marker = (dir: string) => path.join(dir, PROFILE_MARKER);
+  const live = (dir: string, markerBody?: string) =>
+    fakeFs({
+      dirs: [PROFILES, dir],
+      files: {
+        [portFile(dir)]: '51000\n/x',
+        ...(markerBody !== undefined ? { [marker(dir)]: markerBody } : {}),
+      },
+    });
+
+  it('is off unless asked: the launcher is not told to hide, and the marker says so', async () => {
+    const { deps, files } = fakeFs({ dirs: [PROFILES] });
+    const { launch, calls } = launcherStub();
+    const result = await startCdpBrowser(
+      { projectRoot: ROOT, engine: 'chrome', profile: 'plain' },
+      { ...deps, launch, probe: probeFor({ 40000: 'chrome' }) },
+    );
+    expect(calls[0]).toMatchObject({ hideAutomation: false });
+    expect(JSON.parse(files.get(marker(path.join(PROFILES, 'chrome-plain')))!)).toMatchObject({
+      hideAutomation: false,
+    });
+    expect(result.ok && result.warnings).toEqual([]);
+  });
+
+  it('passes the flag to the launcher, records it, and says the bar is coming', async () => {
+    const { deps, files } = fakeFs({ dirs: [PROFILES] });
+    const { launch, calls } = launcherStub();
+    const result = await startCdpBrowser(
+      { projectRoot: ROOT, engine: 'chrome', profile: 'quiet', hideAutomation: true },
+      { ...deps, launch, probe: probeFor({ 40000: 'chrome' }) },
+    );
+    expect(calls[0]).toMatchObject({ hideAutomation: true });
+    expect(JSON.parse(files.get(marker(path.join(PROFILES, 'chrome-quiet')))!)).toMatchObject({
+      hideAutomation: true,
+    });
+    expect(result.ok && result.warnings.join('\n')).toContain('unsupported command-line flag');
+  });
+
+  it('reuse: no warning when the running browser matches the config', async () => {
+    const dir = path.join(PROFILES, 'chrome-default');
+    const { deps } = live(dir, JSON.stringify({ engine: 'chrome', profile: 'default', hideAutomation: true }));
+    const { launch, spy } = launcherStub();
+    const result = await startCdpBrowser(
+      { projectRoot: ROOT, engine: 'chrome', hideAutomation: true },
+      { ...deps, launch, probe: probeFor({ 51000: 'chrome' }) },
+    );
+    expect(result).toMatchObject({ ok: true, outcome: 'reused_running_browser', warnings: [] });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('reuse: warns when the config asks to hide but the browser was started without it', async () => {
+    // The trap this exists for: turn the setting on, call start, get the
+    // browser that was already running — which still announces itself.
+    const dir = path.join(PROFILES, 'chrome-default');
+    const { deps } = live(dir, JSON.stringify({ engine: 'chrome', profile: 'default', hideAutomation: false }));
+    const result = await startCdpBrowser(
+      { projectRoot: ROOT, engine: 'chrome', hideAutomation: true },
+      { ...deps, launch: launcherStub().launch, probe: probeFor({ 51000: 'chrome' }) },
+    );
+    expect(result.ok && result.outcome).toBe('reused_running_browser');
+    const text = result.ok ? result.warnings.join('\n') : '';
+    expect(text).toContain('was started without it');
+    expect(text).toContain('Close the browser and start it again');
+  });
+
+  it('reuse: a marker that predates the field reads as "no record", not as off', async () => {
+    const dir = path.join(PROFILES, 'chrome-default');
+    const { deps } = live(dir, JSON.stringify({ engine: 'chrome', profile: 'default' }));
+    const result = await startCdpBrowser(
+      { projectRoot: ROOT, engine: 'chrome', hideAutomation: true },
+      { ...deps, launch: launcherStub().launch, probe: probeFor({ 51000: 'chrome' }) },
+    );
+    expect(result.ok ? result.warnings.join('\n') : '').toContain('has no record of being started with it');
+  });
+
+  it('reuse: warns the other way round too — config off, browser started with it on', async () => {
+    const dir = path.join(PROFILES, 'chrome-default');
+    const { deps } = live(dir, JSON.stringify({ engine: 'chrome', profile: 'default', hideAutomation: true }));
+    const result = await startCdpBrowser(
+      { projectRoot: ROOT, engine: 'chrome' },
+      { ...deps, launch: launcherStub().launch, probe: probeFor({ 51000: 'chrome' }) },
+    );
+    expect(result.ok ? result.warnings.join('\n') : '').toContain('was started with it on');
+  });
+
+  it('reuse: config off and no marker at all is simply quiet', async () => {
+    // A hand-started browser on a framework profile dir, or one from before
+    // markers existed. Nothing to compare against and nothing was asked for.
+    const dir = path.join(PROFILES, 'chrome-default');
+    const { deps } = live(dir);
+    const result = await startCdpBrowser(
+      { projectRoot: ROOT, engine: 'chrome' },
+      { ...deps, launch: launcherStub().launch, probe: probeFor({ 51000: 'chrome' }) },
+    );
+    expect(result).toMatchObject({ ok: true, warnings: [] });
+  });
+
+  it('readProfileMarker never throws and only trusts a boolean', () => {
+    const dir = path.join(PROFILES, 'chrome-x');
+    expect(readProfileMarker(dir, fakeFs({}).deps)).toEqual({ hideAutomation: null });
+    expect(readProfileMarker(dir, live(dir, 'not json').deps)).toEqual({ hideAutomation: null });
+    expect(readProfileMarker(dir, live(dir, '"a string"').deps)).toEqual({ hideAutomation: null });
+    expect(readProfileMarker(dir, live(dir, '{"hideAutomation":"yes"}').deps)).toEqual({
+      hideAutomation: null,
+    });
+    expect(readProfileMarker(dir, live(dir, '{"hideAutomation":true}').deps)).toEqual({
+      hideAutomation: true,
+    });
+  });
+
+  it('hideAutomationMismatch covers the three disagreements and the two agreements', () => {
+    expect(hideAutomationMismatch(true, true)).toBeNull();
+    expect(hideAutomationMismatch(false, false)).toBeNull();
+    expect(hideAutomationMismatch(false, null)).toBeNull();
+    expect(hideAutomationMismatch(true, false)).toContain('was started without it');
+    expect(hideAutomationMismatch(true, null)).toContain('no record');
+    expect(hideAutomationMismatch(false, true)).toContain('was started with it on');
   });
 });
 

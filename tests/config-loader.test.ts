@@ -152,6 +152,15 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
     expect(dnr.hideHiddenInputs).toBe(true);
   });
 
+  it('browser.cdp.hideAutomation defaults to false and merges when set', async () => {
+    expect((await loadConfig(await writeConfig({}))).browser.cdp?.hideAutomation).toBe(false);
+    const file = await writeConfig({ browser: { cdp: { hideAutomation: true } } });
+    const config = await loadConfig(file);
+    expect(config.browser.cdp?.hideAutomation).toBe(true);
+    // Siblings under browser are untouched by the nested merge.
+    expect(config.browser.headed).toBe(true);
+  });
+
   it('replaces arrays wholesale (does not concatenate)', async () => {
     const file = await writeConfig({
       execution: { defaultHooks: { beforeEach: ['[skill: only_this]'] } },
@@ -325,6 +334,12 @@ describe('aiui.config.schema.json validates configs', () => {
 
   it('rejects a wrong-typed port', () => {
     expect(validate({ server: { port: '3100' } })).toBe(false);
+  });
+
+  it('accepts browser.cdp.hideAutomation as a boolean and nothing else', () => {
+    expect(validate({ browser: { cdp: { hideAutomation: true } } })).toBe(true);
+    expect(validate({ browser: { cdp: { hideAutomation: 'yes' } } })).toBe(false);
+    expect(validate({ browser: { cdp: { hideAutomaton: true } } })).toBe(false);
   });
 
   it('rejects an unknown top-level key', () => {

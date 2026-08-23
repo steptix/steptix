@@ -1,7 +1,9 @@
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { Express } from 'express';
 import path from 'node:path';
+import os from 'node:os';
+import { promises as fsp } from 'node:fs';
 import type { Config } from '../src/config/types.js';
 
 // ---------------------------------------------------------------------------
@@ -636,6 +638,65 @@ describe('POST /cdp/browsers', () => {
     });
   }
 
+describe('browser.cdp.hideAutomation comes from the launch root\'s own aiui.config.json', () => {
+    // A real directory, because the point is that the SERVER reads the file of
+    // the root it was asked to launch into — a unit test of the registry would
+    // say nothing about whether the route ever looked.
+    let root: string;
+    beforeEach(async () => {
+      root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aiui-cdp-launch-'));
+      startCdpBrowserMock.mockResolvedValue(ok('launched_into_new_profile'));
+    });
+    afterEach(async () => {
+      await fsp.rm(root, { recursive: true, force: true });
+    });
+
+    it('is off when the root has no config file', async () => {
+      expect((await post({ projectRoot: root, engine: 'chrome' })).status).toBe(200);
+      expect(startCdpBrowserMock).toHaveBeenCalledWith(
+        expect.objectContaining({ projectRoot: root, hideAutomation: false }),
+      );
+    });
+
+    it('is passed through when the file turns it on', async () => {
+      await fsp.writeFile(
+        path.join(root, 'aiui.config.json'),
+        JSON.stringify({ browser: { cdp: { hideAutomation: true } } }),
+        'utf8',
+      );
+      expect((await post({ projectRoot: root, engine: 'chrome' })).status).toBe(200);
+      expect(startCdpBrowserMock).toHaveBeenCalledWith(
+        expect.objectContaining({ projectRoot: root, hideAutomation: true }),
+      );
+    });
+
+    it('is read exactly at the root, never from a parent', async () => {
+      // The user root sits under %LOCALAPPDATA%; a walk-up from it could adopt
+      // a stray file above. A child dir of a configured root is the same shape.
+      await fsp.writeFile(
+        path.join(root, 'aiui.config.json'),
+        JSON.stringify({ browser: { cdp: { hideAutomation: true } } }),
+        'utf8',
+      );
+      const child = path.join(root, 'child');
+      await fsp.mkdir(child);
+      expect((await post({ projectRoot: child, engine: 'chrome' })).status).toBe(200);
+      expect(startCdpBrowserMock).toHaveBeenCalledWith(
+        expect.objectContaining({ projectRoot: child, hideAutomation: false }),
+      );
+    });
+
+    it('a malformed file refuses the launch with config_invalid and starts nothing', async () => {
+      await fsp.writeFile(path.join(root, 'aiui.config.json'), '{ not json', 'utf8');
+      const res = await post({ projectRoot: root, engine: 'chrome' });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.reason).toBe('config_invalid');
+      expect(body.error).toContain('aiui.config.json');
+      expect(startCdpBrowserMock).not.toHaveBeenCalled();
+    });
+  });
+
   it('defaults the profile to "default" and passes reset through', async () => {
     startCdpBrowserMock.mockResolvedValue(ok('launched_after_reset'));
     await post({ projectRoot: PROJECT, engine: 'chrome', reset: true });
@@ -644,6 +705,8 @@ describe('POST /cdp/browsers', () => {
       engine: 'chrome',
       profile: 'default',
       reset: true,
+      // No aiui.config.json at C:\proj, so the launch setting is its default.
+      hideAutomation: false,
     });
   });
 
