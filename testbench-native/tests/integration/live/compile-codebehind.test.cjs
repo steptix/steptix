@@ -196,12 +196,12 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
     await vscode.commands.executeCommand('testbench-native.restartSession');
   });
 
-  it('compiles from the run the author just did — no Record — and paints ⚙ as it replays', async () => {
-    // stories/codebehind-compile-as-a-run.md: an ordinary run captures the
-    // DOM either side of its steps, so it IS the recording. Press Run, then
-    // Compile: the server says it is compiling from the session's last run,
-    // never records, and the Replay round's events paint ⚙ in the gutter —
-    // before anything is applied.
+  it('records again after a run — in the same session — paints ⚙ as it replays, and leaves the recording on disk', async () => {
+    // stories/codebehind-recording-on-disk.md: an ordinary run captures
+    // nothing; the compile's own Record, in this session, is the recording —
+    // written beside the test as files, with the candidate next to it, all of
+    // it there before anything is applied. The Replay round's events paint ⚙
+    // in the gutter.
     fs.rmSync(stepsFile, { force: true });
     const uri = vscode.Uri.file(testFile);
     await vscode.commands.executeCommand('vscode.open', uri);
@@ -254,10 +254,29 @@ describe('TestBench live — compile code-behind, apply, replay as code', functi
     const log = readLiveLog();
     if (log !== null) {
       const thisRun = log.slice(logBefore);
-      assert.match(thisRun, /Compiling from session .* last run/, 'the compile must reuse the run');
-      assert.doesNotMatch(thisRun, /Recording in session/, 'the compile must not record');
-      assert.doesNotMatch(thisRun, /Record\s+running \d+ step/, 'no Record phase');
+      assert.match(thisRun, /Recording in session/, 'the compile must record in this session');
+      assert.match(thisRun, /Record\s+running \d+ step/, 'a Record phase must run');
+      assert.doesNotMatch(thisRun, /Compiling from session .* last run/, 'no run is reused');
     }
+
+    // The recording, beside the test: a JSON and the DOM either side for
+    // every step, and the candidate — the proposal — next to it.
+    const cacheDir = path.join(path.dirname(testFile), '.aiui-codebehind-cache');
+    const recordingDir = path.join(cacheDir, 'compile-codebehind.recording');
+    const recorded = fs.readdirSync(recordingDir).sort();
+    for (const name of ['recording.json', 'step-01.json', 'step-01.before.html', 'step-01.after.html', 'step-02.json', 'step-02.before.html', 'step-02.after.html']) {
+      assert.ok(recorded.includes(name), `${name} should be in the recording, got ${recorded.join(', ')}`);
+    }
+    const manifest = JSON.parse(fs.readFileSync(path.join(recordingDir, 'recording.json'), 'utf-8'));
+    assert.equal(manifest.status, 'passed');
+    assert.equal(manifest.steps, 2);
+    assert.equal(manifest.source, 'server');
+    const step1 = JSON.parse(fs.readFileSync(path.join(recordingDir, 'step-01.json'), 'utf-8'));
+    assert.ok(step1.actions.length > 0, 'step 1 must carry its transcript');
+    assert.ok(fs.readFileSync(path.join(recordingDir, 'step-02.before.html'), 'utf-8').length > 0, 'the DOM before step 2 must be a real snapshot');
+    const candidate = fs.readFileSync(path.join(cacheDir, 'compile-codebehind.steps.ts.candidate'), 'utf-8');
+    assert.equal(candidate, content, 'the candidate on disk must be the proposal the diff shows');
+    assert.equal(fs.existsSync(stepsFile), false, 'still nothing applied');
 
     await vscode.commands.executeCommand('testbench-native.discardCodeBehind');
     await vscode.commands.executeCommand('testbench-native.restartSession');

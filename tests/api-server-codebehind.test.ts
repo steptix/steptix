@@ -87,6 +87,7 @@ vi.mock('../src/codebehind/compile.js', async (importOriginal) => ({
         unproven: [],
         writtenOffAi: [],
         notAttempted: [],
+        recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
       },
     };
   }),
@@ -185,7 +186,7 @@ vi.mock('../src/utils/logger.js', () => ({
 import { createApiServer } from '../src/server/api-server.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { compileTest } from '../src/codebehind/compile.js';
-import type { RunDetails, SessionManager } from '../src/server/session-manager.js';
+import type { SessionManager } from '../src/server/session-manager.js';
 
 const compileTestMock = vi.mocked(compileTest);
 
@@ -245,8 +246,6 @@ let server: Server;
 let baseUrl: string;
 let sessionManager: SessionManager;
 let projectRoot: string;
-/** Restored per test — the compiler reads it through the manager the app owns. */
-let detailsSpy: MockInstance | undefined;
 
 function testFile(name: string): string {
   return path.join(projectRoot, 'tests', name);
@@ -385,26 +384,6 @@ function stepWithContext(index: number): StepResult {
   };
 }
 
-/** The same, from an ordinary run: no DOM either side, which is the common case. */
-function stepWithoutContext(index: number): StepResult {
-  return {
-    index,
-    instruction: `step ${index}`,
-    status: 'passed',
-    turns: [],
-    durationMs: 1,
-    retried: false,
-  };
-}
-
-function runDetails(
-  status: 'passed' | 'failed',
-  steps: StepResult[],
-  coverage: RunDetails['coverage'] = 'whole',
-): RunDetails & { status: 'passed' | 'failed' } {
-  return { status, steps, parameters: { stage: 'staging' }, tokens: 1234, coverage };
-}
-
 /**
  * Stand in for the session machinery: play a scripted run into the listener
  * and hand the core the step records. `executeSteps` is the one seam the
@@ -427,7 +406,7 @@ function fakeRun(
         );
       }
       onEvent?.({ type: 'done', status });
-      internal?.onRunDetails?.({ steps, parameters: {}, tokens: 7, coverage: 'whole' });
+      internal?.onRunDetails?.({ steps, parameters: {}, tokens: 7 });
       return {
         sessionId,
         status,
@@ -474,14 +453,15 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  detailsSpy?.mockRestore();
-  detailsSpy = undefined;
   rmSync(projectRoot, { recursive: true, force: true });
 });
 
 describe('the compile stream', () => {
   it('streams the phases in order and ends with the proposed files and the summary', async () => {
-    const events = await compileStream({ testFilePath: testFile('smoke.md') });
+    const all = await compileStream({ testFilePath: testFile('smoke.md') });
+    // The server's own narration (where the recording goes) rides `output`
+    // frames ahead of the core's phases; the order under test is the core's.
+    const events = all.filter((e) => e.event !== 'output');
 
     expect(events.map((e) => e.event)).toEqual([
       'compile:phase',
@@ -542,6 +522,7 @@ describe('the compile stream', () => {
       unproven: [],
       writtenOffAi: [],
       notAttempted: [],
+      recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
     });
   });
 
@@ -623,80 +604,13 @@ describe('one compile per test file', () => {
   });
 });
 
-describe('compiling from the caller\'s session', () => {
-  it('hands the core that session\'s last run instead of recording a fresh one', async () => {
-    const details = runDetails('passed', [stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
-    detailsSpy = vi.spyOn(sessionManager, 'lastRunDetails').mockReturnValue(details);
-    const executeSteps = vi.spyOn(sessionManager, 'executeSteps');
-
-    const events = await compileStream({
-      testFilePath: testFile('smoke.md'),
-      sessionId: 'session-with-a-green-run',
-    });
-
-    const recorded = optionsAt(0).recorded;
-    expect(recorded).toBeDefined();
-    expect(recorded!.status).toBe('passed');
-    // One slot per expanded step — the core indexes into this by step number.
-    expect(recorded!.steps).toHaveLength(3);
-    expect(recorded!.steps[0]).toBe(details.steps[0]);
-    expect(recorded!.resolvedParameters).toEqual({ stage: 'staging' });
-    expect(recorded!.tokensUsed).toBe(1234);
-
-    // The whole point of reusing a run: nothing is re-run. The core would be
-    // the one to ask for a Record, and it was handed a `recorded` outcome
-    // instead; the server itself drove no session either.
-    expect(executeSteps).not.toHaveBeenCalled();
-    expect(outputs(events)).toEqual([
-      {
-        kind: 'info',
-        msg: "Compiling from session session-with-a-green-run's last run (3 step(s), green, 3 with page context).",
-      },
-    ]);
-    executeSteps.mockRestore();
-  });
-
-  it('hands the core a red run too — the steps before the failure are the recording', async () => {
-    // A run that failed at step 2 is a recording of step 1. The core compiles
-    // that prefix; the server's job is only to pass it on and say so.
-    const details = runDetails('failed', [
-      stepWithContext(1),
-      { ...stepWithContext(2), status: 'failed', error: 'no such button' },
-    ]);
-    detailsSpy = vi.spyOn(sessionManager, 'lastRunDetails').mockReturnValue(details);
-    const executeSteps = vi.spyOn(sessionManager, 'executeSteps');
-
-    const events = await compileStream({
-      testFilePath: testFile('smoke.md'),
-      sessionId: 'session-that-failed',
-    });
-
-    const recorded = optionsAt(0).recorded;
-    expect(recorded!.status).toBe('failed');
-    expect(recorded!.steps[0]).toBe(details.steps[0]);
-    expect(recorded!.steps[1]!.status).toBe('failed');
-    expect(recorded!.steps[2]).toBeUndefined();
-    expect(executeSteps).not.toHaveBeenCalled();
-    expect(outputs(events)).toEqual([
-      {
-        kind: 'info',
-        msg: "Compiling from session session-that-failed's last run — it stopped at step 2; the steps before it are the recording.",
-      },
-    ]);
-    executeSteps.mockRestore();
-  });
-
-  it('records in that session, and leaves it open, when it has no run yet', async () => {
-    // No spy on lastRunDetails: an id nobody opened is exactly what the manager
-    // answers `null` for. The Record must then happen IN the caller's session
-    // — the browser they watch — not in a throwaway one, and must not close it.
-    const run = fakeRun([stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
-    const close = vi.spyOn(sessionManager, 'closeSession');
+describe('recording in the caller\'s session', () => {
+  /** A green mocked core that drives one Record through the runner. */
+  const recordOnce = (): void => {
     compileTestMock.mockImplementationOnce(async (options) => {
       core.calls.push(options);
       const outcome = await options.runner!({ purpose: 'record', parameters: {}, strict: false, captureContext: true });
       expect(outcome.status).toBe('passed');
-      expect(outcome.steps).toHaveLength(3);
       options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
       return {
         status: 'green',
@@ -704,9 +618,19 @@ describe('compiling from the caller\'s session', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
+          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
         },
       };
     });
+  };
+
+  it('records in that session every time, and leaves it open', async () => {
+    // stories/codebehind-recording-on-disk.md: no run is reused. The Record
+    // happens IN the caller's session — the browser they watch — with the
+    // capture on, and the session is not closed afterwards.
+    const run = fakeRun([stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
+    const close = vi.spyOn(sessionManager, 'closeSession');
+    recordOnce();
 
     const events = await compileStream({
       testFilePath: testFile('smoke.md'),
@@ -717,22 +641,23 @@ describe('compiling from the caller\'s session', () => {
     expect(run).toHaveBeenCalledTimes(1);
     const [sessionId, request, , , internal] = run.mock.calls[0]!;
     expect(sessionId).toBe('editor-session');
-    // An ordinary run in every respect that matters to the author: context
-    // captured, the project's cache setting, code-behind on (nothing selected
-    // has an entry to hide a transcript), and the test's config because the
-    // session did not exist yet.
     expect(request.captureStepContext).toBe(true);
     expect(request.cacheEnabled).toBe(testConfig.cache.enabled);
     expect(request.config).toBeDefined();
     expect(internal?.codeBehind?.disabled).toBeUndefined();
     expect(internal?.codeBehind?.strict).toBe(false);
     expect(close).not.toHaveBeenCalledWith('editor-session');
-    expect(outputs(events)).toEqual([
-      { kind: 'info', msg: 'Session editor-session has no run to compile from — recording in it.' },
-      { kind: 'info', msg: 'Recording in session editor-session (opening it).' },
-    ]);
+    // The stream says where the recording goes, before anything runs.
+    expect(outputs(events).map((o) => o.msg)).toContainEqual(
+      expect.stringMatching(/^Recording to .*smoke\.recording$/),
+    );
+    expect(outputs(events)).toContainEqual({ kind: 'info', msg: 'Recording in session editor-session (opening it).' });
     run.mockRestore();
     close.mockRestore();
+  });
+
+  it('keeps nothing of a run on the session — there is no last run to reuse', () => {
+    expect((sessionManager as unknown as { lastRunDetails?: unknown }).lastRunDetails).toBeUndefined();
   });
 
   it('streams every event of a Record and a Replay inside compile:run, with the round', async () => {
@@ -754,6 +679,7 @@ describe('compiling from the caller\'s session', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 1, kept: 0, keptAi: 1, rounds: 2,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [2], notAttempted: [],
+          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
         },
       };
     });
@@ -764,8 +690,6 @@ describe('compiling from the caller\'s session', () => {
     });
 
     const runs = events.filter((e) => e.event === 'compile:run').map((e) => e.data);
-    // Four events per run — start, pass/fail, start, fail, done — untouched
-    // inside the wrapper, with the phase and (for a replay) the round.
     expect(runs.map((r) => [r.phase, r.round, r.event.type])).toEqual([
       ['record', undefined, 'step:start'],
       ['record', undefined, 'step:pass'],
@@ -778,8 +702,6 @@ describe('compiling from the caller\'s session', () => {
       ['replay', 2, 'step:fail'],
       ['replay', 2, 'done'],
     ]);
-    // The run's own fields survive: the line (from the test's own step lines),
-    // ⚙, and the error.
     expect(runs[1]!.event).toEqual({ type: 'step:pass', line: 11, fromCodeBehind: true });
     expect(runs[3]!.event).toEqual({ type: 'step:fail', line: 12, error: 'locator timeout' });
     // The replay ran the prefix it was asked for, in a session of its own that
@@ -789,12 +711,13 @@ describe('compiling from the caller\'s session', () => {
     expect(replay[1].steps).toHaveLength(2);
     expect(replay[1].sourceLines).toEqual([11, 12]);
     expect(replay[1].cacheEnabled).toBe(false);
+    expect(replay[1].captureStepContext).toBe(false);
     expect(replay[4]?.codeBehind?.strict).toBe(true);
     expect(close).toHaveBeenCalledWith(replay[0]);
     expect(close).not.toHaveBeenCalledWith('editor-session');
-    // Partial rides the result frame like any status.
     expect(events.at(-1)!.data.status).toBe('partial');
     expect(events.at(-1)!.data.summary.writtenOffAi).toEqual([2]);
+    expect(events.at(-1)!.data.summary.recordingDir).toBe('/x/.aiui-codebehind-cache/smoke.recording');
     run.mockRestore();
     close.mockRestore();
   });
@@ -815,7 +738,6 @@ describe('compiling from the caller\'s session', () => {
     });
 
     expect(run).not.toHaveBeenCalled();
-    // Raised after the stream opened, so it is a frame, not a 409.
     const error = outputs(events).find((o) => o.kind === 'error');
     expect(error?.msg).toContain('busy-session is busy');
     expect(events.at(-1)!.data.status).toBe('failed');
@@ -823,85 +745,17 @@ describe('compiling from the caller\'s session', () => {
     run.mockRestore();
   });
 
-  it('records instead, and says why, when the last run started mid-test', async () => {
-    detailsSpy = vi
-      .spyOn(sessionManager, 'lastRunDetails')
-      .mockReturnValue(runDetails('passed', [stepWithContext(2), stepWithContext(3)], 'partial'));
-
-    const events = await compileStream({
-      testFilePath: testFile('smoke.md'),
-      sessionId: 'session-mid-test',
-    });
-
-    // A continuation knows nothing about the steps before it; the compile
-    // needs them in order from the first.
-    expect(optionsAt(0).recorded).toBeUndefined();
-    expect(outputs(events)[0]).toEqual({
-      kind: 'warn',
-      msg: "Cannot compile from session session-mid-test's last run: it started partway into the test. Recording in it instead.",
-    });
-  });
-
-  it('records instead when the run carried no page context', async () => {
-    // An older client, or a run that did not ask: no DOM either side, so
-    // nothing to generate from — and the fallback has to be loud, because a
-    // silent one is a whole extra run of the test that nobody asked for.
-    detailsSpy = vi
-      .spyOn(sessionManager, 'lastRunDetails')
-      .mockReturnValue(runDetails('passed', [stepWithoutContext(1), stepWithoutContext(2)]));
-
-    const events = await compileStream({
-      testFilePath: testFile('smoke.md'),
-      sessionId: 'session-without-dom',
-    });
-
-    expect(optionsAt(0).recorded).toBeUndefined();
-    expect(outputs(events)[0]).toEqual({
-      kind: 'warn',
-      msg: "Cannot compile from session session-without-dom's last run: its step results carry no DOM snapshots. Recording in it instead.",
-    });
-  });
-
-  it('records instead when a green run has a different step count than the file', async () => {
-    // The author added a step since that run: its records would bind to the
-    // wrong steps.
-    detailsSpy = vi
-      .spyOn(sessionManager, 'lastRunDetails')
-      .mockReturnValue(runDetails('passed', [stepWithContext(1), stepWithContext(2)]));
-
-    const events = await compileStream({
-      testFilePath: testFile('smoke.md'),
-      sessionId: 'session-stale-shape',
-    });
-
-    expect(optionsAt(0).recorded).toBeUndefined();
-    expect(outputs(events)[0]).toEqual({
-      kind: 'warn',
-      msg: "Cannot compile from session session-stale-shape's last run: it ran 2 step(s) and the test has 3 now. Recording in it instead.",
-    });
-  });
-
   it('records in a session of its own when no session is named', async () => {
     const run = fakeRun([stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
     const close = vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
-    compileTestMock.mockImplementationOnce(async (options) => {
-      core.calls.push(options);
-      await options.runner!({ purpose: 'record', parameters: {}, strict: false, captureContext: true });
-      options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
-      return {
-        status: 'green', files: {},
-        summary: {
-          test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
-          tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
-        },
-      };
-    });
+    recordOnce();
 
     await compileStream({ testFilePath: testFile('smoke.md') });
 
     const [sessionId, request] = run.mock.calls[0]!;
     expect(sessionId).toMatch(/^compile:/);
     expect(request.cacheEnabled).toBe(false);
+    expect(request.captureStepContext).toBe(true);
     expect(close).toHaveBeenCalledWith(sessionId);
     run.mockRestore();
     close.mockRestore();
@@ -957,6 +811,7 @@ describe('the parameters a compile\'s runs start from', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
+          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
         },
       };
     });
@@ -982,6 +837,7 @@ describe('the parameters a compile\'s runs start from', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
+          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
         },
       };
     });

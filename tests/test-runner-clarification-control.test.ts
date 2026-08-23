@@ -641,3 +641,56 @@ describe('test-runner — stopAfterStep runs a prefix as a passed run', () => {
     expect(report.totalSteps).toBe(3);
   });
 });
+
+describe('test-runner — the recording', () => {
+  beforeEach(() => {
+    executeStepMock.mockReset();
+    executeBranchedStepMock.mockReset();
+    runInteractiveReplMock.mockReset();
+    launchBrowserMock.mockReset();
+    closeBrowserMock.mockReset();
+    resolveHooksMock.mockReset();
+    stepCacheInitMock.mockReset();
+    diagnoseFailureMock.mockReset();
+
+    launchBrowserMock.mockResolvedValue(makeSession());
+    closeBrowserMock.mockResolvedValue(undefined);
+    resolveHooksMock.mockResolvedValue({
+      before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
+    });
+    stepCacheInitMock.mockResolvedValue({
+      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
+    });
+    diagnoseFailureMock.mockResolvedValue(null);
+  });
+
+  it('writes the recording beside the test when captureStepContext is on, and nothing otherwise', async () => {
+    // stories/codebehind-recording-on-disk.md: the run that was asked to
+    // capture — a compile's Record — leaves its recording beside the test.
+    const os = await import('node:os');
+    const fsp = await import('node:fs/promises');
+    const pathMod = await import('node:path');
+    const { recordingDirFor } = await import('../src/codebehind/recording.js');
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'aiui-recording-'));
+    const testPath = pathMod.join(dir, 'fake-test.md');
+    const instance = makeInstance(['step one', 'step two']);
+    instance.test = { ...instance.test, filePath: testPath };
+    executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) => ({
+      ...passingResult(index, instruction),
+      stepContext: { domBefore: `<before ${index}>`, domAfter: `<after ${index}>`, urlBefore: 'u', urlAfter: 'u' },
+    }));
+
+    await runTest(instance, makeConfig(), '');
+    await expect(fsp.access(recordingDirFor(testPath))).rejects.toThrow();
+
+    await runTest(instance, makeConfig(), '', undefined, { captureStepContext: true });
+    const files = (await fsp.readdir(recordingDirFor(testPath))).sort();
+    expect(files).toEqual([
+      'recording.json', 'step-01.after.html', 'step-01.before.html', 'step-01.json',
+      'step-02.after.html', 'step-02.before.html', 'step-02.json',
+    ]);
+    const manifest = JSON.parse(await fsp.readFile(pathMod.join(recordingDirFor(testPath), 'recording.json'), 'utf-8'));
+    expect(manifest).toMatchObject({ status: 'passed', steps: 2, source: 'cli' });
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+});

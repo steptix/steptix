@@ -611,6 +611,14 @@ type: skill
       expect(observed[0].captureStepContext).toBe(true);
       expect(observed[1].captureStepContext).toBeUndefined();
 
+      // The run that asked to capture left its recording beside the test
+      // (stories/codebehind-recording-on-disk.md); the server keeps none of it.
+      const { recordingDirFor } = await import('../src/codebehind/recording.js');
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(recordingDirFor(cacheTestFile), 'recording.json'), 'utf-8'),
+      );
+      expect(manifest).toMatchObject({ status: 'passed', steps: 1, source: 'server' });
+
       exec.mockReset();
       if (defaultImpl) exec.mockImplementation(defaultImpl);
     });

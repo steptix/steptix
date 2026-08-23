@@ -248,6 +248,12 @@ describe('compileTest — the happy path', () => {
     expect(written).toContain(`import { defineSteps } from 'ai-ui-automation/codebehind';`);
     expect(result.summary.compiled).toBe(2);
     expect(result.summary.written).toEqual([path.join(dir, 'booking.steps.ts')]);
+    // The candidate trail survives a green compile: it is the proposal, and it
+    // is the file (stories/codebehind-recording-on-disk.md).
+    expect(
+      await fs.readFile(path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate'), 'utf-8'),
+    ).toBe(written);
+    expect(result.summary.recordingDir).toBe(path.join(dir, '.aiui-codebehind-cache', 'booking.recording'));
     // Step 2's prompt saw the whole test and step 1's entry in the candidate.
     expect(prompts[1]).toContain('## The whole test');
     expect(prompts[1]).toContain('## The code-behind file as it stands');
@@ -663,16 +669,24 @@ export default defineSteps([
     expect(result.summary.compiled).toBe(0);
     expect(result.summary.keptAi).toBe(2);
     expect(result.summary.error).toContain('step 1 still fails as code');
-    // The CLI path writes the partial file; there is no candidate to salvage
-    // because nothing was thrown away.
+    // The CLI path writes the partial file. The candidate trail is the same
+    // content, beside the recording — the compile's last proposal.
     expect(result.summary.candidatePath).toBeUndefined();
     const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
     expect(written.match(/ai: true/g)).toHaveLength(2);
     expect(written).toContain('replay kept failing — nope');
     expect(written).toContain('replay kept failing — and now step 1 too');
-    await expect(
-      fs.access(path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate')),
-    ).rejects.toThrow();
+    expect(
+      await fs.readFile(path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate'), 'utf-8'),
+    ).toBe(written);
+    // Each failed round left its evidence beside the recording.
+    const recordingDir = path.join(dir, '.aiui-codebehind-cache', 'booking.recording');
+    expect(result.summary.recordingDir).toBe(recordingDir);
+    const failures = (await fs.readdir(recordingDir)).filter((f) => f.endsWith('.failure.json')).sort();
+    expect(failures).toEqual(['replay-1.failure.json', 'replay-2.failure.json', 'replay-3.failure.json']);
+    expect(JSON.parse(await fs.readFile(path.join(recordingDir, 'replay-1.failure.json'), 'utf-8'))).toMatchObject({
+      round: 1, step: 2, line: 5, error: 'nope', files: { screenshot: 'replay-1.failure.png', dom: 'replay-1.failure.html' },
+    });
   });
 
   it('proposes an entry no round reached as unproven code, and keeps its stale flag', async () => {

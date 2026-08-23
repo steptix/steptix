@@ -33,6 +33,7 @@ import {
   type CompileRequest,
   type CompileWireEvent,
 } from './compile-runner.js';
+import { recordingDirFor } from '../codebehind/recording.js';
 import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
 import { capturePageContent, readPageIdentity, type PageContentOptions } from './page-capture.js';
@@ -899,6 +900,7 @@ export function createApiServer(
           unproven: [],
           writtenOffAi: [],
           notAttempted: [],
+          recordingDir: recordingDirFor(parsed.testFilePath),
           error: message,
         },
       });

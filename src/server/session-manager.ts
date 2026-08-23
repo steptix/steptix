@@ -40,6 +40,7 @@ import {
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
+import { writeRecording } from '../codebehind/recording.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
@@ -129,14 +130,14 @@ export interface StepRequest {
    */
   sourceLines?: number[];
   /**
-   * Keep the DOM + URL either side of every step on the run's step results
-   * (stories/codebehind-compile-as-a-run.md §Ordinary runs capture what a
-   * compile needs). That is what `POST /codebehind/compile` generates from,
-   * so a run that captured it is a recording and the compile skips Record.
-   * One extra DOM snapshot per step; a cache hit also takes the turn-1
-   * snapshot it would otherwise skip. The only one of compile's run knobs on
-   * the wire, because it only retains more — the ones that change what
-   * executes stay in `InternalRunOptions`.
+   * Capture the DOM + URL either side of every step and write the run's
+   * recording beside the test when it ends
+   * (stories/codebehind-recording-on-disk.md). How a compile's own Record
+   * asks for its input; nothing sends it on an ordinary run, and nothing of
+   * it is kept on the session. One extra DOM snapshot per step; a cache hit
+   * also takes the turn-1 snapshot it would otherwise skip. The only one of
+   * compile's run knobs on the wire, because it only records — the ones that
+   * change what executes stay in `InternalRunOptions`.
    */
   captureStepContext?: boolean;
   /**
@@ -451,14 +452,6 @@ export interface RunDetails {
   /** The run's final parameter map, captures included. */
   parameters: Record<string, string>;
   tokens: number;
-  /**
-   * How much of the test this run described. `whole`: every step as the test
-   * stands. `prefix`: the first N steps (a breakpoint-truncated batch), so a
-   * compile can treat it as a recording that stopped at N+1. `partial`: a
-   * continuation or a re-run from the middle — of no use to a compile, which
-   * needs the steps in order from the first.
-   */
-  coverage: 'whole' | 'prefix' | 'partial';
 }
 
 /**
@@ -754,13 +747,6 @@ interface ManagedSession {
    * session has run once.
    */
   lastEffectiveSettings?: EffectiveSettings;
-  /**
-   * The last completed run, in full — what `POST /codebehind/compile` with
-   * `sessionId` compiles from instead of recording a fresh run
-   * (stories/codebehind-compile.md §Server). Absent until the session has run
-   * once, and gone the moment the session is.
-   */
-  lastRunDetails?: RunDetails & { status: 'passed' | 'failed' };
   outputs: Record<string, string>;
   /**
    * Provenance label for each key in `outputs`. Written at each variable
@@ -1377,12 +1363,6 @@ export class SessionManager {
    * input to a compile. Null when the session is gone, closed, or has not run,
    * which is the compile endpoint's cue to record instead.
    */
-  lastRunDetails(sessionId: string): (RunDetails & { status: 'passed' | 'failed' }) | null {
-    const session = this.sessions.get(sessionId);
-    if (!session || session.status === 'closed') return null;
-    return session.lastRunDetails ?? null;
-  }
-
   /**
    * Is this session open, and is a run in flight in it?
    *
@@ -3939,35 +3919,28 @@ export class SessionManager {
     // Hand the whole run to an in-process caller (the compiler). After the
     // sidecar, so a compile that reuses this run sees the same disk state a
     // fresh one would.
-    // A batch that is a strict prefix of the full step list is a recording the
-    // compile can use up to where it stopped; anything starting later is not.
-    const coverage: RunDetails['coverage'] =
-      request.startAt !== undefined
-        ? 'partial'
-        : !isSubsetBatch
-          ? 'whole'
-          : request.fullSteps !== undefined &&
-              request.steps.length < request.fullSteps.length &&
-              request.steps.every((step, i) => step === request.fullSteps![i])
-            ? 'prefix'
-            : 'partial';
+    // The recording, beside the test, when this run was asked to capture —
+    // a compile's Record (stories/codebehind-recording-on-disk.md). Gated on
+    // the capture flag alone: a Record with code-behind off is excluded from
+    // the sidecar above and must still be recorded. Nothing of it is kept on
+    // the session afterwards.
+    if (request.testFilePath && request.captureStepContext) {
+      await writeRecording(request.testFilePath, {
+        steps: fullStepResults,
+        status: overallStatus === 'passed' ? 'passed' : 'failed',
+        startedAt: new Date(runStartTime).toISOString(),
+        parameters: resolvedParameters,
+        source: 'server',
+      });
+    }
+
+    // Hand the whole run to an in-process caller (the compiler): it drove this
+    // run and consumes the results now, in flight. They are not retained.
     internal?.onRunDetails?.({
       steps: fullStepResults,
       parameters: { ...resolvedParameters },
       tokens: runTokens.total,
-      coverage,
     });
-    // Retained for `POST /codebehind/compile` with `sessionId` — "compile
-    // from this run", which skips the Record phase entirely. Kept on the
-    // session rather than the manager's `lastRunInfo` because it dies with the
-    // session, which is exactly the window the story says the id is valid for.
-    session.lastRunDetails = {
-      steps: fullStepResults,
-      parameters: { ...resolvedParameters },
-      tokens: runTokens.total,
-      coverage,
-      status: overallStatus === 'passed' ? 'passed' : 'failed',
-    };
 
     // Record the finalized run so a client that STOPPED the run — and so closed
     // the SSE stream before the final `done` event — can recover the report path

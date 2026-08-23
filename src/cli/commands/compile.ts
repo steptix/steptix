@@ -258,6 +258,7 @@ function printSummary(result: CompileResult, dryRun: boolean): void {
   }
   console.log(`  Rounds:   ${s.rounds}`);
   console.log(`  Tokens:   ${s.tokensUsed.toLocaleString()}`);
+  console.log(`  Recording: ${path.relative(process.cwd(), s.recordingDir)}`);
   if (result.status !== 'failed' && dryRun) {
     for (const [file, content] of Object.entries(result.files)) {
       console.log(chalk.bold(`\n--- ${path.relative(process.cwd(), file)} (candidate) ---`));

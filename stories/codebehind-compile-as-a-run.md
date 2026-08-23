@@ -123,6 +123,13 @@ the test — the opaque one — even when the author had just watched it pass.
 
 ## Design
 
+> **Amended by [codebehind-recording-on-disk.md](codebehind-recording-on-disk.md).**
+> Ordinary runs no longer capture step context and the server no longer
+> retains it: the compile's own Record is the recording, written to disk
+> beside the test, and every compile records again. The sections below on
+> capture-by-default and on reusing a session's last run are withdrawn; the
+> gutter, the partial status and the rest stand.
+
 ### Ordinary runs capture what a compile needs
 
 Generation needs three things per step: the action transcript, and the page
@@ -156,6 +163,10 @@ until they press Compile, which is the point.
 the default selection and has no transcript to generate from anyway.
 
 ### Record is a run
+
+> **Withdrawn in part by [codebehind-recording-on-disk.md](codebehind-recording-on-disk.md):**
+> the source-run rule below collapses to "Record, in the caller's session,
+> every time". A red Record is still a prefix compile.
 
 With the last run carrying context, the compile's source is decided like
 this. The request names the editor's session (`sessionId`, replacing

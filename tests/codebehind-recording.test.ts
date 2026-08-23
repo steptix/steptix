@@ -1,0 +1,207 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { StepResult } from '../src/report/types.js';
+import {
+  readRecording,
+  recordingDirFor,
+  redact,
+  secretValues,
+  writeRecording,
+  writeReplayFailure,
+} from '../src/codebehind/recording.js';
+
+/**
+ * The recording on disk (stories/codebehind-recording-on-disk.md): a compile's
+ * input as files beside the test, written by the run and readable by the
+ * author — and by nobody on the server afterwards.
+ */
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-recording');
+let counter = 0;
+let dir: string;
+
+beforeEach(async () => {
+  dir = path.join(tmpBase, `t${counter++}`);
+  await fs.mkdir(dir, { recursive: true });
+});
+
+afterAll(async () => {
+  await fs.rm(tmpBase, { recursive: true, force: true });
+});
+
+function step(index: number, over: Partial<StepResult> = {}): StepResult {
+  return {
+    index,
+    instruction: `step ${index}`,
+    status: 'passed',
+    turns: [
+      {
+        turnNumber: 1,
+        attemptNumber: 1,
+        timestamp: '2026-08-23T00:00:00.000Z',
+        aiInteractions: [],
+        subActions: [
+          { index: 1, action: { action: 'type', selector: '#email', value: 'demo@example.com' }, durationMs: 1 },
+          { index: 2, action: { action: 'click', selector: '#go' }, durationMs: 1, error: 'skipped' },
+        ],
+      },
+    ],
+    durationMs: 12,
+    retried: false,
+    pageUrl: 'https://app.test/after',
+    stepContext: {
+      domBefore: `<input id="email">`,
+      urlBefore: 'https://app.test/before',
+      domAfter: `<input id="email" value="demo@example.com">`,
+      urlAfter: 'https://app.test/after',
+    },
+    ...over,
+  };
+}
+
+describe('the recording', () => {
+  it('lives in the test\'s cache dir, named after the test', () => {
+    expect(recordingDirFor(path.join(dir, 'tests', 'checkout.md'))).toBe(
+      path.join(dir, 'tests', '.aiui-codebehind-cache', 'checkout.recording'),
+    );
+  });
+
+  it('round-trips the steps, the DOM files and the failure screenshot, sparse where the run has nothing', async () => {
+    const test = path.join(dir, 'checkout.md');
+    const written = await writeRecording(test, {
+      steps: [
+        step(1),
+        // A hook row shares the index space and is dropped.
+        { ...step(1, { instruction: 'before hook' }), hookScope: 'before' } as StepResult,
+        step(3, { status: 'failed', error: 'no such button', screenshotBase64: Buffer.from('png!').toString('base64') }),
+      ],
+      status: 'failed',
+      startedAt: '2026-08-23T00:00:00.000Z',
+      parameters: { username: 'octocat' },
+      source: 'server',
+    });
+    expect(written).toBe(recordingDirFor(test));
+
+    const files = (await fs.readdir(written!)).sort();
+    expect(files).toEqual([
+      'recording.json',
+      'step-01.after.html',
+      'step-01.before.html',
+      'step-01.json',
+      'step-03.after.html',
+      'step-03.before.html',
+      'step-03.failure.png',
+      'step-03.json',
+    ]);
+    expect(await fs.readFile(path.join(written!, 'step-03.failure.png'))).toEqual(Buffer.from('png!'));
+
+    const recording = (await readRecording(test))!;
+    expect(recording.manifest).toMatchObject({
+      test,
+      status: 'failed',
+      steps: 2,
+      // Names, never values.
+      parameters: ['username'],
+      source: 'server',
+      startedAt: '2026-08-23T00:00:00.000Z',
+    });
+    expect(recording.steps).toHaveLength(3);
+    expect(recording.steps[1]).toBeUndefined();
+    expect(recording.steps[0]).toMatchObject({
+      index: 1,
+      status: 'passed',
+      urlBefore: 'https://app.test/before',
+      urlAfter: 'https://app.test/after',
+      pageUrl: 'https://app.test/after',
+      // Only the actions that ran — the errored one is not part of the transcript.
+      actions: [{ action: 'type', selector: '#email', value: 'demo@example.com' }],
+      domBefore: '<input id="email">',
+      domAfter: '<input id="email" value="demo@example.com">',
+      files: { before: 'step-01.before.html', after: 'step-01.after.html' },
+    });
+    expect(recording.steps[2]).toMatchObject({
+      index: 3,
+      status: 'failed',
+      error: 'no such button',
+      files: { screenshot: 'step-03.failure.png' },
+    });
+  });
+
+  it('replaces the previous recording wholesale', async () => {
+    const test = path.join(dir, 'checkout.md');
+    await writeRecording(test, {
+      steps: [step(1), step(2)], status: 'passed', startedAt: 'a', parameters: {}, source: 'cli',
+    });
+    await writeRecording(test, {
+      steps: [step(1)], status: 'passed', startedAt: 'b', parameters: {}, source: 'cli',
+    });
+    const files = await fs.readdir(recordingDirFor(test));
+    expect(files.some((f) => f.startsWith('step-02'))).toBe(false);
+    expect((await readRecording(test))!.manifest.startedAt).toBe('b');
+  });
+
+  it('redacts secret parameter values from the actions, the DOM and the outputs', async () => {
+    const test = path.join(dir, 'login.md');
+    const secrets = secretValues({ username: 'octocat', password: 'hunter2-horse', apiToken: 'tok-1', note: 'plain' });
+    expect(secrets).toEqual(['hunter2-horse', 'tok-1']);
+    expect(redact('typed hunter2-horse then tok-1', secrets)).toBe('typed *** then ***');
+
+    await writeRecording(test, {
+      steps: [
+        step(1, {
+          turns: [
+            {
+              turnNumber: 1, attemptNumber: 1, timestamp: 't', aiInteractions: [],
+              subActions: [{ index: 1, action: { action: 'type', selector: '#pw', value: 'hunter2-horse' }, durationMs: 1 }],
+            },
+          ],
+          stepContext: { domBefore: '<input value="hunter2-horse">', domAfter: '<p>welcome octocat</p>' },
+          outputs: { password: 'hunter2-horse', greeting: 'hi hunter2-horse' },
+        }),
+      ],
+      status: 'passed',
+      startedAt: 't',
+      parameters: { username: 'octocat', password: 'hunter2-horse' },
+      source: 'cli',
+    });
+    const recording = (await readRecording(test))!;
+    expect(recording.steps[0]!.actions[0]).toEqual({ action: 'type', selector: '#pw', value: '***' });
+    expect(recording.steps[0]!.domBefore).toBe('<input value="***">');
+    // A non-secret value is kept: the recording is for reading.
+    expect(recording.steps[0]!.domAfter).toBe('<p>welcome octocat</p>');
+    expect(recording.steps[0]!.outputs).toEqual({ password: '***', greeting: 'hi ***' });
+    const raw = await fs.readFile(path.join(recordingDirFor(test), 'step-01.json'), 'utf-8');
+    expect(raw).not.toContain('hunter2-horse');
+  });
+
+  it('writes a replay failure beside the recording, with its screenshot and DOM', async () => {
+    const test = path.join(dir, 'checkout.md');
+    await writeReplayFailure(test, {
+      round: 2,
+      step: 7,
+      line: 18,
+      error: 'locator timeout on [data-test="promo"] for hunter2',
+      url: 'https://app.test/cart',
+      screenshotBase64: Buffer.from('shot').toString('base64'),
+      dom: '<div>cart hunter2</div>',
+    }, { password: 'hunter2' });
+    const d = recordingDirFor(test);
+    expect(JSON.parse(await fs.readFile(path.join(d, 'replay-2.failure.json'), 'utf-8'))).toEqual({
+      round: 2,
+      step: 7,
+      line: 18,
+      error: 'locator timeout on [data-test="promo"] for ***',
+      url: 'https://app.test/cart',
+      files: { screenshot: 'replay-2.failure.png', dom: 'replay-2.failure.html' },
+    });
+    expect(await fs.readFile(path.join(d, 'replay-2.failure.html'), 'utf-8')).toBe('<div>cart ***</div>');
+    expect(await fs.readFile(path.join(d, 'replay-2.failure.png'))).toEqual(Buffer.from('shot'));
+  });
+
+  it('reads as nothing when there is no recording', async () => {
+    expect(await readRecording(path.join(dir, 'nothing.md'))).toBeNull();
+  });
+});

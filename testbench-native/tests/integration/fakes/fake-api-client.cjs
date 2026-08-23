@@ -176,6 +176,7 @@ class FakeApiClient {
           unproven: [],
           writtenOffAi: [],
           notAttempted: [],
+          recordingDir: '/x/.aiui-codebehind-cache/compile-me.recording',
         },
       },
     ];

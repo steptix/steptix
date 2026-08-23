@@ -32,6 +32,7 @@ import {
 } from './writer.js';
 import { findInlinedParameterValue } from '../ai/action-parser.js';
 import { loadDataFile } from '../parser/parameters.js';
+import { recordingDirFor, writeReplayFailure } from './recording.js';
 
 /**
  * The compiler (stories/codebehind-compile.md, "The compile pipeline").
@@ -119,6 +120,9 @@ export interface CompileSummary {
    *  them. They have no entry, and the next compile's default selection takes
    *  them. */
   notAttempted: number[];
+  /** Where the recording — and the candidate, and any replay failure — were
+   *  written: the test's `.aiui-codebehind-cache/<name>.recording/`. */
+  recordingDir: string;
 }
 
 export interface CompileResult {
@@ -305,6 +309,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         unproven: [],
         writtenOffAi: [],
         notAttempted: [],
+        recordingDir: recordingDirFor(test.filePath),
         ...summary,
       },
     };
@@ -488,8 +493,13 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     }
   }
 
+  // The candidate trail (stories/codebehind-recording-on-disk.md): what the
+  // compile has so far, on disk beside the recording, after every stage.
+  await candidate.persist();
+
   // ─── 4. Review ────────────────────────────────────────────────────────────
   await reviewCandidate(candidate, test, parameters, options, emit);
+  await candidate.persist();
 
   // ─── 5. Replay ────────────────────────────────────────────────────────────
   //
@@ -545,9 +555,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       error: result?.error ?? 'the run failed without naming a step',
     };
   };
-  const writeOff = (step: CompileStep, error: string, after: string): void => {
+  const writeOff = async (step: CompileStep, error: string, after: string): Promise<void> => {
     stepEvent('replay', step, `kept as AI ${after}: ${error}`);
     candidate.apply(step, aiEntryFor(step.text, `replay kept failing — ${error}`));
+    await candidate.persist();
     proven.delete(step.key!);
     declined++;
     writtenOffAi.push(step.number);
@@ -594,6 +605,19 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     }
 
     lastFailure = { step: failed.step, error: failed.error, result: failed.result };
+    await writeReplayFailure(
+      test.filePath,
+      {
+        round,
+        step: failed.step.number,
+        ...(typeof test.stepLines[failed.step.index] === 'number' && { line: test.stepLines[failed.step.index] }),
+        error: failed.error,
+        ...(failed.result?.pageUrl !== undefined && { url: failed.result.pageUrl }),
+        ...(failed.result?.screenshotBase64 !== undefined && { screenshotBase64: failed.result.screenshotBase64 }),
+        ...(failed.result?.domSnapshot !== undefined && { dom: failed.result.domSnapshot }),
+      },
+      parameters,
+    );
     if (round === maxRounds) break;
 
     stepEvent('repair', failed.step, 'regenerating from the failure');
@@ -603,6 +627,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     });
     proven.delete(failed.step.key);
     const applied = applyGenerated(candidate, failed.step, repaired, stepEvent, 'repair');
+    await candidate.persist();
     if (applied.kind === 'declined') declined++;
     if (applied.kind === 'error') {
       return finish(
@@ -624,7 +649,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // error as its comment, then one round to confirm the rest still passes.
   if (!green && !failure && lastFailure) {
     const { step, error } = lastFailure;
-    writeOff(step, error, `after ${maxRounds} round(s)`);
+    await writeOff(step, error, `after ${maxRounds} round(s)`);
     const outcome = await replay(rounds + 1);
     green = outcome.status === 'passed';
     if (green) {
@@ -666,7 +691,18 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           `existing entry for step ${failed.step.number} fails; recompile it with ` +
           `\`--steps ${failed.step.number}\` (or Compile This Step)`;
       } else {
-        if (failed.step.key !== step.key) writeOff(failed.step, failed.error, 'in the confirming round');
+        await writeReplayFailure(
+          test.filePath,
+          {
+            round: rounds,
+            step: failed.step.number,
+            error: failed.error,
+            ...(failed.result?.pageUrl !== undefined && { url: failed.result.pageUrl }),
+            ...(failed.result?.screenshotBase64 !== undefined && { screenshotBase64: failed.result.screenshotBase64 }),
+          },
+          parameters,
+        );
+        if (failed.step.key !== step.key) await writeOff(failed.step, failed.error, 'in the confirming round');
         failure = `step ${failed.step.number} still fails as code: ${failed.error}`;
       }
     }
@@ -729,7 +765,6 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     written.push(file);
     emit({ kind: 'phase', phase: 'write', message: `${path.basename(file)}` });
   }
-  await candidate.discardPersisted();
   // The flags the compile acted on have been acted on: a proven entry replaced
   // the broken one, and a write-off is an `ai: true` entry the selection skips
   // anyway. An unproven entry keeps its flag — the next run decides.
@@ -1279,10 +1314,13 @@ class Candidate {
   }
 
   /**
-   * Leave the candidate on disk for salvage after a red compile, at the path
-   * the story names, and return the first one (what the summary points at).
+   * Write the candidate where the author can read it — the recording dir,
+   * under the name the story gives it — and return the first path (what the
+   * summary points at). Called after every stage, so the file is always the
+   * compile's latest proposal; after Apply it is identical to the real file.
    */
   async persist(): Promise<string | undefined> {
+    this.persisted = [];
     for (const [file, content] of this.current) {
       const target = path.join(
         resolveCodeBehindCacheDir(file),
@@ -1293,22 +1331,10 @@ class Candidate {
         await fs.writeFile(target, content, 'utf-8');
         this.persisted.push(target);
       } catch (err) {
-        logger.debug(`Could not leave the compile candidate at ${target}: ${String(err)}`);
+        logger.debug(`Could not write the compile candidate at ${target}: ${String(err)}`);
       }
     }
     return this.persisted[0];
-  }
-
-  /** Drop a candidate from an earlier red compile once a green one has
-   *  written the real files — otherwise it reads as current and is not. */
-  async discardPersisted(): Promise<void> {
-    for (const file of this.current.keys()) {
-      const target = path.join(
-        resolveCodeBehindCacheDir(file),
-        `${path.basename(file)}.candidate`,
-      );
-      await fs.rm(target, { force: true }).catch(() => {});
-    }
   }
 }
 
