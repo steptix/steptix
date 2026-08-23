@@ -458,6 +458,26 @@ describe('start_cdp_browser', () => {
     expect(description).toContain('one set of cookies');
     // Asking for an existing profile is not an error.
     expect(description).toContain('not** an error');
+    // A site that refuses an automated browser is fixed by a config setting the
+    // agent must point the user at, not worked around — and the description has
+    // to name the setting AND the file, or the agent guides them to the wrong
+    // place (esp. the user-root config for `scope: "user"`).
+    expect(description).toContain('browser.cdp.hideAutomation');
+    expect(description).toContain('%LOCALAPPDATA%');
+  });
+
+  it('does NOT accept hideAutomation as a tool argument (config-only)', async () => {
+    // The gate is a human-held config setting by design; a tool argument would
+    // let a page talk an agent into flipping it. If it ever leaks into the
+    // schema, the request body would start carrying it — assert it never does.
+    const h = await connect();
+    await h.client.callTool({
+      name: 'start_cdp_browser',
+      // hideAutomation is not in the input schema; the SDK drops unknown args,
+      // but assert on the outgoing body regardless.
+      arguments: { engine: 'chrome', hideAutomation: true } as Record<string, unknown>,
+    });
+    expect(h.startCalls[0]).not.toHaveProperty('hideAutomation');
   });
 });
 

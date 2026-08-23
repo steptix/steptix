@@ -18,6 +18,7 @@ import {
 import { discoverCdpPorts, listPageTabs } from '../browser/cdp-discovery.js';
 import { CdpTabNotFoundError, closeBrowser, launchBrowser } from '../browser/manager.js';
 import { userRootDir } from '../env/user-root.js';
+import { loadConfig } from '../config/loader.js';
 import fs from 'node:fs';
 import {
   SessionManager,
@@ -1434,12 +1435,35 @@ export function createApiServer(
       const profile = (body.profile as string | undefined) ?? DEFAULT_PROFILE;
       const reset = body.reset === true;
 
+      // Launch settings come from the aiui.config.json of the root the browser
+      // is launched into — read exactly there, no walk-up, so the user root's
+      // own file governs a machine-wide browser and nothing above it can. Read
+      // per request rather than off the server's startup config: the server is
+      // shared across projects, and browser.cdp.hideAutomation is the
+      // project's (or the user's) decision, not the server's. A malformed file
+      // refuses the launch — the flags it governs cannot be known, and guessing
+      // "off" would silently start a different browser than the one asked for.
+      let hideAutomation = false;
+      try {
+        const launchConfig = await loadConfig(undefined, projectRoot);
+        hideAutomation = launchConfig.browser.cdp?.hideAutomation === true;
+      } catch (err) {
+        res.status(statusForCdpFailure('invalid_input')).json({
+          error:
+            `Cannot start a browser for ${projectRoot}: its aiui.config.json could not be ` +
+            'loaded, so the launch settings it governs are unknown. ' +
+            `${err instanceof Error ? err.message : String(err)}`,
+          reason: 'config_invalid',
+        });
+        return;
+      }
+
       // Single-flight. The key is built from the validated values so two
       // spellings of the same request share a slot.
       const key = `${projectRoot}\u0000${engine}\u0000${profile}`;
       let pending = cdpLaunchesInFlight.get(key);
       if (!pending) {
-        pending = startCdpBrowser({ projectRoot, engine, profile, reset }).finally(() => {
+        pending = startCdpBrowser({ projectRoot, engine, profile, reset, hideAutomation }).finally(() => {
           cdpLaunchesInFlight.delete(key);
         });
         cdpLaunchesInFlight.set(key, pending);

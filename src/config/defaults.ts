@@ -26,6 +26,7 @@ export const DEFAULT_CONFIG: Config = {
     domSnapshotCharLimit: 300_000,
     captureScreenshotsPerAction: false,
     video: 'off',
+    cdp: { hideAutomation: false },
     domNoiseReduction: {
       collapseRepetitiveDom: true,
       compactSvg: true,

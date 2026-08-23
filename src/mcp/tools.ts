@@ -2670,6 +2670,21 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'A profile is a directory that persists. Sign in by hand once and the ' +
         'login survives closing the browser, restarting the server, and ' +
         'restarting this agent — that is the point of the feature.\n\n' +
+        'Some sites refuse a browser that reports itself as automated ' +
+        '(`navigator.webdriver`), which a remote-debuggable Chrome does by ' +
+        'default. `browser.cdp.hideAutomation: true` in `aiui.config.json` ' +
+        'launches it without that signal. The file is the one for the root ' +
+        'this browser lands in: for `scope: "user"` (the user\'s own browser) ' +
+        'that is the user-level `aiui.config.json` (`%LOCALAPPDATA%\\aiui\\` on ' +
+        'Windows, `~/.aiui/` elsewhere); for a project browser it is the ' +
+        'project\'s. It is deliberately a config setting and not an argument ' +
+        'here — a human holds it, an agent cannot set it. If a site turns the ' +
+        'browser away, tell the user to add that setting (naming the file ' +
+        'above) rather than looking for a way around the site. It applies at ' +
+        'launch only; a browser already running keeps whatever it was started ' +
+        'with, and `warnings` says when the running browser and the config ' +
+        'disagree — relay that warning, since the fix is to close and restart ' +
+        'the browser.\n\n' +
         'Read `outcome` and tell the user which happened, because they mean ' +
         'different things:\n' +
         '- `launched_into_new_profile` — empty browser. **A human must sign ' +

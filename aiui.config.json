@@ -11,7 +11,8 @@
     "slowMo": 0,
     "browser": "chromium",
     "stealth": false,
-    "bypassCSP": false
+    "bypassCSP": false,
+    "cdp": { "hideAutomation": false }
   },
   "tests": {
     "dir": "./fixtures/tests",

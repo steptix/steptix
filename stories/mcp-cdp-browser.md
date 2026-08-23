@@ -700,6 +700,24 @@ Spawn flags stay as the extension has them — `--user-data-dir`,
 concat is a command-injection vector once `profileDir` can contain
 spaces.
 
+One optional flag joined them later (2026-08-23):
+`--disable-blink-features=AutomationControlled`, behind
+`browser.cdp.hideAutomation` in `aiui.config.json` (default `false`).
+Measured on Chrome 151: `--remote-debugging-port` on its own makes every
+page read `navigator.webdriver === true`, with nothing attached — the same
+profile without the port flag reads `false` — and some sites refuse a
+browser that says so, which defeats a browser a human signs into by hand.
+The flag turns it back off at the cost of Chrome's yellow "unsupported
+command-line flag" bar on launch. It is a config setting and not a tool
+argument for the same reason `mcp.cdp` is: whether a browser stops
+announcing itself is a human's decision, and an agent cannot write the
+config file. The server reads the file of the root the launch goes into
+(the project's, or the user root's for a machine-wide browser) — exactly
+there, no walk-up — and records the choice in the profile's
+`.aiui-profile` marker, so a later `reused_running_browser` can warn when
+the running browser and the config disagree; the flag only applies at
+launch.
+
 ### 10. Canonical copy, and flick
 
 `src/browser/cdp-*.ts` is canonical. flick-vscode's copies are

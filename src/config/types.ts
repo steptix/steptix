@@ -57,6 +57,23 @@ export interface DomNoiseReductionConfig {
   dropUnstableIds?: boolean | undefined;
 }
 
+/** How this framework launches a CDP browser (`start_cdp_browser`,
+ *  `POST /cdp/browsers`). Read from the `aiui.config.json` of the root the
+ *  browser is launched into — the project's, or the user root's for a
+ *  machine-wide browser. Applies at launch only: a browser that is already
+ *  running keeps whatever it was started with. */
+export interface CdpBrowserConfig {
+  /** Start the browser with `--disable-blink-features=AutomationControlled`,
+   *  so pages read `navigator.webdriver` as `false` the way they do in a
+   *  Chrome started by hand. A remote-debuggable Chrome otherwise reports
+   *  `true` to every page, and some sites refuse a browser that says so —
+   *  which defeats the point of a browser a human signs into. While it is on,
+   *  Chrome shows its "unsupported command-line flag" bar on launch; dismiss
+   *  it. A human-held choice, deliberately a config file setting and not a
+   *  tool argument. Default false. */
+  hideAutomation?: boolean | undefined;
+}
+
 export interface BrowserConfig {
   /** Show browser window (false = headless) */
   headed: boolean;
@@ -77,6 +94,9 @@ export interface BrowserConfig {
   /** Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts
    *  the site itself needs (cascading failures). Default false. */
   bypassCSP?: boolean;
+  /** Launch settings for CDP browsers this framework starts. See
+   *  CdpBrowserConfig. Nothing here applies to a browser attached to by port. */
+  cdp?: CdpBrowserConfig | undefined;
   /** DOM snapshot noise-reduction toggles — the primary lever for keeping
    *  AI input compact on framework-heavy pages. See DomNoiseReductionConfig. */
   domNoiseReduction?: DomNoiseReductionConfig | undefined;

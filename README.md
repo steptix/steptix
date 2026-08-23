@@ -208,6 +208,13 @@ under `.aiui/cdp-profiles/`.
   signed-in browser can reach everything that browser can, and per-step output
   goes to the model provider. Sign these profiles into test accounts, not your
   own.
+- **Some sites turn the browser away.** A Chrome started with a debugging port
+  tells every page it is automated (`navigator.webdriver` reads `true`, even
+  with nothing attached), and some sites refuse to let such a browser sign in.
+  If a site that works in your everyday browser blocks this one, that is
+  usually why. `browser.cdp.hideAutomation` below launches it without that
+  signal; it applies at launch, so close a running browser and start it again
+  after changing it.
 
 An agent may only drive browsers **this project launched**. Anything else — a
 browser you started yourself, or one another tool left on 9222 — is refused,
@@ -218,7 +225,22 @@ and listing it withholds its tab titles and URLs. To lift that, a human edits
 { "mcp": { "cdp": { "allowUnowned": true } } }
 ```
 
-That gate deliberately lives in a file an agent cannot write.
+That gate deliberately lives in a file an agent cannot write. The same goes
+for whether a browser announces itself as automated:
+
+```json
+{ "browser": { "cdp": { "hideAutomation": true } } }
+```
+
+Off by default. It adds `--disable-blink-features=AutomationControlled` to the
+launch, which makes pages read `navigator.webdriver` as `false` the way they
+do in a Chrome you started yourself, at the cost of Chrome's yellow
+"unsupported command-line flag" bar on launch (dismiss it). The file that
+counts is the one in the root the browser is launched into — the project's, or
+for a machine-wide browser (`scope: "user"`) the user root's own
+`aiui.config.json` under `%LOCALAPPDATA%\aiui` (`~/.aiui` elsewhere). It is
+deliberately not a tool argument: if a site refuses the browser, the agent is
+told to raise it with you, not to work around the site.
 
 #### Working with its tabs
 
