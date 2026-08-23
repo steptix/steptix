@@ -1,5 +1,5 @@
 import { AIGateway } from '@pkent/aigateway';
-import type { V2ContentBlock } from '@pkent/aigateway';
+import type { CallOptions, Effort, V2ContentBlock } from '@pkent/aigateway';
 import type { AiConfig } from '../config/types.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
@@ -35,6 +35,38 @@ function textFromV2(content: V2ContentBlock[]): string {
     .filter((b) => b.type === 'text')
     .map((b) => b.text ?? '')
     .join('');
+}
+
+/**
+ * Which KIND of call this is. Effort is a property of the call site and is
+ * known statically — the hot path wants a fast answer, authoring wants a
+ * considered one — so there is no runtime difficulty heuristic to tune.
+ */
+export type CompleteProfile = 'routine' | 'retry' | 'authoring';
+
+/**
+ * Effort and its output cap come from ONE record so they cannot drift apart.
+ *
+ * Reasoning tokens count against the output cap on every provider, and
+ * OpenRouter sizes the reasoning budget as a *fraction of* `maxTokens` (`high`
+ * at roughly 80% of it). Raising effort without raising the cap leaves the model
+ * a few hundred tokens to answer in, and the JSON action list comes back
+ * truncated — a failure that reads like a bad model rather than a bad config.
+ *
+ * `routine` carries NO effort on purpose: unset means the request body is
+ * byte-for-byte what it is today, so existing runs and prompt-cache prefixes are
+ * untouched. Raising the hot path is opt-in, via `AI_EFFORT`.
+ */
+const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> = {
+  routine: { maxTokens: 4096 },
+  retry: { effort: 'medium', maxTokens: 8192 },
+  authoring: { effort: 'high', maxTokens: 16384 },
+};
+
+/** Per-call knobs beyond the messages themselves. */
+export interface CompleteOptions {
+  /** Defaults to `routine` — today's behavior. */
+  profile?: CompleteProfile;
 }
 
 /** Result of a single AI completion, including which model the gateway actually served. */
@@ -129,15 +161,43 @@ export class AiClient {
    * the 120s timeout — this is what makes stop feel instant. It's combined with
    * the timeout in `buildSignal`, so either one aborts the request.
    */
-  async complete(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
+  async complete(
+    messages: ChatMessage[],
+    signal?: AbortSignal,
+    options?: CompleteOptions,
+  ): Promise<CompleteResult> {
     if (this.config.streamResponses) {
-      return this.completeStream(messages, signal);
+      return this.completeStream(messages, signal, options);
     }
-    return this.completeOnce(messages, signal);
+    return this.completeOnce(messages, signal, options);
+  }
+
+  /**
+   * Resolve a profile into the `effort` + `maxTokens` pair that goes on the
+   * call. `AI_EFFORT` overrides the ROUTINE profile only, and raises its cap
+   * alongside — the two never move independently. It deliberately does not
+   * touch `retry`/`authoring`: letting a global cost knob lower those would
+   * make failure diagnosis worse exactly when someone is trying to save money.
+   */
+  private resolveProfile(profile: CompleteProfile = 'routine'): Pick<CallOptions, 'effort' | 'maxTokens'> {
+    const base = PROFILES[profile];
+    const override = profile === 'routine' ? this.config.effort : undefined;
+
+    if (override !== undefined) {
+      return { effort: override, maxTokens: Math.max(base.maxTokens, 8192) };
+    }
+    // Spread-or-omit rather than `effort: undefined`: the repo builds with
+    // exactOptionalPropertyTypes, and an explicit undefined is not the same as
+    // an absent key.
+    return { maxTokens: base.maxTokens, ...(base.effort !== undefined && { effort: base.effort }) };
   }
 
   /** Non-streaming chat completion. */
-  private async completeOnce(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
+  private async completeOnce(
+    messages: ChatMessage[],
+    signal?: AbortSignal,
+    options?: CompleteOptions,
+  ): Promise<CompleteResult> {
     const requestId = nextRequestId++;
     const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
@@ -156,7 +216,7 @@ export class AiClient {
       // Messages pass through unchanged — `@pkent/aigateway` accepts the
       // consumer's `ChatMessage` shape and handles `cache` hints itself.
       v2 = await this.getGateway().chat(messages, {
-        maxTokens: 4096,
+        ...this.resolveProfile(options?.profile),
         responseFormat: { type: 'json_object' },
         signal: this.buildSignal(signal),
       });
@@ -191,7 +251,11 @@ export class AiClient {
   }
 
   /** Streaming chat completion, accumulated into a single response. */
-  private async completeStream(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult> {
+  private async completeStream(
+    messages: ChatMessage[],
+    signal?: AbortSignal,
+    options?: CompleteOptions,
+  ): Promise<CompleteResult> {
     const requestId = nextRequestId++;
     const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
@@ -213,7 +277,7 @@ export class AiClient {
 
     try {
       const stream = this.getGateway().stream(messages, {
-        maxTokens: 4096,
+        ...this.resolveProfile(options?.profile),
         responseFormat: { type: 'json_object' },
         signal: this.buildSignal(signal),
       });

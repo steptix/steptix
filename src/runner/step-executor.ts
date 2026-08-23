@@ -992,7 +992,7 @@ async function executeStepAttempt(
         { role: 'assistant', content: rawResponse },
         clarificationMsg,
       ];
-      const clarifiedCompletion = await aiClient.complete(clarificationMessages, opts.signal);
+      const clarifiedCompletion = await aiClient.complete(clarificationMessages, opts.signal, { profile: 'retry' });
       const clarifiedResponse = clarifiedCompletion.text;
       turnAiInteractions.push({
         purpose: 'clarification',
@@ -1955,7 +1955,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       const codeCompletion = await p.aiClient.complete([
         { role: 'system', content: assertSystemPrompt },
         codeMsg,
-      ], p.signal);
+      ], p.signal, { profile: 'authoring' });
 
       aiInteraction = {
         purpose: `assertion[${p.assertIndex}]`,

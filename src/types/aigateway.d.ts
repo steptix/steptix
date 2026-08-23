@@ -44,9 +44,18 @@ declare module '@pkent/aigateway' {
     final: Promise<V2Response>;
   };
 
+  /**
+   * Reasoning effort — the union of the three upstream vocabularies. The
+   * library forwards it verbatim and does not translate between them, so a
+   * level the bound model does not support comes back as that provider's own
+   * error. Unset leaves the request body byte-for-byte what it is without it.
+   */
+  export type Effort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
   /** Options accepted by a single `chat`/`stream` call. */
   export interface CallOptions {
     maxTokens?: number;
+    effort?: Effort;
     temperature?: number;
     responseFormat?: { type: string };
     signal?: AbortSignal;
@@ -58,6 +67,7 @@ declare module '@pkent/aigateway' {
     /** Required by the `aibroker` provider; the gateway URL (with `/v1`). */
     baseURL?: string;
     maxTokens?: number;
+    effort?: Effort;
     timeout?: number;
     referer?: string;
     title?: string;

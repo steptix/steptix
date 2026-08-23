@@ -61,7 +61,7 @@ export async function diagnoseFailure(
     ];
 
     const requestStartedAt = new Date().toISOString();
-    const completion = await aiClient.complete(messages);
+    const completion = await aiClient.complete(messages, undefined, { profile: 'authoring' });
     const responseText = completion.text;
 
     const parsed = parseDiagnosis(responseText);

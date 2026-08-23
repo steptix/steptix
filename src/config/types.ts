@@ -1,3 +1,5 @@
+import type { Effort } from '@pkent/aigateway';
+
 export interface AiConfig {
   /** Base URL for the aiapi gateway */
   gatewayUrl: string;
@@ -7,6 +9,20 @@ export interface AiConfig {
   model: string;
   /** Maximum input tokens per request */
   maxInputTokens: number;
+  /**
+   * Reasoning effort for ROUTINE calls (`AI_EFFORT`): one of `none`, `minimal`,
+   * `low`, `medium`, `high`, `xhigh`, `max`. Unset means today's behavior — no
+   * effort on the wire. The `retry` and `authoring` profiles set their own and
+   * are deliberately NOT lowered by this: a global cost knob should not make
+   * failure diagnosis worse.
+   *
+   * The generated JSON schema leaves this untyped because `Effort` resolves
+   * through an ambient module declaration. That is deliberate rather than worked
+   * around: restating the seven levels here would create a second source of
+   * truth that goes stale the next time a provider adds one, and the gateway
+   * already rejects an unknown level at the first call with `invalid_effort`.
+   */
+  effort?: Effort;
   /** Use streaming endpoint instead of vision */
   streamResponses: boolean;
   /** Include a screenshot in each AI request (set false to reduce token usage) */

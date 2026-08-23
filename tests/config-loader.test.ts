@@ -230,7 +230,7 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
 
 describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
   let tmpDir: string;
-  const AI_KEYS = ['AI_API_KEY', 'AI_MODEL'] as const;
+  const AI_KEYS = ['AI_API_KEY', 'AI_MODEL', 'AI_EFFORT'] as const;
   const preservedAi: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
@@ -284,6 +284,30 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
 
     expect(config.ai.apiKey).toBe('env-ai-key');
     expect(config.ai.model).toBe('env/model');
+  });
+
+  it('AI_EFFORT lands on ai.effort', async () => {
+    process.env['AI_EFFORT'] = 'high';
+
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.effort).toBe('high');
+  });
+
+  it('an absent AI_EFFORT leaves ai.effort unset', async () => {
+    const config = await loadConfig(await writeConfig({}));
+
+    // Unset is what keeps every existing run — and its prompt-cache prefix —
+    // byte-for-byte what it is today.
+    expect(config.ai.effort).toBeUndefined();
+  });
+
+  it('a blank AI_EFFORT reads as absent', async () => {
+    process.env['AI_EFFORT'] = '   ';
+
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.effort).toBeUndefined();
   });
 
   it('no machine values leaves the built-in default model untouched', async () => {

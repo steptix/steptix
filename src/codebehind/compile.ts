@@ -1086,6 +1086,7 @@ async function reviewCandidate(
           }),
         ],
         options.signal,
+        { profile: 'authoring' },
       );
       revised = parseFileRevision(completion.text);
     } catch (err) {
