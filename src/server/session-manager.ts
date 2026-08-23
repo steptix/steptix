@@ -45,6 +45,7 @@ import {
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
+import { redact, redactReport, runSecrets } from '../utils/secrets.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
@@ -1998,8 +1999,12 @@ export class SessionManager {
       );
       logger.info(`Run log: ${runLog.path}`);
     }
+    // What this run must never print (stories/secret-redaction.md). The
+    // parameter map and the env context are built further down; until then a
+    // log line has nothing to mask. Read fresh each time — captures add to it.
+    let secretsNow = (): string[] => [];
     const removeFileBridges = runLog
-      ? attachRunLogBridges(runLog, fileMode)
+      ? attachRunLogBridges(runLog, fileMode, () => secretsNow())
       : () => {};
 
     // Re-run seed scope: captured/runtime vars to inject before the run so a
@@ -2109,6 +2114,7 @@ export class SessionManager {
         envDataCtx = { ...envDataCtx, extraData };
       }
     }
+    secretsNow = () => runSecrets({ parameters: resolvedParameters, envData: envDataCtx });
 
     // Determine per-step timeout
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
@@ -3260,10 +3266,13 @@ export class SessionManager {
           stepInstruction = interpolated;
         }
 
+        // The one log line that ignores the log level — so the one place the
+        // resolved password would always print. Masked; the step itself runs
+        // with the real value.
         logger.step(
           session.totalStepsExecuted + 1,
           session.totalStepsExecuted + stepsTotal - i,
-          stepInstruction,
+          redact(stepInstruction, secretsNow()),
         );
 
         emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread, ...(await tabSpread()) });
@@ -3860,7 +3869,9 @@ export class SessionManager {
         // back to sessionId for clients that don't send testFilePath.
         const fileForName = request.testFilePath ?? sessionId;
         const testName = basename(fileForName, '.md').replace(/^.*[\\/]/, '') || sessionId;
-        const report: TestReport = {
+        // The masked copy is the one that renders — now, and again when the
+        // session closes and the video link is added (`pendingVideo`).
+        const report: TestReport = redactReport({
           testName,
           filePath: fileForName,
           tags: [],
@@ -3881,7 +3892,7 @@ export class SessionManager {
           ...(overallStatus === 'aborted' && { aborted: true }),
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
-        };
+        }, secretsNow());
         reportPath = await generateReport(report, session.reportOutputDir);
         logger.info(`Report saved: ${reportPath}`);
 

@@ -814,3 +814,122 @@ describe('test-runner — the env/data context reaches the step', () => {
     await fsp.rm(dir, { recursive: true, force: true });
   });
 });
+
+describe('test-runner — secrets stay out of what the run writes (stories/secret-redaction.md)', () => {
+  beforeEach(() => {
+    executeStepMock.mockReset();
+    executeBranchedStepMock.mockReset();
+    runInteractiveReplMock.mockReset();
+    launchBrowserMock.mockReset();
+    closeBrowserMock.mockReset();
+    resolveHooksMock.mockReset();
+    stepCacheInitMock.mockReset();
+    diagnoseFailureMock.mockReset();
+
+    launchBrowserMock.mockResolvedValue(makeSession());
+    closeBrowserMock.mockResolvedValue(undefined);
+    resolveHooksMock.mockResolvedValue({
+      before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
+    });
+    stepCacheInitMock.mockResolvedValue({
+      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
+    });
+    diagnoseFailureMock.mockResolvedValue(null);
+  });
+
+  it('masks the password on the console step line and throughout the returned report, while the step runs with the real value', async () => {
+    const { logger } = await import('../src/utils/logger.js');
+    const stepLine = vi.spyOn(logger, 'step').mockImplementation(() => {});
+    executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) => ({
+      index,
+      instruction,
+      status: 'passed',
+      durationMs: 1,
+      retried: false,
+      turns: [{
+        turnNumber: 1,
+        attemptNumber: 1,
+        timestamp: 't',
+        aiInteractions: [{
+          purpose: 'step',
+          requestMessages: [{ role: 'user', content: `## Current Step\n${instruction}` }],
+          response: '{"actions":[{"type":"type","selector":"#p","value":"hunter2!x"}]}',
+        }],
+        subActions: [
+          { index: 0, action: { type: 'type', selector: '#p', value: 'hunter2!x' }, durationMs: 1 },
+          { index: 1, action: { type: 'press', key: 'Enter' }, durationMs: 1 },
+        ],
+      }],
+      screenshotBase64: 'AAAAhunter2!xAAAA',
+      aiExplanation: `Did: ${instruction}`,
+    }));
+
+    try {
+      const instance: TestInstance = {
+        test: makeTest(['Enter the username {{username}}', 'Enter the password {{password}}']),
+        resolvedParameters: { username: 'octocat', password: 'hunter2!x' },
+      };
+      const report = await runTest(instance, makeConfig(), '');
+
+      // The executor got the resolved text.
+      expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+        'Enter the username octocat',
+        'Enter the password hunter2!x',
+      ]);
+      // The console line did not print the secret; the username is not one.
+      expect(stepLine.mock.calls.map((c) => c[2])).toEqual([
+        'Enter the username octocat',
+        'Enter the password ***',
+      ]);
+      // The report — what `aiui run` renders, summarises and appends to the
+      // test file — carries it nowhere but the screenshot bytes.
+      expect(report.status).toBe('passed');
+      expect(report.parameters).toEqual({ username: 'octocat', password: '***' });
+      const step = report.steps[1]!;
+      expect(step.instruction).toBe('Enter the password ***');
+      expect(step.aiExplanation).toBe('Did: Enter the password ***');
+      const turn = step.turns[0]!;
+      expect(turn.aiInteractions[0]!.requestMessages![0]!.content).toBe('## Current Step\nEnter the password ***');
+      expect(turn.aiInteractions[0]!.response).toBe('{"actions":[{"type":"type","selector":"#p","value":"***"}]}');
+      expect(turn.subActions[0]!.action).toEqual({ type: 'type', selector: '#p', value: '***' });
+      expect(turn.subActions[1]!.action).toEqual({ type: 'press', key: 'Enter' });
+      expect(step.screenshotBase64).toBe('AAAAhunter2!xAAAA');
+      const text = JSON.stringify({ ...report, steps: report.steps.map((s) => ({ ...s, screenshotBase64: '' })) });
+      expect(text).not.toContain('hunter2!x');
+    } finally {
+      stepLine.mockRestore();
+    }
+  });
+
+  it('masks the failure diagnosis too — it reads the live page, where the typed value can still sit', async () => {
+    const { logger } = await import('../src/utils/logger.js');
+    const stepLine = vi.spyOn(logger, 'step').mockImplementation(() => {});
+    executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) => ({
+      index, instruction, status: 'failed', durationMs: 1, retried: false, turns: [],
+      error: 'Could not submit after typing hunter2!x',
+    }));
+    diagnoseFailureMock.mockResolvedValue({
+      faultCategory: 'app',
+      confidence: 'high',
+      rootCause: 'The form rejected hunter2!x as too short',
+      suggestedFix: 'Use a longer password than hunter2!x',
+    });
+    const config = makeConfig();
+    config.ai = { ...config.ai, diagnoseFailures: true };
+
+    try {
+      const report = await runTest(
+        { test: makeTest(['Enter the password {{password}}']), resolvedParameters: { password: 'hunter2!x' } },
+        config,
+        '',
+      );
+      expect(report.status).toBe('failed');
+      expect(report.steps[0]!.error).toBe('Could not submit after typing ***');
+      expect(report.diagnosis?.rootCause).toBe('The form rejected *** as too short');
+      expect(report.diagnosis?.suggestedFix).toBe('Use a longer password than ***');
+      expect(JSON.stringify(report)).not.toContain('hunter2!x');
+    } finally {
+      stepLine.mockRestore();
+    }
+  });
+});

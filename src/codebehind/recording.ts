@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AIAction } from '../ai/types.js';
 import type { AssertionResult, StepResult, StepStatus } from '../report/types.js';
 import { logger } from '../utils/logger.js';
-import { isSecretName } from '../parser/parameters.js';
+import { isSecretName, secretValues, redact, redactDeep, redactMap } from '../utils/secrets.js';
 import { resolveCodeBehindCacheDir } from './loader.js';
 
 /**
@@ -84,26 +84,10 @@ export function recordingDirFor(testFilePath: string): string {
   return path.join(resolveCodeBehindCacheDir(resolved), `${base}${DIR_SUFFIX}`);
 }
 
-export { isSecretName };
-
-/** The values to redact from a recording: those of secret-named parameters,
- *  plus any the caller names (the environment's secrets). */
-export function secretValues(parameters: Record<string, string>, extra: string[] = []): string[] {
-  const fromParameters = Object.entries(parameters)
-    .filter(([name, value]) => isSecretName(name) && value.length > 0)
-    .map(([, value]) => value);
-  return [...new Set([...fromParameters, ...extra.filter((v) => v.length > 0)])];
-}
-
-/** Every occurrence of a secret value, replaced. Longest first, so a value
- *  that contains another is redacted whole. */
-export function redact(text: string, secrets: string[]): string {
-  let out = text;
-  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
-    out = out.split(secret).join('***');
-  }
-  return out;
-}
+/** The rule and the masking live in `src/utils/secrets.ts` now, shared with
+ *  the console step line and the report; re-exported for the callers that
+ *  learned them here. */
+export { isSecretName, secretValues, redact };
 
 /**
  * Write a run's recording. Replaces any earlier one for the test, so the
@@ -147,7 +131,7 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
         ...(ctx?.urlBefore !== undefined && { urlBefore: ctx.urlBefore }),
         ...(ctx?.urlAfter !== undefined && { urlAfter: ctx.urlAfter }),
         ...(result.pageUrl !== undefined && { pageUrl: result.pageUrl }),
-        actions: actionsOf(result).map((a) => redactAction(a, secrets)),
+        actions: actionsOf(result).map((a) => redactDeep(a, secrets)),
         ...(result.assertions && { assertions: result.assertions }),
         ...(result.outputs && { outputs: redactMap(result.outputs, secrets) }),
         durationMs: result.durationMs,
@@ -270,17 +254,3 @@ function actionsOf(result: StepResult): AIAction[] {
   return result.turns.flatMap((t) => t.subActions).filter((sa) => !sa.error).map((sa) => sa.action);
 }
 
-function redactAction(action: AIAction, secrets: string[]): AIAction {
-  if (secrets.length === 0) return action;
-  const out: Record<string, unknown> = { ...action };
-  for (const [k, v] of Object.entries(out)) {
-    if (typeof v === 'string') out[k] = redact(v, secrets);
-  }
-  return out as unknown as AIAction;
-}
-
-function redactMap(map: Record<string, string>, secrets: string[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(map)) out[k] = isSecretName(k) ? '***' : redact(v, secrets);
-  return out;
-}

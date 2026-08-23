@@ -1986,6 +1986,41 @@ describe('POST /errands', () => {
     expect(without).toEqual(['sign in as ${env.ERRAND_USER}']);
   });
 
+  it('masks a secret on the console step line (the MCP host keeps stderr) while the step runs with it', async () => {
+    // stories/secret-redaction.md. Under `aiui mcp` this line goes to
+    // stderr, which the host keeps; an errand has no report, so the line is
+    // its one framework-written output.
+    writeFileSync(path.join(projectRoot, '.env.uat'), ['ERRAND_USER=zoe', 'ERRAND_PASSWORD=hunter2!x', ''].join('\n'));
+    const { logger } = await import('../src/utils/logger.js');
+    const stepLine = vi.mocked(logger.step);
+    stepLine.mockClear();
+
+    const seen: string[] = [];
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, instruction, opts) => {
+      seen.push(instruction as string);
+      // Step 2 captures under a secret name, the way `[output: api_key]` does.
+      if ((idx as number) === 2) opts.resolvedParameters!.api_key = 'k-9';
+      return { index: idx as number, instruction: instruction as string, status: 'passed', turns: [], durationMs: 1, retried: false };
+    });
+    await api(
+      'POST',
+      '/errands',
+      errandBody({
+        steps: ['sign in as ${env.ERRAND_USER} with ${env.ERRAND_PASSWORD}', '[output: api_key] read the key', 'then type {{api_key}}'],
+        envName: 'uat',
+      }),
+    );
+    // An `[output: …]` step reaches the executor rewritten as a `[store as:]`
+    // with an enrichment appended after a newline; the first line is enough.
+    expect(seen.map((t) => t.split('\n')[0])).toEqual(['sign in as zoe with hunter2!x', 'read the key [store as: api_key]', 'then type k-9']);
+    expect(stepLine.mock.calls.map((c) => (c[2] as string).split('\n')[0])).toEqual([
+      'sign in as zoe with ***',
+      'read the key [store as: api_key]',
+      // Captured under a secret name one step earlier: masked from then on.
+      'then type ***',
+    ]);
+  });
+
   // -------------------------------------------------------------------------
   // The allow-list
   // -------------------------------------------------------------------------

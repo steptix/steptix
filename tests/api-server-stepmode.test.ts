@@ -1719,4 +1719,161 @@ type: skill
     // frames).
     expect(events.find((e) => e.type === 'frame:push')).toBeUndefined();
   });
+
+  describe('secrets stay out of what the server writes (stories/secret-redaction.md)', () => {
+    let root: string;
+    let mdFile: string;
+
+    beforeEach(async () => {
+      root = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-secrets-'));
+      await fs.writeFile(path.join(root, 'aiui.config.json'), '{}\n');
+      await fs.writeFile(
+        path.join(root, '.env.uat'),
+        ['GITHUB_USERNAME=octocat', 'GITHUB_PASSWORD=hunter2-uat-secret', ''].join('\n'),
+      );
+      mdFile = path.join(root, 'login.md');
+      await fs.writeFile(mdFile, '# login\n');
+    });
+
+    afterEach(async () => {
+      await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
+    });
+
+    /** A turn the way the executor records one: the prompt, the reply and
+     *  the action all carry the typed value. */
+    function turnTyping(value: string) {
+      return {
+        turnNumber: 1,
+        attemptNumber: 1,
+        timestamp: 't',
+        aiInteractions: [
+          {
+            purpose: 'step',
+            requestMessages: [{ role: 'user', content: `## Current Step\nEnter the password ${value}` }],
+            response: `{"actions":[{"type":"type","selector":"#p","value":"${value}"}]}`,
+          },
+        ],
+        subActions: [
+          { index: 0, action: { type: 'type', selector: '#p', value } as never, durationMs: 1 },
+          { index: 1, action: { type: 'press', key: 'Enter' } as never, durationMs: 1 },
+        ],
+      };
+    }
+
+    it('masks a secret-named parameter on the console step line and in the report, and nowhere the run needs it', async () => {
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const exec = vi.mocked(executeStep);
+      const defaultImpl = exec.getMockImplementation();
+      const { logger } = await import('../src/utils/logger.js');
+      const stepLine = vi.mocked(logger.step);
+      stepLine.mockClear();
+      const { generateReport } = await import('../src/report/generator.js');
+      const reportMock = vi.mocked(generateReport);
+      reportMock.mockClear();
+
+      const seen: string[] = [];
+      exec.mockImplementation(async (idx, _total, instr) => {
+        seen.push(instr);
+        return {
+          index: idx, instruction: instr, status: 'passed', durationMs: 1, retried: false,
+          turns: [turnTyping('hunter2!x')],
+          screenshotBase64: 'AAAAhunter2!xAAAA',
+          aiExplanation: 'Typed hunter2!x into the password field',
+        };
+      });
+
+      try {
+        const sessionId = 'secrets-param-' + Date.now();
+        const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+        const events: Array<{ type: string; [k: string]: any }> = [];
+        for await (const ev of sseEvents(url, {
+          steps: ['Enter the username {{username}}', 'Enter the password {{password}}'],
+          sourceLines: [1, 2],
+          testFilePath: mdFile,
+          parameters: { username: 'octocat', password: 'hunter2!x' },
+        })) {
+          events.push(ev);
+          if (ev.type === 'done') break;
+        }
+
+        // The step ran with the real value…
+        expect(seen).toEqual(['Enter the username octocat', 'Enter the password hunter2!x']);
+        // …the console line did not print it (the username is not a secret
+        // by name, and resolved values are what the line is for)…
+        expect(stepLine.mock.calls.map((c) => c[2])).toEqual([
+          'Enter the username octocat',
+          'Enter the password ***',
+        ]);
+        // …and the report the generator got carries it nowhere: not in the
+        // parameters, not in the prompt, the reply, the action or the
+        // explanation. The screenshot is untouched; so is the press key.
+        expect(reportMock).toHaveBeenCalledTimes(1);
+        const report = reportMock.mock.calls[0]![0];
+        expect(report.parameters).toEqual({ username: 'octocat', password: '***' });
+        const turn = report.steps[1]!.turns[0]!;
+        expect(turn.aiInteractions[0]!.requestMessages![0]!.content).toBe('## Current Step\nEnter the password ***');
+        expect(turn.aiInteractions[0]!.response).toBe('{"actions":[{"type":"type","selector":"#p","value":"***"}]}');
+        expect(turn.subActions[0]!.action).toEqual({ type: 'type', selector: '#p', value: '***' });
+        expect(turn.subActions[1]!.action).toEqual({ type: 'press', key: 'Enter' });
+        expect(report.steps[1]!.aiExplanation).toBe('Typed *** into the password field');
+        expect(report.steps[1]!.screenshotBase64).toBe('AAAAhunter2!xAAAA');
+        expect(JSON.stringify({ ...report, steps: report.steps.map((s) => ({ ...s, screenshotBase64: '' })) })).not.toContain('hunter2!x');
+        // The wire is not the framework's output: the client that sent the
+        // value gets the run's events as they happened.
+        expect(events.some((e) => e.type === 'done' && e.status === 'passed')).toBe(true);
+      } finally {
+        exec.mockReset();
+        if (defaultImpl) exec.mockImplementation(defaultImpl);
+      }
+    });
+
+    it('masks an env secret referenced inline, and a value captured under a secret name mid-run', async () => {
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const exec = vi.mocked(executeStep);
+      const defaultImpl = exec.getMockImplementation();
+      const { logger } = await import('../src/utils/logger.js');
+      const stepLine = vi.mocked(logger.step);
+      stepLine.mockClear();
+      const { generateReport } = await import('../src/report/generator.js');
+      const reportMock = vi.mocked(generateReport);
+      reportMock.mockClear();
+
+      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
+        // Step 2 captures an API token the way `[as: api_token]` does —
+        // written straight into the run's parameter map.
+        if (idx === 2 && opts?.resolvedParameters) opts.resolvedParameters['api_token'] = 'tok-from-page';
+        return {
+          index: idx, instruction: instr, status: 'passed', durationMs: 1, retried: false,
+          turns: [],
+          ...(idx === 2 && { aiExplanation: 'Read tok-from-page off the page' }),
+        };
+      });
+
+      try {
+        const sessionId = 'secrets-env-' + Date.now();
+        const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+        for await (const ev of sseEvents(url, {
+          steps: ['Enter ${env.GITHUB_PASSWORD} for ${env.GITHUB_USERNAME}', 'Read the API token', 'Send {{api_token}}'],
+          sourceLines: [1, 2, 3],
+          testFilePath: mdFile,
+          envName: 'uat',
+        })) {
+          if (ev.type === 'done') break;
+        }
+
+        expect(stepLine.mock.calls.map((c) => c[2])).toEqual([
+          'Enter *** for octocat',
+          'Read the API token',
+          // Captured under a secret name one step earlier: masked from then on.
+          'Send ***',
+        ]);
+        const report = reportMock.mock.calls[0]![0];
+        expect(report.steps[1]!.aiExplanation).toBe('Read *** off the page');
+        expect(report.parameters!['api_token']).toBe('***');
+      } finally {
+        exec.mockReset();
+        if (defaultImpl) exec.mockImplementation(defaultImpl);
+      }
+    });
+  });
 });
