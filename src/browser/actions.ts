@@ -297,12 +297,21 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
     throw new Error('navigate action requires a url or value');
   }
 
-  // Resolve relative URLs against baseUrl
-  if (url.startsWith('/') && baseUrl) {
-    const base = baseUrl.replace(/\/$/, '');
-    url = `${base}${url}`;
-  } else if (!url.startsWith('http') && baseUrl) {
-    url = `${baseUrl.replace(/\/$/, '')}/${url}`;
+  // Resolve relative URLs against baseUrl. A URL carrying its own navigable
+  // scheme is absolute and passes through untouched — concatenating it onto
+  // baseUrl produced `<base>/file:///…` (net::ERR_FILE_NOT_FOUND) whenever a
+  // test used a file:// baseUrl, and `<base>/about:blank` on the AI's retry.
+  // Deliberately an allowlist rather than `new URL(url)`: `localhost:3000`
+  // and Windows paths like `C:/x` parse with schemes (`localhost:`, `c:`)
+  // but must keep the baseUrl-relative handling they have today.
+  const hasAbsoluteScheme = /^(https?|file|about|data|blob|chrome):/i.test(url);
+  if (!hasAbsoluteScheme && baseUrl) {
+    if (url.startsWith('/')) {
+      const base = baseUrl.replace(/\/$/, '');
+      url = `${base}${url}`;
+    } else {
+      url = `${baseUrl.replace(/\/$/, '')}/${url}`;
+    }
   }
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
