@@ -117,11 +117,13 @@ describe('TestBench code-behind compile', function () {
     assert.ok(request.sessionId.length > 0, 'sessionId must name the document\'s session');
   });
 
-  it('every run asks the server to keep step context, so Compile can use it', async () => {
+  it('an ordinary run does not ask the server to capture; the compile names the run\'s session', async () => {
+    // stories/codebehind-recording-on-disk.md: capturing is the compile's
+    // job. A Run sends no `captureStepContext`; the compile's own Record, in
+    // this document's session, is the recording.
     void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
-    assert.equal(fake.requests[0].captureStepContext, true);
-    // And the compile names the same session the run used.
+    assert.equal(fake.requests[0].captureStepContext, undefined);
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
     void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
@@ -190,6 +192,7 @@ describe('TestBench code-behind compile', function () {
           test: 'compile-me.md', totalSteps: 2, compiled: 1, kept: 0, keptAi: 0, rounds: 1,
           tokensUsed: 4_000, written: [], unproven: [], writtenOffAi: [],
           stoppedAt: { step: 2, error: 'no such button' }, notAttempted: [2],
+          recordingDir: '/x/.aiui-codebehind-cache/compile-me.recording',
         },
       },
     ];
@@ -222,6 +225,7 @@ describe('TestBench code-behind compile', function () {
           unproven: [],
           writtenOffAi: [],
           notAttempted: [],
+          recordingDir: '/x/.aiui-codebehind-cache/compile-me.recording',
           error: 'locator timeout',
           candidatePath: '/x/.aiui-codebehind-cache/compile-me.steps.ts.candidate',
         },
@@ -402,6 +406,7 @@ function greenCompile(file, content) {
         unproven: [],
         writtenOffAi: [],
         notAttempted: [],
+        recordingDir: '/x/.aiui-codebehind-cache/compile-me.recording',
       },
     },
   ];

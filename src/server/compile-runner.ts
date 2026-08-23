@@ -24,6 +24,7 @@ import {
 import { applyEnvToAiConfig } from './run-helpers.js';
 import type { ProjectBundle, ProjectBundleResolver } from './project-bundle.js';
 import type { RunDetails, RunEvent, SessionManager, StepRequest } from './session-manager.js';
+import { recordingDirFor } from '../codebehind/recording.js';
 
 /**
  * `POST /codebehind/compile` (stories/codebehind-compile.md §Server, amended by
@@ -37,10 +38,11 @@ import type { RunDetails, RunEvent, SessionManager, StepRequest } from './sessio
  * project except the gitignored candidate — `dryRun` is forced on, and the
  * proposed files go back on the wire for TestBench to apply through a diff.
  *
- * Given the caller's session, it compiles from that session's last run when
- * the run can serve as a recording — green, or red as a prefix — and records
- * *in* that session when it cannot, leaving it open where the run ended, as a
- * Run would.
+ * Given the caller's session, it records *in* that session — the browser the
+ * author watches — and leaves it open where the run ended, as a Run would.
+ * Every compile records; the recording is written beside the test by the run
+ * itself (stories/codebehind-recording-on-disk.md), and nothing of it is kept
+ * on the session.
  */
 
 export interface CompileRequest {
@@ -63,11 +65,11 @@ export interface CompileRequest {
   sections?: Record<string, { name: string; headingLine: number; steps: string[]; stepLines: number[] }>;
   envName?: string;
   /**
-   * The caller's session — the one TestBench runs this test in. Its last run
-   * is the recording when it can be (it started at step 1 and kept the DOM
-   * either side of its steps), and otherwise Record runs in it, not in a
-   * throwaway session, and leaves it open. Without it, Record runs in a fresh
-   * session that is closed afterwards.
+   * The caller's session — the one TestBench runs this test in. Record runs
+   * in it, not in a throwaway session, and leaves it open where the run ended,
+   * as a Run would. Without it, Record runs in a fresh session that is closed
+   * afterwards. Every compile records (stories/codebehind-recording-on-disk.md);
+   * the recording goes to disk beside the test, not to the session.
    */
   sessionId?: string;
   select?: CompileSelect;
@@ -256,8 +258,6 @@ export class CodeBehindCompiler {
       tokenTracker,
     );
 
-    const recorded = this.reuseRun(request.sessionId, test, emit);
-
     // What a Run resolves `$VAR` parameters against. TestBench composes it on
     // the client: the nearest `.env` walking up from the test file, with
     // `.env.<name>` overlaid when an env is active. The server's env bundle
@@ -288,6 +288,12 @@ export class CodeBehindCompiler {
       });
     }
 
+    emit({
+      type: 'output',
+      kind: 'info',
+      msg: `Recording to ${recordingDirFor(testFilePath)}`,
+    });
+
     return compileTest({
       test,
       config: bundle.config,
@@ -298,76 +304,15 @@ export class CodeBehindCompiler {
       ...(dataRow && { dataRow: dataRow.row }),
       ...(request.select && { select: request.select }),
       ...(request.maxRounds !== undefined && { maxRounds: request.maxRounds }),
-      // Always. The server writes nothing under the project; the proposed files
-      // ride back on `compile:result` and TestBench applies them through a diff
-      // so the write is undoable and shows up in Source Control.
+      // Always. The server writes nothing under the project except the
+      // recording and the candidate in the gitignored cache dir; the proposed
+      // files ride back on `compile:result` and TestBench applies them through
+      // a diff so the write is undoable and shows up in Source Control.
       dryRun: true,
-      ...(recorded && { recorded }),
       onEvent: (event) => emit(toWireEvent(event)),
       ...(signal && { signal }),
       runner: this.sessionRunner(test, bundle, envName, emit, request.sessionId),
     });
-  }
-
-  /**
-   * The caller's last run, when it can serve as the recording.
-   *
-   * It can when it started at step 1 — the whole test, or a prefix of it — and
-   * its steps carry the DOM either side, which a run captures when the client
-   * asked it to (`StepRequest.captureStepContext`). Green or red: a run that
-   * stopped at step k is a recording of 1..k-1, and the core compiles that
-   * prefix. Every refusal says which, because "it recorded anyway" is
-   * otherwise a silent extra run of the whole test.
-   */
-  private reuseRun(
-    sessionId: string | undefined,
-    test: ParsedTest,
-    emit: CompileEventListener,
-  ): CompileRunOutcome | undefined {
-    if (!sessionId) return undefined;
-    const decline = (why: string): undefined => {
-      emit({
-        type: 'output',
-        kind: 'warn',
-        msg: `Cannot compile from session ${sessionId}'s last run: ${why}. Recording in it instead.`,
-      });
-      return undefined;
-    };
-
-    const details = this.sessions.lastRunDetails(sessionId);
-    if (!details) {
-      emit({
-        type: 'output',
-        kind: 'info',
-        msg: `Session ${sessionId} has no run to compile from — recording in it.`,
-      });
-      return undefined;
-    }
-    if (details.coverage === 'partial') return decline('it started partway into the test');
-    const steps = outcomeSteps(details, test.steps.length);
-    const captured = steps.filter((s) => s?.stepContext?.domBefore !== undefined).length;
-    if (captured === 0) return decline('its step results carry no DOM snapshots');
-    const ran = steps.filter((s) => s !== undefined).length;
-    if (details.coverage === 'whole' && details.status === 'passed' && ran !== test.steps.length) {
-      return decline(`it ran ${ran} step(s) and the test has ${test.steps.length} now`);
-    }
-
-    const passed = steps.findIndex((s) => s?.status !== 'passed');
-    emit({
-      type: 'output',
-      kind: 'info',
-      msg:
-        details.status === 'passed' && passed < 0
-          ? `Compiling from session ${sessionId}'s last run (${ran} step(s), green, ${captured} with page context).`
-          : `Compiling from session ${sessionId}'s last run — it stopped at step ${passed + 1}; ` +
-            'the steps before it are the recording.',
-    });
-    return {
-      status: details.status,
-      steps,
-      resolvedParameters: details.parameters,
-      tokensUsed: details.tokens,
-    };
   }
 
   /**

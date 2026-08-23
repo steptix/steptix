@@ -29,6 +29,7 @@ import { executeToolStep } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
+import { writeRecording } from '../codebehind/recording.js';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -1049,6 +1050,19 @@ export async function runTest(
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
     const timedOut = stepResults.length < stepLimit && !bail;
     overallStatus = failedSteps > 0 || timedOut ? 'failed' : 'passed';
+
+    // The recording, beside the test, when this run was asked to capture —
+    // which is a compile's Record (stories/codebehind-recording-on-disk.md).
+    // Written here, once the run is over, and never kept in memory past it.
+    if (extras.captureStepContext) {
+      await writeRecording(test.filePath, {
+        steps: stepResults,
+        status: overallStatus,
+        startedAt: new Date(startTime).toISOString(),
+        parameters: resolvedParameters,
+        source: 'cli',
+      });
+    }
 
     logger.testEnd(test.title, overallStatus === 'passed', durationMs);
     logger.info(`Tokens used: ${tokenTracker.getSummary()}`);

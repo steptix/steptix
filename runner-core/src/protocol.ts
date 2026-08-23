@@ -335,6 +335,10 @@ export interface CompileSummary {
   stoppedAt?: { step: number; error: string };
   /** Selected steps the prefix never reached; nothing was generated for them. */
   notAttempted: number[];
+  /** Where the recording, the candidate and any replay failure were written —
+   *  the test's `.aiui-codebehind-cache/<name>.recording/`
+   *  (stories/codebehind-recording-on-disk.md). */
+  recordingDir: string;
 }
 
 /**
@@ -382,9 +386,9 @@ export interface CompileRequest {
   sections?: Record<string, { name: string; headingLine: number; steps: string[]; stepLines: number[] }>;
   envName?: string;
   /**
-   * The caller's session — the one this test runs in. Its last run is the
-   * recording when it can be (green, or red as a prefix, with step context);
-   * otherwise Record runs in it and leaves it open, as a Run would.
+   * The caller's session — the one this test runs in. Record runs in it and
+   * leaves it open, as a Run would; every compile records, to disk beside the
+   * test (stories/codebehind-recording-on-disk.md).
    */
   sessionId?: string;
   select?: { onlyStale?: boolean; all?: boolean; steps?: number[] };

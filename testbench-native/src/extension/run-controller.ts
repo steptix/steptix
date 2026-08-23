@@ -2185,10 +2185,6 @@ export class RunController {
         steps: stepInstructions,
         fullSteps: fullStepInstructions,
         sourceLines: stepLines,
-        // Every run keeps the DOM either side of its steps, so the run the
-        // author just watched is what Compile compiles from — no second run of
-        // the test (stories/codebehind-compile-as-a-run.md).
-        captureStepContext: true,
         env,
         ...(envName && { envName }),
         ...(dataSources && Object.keys(dataSources).length > 0 && { dataSources }),

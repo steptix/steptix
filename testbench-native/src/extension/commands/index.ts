@@ -104,7 +104,8 @@ export function registerCommands(
     // the caller (and every test) waiting on the user.
     if (!outcome.ok) {
       const s = outcome.summary;
-      const actions = s?.candidatePath ? ['Show log', 'Open candidate'] : ['Show log'];
+      const actions = ['Show log', ...(s?.recordingDir ? ['Open recording'] : [])];
+      if (s?.candidatePath) actions.push('Open candidate');
       void vscode.window
         .showErrorMessage(
           `Compile failed for ${label}: ${outcome.error ?? 'unknown error'}`,
@@ -112,6 +113,7 @@ export function registerCommands(
         )
         .then(async (choice) => {
           if (choice === 'Show log') getOutputChannel().show(true);
+          if (choice === 'Open recording' && s?.recordingDir) await revealRecording(s.recordingDir);
           if (choice === 'Open candidate' && s?.candidatePath) {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.candidatePath));
             await vscode.window.showTextDocument(doc, { preview: false });
@@ -148,6 +150,7 @@ export function registerCommands(
           `.${partial} Used ${tokens} tokens; the compiled steps now cost 0.`,
         'Apply',
         'Open diff',
+        'Open recording',
         'Show log',
       )
       .then(async (choice) => {
@@ -157,6 +160,7 @@ export function registerCommands(
         if (choice === 'Open diff') {
           await diffs.open({ testFilePath: controller.document.uri.fsPath, files });
         }
+        if (choice === 'Open recording' && summary?.recordingDir) await revealRecording(summary.recordingDir);
         if (choice === 'Show log') getOutputChannel().show(true);
       });
   };
@@ -1031,6 +1035,21 @@ function refuseStaleResume(tracker: ActiveFileTracker, uri: vscode.Uri): void {
     'TestBench: the paused step is no longer runnable on its own — use Run All',
     4000,
   );
+}
+
+/**
+ * Reveal the compile's recording — the DOM either side of every step, the
+ * candidate, any replay failure — in the Explorer
+ * (stories/codebehind-recording-on-disk.md §What the author sees). The
+ * directory may not exist when a compile failed before it recorded; say so
+ * rather than reveal nothing.
+ */
+async function revealRecording(dir: string): Promise<void> {
+  if (!fs.existsSync(dir)) {
+    vscode.window.showInformationMessage(`No recording at ${dir} — the compile did not get as far as recording.`);
+    return;
+  }
+  await vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(dir));
 }
 
 /**

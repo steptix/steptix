@@ -73,10 +73,10 @@ export interface StreamStepsRequest {
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */
   sourceLines?: number[];
   /**
-   * Keep the DOM either side of every step on the run's results, so this run
-   * is a recording `POST /codebehind/compile` can use instead of running the
-   * test again (stories/codebehind-compile-as-a-run.md). TestBench sends it
-   * on every run.
+   * Write the DOM either side of every step to the recording beside the test
+   * when the run ends (stories/codebehind-recording-on-disk.md). How a
+   * compile's own Record asks for its input; nothing sends it on an ordinary
+   * run.
    */
   captureStepContext?: boolean;
   /**
