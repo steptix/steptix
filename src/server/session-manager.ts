@@ -129,6 +129,17 @@ export interface StepRequest {
    */
   sourceLines?: number[];
   /**
+   * Keep the DOM + URL either side of every step on the run's step results
+   * (stories/codebehind-compile-as-a-run.md §Ordinary runs capture what a
+   * compile needs). That is what `POST /codebehind/compile` generates from,
+   * so a run that captured it is a recording and the compile skips Record.
+   * One extra DOM snapshot per step; a cache hit also takes the turn-1
+   * snapshot it would otherwise skip. The only one of compile's run knobs on
+   * the wire, because it only retains more — the ones that change what
+   * executes stay in `InternalRunOptions`.
+   */
+  captureStepContext?: boolean;
+  /**
    * Absolute path to the project's skills directory. When supplied, the
    * server runs `expandSkills` over `steps`, flattens `[skill: ...]`
    * invocations, and emits `frame:push` / `frame:pop` events around each
@@ -440,15 +451,24 @@ export interface RunDetails {
   /** The run's final parameter map, captures included. */
   parameters: Record<string, string>;
   tokens: number;
+  /**
+   * How much of the test this run described. `whole`: every step as the test
+   * stands. `prefix`: the first N steps (a breakpoint-truncated batch), so a
+   * compile can treat it as a recording that stopped at N+1. `partial`: a
+   * continuation or a re-run from the middle — of no use to a compile, which
+   * needs the steps in order from the first.
+   */
+  coverage: 'whole' | 'prefix' | 'partial';
 }
 
 /**
  * Knobs no HTTP client can set (stories/codebehind-compile.md §Server).
  *
  * The compile endpoint drives this same session machinery in-process, and
- * needs four things from a run that no test author ever asks for. They are
+ * needs three things from a run that no test author ever asks for. They are
  * kept off `StepRequest` on purpose: that type is the wire, and a field there
- * is a field the world can set.
+ * is a field the world can set. (A fourth, capturing step context, only
+ * retains more and went on the wire — `StepRequest.captureStepContext`.)
  */
 export interface InternalRunOptions {
   codeBehind?: {
@@ -472,8 +492,6 @@ export interface InternalRunOptions {
     disabled?: boolean;
     /** An entry that throws fails the step instead of healing under AI. */
     strict?: boolean;
-    /** Capture DOM + URL either side of every step (record). */
-    captureContext?: boolean;
   };
   /** Receives the full step records the `StepResponse` folds away. */
   onRunDetails?: (details: RunDetails) => void;
@@ -738,7 +756,7 @@ interface ManagedSession {
   lastEffectiveSettings?: EffectiveSettings;
   /**
    * The last completed run, in full — what `POST /codebehind/compile` with
-   * `fromSessionId` compiles from instead of recording a fresh run
+   * `sessionId` compiles from instead of recording a fresh run
    * (stories/codebehind-compile.md §Server). Absent until the session has run
    * once, and gone the moment the session is.
    */
@@ -1355,7 +1373,7 @@ export class SessionManager {
    * guessing a timeout. Survives session deletion (a browser-closing stop).
    */
   /**
-   * The last completed run of an OPEN session, in full — the `fromSessionId`
+   * The last completed run of an OPEN session, in full — the `sessionId`
    * input to a compile. Null when the session is gone, closed, or has not run,
    * which is the compile endpoint's cue to record instead.
    */
@@ -1363,6 +1381,20 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session || session.status === 'closed') return null;
     return session.lastRunDetails ?? null;
+  }
+
+  /**
+   * Is this session open, and is a run in flight in it?
+   *
+   * `null` when there is no such open session. Unlike `getSession` this touches
+   * no page — it is a yes/no the compiler asks before recording in a caller's
+   * session, and a paused run (step mode, a tool debugger) reads as
+   * `executing` because it is: the batch is parked inside it.
+   */
+  sessionStatus(sessionId: string): 'active' | 'executing' | null {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status === 'closed') return null;
+    return session.status === 'executing' ? 'executing' : 'active';
   }
 
   getLastRun(sessionId: string): LastRunInfo {
@@ -3392,7 +3424,7 @@ export class SessionManager {
                 cacheKey: stepCacheKey,
                 ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
                 ...(cb?.strict !== undefined && { codeBehindStrict: cb.strict }),
-                ...(cb?.captureContext !== undefined && { captureStepContext: cb.captureContext }),
+                ...(request.captureStepContext === true && { captureStepContext: true }),
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.
@@ -3907,12 +3939,25 @@ export class SessionManager {
     // Hand the whole run to an in-process caller (the compiler). After the
     // sidecar, so a compile that reuses this run sees the same disk state a
     // fresh one would.
+    // A batch that is a strict prefix of the full step list is a recording the
+    // compile can use up to where it stopped; anything starting later is not.
+    const coverage: RunDetails['coverage'] =
+      request.startAt !== undefined
+        ? 'partial'
+        : !isSubsetBatch
+          ? 'whole'
+          : request.fullSteps !== undefined &&
+              request.steps.length < request.fullSteps.length &&
+              request.steps.every((step, i) => step === request.fullSteps![i])
+            ? 'prefix'
+            : 'partial';
     internal?.onRunDetails?.({
       steps: fullStepResults,
       parameters: { ...resolvedParameters },
       tokens: runTokens.total,
+      coverage,
     });
-    // Retained for `POST /codebehind/compile` with `fromSessionId` — "compile
+    // Retained for `POST /codebehind/compile` with `sessionId` — "compile
     // from this run", which skips the Record phase entirely. Kept on the
     // session rather than the manager's `lastRunInfo` because it dies with the
     // session, which is exactly the window the story says the id is valid for.
@@ -3920,6 +3965,7 @@ export class SessionManager {
       steps: fullStepResults,
       parameters: { ...resolvedParameters },
       tokens: runTokens.total,
+      coverage,
       status: overallStatus === 'passed' ? 'passed' : 'failed',
     };
 

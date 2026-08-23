@@ -125,7 +125,16 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
   }
 
   printSummary(result, Boolean(opts.dryRun));
-  process.exit(result.status === 'green' ? 0 : 1);
+  process.exit(exitCodeFor(result.status));
+}
+
+/**
+ * 0 green, 2 partial, 1 failed — so a script can tell "everything compiled"
+ * from "some did, and the files are written" from "nothing did"
+ * (stories/codebehind-compile-as-a-run.md §Write what passed).
+ */
+export function exitCodeFor(status: CompileResult['status']): number {
+  return status === 'green' ? 0 : status === 'partial' ? 2 : 1;
 }
 
 /**
@@ -191,19 +200,36 @@ function printEvent(event: CompileEvent): void {
 function printSummary(result: CompileResult, dryRun: boolean): void {
   const s = result.summary;
   console.log();
-  if (result.status === 'green') {
+  if (result.status !== 'failed') {
     const written = dryRun
       ? 'nothing written (dry run)'
       : s.written.length === 0
         ? 'nothing to write'
         : s.written.map((f) => path.relative(process.cwd(), f)).join(', ');
-    console.log(
-      chalk.green(
-        `✓ Compiled ${path.basename(s.test)}: ${s.compiled} of ${s.totalSteps} step(s) as code` +
-          (s.keptAi > 0 ? `, ${s.keptAi} kept AI` : '') +
-          (s.kept > 0 ? `, ${s.kept} unchanged` : ''),
-      ),
-    );
+    const headline =
+      `Compiled ${path.basename(s.test)}: ${s.compiled} of ${s.totalSteps} step(s) as code` +
+      (s.keptAi > 0 ? `, ${s.keptAi} kept AI` : '') +
+      (s.kept > 0 ? `, ${s.kept} unchanged` : '');
+    console.log(result.status === 'green' ? chalk.green(`✓ ${headline}`) : chalk.yellow(`◐ ${headline}`));
+    if (s.stoppedAt) {
+      console.log(
+        chalk.yellow(`  Step ${s.stoppedAt.step} failed under AI — ${s.stoppedAt.error}`) +
+          (s.notAttempted.length > 0 ? ` Not attempted: ${listSteps(s.notAttempted)}.` : ''),
+      );
+      console.log('  Fix that step, run, and compile again for the rest.');
+    }
+    if (s.writtenOffAi.length > 0) {
+      console.log(
+        `  Kept AI after replay failures: ${listSteps(s.writtenOffAi)} — ` +
+          'fix the cause, then Compile This Step (or --steps) to try again.',
+      );
+    }
+    if (s.unproven.length > 0) {
+      console.log(
+        `  Unproven: ${listSteps(s.unproven)} — written as code; the next run proves or flags them.`,
+      );
+    }
+    if (result.status === 'partial' && s.error) console.log(`  Reason:   ${s.error}`);
     console.log(`  Written:  ${written}`);
   } else {
     console.log(chalk.red(`✗ Compile failed: ${s.error ?? 'unknown error'}`));
@@ -215,11 +241,21 @@ function printSummary(result: CompileResult, dryRun: boolean): void {
   }
   console.log(`  Rounds:   ${s.rounds}`);
   console.log(`  Tokens:   ${s.tokensUsed.toLocaleString()}`);
-  if (result.status === 'green' && dryRun) {
+  if (result.status !== 'failed' && dryRun) {
     for (const [file, content] of Object.entries(result.files)) {
       console.log(chalk.bold(`\n--- ${path.relative(process.cwd(), file)} (candidate) ---`));
       console.log(content);
     }
   }
   console.log();
+}
+
+/** "steps 6–9", "step 4", "steps 2, 5". */
+function listSteps(numbers: number[]): string {
+  if (numbers.length === 1) return `step ${numbers[0]}`;
+  const sorted = [...numbers].sort((a, b) => a - b);
+  const contiguous = sorted.every((n, i) => i === 0 || n === sorted[i - 1]! + 1);
+  return contiguous && sorted.length > 1
+    ? `steps ${sorted[0]}–${sorted[sorted.length - 1]}`
+    : `steps ${sorted.join(', ')}`;
 }

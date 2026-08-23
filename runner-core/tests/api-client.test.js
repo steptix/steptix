@@ -232,7 +232,7 @@ test('compileCodeBehind: posts the compile route with the request body', async (
 
   const events = await collect(
     client.compileCodeBehind(
-      { testFilePath: '/p/tests/a.md', select: { steps: [3] }, envName: 'ci' },
+      { testFilePath: '/p/tests/a.md', select: { steps: [3] }, envName: 'ci', sessionId: 'editor-1' },
       new AbortController().signal,
     ),
   );
@@ -245,7 +245,46 @@ test('compileCodeBehind: posts the compile route with the request body', async (
   assert.equal(body.testFilePath, '/p/tests/a.md');
   assert.deepEqual(body.select, { steps: [3] });
   assert.equal(body.envName, 'ci');
+  // The caller's session rides the body verbatim — the server compiles from
+  // its last run, or records in it.
+  assert.equal(body.sessionId, 'editor-1');
   assert.equal(events.length, 1);
+});
+
+test('compileCodeBehind: yields the inner run events of a Record and a Replay as compile:run', async () => {
+  const frames = [
+    'event: compile:phase\ndata: {"type":"compile:phase","phase":"record","message":"running 2 step(s)"}\n\n',
+    'event: compile:run\ndata: {"type":"compile:run","phase":"record","event":{"type":"step:start","line":4}}\n\n',
+    'event: compile:run\ndata: {"type":"compile:run","phase":"record","event":{"type":"step:pass","line":4}}\n\n',
+    'event: compile:run\ndata: {"type":"compile:run","phase":"replay","round":1,"event":{"type":"step:pass","line":4,"fromCodeBehind":true}}\n\n',
+    'event: compile:run\ndata: {"type":"compile:run","phase":"replay","round":1,"event":{"type":"step:fail","line":5,"error":"locator timeout","screenshot":"AAAA"}}\n\n',
+    'event: compile:done\ndata: {"type":"compile:done","status":"partial","message":"some"}\n\n',
+    'event: compile:result\ndata: {"type":"compile:result","status":"partial","files":{},"summary":{"test":"/p/tests/a.md","unproven":[],"writtenOffAi":[2],"notAttempted":[]}}\n\n',
+  ];
+  const client = new ApiClient({
+    serverUrl: 'http://x:1',
+    apiKey: 'k',
+    fetch: async () => streamingResponse(frames),
+  });
+  const events = await collect(
+    client.compileCodeBehind({ testFilePath: '/p/tests/a.md' }, new AbortController().signal),
+  );
+  const runs = events.filter((e) => e.type === 'compile:run');
+  assert.deepEqual(
+    runs.map((r) => [r.phase, r.round, r.event.type, r.event.line]),
+    [
+      ['record', undefined, 'step:start', 4],
+      ['record', undefined, 'step:pass', 4],
+      ['replay', 1, 'step:pass', 4],
+      ['replay', 1, 'step:fail', 5],
+    ],
+  );
+  // The inner event is whole: the glyph flag and the failure's evidence survive.
+  assert.equal(runs[2].event.fromCodeBehind, true);
+  assert.equal(runs[3].event.error, 'locator timeout');
+  assert.equal(runs[3].event.screenshot, 'AAAA');
+  assert.equal(events.at(-1).status, 'partial');
+  assert.deepEqual(events.at(-1).summary.writtenOffAi, [2]);
 });
 
 test('compileCodeBehind: yields phases, steps and the final result in order', async () => {

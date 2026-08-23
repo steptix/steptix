@@ -593,3 +593,51 @@ describe('test-runner — captured `as` values reach the report', () => {
     expect(report.steps[1]!.outputs).toEqual({ debugValue: '42' });
   });
 });
+
+describe('test-runner — stopAfterStep runs a prefix as a passed run', () => {
+  beforeEach(() => {
+    executeStepMock.mockReset();
+    executeBranchedStepMock.mockReset();
+    runInteractiveReplMock.mockReset();
+    launchBrowserMock.mockReset();
+    closeBrowserMock.mockReset();
+    resolveHooksMock.mockReset();
+    stepCacheInitMock.mockReset();
+    diagnoseFailureMock.mockReset();
+
+    launchBrowserMock.mockResolvedValue(makeSession());
+    closeBrowserMock.mockResolvedValue(undefined);
+    resolveHooksMock.mockResolvedValue({
+      before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
+    });
+    stepCacheInitMock.mockResolvedValue({
+      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
+    });
+    diagnoseFailureMock.mockResolvedValue(null);
+  });
+
+  it('executes the first N steps only, and does not read the short run as a timeout', async () => {
+    // A prefix compile's replay (stories/codebehind-compile-as-a-run.md) runs
+    // the steps it compiled and not the ones the recording never reached.
+    // Without the knob the runner would read "fewer results than steps" as a
+    // timeout and fail the run.
+    executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) =>
+      passingResult(index, instruction),
+    );
+
+    const report = await runTest(
+      makeInstance(['step one', 'step two', 'step three']),
+      makeConfig(),
+      '',
+      undefined,
+      { stopAfterStep: 2 },
+    );
+
+    expect(executeStepMock).toHaveBeenCalledTimes(2);
+    expect(report.status).toBe('passed');
+    expect(report.steps.map((s) => s.index)).toEqual([1, 2]);
+    // The report still describes the whole test, so a caller indexing by
+    // expanded step sees the third slot empty rather than shifted.
+    expect(report.totalSteps).toBe(3);
+  });
+});

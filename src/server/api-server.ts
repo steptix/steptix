@@ -718,6 +718,14 @@ export function createApiServer(
       ) {
         request.fullSteps = body.fullSteps as string[];
       }
+      // Keep the DOM either side of every step on the run's results, so this
+      // run is a recording `POST /codebehind/compile` can use instead of
+      // running the test again (stories/codebehind-compile-as-a-run.md). This
+      // line is load-bearing for the reason the `sections` one is: a field the
+      // allow-list does not name is dropped, silently.
+      if (body.captureStepContext === true) {
+        request.captureStepContext = true;
+      }
       // Re-run-with-variables fields (testbench "re-run a skill step"):
       // `seedScope` injects captured/runtime vars before the run; `startAt`
       // starts execution partway into the expanded skill body. Both optional.
@@ -888,6 +896,9 @@ export function createApiServer(
           rounds: 0,
           tokensUsed: 0,
           written: [],
+          unproven: [],
+          writtenOffAi: [],
+          notAttempted: [],
           error: message,
         },
       });
@@ -2413,11 +2424,11 @@ export function parseCompileRequest(raw: unknown): CompileRequest | string {
     request.envName = body.envName;
   }
 
-  if (body.fromSessionId !== undefined) {
-    if (typeof body.fromSessionId !== 'string' || body.fromSessionId === '') {
-      return '"fromSessionId" must be a non-empty string';
+  if (body.sessionId !== undefined) {
+    if (typeof body.sessionId !== 'string' || body.sessionId === '') {
+      return '"sessionId" must be a non-empty string';
     }
-    request.fromSessionId = body.fromSessionId;
+    request.sessionId = body.sessionId;
   }
 
   if (body.select !== undefined && body.select !== null) {

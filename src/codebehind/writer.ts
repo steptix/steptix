@@ -262,6 +262,28 @@ export function findEntrySpans(
   return spans;
 }
 
+/**
+ * The `source` of every entry in a file, in file order, each paired with its
+ * `section` scope — the identity an entry binds by. What the review guard
+ * compares before and after a revision: a reviewer may edit an entry's code,
+ * never the set of entries.
+ */
+export function listEntries(src: string): Array<{ source: string; section: string }> {
+  const s = scan(src);
+  const seen = new Set<number>();
+  const out: Array<{ source: string; section: string }> = [];
+  for (const token of s.strings) {
+    const span = enclosingBraceSpan(s, token.start);
+    if (!span || seen.has(span.start)) continue;
+    const source = objectStringProperty(s, span.start, span.end, 'source');
+    if (source === undefined || source.trim() !== token.value.trim()) continue;
+    seen.add(span.start);
+    const section = objectStringProperty(s, span.start, span.end, 'section');
+    out.push({ source: source.trim(), section: section ? matchText(section) : '' });
+  }
+  return out;
+}
+
 /** Index of the `]` closing the `defineSteps([...])` array, or -1. */
 function arrayCloseIndex(s: Scan): number {
   const call = findCodeIdentifier(s, 'defineSteps');

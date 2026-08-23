@@ -73,6 +73,13 @@ export interface StreamStepsRequest {
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */
   sourceLines?: number[];
   /**
+   * Keep the DOM either side of every step on the run's results, so this run
+   * is a recording `POST /codebehind/compile` can use instead of running the
+   * test again (stories/codebehind-compile-as-a-run.md). TestBench sends it
+   * on every run.
+   */
+  captureStepContext?: boolean;
+  /**
    * Absolute path of the file each step in `steps` was authored in. Parallel
    * to `steps`; defaults to the test file when omitted per-step. Used by the
    * server to attribute frame origins when a request is sent already-expanded

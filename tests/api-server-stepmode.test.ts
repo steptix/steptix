@@ -575,6 +575,46 @@ type: skill
       if (defaultImpl) exec.mockImplementation(defaultImpl);
     });
 
+    it('captureStepContext on the request reaches the step, and its absence leaves it off', async () => {
+      // The step route's request builder is a per-field allow-list, so a field
+      // the TYPE admits can still vanish at runtime. `captureStepContext` is
+      // what makes an ordinary run a recording `POST /codebehind/compile` can
+      // use (stories/codebehind-compile-as-a-run.md), and a dropped flag here
+      // would mean every compile records the test again, silently.
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const exec = vi.mocked(executeStep);
+      const defaultImpl = exec.getMockImplementation();
+
+      const observed: any[] = [];
+      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
+        observed.push(opts);
+        return {
+          index: idx, instruction: instr, status: 'passed',
+          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
+        };
+      });
+
+      for (const captureStepContext of [true, undefined]) {
+        const sessionId = `capture-context-${captureStepContext}-` + Date.now();
+        const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+        for await (const ev of sseEvents(url, {
+          steps: ['just one step'],
+          sourceLines: [1],
+          testFilePath: cacheTestFile,
+          ...(captureStepContext !== undefined && { captureStepContext }),
+        })) {
+          if (ev.type === 'done') break;
+        }
+      }
+
+      expect(observed).toHaveLength(2);
+      expect(observed[0].captureStepContext).toBe(true);
+      expect(observed[1].captureStepContext).toBeUndefined();
+
+      exec.mockReset();
+      if (defaultImpl) exec.mockImplementation(defaultImpl);
+    });
+
     it('absent cacheEnabled with testFilePath leaves the cache OFF (opt-in default)', async () => {
       // Caching is opt-in: a request that says nothing about caching gets
       // none, even with a resolvable testFilePath. This is the default that

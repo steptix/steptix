@@ -61,7 +61,7 @@ vi.mock('../src/codebehind/compile.js', () => ({
   compileTest: vi.fn(async (options: CompileOptions): Promise<CompileResult> => {
     core.calls.push(options);
     options.onEvent?.({ kind: 'phase', phase: 'record', message: 'Recording the test' });
-    options.onEvent?.({ kind: 'step', phase: 'generate', step: 1, message: 'Step 1: generated' });
+    options.onEvent?.({ kind: 'step', phase: 'generate', step: 1, line: 11, message: 'Step 1: generated' });
     options.onEvent?.({ kind: 'phase', phase: 'replay', round: 2, message: 'Replay round 2' });
     await core.hold?.(options);
     options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled 1 step' });
@@ -81,6 +81,9 @@ vi.mock('../src/codebehind/compile.js', () => ({
         rounds: 2,
         tokensUsed: 4242,
         written: [],
+        unproven: [],
+        writtenOffAi: [],
+        notAttempted: [],
       },
     };
   }),
@@ -394,8 +397,45 @@ function stepWithoutContext(index: number): StepResult {
 function runDetails(
   status: 'passed' | 'failed',
   steps: StepResult[],
+  coverage: RunDetails['coverage'] = 'whole',
 ): RunDetails & { status: 'passed' | 'failed' } {
-  return { status, steps, parameters: { stage: 'staging' }, tokens: 1234 };
+  return { status, steps, parameters: { stage: 'staging' }, tokens: 1234, coverage };
+}
+
+/**
+ * Stand in for the session machinery: play a scripted run into the listener
+ * and hand the core the step records. `executeSteps` is the one seam the
+ * compile runner drives, and the browser mock above throws, so a test that
+ * wants a run to happen has to fake it here.
+ */
+function fakeRun(
+  steps: StepResult[],
+  status: 'passed' | 'failed' = 'passed',
+): MockInstance {
+  return vi.spyOn(sessionManager, 'executeSteps').mockImplementation(
+    async (sessionId, request, onEvent, _signal, internal) => {
+      for (const step of steps) {
+        const line = request.sourceLines?.[step.index - 1] ?? step.index;
+        onEvent?.({ type: 'step:start', line });
+        onEvent?.(
+          step.status === 'passed'
+            ? { type: 'step:pass', line, ...(step.fromCodeBehind && { fromCodeBehind: true }) }
+            : { type: 'step:fail', line, error: step.error ?? 'failed' },
+        );
+      }
+      onEvent?.({ type: 'done', status });
+      internal?.onRunDetails?.({ steps, parameters: {}, tokens: 7, coverage: 'whole' });
+      return {
+        sessionId,
+        status,
+        stepsCompleted: steps.length,
+        stepsTotal: request.steps.length,
+        results: [],
+        outputs: {},
+        outputSources: {},
+      };
+    },
+  );
 }
 
 beforeAll(async () => {
@@ -453,10 +493,13 @@ describe('the compile stream', () => {
       phase: 'record',
       message: 'Recording the test',
     });
+    // `line` rides along for the gutter's ▶ — and, like `round`, is spread
+    // conditionally on the way to the wire.
     expect(events[1]!.data).toEqual({
       type: 'compile:step',
       phase: 'generate',
       step: 1,
+      line: 11,
       message: 'Step 1: generated',
     });
     // `round` is spread conditionally on the way to the wire, which is exactly
@@ -489,6 +532,9 @@ describe('the compile stream', () => {
       rounds: 2,
       tokensUsed: 4242,
       written: [],
+      unproven: [],
+      writtenOffAi: [],
+      notAttempted: [],
     });
   });
 
@@ -570,26 +616,23 @@ describe('one compile per test file', () => {
   });
 });
 
-describe('compiling from an open session\'s last run', () => {
-  it('hands the core that run\'s step results instead of recording a fresh one', async () => {
-    const details = runDetails('passed', [stepWithContext(1)]);
+describe('compiling from the caller\'s session', () => {
+  it('hands the core that session\'s last run instead of recording a fresh one', async () => {
+    const details = runDetails('passed', [stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
     detailsSpy = vi.spyOn(sessionManager, 'lastRunDetails').mockReturnValue(details);
     const executeSteps = vi.spyOn(sessionManager, 'executeSteps');
 
     const events = await compileStream({
       testFilePath: testFile('smoke.md'),
-      fromSessionId: 'session-with-a-green-run',
+      sessionId: 'session-with-a-green-run',
     });
 
     const recorded = optionsAt(0).recorded;
     expect(recorded).toBeDefined();
     expect(recorded!.status).toBe('passed');
-    // One slot per expanded step, sparse where that run has nothing — the
-    // core indexes into this by step number, so a compacted array would bind
-    // step 1's DOM to step 2.
+    // One slot per expanded step — the core indexes into this by step number.
     expect(recorded!.steps).toHaveLength(3);
     expect(recorded!.steps[0]).toBe(details.steps[0]);
-    expect(recorded!.steps[1]).toBeUndefined();
     expect(recorded!.resolvedParameters).toEqual({ stage: 'staging' });
     expect(recorded!.tokensUsed).toBe(1234);
 
@@ -600,70 +643,261 @@ describe('compiling from an open session\'s last run', () => {
     expect(outputs(events)).toEqual([
       {
         kind: 'info',
-        msg: 'Compiling from session session-with-a-green-run (1 step(s) with page context).',
+        msg: "Compiling from session session-with-a-green-run's last run (3 step(s), green, 3 with page context).",
       },
     ]);
     executeSteps.mockRestore();
   });
 
-  it('records instead, and says why, when the session is not there', async () => {
-    // No spy: an id nobody opened is exactly what the manager answers `null`
-    // for, and that is the case a client hits after a Close Session.
+  it('hands the core a red run too — the steps before the failure are the recording', async () => {
+    // A run that failed at step 2 is a recording of step 1. The core compiles
+    // that prefix; the server's job is only to pass it on and say so.
+    const details = runDetails('failed', [
+      stepWithContext(1),
+      { ...stepWithContext(2), status: 'failed', error: 'no such button' },
+    ]);
+    detailsSpy = vi.spyOn(sessionManager, 'lastRunDetails').mockReturnValue(details);
+    const executeSteps = vi.spyOn(sessionManager, 'executeSteps');
+
     const events = await compileStream({
       testFilePath: testFile('smoke.md'),
-      fromSessionId: 'no-such-session',
+      sessionId: 'session-that-failed',
     });
 
-    expect(optionsAt(0).recorded).toBeUndefined();
+    const recorded = optionsAt(0).recorded;
+    expect(recorded!.status).toBe('failed');
+    expect(recorded!.steps[0]).toBe(details.steps[0]);
+    expect(recorded!.steps[1]!.status).toBe('failed');
+    expect(recorded!.steps[2]).toBeUndefined();
+    expect(executeSteps).not.toHaveBeenCalled();
     expect(outputs(events)).toEqual([
       {
-        kind: 'warn',
-        msg: 'Cannot compile from session no-such-session: it is closed, gone, or has not run. Recording instead.',
+        kind: 'info',
+        msg: "Compiling from session session-that-failed's last run — it stopped at step 2; the steps before it are the recording.",
       },
     ]);
+    executeSteps.mockRestore();
   });
 
-  it('records instead when that run failed', async () => {
-    detailsSpy = vi
-      .spyOn(sessionManager, 'lastRunDetails')
-      .mockReturnValue(runDetails('failed', [stepWithContext(1)]));
+  it('records in that session, and leaves it open, when it has no run yet', async () => {
+    // No spy on lastRunDetails: an id nobody opened is exactly what the manager
+    // answers `null` for. The Record must then happen IN the caller's session
+    // — the browser they watch — not in a throwaway one, and must not close it.
+    const run = fakeRun([stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
+    const close = vi.spyOn(sessionManager, 'closeSession');
+    compileTestMock.mockImplementationOnce(async (options) => {
+      core.calls.push(options);
+      const outcome = await options.runner!({ purpose: 'record', strict: false, captureContext: true });
+      expect(outcome.status).toBe('passed');
+      expect(outcome.steps).toHaveLength(3);
+      options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
+      return {
+        status: 'green',
+        files: {},
+        summary: {
+          test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
+          tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
+        },
+      };
+    });
 
     const events = await compileStream({
       testFilePath: testFile('smoke.md'),
-      fromSessionId: 'session-that-failed',
+      sessionId: 'editor-session',
     });
 
-    // A red run's steps describe a journey that did not work. Compiling from
-    // them would generate code for a page the test never reached.
     expect(optionsAt(0).recorded).toBeUndefined();
+    expect(run).toHaveBeenCalledTimes(1);
+    const [sessionId, request, , , internal] = run.mock.calls[0]!;
+    expect(sessionId).toBe('editor-session');
+    // An ordinary run in every respect that matters to the author: context
+    // captured, the project's cache setting, code-behind on (nothing selected
+    // has an entry to hide a transcript), and the test's config because the
+    // session did not exist yet.
+    expect(request.captureStepContext).toBe(true);
+    expect(request.cacheEnabled).toBe(testConfig.cache.enabled);
+    expect(request.config).toBeDefined();
+    expect(internal?.codeBehind?.disabled).toBeUndefined();
+    expect(internal?.codeBehind?.strict).toBe(false);
+    expect(close).not.toHaveBeenCalledWith('editor-session');
     expect(outputs(events)).toEqual([
-      {
-        kind: 'warn',
-        msg: 'Cannot compile from session session-that-failed: that run did not pass. Recording instead.',
-      },
+      { kind: 'info', msg: 'Session editor-session has no run to compile from — recording in it.' },
+      { kind: 'info', msg: 'Recording in session editor-session (opening it).' },
     ]);
+    run.mockRestore();
+    close.mockRestore();
+  });
+
+  it('streams every event of a Record and a Replay inside compile:run, with the round', async () => {
+    const run = fakeRun([
+      { ...stepWithContext(1), fromCodeBehind: true },
+      { ...stepWithContext(2), status: 'failed', error: 'locator timeout' },
+    ], 'failed');
+    const close = vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
+    compileTestMock.mockImplementationOnce(async (options) => {
+      core.calls.push(options);
+      await options.runner!({ purpose: 'record', strict: false, captureContext: true });
+      await options.runner!({
+        purpose: 'replay', round: 2, strict: true, captureContext: false, throughStep: 2,
+      });
+      options.onEvent?.({ kind: 'done', status: 'partial', message: 'Compiled some' });
+      return {
+        status: 'partial',
+        files: {},
+        summary: {
+          test: options.test.filePath, totalSteps: 3, compiled: 1, kept: 0, keptAi: 1, rounds: 2,
+          tokensUsed: 0, written: [], unproven: [], writtenOffAi: [2], notAttempted: [],
+        },
+      };
+    });
+
+    const events = await compileStream({
+      testFilePath: testFile('smoke.md'),
+      sessionId: 'editor-session',
+    });
+
+    const runs = events.filter((e) => e.event === 'compile:run').map((e) => e.data);
+    // Four events per run — start, pass/fail, start, fail, done — untouched
+    // inside the wrapper, with the phase and (for a replay) the round.
+    expect(runs.map((r) => [r.phase, r.round, r.event.type])).toEqual([
+      ['record', undefined, 'step:start'],
+      ['record', undefined, 'step:pass'],
+      ['record', undefined, 'step:start'],
+      ['record', undefined, 'step:fail'],
+      ['record', undefined, 'done'],
+      ['replay', 2, 'step:start'],
+      ['replay', 2, 'step:pass'],
+      ['replay', 2, 'step:start'],
+      ['replay', 2, 'step:fail'],
+      ['replay', 2, 'done'],
+    ]);
+    // The run's own fields survive: the line (from the test's own step lines),
+    // ⚙, and the error.
+    expect(runs[1]!.event).toEqual({ type: 'step:pass', line: 11, fromCodeBehind: true });
+    expect(runs[3]!.event).toEqual({ type: 'step:fail', line: 12, error: 'locator timeout' });
+    // The replay ran the prefix it was asked for, in a session of its own that
+    // was closed after; the Record's session — the caller's — was not.
+    const replay = run.mock.calls[1]!;
+    expect(replay[0]).toMatch(/^compile:/);
+    expect(replay[1].steps).toHaveLength(2);
+    expect(replay[1].sourceLines).toEqual([11, 12]);
+    expect(replay[1].cacheEnabled).toBe(false);
+    expect(replay[4]?.codeBehind?.strict).toBe(true);
+    expect(close).toHaveBeenCalledWith(replay[0]);
+    expect(close).not.toHaveBeenCalledWith('editor-session');
+    // Partial rides the result frame like any status.
+    expect(events.at(-1)!.data.status).toBe('partial');
+    expect(events.at(-1)!.data.summary.writtenOffAi).toEqual([2]);
+    run.mockRestore();
+    close.mockRestore();
+  });
+
+  it('refuses to record in a session with a run in flight', async () => {
+    const status = vi.spyOn(sessionManager, 'sessionStatus').mockReturnValue('executing');
+    const run = vi.spyOn(sessionManager, 'executeSteps');
+    compileTestMock.mockImplementationOnce(async (options) => {
+      core.calls.push(options);
+      return options.runner!({ purpose: 'record', strict: false, captureContext: true }).then(
+        () => { throw new Error('the runner should have refused'); },
+      );
+    });
+
+    const events = await compileStream({
+      testFilePath: testFile('smoke.md'),
+      sessionId: 'busy-session',
+    });
+
+    expect(run).not.toHaveBeenCalled();
+    // Raised after the stream opened, so it is a frame, not a 409.
+    const error = outputs(events).find((o) => o.kind === 'error');
+    expect(error?.msg).toContain('busy-session is busy');
+    expect(events.at(-1)!.data.status).toBe('failed');
+    status.mockRestore();
+    run.mockRestore();
+  });
+
+  it('records instead, and says why, when the last run started mid-test', async () => {
+    detailsSpy = vi
+      .spyOn(sessionManager, 'lastRunDetails')
+      .mockReturnValue(runDetails('passed', [stepWithContext(2), stepWithContext(3)], 'partial'));
+
+    const events = await compileStream({
+      testFilePath: testFile('smoke.md'),
+      sessionId: 'session-mid-test',
+    });
+
+    // A continuation knows nothing about the steps before it; the compile
+    // needs them in order from the first.
+    expect(optionsAt(0).recorded).toBeUndefined();
+    expect(outputs(events)[0]).toEqual({
+      kind: 'warn',
+      msg: "Cannot compile from session session-mid-test's last run: it started partway into the test. Recording in it instead.",
+    });
   });
 
   it('records instead when the run carried no page context', async () => {
-    // The common case, and the reason the fallback has to be loud: an ordinary
-    // run captures no DOM, so most green sessions cannot answer — and a silent
-    // fallback is a whole extra AI run of the test that nobody asked for.
+    // An older client, or a run that did not ask: no DOM either side, so
+    // nothing to generate from — and the fallback has to be loud, because a
+    // silent one is a whole extra run of the test that nobody asked for.
     detailsSpy = vi
       .spyOn(sessionManager, 'lastRunDetails')
       .mockReturnValue(runDetails('passed', [stepWithoutContext(1), stepWithoutContext(2)]));
 
     const events = await compileStream({
       testFilePath: testFile('smoke.md'),
-      fromSessionId: 'session-without-dom',
+      sessionId: 'session-without-dom',
     });
 
     expect(optionsAt(0).recorded).toBeUndefined();
-    expect(outputs(events)).toEqual([
-      {
-        kind: 'warn',
-        msg: 'Cannot compile from session session-without-dom: its step results carry no DOM snapshots. Recording instead.',
-      },
-    ]);
+    expect(outputs(events)[0]).toEqual({
+      kind: 'warn',
+      msg: "Cannot compile from session session-without-dom's last run: its step results carry no DOM snapshots. Recording in it instead.",
+    });
+  });
+
+  it('records instead when a green run has a different step count than the file', async () => {
+    // The author added a step since that run: its records would bind to the
+    // wrong steps.
+    detailsSpy = vi
+      .spyOn(sessionManager, 'lastRunDetails')
+      .mockReturnValue(runDetails('passed', [stepWithContext(1), stepWithContext(2)]));
+
+    const events = await compileStream({
+      testFilePath: testFile('smoke.md'),
+      sessionId: 'session-stale-shape',
+    });
+
+    expect(optionsAt(0).recorded).toBeUndefined();
+    expect(outputs(events)[0]).toEqual({
+      kind: 'warn',
+      msg: "Cannot compile from session session-stale-shape's last run: it ran 2 step(s) and the test has 3 now. Recording in it instead.",
+    });
+  });
+
+  it('records in a session of its own when no session is named', async () => {
+    const run = fakeRun([stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
+    const close = vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
+    compileTestMock.mockImplementationOnce(async (options) => {
+      core.calls.push(options);
+      await options.runner!({ purpose: 'record', strict: false, captureContext: true });
+      options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
+      return {
+        status: 'green', files: {},
+        summary: {
+          test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
+          tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
+        },
+      };
+    });
+
+    await compileStream({ testFilePath: testFile('smoke.md') });
+
+    const [sessionId, request] = run.mock.calls[0]!;
+    expect(sessionId).toMatch(/^compile:/);
+    expect(request.cacheEnabled).toBe(false);
+    expect(close).toHaveBeenCalledWith(sessionId);
+    run.mockRestore();
+    close.mockRestore();
   });
 });
 

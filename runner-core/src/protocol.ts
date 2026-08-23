@@ -257,7 +257,12 @@ export type CompilePhase =
   | 'repair'
   | 'write';
 
-export type CompileStatus = 'green' | 'failed';
+/**
+ * `partial` (stories/codebehind-compile-as-a-run.md §Write what passed): the
+ * compile proposes what it has — proven entries, write-offs, entries no round
+ * reached — and the summary says which is which. `failed` proposes nothing.
+ */
+export type CompileStatus = 'green' | 'partial' | 'failed';
 
 /** A phase started, or reported its result. */
 export interface CompilePhaseEvent {
@@ -273,7 +278,25 @@ export interface CompileStepEvent {
   type: 'compile:step';
   phase: CompilePhase;
   step: number;
+  /** The step's source line in the test file, when the server knows it —
+   *  paint ▶ there while the model works on the step. */
+  line?: number;
   message: string;
+}
+
+/**
+ * One event of a run the compile drove — Record, or a Replay round — untouched
+ * inside the wrapper (stories/codebehind-compile-as-a-run.md §Every run is on
+ * the stream). A client folds `event` as it folds a run's own: ▶ on
+ * `step:start`, ⚙ on a `step:pass` with `fromCodeBehind`, ✗ with the error
+ * and screenshot on `step:fail`.
+ */
+export interface CompileRunEvent {
+  type: 'compile:run';
+  phase: 'record' | 'replay';
+  /** 1-based replay round. */
+  round?: number;
+  event: RunEvent;
 }
 
 /** Terminal narrative event. The result follows separately. */
@@ -302,6 +325,16 @@ export interface CompileSummary {
   candidatePath?: string;
   /** Why the compile is not green. */
   error?: string;
+  /** Steps (1-based) whose new entries no replay round executed to a pass.
+   *  Proposed as code all the same; the next run proves or flags them. */
+  unproven: number[];
+  /** Steps (1-based) written off as `ai: true` after a replay failure. */
+  writtenOffAi: number[];
+  /** Where the recording stopped, when it did not reach the end of the test —
+   *  the compile was then a prefix compile of the steps before it. */
+  stoppedAt?: { step: number; error: string };
+  /** Selected steps the prefix never reached; nothing was generated for them. */
+  notAttempted: number[];
 }
 
 /**
@@ -324,6 +357,7 @@ export type CompileEvent =
   | CompileStepEvent
   | CompileDoneEvent
   | CompileResultEvent
+  | CompileRunEvent
   | OutputEvent;
 
 export function isCompileEvent(value: unknown): value is CompileEvent {
@@ -334,6 +368,7 @@ export function isCompileEvent(value: unknown): value is CompileEvent {
     t === 'compile:step' ||
     t === 'compile:done' ||
     t === 'compile:result' ||
+    (t === 'compile:run' && isRunEvent((value as { event?: unknown }).event)) ||
     t === 'output'
   );
 }
@@ -346,8 +381,12 @@ export interface CompileRequest {
   steps?: string[];
   sections?: Record<string, { name: string; headingLine: number; steps: string[]; stepLines: number[] }>;
   envName?: string;
-  /** Compile from this open session's last run instead of recording. */
-  fromSessionId?: string;
+  /**
+   * The caller's session — the one this test runs in. Its last run is the
+   * recording when it can be (green, or red as a prefix, with step context);
+   * otherwise Record runs in it and leaves it open, as a Run would.
+   */
+  sessionId?: string;
   select?: { onlyStale?: boolean; all?: boolean; steps?: number[] };
   maxRounds?: number;
   dryRun?: boolean;
@@ -531,13 +570,27 @@ export interface HostCompileEventMsg {
 }
 
 /**
- * Offer (or withdraw) "Compile from this run" — the action that skips the
- * Record phase by compiling from the run that just finished. Sent with a
- * session id after a green run, `sessionId: null` to withdraw.
+ * One event of a run the compile drove — the Record, or a Replay round —
+ * forwarded for the panel's Variables section (captures) and mirrored to the
+ * gutter by the host (stories/codebehind-compile-as-a-run.md §Every run is on
+ * the stream). The log line for it arrives separately as `compileEvent`, so
+ * the panel does not log this one.
  */
-export interface HostCompileFromRunAvailableMsg {
-  type: 'compileFromRunAvailable';
-  sessionId: string | null;
+export interface HostCompileRunEventMsg {
+  type: 'compileRunEvent';
+  phase: 'record' | 'replay';
+  round?: number;
+  event: RunEvent;
+}
+
+/**
+ * The model is working on the step at `line` (Generate or Repair). The host
+ * paints ▶ there, so the gutter walks the test during the phases that do not
+ * execute it.
+ */
+export interface HostCompileStepMsg {
+  type: 'compileStep';
+  line: number;
 }
 
 export type HostToWebviewMsg =
@@ -553,7 +606,8 @@ export type HostToWebviewMsg =
   | HostSkillRerunAvailableMsg
   | HostCompileStateMsg
   | HostCompileEventMsg
-  | HostCompileFromRunAvailableMsg;
+  | HostCompileRunEventMsg
+  | HostCompileStepMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -667,13 +721,12 @@ export interface WebviewRerunSkillStepMsg {
 }
 
 /**
- * User pressed Compile in the runner panel. `fromSessionId` is set by the
- * "Compile from this run" action, which skips the Record phase by compiling
- * from the run that just finished (stories/codebehind-compile.md).
+ * User pressed Compile in the runner panel. The host always compiles against
+ * the document's own session — from its last run when that can be the
+ * recording, recording in it otherwise (stories/codebehind-compile-as-a-run.md).
  */
 export interface WebviewCompileMsg {
   type: 'compile';
-  fromSessionId?: string;
 }
 
 export type WebviewToHostMsg =
@@ -714,7 +767,8 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'skillRerunAvailable' ||
     t === 'compileState' ||
     t === 'compileEvent' ||
-    t === 'compileFromRunAvailable'
+    t === 'compileRunEvent' ||
+    t === 'compileStep'
   );
 }
 

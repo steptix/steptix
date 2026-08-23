@@ -59,7 +59,10 @@ ${input.file}
    \`page.waitForTimeout\` unless it is genuinely unavoidable.
 7. Leave \`source\` strings and \`section\` fields **exactly** as they are —
    they are how entries bind to steps, and an edit silently unbinds one. Never
-   remove an entry.
+   remove an entry, and **never add one**: a step with no entry is one the
+   compile chose not to generate for, or has no recording of, and code written
+   for it without a recording is a guess. The set of entries you return must
+   be exactly the set you were given.
 8. An \`ai: true\` entry is a decision, not an omission: leave it alone,
    comment included. Do not turn one into a \`run\` entry, however obvious the
    code looks — something already established that this step needs the model.

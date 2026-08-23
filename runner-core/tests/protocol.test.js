@@ -14,6 +14,11 @@ test('isHostMsg: accepts every host variant', () => {
     'running',
     'breakpointStop',
     'batchBanner',
+    'skillRerunAvailable',
+    'compileState',
+    'compileEvent',
+    'compileRunEvent',
+    'compileStep',
   ]) {
     assert.equal(isHostMsg({ type }), true, type);
   }
@@ -133,8 +138,35 @@ test('isCompileEvent: accepts every compile frame the server sends', () => {
     true,
   );
   // `output` rides the compile stream too — the server uses it for the
-  // fromSessionId decline and for run noise.
+  // sessionId decline and for run noise.
   assert.equal(isCompileEvent({ type: 'output', msg: 'x', kind: 'info' }), true);
+  // `line` on a step event, `partial` as a status: both additive.
+  assert.equal(isCompileEvent({ type: 'compile:step', phase: 'generate', step: 4, line: 12, message: 'generated' }), true);
+  assert.equal(isCompileEvent({ type: 'compile:done', status: 'partial', message: 'some' }), true);
+});
+
+test('isCompileEvent: accepts a run event inside compile:run, and only a run event', () => {
+  // stories/codebehind-compile-as-a-run.md §Every run is on the stream: the
+  // inner event is one of the run stream's own, untouched.
+  assert.equal(
+    isCompileEvent({ type: 'compile:run', phase: 'record', event: { type: 'step:start', line: 4 } }),
+    true,
+  );
+  assert.equal(
+    isCompileEvent({
+      type: 'compile:run', phase: 'replay', round: 2,
+      event: { type: 'step:pass', line: 4, fromCodeBehind: true },
+    }),
+    true,
+  );
+  assert.equal(
+    isCompileEvent({ type: 'compile:run', phase: 'replay', round: 1, event: { type: 'done', status: 'failed' } }),
+    true,
+  );
+  // A wrapper around something that is not a run event is not a compile event.
+  assert.equal(isCompileEvent({ type: 'compile:run', phase: 'record', event: { type: 'compile:phase' } }), false);
+  assert.equal(isCompileEvent({ type: 'compile:run', phase: 'record' }), false);
+  assert.equal(isRunEvent({ type: 'compile:run', phase: 'record', event: { type: 'step:start', line: 4 } }), false);
 });
 
 test('isCompileEvent: rejects run events and junk', () => {

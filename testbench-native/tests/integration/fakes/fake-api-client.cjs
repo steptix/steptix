@@ -173,6 +173,9 @@ class FakeApiClient {
           rounds: 1,
           tokensUsed: 1234,
           written: [],
+          unproven: [],
+          writtenOffAi: [],
+          notAttempted: [],
         },
       },
     ];

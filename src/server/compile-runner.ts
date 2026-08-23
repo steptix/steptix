@@ -20,17 +20,24 @@ import {
 } from '../codebehind/compile.js';
 import { applyEnvToAiConfig } from './run-helpers.js';
 import type { ProjectBundle, ProjectBundleResolver } from './project-bundle.js';
-import type { SessionManager, StepRequest } from './session-manager.js';
+import type { RunDetails, RunEvent, SessionManager, StepRequest } from './session-manager.js';
 
 /**
- * `POST /codebehind/compile` (stories/codebehind-compile.md §Server).
+ * `POST /codebehind/compile` (stories/codebehind-compile.md §Server, amended by
+ * stories/codebehind-compile-as-a-run.md).
  *
  * The compile core with a server around it: it resolves the project the same
  * way a run does, drives Record and Replay through the session machinery so
  * they use the project's browser and appear in `GET /sessions` like any other
- * run, and streams the phases out. It writes nothing under the project except
- * the gitignored candidate — `dryRun` is forced on, and the proposed files go
- * back on the wire for TestBench to apply through a diff.
+ * run, and streams the phases out — every inner run's events included, so a
+ * client paints a compile the way it paints a run. It writes nothing under the
+ * project except the gitignored candidate — `dryRun` is forced on, and the
+ * proposed files go back on the wire for TestBench to apply through a diff.
+ *
+ * Given the caller's session, it compiles from that session's last run when
+ * the run can serve as a recording — green, or red as a prefix — and records
+ * *in* that session when it cannot, leaving it open where the run ended, as a
+ * Run would.
  */
 
 export interface CompileRequest {
@@ -52,8 +59,14 @@ export interface CompileRequest {
    */
   sections?: Record<string, { name: string; headingLine: number; steps: string[]; stepLines: number[] }>;
   envName?: string;
-  /** Compile from this open session's last run instead of recording. */
-  fromSessionId?: string;
+  /**
+   * The caller's session — the one TestBench runs this test in. Its last run
+   * is the recording when it can be (it started at step 1 and kept the DOM
+   * either side of its steps), and otherwise Record runs in it, not in a
+   * throwaway session, and leaves it open. Without it, Record runs in a fresh
+   * session that is closed afterwards.
+   */
+  sessionId?: string;
   select?: CompileSelect;
   maxRounds?: number;
   /**
@@ -68,20 +81,29 @@ export interface CompileRequest {
  * What the compile stream carries.
  *
  * Same framing as the step stream — one SSE frame per event, `type` naming it —
- * but its own event names, because a compile is not a run: nothing here has a
- * line number, and a client that renders `step:pass` in the gutter must not
- * render "step 4 generated" there.
+ * with its own event names for the compile's own phases. A Record or Replay is
+ * a real run of the test, though, and its events ride along unchanged inside
+ * `compile:run`, where a client folds them exactly as it folds a run's.
  */
 export type CompileWireEvent =
   | { type: 'compile:phase'; phase: CompilePhase; round?: number; message: string }
-  | { type: 'compile:step'; phase: CompilePhase; step: number; message: string }
+  | { type: 'compile:step'; phase: CompilePhase; step: number; line?: number; message: string }
   | { type: 'compile:done'; status: CompileStatus; message: string }
   | {
       type: 'compile:result';
       status: CompileStatus;
-      /** Proposed content by absolute `.steps.ts` path. Empty unless green. */
+      /** Proposed content by absolute `.steps.ts` path. Empty when failed. */
       files: Record<string, string>;
       summary: CompileSummary;
+    }
+  | {
+      type: 'compile:run';
+      /** Which of the compile's runs this event belongs to. */
+      phase: 'record' | 'replay';
+      /** 1-based replay round. */
+      round?: number;
+      /** The run's own event, untouched. */
+      event: RunEvent;
     }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' };
 
@@ -145,9 +167,10 @@ export class CodeBehindCompiler {
    * Compile one test.
    *
    * Throws `CompileRefused` for anything the caller could have avoided (a
-   * second compile of the same file, a test file that will not parse); every
-   * other outcome — including a red compile — is a resolved `CompileResult`,
-   * because "the replay never went green" is an answer, not an error.
+   * second compile of the same file, a test file that will not parse, a
+   * session with a run in flight); every other outcome — including a red
+   * compile — is a resolved `CompileResult`, because "the replay never went
+   * green" is an answer, not an error.
    */
   async compile(
     request: CompileRequest,
@@ -230,7 +253,7 @@ export class CodeBehindCompiler {
       tokenTracker,
     );
 
-    const recorded = this.reuseRun(request.fromSessionId, test, emit);
+    const recorded = this.reuseRun(request.sessionId, test, emit);
 
     return compileTest({
       test,
@@ -247,53 +270,65 @@ export class CodeBehindCompiler {
       ...(recorded && { recorded }),
       onEvent: (event) => emit(toWireEvent(event)),
       ...(signal && { signal }),
-      runner: this.sessionRunner(test, bundle, envName, emit),
+      runner: this.sessionRunner(test, bundle, envName, emit, request.sessionId),
     });
   }
 
   /**
-   * The "Compile from this run" input, when the named session can supply one.
+   * The caller's last run, when it can serve as the recording.
    *
-   * Valid only while that session is open, only if the run passed, and only if
-   * its steps carry the DOM either side — an ordinary run captures no step
-   * context, so most sessions cannot answer and the compile records instead.
-   * Every refusal says which, because "it recorded anyway" is otherwise a
-   * silent extra AI run of the whole test.
+   * It can when it started at step 1 — the whole test, or a prefix of it — and
+   * its steps carry the DOM either side, which a run captures when the client
+   * asked it to (`StepRequest.captureStepContext`). Green or red: a run that
+   * stopped at step k is a recording of 1..k-1, and the core compiles that
+   * prefix. Every refusal says which, because "it recorded anyway" is
+   * otherwise a silent extra run of the whole test.
    */
   private reuseRun(
-    fromSessionId: string | undefined,
+    sessionId: string | undefined,
     test: ParsedTest,
     emit: CompileEventListener,
   ): CompileRunOutcome | undefined {
-    if (!fromSessionId) return undefined;
+    if (!sessionId) return undefined;
     const decline = (why: string): undefined => {
       emit({
         type: 'output',
         kind: 'warn',
-        msg: `Cannot compile from session ${fromSessionId}: ${why}. Recording instead.`,
+        msg: `Cannot compile from session ${sessionId}'s last run: ${why}. Recording in it instead.`,
       });
       return undefined;
     };
 
-    const details = this.sessions.lastRunDetails(fromSessionId);
-    if (!details) return decline('it is closed, gone, or has not run');
-    if (details.status !== 'passed') return decline('that run did not pass');
-    const steps: CompileRunOutcome['steps'] = new Array(test.steps.length).fill(undefined);
-    for (const step of details.steps) {
-      if (step.hookScope || step.interactiveAdHoc || step.interactiveChild) continue;
-      const at = step.index - 1;
-      if (at >= 0 && at < steps.length) steps[at] = step;
+    const details = this.sessions.lastRunDetails(sessionId);
+    if (!details) {
+      emit({
+        type: 'output',
+        kind: 'info',
+        msg: `Session ${sessionId} has no run to compile from — recording in it.`,
+      });
+      return undefined;
     }
+    if (details.coverage === 'partial') return decline('it started partway into the test');
+    const steps = outcomeSteps(details, test.steps.length);
     const captured = steps.filter((s) => s?.stepContext?.domBefore !== undefined).length;
     if (captured === 0) return decline('its step results carry no DOM snapshots');
+    const ran = steps.filter((s) => s !== undefined).length;
+    if (details.coverage === 'whole' && details.status === 'passed' && ran !== test.steps.length) {
+      return decline(`it ran ${ran} step(s) and the test has ${test.steps.length} now`);
+    }
 
+    const passed = steps.findIndex((s) => s?.status !== 'passed');
     emit({
       type: 'output',
       kind: 'info',
-      msg: `Compiling from session ${fromSessionId} (${captured} step(s) with page context).`,
+      msg:
+        details.status === 'passed' && passed < 0
+          ? `Compiling from session ${sessionId}'s last run (${ran} step(s), green, ${captured} with page context).`
+          : `Compiling from session ${sessionId}'s last run — it stopped at step ${passed + 1}; ` +
+            'the steps before it are the recording.',
     });
     return {
-      status: 'passed',
+      status: details.status,
       steps,
       resolvedParameters: details.parameters,
       tokensUsed: details.tokens,
@@ -303,38 +338,75 @@ export class CodeBehindCompiler {
   /**
    * Run the test through the session machinery, once per Record/Replay.
    *
-   * A fresh session per run and closed after: a compile's Record must not
-   * inherit a page some earlier run left behind, and its Replay must not
-   * inherit the Record's.
+   * Record runs in the caller's session when one is named — the browser the
+   * author watches, left open where the run ended — and in a fresh session
+   * closed afterwards when none is. Replay always gets a fresh session, closed
+   * after the round: a round must start from a clean page, and a replay in the
+   * caller's session would overwrite the recording the compile is working from
+   * with a run that has no transcripts.
    *
    * The steps go out already expanded, with the compiler's own expansion handed
    * over for the code-behind registry. Re-expanding server-side would be a
    * second answer to "which `.steps.ts` does step 7 bind into", and the two
    * only have to disagree once for a skill's entries to land in the test's file.
+   * A prefix replay sends fewer steps; the expansion's indices still line up.
+   *
+   * Every event the run emits rides the compile stream inside `compile:run`.
    */
   private sessionRunner(
     test: ParsedTest,
     bundle: ProjectBundle,
     envName: string | null,
     emit: CompileEventListener,
+    callerSessionId: string | undefined,
   ): CompileRunnerFn {
     return async (run) => {
-      const label = run.purpose === 'record' ? 'Record' : `Replay ${run.round ?? 1}`;
-      const sessionId = `compile:${randomUUID()}`;
+      const inCallerSession = run.purpose === 'record' && callerSessionId !== undefined;
+      const sessionId = inCallerSession ? callerSessionId : `compile:${randomUUID()}`;
+      const count = run.throughStep !== undefined ? run.throughStep : test.steps.length;
+
+      if (inCallerSession) {
+        const status = this.sessions.sessionStatus(sessionId);
+        if (status === 'executing') {
+          throw new CompileRefused(
+            409,
+            `Session ${sessionId} is busy — a run is executing or paused in it. ` +
+              'Let it finish, or stop it, then compile.',
+          );
+        }
+        emit({
+          type: 'output',
+          kind: 'info',
+          msg:
+            status === null
+              ? `Recording in session ${sessionId} (opening it).`
+              : `Recording in session ${sessionId}.`,
+        });
+      }
+
       const stepRequest: StepRequest = {
-        steps: test.steps,
+        steps: test.steps.slice(0, count),
         parameters: { ...test.parameters },
         testFilePath: test.filePath,
-        sourceLines: test.stepLines,
+        sourceLines: test.stepLines.slice(0, count),
         ...(envName && { envName }),
         ...(bundle.envBundle && { env: bundle.envBundle.env }),
-        // The action cache is off for both phases on purpose: a Record wants
-        // the model's actual transcript, and a Replay wants the entry to run.
-        cacheEnabled: false,
-        config: {
-          ...(test.config.baseUrl !== undefined && { baseUrl: test.config.baseUrl }),
-          ...(test.config.timeout !== undefined && { timeout: test.config.timeout }),
-        },
+        // A Record in the caller's session is an ordinary run, cache as the
+        // project has it: a cached transcript is the model's own actions,
+        // recorded earlier, and with `captureStepContext` it comes with the
+        // DOM either side. A Replay wants the entry to run, so the cache is
+        // off; so is a Record in a throwaway session, as it always was.
+        cacheEnabled: inCallerSession && bundle.config.cache.enabled,
+        captureStepContext: run.captureContext,
+        // Config belongs to a session's first request only. A caller's session
+        // that already exists has one; a fresh one — compile's own, or the
+        // caller's when they never ran — takes the test's.
+        ...(!(inCallerSession && this.sessions.sessionStatus(sessionId) !== null) && {
+          config: {
+            ...(test.config.baseUrl !== undefined && { baseUrl: test.config.baseUrl }),
+            ...(test.config.timeout !== undefined && { timeout: test.config.timeout }),
+          },
+        }),
       };
 
       let details: CompileRunOutcome | undefined;
@@ -343,9 +415,12 @@ export class CodeBehindCompiler {
           sessionId,
           stepRequest,
           (event) => {
-            if (event.type === 'step:fail') {
-              emit({ type: 'output', kind: 'warn', msg: `${label}: step failed — ${event.error}` });
-            }
+            emit({
+              type: 'compile:run',
+              phase: run.purpose,
+              ...(run.round !== undefined && { round: run.round }),
+              event,
+            });
           },
           run.signal,
           {
@@ -360,18 +435,11 @@ export class CodeBehindCompiler {
               ...(run.candidateFiles && { candidateFiles: run.candidateFiles }),
               ...(run.disableCodeBehind && { disabled: true }),
               strict: run.strict,
-              captureContext: run.captureContext,
             },
             onRunDetails: (d) => {
-              const steps: CompileRunOutcome['steps'] = new Array(test.steps.length).fill(undefined);
-              for (const step of d.steps) {
-                if (step.hookScope || step.interactiveAdHoc || step.interactiveChild) continue;
-                const at = step.index - 1;
-                if (at >= 0 && at < steps.length) steps[at] = step;
-              }
               details = {
                 status: 'failed',
-                steps,
+                steps: outcomeSteps(d, test.steps.length),
                 resolvedParameters: d.parameters,
                 tokensUsed: d.tokens,
               };
@@ -385,13 +453,33 @@ export class CodeBehindCompiler {
           tokensUsed: details?.tokensUsed ?? 0,
         };
       } finally {
-        // Best-effort: a browser the compile leaves open outlives the compile.
-        await this.sessions.closeSession(sessionId).catch((err: unknown) => {
-          logger.debug(`Could not close compile session ${sessionId}: ${String(err)}`);
-        });
+        // The caller's session is theirs and stays open, as after a Run. A
+        // compile's own session is closed: best-effort, because a browser the
+        // compile leaves open outlives the compile.
+        if (!inCallerSession) {
+          await this.sessions.closeSession(sessionId).catch((err: unknown) => {
+            logger.debug(`Could not close compile session ${sessionId}: ${String(err)}`);
+          });
+        }
       }
     };
   }
+}
+
+/**
+ * A run's step records, indexed by expanded step (`index - 1`) and sparse
+ * where the run has nothing. Hook results and interactive rows share the index
+ * space with real steps, so they are dropped rather than allowed to overwrite
+ * one.
+ */
+function outcomeSteps(details: RunDetails, totalSteps: number): CompileRunOutcome['steps'] {
+  const steps: CompileRunOutcome['steps'] = new Array(totalSteps).fill(undefined);
+  for (const step of details.steps) {
+    if (step.hookScope || step.interactiveAdHoc || step.interactiveChild) continue;
+    const at = step.index - 1;
+    if (at >= 0 && at < totalSteps) steps[at] = step;
+  }
+  return steps;
 }
 
 function toWireEvent(event: CompileEvent): CompileWireEvent {
@@ -408,6 +496,7 @@ function toWireEvent(event: CompileEvent): CompileWireEvent {
       type: 'compile:step',
       phase: event.phase,
       step: event.step,
+      ...(event.line !== undefined && { line: event.line }),
       message: event.message,
     };
   }

@@ -29,7 +29,8 @@ const HOST_MSG_TYPES = new Set([
   "skillRerunAvailable",
   "compileState",
   "compileEvent",
-  "compileFromRunAvailable",
+  "compileRunEvent",
+  "compileStep",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -217,12 +218,6 @@ function TestBenchRunner() {
   /** True while a code-behind compile is running for this file. */
   const [compiling, setCompiling] = useState(false);
   /**
-   * Session id of the last green interactive run, or null. Non-null turns
-   * Compile into "Compile from this run", which skips the Record phase —
-   * a whole AI run of the test saved (stories/codebehind-compile.md).
-   */
-  const [compileFromRun, setCompileFromRun] = useState(null);
-  /**
    * Per-step right-click menu. Non-null carries cursor coords + the row's
    * state (line, hasBreakpoint, hasStatus) so the menu can label items
    * correctly and disable "Clear status here" when nothing is set.
@@ -323,8 +318,19 @@ function TestBenchRunner() {
         case "compileEvent":
           log(msg.line, "info");
           break;
-        case "compileFromRunAvailable":
-          setCompileFromRun(msg.sessionId);
+        case "compileRunEvent":
+          // The log line for this event arrived as `compileEvent`; what is
+          // left to do here is what a run's event would do to the Variables
+          // panel. The gutter is the host's.
+          if (msg.event.type === "capture") {
+            setRuntimeVariables((prev) => ({ ...prev, [msg.event.name]: msg.event.value }));
+            setRuntimeSources((prev) => ({
+              ...prev,
+              [msg.event.name]: classifyCaptureSource(msg.event.source),
+            }));
+          }
+          break;
+        case "compileStep":
           break;
         default:
           break;
@@ -474,7 +480,7 @@ function TestBenchRunner() {
   };
   const handleCompile = () => {
     if (!isTestFile) return;
-    hostBridge.postCompile(compileFromRun ?? undefined);
+    hostBridge.postCompile();
   };
   const handleStop = () => hostBridge.postStop();
   const handleCloseSession = () => hostBridge.postRestartSession();
@@ -736,13 +742,9 @@ function TestBenchRunner() {
             className="tb-btn"
             onClick={handleCompile}
             disabled={running || compiling}
-            title={
-              compileFromRun
-                ? "Compile this test's code-behind from the run that just passed — no re-record"
-                : "Record this test under AI, generate its code-behind, and replay it as code"
-            }
+            title="Generate this test's code-behind from its last run (recording it here first if there is none), replay it as code, and offer the result as a diff"
           >
-            {compiling ? "⚙ Compiling…" : compileFromRun ? "⚙ Compile from this run" : "⚙ Compile"}
+            {compiling ? "⚙ Compiling…" : "⚙ Compile"}
           </button>
         </div>
         {(passCount > 0 || failCount > 0) && (

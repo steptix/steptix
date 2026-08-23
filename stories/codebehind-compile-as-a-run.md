@@ -3,8 +3,9 @@
 Builds on [codebehind-compile.md](codebehind-compile.md), which shipped the
 compile pipeline, the server endpoint and the TestBench commands. This story
 changes *how a compile behaves while it runs and what it leaves behind*.
-Nothing about the file format, binding, generation prompts or the review pass
-changes.
+Nothing about the file format, binding or the generation prompts changes; the
+review pass gains one rule, which the build found it needed (see "What was
+built").
 
 ## What we're building
 
@@ -361,13 +362,51 @@ per-file compile lock is unchanged.
 - **How many prompts** — the Record row reads "none, when the last run has
   context; one AI run otherwise".
 
+## What was built
+
+Everything above, in one pass, with three things the build added:
+
+- **The reviewer may not change the set of entries.** Caught live on the
+  first prefix compile: shown the whole test, the review pass wrote an entry
+  for the step the recording had never reached — code for a step nobody
+  recorded, which the next compile would then have skipped as "already has
+  one". The review prompt now says never to add an entry, and because a
+  prompt rule is a request, `reviewCandidate` compares the entries before and
+  after (`listEntries` in the writer) and rejects a revision that adds or
+  removes one, the generated file standing as for any other rejection.
+- **`RunDetails.coverage`** — `whole` | `prefix` | `partial` — is how the
+  server tells a run that describes the test from step 1 (green, or truncated
+  at a breakpoint) from a continuation or a mid-test re-run. Only the first
+  two can be a recording; a green `whole` run whose step count no longer
+  matches the file is declined too, since the author added a step since.
+- **A session with a run in flight refuses a Record** — a step-mode pause or
+  a tool debugger parks the batch inside the session, and a Record queued
+  behind it would wait forever. It arrives as an error frame, not a 409: the
+  decision is made at Record time, after the stream has opened.
+
+One deviation from the text above: a prefix compile reports `partial` even
+when its replay is green, because "green" means the whole test replays as
+code and a prefix only proved the prefix — the CLI exits 2 and TestBench's
+notification says what is left, which is the point of the status.
+
+Verified by running: root 2710+ (vitest), runner-core 432, testbench-native
+unit 223 and integration 186; live through the extension against
+`fixtures/test-app` — Compile with no prior run records in the editor's
+session and the next run serves every step as code, and Run-then-Compile
+reuses the run ("Compiling from session …'s last run (2 step(s), green, 2
+with page context)"), records nothing, and paints ⚙ from the replay before
+anything is applied; and the prefix compile over HTTP — a run red at step 3,
+then `partial` with `stoppedAt: 3`, steps 1–2 proven, and a proposed file of
+exactly two entries. The cached-run slowdown with capture on is still
+unmeasured.
+
 ## Implementation outline
 
 - `src/runner/step-executor.ts` — take the turn-1 DOM snapshot on a cache hit
   when `captureStepContext` is on.
 - `src/server/session-manager.ts` — `StepRequest.captureStepContext`;
-  `InternalRunOptions.codeBehind` drops `captureContext`. `lastRunDetails`
-  is already what it needs to be.
+  `InternalRunOptions.codeBehind` drops `captureContext`; `RunDetails.coverage`;
+  `sessionStatus` for the busy check.
 - `src/server/api-server.ts` — both allow-lists: `captureStepContext` on the
   step route, `sessionId` on the compile route.
 - `src/server/compile-runner.ts` — the source-run rule (green / red prefix /
@@ -376,7 +415,9 @@ per-file compile lock is unchanged.
   and `frame` on `compile:step`.
 - `src/codebehind/compile.ts` — per-entry state across rounds (proven /
   failed / unreached); prefix selection from a red source; `partial`; the
-  summary fields; `clearStale` for proven steps only; `files` on partial.
+  summary fields; `clearStale` for proven steps only; `files` on partial;
+  the review entry-set guard. `src/codebehind/review.ts` — the never-add
+  rule; `src/codebehind/writer.ts` — `listEntries`.
 - `src/cli/commands/compile.ts` — step lines under phases; the partial
   summary; exit code 2.
 - `runner-core` — `CompileRunEvent` and the narrower; `partial`; the summary

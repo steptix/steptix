@@ -65,6 +65,15 @@ const TEST_MD = [
   '2. Confirm the booking',
 ].join('\n');
 
+const THREE_STEP_MD = [
+  '# Booking',
+  '',
+  '## Steps',
+  '1. Enter the booking code',
+  '2. Confirm the booking',
+  '3. Read the reference',
+].join('\n');
+
 /**
  * A review response that hands the candidate back verbatim.
  *
@@ -165,32 +174,26 @@ function scriptedRunner(
     if (request.purpose === 'record') return record ?? recordOutcome(totalSteps);
     const next = queue.shift();
     if (next === undefined) throw new Error('replayed more times than the test scripted');
+    // A prefix replay runs the first N steps; the outcome is sparse past them,
+    // and a run that fails stops at the failure.
+    const ran = request.throughStep ?? totalSteps;
+    const steps: (StepResult | undefined)[] = new Array(totalSteps).fill(undefined);
     if (next === 'pass') {
-      return {
-        status: 'passed',
-        steps: Array.from({ length: totalSteps }, (_, i) =>
-          stepResult(i + 1, { fromCodeBehind: true }),
-        ),
-        resolvedParameters: {},
-        tokensUsed: 0,
-      };
+      for (let i = 0; i < ran; i++) steps[i] = stepResult(i + 1, { fromCodeBehind: true });
+      return { status: 'passed', steps, resolvedParameters: {}, tokensUsed: 0 };
     }
-    return {
-      status: 'failed',
-      steps: Array.from({ length: totalSteps }, (_, i) =>
-        stepResult(i + 1, {
-          fromCodeBehind: true,
-          ...(i + 1 === next.failAt && {
-            status: 'failed' as const,
-            error: next.error,
-            domSnapshot: '<input id="code">',
-            screenshotBase64: 'AAAA',
-          }),
+    for (let i = 0; i < Math.min(ran, next.failAt); i++) {
+      steps[i] = stepResult(i + 1, {
+        fromCodeBehind: true,
+        ...(i + 1 === next.failAt && {
+          status: 'failed' as const,
+          error: next.error,
+          domSnapshot: '<input id="code">',
+          screenshotBase64: 'AAAA',
         }),
-      ),
-      resolvedParameters: {},
-      tokensUsed: 0,
-    };
+      });
+    }
+    return { status: 'failed', steps, resolvedParameters: {}, tokensUsed: 0 };
   };
   return { runner, requests };
 }
@@ -223,14 +226,16 @@ describe('compileTest — the happy path', () => {
 
     expect(result.status).toBe('green');
     expect(generatedSteps(events)).toEqual([1, 2]);
-    // Record ran under AI with code-behind off and captured the page state
-    // either side of each step; the replay ran the candidate as strict code.
-    expect(requests[0]).toMatchObject({
-      purpose: 'record',
-      strict: false,
-      captureContext: true,
-      disableCodeBehind: true,
-    });
+    // Record captured the page state either side of each step, with
+    // code-behind left on — nothing selected has an entry an existing
+    // code-behind could hide — and the replay ran the candidate as strict code.
+    expect(requests[0]).toMatchObject({ purpose: 'record', strict: false, captureContext: true });
+    expect(requests[0]!.disableCodeBehind).toBeUndefined();
+    // Each step event names the line the step is on, for a gutter mark.
+    expect(events.find((e) => e.kind === 'step' && e.step === 1)).toMatchObject({ line: 4 });
+    expect(events.find((e) => e.kind === 'step' && e.step === 2)).toMatchObject({ line: 5 });
+    expect(result.summary.unproven).toEqual([]);
+    expect(result.summary.writtenOffAi).toEqual([]);
     expect(requests[1]).toMatchObject({ purpose: 'replay', strict: true, round: 1 });
     // …and the replay was pointed at a candidate, never the real file.
     expect(Object.keys(requests[1]!.candidateFiles ?? {})).toEqual([
@@ -427,6 +432,52 @@ export default defineSteps([
     expect(generatedSteps(b.events)).toEqual([1, 2]);
   });
 
+  it('turns code-behind off for Record only when the selection includes a working entry', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { runner, requests } = scriptedRunner(2, ['pass']);
+
+    // --all re-generates step 1's working entry, whose transcript only exists
+    // if the entry does not run.
+    await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, select: { all: true }, dryRun: true,
+    });
+    expect(requests[0]).toMatchObject({ purpose: 'record', disableCodeBehind: true });
+  });
+
+  it('adds a step whose entry failed during Record to the selection', async () => {
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    const test = await parseTestFile(md);
+    // Record (code-behind on) ran step 1's entry, which threw; the step healed
+    // under AI and so has a transcript to regenerate from.
+    const record = staleRecord();
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code', `await page.locator('#code-v2').waitFor();`),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { runner } = scriptedRunner(2, ['pass'], record);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    expect(generatedSteps(events)).toEqual([1, 2]);
+    expect(
+      events.some((e) => e.kind === 'step' && e.step === 1 && e.message.includes('joined the selection')),
+    ).toBe(true);
+    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).toContain('#code-v2');
+  });
+
   it('never compiles over an `ai: true` entry, even with --all', async () => {
     const md = await write('booking.md', TEST_MD);
     await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
@@ -563,19 +614,27 @@ export default defineSteps([
     const { events, onEvent } = collect();
 
     const result = await compileTest({
-      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent, dryRun: true,
     });
 
-    expect(result.status).toBe('failed');
-    const done = events.find((e) => e.kind === 'done')!;
-    expect(done.kind === 'done' && done.message).toContain('existing entry for step 1 fails');
-    expect(done.kind === 'done' && done.message).toContain('--steps 1');
-    // The author's file is exactly as they left it.
-    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).toContain('#hand-written');
-    expect(result.files).toEqual({});
+    // Partial, not failed: the compiler does not rewrite the author's entry,
+    // and it does not throw away step 2's either — that one never ran, and is
+    // proposed as unproven code.
+    expect(result.status).toBe('partial');
+    expect(result.summary.error).toContain('existing entry for step 1 fails');
+    expect(result.summary.error).toContain('--steps 1');
+    expect(result.summary.unproven).toEqual([2]);
+    expect(result.summary.writtenOffAi).toEqual([]);
+    const proposed = result.files[path.join(dir, 'booking.steps.ts')]!;
+    expect(proposed).toContain('#hand-written');
+    expect(proposed).toContain('source: "Confirm the booking"');
+    // And only one replay round: the author's code is not the compiler's to repair.
+    expect(result.summary.rounds).toBe(1);
+    // Nothing reached disk — dry run — and the author's file is as they left it.
+    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).not.toContain('Confirm the booking');
   });
 
-  it('writes nothing when replay never goes green, and leaves the candidate for salvage', async () => {
+  it('writes what it has when replay never goes green — the failing steps as AI', async () => {
     const md = await write('booking.md', TEST_MD);
     const test = await parseTestFile(md);
     const { client } = scriptedClient([
@@ -584,7 +643,10 @@ export default defineSteps([
       REVIEW_NOOP,
       entryEnvelope('Confirm the booking', `await page.locator('#retry').waitFor();`),
     ]);
-    const { runner } = scriptedRunner(2, [
+    // Rounds 1 and 2 fail at step 2, which is written off; the confirming
+    // round then fails at step 1, which gets the same answer — and the rounds
+    // are spent, so no further repair.
+    const { runner, requests } = scriptedRunner(2, [
       { failAt: 2, error: 'nope' },
       { failAt: 2, error: 'nope' },
       { failAt: 1, error: 'and now step 1 too' },
@@ -594,20 +656,108 @@ export default defineSteps([
       test, config: CONFIG, contextContent: '', aiClient: client, runner, maxRounds: 2,
     });
 
-    expect(result.status).toBe('failed');
-    expect(result.files).toEqual({});
-    await expect(fs.access(path.join(dir, 'booking.steps.ts'))).rejects.toThrow();
-    const candidate = path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate');
-    expect(result.summary.candidatePath).toBe(candidate);
-    expect(await fs.readFile(candidate, 'utf-8')).toContain('Enter the booking code');
+    expect(result.status).toBe('partial');
+    expect(requests.filter((r) => r.purpose === 'replay')).toHaveLength(3);
+    expect(result.summary.writtenOffAi).toEqual([2, 1]);
+    expect(result.summary.unproven).toEqual([]);
+    expect(result.summary.compiled).toBe(0);
+    expect(result.summary.keptAi).toBe(2);
+    expect(result.summary.error).toContain('step 1 still fails as code');
+    // The CLI path writes the partial file; there is no candidate to salvage
+    // because nothing was thrown away.
+    expect(result.summary.candidatePath).toBeUndefined();
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written.match(/ai: true/g)).toHaveLength(2);
+    expect(written).toContain('replay kept failing — nope');
+    expect(written).toContain('replay kept failing — and now step 1 too');
+    await expect(
+      fs.access(path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate')),
+    ).rejects.toThrow();
   });
 
-  it('fails without compiling when the recording run is red', async () => {
+  it('proposes an entry no round reached as unproven code, and keeps its stale flag', async () => {
+    const md = await write('booking.md', THREE_STEP_MD);
+    const test = await parseTestFile(md);
+    // The sidecar says every step is stale. After the compile: 1 proven
+    // (cleared), 2 written off (cleared — it is `ai: true` now), 3 unproven
+    // (kept — the next run decides).
+    await writeLastRun(md, [
+      { index: 1, source: 'Enter the booking code', status: 'passed', fromCodeBehind: false, stale: true },
+      { index: 2, source: 'Confirm the booking', status: 'passed', fromCodeBehind: false, stale: true },
+      { index: 3, source: 'Read the reference', status: 'passed', fromCodeBehind: false, stale: true },
+    ]);
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      entryEnvelope('Read the reference', `await page.locator('#ref').waitFor();`),
+      REVIEW_NOOP,
+    ]);
+    // One round, failing at 2: step 2 is written off, and the confirming
+    // round fails at 2 again — under AI this time, so the compiler has nothing
+    // left to try. Step 3 was never reached.
+    const { runner } = scriptedRunner(3, [
+      { failAt: 2, error: 'no confirm button' },
+      { failAt: 2, error: 'no confirm button' },
+    ]);
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, maxRounds: 1,
+    });
+
+    expect(result.status).toBe('partial');
+    expect(result.summary.writtenOffAi).toEqual([2]);
+    expect(result.summary.unproven).toEqual([3]);
+    expect(result.summary.compiled).toBe(2);
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    // Step 3's entry is real code, not a write-off.
+    expect(written).toContain('#ref');
+    expect(written.match(/ai: true/g)).toHaveLength(1);
+    const sidecar = await readLastRun(md);
+    expect(sidecar!.steps.map((s) => [s.index, s.stale])).toEqual([[1, false], [2, false], [3, true]]);
+  });
+
+  it('compiles the steps before the failure when the recording run is red', async () => {
+    const md = await write('booking.md', THREE_STEP_MD);
+    const test = await parseTestFile(md);
+    const record: CompileRunOutcome = {
+      status: 'failed',
+      steps: [stepResult(1), stepResult(2, { status: 'failed', error: 'the page never loaded' }), undefined],
+      resolvedParameters: {},
+      tokensUsed: 500,
+    };
+    const { client, prompts } = scriptedClient([entryEnvelope('Enter the booking code'), REVIEW_NOOP]);
+    const { runner, requests } = scriptedRunner(3, ['pass'], record);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    // A prefix compile: step 1 has a transcript, steps 2 and 3 do not.
+    expect(result.status).toBe('partial');
+    expect(generatedSteps(events)).toEqual([1]);
+    expect(result.summary.stoppedAt).toEqual({ step: 2, error: 'the page never loaded' });
+    expect(result.summary.notAttempted).toEqual([2, 3]);
+    expect(result.summary.compiled).toBe(1);
+    expect(result.summary.unproven).toEqual([]);
+    // The replay ran the prefix, not the whole test.
+    expect(requests.find((r) => r.purpose === 'replay')).toMatchObject({ throughStep: 1 });
+    // Generation still saw the whole test — it is the context — but only step 1 in scope.
+    expect(prompts[0]).toContain('Read the reference');
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written).toContain('source: "Enter the booking code"');
+    expect(written).not.toContain('Confirm the booking');
+    expect(
+      events.some((e) => e.kind === 'phase' && e.phase === 'record' && e.message.includes('stopped at step 2')),
+    ).toBe(true);
+  });
+
+  it('fails with nothing to compile when the recording stops at step 1', async () => {
     const md = await write('booking.md', TEST_MD);
     const test = await parseTestFile(md);
     const record: CompileRunOutcome = {
       status: 'failed',
-      steps: [stepResult(1), stepResult(2, { status: 'failed', error: 'the page never loaded' })],
+      steps: [stepResult(1, { status: 'failed', error: 'the page never loaded' }), undefined],
       resolvedParameters: {},
       tokensUsed: 500,
     };
@@ -618,8 +768,40 @@ export default defineSteps([
       test, config: CONFIG, contextContent: '', aiClient: client, runner,
     });
     expect(result.status).toBe('failed');
-    expect(result.summary.error).toContain('the recording run did not pass');
+    expect(result.summary.error).toContain('stopped at step 1');
     expect(result.summary.error).toContain('the page never loaded');
+    expect(result.summary.stoppedAt).toEqual({ step: 1, error: 'the page never loaded' });
+    expect(result.files).toEqual({});
+  });
+
+  it('treats a supplied run that stopped early as a prefix, green or not', async () => {
+    const md = await write('booking.md', THREE_STEP_MD);
+    const test = await parseTestFile(md);
+    // A breakpoint-truncated run: steps 1–2 passed, 3 never ran.
+    const recorded: CompileRunOutcome = {
+      status: 'passed',
+      steps: [stepResult(1), stepResult(2), undefined],
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { runner, requests } = scriptedRunner(3, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, recorded, onEvent, dryRun: true,
+    });
+
+    expect(result.status).toBe('partial');
+    expect(generatedSteps(events)).toEqual([1, 2]);
+    expect(result.summary.stoppedAt).toEqual({ step: 3, error: 'the run stopped before this step' });
+    expect(result.summary.notAttempted).toEqual([3]);
+    expect(requests.filter((r) => r.purpose === 'record')).toHaveLength(0);
+    expect(requests[0]).toMatchObject({ purpose: 'replay', throughStep: 2 });
   });
 });
 
@@ -684,6 +866,7 @@ export default defineSteps([
     const broken = `import { defineSteps } from 'ai-ui-automation/codebehind';
 export default defineSteps([
   { source: "Enter the booking code", async run({ page }) { await page.locator('#x'.waitFor(); } },
+  { source: "Confirm the booking", async run({ page }) { await page.locator('#code').waitFor(); } },
 ]);
 `;
     const { client } = scriptedClient([
@@ -741,6 +924,47 @@ export default defineSteps([
       .not.toContain('hunter2-correct-horse');
     expect(
       events.some((e) => e.kind === 'phase' && e.message.includes('inlines {{password}}')),
+    ).toBe(true);
+  });
+
+  it('rejects a review revision that adds an entry for a step it was not given', async () => {
+    // Caught live in a prefix compile: the reviewer, shown the whole test,
+    // wrote an entry for the step the recording never reached — code for a
+    // step nobody recorded, which the next compile would then skip as
+    // "already has one". The set of entries is the compiler's decision.
+    const md = await write('booking.md', THREE_STEP_MD);
+    const test = await parseTestFile(md);
+    const record: CompileRunOutcome = {
+      status: 'failed',
+      steps: [stepResult(1), stepResult(2), stepResult(3, { status: 'failed', error: 'no such button' })],
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+    const inventive = `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: "Enter the booking code", async run({ page }) { await page.locator('#code').waitFor(); } },
+  { source: "Confirm the booking", async run({ page }) { await page.locator('#code').waitFor(); } },
+  { source: "Read the reference", async run({ page }) { await page.locator('#invented').click(); } },
+]);
+`;
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      JSON.stringify({ file: inventive }),
+    ]);
+    const { runner } = scriptedRunner(3, ['pass'], record);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('partial');
+    const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
+    expect(written).not.toContain('Read the reference');
+    expect(written).not.toContain('#invented');
+    expect(
+      events.some((e) => e.kind === 'phase' && e.message.includes('adds an entry for "Read the reference"')),
     ).toBe(true);
   });
 
