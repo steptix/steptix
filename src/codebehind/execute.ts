@@ -1,5 +1,6 @@
 import type { Page, BrowserContext, Browser } from 'playwright';
 import { interpolate } from '../parser/parameters.js';
+import { resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
 import type { CodeBehindContext, CodeBehindStepApi, StepCodeEntry } from './types.js';
@@ -28,6 +29,12 @@ export interface RunCodeBehindOptions {
   browser: Browser;
   /** Live parameter map — the same object `{{var}}` and `[as: x]` use. */
   resolvedParameters: Record<string, string>;
+  /**
+   * The run's env/data context, when it has one — what `${data.url}` was
+   * resolved against in the step text, and what `step.getVar('data.url')`
+   * reads from the entry (stories/codebehind-env-data.md).
+   */
+  envData?: EnvDataContext | undefined;
   baseUrl?: string | undefined;
   /** Step label used in log lines, e.g. `codebehind:12`. */
   label: string;
@@ -70,7 +77,7 @@ export async function runCodeBehindEntry(
     page: options.page,
     context: options.context,
     browser: options.browser,
-    step: makeStepApi(options.binding.scope, options.resolvedParameters, outputs),
+    step: makeStepApi(options.binding.scope, options.resolvedParameters, outputs, options.envData),
     log: createCapturingLog(options.label, logs),
     ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
   };
@@ -108,16 +115,22 @@ export async function runCodeBehindEntry(
  *
  *  1. the frame's rename table (internal names + output aliases),
  *  2. the frame's captured inputs (declared parameters),
- *  3. the bare name.
+ *  3. the bare name,
+ *  4. the environment: `data.url`, `env.BASE_URL`, `<source>.path`,
+ *     `envName` — the name inside a `${...}` placeholder, resolved against
+ *     the run's context the way the parser resolved the placeholder
+ *     (stories/codebehind-env-data.md). Parameters win, as they would in
+ *     the markdown; a run with no environment answers `undefined`.
  *
- * Steps at the top level or in a plain section have an empty scope, so all
- * three collapse to "the bare name" and this behaves exactly like the tool
- * executor's `step`.
+ * Steps at the top level or in a plain section have an empty scope, so the
+ * first three collapse to "the bare name" and this behaves exactly like the
+ * tool executor's `step`.
  */
 function makeStepApi(
   scope: CodeBehindVarScope,
   resolvedParameters: Record<string, string>,
   outputs: Record<string, string>,
+  envData?: EnvDataContext | undefined,
 ): CodeBehindStepApi {
   return {
     getVar(name) {
@@ -128,7 +141,9 @@ function makeStepApi(
       // the expander interpolates into the body text at run time rather than
       // at expansion time. Resolve it the same way here.
       if (input !== undefined) return interpolate(input, resolvedParameters);
-      return resolvedParameters[name];
+      const bare = resolvedParameters[name];
+      if (bare !== undefined) return bare;
+      return envData ? resolveEnvDataRef(name, envData) : undefined;
     },
     setVar(name, value) {
       const effective = scope.renames[name] ?? name;

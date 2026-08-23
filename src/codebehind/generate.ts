@@ -2,6 +2,11 @@ import type { AiClient } from '../ai/client.js';
 import { findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
 import { buildStepCodePrompt, buildSystemPrompt, formatTestInfo } from '../ai/prompts.js';
 import type { AIAction, ChatMessage } from '../ai/types.js';
+import {
+  envDataRefsIn,
+  resolveEnvDataRef,
+  type EnvDataContext,
+} from '../parser/interpolate-env-data.js';
 import { interpolate } from '../parser/parameters.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
@@ -80,6 +85,12 @@ export interface GenerateStepEntryOptions {
   assertions?: AssertionResult[] | undefined;
   /** Live parameter map from the recording, for resolving `{{param}}`. */
   resolvedParameters: Record<string, string>;
+  /**
+   * The env/data context the test was parsed with, for resolving `${data.url}`
+   * and kin (stories/codebehind-env-data.md). Absent when the compile ran
+   * without an environment — a step making such a reference is then declined.
+   */
+  envData?: EnvDataContext | undefined;
   aiClient: AiClient;
   contextContent: string;
   testName: string;
@@ -116,10 +127,18 @@ export async function generateStepEntry(
 
   const parameters = stepParameters(binding, options.resolvedParameters);
   const { captures } = referencedVariableNames(binding.source);
+  const envRefs = stepEnvRefs(binding, options.envData);
+  // A reference the run cannot answer is declined before the model is asked:
+  // the code it would write calls `getVar` for a value that does not exist,
+  // and the replay would only discover that one round later.
+  if (envRefs.unresolved.length > 0) {
+    return { kind: 'declined', reason: unresolvedRefsReason(envRefs.unresolved, options.envData) };
+  }
 
   const prompt = buildStepCodePrompt({
     rawStepText: binding.source,
     parameters,
+    ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     actions: options.actions,
     ...(options.assertions && options.assertions.length > 0 && {
       assertions: options.assertions.map((a) => ({
@@ -139,19 +158,28 @@ export async function generateStepEntry(
     ...(options.urlAfter !== undefined && { urlAfter: options.urlAfter }),
   });
 
-  return askForEntry(options.aiClient, options.contextContent, prompt, parameters, options.signal);
+  return askForEntry(
+    options.aiClient,
+    options.contextContent,
+    prompt,
+    guardedValues(parameters, envRefs.resolved),
+    options.signal,
+  );
 }
 
 /**
  * One model round-trip that must come back as an entry, a decline, or an
  * error. Shared by generation and repair — the envelope, the parse and the
  * leak guard are identical, and only the prompt differs.
+ *
+ * `guarded` is every value the answer must not contain as a literal: the
+ * step's parameters and its environment references, from `guardedValues`.
  */
 export async function askForEntry(
   aiClient: AiClient,
   contextContent: string,
   prompt: ChatMessage,
-  parameters: Array<{ name: string; value: string }>,
+  guarded: Array<{ name: string; value: string }>,
   signal?: AbortSignal | undefined,
 ): Promise<GeneratedEntry> {
   let answer;
@@ -169,18 +197,77 @@ export async function askForEntry(
 
   // The non-negotiable guard. A parameter value reaching a committed file as
   // a literal is exactly the failure this feature must not introduce, and a
-  // password is the case that makes it non-negotiable.
-  const leaked = findInlinedParameterValue(answer.entry, parameters);
+  // password is the case that makes it non-negotiable. An environment value
+  // is the same failure with a different name: `${env.GITHUB_PASSWORD}` hands
+  // the model the real password in the transcript, and `${data.url}` inlined
+  // is a file that runs against one environment only.
+  const leaked = findInlinedParameterValue(answer.entry, guarded);
   if (leaked) {
     return {
       kind: 'error',
       message:
-        `the generated code contains the resolved value of {{${leaked}}} as a literal, ` +
+        `the generated code contains the resolved value of ${describeGuardedName(leaked)} as a literal, ` +
         `so it was discarded`,
     };
   }
 
   return { kind: 'entry', code: answer.entry };
+}
+
+/**
+ * The environment references a step makes, split by whether the run's
+ * context answers them (stories/codebehind-env-data.md).
+ *
+ * Resolved ones go into the prompt with their values and into the leak guard;
+ * an unresolved one declines the step. Scoped to the step's own references,
+ * as `stepParameters` is, and for the same reasons.
+ */
+export function stepEnvRefs(
+  binding: CodeBehindBinding,
+  envData: EnvDataContext | undefined,
+): { resolved: Array<{ ref: string; value: string }>; unresolved: string[] } {
+  const resolved: Array<{ ref: string; value: string }> = [];
+  const unresolved: string[] = [];
+  for (const ref of envDataRefsIn(binding.source)) {
+    const value = envData ? resolveEnvDataRef(ref, envData) : undefined;
+    if (value === undefined) unresolved.push(ref);
+    else resolved.push({ ref, value });
+  }
+  return { resolved, unresolved };
+}
+
+/**
+ * Why a step with a reference the run cannot answer stays AI. The reason
+ * lands in the file as the entry's comment, so it names the reference and
+ * the likely cause rather than just "undefined".
+ */
+export function unresolvedRefsReason(refs: string[], envData: EnvDataContext | undefined): string {
+  const list = refs.map((r) => `\${${r}}`).join(', ');
+  const cause = envData
+    ? 'nothing in this environment defines it — a skill-private data source is ' +
+      'resolved inside the skill and has no run-time name'
+    : 'the compile ran without an environment';
+  return `the step references ${list}, which code-behind cannot read at run time: ${cause}`;
+}
+
+/**
+ * Every value the generated code must not contain as a literal: the step's
+ * parameters under their `{{name}}` and its environment references under
+ * their `${ref}`, so the rejection message can name either as written.
+ */
+export function guardedValues(
+  parameters: Array<{ name: string; value: string }>,
+  envRefs: Array<{ ref: string; value: string }>,
+): Array<{ name: string; value: string }> {
+  return [
+    ...parameters,
+    ...envRefs.map((r) => ({ name: `\${${r.ref}}`, value: r.value })),
+  ];
+}
+
+/** `{{username}}` for a parameter, `${data.url}` for an environment reference. */
+export function describeGuardedName(name: string): string {
+  return name.startsWith('${') ? name : `{{${name}}}`;
 }
 
 /**

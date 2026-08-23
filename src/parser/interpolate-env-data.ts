@@ -1,4 +1,5 @@
 import { lookupDataPath, type DataObject, type DataValue } from '../env/data-loader.js';
+import { isSecretName } from './parameters.js';
 
 export interface EnvDataContext {
   /** Snapshot of resolved env vars (typically a frozen process.env clone). */
@@ -129,6 +130,90 @@ export function interpolateDataSourcePath(
 /** `${envName}` — the no-dot, single-token form. Allows surrounding whitespace. */
 const ENV_NAME_TOKEN_RE = /\$\{\s*envName\s*\}/g;
 
+/**
+ * Every placeholder of the grammar above, whatever its namespace: `envName`
+ * and `<word>.<dotted-path>`. Used to find the references in a step's
+ * authored text without a context in hand — a namespace nothing declares is
+ * a reference too, one `resolveEnvDataRef` answers with `undefined`.
+ */
+const ANY_REF_RE = /\$\{\s*(envName|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_.\-]+)\s*\}/g;
+
+/**
+ * The `${...}` references a step makes, as the bare name inside the braces
+ * (`data.url`, `env.BASE_URL`, `endpoints.api.url`, `envName`), in source
+ * order, deduped. `{{name}}` placeholders are a different grammar and are
+ * not reported here — see `referencedVariableNames`.
+ *
+ * This is the name `step.getVar` takes for the same reference at run time
+ * (stories/codebehind-env-data.md): whatever is inside `${...}` in the step
+ * is what the code passes to `getVar`.
+ */
+export function envDataRefsIn(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(ANY_REF_RE)) {
+    const ref = m[1]!;
+    if (!out.includes(ref)) out.push(ref);
+  }
+  return out;
+}
+
+/**
+ * Resolve one reference the way `interpolateEnvData` would — same namespace
+ * rules, same path walk, same stringification of a non-string leaf — except
+ * that a miss is `undefined` rather than a throw: at run time the caller is
+ * generated code asking for a value, and "not defined" is an answer.
+ *
+ * `data` resolves only when the context carries it (skill-level contexts
+ * deliberately omit it); any other namespace must be a declared source.
+ */
+export function resolveEnvDataRef(name: string, ctx: EnvDataContext): string | undefined {
+  const ref = name.trim();
+  if (ref === 'envName') return ctx.envName ?? undefined;
+  const dot = ref.indexOf('.');
+  if (dot <= 0 || dot === ref.length - 1) return undefined;
+  const namespace = ref.slice(0, dot);
+  const dataPath = ref.slice(dot + 1);
+  if (namespace === 'env') return ctx.env[dataPath];
+  const tree = namespace === 'data' ? ctx.data : ctx.extraData?.[namespace];
+  if (!tree) return undefined;
+  const value = lookupDataPath(tree, dataPath);
+  return value === undefined ? undefined : stringifyDataValue(value);
+}
+
+/**
+ * The environment's secret values: every env var with a secret-looking name,
+ * and every string leaf of the data trees that sits under a secret-looking
+ * key anywhere on its path (`users.admin.password`). What a recording on disk
+ * redacts besides the secret-named parameters
+ * (stories/codebehind-env-data.md, "The recording redacts environment
+ * secrets"). Non-empty strings only: a numeric `pin` would not match the
+ * name rule anyway, and redacting `""` is a no-op that costs a split.
+ */
+export function envDataSecretValues(ctx: EnvDataContext): string[] {
+  const out = new Set<string>();
+  for (const [name, value] of Object.entries(ctx.env)) {
+    if (isSecretName(name) && value.length > 0) out.add(value);
+  }
+  const walk = (value: DataValue, underSecret: boolean): void => {
+    if (typeof value === 'string') {
+      if (underSecret && value.length > 0) out.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, underSecret);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      for (const [key, child] of Object.entries(value)) {
+        walk(child, underSecret || isSecretName(key));
+      }
+    }
+  };
+  if (ctx.data) walk(ctx.data, false);
+  for (const tree of Object.values(ctx.extraData ?? {})) walk(tree, false);
+  return [...out];
+}
+
 function envNameUnsetError(filePath?: string): Error {
   return new Error(
     `Cannot resolve \${envName}${filePath ? ` in ${filePath}` : ''} — ` +
@@ -179,7 +264,10 @@ export function interpolateEnvDataDeep<T>(value: T, ctx: EnvDataContext): T {
   return value;
 }
 
-function stringifyDataValue(v: DataValue): string {
+/** A data leaf as step text sees it: strings as they are, scalars via
+ *  `String`, a subtree JSON-encoded. Shared with `resolveEnvDataRef` so
+ *  `step.getVar('data.fixtures')` reads what `${data.fixtures}` would. */
+export function stringifyDataValue(v: DataValue): string {
   if (v === null) return '';
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);

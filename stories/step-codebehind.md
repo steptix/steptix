@@ -264,6 +264,13 @@ and the variable scope is the same map `{{var}}` and `[as: x]` use. Execution
 honours the session abort signal and the same timeout discipline as tool
 steps.
 
+> **Extended by [codebehind-env-data.md](codebehind-env-data.md).** The
+> variable map never held the environment — `${data.url}` is substituted by
+> the parser before the run — so `step.getVar` had no way to read it.
+> `getVar` now falls through to the run's env/data context for a name
+> written the way the placeholder is: `step.getVar('data.url')`,
+> `step.getVar('env.BASE_URL')`. Parameters still win.
+
 **Failure → self-heal.** If `run` throws, the runner logs
 `Code-behind failed for step N — falling through to AI`, discards that entry
 for the rest of the run, and enters the normal AI flow with a clean slate —

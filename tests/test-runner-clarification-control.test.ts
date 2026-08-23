@@ -753,3 +753,64 @@ export default defineSteps([{ source: 'step one', async run() { const x = ; } }]
     await fsp.rm(dir, { recursive: true, force: true });
   });
 });
+
+describe('test-runner — the env/data context reaches the step', () => {
+  beforeEach(() => {
+    executeStepMock.mockReset();
+    executeBranchedStepMock.mockReset();
+    runInteractiveReplMock.mockReset();
+    launchBrowserMock.mockReset();
+    closeBrowserMock.mockReset();
+    resolveHooksMock.mockReset();
+    stepCacheInitMock.mockReset();
+    diagnoseFailureMock.mockReset();
+
+    launchBrowserMock.mockResolvedValue(makeSession());
+    closeBrowserMock.mockResolvedValue(undefined);
+    resolveHooksMock.mockResolvedValue({
+      before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
+    });
+    stepCacheInitMock.mockResolvedValue({
+      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
+    });
+    diagnoseFailureMock.mockResolvedValue(null);
+  });
+
+  it('passes the parsed test\'s context to every step, and nothing when the parse had none', async () => {
+    // `step.getVar('data.url')` in a code-behind entry reads this
+    // (stories/codebehind-env-data.md). The CLI run and the compile's own
+    // runs both come through here, so this is the one place to lose it.
+    const os = await import('node:os');
+    const fsp = await import('node:fs/promises');
+    const pathMod = await import('node:path');
+    const { parseTestFile } = await import('../src/parser/markdown.js');
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'aiui-envdata-'));
+    const md = pathMod.join(dir, 'login.md');
+    await fsp.writeFile(md, ['# Login', '', '## Steps', '1. Navigate to ${data.url}', '2. Click Sign in'].join('\n'));
+    executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) =>
+      passingResult(index, instruction),
+    );
+
+    const withEnv = await parseTestFile(md, {
+      envData: { env: { GITHUB_USERNAME: 'octocat' }, data: { url: 'https://uat.example/' }, envName: 'uat' },
+    });
+    const report = await runTest({ test: withEnv, resolvedParameters: {} }, makeConfig(), '');
+    expect(report.status).toBe('passed');
+    expect(executeStepMock).toHaveBeenCalledTimes(2);
+    for (const call of executeStepMock.mock.calls) {
+      const opts = call[3];
+      expect(opts.envData).toBe(withEnv.envData);
+      expect(opts.envData.data.url).toBe('https://uat.example/');
+    }
+    // The step text the executor runs is the interpolated one, as before.
+    expect(executeStepMock.mock.calls[0]![2]).toBe('Navigate to https://uat.example/');
+
+    executeStepMock.mockClear();
+    const withoutEnv = await parseTestFile(md);
+    await runTest({ test: withoutEnv, resolvedParameters: {} }, makeConfig(), '');
+    for (const call of executeStepMock.mock.calls) {
+      expect(call[3].envData).toBeUndefined();
+    }
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+});

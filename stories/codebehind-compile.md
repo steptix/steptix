@@ -177,6 +177,15 @@ it can already see: a bracket-marker step, a transcript containing a
 runner-state action (`openBrowser`, `prompt`, …), and a step the recording
 performed no page actions for.
 
+> **Extended by [codebehind-env-data.md](codebehind-env-data.md).** The
+> "referenced parameters with values" above were only the `{{name}}` kind;
+> a step saying `Navigate to ${data.url}` reached the model as "no
+> parameters" and stayed AI for want of a variable to read. The prompt now
+> lists the step's `${...}` references with their values and the
+> `step.getVar('data.url')` call that reads each one, the leak guard covers
+> those values too, and a reference the run cannot answer is a fourth
+> up-front decline.
+
 The response shape is the `{"entry": ...}` JSON envelope (the client forces
 `json_object`), parsed by `parseStepCodeOrDecline`, which is `parseStepCode`
 plus the decline arm.
