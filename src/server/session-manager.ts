@@ -2333,6 +2333,28 @@ export class SessionManager {
         },
       );
     }
+    // A strict run — a compile's replay — exists to find out whether the code
+    // works on its own. A file that did not load has no code to run, so the
+    // answer is "no", said before any step runs under AI and looks like "yes".
+    if (cb?.strict && codeBehind.loadErrors.length > 0) {
+      const { file, error } = codeBehind.loadErrors[0]!;
+      const message = `code-behind file ${file} could not be loaded: ${error}`;
+      logger.error(`Session "${sessionId}": ${message}`);
+      emit({ type: 'output', msg: message, kind: 'error' });
+      emit({ type: 'done', status: 'failed', effectiveSettings: resolvedSettings.effective });
+      return {
+        sessionId,
+        status: 'failed',
+        stepsCompleted: 0,
+        stepsTotal,
+        results: [],
+        outputs: session.outputs,
+        outputSources: { ...session.outputSources },
+        error: { step: 0, message },
+        pageTitle: '',
+      };
+    }
+
     // ─── StepCache initialization ────────────────────────────────────────
     //
     // Per-request: clear the skill cache (already done at the top of

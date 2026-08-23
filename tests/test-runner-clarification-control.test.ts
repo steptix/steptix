@@ -694,3 +694,62 @@ describe('test-runner — the recording', () => {
     await fsp.rm(dir, { recursive: true, force: true });
   });
 });
+
+describe('test-runner — a strict run whose code-behind did not load', () => {
+  beforeEach(() => {
+    executeStepMock.mockReset();
+    executeBranchedStepMock.mockReset();
+    runInteractiveReplMock.mockReset();
+    launchBrowserMock.mockReset();
+    closeBrowserMock.mockReset();
+    resolveHooksMock.mockReset();
+    stepCacheInitMock.mockReset();
+    diagnoseFailureMock.mockReset();
+
+    launchBrowserMock.mockResolvedValue(makeSession());
+    closeBrowserMock.mockResolvedValue(undefined);
+    resolveHooksMock.mockResolvedValue({
+      before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
+    });
+    stepCacheInitMock.mockResolvedValue({
+      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
+    });
+    diagnoseFailureMock.mockResolvedValue(null);
+  });
+
+  it('fails before the first step and says which file, instead of passing under AI', async () => {
+    // A compile's replay asks "does this code work on its own"; a file that
+    // never loaded has no code to run. Caught live: a project without
+    // node_modules replayed "4/4 as code" under AI and the compile went green.
+    const os = await import('node:os');
+    const fsp = await import('node:fs/promises');
+    const pathMod = await import('node:path');
+    const { parseTestFile } = await import('../src/parser/markdown.js');
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'aiui-strict-'));
+    const md = pathMod.join(dir, 'booking.md');
+    await fsp.writeFile(md, ['# Booking', '', '## Steps', '1. step one', '2. step two'].join('\n'));
+    const stepsFile = pathMod.join(dir, 'booking.steps.ts');
+    await fsp.writeFile(stepsFile, `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([{ source: 'step one', async run() { const x = ; } }]);
+`);
+    const parsed = await parseTestFile(md);
+    executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) =>
+      passingResult(index, instruction),
+    );
+
+    // Not strict: the file is a warning, the steps run under AI, the run passes.
+    const lenient = await runTest({ test: parsed, resolvedParameters: {} }, makeConfig(), '');
+    expect(lenient.status).toBe('passed');
+    expect(executeStepMock).toHaveBeenCalledTimes(2);
+
+    executeStepMock.mockClear();
+    const strict = await runTest({ test: parsed, resolvedParameters: {} }, makeConfig(), '', undefined, {
+      codeBehindStrict: true,
+    });
+    expect(strict.status).toBe('failed');
+    expect(strict.error).toContain('could not be loaded');
+    expect(strict.error).toContain('booking.steps.ts');
+    expect(executeStepMock).not.toHaveBeenCalled();
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+});

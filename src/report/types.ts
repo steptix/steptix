@@ -270,6 +270,11 @@ export interface FailureDiagnosis {
 
 /** Complete test run report data */
 export interface TestReport {
+  /**
+   * Why the run failed before (or without) a step failing — a code-behind
+   * file a strict replay could not load. Absent when the steps tell the story.
+   */
+  error?: string;
   testName: string;
   filePath: string;
   tags: string[];

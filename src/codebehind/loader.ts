@@ -87,7 +87,18 @@ export interface CodeBehindBinding {
  * occurrence to write to.
  */
 export class CodeBehindRegistry {
-  constructor(private readonly bindings: (CodeBehindBinding | undefined)[]) {}
+  constructor(
+    private readonly bindings: (CodeBehindBinding | undefined)[],
+    /**
+     * Code-behind files that exist but could not be loaded — a syntax error,
+     * an import that does not resolve. Each is also warned about, and its
+     * steps fall back to AI, which is right for a run and wrong for a strict
+     * replay: a compile asking "does this code work on its own" must not get
+     * "yes" because the code never ran. Caught live: a project with no
+     * `node_modules` replayed 4/4 "as code" under AI and the compile went green.
+     */
+    readonly loadErrors: ReadonlyArray<{ file: string; error: string }> = [],
+  ) {}
 
   /** The binding for expanded step `index` (0-based), if any. */
   bindingFor(index: number): CodeBehindBinding | undefined {
@@ -233,7 +244,11 @@ export async function buildCodeBehindRegistry(
     }
   }
 
-  return new CodeBehindRegistry(bindings);
+  const loadErrors: Array<{ file: string; error: string }> = [];
+  for (const [file, load] of loaded) {
+    if (load.error !== undefined) loadErrors.push({ file, error: load.error });
+  }
+  return new CodeBehindRegistry(bindings, loadErrors);
 }
 
 /**
@@ -295,6 +310,8 @@ interface LoadedCodeBehind {
     source: string,
     occurrence: number,
   ): StepCodeEntry | undefined;
+  /** Why the file yielded no entries, when it exists and failed to load. */
+  error?: string;
 }
 
 const EMPTY_LOAD: LoadedCodeBehind = { entries: [], lookup: () => undefined };
@@ -337,9 +354,11 @@ async function loadCodeBehindFile(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // A missing sibling file is the normal case, not a problem: most tests
-    // have no code-behind. Anything else is worth saying out loud.
+    // have no code-behind. Anything else is worth saying out loud — and
+    // recording, so a strict replay can refuse to pretend.
     if (!isMissingFile(err)) {
       warn(`Failed to load code-behind file ${file}: ${message}. Steps fall back to AI.`);
+      return { ...EMPTY_LOAD, error: message };
     }
     return EMPTY_LOAD;
   }

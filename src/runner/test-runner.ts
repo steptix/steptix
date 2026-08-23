@@ -359,6 +359,13 @@ export async function runTest(
             ...(extras.codeBehindCandidates && { candidateFiles: extras.codeBehindCandidates }),
           },
         );
+  // A strict run — a compile's replay — exists to find out whether the code
+  // works on its own. A file that did not load has no code to run, so the
+  // answer is "no", not "every step passed under AI".
+  const strictLoadError =
+    extras.codeBehindStrict && codeBehind.loadErrors.length > 0
+      ? `code-behind file ${codeBehind.loadErrors[0]!.file} could not be loaded: ${codeBehind.loadErrors[0]!.error}`
+      : undefined;
   /** Per-expanded-step facts for the last-run sidecar, filled as steps run.
    *  Not written when this run deliberately bypassed code-behind: a compile's
    *  Record would otherwise stamp "0 code-behind, all AI" over the real run's
@@ -575,6 +582,11 @@ export async function runTest(
       extras.stopAfterStep !== undefined
         ? Math.max(0, Math.min(test.steps.length, extras.stopAfterStep))
         : test.steps.length;
+
+    if (strictLoadError) {
+      logger.error(strictLoadError);
+      bail = true;
+    }
 
     for (let i = 0; i < stepLimit; i++) {
       if (bail) break;
@@ -1049,7 +1061,7 @@ export async function runTest(
     const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
     const timedOut = stepResults.length < stepLimit && !bail;
-    overallStatus = failedSteps > 0 || timedOut ? 'failed' : 'passed';
+    overallStatus = failedSteps > 0 || timedOut || strictLoadError !== undefined ? 'failed' : 'passed';
 
     // The recording, beside the test, when this run was asked to capture —
     // which is a compile's Record (stories/codebehind-recording-on-disk.md).
@@ -1087,6 +1099,7 @@ export async function runTest(
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
       ...(dataRowVal !== undefined && { dataRow: dataRowVal }),
       ...(humanIntervened && { humanIntervened: true }),
+      ...(strictLoadError !== undefined && { error: strictLoadError }),
     };
 
     if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
