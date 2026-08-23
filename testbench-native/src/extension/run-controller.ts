@@ -142,6 +142,18 @@ export interface CompileOutcome {
   error?: string;
 }
 
+/** What `resolveClient` hands back: a client plus enough about its target
+ *  to log it and to name it in an error. */
+interface ResolvedClient {
+  client: ApiClientLike;
+  sessionId: string;
+  serverUrl: string;
+  /** Prose for the log: where `serverUrl` came from. */
+  source: string;
+  /** The .env the URL was read from, or null when it is the last run's. */
+  envPath: string | null;
+}
+
 /** Phase labels for the run log, matching `aiui compile`'s output. */
 const COMPILE_PHASE_LABEL: Record<string, string> = {
   record: 'Record',
@@ -927,8 +939,14 @@ export class RunController {
 
       case 'skip':
         // Not ours to start. Let the run proceed so the existing TB010
-        // connect-failure path reports it, with its new settings hint.
-        log(`server down at ${serverUrl} — not auto-starting (${action.reason})`);
+        // connect-failure path reports it, with its new settings hint. The
+        // probe's own reason goes in the line — refused, unresolvable and
+        // timed out are different problems with different fixes.
+        log(
+          `server down at ${serverUrl}` +
+            (probe.kind === 'down' ? ` (${probe.detail})` : '') +
+            ` — not auto-starting (${action.reason})`,
+        );
         return { kind: 'proceed' };
 
       case 'spawn': {
@@ -1184,8 +1202,13 @@ export class RunController {
    * for batch runs — so `closeSession`, the re-run liveness probe, and getLastRun
    * all target the session the run actually used. Falls back to the file path
    * before the first run.
+   *
+   * `serverUrl` and `source` say which server this is and where the URL came
+   * from, for callers that log their target before using it (Compile) or map
+   * a transport failure onto the TBxxx catalogue. `envPath` is the .env the
+   * URL was read from, or null when it is the last run's.
    */
-  private async resolveClient(): Promise<{ client: ApiClientLike; sessionId: string } | null> {
+  private async resolveClient(): Promise<ResolvedClient | null> {
     const filePath = this.document.uri.fsPath;
     const sessionId = this.activeSessionId ?? filePath;
 
@@ -1197,7 +1220,13 @@ export class RunController {
         serverUrl: this.lastRunServerUrl,
         apiKey: this.lastRunApiKey,
       });
-      return { client, sessionId };
+      return {
+        client,
+        sessionId,
+        serverUrl: this.lastRunServerUrl,
+        source: 'the last run in this window',
+        envPath: this.lastResolvedEnvPath,
+      };
     }
 
     // No run yet this session (or after a window reload): resolve base `.env`
@@ -1230,7 +1259,13 @@ export class RunController {
       readMachineKey() ||
       '';
     if (!serverUrl || !apiKey) return null;
-    return { client: this.clientFactory({ serverUrl, apiKey }), sessionId };
+    return {
+      client: this.clientFactory({ serverUrl, apiKey }),
+      sessionId,
+      serverUrl,
+      source: `SERVER_URL in ${envResolution.path}`,
+      envPath: envResolution.path,
+    };
   }
 
   /**
@@ -1249,6 +1284,17 @@ export class RunController {
     const out = getOutputChannel();
     const log = (line: string): void => out.appendLine(`[${timestamp()}] ${line}`);
     const filePath = this.document.uri.fsPath;
+
+    // The panel greys Compile out while a run is in flight; the palette and
+    // gutter commands have no such gate. A compile records in this document's
+    // session, which the run is using — and the server probe below would
+    // reset the run's inspector URL under it.
+    if (this.isRunning) {
+      const message =
+        'Cannot compile while a run of this test is in progress — wait for it to finish, or Stop it.';
+      log(message);
+      return { ok: false, error: message };
+    }
 
     const resolved = await this.resolveClient();
     if (!resolved) {
@@ -1279,12 +1325,35 @@ export class RunController {
     const controller = new AbortController();
     options.signal?.addEventListener('abort', () => controller.abort());
     log(`compile requested for ${filePath}`);
+    // Posted before the server check, not after: an auto-start can take the
+    // whole readyTimeout, and the panel's Compile button must be greyed out
+    // for all of it. The `finally` below clears it on every exit.
     this.post({ type: 'compileState', running: true, file: filePath });
 
     let result: CompileOutcome = { ok: false, error: 'the compile stream ended with no result' };
     /** `phase:round` of the run whose events are flowing, to spot a new one. */
     let currentRun: string | null = null;
     try {
+      // Say where the compile is going BEFORE trying to get there, then make
+      // sure something is listening — the same probe + auto-start a Run does.
+      // Without this, a compile on a machine whose server only ever comes up
+      // because someone pressed Run fails with a bare "fetch failed", with no
+      // line saying which URL it tried or why that URL did not answer.
+      log(`server ${resolved.serverUrl} (${resolved.source})`);
+      const serverReady = await this.ensureServerReady({
+        serverUrl: resolved.serverUrl,
+        signal: controller.signal,
+        log,
+      });
+      if (serverReady.kind === 'aborted') {
+        log('compile aborted by user');
+        return { ok: false, error: 'aborted' };
+      }
+      if (serverReady.kind === 'fail') {
+        log(`compile failed: ${serverReady.payload.message}`);
+        return { ok: false, error: serverReady.payload.message };
+      }
+
       for await (const event of resolved.client.compileCodeBehind(request, controller.signal)) {
         if (event.type === 'compile:run') {
           const key = `${event.phase}:${event.round ?? 0}`;
@@ -1328,11 +1397,25 @@ export class RunController {
         }
       }
     } catch (err) {
+      const apiErr = asApiClientError(err);
       if (isUserAbort(err)) {
         log('compile aborted by user');
         result = { ok: false, error: 'aborted' };
+      } else if (apiErr?.kind === 'conflict') {
+        // The server's own refusal ("a compile of X is already running"),
+        // worded by the server; the catalogue has nothing better to say.
+        log(`compile failed: ${apiErr.message}`);
+        result = { ok: false, error: apiErr.message };
       } else {
-        const message = err instanceof ApiClientError ? err.message : String(err);
+        // Transport and HTTP failures get the same TBxxx diagnosis a Run
+        // would — TB010 with the cause for a server that did not answer,
+        // TB011 for a rejected key — so the notification and the log both
+        // say what to check rather than echoing the client's raw reason.
+        const payload = mapApiErrorToPayload(err, {
+          serverUrl: resolved.serverUrl,
+          envPath: resolved.envPath ?? "the last run's .env",
+        });
+        const message = payload.message;
         log(`compile failed: ${message}`);
         result = { ok: false, error: message };
       }
@@ -2447,12 +2530,26 @@ function listStepInstructions(text: string): string {
     .join('\n');
 }
 
+/**
+ * The ApiClientError an error is, or null. Duck-typed by name like
+ * `isUserAbort` in runner-core: the extension bundles its own copy of that
+ * module, so an error thrown by another copy (the integration suite's fake
+ * client, an un-bundled caller) fails `instanceof` while being one.
+ */
+function asApiClientError(err: unknown): ApiClientError | null {
+  if (err instanceof ApiClientError) return err;
+  if (!err || typeof err !== 'object') return null;
+  const e = err as { name?: unknown; kind?: unknown };
+  return e.name === 'ApiClientError' && typeof e.kind === 'string' ? (err as ApiClientError) : null;
+}
+
 function mapApiErrorToPayload(
   err: unknown,
   ctx: { serverUrl: string; envPath: string },
 ): ErrorPayload {
-  if (err instanceof ApiClientError) {
-    switch (err.kind) {
+  const apiErr = asApiClientError(err);
+  if (apiErr) {
+    switch (apiErr.kind) {
       case 'unauthorized':
         return reportError('TB011', { envPath: ctx.envPath, serverUrl: ctx.serverUrl });
       case 'not-found':
@@ -2460,16 +2557,16 @@ function mapApiErrorToPayload(
       case 'server-error':
         return reportError('TB013', {
           serverUrl: ctx.serverUrl,
-          status: err.status ?? 0,
-          ...(err.bodyExcerpt && { bodyExcerpt: err.bodyExcerpt }),
+          status: apiErr.status ?? 0,
+          ...(apiErr.bodyExcerpt && { bodyExcerpt: apiErr.bodyExcerpt }),
         });
       case 'stream-dropped':
-        return reportError('TB014', { serverUrl: ctx.serverUrl, reason: err.message });
+        return reportError('TB014', { serverUrl: ctx.serverUrl, reason: apiErr.message });
       case 'aborted':
         return reportError('TB014', { serverUrl: ctx.serverUrl, reason: 'aborted' });
       case 'connect-failed':
       default:
-        return reportError('TB010', { serverUrl: ctx.serverUrl, reason: err.message });
+        return reportError('TB010', { serverUrl: ctx.serverUrl, reason: apiErr.message });
     }
   }
   const reason = err instanceof Error ? err.message : String(err);

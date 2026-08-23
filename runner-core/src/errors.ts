@@ -130,8 +130,8 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   TB010: (ctx) => ({
     diagnosis: `Cannot reach the ai-ui-automation server at ${ctx.serverUrl} (${ctx.reason})`,
     fix:
-      "Start the server (run 'npx tsx src/index.ts serve' in the ai-ui-automation repo) and confirm it's listening on the host and port in SERVER_URL. " +
-      'If running on another machine, check the firewall. ' +
+      "Start it with 'npx aiui serve' in your test project (or 'aiui serve' if the package is installed globally), then confirm SERVER_URL names the host and port it is listening on. " +
+      'If it runs on another machine, check the firewall. ' +
       'To have TestBench start it for you, configure "testbench-native.serverAutoStart.command" and ".cwd" in your user settings.',
     actions: [{ label: 'Show Run Log', command: 'testbench.showRunLog' }],
   }),

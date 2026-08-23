@@ -932,6 +932,9 @@ class RunControllerRegistry implements vscode.Disposable {
   readonly notifyRunningHistory: boolean[] = [];
   /** Test-only: most recent runError payload posted by any controller. */
   lastRunError: { code: string; diagnosis: string; fix?: string } | null = null;
+  /** Test-only: what the most recent compile failed with, or null. Written by
+   *  the compile command, which is where the outcome lands. */
+  lastCompileError: string | null = null;
   /** Test-only: status of the most recent `done` event. §5 specifies the
    *  Stop-during-spawn outcome as a STATUS ("aborted"), which no error-code
    *  assertion can prove. */
@@ -988,6 +991,10 @@ export interface TestBenchTestHooks {
   clearRunError: () => void;
   /** Status of the most recent `done` event, or null. */
   lastDoneStatus: () => 'passed' | 'failed' | 'error' | 'aborted' | null;
+  /** What the most recent compile failed with — the text of its error
+   *  notification — or null when it succeeded or none has run. Reset at the
+   *  start of every compile, so it always describes the latest one. */
+  lastCompileError: () => string | null;
   /** True when any controller has a parked skill-step failure (the Variables
    *  re-run panel would be offered). Used to assert a refused dead-session
    *  re-run does NOT wipe the parked failure. */
@@ -1343,6 +1350,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         registry.lastDoneStatus = null;
       },
       lastDoneStatus: () => registry.lastDoneStatus,
+      lastCompileError: () => registry.lastCompileError,
       skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
       skillDebugActive: () => registry.skillDebug !== null,
       skillDebugContext: () => {

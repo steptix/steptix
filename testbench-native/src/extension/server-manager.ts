@@ -9,6 +9,7 @@ import {
   mkdirSync,
 } from 'node:fs';
 import * as path from 'node:path';
+import { describeFetchError } from 'ai-ui-automation-runner-core';
 
 /**
  * Server lifecycle helpers for the extension: the `/health` identity probe and
@@ -104,12 +105,22 @@ function withTimeout(
   signal?: AbortSignal,
 ): { signal: AbortSignal; release: () => void } {
   if (signal?.aborted) return { signal, release: () => {} };
-  if (!signal) return { signal: AbortSignal.timeout(timeoutMs), release: () => {} };
+  if (!signal) {
+    // Same reason as the combined branch below, rather than
+    // `AbortSignal.timeout`'s "The operation was aborted due to timeout"
+    // — one wording for a timed-out probe wherever it was issued from.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(timeoutReason(timeoutMs)), timeoutMs);
+    return { signal: controller.signal, release: () => clearTimeout(timer) };
+  }
 
   const controller = new AbortController();
-  const abort = (): void => controller.abort();
+  // Each abort carries its reason, which is what `fetch` rejects with: the
+  // probe's log line then says "timed out" or repeats the caller's reason
+  // instead of the generic "This operation was aborted" for both.
+  const abort = (): void => controller.abort(signal.reason);
   signal.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(abort, timeoutMs);
+  const timer = setTimeout(() => controller.abort(timeoutReason(timeoutMs)), timeoutMs);
   // `release` must be called on EVERY exit, not just on abort. A spawn poll
   // issues ~80 probes against one long-lived run signal; if a successful
   // fetch left its timer and listener behind, they would all pile up on that
@@ -121,6 +132,11 @@ function withTimeout(
       signal.removeEventListener('abort', abort);
     },
   };
+}
+
+/** What a probe's fetch rejects with when the server did not answer in time. */
+function timeoutReason(timeoutMs: number): Error {
+  return new Error(`no answer within ${timeoutMs} ms`);
 }
 
 /** The real probe. Never throws — every failure maps onto an arm above. */
@@ -139,8 +155,10 @@ export const defaultHealthProbe: HealthProbe = async (serverUrl, timeoutMs, sign
     } catch (err) {
       // An abort from the RUN's signal is a user Stop, not a down server — the
       // caller distinguishes by checking its own signal, but pass the reason
-      // through so the log says which it was.
-      return { kind: 'down', detail: err instanceof Error ? err.message : String(err) };
+      // through so the log says which it was. `describeFetchError` unwraps
+      // the cause Node hides behind "fetch failed" (refused / unresolvable /
+      // bad certificate), which is the part a reader can act on.
+      return { kind: 'down', detail: describeFetchError(err) };
     }
 
     if (!res.ok) return { kind: 'unknown', detail: `HTTP ${res.status}` };

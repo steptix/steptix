@@ -59,7 +59,9 @@ class FakeApiClient {
      * that wants a red one sets its own.
      */
     this.compileEvents = null;
-    /** Set to an ApiClientError kind to make the next compile throw. */
+    /** Set to an ApiClientError kind — or an Error to throw as-is, for a
+     *  test that needs a particular message (the transport reason a real
+     *  client carries) — to make the next compile throw. */
     this.compileThrows = null;
   }
 
@@ -152,6 +154,7 @@ class FakeApiClient {
   async *compileCodeBehind(request, signal) {
     this.compileRequests.push(request);
     if (this.compileThrows) {
+      if (this.compileThrows instanceof Error) throw this.compileThrows;
       throw new ApiClientError(this.compileThrows, `fake compile error: ${this.compileThrows}`);
     }
     const events = this.compileEvents ?? [

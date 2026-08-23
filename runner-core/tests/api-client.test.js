@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { ApiClient, ApiClientError, isUserAbort } from '../dist/api-client.js';
+import { ApiClient, ApiClientError, describeFetchError, isUserAbort } from '../dist/api-client.js';
 
 function streamingResponse(chunks, status = 200) {
   const encoder = new TextEncoder();
@@ -99,9 +99,13 @@ test('streamSteps: 500 throws server-error with body excerpt', async () => {
   }
 });
 
-test('streamSteps: connection failure throws connect-failed', async () => {
+test('streamSteps: connection failure throws connect-failed carrying the cause', async () => {
+  // What undici actually throws for a refused connection: the outer message
+  // is the same for every transport failure, the reason lives on `cause`.
   const fetchImpl = async () => {
-    throw new TypeError('fetch failed');
+    throw new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3100'), { code: 'ECONNREFUSED' }),
+    });
   };
   const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: fetchImpl });
   try {
@@ -109,6 +113,7 @@ test('streamSteps: connection failure throws connect-failed', async () => {
     assert.fail('expected throw');
   } catch (err) {
     assert.equal(err.kind, 'connect-failed');
+    assert.equal(err.message, 'fetch failed: connect ECONNREFUSED 127.0.0.1:3100');
   }
 });
 
@@ -215,7 +220,78 @@ test('getLastRun: throws unauthorized on 401', async () => {
 
 test('getLastRun: throws connect-failed on transport error', async () => {
   const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => { throw new Error('ECONNREFUSED'); } });
-  await assert.rejects(() => client.getLastRun('id'), (err) => err instanceof ApiClientError && err.kind === 'connect-failed');
+  await assert.rejects(
+    () => client.getLastRun('id'),
+    (err) => err instanceof ApiClientError && err.kind === 'connect-failed' && err.message === 'ECONNREFUSED',
+  );
+});
+
+// ── describeFetchError ──────────────────────────────────────────────────────
+// Shapes captured from Node 22's undici against a closed port / a bad host;
+// the fixtures below are those objects rebuilt by hand.
+
+test('describeFetchError: appends the cause Node hides behind "fetch failed"', () => {
+  const err = new TypeError('fetch failed', {
+    cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3100'), { code: 'ECONNREFUSED' }),
+  });
+  assert.equal(describeFetchError(err), 'fetch failed: connect ECONNREFUSED 127.0.0.1:3100');
+});
+
+test('describeFetchError: a localhost refusal is an AggregateError with an EMPTY message — list its members', () => {
+  // `localhost` ⇒ Node tries ::1 then 127.0.0.1 and wraps both failures. The
+  // wrapper's own message is '', so a naive `cause.message` prints nothing.
+  const agg = new AggregateError(
+    [
+      Object.assign(new Error('connect ECONNREFUSED ::1:3100'), { code: 'ECONNREFUSED' }),
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3100'), { code: 'ECONNREFUSED' }),
+    ],
+    '',
+  );
+  agg.code = 'ECONNREFUSED';
+  const err = new TypeError('fetch failed', { cause: agg });
+  assert.equal(
+    describeFetchError(err),
+    'fetch failed: connect ECONNREFUSED ::1:3100; connect ECONNREFUSED 127.0.0.1:3100',
+  );
+});
+
+test('describeFetchError: DNS and TLS failures name the host / the certificate problem', () => {
+  const dns = new TypeError('fetch failed', {
+    cause: Object.assign(new Error('getaddrinfo ENOTFOUND build-box'), { code: 'ENOTFOUND' }),
+  });
+  assert.equal(describeFetchError(dns), 'fetch failed: getaddrinfo ENOTFOUND build-box');
+  const tls = new TypeError('fetch failed', {
+    cause: Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+  });
+  assert.equal(
+    describeFetchError(tls),
+    'fetch failed: DEPTH_ZERO_SELF_SIGNED_CERT: self-signed certificate',
+  );
+});
+
+test('describeFetchError: a code absent from the message is kept; one already in it is not repeated', () => {
+  const timeout = new TypeError('fetch failed', {
+    cause: Object.assign(new Error('Connect Timeout Error'), { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+  });
+  assert.equal(describeFetchError(timeout), 'fetch failed: UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error');
+  const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' });
+  assert.equal(describeFetchError(refused), 'connect ECONNREFUSED 127.0.0.1:1');
+});
+
+test('describeFetchError: a plain error, a non-error value and a cyclic cause chain all terminate', () => {
+  assert.equal(describeFetchError(new Error('ECONNREFUSED')), 'ECONNREFUSED');
+  assert.equal(describeFetchError('boom'), 'boom');
+  const cyclic = new Error('a');
+  cyclic.cause = cyclic;
+  assert.equal(describeFetchError(cyclic), 'a');
+});
+
+test('describeFetchError: a mid-stream drop reads as terminated + the socket error', () => {
+  // What `reader.read()` rejects with when the server goes away mid-SSE.
+  const err = new TypeError('terminated', {
+    cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+  });
+  assert.equal(describeFetchError(err), 'terminated: UND_ERR_SOCKET: other side closed');
 });
 
 // ── compileCodeBehind (stories/codebehind-compile.md §Server) ──────────────

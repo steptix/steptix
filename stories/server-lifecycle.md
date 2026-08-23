@@ -231,6 +231,16 @@ with `cwd` = the framework checkout. `--inspect=0` lets node pick any free
 inspector port (discovered via `/health`, §7); `--idle-timeout 60` arms the
 self-stop only for auto-started servers.
 
+A machine that has only the package installed (a test project depending on
+`ai-ui-automation`, no checkout) runs the same server as
+`npx aiui serve --idle-timeout 60` with `cwd` = that project, or as
+`node --inspect=0 node_modules/ai-ui-automation/dist/index.js serve
+--idle-timeout 60` to keep the inspector for step-into. The setting
+descriptions carry both forms; `cwd` is "whichever the command is written
+against", not "the checkout". Same for TB010's fix text, which names
+`npx aiui serve` rather than a command that needs the repo
+([issue 050](../issues/resolved/050-codebehind-compile-fetch-failed.md)).
+
 Pre-run flow (in the run controller, after env resolution gives
 `SERVER_URL`, before session creation). The run's `AbortController` is
 created **before** this phase so the Stop button cancels a wedged health

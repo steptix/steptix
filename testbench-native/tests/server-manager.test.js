@@ -136,6 +136,41 @@ test('probe: nothing listening is DOWN', async () => {
   assert.equal(result.kind, 'down');
 });
 
+test('probe: a DOWN detail names the refusal, not just "fetch failed"', async () => {
+  // Node reports every transport failure as `TypeError: fetch failed` and
+  // hides the reason on `cause`. The detail is what the run log prints for
+  // "server down at <url> (<detail>)", so it has to carry the cause — the
+  // port that refused — or the reader is left guessing which URL was tried
+  // and why it did not answer.
+  const s = await stub(() => {});
+  await s.close();
+  const port = new URL(s.url).port;
+  const result = await defaultHealthProbe(s.url, 1000);
+  assert.equal(result.kind, 'down');
+  assert.match(result.detail, /ECONNREFUSED/);
+  assert.match(result.detail, new RegExp(`:${port}`));
+});
+
+test('probe: a server that never answers is DOWN with a detail that says it timed out', async () => {
+  const s = await stub(() => {
+    /* never respond */
+  });
+  try {
+    // Without a caller signal the timeout is the only way out; with one, the
+    // timer still has to win. Both must say "timed out", not the generic
+    // "This operation was aborted" that a user Stop also produces.
+    const alone = await defaultHealthProbe(s.url, 50);
+    assert.equal(alone.kind, 'down');
+    assert.match(alone.detail, /no answer within 50 ms/);
+
+    const combined = await defaultHealthProbe(s.url, 50, new AbortController().signal);
+    assert.equal(combined.kind, 'down');
+    assert.match(combined.detail, /no answer within 50 ms/);
+  } finally {
+    await s.close();
+  }
+});
+
 test('probe: a trailing slash on SERVER_URL does not produce //health', async () => {
   let seen = null;
   const s = await stub((req, res) => {
