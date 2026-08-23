@@ -57,7 +57,10 @@ const core = vi.hoisted(() => ({
   hold: null as null | ((options: CompileOptions) => Promise<void> | void),
 }));
 
-vi.mock('../src/codebehind/compile.js', () => ({
+vi.mock('../src/codebehind/compile.js', async (importOriginal) => ({
+  // The real module underneath: the server also imports `firstDataRow` from
+  // it, and a mock that drops it turns every compile into an error frame.
+  ...(await importOriginal<typeof import('../src/codebehind/compile.js')>()),
   compileTest: vi.fn(async (options: CompileOptions): Promise<CompileResult> => {
     core.calls.push(options);
     options.onEvent?.({ kind: 'phase', phase: 'record', message: 'Recording the test' });
@@ -457,7 +460,11 @@ beforeEach(() => {
     path.join(projectRoot, 'aiui.config.json'),
     JSON.stringify({ execution: { maxTurns: PROJECT_MAX_TURNS } }),
   );
-  writeFileSync(path.join(projectRoot, '.env.staging'), 'COMPILE_FIXTURE_STAGE=staging\n');
+  writeFileSync(path.join(projectRoot, '.env'), 'COMPILE_FIXTURE_USER=alice\n');
+  writeFileSync(
+    path.join(projectRoot, '.env.staging'),
+    'COMPILE_FIXTURE_STAGE=staging\nCOMPILE_FIXTURE_USER=staging-alice\n',
+  );
   writeFileSync(testFile('smoke.md'), SMOKE_MD);
   writeFileSync(testFile('other.md'), OTHER_MD);
 
@@ -687,7 +694,7 @@ describe('compiling from the caller\'s session', () => {
     const close = vi.spyOn(sessionManager, 'closeSession');
     compileTestMock.mockImplementationOnce(async (options) => {
       core.calls.push(options);
-      const outcome = await options.runner!({ purpose: 'record', strict: false, captureContext: true });
+      const outcome = await options.runner!({ purpose: 'record', parameters: {}, strict: false, captureContext: true });
       expect(outcome.status).toBe('passed');
       expect(outcome.steps).toHaveLength(3);
       options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
@@ -736,9 +743,9 @@ describe('compiling from the caller\'s session', () => {
     const close = vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
     compileTestMock.mockImplementationOnce(async (options) => {
       core.calls.push(options);
-      await options.runner!({ purpose: 'record', strict: false, captureContext: true });
+      await options.runner!({ purpose: 'record', parameters: {}, strict: false, captureContext: true });
       await options.runner!({
-        purpose: 'replay', round: 2, strict: true, captureContext: false, throughStep: 2,
+        purpose: 'replay', parameters: {}, round: 2, strict: true, captureContext: false, throughStep: 2,
       });
       options.onEvent?.({ kind: 'done', status: 'partial', message: 'Compiled some' });
       return {
@@ -797,7 +804,7 @@ describe('compiling from the caller\'s session', () => {
     const run = vi.spyOn(sessionManager, 'executeSteps');
     compileTestMock.mockImplementationOnce(async (options) => {
       core.calls.push(options);
-      return options.runner!({ purpose: 'record', strict: false, captureContext: true }).then(
+      return options.runner!({ purpose: 'record', parameters: {}, strict: false, captureContext: true }).then(
         () => { throw new Error('the runner should have refused'); },
       );
     });
@@ -879,7 +886,7 @@ describe('compiling from the caller\'s session', () => {
     const close = vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
     compileTestMock.mockImplementationOnce(async (options) => {
       core.calls.push(options);
-      await options.runner!({ purpose: 'record', strict: false, captureContext: true });
+      await options.runner!({ purpose: 'record', parameters: {}, strict: false, captureContext: true });
       options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
       return {
         status: 'green', files: {},
@@ -898,6 +905,111 @@ describe('compiling from the caller\'s session', () => {
     expect(close).toHaveBeenCalledWith(sessionId);
     run.mockRestore();
     close.mockRestore();
+  });
+});
+
+describe('the parameters a compile\'s runs start from', () => {
+  // Caught live (stories/codebehind-compile-as-a-run.md §What was built): a
+  // test declaring `- username: $GITHUB_USERNAME` ran green from TestBench and
+  // compiled with the literal typed into the field. TestBench resolves `$VAR`
+  // on the client; the compile builds its own runs on the server, so the
+  // server has to hand the core the env a Run would have resolved against.
+
+  it('hands the core the project\'s base .env when no env is named', async () => {
+    await compileStream({ testFilePath: testFile('smoke.md') });
+    const env = optionsAt(0).env!;
+    expect(env.COMPILE_FIXTURE_USER).toBe('alice');
+    // The process baseline is underneath it, as in the bundle's composition.
+    expect(env.PATH ?? env.Path).toBeDefined();
+  });
+
+  it('takes the nearest .env above the test file, as TestBench does, not only the root one', async () => {
+    // TestBench walks up from the test file and stops at the first `.env`; a
+    // server that read only `<projectRoot>/.env` would resolve a different
+    // value than the Run the author just watched.
+    writeFileSync(path.join(projectRoot, 'tests', '.env'), 'COMPILE_FIXTURE_USER=nearer-alice\n');
+    const events = await compileStream({ testFilePath: testFile('smoke.md') });
+    expect(optionsAt(0).env!.COMPILE_FIXTURE_USER).toBe('nearer-alice');
+    // And it says so, since that file is not beside the project's config.
+    expect(outputs(events).map((o) => o.msg)).toContainEqual(
+      expect.stringMatching(/^\$VAR parameters resolve from .*tests[\\/]\.env \(not beside/),
+    );
+  });
+
+  it('hands the core the named env\'s composed map, which overrides the base .env', async () => {
+    await compileStream({ testFilePath: testFile('smoke.md'), envName: 'staging' });
+    const env = optionsAt(0).env!;
+    expect(env.COMPILE_FIXTURE_USER).toBe('staging-alice');
+    expect(env.COMPILE_FIXTURE_STAGE).toBe('staging');
+  });
+
+  it('starts each run from the map the core resolved, not the parsed test\'s raw values', async () => {
+    const run = fakeRun([stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
+    const close = vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
+    compileTestMock.mockImplementationOnce(async (options) => {
+      core.calls.push(options);
+      await options.runner!({
+        purpose: 'record', parameters: { username: 'alice', stage: 'x' }, strict: false, captureContext: true,
+      });
+      options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
+      return {
+        status: 'green', files: {},
+        summary: {
+          test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
+          tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
+        },
+      };
+    });
+
+    await compileStream({ testFilePath: testFile('smoke.md') });
+
+    const [, request] = run.mock.calls[0]!;
+    expect(request.parameters).toEqual({ username: 'alice', stage: 'x' });
+    run.mockRestore();
+    close.mockRestore();
+  });
+
+  it('carries a note from the core as an output frame', async () => {
+    compileTestMock.mockImplementationOnce(async (options) => {
+      core.calls.push(options);
+      options.onEvent?.({
+        kind: 'note', level: 'warn',
+        message: 'parameter "username" is $GITHUB_USERNAME and nothing in the environment defines it',
+      });
+      options.onEvent?.({ kind: 'done', status: 'green', message: 'Compiled' });
+      return {
+        status: 'green', files: {},
+        summary: {
+          test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
+          tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
+        },
+      };
+    });
+
+    const events = await compileStream({ testFilePath: testFile('smoke.md') });
+    expect(outputs(events)).toContainEqual({
+      kind: 'warn',
+      msg: 'parameter "username" is $GITHUB_USERNAME and nothing in the environment defines it',
+    });
+  });
+
+  it('hands the core the first row of a data-driven test, and says which', async () => {
+    writeFileSync(
+      path.join(projectRoot, 'tests', 'rows.json'),
+      JSON.stringify([{ username: 'row-one' }, { username: 'row-two' }, { username: 'row-three' }]),
+    );
+    writeFileSync(
+      testFile('rows.md'),
+      ['---', 'dataFile: tests/rows.json', '---', '', '# Rows', '', '## Parameters', '- username: {{username}}', '', '## Steps', '1. Log in', ''].join('\n'),
+    );
+
+    const events = await compileStream({ testFilePath: testFile('rows.md') });
+
+    expect(optionsAt(0).dataRow).toEqual({ username: 'row-one' });
+    expect(outputs(events)).toContainEqual({
+      kind: 'info',
+      msg: 'Data file tests/rows.json: compiling with row 1 of 3.',
+    });
   });
 });
 

@@ -968,6 +968,103 @@ export default defineSteps([
     ).toBe(true);
   });
 
+  it('starts every run from $VAR parameters resolved against the env, and guards the resolved secret', async () => {
+    // The parser keeps `$GITHUB_PASSWORD` as written; a Run resolves it before
+    // it starts, and so must the compile — for its runs, and for the review's
+    // leak guard, which would otherwise look for the literal and wave the real
+    // password through.
+    const md = await write('booking.md', [
+      '# Booking',
+      '',
+      '## Parameters',
+      '- username: $GITHUB_USERNAME',
+      '- password: $GITHUB_PASSWORD',
+      '',
+      '## Steps',
+      '1. Enter the booking code',
+    ].join('\n'));
+    const test = await parseTestFile(md);
+    expect(test.parameters).toEqual({ username: '$GITHUB_USERNAME', password: '$GITHUB_PASSWORD' });
+    const leaky = `import { defineSteps } from 'ai-ui-automation/codebehind';
+export default defineSteps([
+  { source: "Enter the booking code", async run({ page }) { await page.fill('#p', 'correct-horse-battery'); } },
+]);
+`;
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      JSON.stringify({ file: leaky }),
+    ]);
+    const { runner, requests } = scriptedRunner(1, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+      env: { GITHUB_USERNAME: 'octocat', GITHUB_PASSWORD: 'correct-horse-battery', UNRELATED: 'x' },
+    });
+
+    expect(result.status).toBe('green');
+    // Record and Replay both started from the resolved map.
+    expect(requests.map((r) => r.parameters)).toEqual([
+      { username: 'octocat', password: 'correct-horse-battery' },
+      { username: 'octocat', password: 'correct-horse-battery' },
+    ]);
+    // The review inlined the RESOLVED password, and was caught.
+    expect(
+      events.some((e) => e.kind === 'phase' && e.message.includes('inlines {{password}}')),
+    ).toBe(true);
+    expect(await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8')).not.toContain('correct-horse-battery');
+    expect(events.some((e) => e.kind === 'note')).toBe(false);
+  });
+
+  it('says so when a $VAR parameter resolves to nothing, and runs with the literal', async () => {
+    const md = await write('booking.md', [
+      '# Booking',
+      '',
+      '## Parameters',
+      '- username: $GITHUB_USERNAME',
+      '',
+      '## Steps',
+      '1. Enter the booking code',
+    ].join('\n'));
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Enter the booking code'), REVIEW_NOOP]);
+    const { runner, requests } = scriptedRunner(1, ['pass']);
+    const { events, onEvent } = collect();
+
+    await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent, env: {} });
+
+    expect(requests[0]!.parameters).toEqual({ username: '$GITHUB_USERNAME' });
+    const note = events.find((e) => e.kind === 'note');
+    expect(note).toMatchObject({ kind: 'note', level: 'warn' });
+    expect(note!.kind === 'note' && note!.message).toContain('parameter "username" is $GITHUB_USERNAME');
+  });
+
+  it('applies a data row over the parameters, as a data-driven run would', async () => {
+    const md = await write('booking.md', [
+      '# Booking',
+      '',
+      '## Parameters',
+      '- username: $GITHUB_USERNAME',
+      '- code: {{code}}',
+      '',
+      '## Steps',
+      '1. Enter the booking code',
+    ].join('\n'));
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Enter the booking code'), REVIEW_NOOP]);
+    const { runner, requests } = scriptedRunner(1, ['pass']);
+
+    await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner,
+      env: { GITHUB_USERNAME: 'octocat' },
+      dataRow: { code: '220826', username: 'row-user' },
+    });
+
+    // The row outranks the env for `username`, fills `code`, and nothing is
+    // left as a placeholder.
+    expect(requests[0]!.parameters).toEqual({ username: 'row-user', code: '220826' });
+  });
+
   it('survives an unparseable review and keeps the generated file', async () => {
     const md = await write('booking.md', TEST_MD);
     const test = await parseTestFile(md);

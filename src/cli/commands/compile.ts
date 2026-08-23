@@ -13,6 +13,7 @@ import {
   type CompileEvent,
   type CompileResult,
   type CompileSelect,
+  firstDataRow,
 } from '../../codebehind/compile.js';
 
 /**
@@ -106,6 +107,14 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
 
   console.log(chalk.bold(`\nCompile ${path.basename(testFile)}`));
 
+  // The first data row, as `aiui run` would start its first instance.
+  const dataRow = await firstDataRow(test, process.cwd());
+  if (dataRow) {
+    console.log(
+      `  ${chalk.cyan('Data'.padEnd(11))} ${test.frontmatter.dataFile}: compiling with row 1 of ${dataRow.of}`,
+    );
+  }
+
   let result: CompileResult;
   try {
     result = await compileTest({
@@ -114,6 +123,10 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
       contextContent: context.combined,
       aiClient,
       tokenTracker,
+      // `$VAR` parameters resolve against the same map `aiui run` would use —
+      // the process env with the project's layers merged in above.
+      env: bundle.env,
+      ...(dataRow && { dataRow: dataRow.row }),
       select,
       ...(opts.maxRounds !== undefined && { maxRounds: opts.maxRounds }),
       ...(opts.dryRun !== undefined && { dryRun: opts.dryRun }),
@@ -187,6 +200,10 @@ const PHASE_LABEL: Record<string, string> = {
 
 function printEvent(event: CompileEvent): void {
   if (event.kind === 'done') return;
+  if (event.kind === 'note') {
+    console.log(`  ${event.level === 'warn' ? chalk.yellow('[warn]') : chalk.dim('[info]')} ${event.message}`);
+    return;
+  }
   if (event.kind === 'phase') {
     const label = event.round
       ? `${PHASE_LABEL[event.phase]} ${event.round}`
