@@ -31,6 +31,7 @@ import {
   type WriteEntryRequest,
 } from './writer.js';
 import { findInlinedParameterValue } from '../ai/action-parser.js';
+import { loadDataFile } from '../parser/parameters.js';
 
 /**
  * The compiler (stories/codebehind-compile.md, "The compile pipeline").
@@ -58,6 +59,10 @@ export type CompileEvent =
    *  line in the test file when the test knows it — a client paints ▶ on it
    *  while the model works on that step. */
   | { kind: 'step'; phase: CompilePhase; step: number; line?: number; message: string }
+  /** Something the author should know that belongs to no phase — an
+   *  unresolved parameter, a data row chosen. The server carries it as an
+   *  `output` frame; the CLI prints it as one. */
+  | { kind: 'note'; level: 'info' | 'warn'; message: string }
   /** Terminal. Always emitted exactly once. */
   | { kind: 'done'; status: CompileStatus; message: string };
 
@@ -128,6 +133,14 @@ export interface CompileResult {
 export interface CompileRunRequest {
   /** `record` runs under AI; `replay` runs the candidate as strict code. */
   purpose: 'record' | 'replay';
+  /**
+   * The parameter map the run starts from — the test's `## Parameters` with
+   * `$VAR` values resolved and the data row applied, exactly what a Run
+   * sends. A runner must use this and not the parsed test's raw values:
+   * the parser keeps `$GITHUB_USERNAME` as written, and a run started from
+   * that types it into the page.
+   */
+  parameters: Record<string, string>;
   /** 1-based replay round, for logs. */
   round?: number;
   /** Canonical `.steps.ts` path → the path to load instead. */
@@ -172,6 +185,20 @@ export interface CompileOptions {
   /** Reads the compile's own prompt tokens; the runs report theirs. */
   tokenTracker?: TokenTracker | undefined;
   select?: CompileSelect | undefined;
+  /**
+   * The env map `$VAR` parameter values resolve against — the project's
+   * `.env` layers, composed the way the caller's runs compose them. A Run
+   * resolves these before it starts (TestBench on the client, `aiui run`
+   * from `process.env`); the compile has to do the same for its own runs,
+   * and nothing downstream does it.
+   */
+  env?: Record<string, string> | undefined;
+  /**
+   * A data-file row to apply over the parameters, as `aiui run` does for a
+   * test with `dataFile:` in its frontmatter. A compile records once, so the
+   * caller picks a row — `firstDataRow` picks the first.
+   */
+  dataRow?: Record<string, string> | undefined;
   /** Replay rounds before a step is written off as AI. Default 3. */
   maxRounds?: number | undefined;
   /** Run everything but Write. */
@@ -233,6 +260,27 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       message,
     });
   };
+
+  // The parameters every run starts from. Resolved here, once, through the
+  // same chain a run uses — data row, `$VAR` from the env, the inline value —
+  // because a recording made with `$GITHUB_USERNAME` typed into the username
+  // field is a recording of nothing, and a replay started from it fails at
+  // the same place.
+  const resolvedParameters = resolveCompileParameters(
+    test.parameters,
+    options.env ?? {},
+    options.dataRow,
+  );
+  for (const key of resolvedParameters.unresolved) {
+    emit({
+      kind: 'note',
+      level: 'warn',
+      message:
+        `parameter "${key}" is ${test.parameters[key]} and nothing in the environment defines it — ` +
+        'the runs will use that literal',
+    });
+  }
+  const parameters = resolvedParameters.values;
 
   const tokens = (): number => (options.tokenTracker?.total ?? 0) + runTokens;
   const finish = (
@@ -322,6 +370,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     });
     record = await runner({
       purpose: 'record',
+      parameters: { ...parameters },
       strict: false,
       captureContext: true,
       ...(needsAllTranscripts && { disableCodeBehind: true }),
@@ -440,7 +489,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   }
 
   // ─── 4. Review ────────────────────────────────────────────────────────────
-  await reviewCandidate(candidate, test, options, emit);
+  await reviewCandidate(candidate, test, parameters, options, emit);
 
   // ─── 5. Replay ────────────────────────────────────────────────────────────
   //
@@ -470,6 +519,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     });
     const outcome = await runner({
       purpose: 'replay',
+      parameters: { ...parameters },
       round,
       strict: true,
       captureContext: false,
@@ -958,6 +1008,7 @@ async function repairStep(
 async function reviewCandidate(
   candidate: Candidate,
   test: ParsedTest,
+  parameters: Record<string, string>,
   options: CompileOptions,
   emit: (event: CompileEvent) => void,
 ): Promise<void> {
@@ -991,7 +1042,7 @@ async function reviewCandidate(
       continue;
     }
 
-    const leaked = findInlinedParameterValue(revised, allParameters(test));
+    const leaked = findInlinedParameterValue(revised, allParameters(parameters));
     if (leaked) {
       emit({
         kind: 'phase',
@@ -1053,9 +1104,73 @@ function describeEntryChange(
 
 /** Every parameter value in play, for the review's leak guard. Unlike the
  *  per-step guard this is deliberately broad: a whole-file rewrite can move a
- *  literal into any entry, so the check has to cover them all. */
-function allParameters(test: ParsedTest): Array<{ name: string; value: string }> {
-  return Object.entries(test.parameters).map(([name, value]) => ({ name, value }));
+ *  literal into any entry, so the check has to cover them all. The RESOLVED
+ *  values: a guard that looked for `$GITHUB_PASSWORD` would wave the real
+ *  password through. */
+function allParameters(parameters: Record<string, string>): Array<{ name: string; value: string }> {
+  return Object.entries(parameters).map(([name, value]) => ({ name, value }));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Parameters
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The parameter map a compile's runs start from.
+ *
+ * The same chain `resolveParameters` walks for `aiui run`, minus the prompt —
+ * a compile never asks — and against an explicit env map rather than
+ * `process.env`, because on the server `process.env` is deliberately not the
+ * project's: a data-row value wins, then a `$VAR` looks itself up in the env,
+ * then the inline value stands. Extra row keys are merged in, as the runner
+ * merges them. Names that were `$VAR` and found nothing come back in
+ * `unresolved`, with the literal left in place so the caller can say so.
+ */
+export function resolveCompileParameters(
+  raw: Record<string, string>,
+  env: Record<string, string>,
+  dataRow?: Record<string, string>,
+): { values: Record<string, string>; unresolved: string[] } {
+  const values: Record<string, string> = {};
+  const unresolved: string[] = [];
+  for (const [key, rawValue] of Object.entries(raw)) {
+    if (dataRow && dataRow[key] !== undefined) {
+      values[key] = dataRow[key]!;
+      continue;
+    }
+    if (rawValue.startsWith('$')) {
+      const fromEnv = env[rawValue.slice(1)];
+      if (fromEnv !== undefined) {
+        values[key] = fromEnv;
+        continue;
+      }
+      unresolved.push(key);
+    }
+    values[key] = rawValue;
+  }
+  if (dataRow) {
+    for (const [key, value] of Object.entries(dataRow)) {
+      if (!(key in values)) values[key] = value;
+    }
+  }
+  return { values, unresolved };
+}
+
+/**
+ * The first row of the test's data file, when it names one, as the row a
+ * compile records with. `aiui run` runs one instance per row; a compile
+ * records once, and the entries it writes read parameters through
+ * `step.getVar`, so they are the same code for every row.
+ */
+export async function firstDataRow(
+  test: ParsedTest,
+  projectRoot: string,
+): Promise<{ row: Record<string, string>; of: number } | undefined> {
+  const dataFile = test.frontmatter.dataFile;
+  if (!dataFile) return undefined;
+  const rows = await loadDataFile(dataFile, projectRoot);
+  const row = rows[0];
+  return row ? { row, of: rows.length } : undefined;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1222,9 +1337,10 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
     const report: TestReport = await runTest(
       {
         test: options.test,
-        // A fresh copy per run: `runTest` writes captured values into this map,
-        // and a replay must not start with the record's leftovers.
-        resolvedParameters: { ...options.test.parameters },
+        // The compile's resolved map, a fresh copy per run: `runTest` writes
+        // captured values into it, and a replay must not start with the
+        // record's leftovers.
+        resolvedParameters: { ...request.parameters },
       },
       options.config,
       options.contextContent,

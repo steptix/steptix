@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { basename, resolve as pathResolve } from 'node:path';
+import { access } from 'node:fs/promises';
+import { basename, dirname, join as pathJoin, resolve as pathResolve } from 'node:path';
 import type { Config } from '../config/types.js';
 import type { ParsedTest } from '../parser/types.js';
 import { parseTestFile } from '../parser/markdown.js';
@@ -7,8 +8,10 @@ import { loadContextFiles } from '../context/loader.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
+import { readDefaultEnvVars, readEnvFileVars } from '../env/loader.js';
 import {
   compileTest,
+  firstDataRow,
   type CompileEvent,
   type CompilePhase,
   type CompileResult,
@@ -255,12 +258,44 @@ export class CodeBehindCompiler {
 
     const recorded = this.reuseRun(request.sessionId, test, emit);
 
+    // What a Run resolves `$VAR` parameters against. TestBench composes it on
+    // the client: the nearest `.env` walking up from the test file, with
+    // `.env.<name>` overlaid when an env is active. The server's env bundle
+    // reads `<projectRoot>/.env` only — and nothing at all for a nameless
+    // run — so the map is composed here the way the client composes it.
+    const { env, dotenv } = await runEnvFor(testFilePath, bundle.projectRoot, envName);
+    if (!dotenv) {
+      emit({
+        type: 'output',
+        kind: 'warn',
+        msg:
+          `No .env found above ${basename(testFilePath)} — $VAR parameters resolve from the ` +
+          "server's own environment only.",
+      });
+    } else if (bundle.projectRoot && dirname(dotenv) !== pathResolve(bundle.projectRoot)) {
+      emit({
+        type: 'output',
+        kind: 'info',
+        msg: `$VAR parameters resolve from ${dotenv} (not beside the project's aiui.config.json).`,
+      });
+    }
+    const dataRow = bundle.projectRoot ? await firstDataRow(test, bundle.projectRoot) : undefined;
+    if (dataRow) {
+      emit({
+        type: 'output',
+        kind: 'info',
+        msg: `Data file ${test.frontmatter.dataFile}: compiling with row 1 of ${dataRow.of}.`,
+      });
+    }
+
     return compileTest({
       test,
       config: bundle.config,
       contextContent: context.combined,
       aiClient,
       tokenTracker,
+      env,
+      ...(dataRow && { dataRow: dataRow.row }),
       ...(request.select && { select: request.select }),
       ...(request.maxRounds !== undefined && { maxRounds: request.maxRounds }),
       // Always. The server writes nothing under the project; the proposed files
@@ -386,7 +421,8 @@ export class CodeBehindCompiler {
 
       const stepRequest: StepRequest = {
         steps: test.steps.slice(0, count),
-        parameters: { ...test.parameters },
+        // The compile's resolved map, never the parsed test's raw values.
+        parameters: { ...run.parameters },
         testFilePath: test.filePath,
         sourceLines: test.stepLines.slice(0, count),
         ...(envName && { envName }),
@@ -482,7 +518,58 @@ function outcomeSteps(details: RunDetails, totalSteps: number): CompileRunOutcom
   return steps;
 }
 
+/**
+ * The env map a Run of this test resolves `$VAR` parameters against, composed
+ * the way the env bundle composes — process baseline lowest, then the base
+ * `.env`, then `.env.<name>` highest — except that the base `.env` is the one
+ * TestBench would find: the nearest one walking up from the test file, which
+ * in a normal project is `<projectRoot>/.env` and in a workspace that keeps
+ * its `.env` above the project is that one. `.env.<name>` is read from the
+ * project root, where the env selector enumerates them.
+ */
+async function runEnvFor(
+  testFilePath: string,
+  projectRoot: string | null,
+  envName: string | null,
+): Promise<{ env: Record<string, string>; dotenv: string | null }> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === 'string') env[k] = v;
+  }
+  const dotenv = await nearestDotEnv(dirname(testFilePath));
+  if (dotenv) {
+    for (const [k, v] of Object.entries(await readDefaultEnvVars(dirname(dotenv)))) {
+      if (!(k in env)) env[k] = v;
+    }
+  }
+  if (envName && projectRoot) {
+    Object.assign(env, await readEnvFileVars(envName, projectRoot));
+  }
+  return { env, dotenv };
+}
+
+/** The nearest `.env` in `dir` or any directory above it, or null. */
+async function nearestDotEnv(dir: string): Promise<string | null> {
+  let current = pathResolve(dir);
+  for (let i = 0; i < 64; i++) {
+    const candidate = pathJoin(current, '.env');
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // keep walking
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+  return null;
+}
+
 function toWireEvent(event: CompileEvent): CompileWireEvent {
+  if (event.kind === 'note') {
+    return { type: 'output', kind: event.level, msg: event.message };
+  }
   if (event.kind === 'phase') {
     return {
       type: 'compile:phase',

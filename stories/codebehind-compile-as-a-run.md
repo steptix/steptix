@@ -384,6 +384,32 @@ Everything above, in one pass, with three things the build added:
   behind it would wait forever. It arrives as an error frame, not a 409: the
   decision is made at Record time, after the stream has opened.
 
+And one the first real use found, the day it shipped. `tests/github with
+sections.md` declares `- username: $GITHUB_USERNAME`, runs green from
+TestBench, and compiled with the literal `$GITHUB_USERNAME` typed into the
+username field. A Run resolves `$VAR` parameters before it starts — TestBench
+on the client, against the nearest `.env` above the test file with
+`.env.<name>` overlaid; `aiui run` from `process.env` — and the compile built
+its runs from the parsed test, whose parser keeps `$VAR` as written. Nothing
+on the server resolves it: the one resolver lives in the CLI's file runner and
+reads `process.env`, which the server deliberately does not share with the
+project. Data-file rows (`dataFile:` in frontmatter) went the same way — the
+CLI runner applies one per instance; the compile applied none.
+
+So `compileTest` resolves the parameters once, up front, through the chain a
+run uses — data row, `$VAR` from an env map the caller supplies, the inline
+value — and every Record and Replay starts from that map
+(`CompileRunRequest.parameters`); the review's leak guard checks the resolved
+values too, since a guard looking for `$GITHUB_PASSWORD` would wave the real
+one through. The server composes the env the way TestBench does — process
+baseline, the nearest `.env` walking up from the test file, `.env.<name>` from
+the project root on top — and passes the first data row; the CLI passes
+`process.env` with the project layers merged, and the first row. A `$VAR`
+nothing defines is said out loud (a `note` event; an `output` frame on the
+wire) and left as the literal. Proven live: a test whose third step asserts
+the field holds the real value compiled green, where before the fix it was a
+prefix compile stopped at step 3 with `got "$LIVE_WHO"`.
+
 One deviation from the text above: a prefix compile reports `partial` even
 when its replay is green, because "green" means the whole test replays as
 code and a prefix only proved the prefix — the CLI exits 2 and TestBench's
