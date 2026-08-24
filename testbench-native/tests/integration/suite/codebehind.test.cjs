@@ -1,14 +1,23 @@
 /**
  * Compiling code-behind, inside the extension host
- * (stories/codebehind-compile.md §What the author sees).
+ * (stories/compile-as-you-go.md).
  *
- * Two halves, and they fail in different ways:
+ * Since that story a compile IS a run: the extension sends `compile: 'run'`
+ * (Run & Compile) or `compile: 'steps'` (Compile This Step) on the ordinary
+ * step request, and the proposal comes back on the run's own stream as
+ * `compile:step` frames and one terminal `compile:result`. There is no Record
+ * phase and no Replay rounds, and `POST /codebehind/compile` is no longer
+ * reachable from the extension at all.
  *
- *   - the compile command — does pressing Compile reach the client with the
- *     right request, log the phases, and end with a diff the author can apply?
- *     The diff editors themselves are not readable from here, so the assertion
- *     is on what they were opened WITH (`pendingCodeBehind`) plus, for Apply,
- *     the bytes on disk afterwards.
+ * Three halves, and they fail in different ways:
+ *
+ *   - the request — does pressing Run & Compile (or Compile This Step) reach
+ *     the client with `compile` set and the right steps? A field the wire
+ *     drops is invisible until a real server ignores it.
+ *   - the proposal — does `compile:result` end with a diff the author can
+ *     apply? The diff editors themselves are not readable from here, so the
+ *     assertion is on what they were opened WITH (`pendingCodeBehind`) plus,
+ *     for Apply, the bytes on disk afterwards.
  *   - the gutter — do `fromCodeBehind` / `codeBehindStale` on a step:pass
  *     reach the tracker as </> / ⚠ rather than a plain ✓? That mapping lives in
  *     one `switch` on the event, and a wrong branch there is invisible until
@@ -28,7 +37,6 @@ const { ApiClientError } = require('ai-ui-automation-runner-core');
 const EXT_ID = 'pkent.testbench-native';
 const FIXTURES_DIR =
   process.env.TESTBENCH_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
-const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitFor(label, predicate, timeoutMs = 5_000) {
@@ -53,6 +61,51 @@ tags: [codebehind]
 ## Steps
 1. Navigate to https://example.com
 2. Click the "Get started" button
+`;
+
+/**
+ * A test whose steps sit BELOW a `### Section` call — the shape the old
+ * Compile This Step refused outright, because it had to number steps in the
+ * expanded test and a call above the line broke the correspondence. This flow
+ * sends steps, not numbers, so it has nothing to refuse.
+ *
+ * Line 8 is the section call, line 9 the step below it, line 12 a body step.
+ */
+const SECTIONED_MD = `---
+tags: [codebehind]
+---
+
+# Sectioned
+
+## Steps
+1. Sign in
+2. Click the "Get started" button
+
+### Sign in
+1. Type the username
+2. Press Enter
+`;
+
+/**
+ * A test an interactive step splits into two step-blocks — so one logical run
+ * reaches the server as two POSTs. Lines 8, 9 and 10.
+ *
+ * `[interactive]` rather than `[input:]` because the two prompt through
+ * different surfaces: `[input:]` opens VS Code's native InputBox, which the
+ * harness cannot answer, while `[interactive]` uses the webview composer that
+ * `dispatchWebviewMessage` drives. Both split the run the same way, which is
+ * the only property under test here.
+ */
+const SPLIT_MD = `---
+tags: [codebehind]
+---
+
+# Split Me
+
+## Steps
+1. Navigate to https://example.com
+2. [interactive] Poke around before the next step
+3. Click the "Get started" button
 `;
 
 describe('TestBench code-behind compile', function () {
@@ -83,13 +136,7 @@ describe('TestBench code-behind compile', function () {
     fs.writeFileSync(mdPath, TEST_MD, 'utf-8');
     fs.rmSync(stepsPath, { force: true });
 
-    const uri = vscode.Uri.file(mdPath);
-    await vscode.commands.executeCommand('vscode.open', uri);
-    await waitFor(
-      'fixture active',
-      () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
-    );
-    await waitFor('active file detected', () => hooks.tracker.snapshot().isTestFile);
+    await openFixture(mdPath);
   });
 
   afterEach(async () => {
@@ -98,45 +145,55 @@ describe('TestBench code-behind compile', function () {
     fs.rmSync(stepsPath, { force: true });
   });
 
-  it('Compile Code-behind sends the test path and the editor steps to the server', async () => {
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
-    await waitFor('compile requested', () => fake.compileRequests.length > 0);
+  /** Open a markdown fixture and wait until TestBench owns it. */
+  async function openFixture(file) {
+    const uri = vscode.Uri.file(file);
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor(
+      'fixture active',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
+    );
+    await waitFor('active file detected', () => hooks.tracker.snapshot().isTestFile);
+    return vscode.window.activeTextEditor;
+  }
 
-    const request = fake.compileRequests[0];
+  it('Run & Compile sends compile:"run" with the test path and the editor steps', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
+    await waitFor('run requested', () => fake.requests.length > 0);
+
+    const request = fake.requests[0];
+    // The one field the whole feature rides on. `StepRequest` is built from an
+    // explicit allow-list server-side, so a wire that drops this compiles
+    // cleanly and silently runs without compiling.
+    assert.equal(request.compile, 'run');
     assert.equal(samePath(request.testFilePath, mdPath), true, request.testFilePath);
     assert.deepEqual(request.steps, [
       'Navigate to https://example.com',
       'Click the "Get started" button',
     ]);
-    // No selection means "steps with no entry, or flagged stale" — the server
-    // decides. Sending an empty select would mean something else.
-    assert.equal(request.select, undefined);
-    // Always this document's session: the server compiles from its last run
-    // when it can, and records in it when it cannot
-    // (stories/codebehind-compile-as-a-run.md §Record is a run).
-    assert.equal(typeof request.sessionId, 'string');
-    assert.ok(request.sessionId.length > 0, 'sessionId must name the document\'s session');
+    // The server turns capture on for a compile-mode run; the client does not
+    // have to remember two flags.
+    assert.equal(request.captureStepContext, undefined);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('an ordinary run does not ask the server to capture; the compile names the run\'s session', async () => {
-    // stories/codebehind-recording-on-disk.md: capturing is the compile's
-    // job. A Run sends no `captureStepContext`; the compile's own Record, in
-    // this document's session, is the recording.
+  it('an ordinary run neither compiles nor asks the server to capture', async () => {
+    // stories/codebehind-recording-on-disk.md: capturing is the compile's job.
     void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
     assert.equal(fake.requests[0].captureStepContext, undefined);
+    assert.equal(fake.requests[0].compile, undefined);
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
-    await waitFor('compile requested', () => fake.compileRequests.length > 0);
-    assert.equal(fake.compileRequests[0].sessionId, fake.streamSessionIds[0]);
   });
 
-  it('a green compile opens a diff of the proposed file without writing it', async () => {
+  it('a Run & Compile opens a diff of the proposed file without writing it', async () => {
     const proposed = 'export default defineSteps([{ source: "Navigate", async run() {} }]);\n';
-    fake.compileEvents = greenCompile(() => stepsPath, proposed);
+    fake.streamScripts = [runAndCompileScript(() => stepsPath, proposed)];
 
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
     await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
 
     const pending = hooks.pendingCodeBehind();
@@ -149,9 +206,9 @@ describe('TestBench code-behind compile', function () {
 
   it('Apply writes the proposed file and clears the proposal', async () => {
     const proposed = 'export default defineSteps([{ source: "Navigate", async run() {} }]);\n';
-    fake.compileEvents = greenCompile(() => stepsPath, proposed);
+    fake.streamScripts = [runAndCompileScript(() => stepsPath, proposed)];
 
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
     await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
 
     await vscode.commands.executeCommand('testbench-native.applyCodeBehind');
@@ -162,9 +219,9 @@ describe('TestBench code-behind compile', function () {
   });
 
   it('Discard drops the proposal and leaves the file alone', async () => {
-    fake.compileEvents = greenCompile(() => stepsPath, 'export default defineSteps([]);\n');
+    fake.streamScripts = [runAndCompileScript(() => stepsPath, 'export default defineSteps([]);\n')];
 
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
     await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
 
     await vscode.commands.executeCommand('testbench-native.discardCodeBehind');
@@ -172,93 +229,446 @@ describe('TestBench code-behind compile', function () {
     assert.equal(fs.existsSync(stepsPath), false);
   });
 
-  it('a partial compile opens the diff like a green one', async () => {
-    // What passed is proposed (stories/codebehind-compile-as-a-run.md §Write
-    // what passed): a prefix compile's files reach the diff, and the summary
-    // carries what the notification says about the rest.
+  it('a run that fails at step 2 still proposes step 1', async () => {
+    // Stop and failure compose the way "write what passed" already composes
+    // (stories/compile-as-you-go.md §Run & Compile): the entries for what
+    // finished are proposed, and the summary names what was not attempted.
     const proposed = 'export default defineSteps([{ source: "Navigate", async run() {} }]);\n';
-    fake.compileEvents = [
-      { type: 'compile:phase', phase: 'select', message: '2 step(s) to generate, 0 kept, 0 already AI' },
-      { type: 'compile:phase', phase: 'record', message: 'stopped at step 2 — no such button; compiling 1 step(s) before it' },
-      { type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' },
-      { type: 'compile:phase', phase: 'replay', round: 1, message: '1/1 passed as code' },
-      { type: 'compile:done', status: 'partial', message: 'Compiled Compile Me: 1 step(s) as code — stopped at step 2.' },
-      {
-        type: 'compile:result',
-        status: 'partial',
-        get files() {
-          return { [stepsPath]: proposed };
-        },
-        summary: {
-          test: 'compile-me.md', totalSteps: 2, compiled: 1, kept: 0, keptAi: 0, rounds: 1,
-          tokensUsed: 4_000, written: [], unproven: [], writtenOffAi: [],
-          stoppedAt: { step: 2, error: 'no such button' }, notAttempted: [2],
-          recordingDir: '/x/.aiui-codebehind-cache/compile-me.recording',
-        },
+    fake.streamScripts = [
+      (f) => {
+        f.push({ type: 'step:start', line: 8 });
+        f.push({ type: 'step:pass', line: 8 });
+        f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' });
+        f.push({ type: 'step:start', line: 9 });
+        f.push({ type: 'step:fail', line: 9, error: 'no such button' });
+        f.push({
+          type: 'compile:result',
+          status: 'partial',
+          files: { [stepsPath]: proposed },
+          summary: summaryFor({
+            compiled: 1,
+            unproven: [1],
+            stoppedAt: { step: 2, error: 'no such button' },
+            notAttempted: [],
+          }),
+        });
+        f.push({ type: 'done', status: 'failed' });
+        f.end();
       },
     ];
 
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
     await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
-    const pending = hooks.pendingCodeBehind();
-    assert.equal(pending.files[stepsPath], proposed);
+    assert.equal(hooks.pendingCodeBehind().files[stepsPath], proposed);
     assert.equal(fs.existsSync(stepsPath), false, 'compile must not write the file itself');
   });
 
-  it('a red compile leaves no proposal to apply', async () => {
-    fake.compileEvents = [
-      { type: 'compile:phase', phase: 'select', message: '2 step(s) to generate' },
-      { type: 'compile:phase', phase: 'replay', round: 1, message: '✗ step 2 — locator timeout' },
-      { type: 'compile:done', status: 'failed', message: 'Replay never went green' },
-      {
-        type: 'compile:result',
-        status: 'failed',
-        files: {},
-        summary: {
-          test: '/x/compile-me.md',
-          totalSteps: 2,
-          compiled: 0,
-          kept: 0,
-          keptAi: 0,
-          rounds: 3,
-          tokensUsed: 900,
-          written: [],
-          unproven: [],
-          writtenOffAi: [],
-          notAttempted: [],
-          recordingDir: '/x/.aiui-codebehind-cache/compile-me.recording',
-          error: 'locator timeout',
-          candidatePath: '/x/.aiui-codebehind-cache/compile-me.steps.ts.candidate',
-        },
+  it('a compile that proposes nothing leaves no proposal to apply', async () => {
+    fake.streamScripts = [
+      (f) => {
+        f.push({ type: 'step:start', line: 8 });
+        f.push({ type: 'step:pass', line: 8, fromCodeBehind: true });
+        f.push({
+          type: 'compile:result',
+          status: 'green',
+          files: {},
+          summary: summaryFor({ compiled: 0, kept: 2 }),
+        });
+        f.push({ type: 'done', status: 'passed' });
+        f.end();
       },
     ];
 
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
-    await waitFor('compile ran', () => fake.compileRequests.length > 0);
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
+    await waitFor('run finished', () => !hooks.isRunning() && fake.requests.length > 0);
     await sleep(300);
     assert.equal(hooks.pendingCodeBehind(), null);
     assert.equal(fs.existsSync(stepsPath), false);
   });
 
-  it('Compile This Step selects exactly that step', async () => {
+  it('Compile This Step runs exactly that step, with code-behind execution off', async () => {
     // Line 9 in the fixture is the second step.
     void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
       lineNumber: 9,
     });
-    await waitFor('compile requested', () => fake.compileRequests.length > 0);
-    assert.deepEqual(fake.compileRequests[0].select, { steps: [2] });
+    await waitFor('run requested', () => fake.requests.length > 0);
+
+    const request = fake.requests[0];
+    // `'steps'`, not `'run'` — which is what disables code-behind execution
+    // server-side so a broken entry re-records under AI instead of being
+    // served by the code under repair.
+    assert.equal(request.compile, 'steps');
+    assert.deepEqual(request.sourceLines, [9]);
+    assert.deepEqual(request.steps, ['Click the "Get started" button']);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('the compile phases reach the run log', async () => {
-    fake.compileEvents = greenCompile(() => stepsPath, 'export default defineSteps([]);\n');
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+  it('Compile This Step compiles every step in a multi-line selection, in order', async () => {
+    const editor = vscode.window.activeTextEditor;
+    // Lines 8 and 9 of the document are steps 1 and 2 (0-based 7 and 8).
+    editor.selection = new vscode.Selection(
+      new vscode.Position(7, 0),
+      new vscode.Position(8, 10),
+    );
+    void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+      lineNumber: 8,
+    });
+    await waitFor('run requested', () => fake.requests.length > 0);
+
+    const request = fake.requests[0];
+    assert.equal(request.compile, 'steps');
+    assert.deepEqual(request.sourceLines, [8, 9]);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  describe('a run that reaches the server as several requests', () => {
+    // Every block after the first must say so, or the server gives each block
+    // its own compiler — its own candidate read from the unapplied file, its
+    // own numbering from 1, and its own wholesale recording write that deletes
+    // the block before it.
+    it('marks the second block of a split run as a continuation', async () => {
+      const splitMd = path.resolve(FIXTURES_DIR, 'compile-split.md');
+      fs.writeFileSync(splitMd, SPLIT_MD, 'utf-8');
+      try {
+        await openFixture(splitMd);
+        void vscode.commands.executeCommand('testbench-native.runAndCompile');
+        await waitFor('first block requested', () => fake.requests.length > 0);
+        assert.equal(fake.requests[0].compile, 'run');
+        assert.equal(fake.requests[0].compileContinues, undefined, 'the first block starts the compile');
+        assert.deepEqual(fake.requests[0].steps, ['Navigate to https://example.com']);
+        fake.end();
+
+        // The interactive step blocks on the composer. There is no hook for
+        // "the prompt is open", and answering early is a silent no-op, so keep
+        // sending `/continue` until the run moves on.
+        await waitFor(
+          'second block requested',
+          async () => {
+            if (fake.requests.length > 1) return true;
+            await hooks.dispatchWebviewMessage({ type: 'promptResponse', text: '/continue' });
+            return fake.requests.length > 1;
+          },
+          20_000,
+        );
+        assert.equal(fake.requests[1].compile, 'run');
+        assert.equal(fake.requests[1].compileContinues, true, 'the second block continues it');
+        assert.deepEqual(fake.requests[1].steps, ['Click the "Get started" button']);
+        fake.end();
+        await waitFor('idle', () => !hooks.isRunning(), 10_000);
+      } finally {
+        fs.rmSync(splitMd, { force: true });
+      }
+    });
+
+    it('Continue after a breakpoint keeps compiling, as a continuation', async () => {
+      // The author who pressed Run & Compile did not stop wanting a compile
+      // when they hit a breakpoint. Continue used to send a plain Run, so the
+      // rest of the test was never compiled.
+      const uri = vscode.Uri.file(mdPath);
+      vscode.debug.addBreakpoints([
+        new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(8, 0))),
+      ]);
+      try {
+        void vscode.commands.executeCommand('testbench-native.runAndCompile');
+        await waitFor('first block requested', () => fake.requests.length > 0);
+        assert.equal(fake.requests[0].compile, 'run');
+        assert.equal(fake.requests[0].compileContinues, undefined);
+        // Trimmed at the breakpoint: only the step above it.
+        assert.deepEqual(fake.requests[0].sourceLines, [8]);
+        fake.end();
+        await waitFor('paused', () => hooks.tracker.snapshot().breakpointStop !== null, 10_000);
+        // Paused mid-compile: no diff yet, the proposal is about to grow.
+        assert.equal(hooks.pendingCodeBehind(), null);
+
+        void vscode.commands.executeCommand('testbench-native.continueRun');
+        await waitFor('continuation requested', () => fake.requests.length > 1, 10_000);
+        assert.equal(fake.requests[1].compile, 'run', 'Continue must carry the compile');
+        assert.equal(fake.requests[1].compileContinues, true);
+        fake.end();
+        await waitFor('idle', () => !hooks.isRunning(), 10_000);
+      } finally {
+        vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+      }
+    });
+
+    it('a plain Run after a Run & Compile carries no compile flag', async () => {
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('compile requested', () => fake.requests.length > 0);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('run requested', () => fake.requests.length > 1);
+      assert.equal(fake.requests[1].compile, undefined);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+  });
+
+  it('a second compile while one is running does not wipe the first\'s proposal', async () => {
+    // The reset used to happen before the `isRunning` guard, so the call that
+    // got turned away cleared the proposal of the run that turned it away.
+    const proposed = 'export default defineSteps([{ source: "Navigate", async run() {} }]);\n';
+    fake.streamScripts = [
+      (f) => {
+        f.push({ type: 'step:start', line: 8 });
+        f.push({ type: 'step:pass', line: 8 });
+        f.push({
+          type: 'compile:result',
+          status: 'partial',
+          files: { [stepsPath]: proposed },
+          summary: summaryFor({ compiled: 1, unproven: [1] }),
+        });
+        // Deliberately left open: the second command lands while this run is
+        // still in flight, exactly as a double-click would.
+      },
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
+    await waitFor('result folded', () => fake.requests.length > 0);
+    await sleep(300);
+
+    await vscode.commands.executeCommand('testbench-native.runAndCompile');
+    assert.match(hooks.lastCompileError() ?? '', /run of this test is in progress/);
+    assert.equal(fake.requests.length, 1, 'the second call must not reach the server');
+
+    fake.push({ type: 'done', status: 'passed' });
+    fake.end();
+    await waitFor('proposal survives', () => hooks.pendingCodeBehind() !== null, 10_000);
+    assert.equal(hooks.pendingCodeBehind().files[stepsPath], proposed);
+  });
+
+  it('compiles a section body step, attributing it to its section', async () => {
+    // The user hit this live: the review round refused it outright. The step
+    // runs detached at the root frame, as Run Step Here runs it; only the
+    // entry's BINDING moves under the section.
+    const sectionedMd = path.resolve(FIXTURES_DIR, 'compile-body.md');
+    fs.writeFileSync(sectionedMd, SECTIONED_MD, 'utf-8');
+    try {
+      await openFixture(sectionedMd);
+      // Line 12 is `1. Type the username` inside the `Sign in` body.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 12,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+
+      const request = fake.requests[0];
+      assert.equal(request.compile, 'steps');
+      assert.deepEqual(request.steps, ['Type the username']);
+      assert.deepEqual(request.sourceLines, [12]);
+      assert.deepEqual(request.compileScope, { section: 'Sign in' });
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    } finally {
+      fs.rmSync(sectionedMd, { force: true });
+    }
+  });
+
+  it('compiles a whole section body in order, under one scope', async () => {
+    const sectionedMd = path.resolve(FIXTURES_DIR, 'compile-body-all.md');
+    fs.writeFileSync(sectionedMd, SECTIONED_MD, 'utf-8');
+    try {
+      const editor = await openFixture(sectionedMd);
+      editor.selection = new vscode.Selection(
+        new vscode.Position(11, 0),
+        new vscode.Position(12, 12),
+      );
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 12,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+
+      const request = fake.requests[0];
+      assert.deepEqual(request.sourceLines, [12, 13]);
+      assert.deepEqual(request.compileScope, { section: 'Sign in' });
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    } finally {
+      fs.rmSync(sectionedMd, { force: true });
+    }
+  });
+
+  it('refuses a selection that spans a section body and the main flow', async () => {
+    // Each entry binds to one scope; guessing one would put half of them where
+    // nothing looks for them.
+    const sectionedMd = path.resolve(FIXTURES_DIR, 'compile-body-mixed.md');
+    fs.writeFileSync(sectionedMd, SECTIONED_MD, 'utf-8');
+    try {
+      const editor = await openFixture(sectionedMd);
+      // Line 9 is a main-flow step, line 12 is inside the `Sign in` body.
+      editor.selection = new vscode.Selection(
+        new vscode.Position(8, 0),
+        new vscode.Position(11, 12),
+      );
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 12,
+      });
+      await waitFor('refused', () => hooks.lastCompileError() !== null, 5_000);
+      assert.match(hooks.lastCompileError(), /spans .* and .*/);
+      assert.match(hooks.lastCompileError(), /Sign in/);
+      assert.match(hooks.lastCompileError(), /main flow/);
+      assert.equal(fake.requests.length, 0);
+    } finally {
+      fs.rmSync(sectionedMd, { force: true });
+    }
+  });
+
+  it('refuses a body step whose text repeats within its own section', async () => {
+    // Occurrence is counted within the request, so sending one of two
+    // identical body steps numbers it 0 and the entry lands on the first.
+    const repeatBody = path.resolve(FIXTURES_DIR, 'compile-body-repeat.md');
+    fs.writeFileSync(
+      repeatBody,
+      [
+        '---', 'tags: [codebehind]', '---', '',
+        '# Repeat Body', '',
+        '## Steps',
+        '1. Sign in',
+        '',
+        '### Sign in',
+        '1. Press Enter',
+        '2. Type the code',
+        '3. Press Enter',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    try {
+      await openFixture(repeatBody);
+      // Line 13 is the second `Press Enter` in the body.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 13,
+      });
+      await waitFor('refused', () => hooks.lastCompileError() !== null, 5_000);
+      assert.match(hooks.lastCompileError(), /appears more than once/);
+      assert.match(hooks.lastCompileError(), /"Sign in"/);
+      assert.equal(fake.requests.length, 0);
+
+      // …and the body step that does NOT repeat compiles.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 12,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+      assert.deepEqual(fake.requests[0].steps, ['Type the code']);
+      assert.deepEqual(fake.requests[0].compileScope, { section: 'Sign in' });
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    } finally {
+      fs.rmSync(repeatBody, { force: true });
+    }
+  });
+
+  it('refuses a step whose text repeats, where a single-step compile cannot tell which', async () => {
+    // Occurrence is counted WITHIN the request, so a lone second "Press Enter"
+    // is occurrence 0 to the server and its entry would replace the first
+    // one's — code generated from a different step.
+    const repeatMd = path.resolve(FIXTURES_DIR, 'compile-repeat.md');
+    fs.writeFileSync(
+      repeatMd,
+      ['---', 'tags: [codebehind]', '---', '', '# Repeat', '', '## Steps', '1. Press Enter', '2. Type the code', '3. Press Enter', ''].join('\n'),
+      'utf-8',
+    );
+    try {
+      await openFixture(repeatMd);
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 10,
+      });
+      await waitFor('refused', () => hooks.lastCompileError() !== null, 5_000);
+      assert.match(hooks.lastCompileError(), /appears more than once/);
+      assert.match(hooks.lastCompileError(), /Run & Compile/);
+      assert.equal(fake.requests.length, 0);
+
+      // …and the step that does NOT repeat still compiles.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 9,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+      assert.deepEqual(fake.requests[0].steps, ['Type the code']);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    } finally {
+      fs.rmSync(repeatMd, { force: true });
+    }
+  });
+
+  it('a line that is not a step is refused rather than compiling the rest of the file', async () => {
+    // Line 5 is the `# Compile Me` heading. An unqualified line resolves to
+    // "every step at or below it", which on a stray right-click would run and
+    // compile the tail of the test.
+    void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+      lineNumber: 5,
+    });
+    await sleep(300);
+    assert.equal(fake.requests.length, 0);
+  });
+
+  describe('a test with a section call above the step', () => {
+    let sectionedMd;
+
+    beforeEach(async () => {
+      sectionedMd = path.resolve(FIXTURES_DIR, 'compile-sectioned.md');
+      fs.writeFileSync(sectionedMd, SECTIONED_MD, 'utf-8');
+      await openFixture(sectionedMd);
+    });
+
+    afterEach(() => {
+      fs.rmSync(sectionedMd, { force: true });
+      fs.rmSync(path.resolve(FIXTURES_DIR, 'compile-sectioned.steps.ts'), { force: true });
+    });
+
+    it('compiles a step BELOW the call — the old "cannot number a step" refusal is gone', async () => {
+      // Line 9 is `2. Click the "Get started" button`, sitting under the
+      // `Sign in` section call on line 8. This used to refuse outright.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 9,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+
+      const request = fake.requests[0];
+      assert.equal(request.compile, 'steps');
+      assert.deepEqual(request.steps, ['Click the "Get started" button']);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('compiles the section call itself, sending the body for the server to expand', async () => {
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 8,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+
+      const request = fake.requests[0];
+      assert.equal(request.compile, 'steps');
+      assert.deepEqual(request.steps, ['Sign in']);
+      // The call goes out as the call, with the sections map a run sends —
+      // the server expands it and binds each body step to its own entry.
+      assert.ok(request.sections, 'the sections map must ride along');
+      assert.deepEqual(
+        Object.values(request.sections)[0].steps,
+        ['Type the username', 'Press Enter'],
+      );
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+  });
+
+  it('the compile lines reach the run log', async () => {
+    fake.streamScripts = [runAndCompileScript(() => stepsPath, 'export default defineSteps([]);\n')];
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
     await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
 
     const log = readLiveLog();
     if (log === null) return; // TESTBENCH_LIVE_LOG not set — nothing to read.
-    assert.match(log, /Select\s+2 step\(s\) to generate/);
     assert.match(log, /step 1 generated/);
-    assert.match(log, /Replay 1\s+2\/2 passed as code/);
+    assert.match(log, /Review\s+revised compile-me\.steps\.ts/);
+    assert.match(log, /Compiled compile-me\.md: 2 step\(s\) as code \(unproven/);
   });
 
   it('paints </> for a step that passed as code and ⚠ for a stale one', async () => {
@@ -314,76 +724,54 @@ describe('TestBench code-behind compile', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('the webview compile message reaches the same command', async () => {
-    await hooks.dispatchWebviewMessage({ type: 'compile' });
-    await waitFor('compile requested', () => fake.compileRequests.length > 0);
-    assert.equal(typeof fake.compileRequests[0].sessionId, 'string');
+  it('a compile:step never repaints a step the run has already marked', async () => {
+    // By the time an entry is generated its step has painted ✓. Painting ▶ on
+    // it from the compile frame would undo that — which is why the run
+    // controller logs these frames and does not fold them into the gutter.
+    fake.streamScripts = [
+      (f) => {
+        f.push({ type: 'step:start', line: 8 });
+        f.push({ type: 'step:pass', line: 8 });
+        f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' });
+      },
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
+    await waitFor('pass painted', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[8] === 'pass';
+    });
+    await sleep(200);
+    const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+    assert.equal(statuses[8], 'pass', 'the generate frame must not repaint the step');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('paints the compile\'s runs in the gutter — ▶ then </> / ✗ — and resets between rounds', async () => {
-    // stories/codebehind-compile-as-a-run.md §Every run is on the stream: the
-    // Record and each Replay round paint as a run would, and a new round
-    // starts from a clean gutter so round 1's ✗ does not outlive round 2.
-    const proposed = 'export default defineSteps([]);\n';
-    const run = (phase, round, event) => ({ type: 'compile:run', phase, ...(round && { round }), event });
-    fake.compileEvents = [
-      { type: 'compile:phase', phase: 'record', message: 'running 2 step(s)' },
-      run('record', undefined, { type: 'step:start', line: 8 }),
-      run('record', undefined, { type: 'step:pass', line: 8 }),
-      run('record', undefined, { type: 'step:start', line: 9 }),
-      run('record', undefined, { type: 'step:pass', line: 9, fromCache: true }),
-      run('record', undefined, { type: 'done', status: 'passed' }),
-      { type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' },
-      { type: 'compile:phase', phase: 'replay', round: 1, message: 'running 2 step(s) as code' },
-      run('replay', 1, { type: 'step:start', line: 8 }),
-      run('replay', 1, { type: 'step:pass', line: 8, fromCodeBehind: true }),
-      run('replay', 1, { type: 'step:start', line: 9 }),
-      run('replay', 1, { type: 'step:fail', line: 9, error: 'locator timeout' }),
-      run('replay', 1, { type: 'done', status: 'failed' }),
-      { type: 'compile:step', phase: 'repair', step: 2, line: 9, message: 'regenerating from the failure' },
-      { type: 'compile:phase', phase: 'replay', round: 2, message: 'running 2 step(s) as code' },
-      run('replay', 2, { type: 'step:start', line: 8 }),
-      run('replay', 2, { type: 'step:pass', line: 8, fromCodeBehind: true }),
-      run('replay', 2, { type: 'step:start', line: 9 }),
-      // Round 2 stops here on purpose: line 9 must read ▶ (this round), not
-      // ✗ (last round), which is what the reset between rounds buys.
-    ];
-    // The stream ends without a result, so the compile reports "no result" —
-    // fine for a test about the gutter.
-    void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
-    await waitFor('compile ran', () => fake.compileRequests.length > 0);
-    await waitFor('round 2 painted', () => {
-      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
-      return statuses[8] === 'pass-code-behind' && statuses[9] === 'running';
-    });
-    void proposed;
-  });
+  it('the panel\'s Compile button and the old command both reach Run & Compile', async () => {
+    // Never awaited: the command now awaits the whole run, and the run only
+    // ends when this test calls `fake.end()`.
+    void hooks.dispatchWebviewMessage({ type: 'compile' });
+    await waitFor('run requested', () => fake.requests.length > 0);
+    assert.equal(fake.requests[0].compile, 'run');
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
 
-  it('a compile\'s replay failure does not park a breakpoint stop', async () => {
-    // A Replay's session is the compile's own and is closed after the round —
-    // there is nothing to Continue into, so the ✗ stays a mark and no more.
-    const run = (phase, round, event) => ({ type: 'compile:run', phase, ...(round && { round }), event });
-    fake.compileEvents = [
-      { type: 'compile:phase', phase: 'replay', round: 1, message: 'running 2 step(s) as code' },
-      run('replay', 1, { type: 'step:start', line: 8 }),
-      run('replay', 1, { type: 'step:fail', line: 8, error: 'locator timeout' }),
-      run('replay', 1, { type: 'done', status: 'failed' }),
-    ];
     void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
-    await waitFor('fail painted', () => {
-      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
-      return statuses[8] === 'fail';
-    });
-    assert.equal(hooks.tracker.snapshot().breakpointStop, null);
+    await waitFor('second run requested', () => fake.requests.length > 1);
+    assert.equal(fake.requests[1].compile, 'run');
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
   });
 
   // ── Reaching the server (issue: "compile failed: fetch failed") ──────────
   //
-  // A compile gets to the server the way a Run does: probe SERVER_URL first,
-  // auto-start it when that is configured, refuse a port that belongs to
-  // something else, and when the request still cannot get through, say which
-  // URL was tried and why it did not answer — in the catalogue's words, with
-  // the fix attached — rather than echoing the client's bare "fetch failed".
+  // A compile gets to the server the way a Run does — because it IS a run now:
+  // probe SERVER_URL first, auto-start it when that is configured, refuse a
+  // port that belongs to something else, and when the request still cannot get
+  // through, say which URL was tried and why it did not answer, in the
+  // catalogue's words with the fix attached, rather than echoing the client's
+  // bare "fetch failed".
   describe('reaching the server', () => {
     const HEALTHY = () => ({
       kind: 'healthy',
@@ -419,15 +807,11 @@ describe('TestBench code-behind compile', function () {
     });
 
     it('a server that does not answer is reported as TB010 naming the URL and the refusal, not "fetch failed"', async () => {
-      // Nothing listening and auto-start not configured: the probe's "skip"
-      // lets the request go out (as a Run's does), and it is the request's
-      // failure — carrying the cause Node hides behind "fetch failed" — that
-      // the author sees, with the catalogue's fix.
-      fake.compileThrows = new ApiClientError(
+      fake.streamThrows = new ApiClientError(
         'connect-failed',
         'fetch failed: connect ECONNREFUSED 127.0.0.1:39917',
       );
-      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
       await waitFor('compile reported', () => hooks.lastCompileError() !== null);
 
       const error = hooks.lastCompileError();
@@ -439,8 +823,8 @@ describe('TestBench code-behind compile', function () {
 
     it('a server that rejects the key is TB011, with the .env the key chain started from', async () => {
       probeResult = HEALTHY();
-      fake.compileThrows = new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
-      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      fake.streamThrows = new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
       await waitFor('compile reported', () => hooks.lastCompileError() !== null);
 
       const error = hooks.lastCompileError();
@@ -451,34 +835,38 @@ describe('TestBench code-behind compile', function () {
 
     it('a down server is auto-started before the request goes out, as it is for a Run', async () => {
       await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR });
-      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
-      await waitFor('compile requested', () => fake.compileRequests.length > 0);
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
 
       assert.equal(spawns.length, 1, 'one spawn, before the request');
       assert.equal(hooks.lastCompileError(), null);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
     });
 
     it('a port held by something else refuses the compile (TB027) before any request is sent', async () => {
       probeResult = { kind: 'foreign', service: 'grafana' };
-      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
       await waitFor('compile reported', () => hooks.lastCompileError() !== null);
 
       assert.match(hooks.lastCompileError(), /^TB027: /);
       assert.match(hooks.lastCompileError(), /grafana/);
-      assert.equal(fake.compileRequests.length, 0, 'nothing was sent to a server that is not ours');
+      assert.equal(fake.requests.length, 0, 'nothing was sent to a server that is not ours');
     });
 
     it('a compile while a run of the test is in progress is refused without touching the server', async () => {
-      // The panel greys Compile out during a run; the palette and gutter
-      // commands do not, and a compile records in the session the run is using.
+      // The panel greys the button out during a run; the palette and gutter
+      // commands do not, and a compile-mode run would queue behind the one in
+      // flight in the same session.
       probeResult = HEALTHY();
       void vscode.commands.executeCommand('testbench-native.runAll');
       await waitFor('stream active', () => fake.hasActiveStream);
 
-      void vscode.commands.executeCommand('testbench-native.compileCodeBehind');
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
       await waitFor('compile refused', () => hooks.lastCompileError() !== null);
       assert.match(hooks.lastCompileError(), /run of this test is in progress/);
-      assert.equal(fake.compileRequests.length, 0);
+      assert.equal(fake.requests.length, 1, 'only the run in flight reached the server');
 
       fake.end();
       await waitFor('idle', () => !hooks.isRunning());
@@ -486,39 +874,56 @@ describe('TestBench code-behind compile', function () {
   });
 });
 
-/** A green compile of the two-step fixture, proposing `content` for `file`. */
-function greenCompile(file, content) {
-  return [
-    { type: 'compile:phase', phase: 'select', message: '2 step(s) to generate, 0 kept, 0 already AI' },
-    { type: 'compile:phase', phase: 'record', message: 'running 2 step(s) under AI' },
-    { type: 'compile:phase', phase: 'generate', message: '2 step(s)' },
-    { type: 'compile:step', phase: 'generate', step: 1, message: 'generated' },
-    { type: 'compile:step', phase: 'generate', step: 2, message: 'generated' },
-    { type: 'compile:phase', phase: 'review', message: 'revised compile-me.steps.ts' },
-    { type: 'compile:phase', phase: 'replay', round: 1, message: '2/2 passed as code' },
-    { type: 'compile:done', status: 'green', message: 'Compiled Compile Me: 2 step(s) as code' },
-    {
+/**
+ * A Run & Compile of the two-step fixture: both steps pass under AI, both
+ * generate, Review revises the file, and the result proposes `content`.
+ *
+ * `compile:result` arrives BEFORE `done`, as the server sends it — the queue
+ * drains and Review runs at run end, and only then does the run finish.
+ */
+function runAndCompileScript(file, content) {
+  return (f) => {
+    f.push({ type: 'step:start', line: 8 });
+    f.push({ type: 'step:pass', line: 8 });
+    f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' });
+    f.push({ type: 'step:start', line: 9 });
+    f.push({ type: 'step:pass', line: 9 });
+    f.push({ type: 'compile:step', phase: 'generate', step: 2, line: 9, message: 'generated' });
+    f.push({
+      type: 'compile:step',
+      phase: 'review',
+      step: 0,
+      message: 'revised compile-me.steps.ts',
+    });
+    f.push({
       type: 'compile:result',
-      status: 'green',
-      get files() {
-        return { [file()]: content };
-      },
-      summary: {
-        test: 'compile-me.md',
-        totalSteps: 2,
-        compiled: 2,
-        kept: 0,
-        keptAi: 0,
-        rounds: 1,
-        tokensUsed: 12_345,
-        written: [],
-        unproven: [],
-        writtenOffAi: [],
-        notAttempted: [],
-        recordingDir: '/x/.aiui-codebehind-cache/compile-me.recording',
-      },
-    },
-  ];
+      status: 'partial',
+      files: { [file()]: content },
+      summary: summaryFor({ compiled: 2, unproven: [1, 2] }),
+    });
+    f.push({ type: 'done', status: 'passed' });
+    f.end();
+  };
+}
+
+/** A compile summary for the two-step fixture, with the fields a live compile
+ *  always sets: no rounds, and every new entry unproven. */
+function summaryFor(overrides = {}) {
+  return {
+    test: path.resolve(FIXTURES_DIR, 'compile-me.md'),
+    totalSteps: 2,
+    compiled: 0,
+    kept: 0,
+    keptAi: 0,
+    rounds: 0,
+    tokensUsed: 12_345,
+    written: [],
+    unproven: [],
+    writtenOffAi: [],
+    notAttempted: [],
+    recordingDir: path.resolve(FIXTURES_DIR, '.aiui-codebehind-cache', 'compile-me.recording'),
+    ...overrides,
+  };
 }
 
 /**

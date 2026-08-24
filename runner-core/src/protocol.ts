@@ -235,7 +235,14 @@ export type RunEvent =
   | FramePopEvent
   | FrameScopeEvent
   | StepAwaitingEvent
-  | ToolAwaitingDebuggerEvent;
+  | ToolAwaitingDebuggerEvent
+  // A compile-mode run's own frames (stories/compile-as-you-go.md §On the
+  // wire). Deliberately the SAME shapes the compile stream carries, so a
+  // client's folding code works on either stream: `compile:step` as each
+  // entry is generated or declined, `compile:result` once, terminal, just
+  // before `done`. Absent from an ordinary run, which sends no `compile`.
+  | CompileStepEvent
+  | CompileResultEvent;
 
 // ---------------------------------------------------------------------------
 // Compile stream (stories/codebehind-compile.md §Server)
@@ -813,6 +820,9 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'frame:pop' ||
     t === 'frame:scope' ||
     t === 'step:awaiting' ||
-    t === 'tool:awaiting-debugger'
+    t === 'tool:awaiting-debugger' ||
+    // Only a compile-mode run emits these; an ordinary one never does.
+    t === 'compile:step' ||
+    t === 'compile:result'
   );
 }

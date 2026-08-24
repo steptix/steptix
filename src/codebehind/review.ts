@@ -1,5 +1,14 @@
+import { basename } from 'node:path';
+import type { AiClient } from '../ai/client.js';
 import type { ChatMessage } from '../ai/types.js';
-import { decodeDoubleEscapedNewlines, extractJson } from '../ai/action-parser.js';
+import {
+  decodeDoubleEscapedNewlines,
+  extractJson,
+  findInlinedParameterValue,
+} from '../ai/action-parser.js';
+import type { Candidate } from './candidate.js';
+import { describeGuardedName } from './generate.js';
+import { listEntries, validateCodeBehindSource } from './writer.js';
 
 /**
  * The compiler's review pass (stories/codebehind-compile.md, "Review").
@@ -111,4 +120,114 @@ export function parseFileRevision(rawResponse: string): string {
     throw new Error('Review response is not a code-behind file (no `defineSteps(` call)');
   }
   return text.endsWith('\n') ? text : `${text}\n`;
+}
+
+/** What a review pass needs to know about the compile it is reviewing. */
+export interface ReviewCandidateInput {
+  /** Basename of the markdown this code-behind belongs to, for orientation. */
+  markdownName: string;
+  /** The test's authored step texts, in order — what every `source` matches. */
+  steps: string[];
+  /**
+   * Every value the revision must not inline: the resolved parameters and the
+   * resolved environment references. Deliberately broad — a whole-file rewrite
+   * can move a literal into any entry, so the check has to cover them all.
+   */
+  guarded: Array<{ name: string; value: string }>;
+  aiClient: AiClient;
+  signal?: AbortSignal | undefined;
+}
+
+/**
+ * The review pass. Non-fatal by construction: a revision that will not compile,
+ * or that smuggles a parameter value in, is discarded and the pre-review
+ * candidate stands.
+ *
+ * Shared by the boxed pipeline (`compileTest`) and the live one
+ * (stories/compile-as-you-go.md, the Run & Compile path). `emit` receives the
+ * phase message; the caller decides what frame it becomes.
+ */
+export async function reviewCandidate(
+  candidate: Candidate,
+  input: ReviewCandidateInput,
+  emit: (message: string) => void,
+  /** Which of the candidate's files to review. Defaults to all of them; the
+   *  live path narrows it to the ones a block actually changed, so a run split
+   *  across several requests does not re-review what it already passed. */
+  files: string[] = candidate.touchedFiles(),
+): Promise<void> {
+  for (const file of files) {
+    const before = candidate.contentOf(file);
+    if (before === undefined) continue;
+    let revised: string;
+    try {
+      const completion = await input.aiClient.complete(
+        [
+          buildFileReviewPrompt({
+            markdownName: input.markdownName,
+            file: before,
+            steps: input.steps,
+          }),
+        ],
+        input.signal,
+        { profile: 'authoring' },
+      );
+      revised = parseFileRevision(completion.text);
+    } catch (err) {
+      emit(`skipped for ${basename(file)} (${(err as Error).message}) — the generated file stands`);
+      continue;
+    }
+
+    if (revised.trim() === before.trim()) {
+      emit(`no changes to ${basename(file)}`);
+      continue;
+    }
+
+    const leaked = findInlinedParameterValue(revised, input.guarded);
+    if (leaked) {
+      emit(`rejected: the revision inlines ${describeGuardedName(leaked)} — the generated file stands`);
+      continue;
+    }
+    // The reviewer edits entries; it does not decide which steps have one.
+    // Caught live: given the whole test, it wrote an entry for the step a
+    // prefix compile had deliberately left alone — code for a step nobody
+    // recorded, which the next compile would then skip as "already has one".
+    const entriesChanged = describeEntryChange(listEntries(before), listEntries(revised));
+    if (entriesChanged) {
+      emit(`rejected: the revision ${entriesChanged} — the generated file stands`);
+      continue;
+    }
+    const invalid = await validateCodeBehindSource(file, revised);
+    if (invalid) {
+      emit(`rejected: the revision does not compile (${invalid}) — the generated file stands`);
+      continue;
+    }
+    await candidate.replaceFile(file, revised);
+    emit(`revised ${basename(file)}`);
+  }
+}
+
+/**
+ * How a revision changed the SET of entries, or null when it did not. Order
+ * and code are the reviewer's to change; which steps have an entry is not.
+ */
+function describeEntryChange(
+  before: Array<{ source: string; section: string }>,
+  after: Array<{ source: string; section: string }>,
+): string | null {
+  const sep = String.fromCharCode(0);
+  const key = (e: { source: string; section: string }): string => `${e.section}${sep}${e.source}`;
+  const was = new Map<string, number>();
+  for (const e of before) was.set(key(e), (was.get(key(e)) ?? 0) + 1);
+  const now = new Map<string, number>();
+  for (const e of after) now.set(key(e), (now.get(key(e)) ?? 0) + 1);
+  const added = after.filter((e) => (now.get(key(e)) ?? 0) > (was.get(key(e)) ?? 0)).map((e) => e.source);
+  const removed = before.filter((e) => (was.get(key(e)) ?? 0) > (now.get(key(e)) ?? 0)).map((e) => e.source);
+  const quote = (sources: string[]): string => [...new Set(sources)].map((s) => JSON.stringify(s)).join(', ');
+  if (added.length > 0 && removed.length > 0) {
+    return `adds an entry for ${quote(added)} and removes ${quote(removed)}`;
+  }
+  if (added.length > 0) return `adds an entry for ${quote(added)}`;
+  if (removed.length > 0) return `removes the entry for ${quote(removed)}`;
+  return null;
 }

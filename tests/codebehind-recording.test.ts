@@ -8,6 +8,7 @@ import {
   recordingDirFor,
   redact,
   secretValues,
+  spliceRecording,
   writeRecording,
   writeReplayFailure,
 } from '../src/codebehind/recording.js';
@@ -203,5 +204,226 @@ describe('the recording', () => {
 
   it('reads as nothing when there is no recording', async () => {
     expect(await readRecording(path.join(dir, 'nothing.md'))).toBeNull();
+  });
+});
+
+/**
+ * The splice (stories/compile-as-you-go.md §The recording).
+ *
+ * A Run & Compile replaces the recording wholesale, as a Record does. A
+ * Compile This Step cannot: it knows only the steps it was sent, so replacing
+ * would delete every other step's recording. It overwrites the matched step
+ * and leaves the siblings — matched by the entry's own identity, authored text
+ * plus section scope, and never by index.
+ */
+describe('splicing a single step into an existing recording', () => {
+  /** Three steps recorded wholesale, then one spliced back in. */
+  async function seed(test: string): Promise<void> {
+    await writeRecording(test, {
+      steps: [
+        step(1, { instruction: 'Sign in' }),
+        step(2, { instruction: 'Add to cart' }),
+        step(3, { instruction: 'Check out' }),
+      ],
+      status: 'passed',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      parameters: { username: 'octocat' },
+      source: 'server',
+      identities: {
+        1: { source: 'Sign in' },
+        2: { source: 'Add to cart' },
+        3: { source: 'Check out' },
+      },
+    });
+  }
+
+  it('overwrites the matched step, stamps it, and leaves the siblings alone', async () => {
+    const test = path.join(dir, 'checkout.md');
+    await seed(test);
+    const before = (await readRecording(test))!;
+
+    await new Promise((r) => setTimeout(r, 5));
+    await spliceRecording(test, {
+      steps: [
+        step(1, {
+          instruction: 'Add to cart',
+          stepContext: {
+            domBefore: '<div>cart empty</div>',
+            urlBefore: 'https://app.test/cart',
+            domAfter: '<div>1 item</div>',
+            urlAfter: 'https://app.test/cart',
+          },
+        }),
+      ],
+      status: 'passed',
+      startedAt: '2026-08-24T00:00:00.000Z',
+      parameters: { username: 'octocat' },
+      source: 'server',
+      // The sent step is index 1 in ITS OWN request — which is exactly why
+      // the match cannot be by index.
+      identities: { 1: { source: 'Add to cart' } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps.map((s) => s.source)).toEqual(['Sign in', 'Add to cart', 'Check out']);
+    // The spliced step kept slot 2 — its filenames, and its place in the test.
+    expect(after.steps[1]!.index).toBe(2);
+    expect(after.steps[1]!.domBefore).toBe('<div>cart empty</div>');
+    expect(after.steps[1]!.recordedAt).not.toBe(before.steps[1]!.recordedAt);
+    // …and the siblings are byte-for-byte the recording they were.
+    expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
+    expect(after.steps[2]!.recordedAt).toBe(before.steps[2]!.recordedAt);
+    expect(after.steps[0]!.domBefore).toBe(before.steps[0]!.domBefore);
+  });
+
+  it('matches within the section scope, not just the text', async () => {
+    const test = path.join(dir, 'sectioned.md');
+    await writeRecording(test, {
+      steps: [step(1, { instruction: 'Press Enter' }), step(2, { instruction: 'Press Enter' })],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: {
+        1: { source: 'Press Enter', section: 'Sign in' },
+        2: { source: 'Press Enter', section: 'Search' },
+      },
+    });
+
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Press Enter', pageUrl: 'https://app.test/search' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press Enter', section: 'Search' } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps[0]!.pageUrl).toBe('https://app.test/after');
+    expect(after.steps[1]!.pageUrl).toBe('https://app.test/search');
+  });
+
+  it('appends a step nothing matches rather than guessing at a slot', async () => {
+    const test = path.join(dir, 'grown.md');
+    await seed(test);
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Print the receipt' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Print the receipt' } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(4);
+    expect(after.steps[3]!.source).toBe('Print the receipt');
+    expect(after.manifest.steps).toBe(4);
+  });
+
+  it('redacts secrets exactly as a wholesale write does', async () => {
+    const test = path.join(dir, 'login.md');
+    await spliceRecording(test, {
+      steps: [
+        step(1, {
+          instruction: 'Sign in',
+          stepContext: { domBefore: '<i>hunter2-horse</i>', domAfter: '<i>ok</i>' },
+        }),
+      ],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: { password: 'hunter2-horse' },
+      source: 'server',
+      identities: { 1: { source: 'Sign in' } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps[0]!.domBefore).toBe('<i>***</i>');
+    // Never values, in the manifest or anywhere else.
+    expect(after.manifest.parameters).toEqual(['password']);
+  });
+
+  it('creates the recording when there is none — a single-step compile of a fresh test', async () => {
+    const test = path.join(dir, 'fresh.md');
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Sign in' })],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Sign in' } },
+    });
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(1);
+    expect(after.manifest.status).toBe('passed');
+  });
+
+  it('reports the dir as failed when any step in it is', async () => {
+    // Mixed provenance by construction: the manifest describes what is on
+    // disk now, not the run that last touched it.
+    const test = path.join(dir, 'mixed.md');
+    await writeRecording(test, {
+      steps: [step(1, { instruction: 'Sign in' }), step(2, { instruction: 'Add to cart', status: 'failed', error: 'gone' })],
+      status: 'failed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Sign in' }, 2: { source: 'Add to cart' } },
+    });
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Sign in' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Sign in' } },
+    });
+    expect((await readRecording(test))!.manifest.status).toBe('failed');
+  });
+});
+
+describe('splicing when a test repeats a step', () => {
+  it('keeps the two occurrences apart — compiling the second leaves the first alone', async () => {
+    // Two identical authored steps at the top level. `section + source` alone
+    // cannot tell them apart, so a splice keyed on that overwrites the FIRST
+    // occurrence's files when the author compiles the second.
+    const test = path.join(dir, 'repeat.md');
+    await writeRecording(test, {
+      steps: [
+        step(1, { instruction: 'Press Enter', pageUrl: 'https://app.test/one' }),
+        step(2, { instruction: 'Type the code' }),
+        step(3, { instruction: 'Press Enter', pageUrl: 'https://app.test/three' }),
+      ],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: {
+        1: { source: 'Press Enter', occurrence: 0 },
+        2: { source: 'Type the code', occurrence: 0 },
+        3: { source: 'Press Enter', occurrence: 1 },
+      },
+    });
+    const before = (await readRecording(test))!;
+
+    await new Promise((r) => setTimeout(r, 5));
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Press Enter', pageUrl: 'https://app.test/spliced' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press Enter', occurrence: 1 } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(3);
+    // The SECOND occurrence took the splice…
+    expect(after.steps[2]!.pageUrl).toBe('https://app.test/spliced');
+    expect(after.steps[2]!.recordedAt).not.toBe(before.steps[2]!.recordedAt);
+    // …and the first is exactly the recording it was.
+    expect(after.steps[0]!.pageUrl).toBe('https://app.test/one');
+    expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
   });
 });

@@ -63,6 +63,13 @@ class FakeApiClient {
      *  test that needs a particular message (the transport reason a real
      *  client carries) — to make the next compile throw. */
     this.compileThrows = null;
+    /**
+     * Same, for the step stream. Since stories/compile-as-you-go.md the
+     * extension compiles through `streamSteps`, so the "could not reach the
+     * server" cases a compile has to report land here rather than on
+     * `compileThrows`.
+     */
+    this.streamThrows = null;
   }
 
   /** Liveness probe used by the re-run pre-flight (GET /sessions/:id). */
@@ -105,6 +112,12 @@ class FakeApiClient {
     const idx = this.streamCallCount;
     this.streamCallCount += 1;
     this.requests.push(request);
+
+    if (this.streamThrows) {
+      this.activeStream = null;
+      if (this.streamThrows instanceof Error) throw this.streamThrows;
+      throw new ApiClientError(this.streamThrows, `fake stream error: ${this.streamThrows}`);
+    }
 
     // Fire any pre-scripted event flow for this stream index. Fire-and-
     // forget — the script pushes events and (usually) calls fake.end()

@@ -80,6 +80,40 @@ export interface StreamStepsRequest {
    */
   captureStepContext?: boolean;
   /**
+   * Compile the steps this run executes, as it executes them
+   * (stories/compile-as-you-go.md).
+   *
+   * `'run'` is **Run & Compile**: an ordinary run of the whole test that also
+   * generates an entry for every step that ran under AI, reviews the files at
+   * the end, and returns the proposal on `compile:result`. `'steps'` is
+   * **Compile This Step**: the sent steps only, with code-behind execution
+   * disabled so a broken entry re-records under AI, no Review, and the
+   * recording spliced rather than replaced.
+   *
+   * Either value turns capture on server-side, so `captureStepContext` need
+   * not be sent alongside. The server never writes a `.steps.ts` on this
+   * path — the proposal rides the stream and the client applies it.
+   */
+  compile?: 'run' | 'steps';
+  /**
+   * This request continues a compile already open in the session, rather than
+   * starting one.
+   *
+   * A logical run is several requests whenever an `[input:]` or
+   * `[interactive]` step splits it, or a breakpoint ends one batch and leaves
+   * Continue to send the rest. Every block after the first sets this, so the
+   * server keeps ONE candidate and one step numbering for the run instead of
+   * giving each block its own and letting the last overwrite the recording.
+   */
+  compileContinues?: boolean;
+  /**
+   * Attribution for a `compile: 'steps'` request whose steps come from a
+   * `### Section` body. Execution is unchanged — the steps still run
+   * detached, at the root frame, as Run Step Here runs them — but the entry
+   * binds under this section's scope, which is where the runtime looks for it.
+   */
+  compileScope?: { section: string };
+  /**
    * Absolute path of the file each step in `steps` was authored in. Parallel
    * to `steps`; defaults to the test file when omitted per-step. Used by the
    * server to attribute frame origins when a request is sent already-expanded

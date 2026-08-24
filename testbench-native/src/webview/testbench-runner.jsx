@@ -769,10 +769,10 @@ function TestBenchRunner() {
             className="tb-btn"
             onClick={handleCompile}
             disabled={running || compiling}
-            title="Generate this test's code-behind from its last run (recording it here first if there is none), replay it as code, and offer the result as a diff"
+            title="Run this test once and generate code-behind for every step that ran under AI, then offer the result as a diff. The entries are unproven — the next run proves them."
           >
             <CodeBehindIcon style={{ marginRight: 5 }} />
-            {compiling ? "Compiling…" : "Compile"}
+            {compiling ? "Compiling…" : "Run & Compile"}
           </button>
         </div>
         {(passCount > 0 || failCount > 0) && (
