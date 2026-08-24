@@ -44,7 +44,10 @@ import {
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
-import { writeRecording } from '../codebehind/recording.js';
+import { spliceRecording, writeRecording, type RecordingInput } from '../codebehind/recording.js';
+import { LiveCompiler } from '../codebehind/live-compile.js';
+import type { CompilePhase, CompileStatus, CompileSummary } from '../codebehind/compile.js';
+import { compileLock } from './compile-lock.js';
 import { redact, redactReport, runSecrets } from '../utils/secrets.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
@@ -145,6 +148,32 @@ export interface StepRequest {
    * change what executes stay in `InternalRunOptions`.
    */
   captureStepContext?: boolean;
+  /**
+   * Compile the steps this run executes, as it executes them
+   * (stories/compile-as-you-go.md).
+   *
+   * The run is an ordinary run in every other respect — same session, same
+   * browser window, same gutter, breakpoints, Pause and Stop all work — and
+   * as each step finishes under AI its transcript is queued for generation
+   * while the browser moves on. At run end the queue drains and the proposed
+   * `.steps.ts` files ride back on `compile:result`. The server never writes
+   * them; TestBench applies them through its diff.
+   *
+   * - `'run'` — **Run & Compile**: the whole test. The Review pass runs over
+   *   each touched file at the end, and the recording replaces the test's
+   *   previous one wholesale, as a full run's does.
+   * - `'steps'` — **Compile This Step**: just the steps sent. Code-behind
+   *   execution is disabled for the request, so a step whose entry is broken
+   *   runs under AI and produces a fresh transcript rather than being served
+   *   (or failed) by the code under repair. No Review — a one-entry diff that
+   *   arrives reflowed end to end buries the change the author asked for —
+   *   and the recording splices rather than replacing.
+   *
+   * Either value forces `captureStepContext`: generation needs the DOM either
+   * side of the step, and asking a client to remember to send both flags
+   * would only mean discovering at Generate time that it did not.
+   */
+  compile?: 'run' | 'steps';
   /**
    * Absolute path to the project's skills directory. When supplied, the
    * server runs `expandSkills` over `steps`, flattens `[skill: ...]`
@@ -440,7 +469,34 @@ export type RunEvent =
   | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
   | { type: 'frame:scope'; frameId: string; scope: Record<string, string> }
   | { type: 'step:awaiting'; line: number; frame?: FrameInfo }
-  | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo };
+  | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo }
+  /**
+   * A compile-mode run's own frames (stories/compile-as-you-go.md §On the
+   * wire). Shaped like the compile stream's so a client's folding carries
+   * over; emitted only when the request carried `compile`.
+   *
+   * `compile:step` — an entry was generated, declined or could not be
+   * generated for a step, with the step's line for the gutter. `step: 0` is
+   * the Review pass, which belongs to the file rather than to any step.
+   */
+  | {
+      type: 'compile:step';
+      phase: CompilePhase;
+      step: number;
+      line?: number;
+      message: string;
+    }
+  /**
+   * Terminal for the compile, after the queue drains and Review runs, and
+   * before `done`. Proposals only: the server writes no `.steps.ts` on this
+   * path.
+   */
+  | {
+      type: 'compile:result';
+      status: CompileStatus;
+      files: Record<string, string>;
+      summary: CompileSummary;
+    };
 
 export type RunEventListener = (event: RunEvent) => void;
 
@@ -1095,9 +1151,26 @@ export class SessionManager {
     // or an abort can never strand the counter above zero, which would
     // silently disable the idle timeout for the rest of the process's life.
     this.activeRuns++;
+    // One compile per test file at a time, whichever route asked — shared
+    // with `POST /codebehind/compile` (stories/compile-as-you-go.md §On the
+    // wire). The step route asks `compileLock.isLocked` itself before opening
+    // the stream so the ordinary case is a 409; this is the race the route
+    // cannot see, and it arrives as an error frame.
+    const releaseCompile =
+      request.compile !== undefined && request.testFilePath !== undefined
+        ? compileLock.acquire(request.testFilePath)
+        : (): void => {};
+    if (!releaseCompile) {
+      this.activeRuns--;
+      throw new Error(
+        `A compile of ${basename(request.testFilePath!)} is already running. ` +
+          'One compile per test file at a time.',
+      );
+    }
     try {
       return await this.executeStepsUncounted(sessionId, request, onEvent, signal, internal);
     } finally {
+      releaseCompile();
       this.activeRuns--;
     }
   }
@@ -1807,6 +1880,12 @@ export class SessionManager {
   ): Promise<StepResponse> {
     session.status = 'executing';
 
+    // A compile-mode run always captures the DOM either side of each step:
+    // that is what generation reads, and a client made to remember two flags
+    // would only discover it forgot one at Generate time
+    // (stories/compile-as-you-go.md §Run & Compile).
+    const captureStepContext = request.captureStepContext === true || request.compile !== undefined;
+
     // Re-apply the per-request env (.env) AI overrides to this session's client
     // so a saved AI_MODEL / AI_API_KEY edit is picked up on the next run without
     // closing the session. Recomputed from the server base (`this.config.ai`),
@@ -2328,20 +2407,79 @@ export class SessionManager {
     // registry binds through the compiler's frames rather than a second
     // expansion the server would have to reproduce exactly.
     const cb = internal?.codeBehind;
-    if (request.testFilePath && !cb?.disabled) {
-      const supplied = cb?.expansion;
-      codeBehind = await buildCodeBehindRegistry(
-        supplied ?? {
-          steps: effectiveSteps,
-          rawSteps: expansionRawSteps,
-          origins: expansionOrigins ?? effectiveSteps.map((_, i) => ({ inputIndex: i, frameId: '' })),
-          frames: expandedFrames,
-        },
-        {
-          testFilePath: request.testFilePath,
-          ...(cb?.candidateFiles && { candidateFiles: cb.candidateFiles }),
-        },
-      );
+    const expansionForBinding = (): Parameters<typeof buildCodeBehindRegistry>[0] =>
+      cb?.expansion ?? {
+        steps: effectiveSteps,
+        rawSteps: expansionRawSteps,
+        origins: expansionOrigins ?? effectiveSteps.map((_, i) => ({ inputIndex: i, frameId: '' })),
+        frames: expandedFrames,
+      };
+    // `compile: 'steps'` disables execution the way a Record does — a step
+    // whose entry is broken has to run under AI to leave a transcript — but
+    // it still needs the bindings, which is what the separate generation
+    // registry below is for.
+    const codeBehindOff = cb?.disabled === true || request.compile === 'steps';
+    if (request.testFilePath && !codeBehindOff) {
+      codeBehind = await buildCodeBehindRegistry(expansionForBinding(), {
+        testFilePath: request.testFilePath,
+        ...(cb?.candidateFiles && { candidateFiles: cb.candidateFiles }),
+      });
+    }
+    /**
+     * Where generation looks up a step's target file, section scope and
+     * occurrence. Normally the execution registry, which binds the same way;
+     * with execution disabled it has to be built separately — silently (the
+     * "entry matches no step" warnings belong to a run that was going to use
+     * them) and against the author's real files, never a candidate.
+     */
+    let generationBindings: CodeBehindRegistry = codeBehind;
+    if (request.compile !== undefined && codeBehindOff && request.testFilePath) {
+      generationBindings = await buildCodeBehindRegistry(expansionForBinding(), {
+        testFilePath: request.testFilePath,
+        onWarn: () => {},
+      });
+    }
+
+    /**
+     * The compile riding this run (stories/compile-as-you-go.md). Generation
+     * trails the browser: each step is offered as it finishes, the queue is
+     * serialized in step order, and the run never waits on it.
+     */
+    let liveCompile: LiveCompiler | undefined;
+    if (request.compile !== undefined && request.testFilePath) {
+      const testFilePath = request.testFilePath;
+      liveCompile = new LiveCompiler({
+        mode: request.compile,
+        testFilePath,
+        // The SESSION's client and context, not a compile-built pair: a
+        // session's `runSettings.model` override now covers generation and
+        // Review as well as the run, which is the asymmetry this fixes.
+        aiClient: session.aiClient,
+        contextContent: session.contextContent,
+        // The run never parses the markdown title, so the file's name is what
+        // the prompt's test-info block gets.
+        testName: basename(testFilePath, '.md'),
+        ...(session.sessionConfig.baseUrl !== undefined && {
+          baseUrl: session.sessionConfig.baseUrl,
+        }),
+        ...(envDataCtx && { envData: envDataCtx }),
+        plan: effectiveSteps.map((step, i) => {
+          const binding = generationBindings.bindingFor(i);
+          return {
+            text: binding?.source ?? expansionRawSteps[i] ?? step,
+            // Decided statically, before the run: a step with no entry is one
+            // this compile means to write, and in `'steps'` mode every sent
+            // step is. The whole-test block has to read the same for step 1
+            // as for step 9, and what step 9 will need is not knowable when
+            // step 1 is generated.
+            inScope: request.compile === 'steps' || binding?.entry === undefined,
+          };
+        }),
+        sourceLines: effectiveSteps.map((_, i) => sourceLineFor(i)),
+        ...(signal && { signal }),
+        emit,
+        note: (msg, level) => emit({ type: 'output', msg, kind: level }),
+      });
     }
     // A strict run — a compile's replay — exists to find out whether the code
     // works on its own. A file that did not load has no code to run, so the
@@ -3442,7 +3580,7 @@ export class SessionManager {
                 // so the entry's `step.getVar('data.url')` reads the same value.
                 ...(envDataCtx && { envData: envDataCtx }),
                 ...(cb?.strict !== undefined && { codeBehindStrict: cb.strict }),
-                ...(request.captureStepContext === true && { captureStepContext: true }),
+                ...(captureStepContext && { captureStepContext: true }),
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.
@@ -3610,7 +3748,7 @@ export class SessionManager {
         // that switched tabs must report the one it ended in.
         const tabAfterStep = await tabSpread();
 
-        fullStepResults.push({
+        const fullResult: StepResult = {
           ...stepResult,
           index: i + 1,
           instruction: originalStep,
@@ -3618,7 +3756,23 @@ export class SessionManager {
           ...(sourceSkill && { sourceSkill }),
           ...(sourceSection && { sourceSection }),
           ...tabAfterStep,
-        });
+        };
+        fullStepResults.push(fullResult);
+
+        // Queue this step's code-behind entry and move on
+        // (stories/compile-as-you-go.md): the browser does not wait, and a
+        // step that ran as code, failed, or is already `ai: true` is dropped
+        // inside `offer`. The parameter map is snapshotted because the run
+        // keeps writing to its own.
+        if (liveCompile) {
+          const binding = generationBindings.bindingFor(i);
+          liveCompile.offer({
+            index: i,
+            ...(binding && { binding }),
+            result: fullResult,
+            resolvedParameters: { ...resolvedParameters },
+          });
+        }
 
         // Update conversation history
         let currentUrl = '';
@@ -3934,7 +4088,7 @@ export class SessionManager {
       request.testFilePath &&
       !isSubsetBatch &&
       request.startAt === undefined &&
-      !cb?.disabled &&
+      !codeBehindOff &&
       !cb?.candidateFiles
     ) {
       const lastRunSteps: LastRunStep[] = [];
@@ -3964,14 +4118,67 @@ export class SessionManager {
     // the capture flag alone: a Record with code-behind off is excluded from
     // the sidecar above and must still be recorded. Nothing of it is kept on
     // the session afterwards.
-    if (request.testFilePath && request.captureStepContext) {
-      await writeRecording(request.testFilePath, {
+    if (request.testFilePath && captureStepContext) {
+      // Authored text + section scope per step, so a later single-step splice
+      // can find its slot by identity rather than by position
+      // (stories/compile-as-you-go.md §The recording).
+      const identities: Record<number, { source: string; section?: string | undefined }> = {};
+      for (const result of fullStepResults) {
+        const binding = generationBindings.bindingFor(result.index - 1);
+        if (!binding) continue;
+        identities[result.index] = {
+          source: binding.source,
+          ...(binding.section !== undefined && { section: binding.section }),
+        };
+      }
+      const recording: RecordingInput = {
         steps: fullStepResults,
         status: overallStatus === 'passed' ? 'passed' : 'failed',
         startedAt: new Date(runStartTime).toISOString(),
         parameters: resolvedParameters,
         ...(envDataCtx && { secrets: envDataSecretValues(envDataCtx) }),
         source: 'server',
+        ...(Object.keys(identities).length > 0 && { identities }),
+      };
+      // A Run & Compile is a full run and its recording supersedes the old one
+      // entirely, as a Record's does. A Compile This Step knows only the steps
+      // it was sent, so replacing wholesale would delete every sibling's
+      // recording: it splices instead, and stamps the step it replaced with
+      // its own `recordedAt`.
+      if (request.compile === 'steps') await spliceRecording(request.testFilePath, recording);
+      else await writeRecording(request.testFilePath, recording);
+    }
+
+    // The compile's own end (stories/compile-as-you-go.md): the trailing
+    // generation queue drains, Review runs over each touched candidate file
+    // on the Run & Compile path, and the proposal rides back on
+    // `compile:result` — before `done`, so a client folding the stream has it
+    // by the time the run is over. The server writes no `.steps.ts` here;
+    // TestBench applies through its diff, as it does for a boxed compile.
+    if (liveCompile) {
+      const recorded = new Set(
+        fullStepResults
+          .filter((r) => !r.hookScope && !r.interactiveAdHoc && !r.interactiveChild)
+          .map((r) => r.index),
+      );
+      const notAttempted: number[] = [];
+      for (let n = 1; n <= stepsTotal; n++) if (!recorded.has(n)) notAttempted.push(n);
+      const failed = fullStepResults.find((r) => r.status === 'failed' && !r.interrupted);
+      const outcome = await liveCompile.finish({
+        // After the drain, so generation's own tokens are in the total —
+        // `runTokens` above was frozen before the queue had finished.
+        tokensUsed: session.tokenTracker.runTotal,
+        notAttempted,
+        ...(failed && {
+          stoppedAt: { step: failed.index, error: failed.error ?? 'the step failed' },
+        }),
+        ...(overallStatus === 'aborted' && { aborted: true }),
+      });
+      emit({
+        type: 'compile:result',
+        status: outcome.status,
+        files: outcome.files,
+        summary: outcome.summary,
       });
     }
 

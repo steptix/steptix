@@ -34,6 +34,7 @@ import {
   type CompileRequest,
   type CompileWireEvent,
 } from './compile-runner.js';
+import { compileLock } from './compile-lock.js';
 import { recordingDirFor } from '../codebehind/recording.js';
 import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
@@ -728,6 +729,38 @@ export function createApiServer(
       if (body.captureStepContext === true) {
         request.captureStepContext = true;
       }
+      // Compile as the run goes (stories/compile-as-you-go.md §On the wire).
+      // Two values, not a boolean: the server behaves differently per mode
+      // (Review and a wholesale recording on `'run'`; no Review, a spliced
+      // recording and code-behind off on `'steps'`), and a bare `true` would
+      // leave it guessing which the client meant. A refusal rather than a
+      // fallback, for the reason `runSettings` refuses: a client that asked
+      // for one mode and quietly got the other has no way to notice. And on
+      // the allow-list because a field the list does not name is dropped,
+      // silently — which is exactly how `envName` was lost once.
+      if (body.compile !== undefined) {
+        if (body.compile !== 'run' && body.compile !== 'steps') {
+          res.status(400).json({ error: '"compile" must be "run" or "steps"' });
+          return;
+        }
+        if (typeof body.testFilePath !== 'string') {
+          res.status(400).json({
+            error: '"compile" requires "testFilePath" — entries are written into the test\'s sibling .steps.ts',
+          });
+          return;
+        }
+        if (!streaming) {
+          // The proposal only exists as a `compile:result` frame — the JSON
+          // response is a `StepResponse` and has nowhere to put it. Generating
+          // it anyway would spend a model call per step on something the
+          // caller cannot receive.
+          res.status(400).json({
+            error: '"compile" requires ?stream=1 — the proposal comes back as a compile:result frame',
+          });
+          return;
+        }
+        request.compile = body.compile;
+      }
       // Re-run-with-variables fields (testbench "re-run a skill step"):
       // `seedScope` injects captured/runtime vars before the run; `startAt`
       // starts execution partway into the expanded skill body. Both optional.
@@ -800,6 +833,20 @@ export function createApiServer(
           return;
         }
         request.runSettings = parsed;
+      }
+
+      // One compile per test file at a time, shared with
+      // `POST /codebehind/compile`. Decided BEFORE the stream opens, for the
+      // reason that route takes its lock in the handler: once `flushHeaders`
+      // has run the answer is a 200 whatever happens next. The session manager
+      // takes the lock for real — two callers can both read false here.
+      if (request.compile !== undefined && request.testFilePath && compileLock.isLocked(request.testFilePath)) {
+        res.status(409).json({
+          error:
+            `A compile of ${path.basename(request.testFilePath)} is already running. ` +
+            'One compile per test file at a time.',
+        });
+        return;
       }
 
       if (streaming) {

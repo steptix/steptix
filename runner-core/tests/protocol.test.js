@@ -177,9 +177,15 @@ test('isCompileEvent: rejects run events and junk', () => {
   assert.equal(isCompileEvent({}), false);
 });
 
-test('isRunEvent: does not accept compile frames', () => {
+test('isRunEvent: admits only the two frames a compile-mode run emits', () => {
+  // stories/compile-as-you-go.md §On the wire — a run carrying `compile`
+  // emits these two on its OWN stream, so the run narrower has to pass them.
+  assert.equal(isRunEvent({ type: 'compile:step', phase: 'generate', step: 1, message: 'generated' }), true);
+  assert.equal(isRunEvent({ type: 'compile:result', status: 'partial', files: {}, summary: {} }), true);
+  // The boxed pipeline's own phases still belong to the compile stream alone.
   assert.equal(isRunEvent({ type: 'compile:phase', phase: 'select', message: 'x' }), false);
-  assert.equal(isRunEvent({ type: 'compile:result', status: 'green', files: {}, summary: {} }), false);
+  assert.equal(isRunEvent({ type: 'compile:done', status: 'green', message: 'x' }), false);
+  assert.equal(isRunEvent({ type: 'compile:run', phase: 'record', event: { type: 'step:pass', line: 1 } }), false);
 });
 
 test('step:pass carries the code-behind flags through the narrower', () => {

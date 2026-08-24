@@ -25,7 +25,7 @@ import {
   userRootEnvPath,
   type ClassifiedStep,
   type CompileEvent,
-  type CompileRequest,
+  type CompileResultEvent,
   type CompileSummary,
   type ErrorPayload,
   type FrameInfo,
@@ -84,10 +84,10 @@ export interface ApiClientLike {
    *  `done` event would have carried. Absent on older clients/fakes → the stop
    *  path simply skips recovery. Returns null on an older server (404). */
   getLastRun?(sessionId: string): Promise<LastRunInfoLike | null>;
-  /** Optional (stories/codebehind-compile.md): stream a code-behind compile.
-   *  Absent on older fakes, which makes Compile refuse with a clear message
-   *  rather than throw. */
-  compileCodeBehind?(request: CompileRequest, signal: AbortSignal): AsyncIterable<CompileEvent>;
+  // No `compileCodeBehind` here any more. The extension compiles through the
+  // ordinary step route now (stories/compile-as-you-go.md); the boxed
+  // `POST /codebehind/compile` pipeline stays server-side for `aiui compile`,
+  // where a headless caller has no diff to click.
 }
 
 /** Shape returned by {@link ApiClientLike.getLastRun} (mirrors runner-core). */
@@ -121,6 +121,12 @@ type ServerReadiness =
 export interface RunOutcome {
   ok: boolean;
   error?: ErrorPayload;
+  /**
+   * What a compile-mode run proposed (stories/compile-as-you-go.md). Present
+   * only when the run carried `compile`; absent when the stream ended without
+   * a `compile:result`, which an older server would do.
+   */
+  compile?: CompileOutcome;
 }
 
 /**
@@ -179,7 +185,12 @@ export function compileLogLine(event: CompileEvent): string | null {
       return `  ${label.padEnd(11)} ${event.message}`;
     }
     case 'compile:step':
-      return `  ${' '.repeat(11)} step ${event.step} ${event.message}`;
+      // `step: 0` is the Review pass, which belongs to the file rather than to
+      // any step — and on a compile-mode run there is no phase line above it
+      // to sit under, so it carries its own label.
+      return event.step > 0
+        ? `  ${' '.repeat(11)} step ${event.step} ${event.message}`
+        : `  ${(COMPILE_PHASE_LABEL[event.phase] ?? event.phase).padEnd(11)} ${event.message}`;
     case 'compile:run': {
       // The run's own pass/fail lines, indented under the phase they belong
       // to. Starts and the run's `done` say nothing the phase line did not.
@@ -211,6 +222,32 @@ export function compileLogLine(event: CompileEvent): string | null {
     default:
       return null;
   }
+}
+
+/**
+ * The one line a compile-mode run leaves in the log when its result arrives
+ * (stories/compile-as-you-go.md). It stands in for the `compile:done`
+ * narrative the boxed pipeline sends, which this path has no phase to hang
+ * off — and it says "unproven" out loud, because that is the trade this
+ * feature makes: no Replay rounds, and the author's next ordinary run is the
+ * proof.
+ */
+export function compileResultLine(event: CompileResultEvent): string {
+  const summary = event.summary;
+  const name = path.basename(summary.test);
+  if (summary.compiled === 0 && summary.keptAi === 0 && !summary.stoppedAt) {
+    return `✓ Nothing to compile in ${name} — every step already has code-behind.`;
+  }
+  const parts = [`${summary.compiled} step(s) as code (unproven — the next run proves them)`];
+  if (summary.keptAi > 0) parts.push(`${summary.keptAi} kept AI`);
+  if (summary.stoppedAt) {
+    parts.push(`stopped at step ${summary.stoppedAt.step} — ${summary.stoppedAt.error}`);
+  }
+  if (summary.notAttempted.length > 0) {
+    parts.push(`${summary.notAttempted.length} step(s) not attempted`);
+  }
+  const glyph = event.status === 'green' ? '✓' : event.status === 'partial' ? '◐' : '✗';
+  return `${glyph} Compiled ${name}: ${parts.join('; ')}.`;
 }
 
 /** Everything the "re-run this skill step with its variables" action needs,
@@ -277,6 +314,10 @@ export class RunController {
   private runGeneration = 0;
   private lastResolvedEnvPath: string | null = null;
   private configSentForSession = false;
+  /** The `compile:result` a compile-mode run produced, collected as the
+   *  stream folds and attached to the outcome by `runLines`. Reset per run,
+   *  so a plain Run after a Run & Compile never carries the old proposal. */
+  private compileResult: CompileOutcome | undefined;
   private pendingPrompt: { resolve: (text: string | null) => void } | null = null;
   /** Set by pause() so the abort handler knows to mark a resume point
    *  rather than treating the abort as a full Stop. */
@@ -1269,163 +1310,6 @@ export class RunController {
   }
 
   /**
-   * Compile this test's code-behind (stories/codebehind-compile.md).
-   *
-   * Streams the pipeline's phases into the run log as they happen and returns
-   * the proposal for the caller to diff. Nothing is written here: the server
-   * compiles dry and hands back file content, and Apply is a separate,
-   * deliberate act.
-   */
-  async compileCodeBehind(options: {
-    select?: { onlyStale?: boolean; all?: boolean; steps?: number[] };
-    maxRounds?: number;
-    signal?: AbortSignal;
-  } = {}): Promise<CompileOutcome> {
-    const out = getOutputChannel();
-    const log = (line: string): void => out.appendLine(`[${timestamp()}] ${line}`);
-    const filePath = this.document.uri.fsPath;
-
-    // The panel greys Compile out while a run is in flight; the palette and
-    // gutter commands have no such gate. A compile records in this document's
-    // session, which the run is using — and the server probe below would
-    // reset the run's inspector URL under it.
-    if (this.isRunning) {
-      const message =
-        'Cannot compile while a run of this test is in progress — wait for it to finish, or Stop it.';
-      log(message);
-      return { ok: false, error: message };
-    }
-
-    const resolved = await this.resolveClient();
-    if (!resolved) {
-      const message = 'Cannot compile: no .env with SERVER_URL was found for this test.';
-      log(message);
-      return { ok: false, error: message };
-    }
-    if (!resolved.client.compileCodeBehind) {
-      const message = 'Cannot compile: this server client does not support compiling.';
-      log(message);
-      return { ok: false, error: message };
-    }
-
-    const envName = (EnvSelector.activeEnv() ?? '').trim() || undefined;
-    const request: CompileRequest = {
-      testFilePath: filePath,
-      steps: extractSteps(this.document.getText()).map((s) => s.instruction),
-      ...(envName && { envName }),
-      // Always this document's session (stories/codebehind-compile-as-a-run.md
-      // §Record is a run): the server compiles from its last run when that can
-      // be the recording, and records in it — the browser the author watches,
-      // left open where the run ended — when it cannot.
-      sessionId: resolved.sessionId,
-      ...(options.select && { select: options.select }),
-      ...(options.maxRounds !== undefined && { maxRounds: options.maxRounds }),
-    };
-
-    const controller = new AbortController();
-    options.signal?.addEventListener('abort', () => controller.abort());
-    log(`compile requested for ${filePath}`);
-    // Posted before the server check, not after: an auto-start can take the
-    // whole readyTimeout, and the panel's Compile button must be greyed out
-    // for all of it. The `finally` below clears it on every exit.
-    this.post({ type: 'compileState', running: true, file: filePath });
-
-    let result: CompileOutcome = { ok: false, error: 'the compile stream ended with no result' };
-    /** `phase:round` of the run whose events are flowing, to spot a new one. */
-    let currentRun: string | null = null;
-    try {
-      // Say where the compile is going BEFORE trying to get there, then make
-      // sure something is listening — the same probe + auto-start a Run does.
-      // Without this, a compile on a machine whose server only ever comes up
-      // because someone pressed Run fails with a bare "fetch failed", with no
-      // line saying which URL it tried or why that URL did not answer.
-      log(`server ${resolved.serverUrl} (${resolved.source})`);
-      const serverReady = await this.ensureServerReady({
-        serverUrl: resolved.serverUrl,
-        signal: controller.signal,
-        log,
-      });
-      if (serverReady.kind === 'aborted') {
-        log('compile aborted by user');
-        return { ok: false, error: 'aborted' };
-      }
-      if (serverReady.kind === 'fail') {
-        log(`compile failed: ${serverReady.payload.message}`);
-        return { ok: false, error: serverReady.payload.message };
-      }
-
-      for await (const event of resolved.client.compileCodeBehind(request, controller.signal)) {
-        if (event.type === 'compile:run') {
-          const key = `${event.phase}:${event.round ?? 0}`;
-          if (key !== currentRun) {
-            currentRun = key;
-            // A run of the test is starting: the marks of the previous one —
-            // the last replay round, or the author's own run — come off, as
-            // they do when any run starts. Replay marks land on the same
-            // lines, so without this a ✗ from round 1 would outlive round 2.
-            this.clearStatusesForUris?.([this.document.uri]);
-            // A Record runs in THIS document's session, opening it if need
-            // be, with the test's config. The next Run must not send config
-            // again — the server refuses config on an existing session.
-            if (event.phase === 'record') this.configSentForSession = true;
-          }
-          this.post({
-            type: 'compileRunEvent',
-            phase: event.phase,
-            ...(event.round !== undefined && { round: event.round }),
-            event: event.event,
-          });
-        }
-        if (event.type === 'compile:step' && event.line !== undefined) {
-          this.post({ type: 'compileStep', line: event.line });
-        }
-        const line = compileLogLine(event);
-        if (line) {
-          log(line);
-          this.post({ type: 'compileEvent', line });
-        }
-        if (event.type === 'compile:result') {
-          result =
-            event.status !== 'failed'
-              ? { ok: true, status: event.status, files: event.files, summary: event.summary }
-              : {
-                  ok: false,
-                  status: 'failed',
-                  error: event.summary.error ?? 'the compile did not go green',
-                  summary: event.summary,
-                };
-        }
-      }
-    } catch (err) {
-      const apiErr = asApiClientError(err);
-      if (isUserAbort(err)) {
-        log('compile aborted by user');
-        result = { ok: false, error: 'aborted' };
-      } else if (apiErr?.kind === 'conflict') {
-        // The server's own refusal ("a compile of X is already running"),
-        // worded by the server; the catalogue has nothing better to say.
-        log(`compile failed: ${apiErr.message}`);
-        result = { ok: false, error: apiErr.message };
-      } else {
-        // Transport and HTTP failures get the same TBxxx diagnosis a Run
-        // would — TB010 with the cause for a server that did not answer,
-        // TB011 for a rejected key — so the notification and the log both
-        // say what to check rather than echoing the client's raw reason.
-        const payload = mapApiErrorToPayload(err, {
-          serverUrl: resolved.serverUrl,
-          envPath: resolved.envPath ?? "the last run's .env",
-        });
-        const message = payload.message;
-        log(`compile failed: ${message}`);
-        result = { ok: false, error: message };
-      }
-    } finally {
-      this.post({ type: 'compileState', running: false });
-    }
-    return result;
-  }
-
-  /**
    * Liveness gate for the re-run, called by the command handler BEFORE it
    * tears down any state (notifyRunning / resetFrameState) — so refusing a
    * dead session leaves the parked failure and its Variables panel intact.
@@ -1496,7 +1380,22 @@ export class RunController {
     }
   }
 
-  async runLines(
+  /**
+   * Run lines, and — when the request carried `compile` — attach what the
+   * run's trailing compile proposed.
+   *
+   * A thin wrapper because `runLinesInner` has half a dozen return points and
+   * a `finally`, and threading the proposal through every one of them is how
+   * a path gets missed. Reset before the run, so a plain Run after a Run &
+   * Compile can never hand back yesterday's proposal.
+   */
+  async runLines(...args: Parameters<RunController['runLinesInner']>): Promise<RunOutcome> {
+    this.compileResult = undefined;
+    const outcome = await this.runLinesInner(...args);
+    return this.compileResult === undefined ? outcome : { ...outcome, compile: this.compileResult };
+  }
+
+  private async runLinesInner(
     lines: number[],
     options: {
       breakpoints?: Set<number>;
@@ -1549,6 +1448,15 @@ export class RunController {
          *  the Stop-debug path, which reads vars from the live session. */
         seedScope?: Record<string, string>;
       };
+      /**
+       * Compile the steps this run executes, as it executes them
+       * (stories/compile-as-you-go.md). `'run'` is Run & Compile — the whole
+       * test, Review at the end; `'steps'` is Compile This Step — the sent
+       * steps only, code-behind execution off, no Review. The proposal comes
+       * back on `RunOutcome.compile`; nothing is written until the caller
+       * opens the diff and the author applies it.
+       */
+      compile?: 'run' | 'steps';
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -1974,6 +1882,7 @@ export class RunController {
             ...(options.stepMode && { stepMode: options.stepMode }),
             ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
             ...(pendingRerun && { rerun: pendingRerun }),
+            ...(options.compile && { compile: options.compile }),
           });
           pendingRerun = undefined;
           if (!ok) {
@@ -2221,8 +2130,11 @@ export class RunController {
       endAt?: { uri: string; line: number };
       seedScope?: Record<string, string>;
     };
+    /** Compile the steps this block executes, as it executes them
+     *  (stories/compile-as-you-go.md). Rides the ordinary step request. */
+    compile?: 'run' | 'steps';
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun, compile } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -2297,6 +2209,7 @@ export class RunController {
           const map = this.breakpointsByUriProvider!();
           return Object.keys(map).length > 0 ? { breakpointsByUri: map } : {};
         })()),
+        ...(compile && { compile }),
       },
       signal,
     );
@@ -2308,6 +2221,27 @@ export class RunController {
     let passCount = 0;
     for await (const event of events) {
       this.configSentForSession = true;
+      // The compile riding this run (stories/compile-as-you-go.md). Logged,
+      // never folded into the gutter: by the time an entry is generated its
+      // step has already painted ✓, and repainting ▶ on it would undo that.
+      if (event.type === 'compile:step' || event.type === 'compile:result') {
+        const line = compileLogLine(event);
+        if (line !== null) log(line);
+        if (event.type === 'compile:result') {
+          this.compileResult = {
+            ok: event.status !== 'failed',
+            status: event.status,
+            files: event.files,
+            summary: event.summary,
+            ...(event.status === 'failed' && {
+              error: event.summary.error ?? 'the compile produced nothing',
+            }),
+          };
+          this.post({ type: 'compileEvent', line: compileResultLine(event) });
+          log(compileResultLine(event));
+        }
+        continue;
+      }
       // How the step passed — the textual half of what the gutter glyphs say.
       // ⚡ replayed a recorded transcript, </> ran compiled code, ⚠ healed under
       // AI because the compiled entry threw.

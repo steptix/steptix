@@ -80,6 +80,22 @@ export interface StreamStepsRequest {
    */
   captureStepContext?: boolean;
   /**
+   * Compile the steps this run executes, as it executes them
+   * (stories/compile-as-you-go.md).
+   *
+   * `'run'` is **Run & Compile**: an ordinary run of the whole test that also
+   * generates an entry for every step that ran under AI, reviews the files at
+   * the end, and returns the proposal on `compile:result`. `'steps'` is
+   * **Compile This Step**: the sent steps only, with code-behind execution
+   * disabled so a broken entry re-records under AI, no Review, and the
+   * recording spliced rather than replaced.
+   *
+   * Either value turns capture on server-side, so `captureStepContext` need
+   * not be sent alongside. The server never writes a `.steps.ts` on this
+   * path — the proposal rides the stream and the client applies it.
+   */
+  compile?: 'run' | 'steps';
+  /**
    * Absolute path of the file each step in `steps` was authored in. Parallel
    * to `steps`; defaults to the test file when omitted per-step. Used by the
    * server to attribute frame origins when a request is sent already-expanded

@@ -22,6 +22,7 @@ import {
   type CompileSummary,
 } from '../codebehind/compile.js';
 import { applyEnvToAiConfig } from './run-helpers.js';
+import { compileLock } from './compile-lock.js';
 import type { ProjectBundle, ProjectBundleResolver } from './project-bundle.js';
 import type { RunDetails, RunEvent, SessionManager, StepRequest } from './session-manager.js';
 import { recordingDirFor } from '../codebehind/recording.js';
@@ -132,24 +133,7 @@ export class CompileRefused extends Error {
   }
 }
 
-/**
- * The lock key for a test file.
- *
- * `path.resolve` alone is not enough on Windows, where it preserves the
- * drive-letter case it was handed: TestBench's paths come from `uri.fsPath`,
- * which lower-cases the drive, while a CLI or MCP caller's usually does not.
- * Two spellings of one file would then take two locks and compile the same
- * test twice, concurrently, each proposing a whole `.steps.ts` for it.
- */
-function lockKey(testFilePath: string): string {
-  const resolved = pathResolve(testFilePath);
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-}
-
 export class CodeBehindCompiler {
-  /** Test files being compiled right now — one compile per file at a time. */
-  private readonly inFlight = new Set<string>();
-
   constructor(
     private readonly config: Config,
     private readonly sessions: SessionManager,
@@ -165,7 +149,7 @@ export class CodeBehindCompiler {
    * two callers can both read false.
    */
   isCompiling(testFilePath: string): boolean {
-    return this.inFlight.has(lockKey(testFilePath));
+    return compileLock.isLocked(testFilePath);
   }
 
   /**
@@ -183,15 +167,18 @@ export class CodeBehindCompiler {
     signal?: AbortSignal,
   ): Promise<CompileResult> {
     const testFilePath = pathResolve(request.testFilePath);
-    const key = lockKey(testFilePath);
-    if (this.inFlight.has(key)) {
+    // Shared with the compile-mode runs on the step route
+    // (stories/compile-as-you-go.md §On the wire): a Run & Compile and this
+    // pipeline both propose a whole `.steps.ts`, so only one of them may be
+    // in flight for a given file.
+    const releaseLock = compileLock.acquire(testFilePath);
+    if (!releaseLock) {
       throw new CompileRefused(
         409,
         `A compile of ${basename(testFilePath)} is already running. ` +
           'One compile per test file at a time.',
       );
     }
-    this.inFlight.add(key);
     // Counted as a run in flight for the whole compile, exactly as an errand is
     // (stories/errands.md §The wheel): a compile drives browsers and spends
     // tokens for minutes, and a server that reaped itself halfway through would
@@ -201,7 +188,7 @@ export class CodeBehindCompiler {
       return await this.compileLocked(testFilePath, request, emit, signal);
     } finally {
       releaseRun();
-      this.inFlight.delete(key);
+      releaseLock();
     }
   }
 

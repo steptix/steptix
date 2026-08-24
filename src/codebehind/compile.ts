@@ -1,21 +1,13 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { AiClient } from '../ai/client.js';
 import type { Config } from '../config/types.js';
 import type { ParsedTest } from '../parser/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
-import { logger } from '../utils/logger.js';
-import {
-  buildCodeBehindRegistry,
-  resolveCodeBehindCacheDir,
-  type CodeBehindBinding,
-} from './loader.js';
+import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
   askForEntry,
-  describeGuardedName,
   generateStepEntry,
   guardedValues,
   stepEnvRefs,
@@ -23,18 +15,19 @@ import {
   type GeneratedEntry,
 } from './generate.js';
 import { buildRepairPrompt } from './repair.js';
-import { buildFileReviewPrompt, parseFileRevision } from './review.js';
+import { reviewCandidate } from './review.js';
 import { clearStale, readLastRun } from './last-run.js';
+import { writeCodeBehindFile } from './writer.js';
 import {
-  createFile,
-  formatCodeBehindSource,
-  listEntries,
-  spliceEntry,
-  validateCodeBehindSource,
-  writeCodeBehindFile,
-  type WriteEntryRequest,
-} from './writer.js';
-import { findInlinedParameterValue } from '../ai/action-parser.js';
+  actionsOf,
+  applyGenerated,
+  Candidate,
+  contextOf,
+  entryKeyOf,
+  wholeTestFor,
+  type CompilePhase,
+  type CompileStep,
+} from './candidate.js';
 import {
   envDataRefsIn,
   envDataSecretValues,
@@ -53,14 +46,7 @@ import { recordingDirFor, writeReplayFailure } from './recording.js';
  * proposed files.
  */
 
-export type CompilePhase =
-  | 'record'
-  | 'select'
-  | 'generate'
-  | 'review'
-  | 'replay'
-  | 'repair'
-  | 'write';
+export type { CompilePhase, CompileStep };
 
 export type CompileEvent =
   /** A phase started, or reported its result. */
@@ -232,29 +218,6 @@ export interface CompileOptions {
 }
 
 const DEFAULT_MAX_ROUNDS = 3;
-
-/**
- * One step's place in the compile.
- *
- * `key` identifies the *entry*, not the step: a section or skill body is
- * defined once and inlined many times, so several expanded steps can share one
- * entry. Generation is keyed by entry, which is why the same body compiles once
- * however many times it is called.
- */
-interface CompileStep {
-  /** 0-based expanded index. */
-  index: number;
-  /** 1-based display number. */
-  number: number;
-  /** Authored text — an entry's `source`. */
-  text: string;
-  binding?: CodeBehindBinding | undefined;
-  key?: string | undefined;
-  hasEntry: boolean;
-  isAiEntry: boolean;
-  /** Why this step can never be in S, when it can't. */
-  ineligible?: string | undefined;
-}
 
 export async function compileTest(options: CompileOptions): Promise<CompileResult> {
   const emit = options.onEvent ?? ((): void => {});
@@ -514,7 +477,21 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   await candidate.persist();
 
   // ─── 4. Review ────────────────────────────────────────────────────────────
-  await reviewCandidate(candidate, test, parameters, options, emit);
+  await reviewCandidate(
+    candidate,
+    {
+      markdownName: path.basename(test.filePath),
+      // The authored text, not the interpolated: it is what every `source` in
+      // the file has to match, and the interpolated text would put resolved
+      // `${env.X}` values in front of a reviewer that has no business seeing
+      // them.
+      steps: test.expansion?.rawSteps ?? test.steps,
+      guarded: [...allParameters(parameters), ...allEnvRefs(test)],
+      aiClient: options.aiClient,
+      ...(options.signal && { signal: options.signal }),
+    },
+    (message) => emit({ kind: 'phase', phase: 'review', message }),
+  );
   await candidate.persist();
 
   // ─── 5. Replay ────────────────────────────────────────────────────────────
@@ -857,17 +834,6 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
   });
 }
 
-/** Joins the parts of an entry key. NUL because it is the one character
- *  neither a path, a section name nor step text can contain — the same choice
- *  the loader's own index makes, and written as an escape so the file stays
- *  text as far as git is concerned. */
-const KEY_SEP = '\u0000';
-
-/** Identifies the entry a step binds to. Two inlinings of one body share it. */
-function entryKeyOf(binding: CodeBehindBinding): string {
-  return [binding.file, binding.section ?? '', binding.source, binding.occurrence].join(KEY_SEP);
-}
-
 /**
  * Keys of entries a run flagged as stale.
  *
@@ -950,75 +916,9 @@ export function selectSteps(
   return { keys, order, errors };
 }
 
-/** The whole-test block for one generation prompt. */
-function wholeTestFor(
-  steps: CompileStep[],
-  inScope: Set<string>,
-  current: CompileStep,
-): Array<{ index: number; text: string; inScope: boolean; isThisStep: boolean }> {
-  return steps.map((s) => ({
-    index: s.number,
-    text: s.text,
-    inScope: s.key !== undefined && inScope.has(s.key),
-    isThisStep: s.index === current.index,
-  }));
-}
-
 // ───────────────────────────────────────────────────────────────────────────
 // Generation plumbing
 // ───────────────────────────────────────────────────────────────────────────
-
-function actionsOf(result: StepResult | undefined) {
-  return (result?.turns ?? [])
-    .flatMap((t) => t.subActions)
-    .filter((sa) => !sa.error)
-    .map((sa) => sa.action);
-}
-
-function contextOf(result: StepResult | undefined): {
-  domBefore?: string;
-  urlBefore?: string;
-  domAfter?: string;
-  urlAfter?: string;
-} {
-  const ctx = result?.stepContext;
-  if (!ctx) return {};
-  return {
-    ...(ctx.domBefore !== undefined && { domBefore: ctx.domBefore }),
-    ...(ctx.urlBefore !== undefined && { urlBefore: ctx.urlBefore }),
-    ...(ctx.domAfter !== undefined && { domAfter: ctx.domAfter }),
-    ...(ctx.urlAfter !== undefined && { urlAfter: ctx.urlAfter }),
-  };
-}
-
-/**
- * Splice one generation answer into the candidate and say what happened.
- *
- * Returns the answer, except that a splice the writer refuses — an entry that
- * is not an object literal, a file with no `defineSteps([...])` to append to —
- * becomes an `error`, which every caller already treats as "stop, leave the
- * candidate, report". A throw here would escape `compileTest` entirely.
- */
-async function applyGenerated(
-  candidate: Candidate,
-  step: CompileStep,
-  generated: GeneratedEntry,
-  stepEvent: (phase: CompilePhase, step: CompileStep, message: string) => void,
-  phase: CompilePhase,
-): Promise<GeneratedEntry> {
-  try {
-    if (generated.kind === 'entry') {
-      await candidate.apply(step, generated.code);
-      stepEvent(phase, step, phase === 'repair' ? 'repaired' : 'generated');
-    } else if (generated.kind === 'declined') {
-      await candidate.apply(step, aiEntryFor(step.text, generated.reason));
-      stepEvent(phase, step, `kept as AI: ${generated.reason}`);
-    }
-    return generated;
-  } catch (err) {
-    return { kind: 'error', message: (err as Error).message };
-  }
-}
 
 async function repairStep(
   step: CompileStep,
@@ -1054,116 +954,6 @@ async function repairStep(
     guardedValues(parameters, envRefs),
     options.signal,
   );
-}
-
-/**
- * The review pass. Non-fatal by construction: a revision that will not compile,
- * or that smuggles a parameter value in, is discarded and the pre-review
- * candidate stands.
- */
-async function reviewCandidate(
-  candidate: Candidate,
-  test: ParsedTest,
-  parameters: Record<string, string>,
-  options: CompileOptions,
-  emit: (event: CompileEvent) => void,
-): Promise<void> {
-  for (const file of candidate.touchedFiles()) {
-    const before = candidate.contentOf(file);
-    if (before === undefined) continue;
-    let revised: string;
-    try {
-      const completion = await options.aiClient.complete(
-        [
-          buildFileReviewPrompt({
-            markdownName: path.basename(test.filePath),
-            file: before,
-            // The authored text, not the interpolated: it is what every
-            // `source` in the file has to match, and the interpolated text
-            // would put resolved `${env.X}` values in front of a reviewer
-            // that has no business seeing them.
-            steps: test.expansion?.rawSteps ?? test.steps,
-          }),
-        ],
-        options.signal,
-        { profile: 'authoring' },
-      );
-      revised = parseFileRevision(completion.text);
-    } catch (err) {
-      emit({
-        kind: 'phase',
-        phase: 'review',
-        message: `skipped for ${path.basename(file)} (${(err as Error).message}) — the generated file stands`,
-      });
-      continue;
-    }
-
-    if (revised.trim() === before.trim()) {
-      emit({ kind: 'phase', phase: 'review', message: `no changes to ${path.basename(file)}` });
-      continue;
-    }
-
-    const leaked = findInlinedParameterValue(revised, [
-      ...allParameters(parameters),
-      ...allEnvRefs(test),
-    ]);
-    if (leaked) {
-      emit({
-        kind: 'phase',
-        phase: 'review',
-        message: `rejected: the revision inlines ${describeGuardedName(leaked)} — the generated file stands`,
-      });
-      continue;
-    }
-    // The reviewer edits entries; it does not decide which steps have one.
-    // Caught live: given the whole test, it wrote an entry for the step a
-    // prefix compile had deliberately left alone — code for a step nobody
-    // recorded, which the next compile would then skip as "already has one".
-    const entriesChanged = describeEntryChange(listEntries(before), listEntries(revised));
-    if (entriesChanged) {
-      emit({
-        kind: 'phase',
-        phase: 'review',
-        message: `rejected: the revision ${entriesChanged} — the generated file stands`,
-      });
-      continue;
-    }
-    const invalid = await validateCodeBehindSource(file, revised);
-    if (invalid) {
-      emit({
-        kind: 'phase',
-        phase: 'review',
-        message: `rejected: the revision does not compile (${invalid}) — the generated file stands`,
-      });
-      continue;
-    }
-    await candidate.replaceFile(file, revised);
-    emit({ kind: 'phase', phase: 'review', message: `revised ${path.basename(file)}` });
-  }
-}
-
-/**
- * How a revision changed the SET of entries, or null when it did not. Order
- * and code are the reviewer's to change; which steps have an entry is not.
- */
-function describeEntryChange(
-  before: Array<{ source: string; section: string }>,
-  after: Array<{ source: string; section: string }>,
-): string | null {
-  const key = (e: { source: string; section: string }): string => `${e.section}\u0000${e.source}`;
-  const was = new Map<string, number>();
-  for (const e of before) was.set(key(e), (was.get(key(e)) ?? 0) + 1);
-  const now = new Map<string, number>();
-  for (const e of after) now.set(key(e), (now.get(key(e)) ?? 0) + 1);
-  const added = after.filter((e) => (now.get(key(e)) ?? 0) > (was.get(key(e)) ?? 0)).map((e) => e.source);
-  const removed = before.filter((e) => (was.get(key(e)) ?? 0) > (now.get(key(e)) ?? 0)).map((e) => e.source);
-  const quote = (sources: string[]): string => [...new Set(sources)].map((s) => JSON.stringify(s)).join(', ');
-  if (added.length > 0 && removed.length > 0) {
-    return `adds an entry for ${quote(added)} and removes ${quote(removed)}`;
-  }
-  if (added.length > 0) return `adds an entry for ${quote(added)}`;
-  if (removed.length > 0) return `removes the entry for ${quote(removed)}`;
-  return null;
 }
 
 /** Every parameter value in play, for the review's leak guard. Unlike the
@@ -1253,149 +1043,6 @@ export async function firstDataRow(
   const rows = await loadDataFile(dataFile, projectRoot);
   const row = rows[0];
   return row ? { row, of: rows.length } : undefined;
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// The candidate
-// ───────────────────────────────────────────────────────────────────────────
-
-/**
- * The proposed `.steps.ts` files, in memory.
- *
- * Nothing here touches the author's tree. Entries are spliced with the same
- * writer the runtime used to use, so hand edits elsewhere in a file survive
- * byte-for-byte; the files only reach disk in the Write phase, and the
- * gitignored `.candidate` copy only when a compile ends red.
- */
-class Candidate {
-  private readonly original = new Map<string, string | null>();
-  private readonly current = new Map<string, string>();
-  private readonly entryText = new Map<string, string>();
-  private materialised: string[] = [];
-  private persisted: string[] = [];
-
-  /** The file as it stands, loading the on-disk original the first time. */
-  async read(file: string): Promise<string | null> {
-    if (!this.original.has(file)) {
-      this.original.set(file, await readIfExists(file));
-    }
-    return this.current.get(file) ?? this.original.get(file) ?? null;
-  }
-
-  contentOf(file: string): string | undefined {
-    return this.current.get(file);
-  }
-
-  touchedFiles(): string[] {
-    return [...this.current.keys()];
-  }
-
-  /** Splice one entry in (or create the file), then format the whole file
-   *  (`formatCodeBehindSource`). The section scope is the runner's, stamped
-   *  by the writer — never the model's. */
-  async apply(step: CompileStep, entryCode: string): Promise<void> {
-    const binding = step.binding!;
-    const request: WriteEntryRequest = {
-      file: binding.file,
-      source: binding.source,
-      ...(binding.section !== undefined && { section: binding.section }),
-      occurrence: binding.occurrence,
-      entryCode,
-      // The header names the file this code-behind belongs to — which for a
-      // skill's entries is the skill, not the test that pulled it in.
-      markdownFile: binding.file.replace(/\.steps\.ts$/, '.md'),
-    };
-    const before = this.current.get(binding.file) ?? this.original.get(binding.file) ?? null;
-    this.current.set(
-      binding.file,
-      await formatCodeBehindSource(
-        before === null ? createFile(request) : spliceEntry(before, request).text,
-        binding.file,
-      ),
-    );
-    this.entryText.set(entryKeyOf(binding), entryCode);
-  }
-
-  /** The entry as last written into the candidate — the repair prompt's input. */
-  entryTextFor(step: CompileStep): string | undefined {
-    return step.key ? this.entryText.get(step.key) : undefined;
-  }
-
-  async replaceFile(file: string, content: string): Promise<void> {
-    this.current.set(file, await formatCodeBehindSource(content, file));
-  }
-
-  /** Files whose content differs from what is on disk today. */
-  changedFiles(): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const [file, content] of this.current) {
-      if (content !== this.original.get(file)) out[file] = content;
-    }
-    return out;
-  }
-
-  /**
-   * Write the candidates somewhere the loader can import them, and return the
-   * override map. `.ts` because esbuild picks its loader by extension; inside
-   * the gitignored cache dir beside the real file, because a `node_modules`
-   * path segment would break the `ai-ui-automation/codebehind` self-reference.
-   */
-  async materialise(): Promise<Record<string, string>> {
-    const overrides: Record<string, string> = {};
-    for (const [file, content] of this.current) {
-      const dir = resolveCodeBehindCacheDir(file);
-      const target = path.join(
-        dir,
-        `${path.basename(file, '.ts')}.${randomUUID().slice(0, 8)}.candidate.ts`,
-      );
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(target, content, 'utf-8');
-      overrides[file] = target;
-      this.materialised.push(target);
-    }
-    return overrides;
-  }
-
-  /** Remove the transient copies a replay round imported. */
-  async clearMaterialised(): Promise<void> {
-    for (const file of this.materialised) {
-      await fs.rm(file, { force: true }).catch(() => {});
-    }
-    this.materialised = [];
-  }
-
-  /**
-   * Write the candidate where the author can read it — the recording dir,
-   * under the name the story gives it — and return the first path (what the
-   * summary points at). Called after every stage, so the file is always the
-   * compile's latest proposal; after Apply it is identical to the real file.
-   */
-  async persist(): Promise<string | undefined> {
-    this.persisted = [];
-    for (const [file, content] of this.current) {
-      const target = path.join(
-        resolveCodeBehindCacheDir(file),
-        `${path.basename(file)}.candidate`,
-      );
-      try {
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, content, 'utf-8');
-        this.persisted.push(target);
-      } catch (err) {
-        logger.debug(`Could not write the compile candidate at ${target}: ${String(err)}`);
-      }
-    }
-    return this.persisted[0];
-  }
-}
-
-async function readIfExists(file: string): Promise<string | null> {
-  try {
-    return await fs.readFile(file, 'utf-8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
-  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
