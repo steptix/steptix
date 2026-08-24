@@ -86,6 +86,9 @@ export function registerCommands(
     /** Lines to run. Empty means the whole test, as Run All does. */
     lines?: number[];
     mode?: 'run' | 'steps';
+    /** The `### Section` the steps were authored in, when they came from a
+     *  body. Their ENTRIES bind under it; they still execute detached. */
+    section?: string;
   } = {}): Promise<void> => {
     const controller = registry.active();
     if (!controller) return notifyNoActive();
@@ -120,6 +123,7 @@ export function registerCommands(
         ...(mode === 'run' && { breakpoints: tracker.breakpoints(controller.document.uri) }),
         ...(mode === 'steps' && { skipBreakpointAtStart: true }),
         compile: mode,
+        ...(options.section !== undefined && { compileScope: { section: options.section } }),
       });
     } finally {
       registry.notifyRunning(false);
@@ -697,23 +701,29 @@ export function registerCommands(
           typeof target?.lineNumber === 'number'
             ? target.lineNumber
             : editor.selection.active.line + 1;
-        const text = editor.document.getText();
-        // Recorded as well as shown: a notification is not readable from the
-        // extension host, and these refusals are the ones a test has to be
-        // able to tell apart from "the request went out".
-        const refusal = compileRefusal(text, line);
-        if (refusal !== null) {
-          registry.lastCompileError = refusal;
-          vscode.window.showWarningMessage(refusal);
-          return;
-        }
         // A multi-line selection that covers the clicked line compiles every
         // step in it, in order — the session advances between them, so a
-        // selection is just this flow k times. `resolveRunSelection` narrows
-        // the raw lines downstream, exactly as it does for Run Selected.
-        const selected = selectionLines(editor);
-        const lines = selected.length > 1 && selected.includes(line) ? selected : [line];
-        await runAndCompile({ lines, mode: 'steps' });
+        // selection is just this flow k times. The resolver also decides the
+        // scope the entries bind under, which for a section body is not the
+        // scope the steps EXECUTE in.
+        const target2 = resolveCompileTarget(
+          editor.document.getText(),
+          line,
+          selectionLines(editor),
+        );
+        if (!target2.ok) {
+          // Recorded as well as shown: a notification is not readable from the
+          // extension host, and these refusals are the ones a test has to be
+          // able to tell apart from "the request went out".
+          registry.lastCompileError = target2.refusal;
+          vscode.window.showWarningMessage(target2.refusal);
+          return;
+        }
+        await runAndCompile({
+          lines: target2.lines,
+          mode: 'steps',
+          ...(target2.section !== undefined && { section: target2.section }),
+        });
       },
     ),
 
@@ -867,48 +877,78 @@ function notifyNoActive(): void {
 }
 
 /**
- * Why this line cannot be compiled on its own, or null when it can
+ * What Compile This Step should send for a click at `line`, or why it cannot
  * (stories/compile-as-you-go.md §Compile This Step).
  *
- * What is deliberately ALLOWED: a step below a skill or section call, and a
- * call line itself. This flow sends steps, not step numbers, so the expansion
- * arithmetic that forced the old refusal has nothing to answer.
+ * What is ALLOWED: a plain step, a `### Section` or `[skill:]` call line, a
+ * step below either of those, and a step inside a section body. The body case
+ * is why this returns a scope rather than a boolean: the step runs detached at
+ * the root frame, as Run Step Here runs it, but its ENTRY has to bind under
+ * the section — that is where the runtime, which reaches the step through the
+ * section, looks for it.
  *
  * What is refused is refused because compiling it would produce a WRONG entry,
  * not because the feature is missing — see each branch.
  */
-export function compileRefusal(text: string, line: number): string | null {
-  const kind = classifyLines(text)[line - 1]?.kind;
-  if (kind === 'section-step') {
-    // Running a body line on its own runs it DETACHED, at the root frame, so
-    // the entry would be written with no section scope — where the runtime,
-    // which reaches that step through the section's frame, never looks. Worse,
-    // a top-level step with the same text would then match it.
-    const owner = sectionOwningLine(text, line);
-    return (
-      'TestBench: a section body compiles as a unit. ' +
-      (owner
-        ? `Compile the "${owner}" call instead — right-click the line that invokes it.`
-        : 'Compile the line that invokes this section instead.')
-    );
+export type CompileTarget =
+  | { ok: true; lines: number[]; section?: string }
+  | { ok: false; refusal: string };
+
+export function resolveCompileTarget(
+  text: string,
+  clicked: number,
+  selected: number[],
+): CompileTarget {
+  const classified = classifyLines(text);
+  const kindOf = (line: number): string | undefined => classified[line - 1]?.kind;
+  const clickedKind = kindOf(clicked);
+  if (clickedKind !== 'step' && clickedKind !== 'section-step') {
+    return { ok: false, refusal: 'TestBench: that line is not a step. Put the cursor on a numbered step.' };
   }
-  if (kind !== 'step') {
-    return 'TestBench: that line is not a step. Put the cursor on a numbered step.';
+
+  // A multi-line selection that covers the clicked line compiles every step in
+  // it, in order; anything else is just the clicked line.
+  const lines =
+    selected.length > 1 && selected.includes(clicked)
+      ? selected.filter((l) => kindOf(l) === 'step' || kindOf(l) === 'section-step')
+      : [clicked];
+
+  // One scope per compile. A selection spanning a section body and the main
+  // flow — or two different sections — has no single `section:` to stamp, and
+  // guessing one would put half the entries where nothing looks for them.
+  const scopes = new Set(lines.map((l) => sectionOwningLine(text, l) ?? ''));
+  if (scopes.size > 1) {
+    const named = [...scopes].map((s) => (s === '' ? 'the main flow' : `"${s}"`)).sort();
+    return {
+      ok: false,
+      refusal:
+        `TestBench: that selection spans ${named.join(' and ')}, and each entry binds to one ` +
+        'scope. Select steps from one section body, or from the main flow.',
+    };
   }
-  // A single-step request cannot know it is the SECOND "Press Enter":
-  // occurrence is counted within the request, so the server says 0 and the
-  // entry lands in the first occurrence's slot, silently replacing code
-  // generated from a different step. Run & Compile sends the whole test.
-  const roots = rootFrameSteps(text);
-  const self = roots.find((s) => s.line === line);
-  if (self && roots.filter((s) => s.instruction === self.instruction).length > 1) {
-    return (
-      `TestBench: "${self.instruction}" appears more than once in this test, and a single-step ` +
-      'compile cannot tell which one you mean — the entry would land on the first. ' +
-      'Use Run & Compile.'
-    );
+  const section = [...scopes][0] ?? '';
+
+  // Occurrence is counted within the request, so a compile that sends SOME of
+  // a repeated text's occurrences numbers them from 0 — and the entry lands on
+  // the wrong one, replacing code generated from a different step. Sending all
+  // of them is fine: they number correctly.
+  const siblings = section === '' ? rootFrameSteps(text) : sectionBodySteps(text, section);
+  for (const line of lines) {
+    const self = siblings.find((s) => s.line === line);
+    if (!self) continue;
+    const same = siblings.filter((s) => s.instruction === self.instruction);
+    if (same.length > 1 && !same.every((s) => lines.includes(s.line))) {
+      return {
+        ok: false,
+        refusal:
+          `TestBench: "${self.instruction}" appears more than once in ` +
+          `${section === '' ? 'this test' : `"${section}"`}, and a partial compile cannot tell ` +
+          'which one you mean — the entry would land on the first. Select them all, or use Run & Compile.',
+      };
+    }
   }
-  return null;
+
+  return { ok: true, lines, ...(section !== '' && { section }) };
 }
 
 /**
@@ -927,6 +967,13 @@ function rootFrameSteps(text: string): { line: number; instruction: string }[] {
       (s) =>
         !/^\[\s*skill\s*:/i.test(s.instruction) && !sectionNames.has(s.instruction.toLowerCase()),
     );
+}
+
+/** The steps of one `### Section` body — the occurrence population for an
+ *  entry that binds under that section's scope. */
+function sectionBodySteps(text: string, section: string): { line: number; instruction: string }[] {
+  const found = extractSections(text).find((s) => s.name === section);
+  return (found?.steps ?? []).map((s) => ({ line: s.line, instruction: s.instruction.trim() }));
 }
 
 /** The name of the `### Section` whose body contains `line`, if any. */

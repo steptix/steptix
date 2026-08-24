@@ -479,6 +479,123 @@ describe('POST /sessions/:id/steps with compile', () => {
     expect(proposed).not.toContain("source: 'Open the dashboard'");
   });
 
+describe('recompiling a step whose entry broke', () => {
+    // Repair parity. In `'run'` the failure arrives in band: the entry threw
+    // during that very run. In `'steps'` it cannot — code-behind execution is
+    // disabled for the request, which is what makes the step re-record under
+    // AI, so the entry never runs and never throws. The last-run sidecar on
+    // disk is where the ⚠ the author is looking at came from, and the only
+    // record of what broke.
+    const BROKEN = [
+      "import { defineSteps } from 'ai-ui-automation/codebehind';",
+      'export default defineSteps([',
+      "  { source: 'Open the dashboard', async run(ctx) { await ctx.page.click('a[href=\"/x\"]'); } },",
+      ']);',
+      '',
+    ].join('\n');
+
+    beforeEach(async () => {
+      await fs.writeFile(stepsFilePath, BROKEN, 'utf-8');
+      await fs.mkdir(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true });
+      await fs.writeFile(
+        path.join(tmpDir, '.aiui-codebehind-cache', 'checkout.last-run.json'),
+        JSON.stringify({
+          test: testFilePath,
+          ranAt: new Date().toISOString(),
+          steps: [
+            {
+              index: 1,
+              source: 'Open the dashboard',
+              status: 'passed',
+              fromCodeBehind: false,
+              stale: true,
+              error: 'strict mode violation: locator resolved to 2 elements',
+            },
+          ],
+        }),
+        'utf-8',
+      );
+    });
+
+    afterEach(async () => {
+      await fs.rm(stepsFilePath, { force: true });
+    });
+
+    it('repairs from the sidecar in "steps" mode, where nothing throws in band', async () => {
+      await runSteps(requestBody({ steps: [STEPS[0]!], sourceLines: [4], compile: 'steps' }));
+
+      const asked = aiPrompts.filter((p) => !/Review a generated/.test(p));
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain('A generated code-behind entry was replayed and it failed');
+      // The error the sidecar recorded, and the code that produced it.
+      expect(asked[0]).toContain('strict mode violation: locator resolved to 2 elements');
+      expect(asked[0]).toContain("ctx.page.click('a[href=\"/x\"]')");
+    });
+
+    it('leaves a step the sidecar does NOT flag on the plain prompt', async () => {
+      // Step 2 has no row in the sidecar at all.
+      await runSteps(requestBody({ steps: [STEPS[1]!], sourceLines: [5], compile: 'steps' }));
+      const asked = aiPrompts.filter((p) => !/Review a generated/.test(p));
+      expect(asked[0]).not.toContain('A generated code-behind entry was replayed');
+      expect(asked[0]).toContain('## The whole test');
+    });
+  });
+
+  describe('a single-step compile of a section body', () => {
+    // The step runs detached at the root frame, as Run Step Here runs it, but
+    // its ENTRY has to bind under the section — that is where the runtime,
+    // which reaches the step through the section, looks for it. The user hit
+    // this live: our review round had refused it outright.
+    it('binds the entry under the section scope the client attributed', async () => {
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Type the username'],
+          sourceLines: [12],
+          compile: 'steps',
+          compileScope: { section: 'Sign in' },
+        }),
+      );
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      const proposed = result.files[stepsFilePath] as string;
+      expect(proposed).toContain("source: 'Type the username'");
+      // The scope stamp is the whole point — without it the entry binds
+      // top-level and the runtime never matches it.
+      expect(proposed).toContain("section: 'Sign in'");
+      expect(result.summary.compiled).toBe(1);
+    });
+
+    it('records the step under the section, so a later splice finds its slot', async () => {
+      await runSteps(
+        requestBody({
+          steps: ['Type the username'],
+          sourceLines: [12],
+          compile: 'steps',
+          compileScope: { section: 'Sign in' },
+        }),
+      );
+      const recording = await readRecording(testFilePath);
+      expect(recording!.steps[0]!.section).toBe('Sign in');
+      expect(recording!.steps[0]!.source).toBe('Type the username');
+      expect(recording!.steps[0]!.occurrence).toBe(0);
+    });
+
+    it('refuses a scope on anything but a single-step compile', async () => {
+      const onRun = await runSteps(requestBody({ compile: 'run', compileScope: { section: 'X' } }));
+      expect(onRun.status).toBe(400);
+      expect(onRun.frames[0]!.error).toMatch(/only valid with "compile": "steps"/);
+
+      const bare = await runSteps(requestBody({ compileScope: { section: 'X' } }));
+      expect(bare.status).toBe(400);
+    });
+
+    it('refuses a malformed scope rather than compiling to the top level', async () => {
+      for (const bad of [{}, { section: '' }, { section: 42 }, [], null]) {
+        const res = await runSteps(requestBody({ steps: ['x'], sourceLines: [4], compile: 'steps', compileScope: bad }));
+        expect(res.status, JSON.stringify(bad)).toBe(400);
+      }
+    });
+  });
+
   describe('a run split across several requests', () => {
     // An `[input:]` or `[interactive]` step, or a breakpoint, ends one batch
     // and leaves the client to send the rest. Each block used to get its own

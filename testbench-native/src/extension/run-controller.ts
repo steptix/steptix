@@ -1498,6 +1498,12 @@ export class RunController {
        * opens the diff and the author applies it.
        */
       compile?: 'run' | 'steps';
+      /**
+       * The `### Section` the compiled steps were authored in, when they came
+       * from a body. Their ENTRIES bind under it; they still execute detached
+       * at the root frame, exactly as Run Step Here runs them.
+       */
+      compileScope?: { section: string };
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -1951,6 +1957,7 @@ export class RunController {
             ...(compileMode && (compileBlocksSent > 0 || options.isContinuation === true) && {
               compileContinues: true,
             }),
+            ...(options.compileScope && { compileScope: options.compileScope }),
           });
           compileBlocksSent++;
           pendingRerun = undefined;
@@ -2207,8 +2214,10 @@ export class RunController {
     /** This block is not the first of its logical run — continue the compile
      *  already open in the session rather than starting a new one. */
     compileContinues?: boolean;
+    /** Section attribution for the entries this block compiles. */
+    compileScope?: { section: string };
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun, compile, compileContinues } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun, compile, compileContinues, compileScope } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -2285,6 +2294,7 @@ export class RunController {
         })()),
         ...(compile && { compile }),
         ...(compile && compileContinues && { compileContinues: true }),
+        ...(compile === 'steps' && compileScope && { compileScope }),
       },
       signal,
     );

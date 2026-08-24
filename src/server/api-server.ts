@@ -765,6 +765,31 @@ export function createApiServer(
         // allow-list for the same reason `compile` is.
         if (body.compileContinues === true) request.compileContinues = true;
       }
+      // Section attribution for a single-step compile of a `### Section`
+      // body. Refused rather than ignored when it makes no sense: a whole-test
+      // Run & Compile has the real frames, and a caller that asked for a scope
+      // and quietly got the top level would find out when the entry never
+      // bound.
+      if (body.compileScope !== undefined) {
+        const scope = body.compileScope as { section?: unknown } | null;
+        if (request.compile !== 'steps') {
+          res.status(400).json({
+            error: '"compileScope" is only valid with "compile": "steps"',
+          });
+          return;
+        }
+        if (
+          scope === null ||
+          typeof scope !== 'object' ||
+          Array.isArray(scope) ||
+          typeof scope.section !== 'string' ||
+          scope.section.trim() === ''
+        ) {
+          res.status(400).json({ error: '"compileScope" must be { section: <non-empty string> }' });
+          return;
+        }
+        request.compileScope = { section: scope.section };
+      }
       // Re-run-with-variables fields (testbench "re-run a skill step"):
       // `seedScope` injects captured/runtime vars before the run; `startAt`
       // starts execution partway into the expanded skill body. Both optional.

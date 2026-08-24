@@ -16,7 +16,19 @@ import {
   type CompilePhase,
   type CompileStep,
 } from './candidate.js';
-import { generateStepEntry } from './generate.js';
+import {
+  askForEntry,
+  generateStepEntry,
+  guardedValues,
+  refuseReason,
+  stepEnvRefs,
+  stepParameters,
+  unresolvedRefsReason,
+  type GeneratedEntry,
+} from './generate.js';
+import { buildRepairPrompt } from './repair.js';
+import { readLastRun, type LastRunStep } from './last-run.js';
+import { entryTextIn } from './writer.js';
 import type { CodeBehindBinding } from './loader.js';
 import { recordingDirFor } from './recording.js';
 import { reviewCandidate } from './review.js';
@@ -222,6 +234,8 @@ export class LiveCompiler {
   /** Content last handed to the reviewer, per file, so a second block does
    *  not pay to review a file it did not change. */
   private readonly reviewed = new Map<string, string>();
+  /** The last-run sidecar's rows, read once and shared by every step. */
+  private lastRun: Promise<LastRunStep[]> | undefined;
 
   constructor(private readonly options: LiveCompileOptions) {
     this.plan = [...options.plan];
@@ -349,16 +363,72 @@ export class LiveCompiler {
     });
   };
 
-  private async generate(step: CompileStep, input: LiveStepInput): Promise<void> {
-    // A stopped run skips what has not started. The in-flight one finishes:
-    // its model call is already paid for, and its entry is work the author
-    // asked for.
-    if (this.disposed || this.signal?.aborted) {
-      this.skippedByStop.push(step.number);
-      return;
+  /**
+   * What this step's entry threw last time, or undefined when it did not.
+   *
+   * Two sources, and which one is available depends on the mode:
+   *
+   * - **`'run'`** — the entry ran in THIS run, threw, and the step healed
+   *   under AI, so the failure arrives in band on the step result. Freshest,
+   *   and it wins.
+   * - **`'steps'`** — code-behind execution is disabled for the request (that
+   *   is what makes the step re-record under AI), so the entry never runs and
+   *   never throws. There is no in-band failure to have. The last-run sidecar
+   *   on disk is where the ⚠ the author is looking at came from, and it is the
+   *   only record of what broke.
+   *
+   * Neither means no prior failure: generate normally.
+   */
+  private async priorFailure(
+    binding: CodeBehindBinding,
+    result: StepResult,
+  ): Promise<string | undefined> {
+    if (result.codeBehindStale) return result.codeBehindStale.error;
+    const rows = await this.lastRunRows();
+    // Matched by the identity the binding uses — section scope, authored text,
+    // and the occurrence of that pair — because a body that says the same
+    // thing twice has two rows and only one of them failed.
+    const same = rows.filter(
+      (r) => (r.section ?? '') === (binding.section ?? '') && r.source === binding.source,
+    );
+    const row = same[binding.occurrence];
+    return row?.stale ? (row.error ?? 'the entry failed on the last run') : undefined;
+  }
+
+  /** The last-run sidecar's rows, read once per compile. */
+  private async lastRunRows(): Promise<LastRunStep[]> {
+    if (this.lastRun === undefined) {
+      this.lastRun = readLastRun(this.options.testFilePath)
+        .then((s) => s?.steps ?? [])
+        .catch(() => []);
     }
-    const generated = await generateStepEntry({
-      binding: step.binding!,
+    return this.lastRun;
+  }
+
+  /**
+   * One model call for one step: a repair when the step is healing a broken
+   * entry, a plain generation otherwise.
+   *
+   * The repair branch is the parity the boxed pipeline has always had. A step
+   * whose entry threw ran under AI *because it threw*, and generating from the
+   * plain prompt hands the model the same page and lets it write the same
+   * broken selector again — which is exactly what happened live: a recorded
+   * `a[href="/login"]` click compiled to a strict locator that resolved to 2
+   * elements, healed under AI, and regenerated identically. The repair prompt
+   * shows it the code that failed and what it threw. Where the failure comes
+   * from depends on the mode — see `priorFailure`.
+   */
+  private async askModel(step: CompileStep, input: LiveStepInput): Promise<GeneratedEntry> {
+    const binding = step.binding!;
+    const failed = await this.priorFailure(binding, input.result);
+    if (failed !== undefined) {
+      const repaired = await this.askForRepair(step, input, failed);
+      if (repaired) return repaired;
+      // No entry text to repair FROM — the file was edited, or the span could
+      // not be found. Fall through and generate as if from scratch.
+    }
+    return generateStepEntry({
+      binding,
       actions: actionsOf(input.result),
       ...(input.result.assertions && { assertions: input.result.assertions }),
       resolvedParameters: input.resolvedParameters,
@@ -373,9 +443,73 @@ export class LiveCompiler {
         inScope: p.inScope,
         isThisStep: i === step.index,
       })),
-      candidateFile: (await this.candidate.read(step.binding!.file)) ?? undefined,
+      candidateFile: (await this.candidate.read(binding.file)) ?? undefined,
       ...contextOf(input.result),
     });
+  }
+
+  /**
+   * Regenerate a stale step from its failure, through the same repair prompt
+   * the boxed pipeline's replay rounds use. Null when the failed entry's text
+   * cannot be recovered, which leaves the caller to generate normally.
+   *
+   * The pre-checks mirror `generateStepEntry`'s own: a transcript that changed
+   * runner state, or a reference this run cannot answer, declines here too —
+   * a repair is still a generation and the same things make it impossible.
+   */
+  private async askForRepair(
+    step: CompileStep,
+    input: LiveStepInput,
+    error: string,
+  ): Promise<GeneratedEntry | null> {
+    const binding = step.binding!;
+    const file = await this.candidate.read(binding.file);
+    if (file === null) return null;
+    const entryCode = entryTextIn(file, binding.source, binding.section, binding.occurrence);
+    if (entryCode === undefined) return null;
+
+    const refused = refuseReason(binding.source, actionsOf(input.result));
+    if (refused) return { kind: 'declined', reason: refused };
+    const envRefs = stepEnvRefs(binding, this.options.envData);
+    if (envRefs.unresolved.length > 0) {
+      return {
+        kind: 'declined',
+        reason: unresolvedRefsReason(envRefs.unresolved, this.options.envData),
+      };
+    }
+
+    const parameters = stepParameters(binding, input.resolvedParameters);
+    const ctx = input.result.stepContext;
+    const prompt = buildRepairPrompt({
+      rawStepText: step.text,
+      stepIndex: step.number,
+      entryCode,
+      error,
+      // The page BEFORE the step is the page the entry threw on: the entry
+      // runs first, and the AI heal that follows is what moved it on.
+      ...(ctx?.domBefore !== undefined && { dom: ctx.domBefore }),
+      ...(ctx?.urlBefore !== undefined && { url: ctx.urlBefore }),
+      parameters,
+      ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
+    });
+    return askForEntry(
+      this.options.aiClient,
+      this.options.contextContent,
+      prompt,
+      guardedValues(parameters, envRefs.resolved),
+      this.signal,
+    );
+  }
+
+  private async generate(step: CompileStep, input: LiveStepInput): Promise<void> {
+    // A stopped run skips what has not started. The in-flight one finishes:
+    // its model call is already paid for, and its entry is work the author
+    // asked for.
+    if (this.disposed || this.signal?.aborted) {
+      this.skippedByStop.push(step.number);
+      return;
+    }
+    const generated = await this.askModel(step, input);
     const applied = await applyGenerated(this.candidate, step, generated, this.stepEvent, 'generate');
     if (applied.kind === 'entry') this.compiled.push(step.number);
     else if (applied.kind === 'declined') this.declined.push(step.number);

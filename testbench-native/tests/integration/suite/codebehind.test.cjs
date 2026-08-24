@@ -154,6 +154,7 @@ describe('TestBench code-behind compile', function () {
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
     );
     await waitFor('active file detected', () => hooks.tracker.snapshot().isTestFile);
+    return vscode.window.activeTextEditor;
   }
 
   it('Run & Compile sends compile:"run" with the test path and the editor steps', async () => {
@@ -440,23 +441,125 @@ describe('TestBench code-behind compile', function () {
     assert.equal(hooks.pendingCodeBehind().files[stepsPath], proposed);
   });
 
-  it('refuses a section body line, pointing at the call that owns it', async () => {
+  it('compiles a section body step, attributing it to its section', async () => {
+    // The user hit this live: the review round refused it outright. The step
+    // runs detached at the root frame, as Run Step Here runs it; only the
+    // entry's BINDING moves under the section.
     const sectionedMd = path.resolve(FIXTURES_DIR, 'compile-body.md');
     fs.writeFileSync(sectionedMd, SECTIONED_MD, 'utf-8');
     try {
       await openFixture(sectionedMd);
-      // Line 12 is `1. Type the username` inside the `Sign in` body. Run on
-      // its own it runs DETACHED at the root frame, so the entry would be
-      // written with no section scope — where the runtime never looks.
+      // Line 12 is `1. Type the username` inside the `Sign in` body.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 12,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+
+      const request = fake.requests[0];
+      assert.equal(request.compile, 'steps');
+      assert.deepEqual(request.steps, ['Type the username']);
+      assert.deepEqual(request.sourceLines, [12]);
+      assert.deepEqual(request.compileScope, { section: 'Sign in' });
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    } finally {
+      fs.rmSync(sectionedMd, { force: true });
+    }
+  });
+
+  it('compiles a whole section body in order, under one scope', async () => {
+    const sectionedMd = path.resolve(FIXTURES_DIR, 'compile-body-all.md');
+    fs.writeFileSync(sectionedMd, SECTIONED_MD, 'utf-8');
+    try {
+      const editor = await openFixture(sectionedMd);
+      editor.selection = new vscode.Selection(
+        new vscode.Position(11, 0),
+        new vscode.Position(12, 12),
+      );
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 12,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+
+      const request = fake.requests[0];
+      assert.deepEqual(request.sourceLines, [12, 13]);
+      assert.deepEqual(request.compileScope, { section: 'Sign in' });
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    } finally {
+      fs.rmSync(sectionedMd, { force: true });
+    }
+  });
+
+  it('refuses a selection that spans a section body and the main flow', async () => {
+    // Each entry binds to one scope; guessing one would put half of them where
+    // nothing looks for them.
+    const sectionedMd = path.resolve(FIXTURES_DIR, 'compile-body-mixed.md');
+    fs.writeFileSync(sectionedMd, SECTIONED_MD, 'utf-8');
+    try {
+      const editor = await openFixture(sectionedMd);
+      // Line 9 is a main-flow step, line 12 is inside the `Sign in` body.
+      editor.selection = new vscode.Selection(
+        new vscode.Position(8, 0),
+        new vscode.Position(11, 12),
+      );
       void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
         lineNumber: 12,
       });
       await waitFor('refused', () => hooks.lastCompileError() !== null, 5_000);
-      assert.match(hooks.lastCompileError(), /section body compiles as a unit/);
+      assert.match(hooks.lastCompileError(), /spans .* and .*/);
       assert.match(hooks.lastCompileError(), /Sign in/);
+      assert.match(hooks.lastCompileError(), /main flow/);
       assert.equal(fake.requests.length, 0);
     } finally {
       fs.rmSync(sectionedMd, { force: true });
+    }
+  });
+
+  it('refuses a body step whose text repeats within its own section', async () => {
+    // Occurrence is counted within the request, so sending one of two
+    // identical body steps numbers it 0 and the entry lands on the first.
+    const repeatBody = path.resolve(FIXTURES_DIR, 'compile-body-repeat.md');
+    fs.writeFileSync(
+      repeatBody,
+      [
+        '---', 'tags: [codebehind]', '---', '',
+        '# Repeat Body', '',
+        '## Steps',
+        '1. Sign in',
+        '',
+        '### Sign in',
+        '1. Press Enter',
+        '2. Type the code',
+        '3. Press Enter',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    try {
+      await openFixture(repeatBody);
+      // Line 13 is the second `Press Enter` in the body.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 13,
+      });
+      await waitFor('refused', () => hooks.lastCompileError() !== null, 5_000);
+      assert.match(hooks.lastCompileError(), /appears more than once/);
+      assert.match(hooks.lastCompileError(), /"Sign in"/);
+      assert.equal(fake.requests.length, 0);
+
+      // …and the body step that does NOT repeat compiles.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 12,
+      });
+      await waitFor('run requested', () => fake.requests.length > 0);
+      assert.deepEqual(fake.requests[0].steps, ['Type the code']);
+      assert.deepEqual(fake.requests[0].compileScope, { section: 'Sign in' });
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    } finally {
+      fs.rmSync(repeatBody, { force: true });
     }
   });
 

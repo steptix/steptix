@@ -107,6 +107,13 @@ export interface StreamStepsRequest {
    */
   compileContinues?: boolean;
   /**
+   * Attribution for a `compile: 'steps'` request whose steps come from a
+   * `### Section` body. Execution is unchanged — the steps still run
+   * detached, at the root frame, as Run Step Here runs them — but the entry
+   * binds under this section's scope, which is where the runtime looks for it.
+   */
+  compileScope?: { section: string };
+  /**
    * Absolute path of the file each step in `steps` was authored in. Parallel
    * to `steps`; defaults to the test file when omitted per-step. Used by the
    * server to attribute frame origins when a request is sent already-expanded

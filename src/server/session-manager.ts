@@ -191,6 +191,23 @@ export interface StepRequest {
    */
   compileContinues?: boolean;
   /**
+   * Attribution for a `compile: 'steps'` request whose steps come from a
+   * `### Section` body (stories/compile-as-you-go.md §Compile This Step).
+   *
+   * EXECUTION is unchanged: the steps still run detached, at the root frame,
+   * exactly as Run Step Here runs them — a body step is a runnable unit on its
+   * own and this does not make it one that carries a frame. Only the BINDING
+   * moves: the generation registry is built against a synthesized section
+   * frame of this name, so the entry lands under `section:` in the test's own
+   * `.steps.ts`, where the runtime — which reaches that step THROUGH the
+   * section — will look for it. Without this the entry binds top-level, never
+   * matches, and can shadow a main-flow step of the same text.
+   *
+   * Only meaningful with `compile: 'steps'`; the step route rejects it
+   * otherwise, because a whole-test Run & Compile has the real frames.
+   */
+  compileScope?: { section: string };
+  /**
    * Absolute path to the project's skills directory. When supplied, the
    * server runs `expandSkills` over `steps`, flattens `[skill: ...]`
    * invocations, and emits `frame:push` / `frame:pop` events around each
@@ -2487,6 +2504,45 @@ export class SessionManager {
         origins: expansionOrigins ?? effectiveSteps.map((_, i) => ({ inputIndex: i, frameId: '' })),
         frames: expandedFrames,
       };
+    /**
+     * The expansion the GENERATION registry binds through.
+     *
+     * Normally the run's own. For a `compile: 'steps'` request carrying
+     * `compileScope`, the steps came from a `### Section` body but ran
+     * detached at the root frame — so the run's expansion says "top level",
+     * which is not where the runtime will look for the entry. A section frame
+     * of that name is synthesized here and the binder derives file, section
+     * and scope from it exactly as it does for a real one: no special case in
+     * `buildCodeBehindRegistry`, and no second answer to "which `.steps.ts`
+     * does this step bind into".
+     *
+     * `skillName` carries the section's name — that is the field
+     * `resolveDefiningSite` reads a section frame's scope from — and
+     * `parentId: null` keeps the variable scope empty, which is right for a
+     * section of the test's own.
+     */
+    const scopedExpansionFor = (
+      section: string,
+      testFilePath: string,
+    ): Parameters<typeof buildCodeBehindRegistry>[0] => {
+      const frameId = 'compile-scope';
+      return {
+        steps: effectiveSteps,
+        rawSteps: expansionRawSteps,
+        origins: effectiveSteps.map((_, i) => ({ inputIndex: i, frameId })),
+        frames: {
+          [frameId]: {
+            id: frameId,
+            parentId: null,
+            kind: 'section' as const,
+            uri: testFilePath,
+            invocationLine: null,
+            skillName: section,
+          },
+        },
+      };
+    };
+
     // `compile: 'steps'` disables execution the way a Record does — a step
     // whose entry is broken has to run under AI to leave a transcript — but
     // it still needs the bindings, which is what the separate generation
@@ -2507,10 +2563,11 @@ export class SessionManager {
      */
     let generationBindings: CodeBehindRegistry = codeBehind;
     if (request.compile !== undefined && codeBehindOff && request.testFilePath) {
-      generationBindings = await buildCodeBehindRegistry(expansionForBinding(), {
-        testFilePath: request.testFilePath,
-        onWarn: () => {},
-      });
+      const scope = request.compileScope?.section;
+      generationBindings = await buildCodeBehindRegistry(
+        scope ? scopedExpansionFor(scope, request.testFilePath) : expansionForBinding(),
+        { testFilePath: request.testFilePath, onWarn: () => {} },
+      );
     }
 
     /**

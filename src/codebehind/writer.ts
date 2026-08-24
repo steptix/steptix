@@ -274,6 +274,24 @@ export function spliceEntry(
  * same-text steps in different scopes — a main-flow one and a `### Checkout`
  * one — from rewriting each other.
  */
+/**
+ * The text of one entry as it stands in a file — the `{ ... }` span that
+ * binds to (source, section, occurrence).
+ *
+ * The repair prompt needs the code that failed, and the only faithful copy
+ * of it is the author's own file: the loader hands back a live object whose
+ * `run` has been through esbuild, which is not what anyone wrote.
+ * Undefined when the file has no such entry.
+ */
+export function entryTextIn(
+  fileContents: string,
+  source: string,
+  section: string | undefined,
+  occurrence = 0,
+): string | undefined {
+  const span = findEntrySpans(scan(fileContents), source, section)[occurrence];
+  return span ? fileContents.slice(span.start, span.end) : undefined;
+}
 export function findEntrySpans(
   s: Scan,
   source: string,

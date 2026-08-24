@@ -1023,7 +1023,8 @@ Rules — all of them are enforced:
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
 6. **No imports.** Everything you need arrives via the context object.
 7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.
-8. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
+8. **A transcript selector is not evidence that it matches one element.** The recorded actions ran through a visible-only filter and took the first match, so a selector that worked there may match several — while the same selector in generated code is strict and throws on the second one ("resolved to N elements"). Use a handle the DOM above shows to be unique: a role with its accessible name, an \`id\`, a \`data-testid\`. Where the DOM cannot settle it, reproduce the runtime's own tolerance rather than guessing — \`page.locator(sel).locator('visible=true').first()\`.
+9. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
 
 Respond with ONLY the JSON object — no prose around it.`;
 

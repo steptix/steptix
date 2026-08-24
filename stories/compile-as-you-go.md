@@ -169,9 +169,19 @@ Resolving the clicked line:
 - **A `[skill:]` call** resolves the same way, and the entries land in the
   skill's `.steps.ts`, keyed by the skill's authored step text — again where
   a whole-test compile puts them.
+- **A step inside a `### Section` body** resolves to itself, and this is the
+  one case where what the step EXECUTES as and what its entry BINDS to come
+  apart. It runs detached, at the root frame, exactly as Run Step Here runs a
+  body line — nothing about execution changes. But its entry has to carry the
+  section scope, because the runtime reaches that step through the section's
+  frame and will look for it nowhere else. The extension sends the section's
+  name alongside the step (`compileScope`), and the server binds through a
+  section frame of that name.
 - **A multi-line selection** resolves each selected step in order and
   compiles them sequentially — the session advances between steps, so a
-  selection is just this flow k times.
+  selection is just this flow k times. One scope per compile: a selection
+  spanning a body and the main flow, or two different sections, has no single
+  `section:` to stamp and is refused rather than guessed at.
 
 The old refusal ("cannot number a step below a skill or section call") goes
 away entirely. It existed because the pipeline needed expanded step
@@ -301,6 +311,13 @@ the box is no longer reachable from the extension.
   order, into the test's file under the section scope; on a `[skill:]` call,
   into the skill's file.
 - A step below a section or skill call compiles without the old refusal.
+- Compile This Step on a step INSIDE a `### Section` body compiles it: the
+  step runs detached at the root frame, and its entry is written under that
+  section's scope in the test's own file.
+- A selection spanning a section body and the main flow is refused, naming
+  both scopes.
+- A step whose authored text repeats within its scope is refused unless every
+  occurrence is selected — a partial compile cannot number them.
 - A multi-line selection compiles each selected step in order in the live
   session.
 - The step's prior recording is discarded: after the compile, its JSON and
@@ -397,13 +414,12 @@ seen. What that changed in the design:
   a breakpoint holds its diff until Continue finishes rather than interrupting
   the debugging session the breakpoint exists for. A fresh compile discards
   whatever the last one abandoned; so does closing the session.
-- **Section-body lines are refused.** Running one on its own runs it
-  *detached*, at the root frame, so the entry would be written with no section
-  scope — where the runtime, reaching that step through the section's frame,
-  never looks, and where a top-level step of the same text would match it
-  instead. Compile This Step now points at the call line, which compiles the
-  body as a unit. (The acceptance row about "a step below a section or skill
-  call" is about document position, and still works.)
+- **Section-body lines were refused.** Running one on its own runs it
+  *detached*, at the root frame, so the entry was being written with no
+  section scope — where the runtime, reaching that step through the section's
+  frame, never looks, and where a top-level step of the same text would match
+  it instead. **Withdrawn in the follow-up round below**: the refusal was the
+  right diagnosis of the wrong problem, and the case is supported now.
 - **A repeated step is refused too.** `occurrence` is counted within the
   request, so a lone second "Press Enter" is occurrence 0 to the server and
   its entry would land in the FIRST occurrence's slot — replacing code
@@ -434,10 +450,59 @@ it, so block 2's `compile:step` frames were written to a response that had
 already closed. The summary was right and not one frame arrived. `beginBlock`
 now takes the block's stream along with its plan and signal.
 
-Verified by running: root 2881 (vitest, 145 files) including a new HTTP seam
+### What the first real use changed
+
+The author took it for a drive and hit two things. Both were the feature
+being wrong rather than incomplete, and both are fixed.
+
+**A compiled entry failed on its first replay with a strict-mode violation.**
+The recording had clicked `a[href="/login"]` on a page carrying two of them,
+and the generated code translated that selector straight into a bare, strict
+locator. The transcript was never evidence of uniqueness: the AI runtime runs
+*every* selector through `root.locator(sel).locator('visible=true').first()`
+([actions.ts](../src/browser/actions.ts)), so what the recording proves is
+"one visible match was clicked", not "one match exists". Two fixes, because
+the failure had two halves:
+
+- The generate prompt now says so, as a rule of its own: use a handle the
+  provided DOM shows to be unique — a role with its accessible name, an `id`,
+  a `data-testid` — or, where the DOM cannot settle it, reproduce the
+  runtime's own tolerance rather than guessing.
+- **Repair parity.** A step whose entry threw and healed under AI was being
+  regenerated from the *plain* prompt, which knows nothing of the failure — so
+  the model saw the same page and wrote the same broken selector. It goes
+  through `buildRepairPrompt` now, the same one the boxed pipeline's replay
+  rounds use, carrying the code that failed and what it threw. Where that
+  failure comes from depends on the mode, and this is the part the fix had to
+  get right twice: in `'run'` the entry threw during that very run and the
+  failure arrives in band on the step result; in `'steps'` it *cannot*, because
+  code-behind execution is disabled for the request — that is what makes the
+  step re-record under AI — so nothing runs and nothing throws. There the
+  last-run sidecar on disk is the only record of what broke, matched to the
+  step by the same identity the binding uses, and it is what feeds the prompt.
+  The entry's code comes from the author's own file rather than the loaded
+  object, whose `run` has been through esbuild and is not what anyone wrote.
+
+**Compile This Step refused a step inside a `### Section` body** — the refusal
+the review round had added. The diagnosis was right and the conclusion was
+wrong: the problem was that the entry bound top-level while the runtime looks
+under the section, and the fix for that is to bind it under the section, not
+to refuse. So the extension resolves the owning section from its own parse and
+sends it as `compileScope: { section }`, and the server synthesizes a section
+frame of that name for the generation registry alone. Execution is untouched —
+the step still runs detached at the root frame, exactly as Run Step Here runs
+it, and the live test that asserts that is still green. Only the binding
+moves, which is what puts the entry under `section:` in the test's own file
+and what makes the recording's splice identity line up. Two refusals remain,
+both about numbering rather than scope: a partial selection of a repeated
+step, and a selection spanning two scopes.
+
+
+Verified by running: root 2891 (vitest, 145 files) including a new HTTP seam
 suite (`api-server-compile-mode.test.ts`) and a new unit suite
 (`codebehind-live-compile.test.ts`); runner-core 441; testbench-native unit
-225 and integration 200. Live through the extension against
+225 and integration 203; the full live suite 24/24 against
+`fixtures/test-app`, the section-body case included. Live through the extension against
 `fixtures/test-app`: Run & Compile on `compile-codebehind.md` runs the test
 once, generates both entries behind the run, leaves the recording and the
 candidate on disk before anything is applied, paints plain ✓ (not `</>` — the

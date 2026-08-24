@@ -444,3 +444,82 @@ describe('the trailing generation queue', () => {
     expect(await fs.readFile(candidate, 'utf-8')).toContain("source: 'Sign in'");
   });
 });
+
+describe('a step healing a broken entry', () => {
+  /** The entry the runtime loaded and that threw, as it sits in the file. */
+  const BROKEN = [
+    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    'export default defineSteps([',
+    "  { source: 'Sign in', async run(ctx) { await ctx.page.click('a[href=\"/login\"]'); } },",
+    ']);',
+    '',
+  ].join('\n');
+
+  it('regenerates through the repair prompt, showing the model the code and the error', async () => {
+    // The parity the boxed pipeline always had. Without it the plain prompt
+    // sees the same page and writes the same broken selector — which is what
+    // happened live: `a[href="/login"]` resolved to 2 elements.
+    await fs.writeFile(stepsFile, BROKEN, 'utf-8');
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Sign in'], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding('Sign in', { entry: { source: 'Sign in', run: async () => {} } }),
+      result: result(1, 'Sign in', {
+        codeBehindStale: {
+          file: stepsFile,
+          source: 'Sign in',
+          error: 'strict mode violation: locator resolved to 2 elements',
+        },
+      }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('A generated code-behind entry was replayed and it failed');
+    expect(asked[0]).toContain('strict mode violation: locator resolved to 2 elements');
+    // The code that failed, verbatim from the author's file — not a rebuilt
+    // approximation of it.
+    expect(asked[0]).toContain("ctx.page.click('a[href=\"/login\"]')");
+    expect(outcome.summary.compiled).toBe(1);
+  });
+
+  it('a step that is NOT stale still uses the plain generation prompt', async () => {
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Sign in'], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding('Sign in'),
+      result: result(1, 'Sign in'),
+      resolvedParameters: {},
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).not.toContain('A generated code-behind entry was replayed');
+    expect(asked[0]).toContain('## The whole test');
+  });
+
+  it('falls back to plain generation when the failed entry cannot be found', async () => {
+    // The author edited the step text, so nothing in the file binds to it any
+    // more. There is nothing to repair FROM; generating is still right.
+    await fs.writeFile(stepsFile, "export default defineSteps([]);\n", 'utf-8');
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Sign in'], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding('Sign in'),
+      result: result(1, 'Sign in', {
+        codeBehindStale: { file: stepsFile, source: 'Sign in', error: 'boom' },
+      }),
+      resolvedParameters: {},
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    expect(asked[0]).not.toContain('A generated code-behind entry was replayed');
+  });
+});

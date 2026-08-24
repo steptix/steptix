@@ -219,6 +219,20 @@ describe('buildStepCodePrompt', () => {
     expect(text).toContain('https://app.test/dashboard');
   });
 
+  it('warns that a transcript selector proves nothing about uniqueness', () => {
+    // The runtime runs every selector through
+    // `root.locator(sel).locator('visible=true').first()`
+    // (src/browser/actions.ts), so a transcript selector may match several
+    // elements — and the same selector in generated code is strict. Caught
+    // live: a recorded click on `a[href="/login"]` compiled to a bare
+    // locator that threw "resolved to 2 elements" on the next run.
+    const text = contentBlocksToText(
+      buildStepCodePrompt({ rawStepText: 'x', parameters: [], actions: [] }).content,
+    );
+    expect(text).toContain('not evidence that it matches one element');
+    expect(text).toContain('visible-only filter and took the first match');
+    expect(text).toContain("locator('visible=true').first()");
+  });
   it('states the post-condition rule and offers the decline envelope', () => {
     const text = contentBlocksToText(
       buildStepCodePrompt({ rawStepText: 'x', parameters: [], actions: [] }).content,

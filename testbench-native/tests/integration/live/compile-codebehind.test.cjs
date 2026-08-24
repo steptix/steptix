@@ -123,6 +123,9 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
     // The compiled file is this test's output, not a fixture: leaving it would
     // make the next run compile nothing and prove nothing.
     fs.rmSync(stepsFile, { force: true });
+    fs.rmSync(path.resolve(path.dirname(testFile), 'compile-codebehind-section.steps.ts'), {
+      force: true,
+    });
     fs.rmSync(cacheDir, { recursive: true, force: true });
     if (startedApp && testApp) {
       try {
@@ -323,6 +326,61 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
     assert.equal(statuses[STEP_LINES[1]], 'pass', `step 2 should have run, got "${statuses[STEP_LINES[1]]}"`);
 
     await vscode.commands.executeCommand('testbench-native.discardCodeBehind');
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+  });
+
+it('Compile This Step on a section body binds the entry under the section', async () => {
+    // The user hit exactly this and got a refusal. The body step runs
+    // detached at the root frame, as Run Step Here runs it — only the entry's
+    // binding moves under the section, which is where the runtime looks.
+    const sectionMd = path.resolve(path.dirname(testFile), 'compile-codebehind-section.md');
+    const sectionSteps = sectionMd.replace(/\.md$/, '.steps.ts');
+    fs.rmSync(sectionSteps, { force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+
+    const uri = vscode.Uri.file(sectionMd);
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor(
+      'the section fixture becomes the active editor',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
+      15_000,
+    );
+    await waitFor('tracker recognises the test file', () => hooks.tracker.snapshot().isTestFile);
+
+    // Run it plainly first, so the browser is parked on the page the body step
+    // expects — Compile This Step records against wherever the session is.
+    await vscode.commands.executeCommand('testbench-native.restartSession');
+    await sleep(1_000);
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('the AI run starts', () => hooks.isRunning(), 60_000);
+    await waitFor('the AI run finishes', () => !hooks.isRunning(), 240_000);
+
+    // Line 21 is `1. Enter "demo@example.com" in the email field`, inside the
+    // `### Fill the form` body.
+    void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+      lineNumber: 21,
+    });
+    await waitFor('the body-step compile proposes a file', () => hooks.pendingCodeBehind() !== null, 300_000);
+
+    const proposal = hooks.pendingCodeBehind();
+    const proposed = Object.entries(proposal.files);
+    assert.equal(proposed.length, 1, `expected one proposed file, got ${proposed.length}`);
+    const [proposedPath, content] = proposed[0];
+    assert.equal(path.basename(proposedPath), 'compile-codebehind-section.steps.ts');
+    assert.match(content, /source: ['"]Enter "demo@example\.com" in the email field['"]/);
+    // The scope stamp: without it the entry binds top-level and the runtime,
+    // which reaches this step through the section, never matches it.
+    assert.match(content, /section: ['"]Fill the form['"]/);
+    assert.equal(fs.existsSync(sectionSteps), false, 'a compile must not write the file itself');
+
+    // The recording carries the same identity, so a later splice finds it.
+    const sectionRecording = path.join(cacheDir, 'compile-codebehind-section.recording');
+    const step = JSON.parse(fs.readFileSync(path.join(sectionRecording, 'step-01.json'), 'utf-8'));
+    assert.equal(step.section, 'Fill the form');
+    assert.equal(step.source, 'Enter "demo@example.com" in the email field');
+
+    await vscode.commands.executeCommand('testbench-native.discardCodeBehind');
+    fs.rmSync(sectionSteps, { force: true });
     await vscode.commands.executeCommand('testbench-native.restartSession');
   });
 
