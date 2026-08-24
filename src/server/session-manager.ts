@@ -1041,6 +1041,28 @@ export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private config: Config;
 
+  /**
+   * The Map key for a session id.
+   *
+   * TestBench's session ids ARE file paths — `uri.fsPath`, which lower-cases
+   * the drive letter (batch runs append `::run-N`) — while a CLI, MCP or test
+   * caller spells the same file with an uppercase drive. Windows paths are
+   * case-insensitive, so on win32 two spellings of one file must be one
+   * session: without this, `DELETE /sessions/:id` from the other spelling
+   * no-ops and the browser is left behind (observed 2026-08-25 in live-test
+   * cleanup). The same normalisation `compileLockKey` applies, gated the same
+   * way, but only for ids that LOOK like Windows paths (drive-letter or UNC
+   * prefix) — `compile:<uuid>` and arbitrary names stay case-sensitive.
+   *
+   * Every `sessions` / `lastRunInfo` access goes through here; `session.id`
+   * keeps the spelling the session was created with, for logs and events.
+   */
+  private sessionKey(sessionId: string): string {
+    return process.platform === 'win32' && /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(sessionId)
+      ? sessionId.toLowerCase()
+      : sessionId;
+  }
+
   /** Backing store for `runsInFlight()`. See `executeSteps`. */
   private activeRuns = 0;
 
@@ -1153,7 +1175,7 @@ export class SessionManager {
    * 409 / "no pause" diagnostic).
    */
   submitRunControl(sessionId: string, mode: 'continue' | 'into' | 'over' | 'out'): boolean {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session?.pendingRunControl) return false;
     const { resolve } = session.pendingRunControl;
     session.pendingRunControl = null;
@@ -1171,7 +1193,7 @@ export class SessionManager {
    * Returns `true` when the session existed and the flag was set.
    */
   setPauseAtNextTool(sessionId: string, value: boolean): boolean {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session) return false;
     session.pauseAtNextTool = value;
     return true;
@@ -1183,7 +1205,7 @@ export class SessionManager {
    * if no run is awaiting (handler returns 409).
    */
   submitDebuggerAck(sessionId: string): boolean {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session?.pendingDebuggerAck) return false;
     const { resolve } = session.pendingDebuggerAck;
     session.pendingDebuggerAck = null;
@@ -1285,11 +1307,11 @@ export class SessionManager {
     // invocations of the same skill.
     clearSkillCache();
 
-    let session = this.sessions.get(sessionId);
+    let session = this.sessions.get(this.sessionKey(sessionId));
 
     // If session exists but is closed, remove it so a fresh one is created
     if (session && session.status === 'closed') {
-      this.sessions.delete(sessionId);
+      this.sessions.delete(this.sessionKey(sessionId));
       session = undefined;
     }
 
@@ -1363,7 +1385,7 @@ export class SessionManager {
             // that used to mask this. The guard makes the normal/abort paths
             // (already finalized) a no-op; the queue serializes runs, so this
             // run's finally settles before the next run starts. See issue 031.
-            if (!this.lastRunInfo.get(sessionId)?.finalized) {
+            if (!this.lastRunInfo.get(this.sessionKey(sessionId))?.finalized) {
               this.recordLastRun(sessionId, {
                 finalized: true,
                 tokens: {
@@ -1385,7 +1407,7 @@ export class SessionManager {
    * Get the current state of a session. Returns null if the session does not exist.
    */
   async getSession(sessionId: string): Promise<SessionState | null> {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session || session.status === 'closed') {
       return null;
     }
@@ -1450,7 +1472,7 @@ export class SessionManager {
    * SESSION adds — the lookup, and the `status` a tab has no equivalent of.
    */
   async getPageContent(sessionId: string, opts: PageContentOptions): Promise<PageContent | null> {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session || session.status === 'closed') {
       return null;
     }
@@ -1480,7 +1502,7 @@ export class SessionManager {
    * a 404 — the same shape `getPageContent` uses for the same condition.
    */
   activePageFor(sessionId: string): Page | null {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session || session.status === 'closed') return null;
     return session.browserSession.pageTracker.getActive();
   }
@@ -1490,8 +1512,8 @@ export class SessionManager {
    * re-inserting moves the key to the end; we evict the oldest once over the cap.
    */
   private recordLastRun(sessionId: string, info: LastRunInfo): void {
-    this.lastRunInfo.delete(sessionId);
-    this.lastRunInfo.set(sessionId, info);
+    this.lastRunInfo.delete(this.sessionKey(sessionId));
+    this.lastRunInfo.set(this.sessionKey(sessionId), info);
     if (this.lastRunInfo.size > SessionManager.LAST_RUN_INFO_LIMIT) {
       const oldest = this.lastRunInfo.keys().next().value;
       if (oldest !== undefined) this.lastRunInfo.delete(oldest);
@@ -1520,14 +1542,14 @@ export class SessionManager {
    * `executing` because it is: the batch is parked inside it.
    */
   sessionStatus(sessionId: string): 'active' | 'executing' | null {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session || session.status === 'closed') return null;
     return session.status === 'executing' ? 'executing' : 'active';
   }
 
   getLastRun(sessionId: string): LastRunInfo {
     return (
-      this.lastRunInfo.get(sessionId) ?? {
+      this.lastRunInfo.get(this.sessionKey(sessionId)) ?? {
         finalized: false,
         tokens: { total: 0, input: 0, output: 0 },
       }
@@ -1553,7 +1575,7 @@ export class SessionManager {
       .effective;
     if (sessionId === undefined) return { server: serverBase, session: null };
 
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session || session.status === 'closed') return null;
 
     // The last run's resolution is the truthful answer for a session that has
@@ -1790,7 +1812,7 @@ export class SessionManager {
   }
 
   async closeSession(sessionId: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session) return;
     // Before the browser goes: an open compile has a queue running, and the
     // session is the only thing that still knows about it.
@@ -1837,7 +1859,7 @@ export class SessionManager {
     }
 
     session.status = 'closed';
-    this.sessions.delete(sessionId);
+    this.sessions.delete(this.sessionKey(sessionId));
     logger.info(`Session "${sessionId}" closed and removed`);
   }
 
@@ -1945,7 +1967,7 @@ export class SessionManager {
         deadSectionsReported: new Set<string>(),
       };
 
-      this.sessions.set(sessionId, session);
+      this.sessions.set(this.sessionKey(sessionId), session);
       return session;
     } catch (err) {
       logger.warn(
@@ -2023,7 +2045,7 @@ export class SessionManager {
     // stale entry immediately and wins the race against this run's own record).
     // getLastRun returns finalized:false for a missing entry, so the client
     // keeps polling until THIS run finalizes. See issue 030.
-    this.lastRunInfo.delete(sessionId);
+    this.lastRunInfo.delete(this.sessionKey(sessionId));
     const results: StepResultResponse[] = [];
     /** Full StepResult records accumulated across this request — used to
      *  generate the per-run HTML report at the end. */
@@ -4123,7 +4145,7 @@ export class SessionManager {
         if (trackerEmpty || isBrowserClosed(session.browserSession)) {
           logger.info(`Session "${sessionId}": browser closed by step, removing session`);
           session.status = 'closed';
-          this.sessions.delete(sessionId);
+          this.sessions.delete(this.sessionKey(sessionId));
           break;
         }
       }
