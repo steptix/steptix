@@ -760,6 +760,10 @@ export function createApiServer(
           return;
         }
         request.compile = body.compile;
+        // Blocks 2..n of a split run (an `[input:]`/`[interactive]` step, or
+        // a breakpoint that left Continue to send the rest). On the
+        // allow-list for the same reason `compile` is.
+        if (body.compileContinues === true) request.compileContinues = true;
       }
       // Re-run-with-variables fields (testbench "re-run a skill step"):
       // `seedScope` injects captured/runtime vars before the run; `startAt`

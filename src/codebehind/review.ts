@@ -151,8 +151,12 @@ export async function reviewCandidate(
   candidate: Candidate,
   input: ReviewCandidateInput,
   emit: (message: string) => void,
+  /** Which of the candidate's files to review. Defaults to all of them; the
+   *  live path narrows it to the ones a block actually changed, so a run split
+   *  across several requests does not re-review what it already passed. */
+  files: string[] = candidate.touchedFiles(),
 ): Promise<void> {
-  for (const file of candidate.touchedFiles()) {
+  for (const file of files) {
     const before = candidate.contentOf(file);
     if (before === undefined) continue;
     let revised: string;

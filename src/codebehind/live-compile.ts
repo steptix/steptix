@@ -87,19 +87,31 @@ export interface LiveCompileOptions {
    * for step 1 as for step 9, and what step 9 will turn out to need is not
    * known when step 1 is generated.
    */
-  plan: Array<{ text: string; inScope: boolean }>;
-  /** 1-based source line per 0-based expanded index, for the gutter. */
-  sourceLines?: (number | undefined)[] | undefined;
-  /** The run's abort signal. A stop skips generations not yet started. */
+  plan: PlanEntry[];
+  /** The run's abort signal. A stop skips generations not yet started.
+   *  Replaced per block by `beginBlock` — a retained compiler outlives the
+   *  request that created it, and block 1's signal is spent by then. */
   signal?: AbortSignal | undefined;
   emit: (event: LiveCompileStepEvent) => void;
   /** Something the author should know that belongs to no step. */
   note?: ((message: string, level: 'info' | 'warn') => void) | undefined;
 }
 
+/** One expanded step, as the compile sees it. */
+export interface PlanEntry {
+  /** The step's authored text — what an entry's `source` must match. */
+  text: string;
+  /** Whether this compile means to write an entry for it (the whole-test
+   *  prompt's scope marking). */
+  inScope: boolean;
+  /** 1-based source line, for the gutter and the run log. */
+  line?: number | undefined;
+}
+
 /** One finished step, offered to the compiler as the run moves on. */
 export interface LiveStepInput {
-  /** 0-based expanded index. */
+  /** 0-based expanded index WITHIN THE CURRENT BLOCK. The compiler adds the
+   *  block's offset to get the step's place in the whole run. */
   index: number;
   /** The step's code-behind binding, from the generation registry. */
   binding?: CodeBehindBinding | undefined;
@@ -177,10 +189,93 @@ export class LiveCompiler {
   private kept = 0;
   private keptAiExisting = 0;
   private errors = 0;
-  /** The most recent parameter snapshot, for the review's leak guard. */
-  private parameters: Record<string, string> = {};
+  /** Every parameter value the run resolved, merged across steps, for the
+   *  review's leak guard. */
+  private readonly parameters: Record<string, string> = {};
+  /**
+   * The whole run's steps, growing a block at a time.
+   *
+   * A logical run reaches the server as several requests whenever it is split
+   * — an `[input:]` or `[interactive]` step between two stretches of steps, or
+   * a breakpoint that ends one batch and leaves Continue to send the next. The
+   * compiler is retained on the session across those, so the candidate is one
+   * file the entries accumulate into rather than a fresh read of the
+   * (unapplied) file per block, and so step numbers stay the run's own.
+   */
+  private plan: PlanEntry[];
+  /** Where the CURRENT block's step 0 sits in `plan`. */
+  private offset = 0;
+  /** This block's abort signal (block 1's is spent by block 2's time). */
+  private signal: AbortSignal | undefined;
+  /**
+   * Where this block's frames go.
+   *
+   * Per block for the same reason the signal is: a retained compiler outlives
+   * the request that created it, and block 1's `emit` writes to an SSE stream
+   * that closed when block 1 answered. Caught by the split-run seam test,
+   * which saw a correct summary and not one `compile:step` frame.
+   */
+  private emit: (event: LiveCompileStepEvent) => void;
+  private note: ((message: string, level: 'info' | 'warn') => void) | undefined;
+  /** Set by `dispose`: skip generations not yet started and propose nothing. */
+  private disposed = false;
+  /** Content last handed to the reviewer, per file, so a second block does
+   *  not pay to review a file it did not change. */
+  private readonly reviewed = new Map<string, string>();
 
-  constructor(private readonly options: LiveCompileOptions) {}
+  constructor(private readonly options: LiveCompileOptions) {
+    this.plan = [...options.plan];
+    this.signal = options.signal;
+    this.emit = options.emit;
+    this.note = options.note;
+  }
+
+  /**
+   * Start another block of the same logical run: extend the plan with the
+   * steps this request carries and take its abort signal. Returns nothing —
+   * the offset is the compiler's own business.
+   */
+  beginBlock(
+    plan: PlanEntry[],
+    signal?: AbortSignal | undefined,
+    stream?: {
+      emit: (event: LiveCompileStepEvent) => void;
+      note?: ((message: string, level: 'info' | 'warn') => void) | undefined;
+    },
+  ): void {
+    this.offset = this.plan.length;
+    this.plan.push(...plan);
+    this.signal = signal;
+    if (stream) {
+      this.emit = stream.emit;
+      this.note = stream.note;
+    }
+  }
+
+  /** How many steps of this run the compiler has seen, blocks included. Used
+   *  by the caller to number the next block's steps and its recording. */
+  get stepsSoFar(): number {
+    return this.plan.length;
+  }
+
+  /** The offset the current block started at. */
+  get blockOffset(): number {
+    return this.offset;
+  }
+
+  /**
+   * Abandon the compile without a result.
+   *
+   * The queue is the reason this exists: it is spending model calls on the
+   * caller's behalf, and a run that threw between "the compiler exists" and
+   * "the compiler is finished" would leave it doing that with nobody left to
+   * receive the answer. Skips generations not yet started and waits for the
+   * one in flight, whose call is already paid for.
+   */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    await this.tail.catch(() => {});
+  }
 
   /** True when at least one step is queued or already generated. */
   get attempted(): number {
@@ -193,7 +288,15 @@ export class LiveCompiler {
    * say how many were kept as code and how many were already AI.
    */
   offer(input: LiveStepInput): void {
-    const text = input.binding?.source ?? this.options.plan[input.index]?.text ?? input.result.instruction;
+    // Merged across EVERY offered step, eligible or not, and before the
+    // refusal below returns. The review's leak guard is a whole-file check —
+    // a rewrite can move a literal into any entry — so it has to see every
+    // value the run resolved, not the last eligible step's snapshot. A step
+    // that captured a password and was then skipped as "ran as code" still
+    // put that password in the run's scope.
+    Object.assign(this.parameters, input.resolvedParameters);
+    const at = this.offset + input.index;
+    const text = input.binding?.source ?? this.plan[at]?.text ?? input.result.instruction;
     const refusal = generationRefusal({
       binding: input.binding,
       text,
@@ -207,10 +310,9 @@ export class LiveCompiler {
       logger.debug(`Compile-as-you-go skipped step ${input.index + 1}: ${refusal}`);
       return;
     }
-    this.parameters = input.resolvedParameters;
     const step: CompileStep = {
-      index: input.index,
-      number: input.index + 1,
+      index: at,
+      number: at + 1,
       text,
       binding: input.binding,
       key: entryKeyOf(input.binding!),
@@ -228,7 +330,7 @@ export class LiveCompiler {
         this.errors++;
         const message = err instanceof Error ? err.message : String(err);
         logger.warn(`Code-behind generation threw for step ${step.number}: ${message}`);
-        this.options.note?.(
+        this.note?.(
           `Code-behind generation failed for step ${step.number}: ${message}. ` +
             'The step stays AI; nothing was written for it.',
           'warn',
@@ -237,8 +339,8 @@ export class LiveCompiler {
   }
 
   private stepEvent = (phase: CompilePhase, step: CompileStep, message: string): void => {
-    const line = this.options.sourceLines?.[step.index];
-    this.options.emit({
+    const line = this.plan[step.index]?.line;
+    this.emit({
       type: 'compile:step',
       phase,
       step: step.number,
@@ -251,7 +353,7 @@ export class LiveCompiler {
     // A stopped run skips what has not started. The in-flight one finishes:
     // its model call is already paid for, and its entry is work the author
     // asked for.
-    if (this.options.signal?.aborted) {
+    if (this.disposed || this.signal?.aborted) {
       this.skippedByStop.push(step.number);
       return;
     }
@@ -265,7 +367,7 @@ export class LiveCompiler {
       contextContent: this.options.contextContent,
       testName: this.options.testName,
       ...(this.options.baseUrl !== undefined && { baseUrl: this.options.baseUrl }),
-      wholeTest: this.options.plan.map((p, i) => ({
+      wholeTest: this.plan.map((p, i) => ({
         index: i + 1,
         text: p.text,
         inScope: p.inScope,
@@ -285,7 +387,7 @@ export class LiveCompiler {
       // deliberately does not.)
       this.errors++;
       this.stepEvent('generate', step, `no entry: ${applied.message}`);
-      this.options.note?.(
+      this.note?.(
         `Code-behind generation failed for step ${step.number}: ${applied.message}. ` +
           'The step stays AI; nothing was written for it.',
         'warn',
@@ -303,27 +405,41 @@ export class LiveCompiler {
       logger.warn(`Code-behind generation queue failed: ${String(err)}`);
     });
 
-    if (this.options.mode === 'run' && !final.aborted && this.candidate.touchedFiles().length > 0) {
+    // A split run finishes once per block, so the reviewer would otherwise be
+    // asked to re-read a file it has already passed. It only sees a file whose
+    // content has actually changed since it last saw it.
+    const unreviewed = this.candidate
+      .touchedFiles()
+      .filter((f) => this.reviewed.get(f) !== this.candidate.contentOf(f));
+    if (this.options.mode === 'run' && !final.aborted && unreviewed.length > 0) {
       await reviewCandidate(
         this.candidate,
         {
           markdownName: path.basename(this.options.testFilePath),
-          steps: this.options.plan.map((p) => p.text),
+          steps: this.plan.map((p) => p.text),
           guarded: this.guardedValues(),
           aiClient: this.options.aiClient,
-          ...(this.options.signal && { signal: this.options.signal }),
+          ...(this.signal && { signal: this.signal }),
         },
         (message) => {
-          this.options.emit({
+          this.emit({
             type: 'compile:step',
             phase: 'review',
             step: 0,
             message,
           });
         },
+        unreviewed,
       );
+      for (const file of unreviewed) {
+        const after = this.candidate.contentOf(file);
+        if (after !== undefined) this.reviewed.set(file, after);
+      }
     }
-    await this.candidate.persist();
+    // The candidate on disk, and where it went: the notification's "Open
+    // candidate" action exists for exactly this path, and a summary that never
+    // carried it left the button with nothing to open.
+    const candidatePath = await this.candidate.persist();
 
     const files = this.candidate.changedFiles();
     const notAttempted = [...new Set([...(final.notAttempted ?? []), ...this.skippedByStop])].sort(
@@ -332,7 +448,7 @@ export class LiveCompiler {
     const nothingToDo = this.attempted === 0 && final.stoppedAt === undefined && !final.aborted;
     const summary: CompileSummary = {
       test: this.options.testFilePath,
-      totalSteps: this.options.plan.length,
+      totalSteps: this.plan.length,
       compiled: this.compiled.length,
       kept: this.kept,
       keptAi: this.keptAiExisting + this.declined.length,
@@ -345,6 +461,7 @@ export class LiveCompiler {
       writtenOffAi: [],
       notAttempted,
       recordingDir: recordingDirFor(this.options.testFilePath),
+      ...(candidatePath !== undefined && { candidatePath }),
       ...(final.stoppedAt && { stoppedAt: final.stoppedAt }),
       ...(this.errors > 0 && {
         error: `${this.errors} step(s) could not be generated; they stay AI`,
@@ -368,7 +485,7 @@ export class LiveCompiler {
     const envData = this.options.envData;
     if (!envData) return out;
     const seen = new Set<string>();
-    for (const { text } of this.options.plan) {
+    for (const { text } of this.plan) {
       for (const ref of envDataRefsIn(text)) {
         if (seen.has(ref)) continue;
         seen.add(ref);

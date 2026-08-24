@@ -60,6 +60,13 @@ export interface RecordedStep {
   /** Section scope of the step's entry, part of the splice identity. */
   section?: string;
   /**
+   * 0-based occurrence of this (section, source) pair within its frame — the
+   * third part of the splice identity. A section body that says "Press Enter"
+   * twice yields two steps identical in every other way, and without this a
+   * splice of the second would overwrite the first.
+   */
+  occurrence?: number;
+  /**
    * When THIS step's files were written. A wholesale recording stamps them
    * all the same; a splice stamps only the step it replaced, so the author
    * can see that step 3's recording is from Tuesday and step 7's from just
@@ -100,7 +107,12 @@ export interface RecordingInput {
    * code-behind bindings. Stamped onto each step so a later splice can find
    * it by identity rather than by position.
    */
-  identities?: Record<number, { source: string; section?: string | undefined }> | undefined;
+  identities?:
+    | Record<
+        number,
+        { source: string; section?: string | undefined; occurrence?: number | undefined }
+      >
+    | undefined;
 }
 
 const DIR_SUFFIX = '.recording';
@@ -179,7 +191,7 @@ async function writeRecordedStep(
     at: number;
     secrets: string[];
     recordedAt: string;
-    identity?: { source: string; section?: string | undefined };
+    identity?: { source: string; section?: string | undefined; occurrence?: number | undefined };
   },
 ): Promise<RecordedStep> {
   const { at, secrets, recordedAt, identity } = options;
@@ -203,6 +215,7 @@ async function writeRecordedStep(
     instruction: redact(result.instruction, secrets),
     ...(identity?.source !== undefined && { source: redact(identity.source, secrets) }),
     ...(identity?.section !== undefined && { section: identity.section }),
+    ...(identity?.occurrence !== undefined && { occurrence: identity.occurrence }),
     recordedAt,
     status: result.status,
     ...(result.error !== undefined && { error: redact(result.error, secrets) }),
@@ -230,11 +243,25 @@ async function writeRecordedStep(
   return step;
 }
 
-/** The identity a splice matches a recorded step by: section scope + the
- *  authored text, falling back to the executed instruction for a recording
- *  written before `source` existed. */
-function identityKey(step: { source?: string; instruction: string; section?: string }): string {
-  return `${step.section ?? ''}${String.fromCharCode(0)}${(step.source ?? step.instruction).trim()}`;
+/**
+ * The identity a splice matches a recorded step by: section scope, the
+ * authored text, and the occurrence of that pair within its frame — the same
+ * three parts the code-behind binding uses, so a spliced step lands in the
+ * slot the runtime would bind to.
+ *
+ * Falls back to the executed instruction for a recording written before
+ * `source` existed, and to occurrence 0 for one written before `occurrence`
+ * did: a mixed-provenance dir still splices, it just cannot tell two
+ * identical pre-existing steps apart — which is what it could never do.
+ */
+function identityKey(step: {
+  source?: string;
+  instruction: string;
+  section?: string;
+  occurrence?: number;
+}): string {
+  const nul = String.fromCharCode(0);
+  return [step.section ?? '', (step.source ?? step.instruction).trim(), step.occurrence ?? 0].join(nul);
 }
 
 /**
@@ -286,6 +313,7 @@ export async function spliceRecording(
         instruction: result.instruction,
         ...(identity?.source !== undefined && { source: identity.source }),
         ...(identity?.section !== undefined && { section: identity.section }),
+        ...(identity?.occurrence !== undefined && { occurrence: identity.occurrence }),
       });
       const bucket = unclaimed.get(key);
       const at = bucket && bucket.length > 0 ? bucket.shift()! : nextFree++;

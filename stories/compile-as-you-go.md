@@ -374,10 +374,70 @@ Two things the build found that the story had not settled:
   when step 1 is generated. It is decided statically from the registry: a step
   with no entry, and every sent step in `'steps'` mode.
 
-Verified by running: root 2870 (vitest, 145 files) including a new HTTP seam
+### What the review round changed
+
+A review pass over the first build found eight things. Six were real and are
+fixed; two were real and turned out to have a companion the reviewer had not
+seen. What that changed in the design:
+
+- **A split run keeps ONE compiler.** The biggest of them. A logical run
+  reaches the server as several requests whenever an `[input:]` or
+  `[interactive]` step splits it, or a breakpoint ends one batch and leaves
+  Continue to send the rest. Each block was getting its own compiler: its own
+  candidate, read from a `.steps.ts` nobody had applied yet; its own step
+  numbering from 1; and its own wholesale recording write that deleted the
+  block before it. The author silently got a diff for the tail of their test.
+  The compiler is now retained on the session (`ManagedSession.liveCompile`)
+  and every block after the first says so on the wire
+  (`StepRequest.compileContinues`). Each block still finishes — drains,
+  reviews what it changed, and emits `compile:result` — but the result it
+  emits is the accumulated one, so the last block's answer is the fullest and
+  a run that dies half way still proposes what it got. Continue inherits the
+  compile mode of the run it is continuing, and a Run & Compile that parks at
+  a breakpoint holds its diff until Continue finishes rather than interrupting
+  the debugging session the breakpoint exists for. A fresh compile discards
+  whatever the last one abandoned; so does closing the session.
+- **Section-body lines are refused.** Running one on its own runs it
+  *detached*, at the root frame, so the entry would be written with no section
+  scope — where the runtime, reaching that step through the section's frame,
+  never looks, and where a top-level step of the same text would match it
+  instead. Compile This Step now points at the call line, which compiles the
+  body as a unit. (The acceptance row about "a step below a section or skill
+  call" is about document position, and still works.)
+- **A repeated step is refused too.** `occurrence` is counted within the
+  request, so a lone second "Press Enter" is occurrence 0 to the server and
+  its entry would land in the FIRST occurrence's slot — replacing code
+  generated from a different step. Measured, not assumed: the same step list
+  gives occurrences `[0, 0, 1]` whole and `0` alone. Run & Compile sends the
+  whole test and numbers them correctly, so that is what the refusal points
+  at. The recording's splice identity gained `occurrence` for the same reason,
+  which is what makes a section body that says the same thing twice splice
+  correctly.
+- **The generation queue is disposable.** `finish` was the only exit, and a
+  run that threw between "the compiler exists" and "the compiler is finished"
+  left the queue spending model calls with nobody to receive them. There is a
+  `dispose` now — skip what has not started, let the in-flight call settle,
+  propose nothing — wired to the run's `catch`, to session close, and to a
+  fresh compile superseding an abandoned one.
+- Four smaller ones: the proposal is no longer wiped by a second Run & Compile
+  that the in-progress guard turns away (the reset moved behind the guard, and
+  a token decides which call may claim the result); a stop with nothing
+  generated no longer logs "every step already has code-behind", which is the
+  opposite of what happened; `summary.candidatePath` is populated, so the
+  notification's **Open candidate** has something to open; and the review's
+  leak guard now sees every parameter the run resolved rather than the last
+  eligible step's snapshot.
+
+And one the fix round's own test found, which no reviewer had: a retained
+compiler's `emit` still pointed at the SSE stream of the block that created
+it, so block 2's `compile:step` frames were written to a response that had
+already closed. The summary was right and not one frame arrived. `beginBlock`
+now takes the block's stream along with its plan and signal.
+
+Verified by running: root 2881 (vitest, 145 files) including a new HTTP seam
 suite (`api-server-compile-mode.test.ts`) and a new unit suite
 (`codebehind-live-compile.test.ts`); runner-core 441; testbench-native unit
-225 and integration 194. Live through the extension against
+225 and integration 200. Live through the extension against
 `fixtures/test-app`: Run & Compile on `compile-codebehind.md` runs the test
 once, generates both entries behind the run, leaves the recording and the
 candidate on disk before anything is applied, paints plain ✓ (not `</>` — the

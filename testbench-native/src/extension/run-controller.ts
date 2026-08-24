@@ -235,8 +235,20 @@ export function compileLogLine(event: CompileEvent): string | null {
 export function compileResultLine(event: CompileResultEvent): string {
   const summary = event.summary;
   const name = path.basename(summary.test);
-  if (summary.compiled === 0 && summary.keptAi === 0 && !summary.stoppedAt) {
+  const nothingHappened =
+    summary.compiled === 0 && summary.keptAi === 0 && !summary.stoppedAt;
+  // "Every step already has code-behind" is only true when the run reached
+  // every step. Stopped with nothing generated, it is a lie — and the one the
+  // author most needs not to be told, because it says the opposite of what
+  // happened.
+  if (nothingHappened && summary.notAttempted.length === 0) {
     return `✓ Nothing to compile in ${name} — every step already has code-behind.`;
+  }
+  if (nothingHappened) {
+    return (
+      `✗ Compiled nothing in ${name}: the run stopped before any step produced an entry ` +
+      `(${summary.notAttempted.length} step(s) not attempted).`
+    );
   }
   const parts = [`${summary.compiled} step(s) as code (unproven — the next run proves them)`];
   if (summary.keptAi > 0) parts.push(`${summary.keptAi} kept AI`);
@@ -318,6 +330,22 @@ export class RunController {
    *  stream folds and attached to the outcome by `runLines`. Reset per run,
    *  so a plain Run after a Run & Compile never carries the old proposal. */
   private compileResult: CompileOutcome | undefined;
+  /** Bumped by every call that gets PAST the `isRunning` guard. `runLines`
+   *  compares it to decide whether the proposal on the field is this call's
+   *  to claim — see the wrapper. */
+  private compileToken = 0;
+  /** The compile mode of the logical run in progress, so a Continue after a
+   *  breakpoint keeps compiling rather than silently becoming a plain Run. */
+  private compileModeOfRun: 'run' | 'steps' | undefined;
+  /**
+   * Did the run that just finished park at a breakpoint (or a pause)?
+   *
+   * Read by Run & Compile to decide whether to open the diff yet: a parked run
+   * has not finished compiling, and its proposal is about to grow. Recorded
+   * here rather than read back off the tracker's snapshot, which derives its
+   * own `breakpointStop` from state a failed run can also leave behind.
+   */
+  private parkedAtPause = false;
   private pendingPrompt: { resolve: (text: string | null) => void } | null = null;
   /** Set by pause() so the abort handler knows to mark a resume point
    *  rather than treating the abort as a full Stop. */
@@ -524,6 +552,13 @@ export class RunController {
 
   get isRunning(): boolean {
     return this.active !== null;
+  }
+
+  /** Did the run that just finished park at a breakpoint or a pause? A parked
+   *  compile has not finished — Continue sends the rest of the test, and the
+   *  proposal it produces is the one to show. */
+  get isParkedAtPause(): boolean {
+    return this.parkedAtPause;
   }
 
   get lastEnvPath(): string | null {
@@ -1390,8 +1425,14 @@ export class RunController {
    * Compile can never hand back yesterday's proposal.
    */
   async runLines(...args: Parameters<RunController['runLinesInner']>): Promise<RunOutcome> {
-    this.compileResult = undefined;
+    // The token, not a reset, is what makes this safe. A second call that the
+    // `isRunning` guard turns away must neither wipe the in-flight run's
+    // proposal (it used to, resetting before the guard) nor claim it as its
+    // own. Only a call that actually STARTED a run bumps the token, and only
+    // such a call reads the field.
+    const tokenBefore = this.compileToken;
     const outcome = await this.runLinesInner(...args);
+    if (this.compileToken === tokenBefore) return outcome;
     return this.compileResult === undefined ? outcome : { ...outcome, compile: this.compileResult };
   }
 
@@ -1462,6 +1503,11 @@ export class RunController {
     if (this.isRunning) {
       return { ok: false };
     }
+    // Past the guard: this call owns the compile slot for the run it is about
+    // to start. Reset here rather than in the wrapper, so a call the guard
+    // turned away cannot wipe the proposal of the run that turned it away.
+    this.compileToken += 1;
+    this.compileResult = undefined;
 
     // Clear any stale pause indicator IMMEDIATELY — synchronously, before
     // we do any async env-file work. If we waited until after env resolution
@@ -1469,6 +1515,7 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
+    this.parkedAtPause = false;
 
     // A new run — including a Resume — supersedes any paused state, so the
     // keep-alive that was pinning the server through the pause is done.
@@ -1747,6 +1794,7 @@ export class RunController {
       // indicator now and treat it as a successful "paused at start"
       // outcome.
       if (pausedAt !== null) {
+        this.parkedAtPause = true;
         this.post({
           type: 'breakpointStop',
           line: pausedAt,
@@ -1844,6 +1892,21 @@ export class RunController {
     // `effectiveEnvName` (resolved above, alongside the env overlay) is the env
     // sent to the server below so its ${env.X} map matches the client overlay.
     const params: Record<string, string> = { ...resolvedParameters };
+    /**
+     * Which compile mode this logical run is in.
+     *
+     * A Continue after a breakpoint is a separate `runLines` call with its own
+     * options, and the author who pressed Run & Compile did not stop wanting a
+     * compile when they hit a breakpoint — so a continuation inherits the mode
+     * of the run it is continuing. Without this the rest of the test ran as a
+     * plain Run and its entries were never generated.
+     */
+    const compileMode =
+      options.compile ?? (options.isContinuation === true ? this.compileModeOfRun : undefined);
+    if (options.isContinuation !== true) this.compileModeOfRun = options.compile;
+    /** Step-blocks already sent in THIS call — the second onwards continues
+     *  the compiler the first opened. */
+    let compileBlocksSent = 0;
     let anyFailed = false;
     const batchMode = options.batchMode === true;
 
@@ -1882,8 +1945,14 @@ export class RunController {
             ...(options.stepMode && { stepMode: options.stepMode }),
             ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
             ...(pendingRerun && { rerun: pendingRerun }),
-            ...(options.compile && { compile: options.compile }),
+            ...(compileMode && { compile: compileMode }),
+            // Blocks 2..n of this call, and every block of a Continue: the
+            // compiler for this run is already open on the session.
+            ...(compileMode && (compileBlocksSent > 0 || options.isContinuation === true) && {
+              compileContinues: true,
+            }),
           });
+          compileBlocksSent++;
           pendingRerun = undefined;
           if (!ok) {
             anyFailed = true;
@@ -1975,6 +2044,7 @@ export class RunController {
       // failure/abort — the user didn't reach the pause point, so the
       // arrow would be misleading.
       if (status === 'passed' && pausedAt !== null) {
+        this.parkedAtPause = true;
         this.post({
           type: 'breakpointStop',
           line: pausedAt,
@@ -2024,6 +2094,7 @@ export class RunController {
               ? root.testLine
               : this.lastStepStartLine ?? firstStepLine;
           if (resumeLine != null) {
+            this.parkedAtPause = true;
             this.post({
               type: 'breakpointStop',
               line: resumeLine,
@@ -2133,8 +2204,11 @@ export class RunController {
     /** Compile the steps this block executes, as it executes them
      *  (stories/compile-as-you-go.md). Rides the ordinary step request. */
     compile?: 'run' | 'steps';
+    /** This block is not the first of its logical run — continue the compile
+     *  already open in the session rather than starting a new one. */
+    compileContinues?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun, compile } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun, compile, compileContinues } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -2210,6 +2284,7 @@ export class RunController {
           return Object.keys(map).length > 0 ? { breakpointsByUri: map } : {};
         })()),
         ...(compile && { compile }),
+        ...(compile && compileContinues && { compileContinues: true }),
       },
       signal,
     );

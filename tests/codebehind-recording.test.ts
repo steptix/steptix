@@ -382,3 +382,48 @@ describe('splicing a single step into an existing recording', () => {
     expect((await readRecording(test))!.manifest.status).toBe('failed');
   });
 });
+
+describe('splicing when a test repeats a step', () => {
+  it('keeps the two occurrences apart — compiling the second leaves the first alone', async () => {
+    // Two identical authored steps at the top level. `section + source` alone
+    // cannot tell them apart, so a splice keyed on that overwrites the FIRST
+    // occurrence's files when the author compiles the second.
+    const test = path.join(dir, 'repeat.md');
+    await writeRecording(test, {
+      steps: [
+        step(1, { instruction: 'Press Enter', pageUrl: 'https://app.test/one' }),
+        step(2, { instruction: 'Type the code' }),
+        step(3, { instruction: 'Press Enter', pageUrl: 'https://app.test/three' }),
+      ],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: {
+        1: { source: 'Press Enter', occurrence: 0 },
+        2: { source: 'Type the code', occurrence: 0 },
+        3: { source: 'Press Enter', occurrence: 1 },
+      },
+    });
+    const before = (await readRecording(test))!;
+
+    await new Promise((r) => setTimeout(r, 5));
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Press Enter', pageUrl: 'https://app.test/spliced' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press Enter', occurrence: 1 } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(3);
+    // The SECOND occurrence took the splice…
+    expect(after.steps[2]!.pageUrl).toBe('https://app.test/spliced');
+    expect(after.steps[2]!.recordedAt).not.toBe(before.steps[2]!.recordedAt);
+    // …and the first is exactly the recording it was.
+    expect(after.steps[0]!.pageUrl).toBe('https://app.test/one');
+    expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
+  });
+});

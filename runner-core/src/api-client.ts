@@ -96,6 +96,17 @@ export interface StreamStepsRequest {
    */
   compile?: 'run' | 'steps';
   /**
+   * This request continues a compile already open in the session, rather than
+   * starting one.
+   *
+   * A logical run is several requests whenever an `[input:]` or
+   * `[interactive]` step splits it, or a breakpoint ends one batch and leaves
+   * Continue to send the rest. Every block after the first sets this, so the
+   * server keeps ONE candidate and one step numbering for the run instead of
+   * giving each block its own and letting the last overwrite the recording.
+   */
+  compileContinues?: boolean;
+  /**
    * Absolute path of the file each step in `steps` was authored in. Parallel
    * to `steps`; defaults to the test file when omitted per-step. Used by the
    * server to attribute frame origins when a request is sent already-expanded

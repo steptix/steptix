@@ -479,6 +479,72 @@ describe('POST /sessions/:id/steps with compile', () => {
     expect(proposed).not.toContain("source: 'Open the dashboard'");
   });
 
+  describe('a run split across several requests', () => {
+    // An `[input:]` or `[interactive]` step, or a breakpoint, ends one batch
+    // and leaves the client to send the rest. Each block used to get its own
+    // compiler: its own candidate read from the (unapplied) file, its own step
+    // numbering from 1, and its own wholesale recording write that deleted the
+    // previous block's. The author got a diff for the tail of their test only.
+    const SPLIT_SESSION = 'compile-split';
+
+    async function block(
+      body: Record<string, unknown>,
+    ): Promise<{ type: string; [k: string]: any }[]> {
+      const res = await fetch(`${baseUrl}/sessions/${SPLIT_SESSION}/steps?stream=1`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, Accept: 'text/event-stream' },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(200);
+      return readSse(res);
+    }
+
+    it('keeps one candidate, one numbering and one recording across the blocks', async () => {
+      await block({ steps: [STEPS[0]!], sourceLines: [4], testFilePath, compile: 'run' });
+      const second = await block({
+        steps: [STEPS[1]!],
+        sourceLines: [5],
+        testFilePath,
+        compile: 'run',
+        compileContinues: true,
+      });
+
+      const generated = second.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+      // Step TWO of the run, on line 5 — not step one all over again.
+      expect(generated.map((f) => [f.step, f.line])).toEqual([[2, 5]]);
+
+      const result = second.find((f) => f.type === 'compile:result')!;
+      // One file carrying BOTH entries: block 2 continued block 1's candidate
+      // instead of re-reading a file nobody has applied yet.
+      expect(result.files[stepsFilePath]).toContain("source: 'Open the dashboard'");
+      expect(result.files[stepsFilePath]).toContain("source: 'Search for the order'");
+      expect(result.summary.compiled).toBe(2);
+      expect(result.summary.totalSteps).toBe(2);
+      expect(result.summary.unproven).toEqual([1, 2]);
+
+      // …and the recording holds both steps, not just the last block's.
+      const recording = await readRecording(testFilePath);
+      expect(recording!.steps.map((s) => s.source)).toEqual([
+        'Open the dashboard',
+        'Search for the order',
+      ]);
+      expect(recording!.manifest.steps).toBe(2);
+    });
+
+    it('a fresh compile supersedes one the previous run abandoned', async () => {
+      await block({ steps: [STEPS[0]!], sourceLines: [4], testFilePath, compile: 'run' });
+      // No `compileContinues`: a new logical run. The abandoned compiler must
+      // be discarded, not continued, or its entries would ride along and its
+      // step numbers would keep climbing.
+      const fresh = await block({ steps: [STEPS[0]!], sourceLines: [4], testFilePath, compile: 'run' });
+      const generated = fresh.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+      expect(generated.map((f) => f.step)).toEqual([1]);
+      const result = fresh.find((f) => f.type === 'compile:result')!;
+      expect(result.summary.totalSteps).toBe(1);
+      expect(result.summary.compiled).toBe(1);
+    });
+  });
+
   it('generates on the session\'s own client, so a runSettings model override covers it too', async () => {
     // The asymmetry this fixes (stories/compile-as-you-go.md §The model): a
     // session's model override applied to the run and not to generation,

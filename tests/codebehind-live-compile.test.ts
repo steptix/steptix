@@ -183,8 +183,7 @@ function compilerFor(
     aiClient: options.client ?? fakeClient().client,
     contextContent: '',
     testName: 'checkout.md',
-    plan: steps.map((text) => ({ text, inScope: true })),
-    sourceLines: steps.map((_, i) => 10 + i),
+    plan: steps.map((text, i) => ({ text, inScope: true, line: 10 + i })),
     ...(options.signal && { signal: options.signal }),
     emit: (event) => events.push(event),
     note: (message) => notes.push(message),
@@ -367,6 +366,72 @@ describe('the trailing generation queue', () => {
     // What did generate is still proposed: a stop composes the way "write
     // what passed" already composes.
     expect(outcome.files[stepsFile]).toContain("source: 'Sign in'");
+  });
+
+  it('carries one candidate and one numbering across a split run\'s blocks', async () => {
+    // A logical run is several requests whenever an `[input:]` step or a
+    // breakpoint splits it. The compiler is retained on the session, so block
+    // 2's entries join block 1's rather than starting a fresh file, and its
+    // steps keep the RUN's numbers rather than restarting at 1.
+    const events: LiveCompileStepEvent[] = [];
+    const compiler = compilerFor(['Sign in', 'Add to cart'], { events });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    const first = await compiler.finish({ tokensUsed: 10 });
+    expect(first.summary.compiled).toBe(1);
+
+    // …and now block 2, as the server hands it over.
+    compiler.beginBlock([{ text: 'Check out', inScope: true, line: 20 }]);
+    compiler.offer({ index: 0, binding: binding('Check out'), result: result(1, 'Check out'), resolvedParameters: {} });
+    const second = await compiler.finish({ tokensUsed: 20 });
+
+    // Block 2's step is step 3 of the run, on ITS line — not step 1 on line 10.
+    const generated = events.filter((e) => e.phase === 'generate').map((e) => [e.step, e.line]);
+    expect(generated).toEqual([[1, 10], [3, 20]]);
+    // One file, both entries: block 2 did not start from the unapplied file.
+    expect(second.summary.compiled).toBe(2);
+    expect(second.files[stepsFile]).toContain("source: 'Sign in'");
+    expect(second.files[stepsFile]).toContain("source: 'Check out'");
+    expect(second.summary.totalSteps).toBe(3);
+    expect(second.summary.unproven).toEqual([1, 3]);
+  });
+
+  it('re-reviews only what a later block changed', async () => {
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Sign in'], { client });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    await compiler.finish({ tokensUsed: 0 });
+    const afterFirst = prompts.filter((p) => /Review a generated/.test(p)).length;
+    expect(afterFirst).toBe(1);
+
+    // A block that generates nothing leaves the file untouched — and the
+    // reviewer, which is a whole-file model call, is not asked again.
+    compiler.beginBlock([{ text: 'Read the total', inScope: false, line: 20 }]);
+    await compiler.finish({ tokensUsed: 0 });
+    expect(prompts.filter((p) => /Review a generated/.test(p)).length).toBe(afterFirst);
+  });
+
+  it('dispose abandons the queue without proposing anything', async () => {
+    // The run threw. The queue is still spending model calls with nobody left
+    // to receive the answer.
+    let calls = 0;
+    const { client } = fakeClient({
+      generate: (prompt) => {
+        calls += 1;
+        const source = /\n\s*source:\s*("(?:[^"\\]|\\.)*")/.exec(prompt);
+        const text = source?.[1] ? (JSON.parse(source[1]) as string) : 'step';
+        return JSON.stringify({ entry: `{ source: ${JSON.stringify(text)}, async run() {} }` });
+      },
+    });
+    const compiler = compilerFor(['Sign in', 'Add to cart', 'Check out'], { client });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    compiler.offer({ index: 1, binding: binding('Add to cart'), result: result(2, 'Add to cart'), resolvedParameters: {} });
+    compiler.offer({ index: 2, binding: binding('Check out'), result: result(3, 'Check out'), resolvedParameters: {} });
+    await compiler.dispose();
+
+    // The in-flight call finishes — it is already paid for — and nothing else
+    // starts. Certainly not all three.
+    expect(calls).toBeLessThan(3);
+    await expect(fs.access(stepsFile)).rejects.toThrow();
   });
 
   it('never writes the .steps.ts — only the gitignored candidate beside it', async () => {

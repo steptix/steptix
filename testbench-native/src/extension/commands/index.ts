@@ -3,13 +3,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   classifyLines,
+  extractSections,
   extractSteps,
   sectionBodyLinesAt,
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
-import type { RunController, SkillDebugContext } from '../run-controller.js';
+import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
 import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
 import { getOutputChannel } from '../output-channel.js';
 import { cacheDirsForTestAllEnvs } from '../cache-paths.js';
@@ -124,6 +125,33 @@ export function registerCommands(
       registry.notifyRunning(false);
     }
 
+    // A run that stopped at a breakpoint has not finished compiling: the
+    // compiler is still open on the session and Continue will send the rest.
+    // Opening a diff now would interrupt the debugging session the breakpoint
+    // exists for, and offer a proposal that is about to grow.
+    if (controller.isParkedAtPause) {
+      vscode.window.setStatusBarMessage(
+        'TestBench: paused at a breakpoint — Continue to finish compiling',
+        5000,
+      );
+      return;
+    }
+    await presentCompile(controller, label, result);
+  };
+
+  /**
+   * Show what a compile-mode run came back with: the diff, and a notification
+   * that says what is in it.
+   *
+   * Separate from `runAndCompile` because Continue reaches here too — a run
+   * paused at a breakpoint finishes on a later `runLines` call, and the fuller
+   * proposal that call produces would otherwise be collected and dropped.
+   */
+  const presentCompile = async (
+    controller: RunController,
+    label: string,
+    result: { ok: boolean; error?: { message: string }; compile?: CompileOutcome },
+  ): Promise<void> => {
     const outcome = result.compile;
     if (!outcome && !result.ok && result.error) {
       // The run never got going — the server was down, the port belongs to
@@ -493,9 +521,20 @@ export function registerCommands(
           return;
         }
         registry.notifyRunning(true);
-        await controller
+        const resumed = await controller
           .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true, isContinuation: true })
           .finally(() => registry.notifyRunning(false));
+        // A Continue inherits the compile mode of the run it is continuing
+        // (see `compileModeOfRun`), so it can be the block that finishes a
+        // Run & Compile. Its proposal is the fullest one — collected and then
+        // dropped, before this.
+        if (resumed.compile && !controller.isParkedAtPause) {
+          await presentCompile(
+            controller,
+            path.basename(controller.document.uri.fsPath),
+            resumed,
+          );
+        }
         return;
       }
 
@@ -659,10 +698,13 @@ export function registerCommands(
             ? target.lineNumber
             : editor.selection.active.line + 1;
         const text = editor.document.getText();
-        if (!isCompilableLine(text, line)) {
-          vscode.window.showWarningMessage(
-            'TestBench: that line is not a step. Put the cursor on a numbered step.',
-          );
+        // Recorded as well as shown: a notification is not readable from the
+        // extension host, and these refusals are the ones a test has to be
+        // able to tell apart from "the request went out".
+        const refusal = compileRefusal(text, line);
+        if (refusal !== null) {
+          registry.lastCompileError = refusal;
+          vscode.window.showWarningMessage(refusal);
           return;
         }
         // A multi-line selection that covers the clicked line compiles every
@@ -825,22 +867,74 @@ function notifyNoActive(): void {
 }
 
 /**
- * Can this line be compiled on its own (stories/compile-as-you-go.md
- * §Compile This Step)?
+ * Why this line cannot be compiled on its own, or null when it can
+ * (stories/compile-as-you-go.md §Compile This Step).
  *
- * A main-flow step, or a step inside a `### Section` body — both are runnable
- * units `resolveRunSelection` knows how to resolve. Prose, headings and blanks
- * are not, and saying so beats the alternative: an unqualified line resolves
- * to "every step at or below it", which would run and compile the tail of the
- * file on a stray right-click.
+ * What is deliberately ALLOWED: a step below a skill or section call, and a
+ * call line itself. This flow sends steps, not step numbers, so the expansion
+ * arithmetic that forced the old refusal has nothing to answer.
  *
- * Note what is deliberately allowed: a step BELOW a skill or section call, and
- * a call line itself. This flow sends steps, not step numbers, so the
- * expansion arithmetic that forced the old refusal has nothing to answer.
+ * What is refused is refused because compiling it would produce a WRONG entry,
+ * not because the feature is missing — see each branch.
  */
-export function isCompilableLine(text: string, line: number): boolean {
+export function compileRefusal(text: string, line: number): string | null {
   const kind = classifyLines(text)[line - 1]?.kind;
-  return kind === 'step' || kind === 'section-step';
+  if (kind === 'section-step') {
+    // Running a body line on its own runs it DETACHED, at the root frame, so
+    // the entry would be written with no section scope — where the runtime,
+    // which reaches that step through the section's frame, never looks. Worse,
+    // a top-level step with the same text would then match it.
+    const owner = sectionOwningLine(text, line);
+    return (
+      'TestBench: a section body compiles as a unit. ' +
+      (owner
+        ? `Compile the "${owner}" call instead — right-click the line that invokes it.`
+        : 'Compile the line that invokes this section instead.')
+    );
+  }
+  if (kind !== 'step') {
+    return 'TestBench: that line is not a step. Put the cursor on a numbered step.';
+  }
+  // A single-step request cannot know it is the SECOND "Press Enter":
+  // occurrence is counted within the request, so the server says 0 and the
+  // entry lands in the first occurrence's slot, silently replacing code
+  // generated from a different step. Run & Compile sends the whole test.
+  const roots = rootFrameSteps(text);
+  const self = roots.find((s) => s.line === line);
+  if (self && roots.filter((s) => s.instruction === self.instruction).length > 1) {
+    return (
+      `TestBench: "${self.instruction}" appears more than once in this test, and a single-step ` +
+      'compile cannot tell which one you mean — the entry would land on the first. ' +
+      'Use Run & Compile.'
+    );
+  }
+  return null;
+}
+
+/**
+ * The main-flow steps that survive expansion as steps of the TEST's own frame
+ * — the population an entry's `occurrence` is counted over.
+ *
+ * A bare section call and a `[skill: ...]` invocation are replaced by their
+ * bodies, which bind inside their own frames, so neither contributes a
+ * root-frame step and neither can collide with one.
+ */
+function rootFrameSteps(text: string): { line: number; instruction: string }[] {
+  const sectionNames = new Set(extractSections(text).map((s) => s.name.trim().toLowerCase()));
+  return extractSteps(text)
+    .map((s) => ({ line: s.line, instruction: s.instruction.trim() }))
+    .filter(
+      (s) =>
+        !/^\[\s*skill\s*:/i.test(s.instruction) && !sectionNames.has(s.instruction.toLowerCase()),
+    );
+}
+
+/** The name of the `### Section` whose body contains `line`, if any. */
+function sectionOwningLine(text: string, line: number): string | null {
+  for (const section of extractSections(text)) {
+    if (section.steps.some((s) => s.line === line)) return section.name;
+  }
+  return null;
 }
 
 /**
