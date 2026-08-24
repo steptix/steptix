@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_CONFIG } from './defaults.js';
-import type { Config, UserConfig } from './types.js';
+import type { AiConfig, Config, UserConfig } from './types.js';
 import { parseBoolEnv } from '../env/loader.js';
 import { readUserRootEnv } from '../env/user-root.js';
 import { logger } from '../utils/logger.js';
@@ -76,6 +76,15 @@ function withEnvDefaults(config: Config): Config {
   const model = process.env['AI_MODEL'];
   if (model !== undefined && model.trim().length > 0) {
     result = { ...result, ai: { ...result.ai, model: model.trim() } };
+  }
+
+  // Reasoning effort for routine steps. Deliberately NOT validated here: the
+  // gateway owns the vocabulary and throws AIGatewayError ('invalid_effort') on
+  // the first call, which the existing AI error path already surfaces. A second
+  // list here would go stale the next time a provider adds a level.
+  const effort = process.env['AI_EFFORT'];
+  if (effort !== undefined && effort.trim().length > 0) {
+    result = { ...result, ai: { ...result.ai, effort: effort.trim() as NonNullable<AiConfig['effort']> } };
   }
 
   const serverApiKey = process.env['AIUI_SERVER_API_KEY'];

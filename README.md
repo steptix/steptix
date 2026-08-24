@@ -773,10 +773,28 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | --- | --- |
 | `AI_API_KEY` | API key for the aiapi gateway. Required. The runner now uses aiapi v2 endpoints. |
 | `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. |
+| `AI_EFFORT` | How hard the model thinks on **routine** steps: `low`, `medium`, `high`, `xhigh`, `max` — plus `none` and `minimal`, but see the warning below before using `none`. Optional — **unset is the default and changes nothing on the wire**. Setting it also raises the routine output cap to 8192, since reasoning tokens count against the same cap. Authoring calls (code-behind generation/review, assertions, failure diagnosis) already run at `high` and are deliberately *not* lowered by this. A level the bound model doesn't support fails on the first AI call with `invalid_effort`. Process-level like `maxInputTokens`, not per-session overridable. |
 | `AIUI_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `aiui serve` generates a machine key at `%LOCALAPPDATA%\aiui\.env` (`~/.aiui/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
 | `APPEND_RUN_HISTORY_TO_TEST_FILE` | `true`/`false`. Append a "Latest runs" section at the bottom of each test `.md` file after it runs, linking to its HTML report (keeps the most recent 10). Default `false`. |
+
+> **Don't set `AI_EFFORT=none` — it is not the cheap option.** Leaving
+> `AI_EFFORT` unset is what saves money. `none` costs *more* and can break runs.
+>
+> Measured on Anthropic Opus 4.8, three runs of the same prompt: unset averaged
+> **91** output tokens, `low` **139**, and `none` **150** — dearer than the
+> setting that actually reasons.
+>
+> Turning thinking off doesn't stop the model reasoning; it moves the reasoning
+> into the **visible reply**. That reply is what the runner parses as a JSON
+> action list, so the model's commentary lands in the middle of the JSON and the
+> step fails to parse. It's a correctness problem, not just a bigger bill — and
+> `responseFormat: {type:'json_object'}` won't save you, because Anthropic
+> ignores it.
+>
+> Want to spend less? Leave it unset. Want a guaranteed floor of reasoning? Use
+> `low`.
 
 > The per-environment data directory is configured via `tests.dataDir` in
 > `aiui.config.json` (default `data`) — **not** an env var. The former
