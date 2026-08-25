@@ -54,6 +54,20 @@ async function up(url) {
   }
 }
 
+/**
+ * Whether two paths name the same file. `path.resolve` normalises separators
+ * but not case, and Windows hands back whatever drive-letter casing the source
+ * used — a proposal keyed `c:\…` against a fixture resolved as `C:\…` would
+ * compare unequal on a case-insensitive filesystem where they are one file.
+ */
+function samePath(a, b) {
+  const left = path.resolve(a);
+  const right = path.resolve(b);
+  return process.platform === 'win32'
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
 describe('TestBench live — compile to code through a subfolder skill', function () {
   this.timeout(600_000);
 
@@ -121,11 +135,15 @@ describe('TestBench live — compile to code through a subfolder skill', functio
   });
 
   after(async () => {
-    // The compiled files are this test's output, not fixtures.
-    fs.rmSync(testStepsFile, { force: true });
-    fs.rmSync(skillStepsFile, { force: true });
-    fs.rmSync(testCacheDir, { recursive: true, force: true });
-    fs.rmSync(skillCacheDir, { recursive: true, force: true });
+    // The compiled files are this test's output, not fixtures. Guarded because
+    // before() may have thrown at the server probe, leaving these undefined —
+    // an ERR_INVALID_ARG_TYPE out of after() would bury the real failure.
+    if (testStepsFile) {
+      fs.rmSync(testStepsFile, { force: true });
+      fs.rmSync(skillStepsFile, { force: true });
+      fs.rmSync(testCacheDir, { recursive: true, force: true });
+      fs.rmSync(skillCacheDir, { recursive: true, force: true });
+    }
     if (startedApp && testApp) {
       try {
         cp.execSync(`taskkill /pid ${testApp.pid} /T /F`, { stdio: 'ignore' });
@@ -174,8 +192,8 @@ describe('TestBench live — compile to code through a subfolder skill', functio
         `${proposed.length}: ${Object.keys(proposal.files).join(', ')}`,
     );
 
-    const testProposal = proposed.find(([p]) => path.resolve(p) === path.resolve(testStepsFile));
-    const skillProposal = proposed.find(([p]) => path.resolve(p) === path.resolve(skillStepsFile));
+    const testProposal = proposed.find(([p]) => samePath(p, testStepsFile));
+    const skillProposal = proposed.find(([p]) => samePath(p, skillStepsFile));
     assert.ok(
       testProposal,
       `one proposed file must be the test's sibling ${testStepsFile}, got ${Object.keys(proposal.files).join(', ')}`,
@@ -205,6 +223,22 @@ describe('TestBench live — compile to code through a subfolder skill', functio
     // Nothing on disk yet — the diff is the whole point.
     assert.equal(fs.existsSync(testStepsFile), false, 'a compile must not write the test file itself');
     assert.equal(fs.existsSync(skillStepsFile), false, 'a compile must not write the skill file itself');
+
+    // The subfolder claim, made before Apply: the compile's own recording of
+    // the skill's proposal sits in the cache dir beside the SKILL, in its
+    // subfolder — not in the test's, and not at skillsDir's root. Every cache
+    // path derives from the binding's file, so this is where a wrong (flat)
+    // derivation would show up first.
+    const skillCandidate = path.join(skillCacheDir, 'enter_email.steps.ts.candidate');
+    assert.ok(
+      fs.existsSync(skillCandidate),
+      `the skill's candidate must be recorded beside the skill file, at ${skillCandidate}`,
+    );
+    assert.equal(
+      fs.readFileSync(skillCandidate, 'utf-8'),
+      skillProposal[1],
+      'the recorded candidate must be the proposal verbatim',
+    );
 
     // ===== Apply =====
     await vscode.commands.executeCommand('testbench-native.applyCodeBehind');
@@ -246,6 +280,15 @@ describe('TestBench live — compile to code through a subfolder skill', functio
     // code-behind outcome — its entry was found beside the skill, imported
     // from the subfolder, and executed.
     await focusFile(skillFile);
+    // The tracker re-keys its statuses to the newly active editor; the active
+    // editor changing is not the same event as that swap landing. Wait for the
+    // skill's own line to carry a status before reading, like the sibling
+    // suite's settled-state waits.
+    await waitFor(
+      `the tracker reports a status for skill line ${SKILL_STEP_LINE}`,
+      () => hooks.tracker.snapshot().statuses.some(([line]) => line === SKILL_STEP_LINE),
+      15_000,
+    );
     const skillStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     assert.ok(
       skillStatuses[SKILL_STEP_LINE] === 'pass-code-behind' || skillStatuses[SKILL_STEP_LINE] === 'pass-stale',

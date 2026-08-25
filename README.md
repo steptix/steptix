@@ -428,6 +428,11 @@ Skills may be grouped into subfolders of that directory and referenced path-qual
 2. [skill: admin/users/create_user role="viewer"]
 ```
 
+Two things worth knowing about how those names resolve:
+
+- **A `[skill: ...]` inside a skill body is resolved against the skills root too**, never against the calling skill's own folder. `[skill: mfa]` written inside `skills/auth/login.md` means `skills/mfa.md`, not `skills/auth/mfa.md` — write `[skill: auth/mfa]` for the sibling. One name always means one file, wherever it is written.
+- **Names are file paths, so they are case-sensitive wherever the filesystem is** (Linux, macOS by default). Windows will happily open `skills/Auth/Login.md` for `[skill: auth/login]`, so a mismatch that works locally can fail in CI. Match the case on disk.
+
 ## Inline Sections
 
 An `### Name` heading **inside `## Steps`** defines a reusable block of steps *within a single test* — an inline skill, without the separate file or the parameter declarations. A step invokes it by writing the section's name as its entire text; the bare name **is** the call.

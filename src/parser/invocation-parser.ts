@@ -36,6 +36,11 @@
 
 export interface ParsedInvocation {
   name: string;
+  /** Zero-based column in the source line where `name`'s first character sits.
+   *  Recorded at read time so callers can point a caret at the name without
+   *  re-deriving the offset with `indexOf` — which finds the wrong occurrence
+   *  when the same text also appears in the call's `label`. */
+  nameColumn: number;
   args: Record<string, string>;
   outputAliases: Record<string, string>;
   /** Text after the closing `]` — preserved for callers that want to log it. */
@@ -185,6 +190,7 @@ export function parseInvocation(
   const scanner = new Scanner(line, prefixIdx + prefix.length, ErrorCls);
   scanner.skipInlineSpace();
 
+  const nameColumn = scanner.pos;
   const name = scanner.readIdentifier({
     allowHyphen: true,
     allowSlash: options.allowSlashInName === true,
@@ -203,6 +209,7 @@ export function parseInvocation(
       scanner.advance();
       return {
         name,
+        nameColumn,
         args,
         outputAliases,
         trailing: scanner.rest(),

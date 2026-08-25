@@ -721,11 +721,20 @@ async function loadSkill(
   name: string,
   envCtx?: EnvDataContext,
 ): Promise<ParsedSkill> {
-  // `name` is the canonical form `parseSkillCall` produced: no leading slash,
-  // no empty segments, and — because the invocation grammar's name class is
-  // `[\w\-/]` — no `.` and no `\`. So a path-qualified name lands in a
-  // subfolder of `skillsDir` and can never traverse out of it; no separate
-  // containment check is needed here.
+  // `name` is the canonical form `parseSkillCall` produced, and containment
+  // rests on BOTH halves of what that function does:
+  //
+  //  - the grammar's name class is `[\w\-/]` — no `.`, no `\` — so a name
+  //    cannot spell `..` and cannot walk upwards;
+  //  - the leading slash is already stripped, without which `path.resolve`
+  //    would read `/auth/login` as an absolute path and escape to the drive
+  //    root instead of landing in `skillsDir`.
+  //
+  // Together those make a path-qualified name land in a subfolder of
+  // `skillsDir`, so no separate containment check is needed here. A symlinked
+  // subdirectory *inside* `skillsDir` can still point elsewhere; that is out of
+  // scope — the skills tree is the project's own code, same trust domain as
+  // the test file that references it.
   const filePath = path.resolve(skillsDir, `${name}.md`);
   // Cache key includes the active envName because skill-level dataSources may
   // resolve to different files per env (e.g. `../data/${envName}.json`). A
@@ -781,10 +790,16 @@ function wrapSkillLoadError(
 }
 
 function validateCall(skill: ParsedSkill, call: SkillCall): void {
+  // `skill.name` is the H1 inside the file; `call.name` is the path-qualified
+  // locator the step wrote. They differ for any skill in a subfolder, and two
+  // subfolders may hold the same H1 (`auth/login.md` and `admin/login.md` are
+  // both `# login`) — so when they differ, name the invocation too. Appended at
+  // the END so the leading `Skill "<H1>" …` phrasing is unchanged.
+  const via = call.name !== skill.name ? ` (invoked as "${call.name}")` : '';
   for (const param of Object.keys(skill.parameters)) {
     if (!(param in call.args)) {
       throw new Error(
-        `Skill "${skill.name}" requires parameter "${param}" but caller did not supply it`,
+        `Skill "${skill.name}" requires parameter "${param}" but caller did not supply it${via}`,
       );
     }
   }
@@ -798,7 +813,7 @@ function validateCall(skill: ParsedSkill, call: SkillCall): void {
   const unknownArgs = Object.keys(call.args).filter((k) => !(k in skill.parameters));
   if (unknownArgs.length > 0) {
     logger.warn(
-      `Skill "${skill.name}" call passes unknown args: ${unknownArgs.join(', ')} (declared: [${Object.keys(skill.parameters).join(', ') || 'none'}])`,
+      `Skill "${skill.name}" call passes unknown args: ${unknownArgs.join(', ')} (declared: [${Object.keys(skill.parameters).join(', ') || 'none'}])${via}`,
     );
   }
 }

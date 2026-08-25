@@ -33,16 +33,25 @@ export function parseSkillCall(line: string): ParsedSkillCall | null {
   // Canonicalise before anything downstream sees the name: the expander's
   // cycle keys, frame `skillName`s and report badges must agree that
   // `/auth/login` and `auth/login` are one skill, so exactly one form
-  // survives parsing. Note the grammar admits no `.` or `\` in the name, so
-  // a path-qualified reference can never traverse out of `skillsDir`.
+  // survives parsing.
+  //
+  // The slash strip is also half of the containment property `loadSkill`
+  // relies on. The grammar admits no `.` and no `\`, so no name can walk
+  // upwards — but a name is fed to `path.resolve(skillsDir, ...)`, and
+  // `path.resolve` treats a leading slash as ABSOLUTE: without this strip,
+  // `/auth/login` would resolve to the drive root on Windows rather than into
+  // `skillsDir`. Grammar plus strip is what makes the resolve safe.
+  //
+  // `''.split('/')` is `['']`, so the `some()` check catches an empty name too.
   const canonical = parsed.name.replace(/^\//, '');
-  if (canonical === '' || canonical.split('/').some((s) => s.length === 0)) {
-    const prefixIdx = line.indexOf('[skill:');
-    const nameCol = line.indexOf(parsed.name, prefixIdx);
+  if (canonical.split('/').some((s) => s.length === 0)) {
     throw new SkillCallSyntaxError(
       `invalid skill name "${parsed.name}": empty path segment (no trailing or doubled '/')`,
       line,
-      nameCol,
+      // The parser's recorded column, not a re-derived `indexOf`: a call whose
+      // label repeats the name (`auth//login [skill: auth//login]`) would put
+      // the caret on the label's copy.
+      parsed.nameColumn,
     );
   }
   return { ...parsed, name: canonical };

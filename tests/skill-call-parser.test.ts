@@ -84,6 +84,9 @@ describe('parseSkillCall — happy path', () => {
     const result = parseSkillCall('[skill: foo]');
     expect(result).toEqual({
       name: 'foo',
+      // 0-based column of `f` in `[skill: foo]` — recorded by the tokenizer so
+      // callers can point a caret at the name without re-deriving the offset.
+      nameColumn: 8,
       args: {},
       outputAliases: {},
       trailing: '',
@@ -280,6 +283,11 @@ describe('parseSkillCall — syntax errors', () => {
     expect(() => parseSkillCall('[skill: /]')).toThrow(/empty path segment/);
   });
 
+  it('throws on a name of nothing but slashes', () => {
+    // The leading-slash strip leaves `/`, whose segments are both empty.
+    expect(() => parseSkillCall('[skill: //]')).toThrow(/empty path segment/);
+  });
+
   it('points the caret at the malformed name', () => {
     const line = '1. [skill: auth//login]';
     try {
@@ -291,6 +299,42 @@ describe('parseSkillCall — syntax errors', () => {
       expect(err.column).toBe(line.indexOf('auth//login'));
     }
   });
+
+  it('points the caret at the invocation, not at a label that repeats the name', () => {
+    // The caret column must come from the tokenizer's recorded position. A
+    // re-derived `line.indexOf(name)` finds the LABEL's copy at column 0 and
+    // decorates the wrong half of the line.
+    const line = 'auth//login [skill: auth//login]';
+    try {
+      parseSkillCall(line);
+      throw new Error('expected throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(SkillCallSyntaxError);
+      const err = e as SkillCallSyntaxError;
+      expect(err.column).toBe(20);
+      expect(line.slice(err.column)).toBe('auth//login]');
+    }
+  });
+});
+
+describe('parseSkillCall — traversal is unlexable', () => {
+  // `loadSkill` does `path.resolve(skillsDir, name + '.md')` with NO containment
+  // check, and is safe only because of two properties: the name grammar admits
+  // no `.` and no `\`, and `parseSkillCall` strips the leading slash before
+  // anything resolves. These pin the first half — every spelling of a traversal
+  // attempt must die at the tokenizer, not reach the filesystem.
+  const traversals = [
+    '[skill: ../x]',       // `.` is not in the name class → no name at all
+    '[skill: a/../b]',     // reads `a/`, stops at `.` → trailing empty segment
+    '[skill: a\\b]',       // `\` is not in the name class → stray character
+    '[skill: C:/x]',       // `:` is not in the name class → stray character
+  ];
+
+  for (const line of traversals) {
+    it(`refuses ${line}`, () => {
+      expect(() => parseSkillCall(line)).toThrow(SkillCallSyntaxError);
+    });
+  }
 
   it('error message includes the source line and a caret', () => {
     const line = '[skill: foo bar=baz]';

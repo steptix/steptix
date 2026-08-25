@@ -18,8 +18,6 @@
  * testbench-native/stories/specs/inline-sections-authoring.md.
  */
 import * as vscode from 'vscode';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import {
   buildSectionIndex,
   isTestFile,
@@ -27,6 +25,7 @@ import {
   sectionNameError,
 } from 'ai-ui-automation-runner-core';
 import { resolveProjectDirs } from './aiui-config.js';
+import { collectSkillNames } from './invocation-target-core.js';
 import {
   computeSectionDiagnostics,
   type PlainDiagnostic,
@@ -88,7 +87,7 @@ export class SectionLinkProvider implements vscode.DocumentLinkProvider {
  * snippet items for the project's skills.
  *
  * Sections sort first (they're the file-local reuse mechanism); skills are a
- * cheap `readdir` and a bonus.
+ * cheap walk of `skillsDir` (see `collectSkillNames`) and a bonus.
  */
 export class SectionCompletionProvider implements vscode.CompletionItemProvider {
   provideCompletionItems(
@@ -146,41 +145,8 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
   private skillNames(docUri: vscode.Uri): string[] {
     const dirs = resolveProjectDirs(docUri);
     if (!dirs?.skillsDir) return [];
-    return collectSkillNames(dirs.skillsDir, '').sort();
+    return collectSkillNames(dirs.skillsDir);
   }
-}
-
-/**
- * Every skill under `dir`, named the way a step must reference it: relative to
- * the skills root, no `.md`, **forward slashes on every platform** — a skill at
- * `skills/auth/login.md` completes as `[skill: auth/login]`, which is exactly
- * what `parseSkillCall` canonicalises to.
- *
- * Each directory read is guarded independently, so one unreadable subfolder
- * costs its own entries and not the whole list.
- */
-function collectSkillNames(dir: string, prefix: string): string[] {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const names: string[] = [];
-  for (const entry of entries) {
-    // Dot-directories are never skills, and `.aiui-codebehind-cache/` — which
-    // sits beside the skill files, recordings and all — would be the bulk of
-    // the walk on every completion request.
-    if (entry.name.startsWith('.')) continue;
-    if (entry.isDirectory()) {
-      names.push(
-        ...collectSkillNames(path.join(dir, entry.name), `${prefix}${entry.name}/`),
-      );
-    } else if (entry.isFile() && entry.name.endsWith('.md')) {
-      names.push(`${prefix}${entry.name.slice(0, -3)}`);
-    }
-  }
-  return names;
 }
 
 // ---------------------------------------------------------------------------
