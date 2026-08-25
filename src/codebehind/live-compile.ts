@@ -478,7 +478,7 @@ export class LiveCompiler {
       };
     }
 
-    const parameters = stepParameters(binding, input.resolvedParameters);
+    const parameters = stepParameters(binding, input.resolvedParameters, this.options.envData);
     const ctx = input.result.stepContext;
     const prompt = buildRepairPrompt({
       rawStepText: step.text,

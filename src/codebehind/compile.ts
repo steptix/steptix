@@ -929,7 +929,7 @@ async function repairStep(
   candidate: Candidate,
   round: { number: number; max: number },
 ): Promise<GeneratedEntry> {
-  const parameters = stepParameters(step.binding!, record.resolvedParameters);
+  const parameters = stepParameters(step.binding!, record.resolvedParameters, options.test.envData);
   // The step passed Generate, so every reference it makes resolved there;
   // the repair sees the same list, and the same guard.
   const envRefs = stepEnvRefs(step.binding!, options.test.envData).resolved;

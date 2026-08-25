@@ -4,6 +4,7 @@ import { buildStepCodePrompt, buildSystemPrompt, formatTestInfo } from '../ai/pr
 import type { AIAction, ChatMessage } from '../ai/types.js';
 import {
   envDataRefsIn,
+  interpolateEnvData,
   resolveEnvDataRef,
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
@@ -125,7 +126,7 @@ export async function generateStepEntry(
   const refused = refuseReason(binding.source, options.actions);
   if (refused) return { kind: 'declined', reason: refused };
 
-  const parameters = stepParameters(binding, options.resolvedParameters);
+  const parameters = stepParameters(binding, options.resolvedParameters, options.envData);
   const { captures } = referencedVariableNames(binding.source);
   const envRefs = stepEnvRefs(binding, options.envData);
   // A reference the run cannot answer is declined before the model is asked:
@@ -133,6 +134,14 @@ export async function generateStepEntry(
   // and the replay would only discover that one round later.
   if (envRefs.unresolved.length > 0) {
     return { kind: 'declined', reason: unresolvedRefsReason(envRefs.unresolved, options.envData) };
+  }
+  // The same rule for a caller ARGUMENT that is an env-data reference: the
+  // frame's `inputs` carry the argument raw (interpolation runs after
+  // expansion), and a mapping the run cannot resolve would put the raw
+  // placeholder in front of the model and the leak guard alike.
+  const unresolvedInputs = unresolvedInputRefs(binding, options.resolvedParameters, options.envData);
+  if (unresolvedInputs.length > 0) {
+    return { kind: 'declined', reason: unresolvedRefsReason(unresolvedInputs, options.envData) };
   }
 
   const prompt = buildStepCodePrompt({
@@ -283,6 +292,7 @@ export function describeGuardedName(name: string): string {
 export function stepParameters(
   binding: CodeBehindBinding,
   resolvedParameters: Record<string, string>,
+  envData?: EnvDataContext | undefined,
 ): Array<{ name: string; value: string }> {
   const { placeholders } = referencedVariableNames(binding.source);
   const out: Array<{ name: string; value: string }> = [];
@@ -292,9 +302,65 @@ export function stepParameters(
     const value = renamed !== undefined
       ? resolvedParameters[renamed]
       : input !== undefined
-        ? interpolate(input, resolvedParameters)
+        ? resolveInputValue(input, resolvedParameters, envData)
         : resolvedParameters[name];
     if (value !== undefined) out.push({ name, value });
+  }
+  return out;
+}
+
+/**
+ * A caller's argument, resolved the way the runtime resolves it: `{{outer}}`
+ * through the live parameter map first, then `${env.X}` / `${data.X}` against
+ * the run's environment.
+ *
+ * The second half exists because the expander captures the argument TEXT and
+ * env-data interpolation runs after expansion without ever walking the
+ * frames' `inputs` — so `[skill: greet username="${data.username}"]` reaches
+ * the binding as the raw placeholder while the transcript typed the value. A
+ * prompt fed the raw text cannot tell the model which name the literal
+ * belongs to, and a leak guard holding the raw text waves the literal
+ * through — the environment-specific value then lands in a committed file,
+ * which is the exact failure the guard exists to stop.
+ *
+ * A reference the context cannot answer is left in place;
+ * `unresolvedInputRefs` reports it and `generateStepEntry` declines over it.
+ */
+function resolveInputValue(
+  input: string,
+  resolvedParameters: Record<string, string>,
+  envData: EnvDataContext | undefined,
+): string {
+  const interpolated = interpolate(input, resolvedParameters);
+  if (!envData || envDataRefsIn(interpolated).length === 0) return interpolated;
+  try {
+    return interpolateEnvData(interpolated, envData);
+  } catch {
+    return interpolated;
+  }
+}
+
+/**
+ * The `${...}` references left unresolved in the step's INPUT-sourced
+ * parameter values — a caller argument like `${data.username}` that this
+ * run's context cannot answer. Scoped to input-sourced names on purpose: a
+ * renamed or bare parameter's VALUE is runtime data, and data that happens
+ * to contain `${...}`-shaped text is not a reference.
+ */
+export function unresolvedInputRefs(
+  binding: CodeBehindBinding,
+  resolvedParameters: Record<string, string>,
+  envData: EnvDataContext | undefined,
+): string[] {
+  const { placeholders } = referencedVariableNames(binding.source);
+  const out: string[] = [];
+  for (const name of placeholders) {
+    if (binding.scope.renames[name] !== undefined) continue;
+    const input = binding.scope.inputs[name];
+    if (input === undefined) continue;
+    for (const ref of envDataRefsIn(resolveInputValue(input, resolvedParameters, envData))) {
+      if (!out.includes(ref)) out.push(ref);
+    }
   }
   return out;
 }
