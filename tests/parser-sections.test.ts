@@ -66,12 +66,15 @@ describe('section capture', () => {
     expect(parsed.sections['s']!.steps).toEqual(['Body', 'Still body']);
   });
 
-  it('treats a #### heading with text as inert prose inside a body', () => {
+  it('a #### heading with text opens an ignored region inside a body', () => {
     const parsed = parseTestContent(
       ['# T', '', '## Steps', '1. One', '', '### S', '1. A', '', '#### Note', '', '2. B'].join('\n'),
     );
-    // The depth-4 heading does not close the body — B still belongs to S.
-    expect(parsed.sections['s']!.steps).toEqual(['A', 'B']);
+    // The depth-4 heading still does not CLOSE the body — S is the only
+    // section, and a later `###` would be what ended it. But B is inert:
+    // nothing under a `####` runs (contract §5 rule 4a).
+    expect(parsed.sections['s']!.steps).toEqual(['A']);
+    expect(parsed.steps).toEqual(['One']);
     expect(Object.keys(parsed.sections)).toEqual(['s']);
   });
 

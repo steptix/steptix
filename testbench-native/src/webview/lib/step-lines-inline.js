@@ -10,6 +10,12 @@
  *     same-or-shallower heading
  *   - it matches `^\s*\d+\.\s+\S` (numbered list item with content)
  *
+ * A numbered item inside an ignored region — one opened by a depth->=4
+ * heading WITH TEXT, per the sections contract §5 rule 4a — is not a step
+ * line here either. Nothing runs those items, so nothing in the panel may
+ * offer to; the host's copy applies the same rule and the copy-parity test
+ * pins the two together.
+ *
  * `extractStepLineIds` returns main-flow AND inline-section body lines, and
  * must keep doing so: the webview paints, anchors and filters by these ids,
  * and a body line is still a line the user can see and click. That is a
@@ -40,13 +46,40 @@ const NO_HOOKS_MARKER = /^\[no-hooks\]\s*/i;
  */
 const SECTION_STEP_RE = /^\d+\.\s+\S/;
 
+/**
+ * 0-based indices inside an ignored region: everything from a depth->=4
+ * heading with text up to the next section heading (a `###` with text, or a
+ * hashes-only line at any depth) or the end of the span.
+ */
+function ignoredLineSet(lines, span) {
+  const out = new Set();
+  if (!span || span.headingDepth !== SECTION_HOST_DEPTH) return out;
+  let ignoring = false;
+  for (let i = span.start; i <= span.end; i++) {
+    const raw = lines[i] || "";
+    if (HASHES_ONLY_RE.test(raw)) {
+      ignoring = false;
+      continue;
+    }
+    const heading = ANY_HEADING_RE.exec(raw);
+    if (heading) {
+      ignoring = heading[1].length >= SECTION_HOST_DEPTH + 2;
+      continue;
+    }
+    if (ignoring) out.add(i);
+  }
+  return out;
+}
+
 /** 1-based line numbers of every step under ## Steps. */
 export function extractStepLineIds(text) {
   const lines = text.split(/\r?\n/);
   const span = findStepsSpan(lines);
   if (!span) return [];
+  const ignored = ignoredLineSet(lines, span);
   const out = [];
   for (let i = span.start; i <= span.end; i++) {
+    if (ignored.has(i)) continue;
     if (STEP_LINE_RE.test(lines[i] || "")) out.push(i + 1);
   }
   return out;
@@ -117,6 +150,7 @@ export function extractSections(text) {
   const span = findStepsSpan(lines, findFrontmatterEnd(lines) + 1);
   if (!span || span.headingDepth !== SECTION_HOST_DEPTH) return [];
 
+  const ignored = ignoredLineSet(lines, span);
   const out = [];
   for (let i = span.start; i <= span.end; i++) {
     const raw = lines[i] || "";
@@ -128,8 +162,9 @@ export function extractSections(text) {
 
     const heading = ANY_HEADING_RE.exec(raw);
     if (heading) {
-      // Depth >= 4 inside the span is inert prose: it neither opens a section
-      // nor closes the body it sits in.
+      // A depth >= 4 heading opens an ignored region: it still neither opens
+      // a section nor closes the body it sits in, but nothing numbered under
+      // it is a step (contract §5 rule 4a).
       if (heading[1].length === SECTION_HOST_DEPTH + 1) {
         out.push({
           name: raw.replace(/^#{3,}\s*/, "").trim(),
@@ -142,6 +177,7 @@ export function extractSections(text) {
 
     // Before the first section heading we are still in the main flow.
     if (out.length === 0) continue;
+    if (ignored.has(i)) continue;
     if (!SECTION_STEP_RE.test(raw)) continue;
 
     const instruction = raw.replace(STEP_PREFIX_RE, "").trim();

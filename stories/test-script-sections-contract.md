@@ -543,11 +543,11 @@ export function chooseCacheHashSource(
 
 ## 5. Line kinds
 
-`LineKind` gains two members:
+`LineKind` gains three members:
 
 ```ts
 export type LineKind =
-  | 'step' | 'section-heading' | 'section-step'
+  | 'step' | 'section-heading' | 'section-step' | 'inert-step'
   | 'frontmatter' | 'heading' | 'prose' | 'blank';
 ```
 
@@ -564,7 +564,16 @@ Classification order inside `classifyLines`, given the Steps span:
 2. blank → `blank`
 3. **in-span and hashes-only** (`/^#{3,}\s*$/`) → `section-heading`, empty name
 4. `ANY_HEADING_RE` match → `section-heading` if in-span and depth is exactly
-   3, else `heading` (depth ≥ 4 in-span is inert prose per the grammar)
+   3, else `heading`. An in-span depth ≥ 4 heading additionally **opens an
+   ignored region** (rule 4a).
+4a. **Ignored regions.** Inside the span, a heading of depth ≥ 4 *with text*
+   opens an ignored region. Every line until the next `section-heading` (a
+   `###` with text, or a hashes-only line at any depth — both open a real
+   section) or the end of the span is inert: a numbered item there is
+   `inert-step`, never `step` and never `section-step`. A further depth ≥ 4
+   heading renews the region. Nothing runs an `inert-step`, in the main flow
+   or in any body, and nothing may address one — no breakpoint, no Run Step
+   Here, no Compile This Step, no gutter affordance.
 5. in-span and `STEP_LINE_RE` → `section-step` if any `section-heading` was
    seen earlier in the span, else `step`
 6. otherwise `prose`
@@ -578,12 +587,27 @@ this feature exists to eliminate.
 **Body attribution.** A hashes-only line at any depth ≥ 3 **both terminates
 the preceding body and opens a new empty-name section.** The grammar's
 "a body runs until the next heading of depth ≤ 3" applies to `ANY_HEADING_RE`
-headings only — which is why an inert `#### With text` does *not* close a body
-(pinned by `classification.md` lines 27→29) while a bare `####` does (pinned by
-`classification-hashes.md`). Consecutive hashes-only lines therefore yield one
-empty-name section each, not one section with a merged body.
+headings only — which is why a `#### With text` does *not* close a body
+(pinned by `classification.md` lines 27→31: `### Cleanup` is still what ends
+Login) while a bare `####` does (pinned by `classification-hashes.md`).
+Consecutive hashes-only lines therefore yield one empty-name section each,
+not one section with a merged body.
 
-Consumer split (runtime spec §3):
+Not closing a body is **not** the same as leaving it in one. A `####` with
+text does not close the body it sits in, and the numbered items beneath it
+still leave it: they are inert (rule 4a). The earlier grammar called such a
+heading "inert prose" and then let its items run — absorbed into the main
+flow when no section was open, and into whichever body was when one was.
+Both were silent. `classification.md` line 29 pins the replacement: it sits
+under the depth-4 heading on line 27, it is an `inert-step`, and it is not
+one of Login's steps.
+
+Consumer split (runtime spec §3). **No consumer on any rung sees an
+`inert-step`** — every one of them dispatches on `step` / `section-step`
+positively, so a distinct kind excludes inert items by construction rather
+than by each caller remembering to. The editor is the one place that must
+still see them, to dim the line and say why it will not run
+(`inertRegionHeading` names the heading responsible).
 
 - **main flow only** — `extractSteps`, `resolveRunLines`,
   `nearestStepAtOrBelow|Above`. These are runner-core's API. `resolveRunLines`
