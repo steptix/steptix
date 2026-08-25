@@ -245,3 +245,47 @@ describe('code-behind variables outside a skill frame', () => {
     expect(params['repos']).toBe('["a","b"]');
   });
 });
+
+describe('a caller argument that is an env-data reference', () => {
+  // The expander captures the argument TEXT raw — env-data interpolation
+  // runs after expansion and never walks frame inputs — so `getVar` must
+  // resolve `${data.*}` itself, against the run's context (the bug found
+  // 2026-08-25: it returned the literal placeholder text instead).
+  const dataCall = ['# T', '', '## Steps', '1. [skill: login username="${data.username}"]'].join('\n');
+
+  it('resolves through the run environment at read time', async () => {
+    const [first] = await bindingsFor(dataCall);
+    expect(first!.scope.inputs['username']).toBe('${data.username}');
+
+    let seen: string | undefined;
+    const outcome = await runCodeBehindEntry({
+      binding: { ...first!, entry: { source: first!.source, run: ({ step }) => { seen = step.getVar('username'); } } },
+      page: noPage,
+      context: noContext,
+      browser: noBrowser,
+      resolvedParameters: {},
+      envData: { env: {}, data: { username: 'alice' }, envName: 'dev' },
+      label: 'test',
+    });
+    expect(outcome.status).toBe('passed');
+    expect(seen).toBe('alice');
+  });
+
+  it('fails fast, naming the reference, when the run has no environment', async () => {
+    const [first] = await bindingsFor(dataCall);
+    let seen: string | undefined;
+    const outcome = await runCodeBehindEntry({
+      binding: { ...first!, entry: { source: first!.source, run: ({ step }) => { seen = step.getVar('username'); } } },
+      page: noPage,
+      context: noContext,
+      browser: noBrowser,
+      resolvedParameters: {},
+      label: 'test',
+    });
+    // Never the raw "${data.username}" text into the page — the failure says
+    // what is missing instead.
+    expect(seen).toBeUndefined();
+    expect(outcome.status).toBe('failed');
+    expect(outcome.error).toMatch(/data\.username/);
+  });
+});

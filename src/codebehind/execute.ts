@@ -1,6 +1,6 @@
 import type { Page, BrowserContext, Browser } from 'playwright';
 import { interpolate } from '../parser/parameters.js';
-import { resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
+import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
 import type { CodeBehindContext, CodeBehindStepApi, StepCodeEntry } from './types.js';
@@ -139,8 +139,24 @@ function makeStepApi(
       const input = scope.inputs[name];
       // A caller may have passed `{{outer}}` through as the argument, which
       // the expander interpolates into the body text at run time rather than
-      // at expansion time. Resolve it the same way here.
-      if (input !== undefined) return interpolate(input, resolvedParameters);
+      // at expansion time. Resolve it the same way here — and then resolve
+      // `${env.X}` / `${data.X}` the way the parser resolved the step text,
+      // because the expander captured the argument RAW (env-data
+      // interpolation runs after expansion and never walks frame inputs).
+      // Fail fast on a reference this run cannot answer: silently handing
+      // generated code the literal "${data.x}" text is the same failure with
+      // no error message.
+      if (input !== undefined) {
+        const value = interpolate(input, resolvedParameters);
+        const refs = envDataRefsIn(value);
+        if (refs.length === 0) return value;
+        if (!envData) {
+          throw new Error(
+            `skill argument "${name}" references \${${refs[0]}} and the run has no environment context to resolve it`,
+          );
+        }
+        return interpolateEnvData(value, envData);
+      }
       const bare = resolvedParameters[name];
       if (bare !== undefined) return bare;
       return envData ? resolveEnvDataRef(name, envData) : undefined;
