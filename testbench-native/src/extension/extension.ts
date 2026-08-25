@@ -104,7 +104,35 @@ class RunControllerRegistry implements vscode.Disposable {
       refresh(): Promise<void>;
       setProbe(probe: HealthProbe): void;
     },
-  ) {}
+  ) {
+    // The run-state context keys describe the ACTIVE EDITOR's document, so
+    // they have to be recomputed when the active editor changes — not only
+    // when a run starts or ends. Without this, switching between two tests
+    // leaves whichever key the last run edge happened to set: a running test
+    // shows Run (its Stop and Pause gone for the rest of its run), and a test
+    // that is doing nothing shows Stop and Pause for someone else's run.
+    this.trackerSub = tracker.onChange(() => {
+      const now = this.activeSignature();
+      if (now === this.lastActiveSignature) return;
+      this.lastActiveSignature = now;
+      this.refreshRunningContext();
+    });
+  }
+
+  /** Disposed with the registry; see the constructor. */
+  private readonly trackerSub: vscode.Disposable;
+  /** Which document the keys were last computed for. `onChange` fires on
+   *  selections and edits as well as editor switches, and recomputing on
+   *  those would undo the synchronous leading edge — a run start emits
+   *  (statuses cleared) before `controller.active` is set. */
+  private lastActiveSignature: string | undefined;
+
+  /** What `active()` depends on, as a comparable string. */
+  private activeSignature(): string {
+    const editor = this.tracker.activeEditor;
+    if (!editor || !this.tracker.isActiveTestFile) return '<none>';
+    return editor.document.uri.toString();
+  }
 
   /** Probe/spawn as the registry currently has them, so the manual server
    *  commands go through the same (swappable) collaborators the run path
@@ -328,11 +356,7 @@ class RunControllerRegistry implements vscode.Disposable {
       this.tracker.setBreakpointStop(entry.uri, null);
     }
     this.stepPausedAt.clear();
-    void vscode.commands.executeCommand(
-      'setContext',
-      'testbench-native.stepPaused',
-      false,
-    );
+    this.refreshRunningContext();
   }
 
   /** The controller for the currently-active TestBench file, if any. */
@@ -340,6 +364,40 @@ class RunControllerRegistry implements vscode.Disposable {
     const editor = this.tracker.activeEditor;
     if (!editor || !this.tracker.isActiveTestFile) return undefined;
     return this.get(editor.document);
+  }
+
+  /**
+   * Is the ACTIVE editor's own document running?
+   *
+   * This — not `anyRunning()` — is what the toolbar asks. Stop, Pause and
+   * Continue all act on `registry.active()`, so gating them on "anything,
+   * anywhere is running" both hides them from a test that IS running (once
+   * another test's run ended last) and offers them on a test that is not.
+   */
+  runningForActive(): boolean {
+    const editor = this.tracker.activeEditor;
+    if (!editor || !this.tracker.isActiveTestFile) return false;
+    // Deliberately not `active()`, which CREATES a controller on demand:
+    // focusing a test file must not allocate one, and a file with no
+    // controller has nothing running by definition.
+    return this.controllers.get(editor.document.uri.toString())?.isRunning === true;
+  }
+
+  /**
+   * Does the ACTIVE editor show a parked step-pause?
+   *
+   * Keyed on the file the yellow ▶ is painted on, not just the controller's
+   * own document: a run that stepped into a skill body parks its pause on the
+   * SKILL file, and that is where the author drives Step Over / Step Out from.
+   */
+  private stepPausedForActive(): boolean {
+    const active = this.tracker.activeEditor?.document.uri.toString();
+    if (active === undefined) return false;
+    if (this.stepPausedAt.has(active)) return true;
+    for (const [, entry] of this.stepPausedAt) {
+      if (entry.uri.toString() === active) return true;
+    }
+    return false;
   }
 
   /** True if any controller is currently running. */
@@ -449,11 +507,7 @@ class RunControllerRegistry implements vscode.Disposable {
           const awaitingSection = this.sectionResumeContext(uri, ev.frame);
           this.tracker.setBreakpointStop(target, ev.line, awaitingSection ?? undefined);
           this.stepPausedAt.set(uri.toString(), { uri: target, line: ev.line });
-          void vscode.commands.executeCommand(
-            'setContext',
-            'testbench-native.stepPaused',
-            true,
-          );
+          this.refreshRunningContext();
           // Reveal the frame's file the same way a step:start would, so
           // the user can SEE the line about to execute (e.g. inside a
           // skill body) without having to open it manually.
@@ -711,11 +765,7 @@ class RunControllerRegistry implements vscode.Disposable {
     if (!entry) return;
     this.stepPausedAt.delete(controllerUri.toString());
     this.tracker.setBreakpointStop(entry.uri, null);
-    void vscode.commands.executeCommand(
-      'setContext',
-      'testbench-native.stepPaused',
-      false,
-    );
+    this.refreshRunningContext();
   }
 
   /**
@@ -889,43 +939,76 @@ class RunControllerRegistry implements vscode.Disposable {
     await controller.ackToolDebugger();
   }
 
-  /** Refresh the `testbench-native.running` context key from current state. Used
-   *  on event-driven boundaries (e.g. `done` arrived and `this.active` is
-   *  still set inside the controller's try-block) where anyRunning() is
-   *  the authoritative answer. */
+  /**
+   * Recompute the run-state context keys from the ACTIVE editor's document.
+   *
+   * Called on every edge that can change the answer: a run start or end
+   * (`done` / `runError`, where the controller is the authority), a step
+   * pause opening or clearing, and — the one that was missing — the active
+   * editor changing. The keys describe what the toolbar is pointing at, so
+   * looking at a different file changes them just as much as a run ending.
+   */
   refreshRunningContext(): void {
-    this.setRunningContext(this.anyRunning());
+    const before = this.lastRunningContextValue;
+    const running = this.runningForActive();
+    this.setRunningContext(running);
+    this.setStepPausedContext(this.stepPausedForActive());
+    // The panel's buttons answer the same question as the toolbar's, so they
+    // follow the active document too. Flagged as a sync so the panel does not
+    // mistake "you switched to a running test" for "a new run started" and
+    // wipe the variables that run has collected.
+    if (running !== before) this.view.post({ type: 'running', running, sync: true });
   }
 
   /**
    * Tell the webview a run started/stopped, and pin the
    * `testbench-native.running` context key to the same value.
    *
-   * IMPORTANT: this trusts the caller's intent — it does NOT poll
-   * `anyRunning()`. Polling fails on the leading edge: the command
-   * handler calls `notifyRunning(true)` synchronously, *before*
-   * `controller.runLines()` sets `controller.active`. If we polled,
-   * we'd read the stale "no active run" state and set the context key
-   * to false, which hides Pause/Stop in the editor title bar until the
-   * first run event drives a refresh — exactly the "Pause disappeared
-   * after Resume" symptom.
+   * The LEADING edge is trusted, and must be: the command handler calls
+   * `notifyRunning(true)` synchronously, *before* `controller.runLines()`
+   * sets `controller.active`. Recomputing there would read the stale "no
+   * active run" state and set the key false, hiding Pause/Stop until the
+   * first run event drove a refresh — the "Pause disappeared after Resume"
+   * symptom. Every caller starts a run in the ACTIVE editor's document
+   * (each takes `registry.active()`), so trusting it stays per-active.
    *
-   * For `running=false` we still trust the caller. Each command handler
-   * pairs `notifyRunning(true)` with a `.finally(notifyRunning(false))`,
-   * so the second call always corresponds to that run's exit.
+   * The TRAILING edge is not trusted any more. It used to be, on the
+   * reasoning that each `notifyRunning(true)` is paired with a
+   * `.finally(notifyRunning(false))` for that same run — true, and not
+   * enough: the key is global to the window while runs are per document, so
+   * one test's run ending slammed it false while another test was still
+   * running, and the running test's Stop and Pause vanished for the rest of
+   * its run. On exit we ask the controllers instead.
    */
   notifyRunning(running: boolean): void {
-    this.notifyRunningHistory.push(running);
-    this.view.post({ type: 'running', running });
-    this.setRunningContext(running);
+    if (running) {
+      this.setRunningContext(true);
+    } else {
+      this.refreshRunningContext();
+    }
+    this.view.post({ type: 'running', running: this.lastRunningContextValue });
     // A run just started or ended — both change what /health reports, and a
     // 30s poll would leave the item stale for most of that window (§6).
     void this.serverStatusBar?.refresh();
   }
 
   private setRunningContext(value: boolean): void {
+    // Recorded here rather than at the call site so the history is what the
+    // key was SET to, which is the thing under test — a request to set false
+    // that a still-running document overrules is not a false in the history.
+    this.notifyRunningHistory.push(value);
+    if (value === this.lastRunningContextValue) return;
     this.lastRunningContextValue = value;
     void vscode.commands.executeCommand('setContext', 'testbench-native.running', value);
+  }
+
+  /** Mirror of the last value pushed to `testbench-native.stepPaused`. */
+  private lastStepPausedContextValue = false;
+
+  private setStepPausedContext(value: boolean): void {
+    if (value === this.lastStepPausedContextValue) return;
+    this.lastStepPausedContextValue = value;
+    void vscode.commands.executeCommand('setContext', 'testbench-native.stepPaused', value);
   }
 
   /** Test-only: every value passed through notifyRunning, in order. */
@@ -941,6 +1024,7 @@ class RunControllerRegistry implements vscode.Disposable {
   lastDoneStatus: 'passed' | 'failed' | 'error' | 'aborted' | null = null;
 
   dispose(): void {
+    this.trackerSub.dispose();
     this.discardControllers();
     for (const sub of this.frameSubs.values()) sub.dispose();
     this.frameSubs.clear();
