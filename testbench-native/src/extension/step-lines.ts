@@ -7,7 +7,14 @@
  *   - it lives under a `## Steps` (or deeper) heading, before the next
  *     same-or-shallower heading
  *   - it matches `^\s*\d+\.\s+\S` (numbered list item with content)
+ *   - it is not inside an ignored region — a depth->=4 heading with text
+ *     makes every numbered item under it inert (sections contract §5 rule
+ *     4a). Those lines look like steps and are not: nothing runs them, so
+ *     nothing here may offer to. The classification comes from runner-core
+ *     rather than a fourth copy of the grammar.
  */
+import { classifyLines } from 'ai-ui-automation-runner-core';
+
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
 const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
 const STEP_LINE_RE = /^\s*\d+\.\s+\S/;
@@ -124,9 +131,12 @@ export function extractStepLineIds(text: string): number[] {
   const lines = text.split(/\r?\n/);
   const span = findStepsSpan(lines);
   if (!span) return [];
+  const kinds = classifyLines(text);
   const out: number[] = [];
   for (let i = span.start; i <= span.end; i++) {
-    if (STEP_LINE_RE.test(lines[i] || '')) out.push(i + 1);
+    if (!STEP_LINE_RE.test(lines[i] || '')) continue;
+    if (kinds[i]?.kind === 'inert-step') continue;
+    out.push(i + 1);
   }
   return out;
 }

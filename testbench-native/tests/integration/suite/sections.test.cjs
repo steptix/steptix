@@ -25,6 +25,7 @@
  * scenario, not by anything here.
  */
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
@@ -913,5 +914,116 @@ describe('TestBench inline sections — editor surfaces', function () {
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
+  });
+});
+
+/**
+ * Nothing under a `####` heading may run, and the editor must say so
+ * (stories/test-script-sections-contract.md §5 rule 4a).
+ *
+ * The old grammar called such a heading "inert prose" and then absorbed the
+ * numbered items beneath it — into the main flow when no section was open,
+ * into whichever body was when one was — and ran them, silently. These assert
+ * the three surfaces an author touches: the gutter, the commands, and the
+ * Problems panel.
+ */
+describe('TestBench inline sections — inert deep headings', function () {
+  this.timeout(20_000);
+
+  let hooks;
+  let fake;
+  let uri;
+  const FIXTURE = [
+    '---', 'type: test', '---', '',
+    '# Inert', '',
+    '## Steps',
+    '1. Open the dashboard',
+    '2. Sign in',
+    '',
+    '### Sign in',
+    '1. Type the username',
+    '',
+    '#### Cleanup',
+    '1. Sign out',
+    '2. Close the browser',
+    '',
+  ].join('\n');
+  let filePath;
+
+  before(async () => {
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    if (!ext.isActive) await ext.activate();
+    hooks = ext.exports?.__testHooks;
+    assert.ok(hooks, '__testHooks not exposed');
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    fake = new FakeApiClient();
+    hooks.setApiClientFactory(() => fake);
+    filePath = path.resolve(FIXTURES_DIR, 'inert-deep.md');
+    fs.writeFileSync(filePath, FIXTURE, 'utf-8');
+    uri = vscode.Uri.file(filePath);
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
+  });
+
+  afterEach(() => {
+    fs.rmSync(filePath, { force: true });
+  });
+
+  it('Run This Step on an inert line refuses and sends nothing', async () => {
+    // Line 15 is `1. Sign out`, under `#### Cleanup` on line 14.
+    await vscode.commands.executeCommand('testbench-native.runStepHere', { lineNumber: 15 });
+    await sleep(300);
+    assert.equal(fake.requests.length, 0, 'nothing may reach the server');
+    assert.equal(hooks.isRunning(), false);
+  });
+
+  it('Compile This Step on an inert line refuses, naming the heading', async () => {
+    await vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+      lineNumber: 15,
+    });
+    await waitFor('refused', () => hooks.lastCompileError() !== null, 5_000);
+    assert.match(hooks.lastCompileError(), /never runs/);
+    assert.match(hooks.lastCompileError(), /Cleanup/);
+    assert.equal(fake.requests.length, 0);
+  });
+
+  it('a breakpoint cannot be set on an inert line', async () => {
+    const before = vscode.debug.breakpoints.length;
+    await vscode.commands.executeCommand('testbench-native.toggleBreakpoint', { lineNumber: 15 });
+    await sleep(300);
+    assert.equal(vscode.debug.breakpoints.length, before, 'no breakpoint may be created');
+  });
+
+  it('a run of the whole test never sends the inert items', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    const request = fake.requests[0];
+    assert.deepEqual(request.steps, ['Open the dashboard', 'Sign in']);
+    // …and the section body the call expands to carries only its own step.
+    const section = Object.values(request.sections ?? {})[0];
+    assert.deepEqual(section.steps, ['Type the username']);
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('warns on each inert item in the Problems panel', async () => {
+    await waitFor(
+      'diagnostics published',
+      () => vscode.languages.getDiagnostics(uri).some((d) => /never runs/.test(d.message)),
+      8_000,
+    );
+    const rows = vscode.languages
+      .getDiagnostics(uri)
+      .filter((d) => /never runs/.test(d.message));
+    assert.equal(rows.length, 2, 'one per numbered item under the heading');
+    assert.equal(rows[0].severity, vscode.DiagnosticSeverity.Warning);
+    assert.match(rows[0].message, /Cleanup/);
   });
 });

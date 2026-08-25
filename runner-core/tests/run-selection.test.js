@@ -8,7 +8,8 @@
  * The fixture's shape, for reading the line numbers below:
  *
  *     13, 17, 18   main flow
- *     ### Login    heading on 20, body steps 24, 25, 29
+ *     ### Login    heading on 20, body steps 24, 25 (29 is inert — it sits
+ *                  under `#### Notes with heading text` on 27)
  *     ### Cleanup  heading on 31, body step 33
  */
 
@@ -34,7 +35,7 @@ const FIXTURES = path.resolve(
 const text = readFileSync(path.join(FIXTURES, 'classification.md'), 'utf-8');
 
 const MAIN_FLOW = [13, 17, 18];
-const LOGIN_BODY = [24, 25, 29];
+const LOGIN_BODY = [24, 25];
 const CLEANUP_BODY = [33];
 
 // ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ test('rung 2 wins over rung 3: a mixed selection drops the body lines', () => {
 });
 
 test('rung 2 wins even when the body lines outnumber the main-flow one', () => {
-  assert.deepEqual(resolveRunSelection(text, [18, 24, 25, 29, 33]), {
+  assert.deepEqual(resolveRunSelection(text, [18, 24, 25, 33]), {
     scope: 'main-flow',
     lines: [18],
   });
@@ -81,10 +82,19 @@ test('rung 3: a body-only selection resolves to those body lines', () => {
 });
 
 test('rung 3: one body line is a one-step run', () => {
-  assert.deepEqual(resolveRunSelection(text, [29]), {
+  assert.deepEqual(resolveRunSelection(text, [25]), {
     scope: 'section-body',
-    lines: [29],
+    lines: [25],
   });
+});
+
+test('an inert line resolves to nothing — it is not addressable', () => {
+  // Line 29 sits under `#### Notes with heading text` (contract §5 rule 4a).
+  // It looks like a step and is not one, so it names no step in either scope
+  // and no main-flow step sits below it. The empty resolution is what the
+  // extension's TB025 guard turns into a refusal, which is why "Run Step Here"
+  // on it sends nothing to the server.
+  assert.deepEqual(resolveRunSelection(text, [29]), { scope: 'main-flow', lines: [] });
 });
 
 test('rung 3: body lines from two different sections keep document order', () => {

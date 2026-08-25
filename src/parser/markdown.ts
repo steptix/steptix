@@ -449,11 +449,19 @@ function parseSections(rawContent: string, filePath: string): {
   };
 
   let currentSection: 'config' | 'parameters' | 'outputs' | 'steps' | 'hooks' | null = null;
+  /**
+   * Inside a depth->=4 heading's ignored region within `## Steps`
+   * (contract §5 rule 4a). The raw line scan drops the same items, and the
+   * two are zipped by index downstream — so if only one of them dropped
+   * them the file would fail its own step/line mismatch check.
+   */
+  let stepsIgnored = false;
 
   for (const token of tokens) {
     if (token.type === 'heading') {
       const headingToken = token as Tokens.Heading;
       const text = headingToken.text.trim();
+      stepsIgnored = headingToken.depth >= 4 && text !== '';
 
       if (headingToken.depth === 1) {
         title = text;
@@ -489,7 +497,7 @@ function parseSections(rawContent: string, filePath: string): {
       extractOutputs(token as Tokens.List, outputs);
     }
 
-    if (currentSection === 'steps' && token.type === 'list') {
+    if (currentSection === 'steps' && token.type === 'list' && !stepsIgnored) {
       extractSteps(token as Tokens.List, steps, skipHooks, toolCalls);
     }
 
@@ -778,6 +786,20 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
   const sectionsRecognised = headingDepth === 2;
   const seenNames = new Map<string, number>();
   let currentSection: number | null = null;
+  /**
+   * Inside a depth->=4 heading's ignored region (contract §5 rule 4a).
+   *
+   * Such a heading used to be called "inert prose", which described the
+   * heading and not its consequences: the numbered items beneath it were
+   * absorbed — into the main flow when no section was open, into the open
+   * section's body when one was — and they RAN. Nothing under a `####` runs
+   * now. The region ends at the next `###`-with-text (a real section, which
+   * a hashes-only line also is) or the end of the span; a further depth->=4
+   * heading renews it.
+   */
+  let ignoredHeading: { name: string; line: number } | null = null;
+  /** Dropped items per ignored heading, for the note below. */
+  const dropped: { name: string; line: number; count: number }[] = [];
 
   for (let j = headingIndex + 1; j < lines.length; j++) {
     const raw = lines[j] ?? '';
@@ -793,7 +815,14 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
     }
 
     if (heading) {
+      if (sectionsRecognised && heading[1]!.length >= 4) {
+        // Opens the ignored region, or renews one already open.
+        ignoredHeading = { name: raw.replace(/^#+s*/, '').trim(), line };
+        continue;
+      }
       if (sectionsRecognised && heading[1]!.length === 3) {
+        // A real section: an open ignored region ends here.
+        ignoredHeading = null;
         const name = raw.replace(/^#{3}\s*/, '').trim();
         validateSectionName(name, filePath, line);
         const key = matchText(name);
@@ -824,7 +853,29 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
     if (!text) continue;
     if (text.replace(NO_HOOKS_MARKER, '').trim() === '') continue;
 
+    if (ignoredHeading) {
+      // Counted, not pushed. The marked walk drops the same items, so the
+      // two passes stay index-aligned by construction — which is what the
+      // step/line mismatch check downstream relies on.
+      const last = dropped[dropped.length - 1];
+      if (last && last.line === ignoredHeading.line) last.count++;
+      else dropped.push({ ...ignoredHeading, count: 1 });
+      continue;
+    }
+
     entries.push({ line, raw: text, sectionIndex: currentSection });
+  }
+
+  // Said out loud, once per heading. Silently dropping numbered items an
+  // author wrote is how the old grammar's absorption went unnoticed; refusing
+  // the file would be worse, since the items are prose as far as the grammar
+  // is concerned.
+  for (const d of dropped) {
+    logger.warn(
+      `${d.count} step(s) under "${d.name}" (${filePath}:${d.line}) are not run — a ` +
+        `heading of depth 4 or more does not define a section. Use "### ${d.name}" ` +
+        `and call it by name from the main flow.`,
+    );
   }
 
   return { entries, heads };

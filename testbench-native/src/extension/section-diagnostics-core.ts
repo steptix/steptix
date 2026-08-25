@@ -10,7 +10,14 @@
  * "never used" info and the run-time dead-section warning can never disagree.
  * See testbench-native/stories/specs/inline-sections-authoring.md §3.4.
  */
-import { buildSectionIndex, isTestFile, matchText, sectionNameError } from 'ai-ui-automation-runner-core';
+import {
+  buildSectionIndex,
+  classifyLines,
+  inertRegionHeading,
+  isTestFile,
+  matchText,
+  sectionNameError,
+} from 'ai-ui-automation-runner-core';
 
 /**
  * A diagnostic as plain data. `line` is 0-based; `[startCol, endCol)` is the
@@ -45,6 +52,29 @@ export function computeSectionDiagnostics(text: string): PlainDiagnostic[] {
     if (startCol >= raw.length) return { startCol: 0, endCol: raw.length };
     return { startCol, endCol: raw.length };
   };
+
+  // Numbered items under a `####` heading. They look exactly like steps and
+  // nothing runs them — which is precisely why they need saying out loud: the
+  // grammar used to absorb them into the main flow or into whichever section
+  // body was open, silently, and an author had no way to tell from the file.
+  // One row per item, on the item, because that is the line the author will
+  // be looking at when they wonder why it never ran.
+  for (const entry of classifyLines(text)) {
+    if (entry.kind !== 'inert-step') continue;
+    const raw = lines[entry.line - 1] ?? '';
+    const owner = inertRegionHeading(text, entry.line);
+    out.push({
+      line: entry.line - 1,
+      startCol: 0,
+      endCol: raw.length,
+      severity: 'warning',
+      message:
+        "This step never runs: steps under a '####' heading" +
+        (owner ? ` ("${owner.name}", line ${owner.line})` : '') +
+        " are ignored. Use '###' to define a section, then call it by name from " +
+        'the main flow.',
+    });
+  }
 
   // Name-level errors. `duplicates` carries every losing heading AND every
   // empty-name heading (under name ""), so both come from one source.

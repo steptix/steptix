@@ -216,10 +216,15 @@ test("the differential harness can actually detect a disagreement", () => {
 
 // ---------------------------------------------------------------------------
 // extractStepLineIds — PRESERVATION: main + body, in both copies
+//
+// Main + body, and NOT inert. Line 29 of classification.md sits under the
+// depth-4 heading on line 27, so nothing runs it — and these ids drive the
+// gutter, the breakpoint gate and the panel's step list, every one of which
+// would otherwise offer to run it (contract §5 rule 4a).
 // ---------------------------------------------------------------------------
 
 const STEP_LINE_IDS = {
-  "classification.md": [13, 17, 18, 24, 25, 29, 33],
+  "classification.md": [13, 17, 18, 24, 25, 33],
   "classification-edge.md": [8, 9, 13, 14, 15, 17, 20, 23],
   "classification-hashes.md": [8, 12, 16, 20],
 };

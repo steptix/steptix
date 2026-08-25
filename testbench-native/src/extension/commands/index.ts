@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import {
   classifyLines,
   extractSections,
+  inertRegionHeading,
   extractSteps,
   sectionBodyLinesAt,
   type StepMode,
@@ -259,6 +260,18 @@ export function registerCommands(
     // the document" — the same behavior as Run All. See selectionLines'
     // doc comment for why.
     const lines = selectionLines(editor);
+    // A selection of nothing but inert items would reach `runLines`, resolve
+    // to no steps, and surface as TB025 ("that selection named no step") —
+    // true, and no help at all. A mixed selection is left alone: the real
+    // steps run and the inert ones are dropped, which is what the author
+    // asked for. Contract §5 rule 4a.
+    const text = editor.document.getText();
+    const inertOnly =
+      lines.length > 0 && lines.every((l) => inertLineRefusal(text, l) !== null);
+    if (inertOnly) {
+      vscode.window.showWarningMessage(inertLineRefusal(text, lines[0]!)!);
+      return;
+    }
     const breakpoints = tracker.breakpoints(controller.document.uri);
     registry.notifyRunning(true);
     await controller.runLines(lines, { breakpoints }).finally(() => registry.notifyRunning(false));
@@ -604,6 +617,11 @@ export function registerCommands(
         typeof target?.lineNumber === 'number'
           ? target.lineNumber
           : editor.selection.active.line + 1;
+      const inert = inertLineRefusal(editor.document.getText(), line);
+      if (inert) {
+        vscode.window.showWarningMessage(inert);
+        return;
+      }
       const breakpoints = tracker.breakpoints(controller.document.uri);
       registry.notifyRunning(true);
       void controller
@@ -894,6 +912,25 @@ export type CompileTarget =
   | { ok: true; lines: number[]; section?: string }
   | { ok: false; refusal: string };
 
+/**
+ * Why this line cannot be run or compiled because it is inert, or null.
+ *
+ * A numbered item under a `####` heading looks exactly like a step. Nothing
+ * runs it (sections contract §5 rule 4a), so every entry point that would
+ * otherwise send it to the server says so instead of quietly doing nothing —
+ * an empty selection reaching `runLines` surfaces as TB025 ("that selection
+ * named no step"), which is true and unhelpful.
+ */
+export function inertLineRefusal(text: string, line: number): string | null {
+  const owner = inertRegionHeading(text, line);
+  if (!owner) return null;
+  return (
+    `TestBench: that step never runs — steps under a '####' heading ("${owner.name}", ` +
+    `line ${owner.line}) are ignored. Use '###' to define a section, then call it ` +
+    'by name from the main flow.'
+  );
+}
+
 export function resolveCompileTarget(
   text: string,
   clicked: number,
@@ -902,6 +939,9 @@ export function resolveCompileTarget(
   const classified = classifyLines(text);
   const kindOf = (line: number): string | undefined => classified[line - 1]?.kind;
   const clickedKind = kindOf(clicked);
+  if (clickedKind === 'inert-step') {
+    return { ok: false, refusal: inertLineRefusal(text, clicked)! };
+  }
   if (clickedKind !== 'step' && clickedKind !== 'section-step') {
     return { ok: false, refusal: 'TestBench: that line is not a step. Put the cursor on a numbered step.' };
   }

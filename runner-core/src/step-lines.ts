@@ -36,6 +36,18 @@ export type LineKind =
   | 'step'
   | 'section-heading'
   | 'section-step'
+  /**
+   * A numbered item inside a depth->=4 heading's ignored region
+   * (contract §5 rule 4a). It LOOKS like a step and is not one: nothing
+   * runs it, in the main flow or in any body, and nothing may address it.
+   *
+   * A distinct kind rather than 'prose' because the editor still has to
+   * treat it as a numbered item to explain itself — dim it, and say why it
+   * will not run — and a distinct kind rather than 'step'/'section-step'
+   * because every consumer that dispatches on those must exclude it by
+   * construction rather than by remembering to.
+   */
+  | 'inert-step'
   | 'frontmatter'
   | 'heading'
   | 'prose'
@@ -99,6 +111,13 @@ export function classifyLines(text: string): ClassifiedLine[] {
   // every step line in the span belongs to a body, not the main flow.
   let inSectionBody = false;
 
+  // Set by a depth->=4 heading WITH TEXT inside the span, cleared by the next
+  // `section-heading` (a `###` with text, or a hashes-only line at any depth —
+  // both of which open a real section). Everything numbered in between is
+  // inert: the old grammar called such a heading "inert prose" and then let
+  // the items beneath it run, in the main flow or in whichever body was open.
+  let inIgnoredRegion = false;
+
   for (let i = 0; i < lines.length; i++) {
     const lineNumber = i + 1;
     const raw = lines[i] ?? '';
@@ -117,6 +136,7 @@ export function classifyLines(text: string): ClassifiedLine[] {
     const inSectionSpan = sectionsEnabled && inSteps;
 
     if (inSectionSpan && HASHES_ONLY_RE.test(raw)) {
+      inIgnoredRegion = false;
       inSectionBody = true;
       out[i] = { line: lineNumber, kind: 'section-heading' };
       continue;
@@ -125,18 +145,23 @@ export function classifyLines(text: string): ClassifiedLine[] {
     const heading = ANY_HEADING_RE.exec(raw);
     if (heading) {
       if (inSectionSpan && heading[1]!.length === SECTION_HOST_DEPTH + 1) {
+        inIgnoredRegion = false;
         inSectionBody = true;
         out[i] = { line: lineNumber, kind: 'section-heading' };
         continue;
       }
-      // Depth ≥ 4 inside the span is inert prose per the grammar: it neither
-      // opens a section nor closes the body it sits in.
+      // A depth->=4 heading with text opens an ignored region: it still does
+      // not close the body it sits in, but nothing numbered under it runs.
+      if (inSectionSpan) inIgnoredRegion = true;
       out[i] = { line: lineNumber, kind: 'heading' };
       continue;
     }
 
     if (inSteps && STEP_LINE_RE.test(raw)) {
-      out[i] = { line: lineNumber, kind: inSectionBody ? 'section-step' : 'step' };
+      out[i] = {
+        line: lineNumber,
+        kind: inIgnoredRegion ? 'inert-step' : inSectionBody ? 'section-step' : 'step',
+      };
       continue;
     }
 
@@ -601,4 +626,32 @@ function findStepsSection(lines: string[], from: number): Span | null {
   }
 
   return { start: headingIndex + 1, end: lines.length - 1, headingDepth };
+}
+
+/**
+ * The depth-≥4 heading whose ignored region contains `line`, or null when the
+ * line is not inert (contract §5 rule 4a).
+ *
+ * Exists so the editor can say *which* heading is stopping a numbered item
+ * from running without re-deriving the grammar — the class of duplication
+ * this contract exists to prevent. Scans upward for the heading that opened
+ * the region the line sits in.
+ */
+export function inertRegionHeading(
+  text: string,
+  line: number,
+): { line: number; name: string } | null {
+  const classified = classifyLines(text);
+  if (classified[line - 1]?.kind !== 'inert-step') return null;
+  const lines = text.split(/\r?\n/);
+  for (let i = line - 2; i >= 0; i--) {
+    const kind = classified[i]?.kind;
+    // A real section heading ends the region, so nothing above it can own
+    // this line. In a well-formed document we meet the opener first.
+    if (kind === 'section-heading') return null;
+    if (kind !== 'heading') continue;
+    const m = /^(#{4,})\s+(\S.*)$/.exec(lines[i] ?? '');
+    if (m) return { line: i + 1, name: m[2]!.trim() };
+  }
+  return null;
 }

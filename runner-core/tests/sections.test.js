@@ -19,6 +19,7 @@ import {
   classifySelectedSteps,
   extractSections,
   extractSteps,
+  inertRegionHeading,
   isStepLine,
   nearestStepAtOrAbove,
   nearestStepAtOrBelow,
@@ -111,15 +112,22 @@ test('nearestStepAtOrBelow/Above: skip over section bodies', () => {
 // Section boundaries
 // ---------------------------------------------------------------------------
 
-test('a depth-4 heading with text is inert: it does not close the body', () => {
-  // classification.md line 27 is `#### Notes with heading text`; line 29 must
-  // still belong to `### Login`. Contract §5, body attribution.
-  const login = extractSections(read('classification.md'))[0];
+test('a depth-4 heading with text opens an ignored region without closing the body', () => {
+  // classification.md line 27 is `#### Notes with heading text`. It still does
+  // not CLOSE `### Login` — a later `###` would be the thing that did — but
+  // line 29 beneath it is inert and is no longer one of Login's steps.
+  // Contract §5 rule 4a and the body-attribution paragraph.
+  const text = read('classification.md');
+  const login = extractSections(text)[0];
   assert.equal(login.name, 'Login');
   assert.deepEqual(
     login.steps.map((s) => s.line),
-    [24, 25, 29],
+    [24, 25],
   );
+  assert.equal(classifyLines(text)[28].kind, 'inert-step');
+  // The body did not close: line 31's `### Cleanup` is still what opens the
+  // next section, and nothing between 27 and 31 opened one.
+  assert.equal(extractSections(text)[1].headingLine, 31);
 });
 
 test('a hashes-only heading DOES close the body and open a new section', () => {
@@ -242,4 +250,81 @@ test('a bare ordinal in a body is absent from every pass', () => {
 
 test('extractSections: no Steps heading yields no sections', () => {
   assert.deepEqual(extractSections('# Title\n\n### Login\n\n1. A\n'), []);
+});
+
+// ---------------------------------------------------------------------------
+// Ignored regions — nothing under a `####` runs (contract §5 rule 4a)
+// ---------------------------------------------------------------------------
+
+const IGNORED = [
+  '## Steps',
+  '1. Main one',
+  '',
+  '#### Notes',
+  '2. Inert one',
+  '',
+  '##### Deeper',
+  '3. Inert two',
+  '',
+  '### Login',
+  '4. Body one',
+  '',
+  '#### More notes',
+  '5. Inert three',
+].join('\n');
+
+test('numbered items under a depth-4 heading are inert, not steps', () => {
+  const kinds = classifyLines(IGNORED).map((c) => c.kind);
+  //          ## Steps  1.      blank   #### Notes  2.
+  assert.deepEqual(kinds.slice(0, 5), ['heading', 'step', 'blank', 'heading', 'inert-step']);
+});
+
+test('a deeper heading renews the region rather than ending it', () => {
+  const kinds = classifyLines(IGNORED).map((c) => c.kind);
+  assert.equal(kinds[6], 'heading', '##### Deeper');
+  assert.equal(kinds[7], 'inert-step', 'the item under it is still inert');
+});
+
+test('a `###` with text ends the region — it opens a real section', () => {
+  const kinds = classifyLines(IGNORED).map((c) => c.kind);
+  assert.equal(kinds[9], 'section-heading', '### Login');
+  assert.equal(kinds[10], 'section-step', 'its body runs');
+  // …and a later `####` opens a fresh region inside that body.
+  assert.equal(kinds[13], 'inert-step');
+});
+
+test('no consumer treats an inert item as runnable or as a section member', () => {
+  assert.deepEqual(extractSteps(IGNORED).map((s) => s.instruction), ['Main one']);
+  const login = extractSections(IGNORED)[0];
+  assert.equal(login.name, 'Login');
+  assert.deepEqual(login.steps.map((s) => s.instruction), ['Body one']);
+  assert.equal(isStepLine(IGNORED, 5), false, 'line 5 is `2. Inert one`');
+  // The nearest-step helpers walk past it rather than landing on it.
+  assert.equal(nearestStepAtOrBelow(IGNORED, 5), null);
+  assert.equal(nearestStepAtOrAbove(IGNORED, 5), 2);
+});
+
+test('inertRegionHeading names the heading that stopped the item', () => {
+  assert.deepEqual(inertRegionHeading(IGNORED, 5), { line: 4, name: 'Notes' });
+  assert.deepEqual(inertRegionHeading(IGNORED, 14), { line: 13, name: 'More notes' });
+  assert.equal(inertRegionHeading(IGNORED, 2), null, 'a real step owns no region');
+  assert.equal(inertRegionHeading(IGNORED, 11), null, 'nor does a body step');
+});
+
+test('hashes-only headings keep their pinned semantics inside a region', () => {
+  // A bare `####` opens an EMPTY-NAME section, so it ends the ignored region
+  // the way a `###` with text does — contract §5 rule 3 is untouched.
+  const text = ['## Steps', '1. Main', '', '#### Notes', '2. Inert', '', '####', '3. Body'].join('\n');
+  const kinds = classifyLines(text).map((c) => c.kind);
+  assert.equal(kinds[4], 'inert-step');
+  assert.equal(kinds[6], 'section-heading', 'bare #### is still a section heading');
+  assert.equal(kinds[7], 'section-step', 'and its items still run');
+});
+
+test('the rule is scoped to a depth-2 Steps span', () => {
+  // Under `### Steps` no section can be defined, so the old grammar stands and
+  // the items below a `####` remain ordinary steps.
+  const text = ['### Steps', '1. Main', '', '#### Notes', '2. Still a step'].join('\n');
+  const kinds = classifyLines(text).map((c) => c.kind);
+  assert.equal(kinds[4], 'step');
 });
