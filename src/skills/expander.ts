@@ -806,7 +806,7 @@ function validateCall(skill: ParsedSkill, call: SkillCall): void {
   for (const aliasedOutput of Object.keys(call.outputAliases)) {
     if (!skill.outputs.includes(aliasedOutput)) {
       throw new Error(
-        `Skill "${skill.name}" has no declared output "${aliasedOutput}" — declared outputs: [${skill.outputs.join(', ') || 'none'}]`,
+        `Skill "${skill.name}" has no declared output "${aliasedOutput}" — declared outputs: [${skill.outputs.join(', ') || 'none'}]${via}`,
       );
     }
   }

@@ -35,12 +35,14 @@ export const TOOL_FILE_EXTS = ['.ts', '.mts', '.js', '.mjs'] as const;
 const SEGMENT_RE = /^[\w-]+$/;
 
 /**
- * How deep the skills walk will follow directories. Only reachable via
- * symlinked directories (which this walk follows, unlike a plain `isDirectory`
- * check) — a link pointing at an ancestor would otherwise recurse forever, and
- * this runs on every completion keystroke.
+ * Hard ceiling on directories visited per walk. The realpath `visited` set
+ * already defeats symlink loops; this bounds the other pathology — a single
+ * junction into some huge foreign tree (`skills/lib -> C:\big-repo`), which is
+ * loop-free and would otherwise be walked in full, synchronously, on every
+ * completion keystroke. Two thousand real directories of skills is far beyond
+ * any plausible project; past it the walk stops quietly with what it has.
  */
-const MAX_SKILL_DEPTH = 16;
+const MAX_SKILL_DIRS = 2000;
 
 /**
  * The file portion of a tool reference, relative to `toolsDir` and without an
@@ -54,23 +56,23 @@ const MAX_SKILL_DEPTH = 16;
  *   auth/login        → auth
  *   auth/login/login  → auth/login
  *
- * Two deliberate leniencies, because this is navigation rather than execution:
+ * One deliberate leniency, because this is navigation rather than execution:
+ * a TRAILING `/` means the author is still typing, so only that empty segment
+ * is dropped and the remaining segments are the file — `auth/login/` →
+ * `auth/login`, the file they are heading into. The last-segment-is-the-tool
+ * rule is deliberately NOT applied to a still-typing ref, which is what makes
+ * this land one directory deeper than a naive "drop all empty segments"
+ * filter would.
  *
- *  - a leading `/` is stripped (`parseToolRef` would throw);
- *  - a TRAILING `/` means the author is still typing, so only that empty
- *    segment is dropped and the remaining segments are the file —
- *    `auth/login/` → `auth/login`, the file they are heading into. The
- *    last-segment-is-the-tool rule is deliberately NOT applied to a
- *    still-typing ref, which is what makes this land one directory deeper than
- *    a naive "drop all empty segments" filter would.
- *
- * An INTERIOR empty segment (`auth//login`) is a real malformation with no
- * plausible target, so it returns `null` and the caller warns.
+ * Every other empty segment — leading `/` included — is a malformation
+ * `parseToolRef` throws on, so it returns `null` and the caller warns. (The
+ * skill side legitimately strips a leading slash, because `[skill: /a/b]` IS
+ * legal at runtime; `[tool: /a/b]` is not, and navigating on it would bless a
+ * ref the runner rejects.)
  */
 export function toolFileFor(ref: string): string | null {
-  const stripped = ref.startsWith('/') ? ref.slice(1) : ref;
-  const stillTyping = stripped.endsWith('/');
-  const segments = stripped.split('/');
+  const stillTyping = ref.endsWith('/');
+  const segments = ref.split('/');
   if (stillTyping) segments.pop(); // only the trailing empty segment
   if (segments.some((s) => s.length === 0)) return null;
   if (stillTyping) return segments.join('/');
@@ -127,13 +129,29 @@ export function skillHeading(name: string): string {
  */
 export function collectSkillNames(skillsDir: string): string[] {
   const names: string[] = [];
-  walkSkills(skillsDir, '', 0, names);
+  walkSkills(skillsDir, '', new Set(), names);
   names.sort();
   return names;
 }
 
-function walkSkills(dir: string, prefix: string, depth: number, out: string[]): void {
-  if (depth > MAX_SKILL_DEPTH) return;
+function walkSkills(dir: string, prefix: string, visited: Set<string>, out: string[]): void {
+  // One visit per REAL directory. Because the walk follows symlinked
+  // directories (see entryKind), the same real directory can be reachable
+  // under many prefixes — and a link to an ancestor makes that infinite. A
+  // depth cap is not enough: it bounds depth, not branching, and two
+  // self-referential links make the walk O(links^depth) (measured at minutes).
+  // The realpath set kills the loop, the fan-out, and duplicate names at once;
+  // whichever prefix reaches a directory first owns its names, and every
+  // offered spelling still resolves at runtime.
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    return;
+  }
+  if (visited.has(real) || visited.size >= MAX_SKILL_DIRS) return;
+  visited.add(real);
+
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -150,7 +168,7 @@ function walkSkills(dir: string, prefix: string, depth: number, out: string[]): 
     const kind = entryKind(dir, entry);
     if (kind === 'dir') {
       if (!SEGMENT_RE.test(entry.name)) continue;
-      walkSkills(path.join(dir, entry.name), `${prefix}${entry.name}/`, depth + 1, out);
+      walkSkills(path.join(dir, entry.name), `${prefix}${entry.name}/`, visited, out);
     } else if (kind === 'file' && entry.name.endsWith('.md')) {
       const base = entry.name.slice(0, -3);
       if (!SEGMENT_RE.test(base)) continue;

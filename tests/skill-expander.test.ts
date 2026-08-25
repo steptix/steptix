@@ -400,6 +400,15 @@ type: skill
     await expect(expandSkills(['[skill: auth/login]'], tmpDir)).rejects.toThrow(
       /Skill "login" requires parameter "username" but caller did not supply it \(invoked as "auth\/login"\)/,
     );
+
+    // The undeclared-output refusal carries the same suffix — with
+    // auth/login.md and admin/login.md both conventionally `# login`, a
+    // message naming only the H1 identifies neither file.
+    await expect(
+      expandSkills(['[skill: auth/login username="u" out.token="t"]'], tmpDir),
+    ).rejects.toThrow(
+      /Skill "login" has no declared output "token" — declared outputs: \[none\] \(invoked as "auth\/login"\)/,
+    );
   });
 
   it('expands a deeply nested skill', async () => {

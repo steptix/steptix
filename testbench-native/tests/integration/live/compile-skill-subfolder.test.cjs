@@ -135,15 +135,15 @@ describe('TestBench live — compile to code through a subfolder skill', functio
   });
 
   after(async () => {
-    // The compiled files are this test's output, not fixtures. Guarded because
-    // before() may have thrown at the server probe, leaving these undefined —
-    // an ERR_INVALID_ARG_TYPE out of after() would bury the real failure.
-    if (testStepsFile) {
-      fs.rmSync(testStepsFile, { force: true });
-      fs.rmSync(skillStepsFile, { force: true });
-      fs.rmSync(testCacheDir, { recursive: true, force: true });
-      fs.rmSync(skillCacheDir, { recursive: true, force: true });
-    }
+    // The compiled files are this test's output, not fixtures. Each rm is
+    // guarded individually: before() assigns these across several asserts, so
+    // ANY prefix of them may be undefined when it threw (server probe, missing
+    // fixture...) — `force` forgives a missing file, not an undefined path,
+    // and an ERR_INVALID_ARG_TYPE out of after() would bury the real failure.
+    if (testStepsFile) fs.rmSync(testStepsFile, { force: true });
+    if (skillStepsFile) fs.rmSync(skillStepsFile, { force: true });
+    if (testCacheDir) fs.rmSync(testCacheDir, { recursive: true, force: true });
+    if (skillCacheDir) fs.rmSync(skillCacheDir, { recursive: true, force: true });
     if (startedApp && testApp) {
       try {
         cp.execSync(`taskkill /pid ${testApp.pid} /T /F`, { stdio: 'ignore' });

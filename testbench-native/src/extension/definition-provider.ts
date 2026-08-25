@@ -176,7 +176,7 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
     const rel = toolFileFor(name);
     if (rel === null) {
       this.warn(
-        `TestBench: invalid tool reference "${name}": empty path segment (no doubled '/')`,
+        `TestBench: invalid tool reference "${name}": empty path segment (no leading or doubled '/')`,
       );
       return undefined;
     }

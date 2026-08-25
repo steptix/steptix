@@ -102,8 +102,8 @@ What deliberately does **not** change:
 ## Editor support (testbench-native)
 
 Three things in the extension know the shape of a skill name and need to learn
-slashes; this is bundled-extension code, so **bump the patch version**
-(0.5.83 → 0.5.84) per the repo rule.
+slashes; this is bundled-extension code, so **bump the patch version** per the
+repo rule (each review round that touches the extension bumps again).
 
 1. **Go to Definition** (`definition-provider.ts`): `INVOCATION_RE`'s name
    class `[A-Za-z0-9_-]+` widens to include `/`. `skillNameTarget` /

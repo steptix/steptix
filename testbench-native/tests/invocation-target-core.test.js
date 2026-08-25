@@ -64,9 +64,12 @@ test('toolFileFor resolves a still-typing ref to the file being typed into', () 
   assert.equal(toolFileFor('auth/'), 'auth');
 });
 
-test('toolFileFor strips one leading slash (parseToolRef would throw)', () => {
-  assert.equal(toolFileFor('/check_health'), 'check_health');
-  assert.equal(toolFileFor('/auth/login'), 'auth');
+test('toolFileFor refuses a leading slash, exactly like parseToolRef', () => {
+  // `[skill: /a/b]` is legal sugar at runtime; `[tool: /a/b]` is not —
+  // parseToolRef throws "empty path segment" on it. Navigating would bless a
+  // ref the runner rejects, so the editor warns instead.
+  assert.equal(toolFileFor('/check_health'), null);
+  assert.equal(toolFileFor('/auth/login'), null);
 });
 
 test('toolFileFor returns null on an interior empty segment', () => {
@@ -178,6 +181,51 @@ test('collectSkillNames drops names the invocation grammar cannot lex', () => {
 
 test('collectSkillNames returns [] for a missing skills dir', () => {
   assert.deepEqual(collectSkillNames(path.join(os.tmpdir(), 'tb-skills-does-not-exist')), []);
+});
+
+test('collectSkillNames survives self-referential directory links (visited-set, not depth)', (t) => {
+  // Two links back into the root: a depth cap alone makes this walk
+  // O(links^depth) — measured in MINUTES at depth 16 — and it runs
+  // synchronously per completion keystroke. The realpath visited-set means
+  // every REAL directory is read once, so the loops contribute nothing and
+  // the walk stays proportional to the actual tree.
+  const root = makeSkillsDir(['real/login.md', 'real/deep/nested.md']);
+  try {
+    try {
+      fs.symlinkSync(root, path.join(root, 'loop_a'), 'junction');
+      fs.symlinkSync(root, path.join(root, 'loop_b'), 'junction');
+    } catch (err) {
+      t.skip(`cannot create junctions here: ${err.code ?? err.message}`);
+      return;
+    }
+    const started = Date.now();
+    const names = collectSkillNames(root);
+    assert.ok(Date.now() - started < 2_000, 'a looping walk must terminate fast');
+    // The root's real path is visited first, so the loop junctions resolve to
+    // an already-visited directory and are skipped outright.
+    assert.deepEqual(names, ['real/deep/nested', 'real/login']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('collectSkillNames offers a junctioned subfolder once, under the first prefix walked', (t) => {
+  // A junction to a SIBLING directory is the legitimate share case. Each real
+  // directory is owned by whichever prefix reaches it first (readdir order:
+  // `linked` before `real`), and both spellings resolve at runtime — the set
+  // exists to stop loops and duplicate fan-out, not to pick a canonical alias.
+  const root = makeSkillsDir(['real/login.md']);
+  try {
+    try {
+      fs.symlinkSync(path.join(root, 'real'), path.join(root, 'linked'), 'junction');
+    } catch (err) {
+      t.skip(`cannot create junctions here: ${err.code ?? err.message}`);
+      return;
+    }
+    assert.deepEqual(collectSkillNames(root), ['linked/login']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('collectSkillNames follows a symlinked skill file', (t) => {
