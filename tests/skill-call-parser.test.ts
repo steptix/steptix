@@ -122,6 +122,35 @@ describe('parseSkillCall — happy path', () => {
     expect(result?.name).toBe('my-cool-skill');
   });
 
+  it('accepts a path-qualified name for a skill in a subfolder', () => {
+    const result = parseSkillCall('[skill: auth/login]');
+    expect(result?.name).toBe('auth/login');
+  });
+
+  it('accepts a deeply nested path-qualified name', () => {
+    const result = parseSkillCall('[skill: admin/users/create_user]');
+    expect(result?.name).toBe('admin/users/create_user');
+  });
+
+  it('canonicalises away a leading slash so both spellings name one skill', () => {
+    expect(parseSkillCall('[skill: /auth/login]')?.name).toBe('auth/login');
+    expect(parseSkillCall('[skill: /capture_url]')?.name).toBe('capture_url');
+  });
+
+  it('parses args and out. aliases on a path-qualified call', () => {
+    const result = parseSkillCall(
+      '[skill: /auth/login username password role="admin" out.session_id="admin_session"] # note',
+    );
+    expect(result?.name).toBe('auth/login');
+    expect(result?.args).toEqual({
+      username: '{{username}}',
+      password: '{{password}}',
+      role: 'admin',
+    });
+    expect(result?.outputAliases).toEqual({ session_id: 'admin_session' });
+    expect(result?.trailing).toBe(' # note');
+  });
+
   it('accepts arbitrary text inside a quoted value, including `]` and `=`', () => {
     const result = parseSkillCall('[skill: foo q="a]b=c d"]');
     expect(result?.args).toEqual({ q: 'a]b=c d' });
@@ -232,6 +261,35 @@ describe('parseSkillCall — syntax errors', () => {
     expect(() => parseSkillCall('[skill: foo out. ]')).toThrow(
       /expected output name after 'out\.'/,
     );
+  });
+
+  it('throws on a doubled slash in the name', () => {
+    expect(() => parseSkillCall('[skill: auth//login]')).toThrow(
+      SkillCallSyntaxError,
+    );
+    expect(() => parseSkillCall('[skill: auth//login]')).toThrow(
+      /empty path segment/,
+    );
+  });
+
+  it('throws on a trailing slash in the name', () => {
+    expect(() => parseSkillCall('[skill: auth/]')).toThrow(/empty path segment/);
+  });
+
+  it('throws on a name that is nothing but a slash', () => {
+    expect(() => parseSkillCall('[skill: /]')).toThrow(/empty path segment/);
+  });
+
+  it('points the caret at the malformed name', () => {
+    const line = '1. [skill: auth//login]';
+    try {
+      parseSkillCall(line);
+      throw new Error('expected throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(SkillCallSyntaxError);
+      const err = e as SkillCallSyntaxError;
+      expect(err.column).toBe(line.indexOf('auth//login'));
+    }
   });
 
   it('error message includes the source line and a caret', () => {

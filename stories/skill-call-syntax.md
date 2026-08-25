@@ -65,6 +65,10 @@ QuotedString := '"' [^"]* '"'
 Trailing   := <anything after the closing ']' — discarded as a human comment>
 ```
 
+Since [stories/skills-in-subfolders.md](skills-in-subfolders.md), `Name` also
+admits `/` — `[\w\-/]+`, still no dots — for path-qualified references to
+skills kept in subfolders (`auth/login`, leading slash optional).
+
 `Param` with no `=` desugars to `Identifier="{{Identifier}}"`. `OutAlias` with
 no `=` desugars to `out.Identifier="Identifier"` (i.e. no rename, but the
 output is still validated against the skill's declared `## Outputs`).

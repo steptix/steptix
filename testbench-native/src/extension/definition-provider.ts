@@ -111,12 +111,14 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
       this.warn(`TestBench: aiui.config does not declare a skillsDir.`);
       return undefined;
     }
-    const file = path.join(skillsDir, `${name}.md`);
+    const rel = canonicalSkillName(name);
+    const file = path.join(skillsDir, `${rel}.md`);
     if (!fs.existsSync(file)) {
-      this.warn(`TestBench: skill "${name}" not found — looked for ${file}`);
+      this.warn(`TestBench: skill "${rel}" not found — looked for ${file}`);
       return undefined;
     }
-    const lineNo = findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(name)}\\b`)) ?? 0;
+    const lineNo =
+      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillHeading(rel))}\\b`)) ?? 0;
     return new vscode.Location(vscode.Uri.file(file), new vscode.Position(lineNo, 0));
   }
 
@@ -129,16 +131,17 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
       this.warn(`TestBench: aiui.config does not declare a skillsDir.`);
       return undefined;
     }
-    const file = path.join(skillsDir, `${skillName}.md`);
+    const rel = canonicalSkillName(skillName);
+    const file = path.join(skillsDir, `${rel}.md`);
     if (!fs.existsSync(file)) {
-      this.warn(`TestBench: skill "${skillName}" not found — looked for ${file}`);
+      this.warn(`TestBench: skill "${rel}" not found — looked for ${file}`);
       return undefined;
     }
     // Prefer the `- <key>:` bullet under an `## Outputs` heading; fall back
     // to the skill heading, then the top of the file.
     const lineNo =
       findOutputBullet(file, outputKey) ??
-      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillName)}\\b`)) ??
+      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillHeading(rel))}\\b`)) ??
       0;
     return new vscode.Location(vscode.Uri.file(file), new vscode.Position(lineNo, 0));
   }
@@ -151,7 +154,12 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
       this.warn(`TestBench: aiui.config does not declare a toolsDir.`);
       return undefined;
     }
-    const file = path.join(toolsDir, `${name}.ts`);
+    // A tool reference addresses a file *and* a tool inside it: the last
+    // `/`-separated segment is the tool name, everything before it is the file
+    // path — `auth/login/login` → `<toolsDir>/auth/login.ts`. A lone segment is
+    // sugar for "the tool named after the file". Mirrors `parseToolRef` in
+    // src/tools/registry.ts.
+    const file = path.join(toolsDir, `${toolFileFor(name)}.ts`);
     if (!fs.existsSync(file)) {
       this.warn(`TestBench: tool "${name}" not found — looked for ${file}`);
       return undefined;
@@ -189,8 +197,39 @@ interface Token {
   text: string;
 }
 
-const INVOCATION_RE = /\[(skill|tool):\s*([A-Za-z0-9_-]+)/;
+// The name class admits `/` because both kinds are path-qualified: skills may
+// live in subfolders of `skillsDir` (`auth/login`, leading slash tolerated) and
+// a tool ref names a file plus the tool inside it (`auth/login/login`). Keep it
+// in step with `readIdentifier`'s `allowSlash` class in
+// src/parser/invocation-parser.ts.
+const INVOCATION_RE = /\[(skill|tool):\s*([A-Za-z0-9_/-]+)/;
 const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
+
+/** Drop the optional leading slash so `/auth/login` and `auth/login` name one
+ *  file — the same canonicalisation `parseSkillCall` applies server-side. */
+function canonicalSkillName(name: string): string {
+  return name.replace(/^\//, '');
+}
+
+/** The heading to look for inside a skill file. A skill's H1 is its own
+ *  unqualified name, so a path-qualified reference searches the last segment. */
+function skillHeading(rel: string): string {
+  return rel.slice(rel.lastIndexOf('/') + 1);
+}
+
+/**
+ * The file portion of a tool reference, relative to `toolsDir` and without an
+ * extension. Mirrors `parseToolRef` (src/tools/registry.ts): the last segment
+ * is the tool name, everything before it is the file; a lone segment is sugar
+ * for "the tool named after the file". Empty segments are dropped rather than
+ * rejected — this is navigation, and a half-typed ref should still find the
+ * file it is heading for.
+ */
+function toolFileFor(name: string): string {
+  const segments = name.split('/').filter((s) => s.length > 0);
+  if (segments.length <= 1) return segments[0] ?? name;
+  return segments.slice(0, -1).join('/');
+}
 
 /**
  * Parse the invocation prefix + name + any `out.<key>` aliases out of a

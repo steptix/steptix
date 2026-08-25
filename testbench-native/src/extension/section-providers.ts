@@ -19,6 +19,7 @@
  */
 import * as vscode from 'vscode';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   buildSectionIndex,
   isTestFile,
@@ -145,16 +146,41 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
   private skillNames(docUri: vscode.Uri): string[] {
     const dirs = resolveProjectDirs(docUri);
     if (!dirs?.skillsDir) return [];
-    try {
-      return fs
-        .readdirSync(dirs.skillsDir)
-        .filter((f) => f.endsWith('.md'))
-        .map((f) => f.slice(0, -3))
-        .sort();
-    } catch {
-      return [];
+    return collectSkillNames(dirs.skillsDir, '').sort();
+  }
+}
+
+/**
+ * Every skill under `dir`, named the way a step must reference it: relative to
+ * the skills root, no `.md`, **forward slashes on every platform** — a skill at
+ * `skills/auth/login.md` completes as `[skill: auth/login]`, which is exactly
+ * what `parseSkillCall` canonicalises to.
+ *
+ * Each directory read is guarded independently, so one unreadable subfolder
+ * costs its own entries and not the whole list.
+ */
+function collectSkillNames(dir: string, prefix: string): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const entry of entries) {
+    // Dot-directories are never skills, and `.aiui-codebehind-cache/` — which
+    // sits beside the skill files, recordings and all — would be the bulk of
+    // the walk on every completion request.
+    if (entry.name.startsWith('.')) continue;
+    if (entry.isDirectory()) {
+      names.push(
+        ...collectSkillNames(path.join(dir, entry.name), `${prefix}${entry.name}/`),
+      );
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      names.push(`${prefix}${entry.name.slice(0, -3)}`);
     }
   }
+  return names;
 }
 
 // ---------------------------------------------------------------------------

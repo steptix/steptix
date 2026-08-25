@@ -201,7 +201,10 @@ export interface SkillExpansion {
  * for inline steps).
  *
  * @param steps  Step list from a test (or another skill).
- * @param skillsDir  Directory containing `*.md` skill files.
+ * @param skillsDir  Root directory of the project's `*.md` skill files. Skills
+ *   may sit in subfolders, referenced path-qualified (`[skill: auth/login]`
+ *   resolves `<skillsDir>/auth/login.md`; a leading slash is accepted sugar
+ *   for the same file).
  */
 export async function expandSkills(
   steps: string[],
@@ -662,7 +665,8 @@ function sectionCycleKey(filePath: string, name: string): string {
   return `section:${filePath}#${matchText(name)}`;
 }
 
-/** Render a cycle key for the error message — skills are bare names. */
+/** Render a cycle key for the error message — skill keys are already the
+ *  canonical (possibly path-qualified) skill name, so they need no unwrapping. */
 function describeCycleKey(key: string): string {
   return key.startsWith('section:') ? (key.split('#')[1] ?? key) : key;
 }
@@ -717,6 +721,11 @@ async function loadSkill(
   name: string,
   envCtx?: EnvDataContext,
 ): Promise<ParsedSkill> {
+  // `name` is the canonical form `parseSkillCall` produced: no leading slash,
+  // no empty segments, and — because the invocation grammar's name class is
+  // `[\w\-/]` — no `.` and no `\`. So a path-qualified name lands in a
+  // subfolder of `skillsDir` and can never traverse out of it; no separate
+  // containment check is needed here.
   const filePath = path.resolve(skillsDir, `${name}.md`);
   // Cache key includes the active envName because skill-level dataSources may
   // resolve to different files per env (e.g. `../data/${envName}.json`). A

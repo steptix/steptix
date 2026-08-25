@@ -20,8 +20,30 @@ export class SkillCallSyntaxError extends InvocationSyntaxError {
 }
 
 export function parseSkillCall(line: string): ParsedSkillCall | null {
-  return parseInvocation(line, {
+  const parsed = parseInvocation(line, {
     prefix: '[skill:',
     errorClass: SkillCallSyntaxError,
+    // Skills may live in subfolders of `skillsDir`, referenced path-qualified:
+    // `[skill: auth/login]` resolves `<skillsDir>/auth/login.md`. A leading
+    // slash is accepted sugar for the same thing (`[skill: /auth/login]`).
+    allowSlashInName: true,
   });
+  if (!parsed || !parsed.name.includes('/')) return parsed;
+
+  // Canonicalise before anything downstream sees the name: the expander's
+  // cycle keys, frame `skillName`s and report badges must agree that
+  // `/auth/login` and `auth/login` are one skill, so exactly one form
+  // survives parsing. Note the grammar admits no `.` or `\` in the name, so
+  // a path-qualified reference can never traverse out of `skillsDir`.
+  const canonical = parsed.name.replace(/^\//, '');
+  if (canonical === '' || canonical.split('/').some((s) => s.length === 0)) {
+    const prefixIdx = line.indexOf('[skill:');
+    const nameCol = line.indexOf(parsed.name, prefixIdx);
+    throw new SkillCallSyntaxError(
+      `invalid skill name "${parsed.name}": empty path segment (no trailing or doubled '/')`,
+      line,
+      nameCol,
+    );
+  }
+  return { ...parsed, name: canonical };
 }
