@@ -209,6 +209,8 @@ let testFilePath: string;
 let skillsDir: string;
 let skillStepsPath: string;
 let dataRefTestPath: string;
+let compositeTestPath: string;
+let chainTestPath: string;
 let sessionSeq = 0;
 
 beforeAll(async () => {
@@ -243,11 +245,41 @@ beforeAll(async () => {
   await fs.writeFile(path.join(tmpDir, 'aiui.config.json'), '{}\n');
   await fs.writeFile(path.join(tmpDir, '.env.dev'), '# empty\n');
   await fs.mkdir(path.join(tmpDir, 'data'), { recursive: true });
-  await fs.writeFile(path.join(tmpDir, 'data', 'dev.json'), JSON.stringify({ username: 'Alice' }));
+  await fs.writeFile(
+    path.join(tmpDir, 'data', 'dev.json'),
+    JSON.stringify({ username: 'Alice', city: 'Paris' }),
+  );
   dataRefTestPath = path.join(tmpDir, 'tdata.md');
   await fs.writeFile(
     dataRefTestPath,
     ['# TData', '', '## Steps', '1. [skill: greet username="${data.username}"]', ''].join('\n'),
+  );
+
+  // Composite argument: {{param}} and ${data.*} mixed in one value.
+  compositeTestPath = path.join(tmpDir, 'tcomposite.md');
+  await fs.writeFile(
+    compositeTestPath,
+    [
+      '# TComposite', '',
+      '## Parameters', '- name: Bob', '',
+      '## Steps', '1. [skill: greet username="Hello {{name}} from ${data.city}"]', '',
+    ].join('\n'),
+  );
+
+  // Chained skills: outer's declared param is inlined as raw TEXT into its
+  // body, so whatever the test passed travels verbatim into greet's inputs.
+  await fs.writeFile(
+    path.join(skillsDir, 'outer.md'),
+    [
+      '---', 'type: skill', '---', '# outer', '',
+      '## Parameters', '- who: who to hand to greet', '',
+      '## Steps', '1. [skill: greet username="{{who}}"]', '',
+    ].join('\n'),
+  );
+  chainTestPath = path.join(tmpDir, 'tchain.md');
+  await fs.writeFile(
+    chainTestPath,
+    ['# TChain', '', '## Steps', '1. [skill: outer who="${data.username}"]', ''].join('\n'),
   );
 });
 
@@ -400,5 +432,68 @@ describe('a skill invoked with a ${data.*} argument, compiled', () => {
       expect(content).not.toContain('Alice');
     }
     expect(JSON.stringify(frames)).toMatch(/discarded|as a literal/);
+  });
+});
+
+describe('a composite argument — {{param}} and ${data.*} in one value', () => {
+  const compileComposite = () =>
+    compileRun({
+      steps: ['[skill: greet username="Hello {{name}} from ${data.city}"]'],
+      testFilePath: compositeTestPath,
+      envName: 'dev',
+      parameters: { name: 'Bob' },
+    });
+
+  it('generation maps the name to the fully resolved value', async () => {
+    await compileComposite();
+    const generation = aiPrompts.find((p) => p.includes('user box') && !/Review a generated/.test(p));
+    expect(generation).toBeDefined();
+    expect(generation!).toContain('Hello Bob from Paris');
+    expect(generation!).not.toContain('${data.city}');
+    expect(generation!).not.toContain('{{name}}"');
+  });
+
+  it('discards a generated entry that inlines the composite value', async () => {
+    forcedEntryBody = `await ctx.page.locator('#user').fill('Hello Bob from Paris');`;
+    const frames = await compileComposite();
+    const result = frames.find((f) => f.type === 'compile:result');
+    expect(result).toBeDefined();
+    for (const content of Object.values(result!.files as Record<string, string>)) {
+      expect(content).not.toContain('Hello Bob from Paris');
+    }
+    expect(JSON.stringify(frames)).toMatch(/discarded|as a literal/);
+  });
+});
+
+describe('chained skills — ${data.*} handed through an outer skill', () => {
+  // outer's declared param `who` is inlined as raw text into its body, so
+  // `[skill: outer who="${data.username}"]` becomes greet's
+  // `username="${data.username}"` — two hops, resolved once, at read time.
+  const compileChain = () =>
+    compileRun({
+      steps: ['[skill: outer who="${data.username}"]'],
+      testFilePath: chainTestPath,
+      envName: 'dev',
+    });
+
+  it('generation maps the innermost name to the value, through both hops', async () => {
+    await compileChain();
+    const generation = aiPrompts.find((p) => p.includes('user box') && !/Review a generated/.test(p));
+    expect(generation).toBeDefined();
+    expect(generation!).toContain(AUTHORED);
+    expect(generation!).toContain('Alice');
+    expect(generation!).not.toContain('${data.username}"');
+    expect(generation!).not.toContain('{{who}}"');
+  });
+
+  it("still proposes the entry in greet's own file, reading via getVar", async () => {
+    const frames = await compileChain();
+    const result = frames.find((f) => f.type === 'compile:result');
+    expect(result).toBeDefined();
+    const files = result!.files as Record<string, string>;
+    const skillFile = Object.keys(files).find((f) => path.resolve(f) === path.resolve(skillStepsPath));
+    expect(skillFile).toBeDefined();
+    expect(files[skillFile!]).toContain("getVar('username')");
+    expect(files[skillFile!]).not.toContain('Alice');
   });
 });
