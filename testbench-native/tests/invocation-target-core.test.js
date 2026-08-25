@@ -211,9 +211,11 @@ test('collectSkillNames survives self-referential directory links (visited-set, 
 
 test('collectSkillNames offers a junctioned subfolder once, under the first prefix walked', (t) => {
   // A junction to a SIBLING directory is the legitimate share case. Each real
-  // directory is owned by whichever prefix reaches it first (readdir order:
-  // `linked` before `real`), and both spellings resolve at runtime — the set
-  // exists to stop loops and duplicate fan-out, not to pick a canonical alias.
+  // directory is owned by whichever prefix reaches it first, and both
+  // spellings resolve at runtime — the set exists to stop loops and duplicate
+  // fan-out, not to pick a canonical alias. Which prefix wins depends on
+  // readdir order, which NTFS sorts by name but other filesystems need not,
+  // so assert "exactly one of the two spellings" rather than a fixed winner.
   const root = makeSkillsDir(['real/login.md']);
   try {
     try {
@@ -222,7 +224,12 @@ test('collectSkillNames offers a junctioned subfolder once, under the first pref
       t.skip(`cannot create junctions here: ${err.code ?? err.message}`);
       return;
     }
-    assert.deepEqual(collectSkillNames(root), ['linked/login']);
+    const names = collectSkillNames(root);
+    assert.equal(names.length, 1, `one real dir, one visit: ${JSON.stringify(names)}`);
+    assert.ok(
+      names[0] === 'linked/login' || names[0] === 'real/login',
+      `either spelling resolves at runtime, got ${JSON.stringify(names)}`,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

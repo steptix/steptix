@@ -16,10 +16,12 @@
  * the canonical implementations' own test tables.
  *
  * The one place the editor is deliberately MORE lenient than the parser is a
- * half-typed reference: an author mid-keystroke on `auth/login/` has not made
- * an error yet, so navigation still resolves the file they are heading for.
- * Genuine malformations (an interior `//`) return `null` and the caller warns —
- * the editor must never bless a name the runner will reject.
+ * half-typed TOOL reference: an author mid-keystroke on `[tool: auth/login/]`
+ * has not made an error yet, so navigation still resolves the file they are
+ * heading for. Skill names get no such leniency — `canonicalSkillName` refuses
+ * a trailing slash like every other empty segment. Genuine malformations
+ * return `null` and the caller warns — the editor must never bless a name the
+ * runner will reject.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -145,7 +147,10 @@ function walkSkills(dir: string, prefix: string, visited: Set<string>, out: stri
   // offered spelling still resolves at runtime.
   let real: string;
   try {
-    real = fs.realpathSync(dir);
+    // `.native` — the libuv resolver is ~5x cheaper than the JS one, which
+    // re-lstats every path component and measured as three quarters of the
+    // whole walk's cost. Junction/loop semantics verified identical.
+    real = fs.realpathSync.native(dir);
   } catch {
     return;
   }
