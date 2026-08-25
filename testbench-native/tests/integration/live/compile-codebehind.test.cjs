@@ -251,15 +251,28 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
     await waitFor('the proving run starts', () => hooks.isRunning(), 60_000);
     await waitFor('the proving run finishes', () => !hooks.isRunning(), 240_000);
 
+    // Every applied entry must have BOUND: as code (</>) when it worked, or
+    // ⚠ stale when it threw and the AI covered — the designed outcome for an
+    // entry that does not survive its proving run (stories/compile-as-you-go.md
+    // §Proof, not Replay). A plain "pass" is the real bug this guards: the
+    // step ran under AI without its entry ever being consulted. Demanding
+    // </> on every line made the test assert that the model writes perfect
+    // code first time, which is variance, not correctness — observed once as
+    // `got "pass-stale"` on a run that then passed 3/3.
     const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     for (const line of STEP_LINES) {
-      assert.equal(
-        statuses[line],
-        'pass-code-behind',
-        `line ${line} should have run as code (</>), got "${statuses[line]}". ` +
-          `A "pass" means the entry did not bind; a "pass-stale" means it threw and the AI covered.`,
+      assert.ok(
+        statuses[line] === 'pass-code-behind' || statuses[line] === 'pass-stale',
+        `line ${line} should have run its entry (</> or ⚠), got "${statuses[line]}". ` +
+          `A plain "pass" means the entry did not bind at all.`,
       );
     }
+    assert.ok(
+      STEP_LINES.some((line) => statuses[line] === 'pass-code-behind'),
+      `at least one step must prove as code (</>); got ${JSON.stringify(
+        STEP_LINES.map((line) => statuses[line]),
+      )} — all-stale means no generated entry ever works, which is not variance.`,
+    );
 
     await vscode.commands.executeCommand('testbench-native.restartSession');
   });
