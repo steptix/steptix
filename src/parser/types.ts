@@ -74,6 +74,19 @@ export interface TestConfig {
    *   - `title~<substring>` — first tab whose title contains the substring.
    *   - `active` — the most recently focused tab. */
   cdpTab?: string;
+  /** Render this test's pages at exactly this size, headed or headless
+   *  (stories/per-test-viewport.md §1). A preset — `mobile` (390×844),
+   *  `tablet` (768×1024), `desktop` (1440×900) — or `<width>x<height>`,
+   *  case-insensitive, each dimension 100–10000.
+   *
+   *  Held as the RAW string, not a resolved size: the value travels the wire
+   *  verbatim and the server resolves it (§3), so one validator and one error
+   *  message serve the CLI, TestBench and MCP alike. `resolveViewportSpec`
+   *  (src/config/viewport.ts) is that validator.
+   *
+   *  Refused alongside `cdp:` — a viewport cannot be imposed on a browser the
+   *  user started themselves. */
+  viewport?: string;
 }
 
 /**

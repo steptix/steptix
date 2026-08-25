@@ -47,6 +47,62 @@ test('streamSteps: sends correct headers + body shape', async () => {
   assert.equal(events[0].type, 'done');
 });
 
+test('streamSteps: the per-session config block rides the body verbatim, viewport included', async () => {
+  // stories/per-test-viewport.md §3 — `viewport` joins baseUrl/timeout in the
+  // write-once `config` block, and the RAW spec string travels: the server owns
+  // the resolver (preset → pixels) and the one error message. This pins that
+  // the client neither drops the key nor normalises it (`Mobile`, whitespace,
+  // an explicit `WxH`, an unresolved `$VAR` — all reach the server as written).
+  let captured;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return streamingResponse(['event: done\ndata: {"type":"done","status":"passed"}\n\n']);
+  };
+  const client = new ApiClient({ serverUrl: 'http://x:1', apiKey: 'k', fetch: fetchImpl });
+
+  await collect(
+    client.streamSteps(
+      'sess-1',
+      {
+        steps: ['s1'],
+        config: { baseUrl: 'https://example.test/', timeout: '30s', viewport: ' Mobile ' },
+      },
+      new AbortController().signal,
+    ),
+  );
+
+  const body = JSON.parse(captured.init.body);
+  assert.deepEqual(body.config, {
+    baseUrl: 'https://example.test/',
+    timeout: '30s',
+    viewport: ' Mobile ',
+  });
+});
+
+test('streamSteps: a config block without viewport stays byte-for-byte what it was', async () => {
+  // The minimum-scenario half of the pair: a test with no `viewport:` key must
+  // send a config block indistinguishable from the pre-story one, so the server
+  // falls back to its own browser config for every test that never opted in.
+  let captured;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return streamingResponse(['event: done\ndata: {"type":"done","status":"passed"}\n\n']);
+  };
+  const client = new ApiClient({ serverUrl: 'http://x:1', apiKey: 'k', fetch: fetchImpl });
+
+  await collect(
+    client.streamSteps(
+      'sess-1',
+      { steps: ['s1'], config: { baseUrl: 'https://example.test/' } },
+      new AbortController().signal,
+    ),
+  );
+
+  const body = JSON.parse(captured.init.body);
+  assert.deepEqual(body.config, { baseUrl: 'https://example.test/' });
+  assert.ok(!('viewport' in body.config), 'no viewport key may be invented');
+});
+
 test('streamSteps: yields ordered events', async () => {
   const chunks = [
     'event: step:start\ndata: {"type":"step:start","line":2}\n\n',

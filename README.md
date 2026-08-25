@@ -365,6 +365,7 @@ timeout: 60s
 
 ## Config
 - baseUrl: https://app.example.com
+- viewport: mobile
 
 ## Parameters
 - username: admin@test.com
@@ -376,6 +377,13 @@ timeout: 60s
 3. Verify the dashboard shows a welcome message
 4. Click logout
 ```
+
+The optional `viewport:` key renders that test's pages at an exact size — a
+preset (`mobile` 390×844, `tablet` 768×1024, `desktop` 1440×900) or an explicit
+`<width>x<height>` like `390x844` — headed or headless, without affecting other
+tests on the same server. It sizes the page for CSS breakpoints only (no touch,
+mobile user agent, or devicePixelRatio emulation); see
+[stories/per-test-viewport.md](stories/per-test-viewport.md).
 
 ### Special step prefixes
 

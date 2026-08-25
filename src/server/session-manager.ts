@@ -12,6 +12,11 @@ import {
 } from './run-helpers.js';
 import type { Config, EffectiveSettings, RunSettings } from '../config/types.js';
 import { mergeRunSettings, resolveRunSettings } from '../config/run-settings.js';
+import {
+  describeViewportSource,
+  resolveViewportSpec,
+  viewportCdpConflictError,
+} from '../config/viewport.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
@@ -79,8 +84,18 @@ import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 export interface StepRequest {
   /** `cdp` is passed through to the runner verbatim — same loose pass-through
    *  pattern as `baseUrl`/`timeout` — so the server stays schema-agnostic
-   *  about CDP attach. The runner validates the shape on receive. */
-  config?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string; profile?: string } };
+   *  about CDP attach. The runner validates the shape on receive.
+   *
+   *  `viewport` is the RAW `## Config: viewport:` string, not a resolved size
+   *  (stories/per-test-viewport.md §3): the server owns the one validator, so
+   *  clients stay dumb and every layer refuses the same values with the same
+   *  words. Resolved at session creation, before the browser launches. */
+  config?: {
+    baseUrl?: string;
+    timeout?: string;
+    viewport?: string;
+    cdp?: { port: number; tab?: string; profile?: string };
+  };
   steps: string[];
   parameters?: Record<string, string>;
   /**
@@ -851,6 +866,12 @@ interface ManagedSession {
   sessionConfig: {
     baseUrl?: string;
     timeout?: string;
+    /** The RAW spec (`mobile`, `390x844`), retained for the same reason `cdp`
+     *  is: the resolved size is inside the browser and unrecoverable from
+     *  here, and a listing that could not say what a session was launched at
+     *  would leave the one thing this feature exists to make visible invisible
+     *  (stories/per-test-viewport.md §3). */
+    viewport?: string;
     cdp?: { port: number; tab?: string; profile?: string };
   };
   configSet: boolean;
@@ -1877,7 +1898,15 @@ export class SessionManager {
 
   private async createSession(
     sessionId: string,
-    sessionConfig: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string; profile?: string } } | undefined,
+    sessionConfig:
+      | {
+          baseUrl?: string;
+          timeout?: string;
+          /** Raw `## Config: viewport:` spec — resolved here, see below. */
+          viewport?: string;
+          cdp?: { port: number; tab?: string; profile?: string };
+        }
+      | undefined,
     envOverrides: Record<string, string> | undefined,
     /** Resolved per-project record mode (from the test's `browser.video`). */
     videoMode: VideoMode,
@@ -1886,6 +1915,30 @@ export class SessionManager {
     reportOutputDir: string,
   ): Promise<ManagedSession> {
     logger.info(`Creating session "${sessionId}"`);
+
+    // Per-test viewport (stories/per-test-viewport.md §3/§4). Resolved FIRST,
+    // before the AI client, the context load and — crucially — the browser
+    // launch: an invalid value must fail the batch with the §1 error and no
+    // browser side effects, and this is the only place on the server path where
+    // that is still true (everything past `launchBrowser` has a window to tear
+    // down).
+    //
+    // The server's own `this.config.browser` is never mutated — the launch gets
+    // a fresh object below, so concurrent sessions without the key on this same
+    // server are untouched (§4).
+    const fixedViewport = resolveViewportSpec(sessionConfig?.viewport);
+    if (fixedViewport && sessionConfig?.cdp) {
+      // §1's conflict, at the server's equivalent of the CLI's parse-to-launch
+      // layer. `launchBrowser` refuses this pairing too, but only after the
+      // session bookkeeping above it — refusing here keeps the message the one
+      // that names both `## Config` keys the author actually typed.
+      throw new Error(
+        viewportCdpConflictError(
+          sessionConfig.viewport!.trim(),
+          String(sessionConfig.cdp.port),
+        ),
+      );
+    }
 
     // Apply per-request env to a fresh ai config copy. Server's process.env is
     // never mutated; concurrent sessions stay isolated.
@@ -1901,9 +1954,21 @@ export class SessionManager {
     // reports are written (the project-anchored reportOutputDir) so the report's
     // relative <video> link resolves.
     const browserSession = await launchBrowser(
-      { ...this.config.browser, video: videoMode },
+      // `fixedViewport` is spread in ONLY when the test declared one, so a
+      // server (or project, §8) that pinned its own keeps it on the sessions
+      // that said nothing — which is the §1 precedence, test over project,
+      // expressed as an absence rather than an override.
+      { ...this.config.browser, video: videoMode, ...(fixedViewport ? { fixedViewport } : {}) },
       sessionConfig?.cdp,
-      { videoDir },
+      {
+        videoDir,
+        // §4's launch line: the size AND its source. Passed whenever a size is
+        // in effect at all, so a project-wide pin is named as such instead of
+        // reading like the test's own choice.
+        ...((fixedViewport ?? this.config.browser.fixedViewport)
+          ? { viewportSource: describeViewportSource(sessionConfig?.viewport) }
+          : {}),
+      },
     );
     const browserTracker = new BrowserTracker(browserSession);
 
@@ -2270,7 +2335,27 @@ export class SessionManager {
       desiredAi.model,
       session.runSettings,
     );
-    const runConfig = resolvedSettings.config;
+    // The session's own viewport, re-applied on top (stories/per-test-viewport.md
+    // §2: "every browser the test opens inherits it").
+    //
+    // `runConfig` is rebuilt from `this.config` — the SERVER's startup config —
+    // on every batch, so the size this session launched at is not in it. The
+    // mid-test `openBrowser` action relaunches from `config.browser`
+    // (step-executor.ts), so without this line a `viewport: mobile` test's
+    // second browser comes up at desktop size while the first stays mobile, and
+    // the two disagree with nothing in the report to say why.
+    //
+    // Re-resolved from the retained RAW spec rather than cached as a size: the
+    // string already survived validation at session creation (an invalid one
+    // never got a browser), so this cannot fail, and one source of truth beats
+    // two fields that can drift.
+    const sessionViewport = resolveViewportSpec(session.sessionConfig.viewport);
+    const runConfig = sessionViewport
+      ? {
+          ...resolvedSettings.config,
+          browser: { ...resolvedSettings.config.browser, fixedViewport: sessionViewport },
+        }
+      : resolvedSettings.config;
     session.lastEffectiveSettings = resolvedSettings.effective;
     let envDataCtx: EnvDataContext | null = projectBundle.envBundle
       ? {

@@ -174,6 +174,17 @@ const toolConfig = z
   .object({
     baseUrl: z.string().optional(),
     timeout: z.string().optional(),
+    viewport: z
+      .string()
+      .optional()
+      .describe(
+        'Render the pages at exactly this size, headed or headless: a preset ' +
+          '(`mobile` 390x844, `tablet` 768x1024, `desktop` 1440x900) or ' +
+          '`<width>x<height>` such as `390x844`. Use it to see a site\'s ' +
+          'breakpoint layout without editing the test. CSS breakpoints only — ' +
+          'no touch events, no mobile user agent. Cannot be combined with ' +
+          '`cdp`: the attached browser is the user\'s own and cannot be resized.',
+      ),
     cdp: cdpTarget,
   })
   .optional()

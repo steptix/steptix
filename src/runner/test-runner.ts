@@ -3,6 +3,12 @@ import readline from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { stdin as input, stdout as output } from 'node:process';
 import type { Config } from '../config/types.js';
+import {
+  describeViewportSource,
+  resolveViewportSpec,
+  viewportCdpConflictError,
+  type ViewportSize,
+} from '../config/viewport.js';
 import type { ParsedTest, TestConfig, TestInstance } from '../parser/types.js';
 import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
@@ -137,6 +143,34 @@ function parseCdpOptionsFromTestConfig(testConfig: TestConfig): CdpLaunchOptions
   }
   const tab = testConfig.cdpTab?.trim();
   return tab ? { port, tab } : { port };
+}
+
+/**
+ * Read `viewport:` from a test's `## Config` block
+ * (stories/per-test-viewport.md §6). Returns `undefined` when the key is
+ * absent, in which case the launch behaves byte-for-byte as it did before this
+ * feature existed (§2) — including honouring a project-wide
+ * `browser.fixedViewport` pin (§8), which lives on the config this does not
+ * touch.
+ *
+ * Modelled on `parseCdpOptionsFromTestConfig` above, and called next to it, for
+ * the same reason: both turn a `## Config` string into launch input, and both
+ * must fail before the browser is touched rather than after.
+ *
+ * `viewport:` + `cdp:` in one file is refused here (§1) — this is the layer that
+ * validates the value, and it is the layer that knows both keys. Refused rather
+ * than ignored: the test was authored around a size we cannot impose on the
+ * user's own Chrome, so running it anyway would report a pass for a layout
+ * nobody asked to see.
+ */
+function parseViewportFromTestConfig(testConfig: TestConfig): ViewportSize | undefined {
+  const size = resolveViewportSpec(testConfig.viewport);
+  if (!size) return undefined;
+  const cdpRaw = testConfig.cdp?.trim();
+  if (cdpRaw) {
+    throw new Error(viewportCdpConflictError(testConfig.viewport!.trim(), cdpRaw));
+  }
+  return size;
 }
 
 /**
@@ -321,12 +355,37 @@ export async function runTest(
     : () => {};
 
   const cdpOptions = parseCdpOptionsFromTestConfig(test.config);
+  // Per-test viewport (stories/per-test-viewport.md §6). Resolved before the
+  // launch — an invalid value or a `cdp:` conflict throws here, with no browser
+  // to clean up.
+  const fixedViewport = parseViewportFromTestConfig(test.config);
+  if (fixedViewport) {
+    // REBINDING THE PARAMETER, deliberately. `config` is threaded into
+    // `executeStep` at six call sites below and into the `openBrowser`
+    // relaunch through `config.browser` (step-executor.ts) — which is exactly
+    // how §2's "every browser the test opens inherits it" comes for free.
+    // Introducing a second name would work only until someone adds a seventh
+    // call site with the old one; this way there is no old one left to pass.
+    //
+    // A fresh object, never a mutation: `runTest` is called once per data row
+    // with the SAME `config` the caller holds, so writing through would leak
+    // one row's viewport into the next test and into the caller's config.
+    config = { ...config, browser: { ...config.browser, fixedViewport } };
+  }
   // Video recording (Tier 1 — main page only). Resolve the mode once and pass
   // the absolute videos/ dir so launchBrowser attaches recordVideo on the
   // non-CDP path; the .webm is finalised + named in the `finally` below.
   const videoMode = resolveVideoMode(config.browser.video);
   const videoDir = path.resolve(config.reports.outputDir, 'videos');
-  const initialSession = await launchBrowser(config.browser, cdpOptions, { videoDir });
+  const initialSession = await launchBrowser(config.browser, cdpOptions, {
+    videoDir,
+    // §4's provenance half. Present whenever a size is in effect, so a
+    // project-wide pin (§8) is named as such rather than looking like the
+    // test's own choice.
+    ...(config.browser.fixedViewport
+      ? { viewportSource: describeViewportSource(test.config.viewport) }
+      : {}),
+  });
   const browserTracker = new BrowserTracker(initialSession);
   // `session` is a *snapshot* of the current active browser — re-read from
   // the tracker before/after each step so openBrowser/switchBrowser actions

@@ -175,6 +175,43 @@ describe('assembleTestFile — goldens', () => {
     expect(run.warnings).toEqual([]);
   });
 
+  // stories/per-test-viewport.md §7. The whitelist here is a real projection —
+  // a key it does not name never reaches the wire — so an MCP-run test would
+  // silently lose its `viewport:` and pass at the wrong size, which is a green
+  // suite reporting a layout nobody looked at.
+  it("forwards a file's `viewport` to the wire, raw", async () => {
+    const run = await assemble('viewport.md');
+    expect(run.request.config).toEqual({
+      baseUrl: 'https://example.com',
+      viewport: 'mobile',
+    });
+  });
+
+  it('lets a tool `viewport` override the file per key', async () => {
+    // The point of the per-key merge for this field: an agent runs someone
+    // else's test at phone width without editing it, and the file's `baseUrl`
+    // survives.
+    const run = await assemble('viewport.md', { config: { viewport: '360x640' } });
+    expect(run.request.config).toEqual({
+      baseUrl: 'https://example.com',
+      viewport: '360x640',
+    });
+  });
+
+  it('sends a tool `viewport` for a file that declares none', async () => {
+    const run = await assemble('simple.md', { config: { viewport: 'tablet' } });
+    expect(run.request.config).toEqual({ viewport: 'tablet' });
+  });
+
+  it('passes an invalid value THROUGH — the server owns the one validator', async () => {
+    // Deliberately not refused here (§3): two validators drift, and the day
+    // they disagree an agent gets a different answer from `run_test_file` than
+    // a human gets from Run on the same file.
+    const run = await assemble('simple.md', { config: { viewport: '390' } });
+    expect(run.request.config).toEqual({ viewport: '390' });
+    expect(run.warnings).toEqual([]);
+  });
+
   it('honours the whole `cache:` value set in both directions', async () => {
     // Project default is on.
     expect((await assemble('simple.md')).request.cacheEnabled).toBe(true);

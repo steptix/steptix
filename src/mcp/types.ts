@@ -172,7 +172,10 @@ export interface McpStepRequest {
   >;
   env?: Record<string, string>;
   envName?: string;
-  config?: { baseUrl?: string; timeout?: string; cdp?: { port: number; tab?: string } };
+  /** `viewport` is the raw `## Config: viewport:` spec, forwarded as a string —
+   *  the Sessions API resolves and validates it (stories/per-test-viewport.md
+   *  §3/§7), so this side never has to know what `mobile` means. */
+  config?: { baseUrl?: string; timeout?: string; viewport?: string; cdp?: { port: number; tab?: string } };
   parameters?: Record<string, string>;
   dataSources?: Record<string, string>;
   skillsDir?: string;
