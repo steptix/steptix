@@ -76,7 +76,7 @@ test('indexes the shared fixture: one call, one dead section, no duplicates', ()
   assert.deepEqual(index.sections.get('login'), {
     name: 'Login',
     headingLine: 20,
-    stepCount: 3,
+    stepCount: 2,
   });
   assert.deepEqual(index.sections.get('cleanup'), {
     name: 'Cleanup',

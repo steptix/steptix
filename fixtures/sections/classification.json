@@ -2,7 +2,7 @@
   "$comment": "Frozen cross-package classification table for inline sections. See stories/test-script-sections-contract.md section 5. Consumed by runner-core (classifyLines / extractSteps / extractSections / buildSectionIndex), by the root vitest suite for the hand-mirrored server-side scanner in src/parser/markdown.ts, and by the native + monaco copy-parity tests. BLANK LINES ARE OMITTED deliberately: trailing-newline and CRLF variance across checkouts makes a dense array fragile, while a misclassified non-blank line still shows up as a mismatch.",
   "files": {
     "classification.md": {
-      "note": "The mainstream case: parses cleanly end-to-end and is the frozen extractSections / main-flow reference. The depth-4 heading at line 27 is inert prose and does NOT close the Login section (line 29 still belongs to it) — contrast the bare #### in classification-hashes.md, which does close a body. `### Cleanup` is deliberately never invoked, so this file doubles as the dead-section-warning fixture: expanding it must emit exactly one warning, naming Cleanup.",
+      "note": "The mainstream case: parses cleanly end-to-end and is the frozen extractSections / main-flow reference. The depth-4 heading at line 27 opens an IGNORED REGION (contract §5 rule 4a): it still does not close the Login section, but line 29 under it is inert — it is not a body step, not a main-flow step, and nothing runs it. Contrast the bare #### in classification-hashes.md, which opens an empty-name section and so does close a body. `### Cleanup` is deliberately never invoked, so this file doubles as the dead-section-warning fixture: expanding it must emit exactly one warning, naming Cleanup.",
       "lines": [
         {
           "line": 1,
@@ -74,7 +74,7 @@
         },
         {
           "line": 29,
-          "kind": "section-step"
+          "kind": "inert-step"
         },
         {
           "line": 31,
@@ -105,10 +105,6 @@
             {
               "line": 25,
               "instruction": "Click Sign in"
-            },
-            {
-              "line": 29,
-              "instruction": "Verify the dashboard loads"
             }
           ]
         },

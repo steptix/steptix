@@ -237,3 +237,42 @@ test('editDistance: basics and the cap', () => {
   // Length gap alone exceeds the cap without scanning.
   assert.ok(editDistance('a', 'abcd') > 2);
 });
+
+// ---------------------------------------------------------------------------
+// Inert steps — nothing under a `####` runs (contract §5 rule 4a)
+// ---------------------------------------------------------------------------
+
+test('flags every numbered item under a #### heading, as a warning, on the item', () => {
+  const text = [
+    '# T', '', '## Steps',
+    '1. Open the dashboard',
+    '',
+    '#### Cleanup',
+    '1. Sign out',
+    '2. Close the browser',
+  ].join('\n');
+  const rows = computeSectionDiagnostics(text).filter((d) => /never runs/.test(d.message));
+  assert.equal(rows.length, 2);
+  // 0-based lines 6 and 7 are the two numbered items, not the heading.
+  assert.deepEqual(rows.map((r) => r.line), [6, 7]);
+  assert.equal(rows[0].severity, 'warning');
+  // It names the heading responsible, and what to do instead.
+  assert.match(rows[0].message, /"Cleanup", line 6/);
+  assert.match(rows[0].message, /Use '###' to define a section/);
+});
+
+test('says nothing about a #### heading with no numbered items under it', () => {
+  const text = ['# T', '', '## Steps', '1. Open', '', '#### A note', '', 'Just prose.'].join('\n');
+  assert.deepEqual(
+    computeSectionDiagnostics(text).filter((d) => /never runs/.test(d.message)),
+    [],
+  );
+});
+
+test('says nothing about ordinary steps or section bodies', () => {
+  const text = ['# T', '', '## Steps', '1. Open', '2. Login', '', '### Login', '1. Type'].join('\n');
+  assert.deepEqual(
+    computeSectionDiagnostics(text).filter((d) => /never runs/.test(d.message)),
+    [],
+  );
+});

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { ActiveFileTracker, FileStateSnapshot } from './active-file-tracker.js';
-import { extractSteps } from 'ai-ui-automation-runner-core';
+import { classifyLines, extractSteps } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
 
 /**
@@ -66,6 +66,7 @@ export class DecorationManager implements vscode.Disposable {
   private readonly statusSkip: vscode.TextEditorDecorationType;
   private readonly statusStopped: vscode.TextEditorDecorationType;
   private readonly statusPlaceholder: vscode.TextEditorDecorationType;
+  private readonly inertStep: vscode.TextEditorDecorationType;
   private readonly stepsSummary: vscode.TextEditorDecorationType;
   private readonly errorLine: vscode.TextEditorDecorationType;
 
@@ -114,6 +115,16 @@ export class DecorationManager implements vscode.Disposable {
     this.statusPlaceholder = vscode.window.createTextEditorDecorationType(
       statusIcon('status-placeholder.svg'),
     );
+    // A numbered item under a `####` heading. It reads as a step and nothing
+    // runs it (sections contract §5 rule 4a), so it is painted as what it is:
+    // prose. No status cell, no run affordance — just dimmed, with the reason
+    // on hover. The warning diagnostic says the same thing in the Problems
+    // panel; this is the version you see without looking for it.
+    this.inertStep = vscode.window.createTextEditorDecorationType({
+      opacity: '0.55',
+      fontStyle: 'italic',
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+    });
     this.breakpointStopped = vscode.window.createTextEditorDecorationType(
       statusIcon('breakpoint-stopped.svg'),
     );
@@ -152,6 +163,7 @@ export class DecorationManager implements vscode.Disposable {
     this.statusSkip.dispose();
     this.statusStopped.dispose();
     this.statusPlaceholder.dispose();
+    this.inertStep.dispose();
     this.stepsSummary.dispose();
     this.errorLine.dispose();
   }
@@ -314,6 +326,19 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.statusSkip, skipRanges);
     editor.setDecorations(this.statusStopped, stoppedRanges);
     editor.setDecorations(this.statusPlaceholder, placeholderRanges);
+    // Inert items are not in `stepLines`, so they already carry no status
+    // cell; this is what makes them LOOK inert rather than merely unpainted.
+    editor.setDecorations(
+      this.inertStep,
+      classifyLines(snap.text)
+        .filter((c) => c.kind === 'inert-step')
+        .map((c) => ({
+          range: range(c.line),
+          hoverMessage:
+            "This step never runs: steps under a '####' heading are ignored. " +
+            "Use '###' to define a section, then call it by name from the main flow.",
+        })),
+    );
     editor.setDecorations(this.stepsSummary, summaryRanges);
     editor.setDecorations(this.errorLine, errorRanges);
   }

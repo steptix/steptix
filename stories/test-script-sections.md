@@ -100,9 +100,14 @@ Two companion specs cover the editor side:
 - **Definition.** Inside the `## Steps` section, each `### Name` heading
   starts a section. Its body is every numbered list item until the next
   heading of depth ≤ 3 (the next `###` section or the next `##` H2) or EOF.
-  Headings of depth ≥ 4 *with heading text* inside a body are inert
-  (treated as prose), same as prose paragraphs and comments anywhere in a
-  Steps body today. A raw line that is **hashes only** (`/^#{3,}\s*$/`,
+  A heading of depth ≥ 4 *with heading text* inside the span does not close
+  the body it sits in — but it opens an **ignored region**, and every
+  numbered item from there to the next `###` (or the end of the span) is
+  inert: not a main-flow step, not a body step, and nothing runs it. The
+  first cut called such a heading "inert prose" and then absorbed the items
+  beneath it — into the main flow when no section was open, into whichever
+  body was when one was — and ran them, silently. See the contract §5 rule
+  4a for the classification and `inert-step`. A raw line that is **hashes only** (`/^#{3,}\s*$/`,
   any depth ≥ 3) inside `## Steps` is an empty-name section heading — a
   parse error — not prose: the client-side classifiers cannot tell a bare
   `###` from a bare `####` apart from raw text, so the CLI must refuse
@@ -137,8 +142,8 @@ Two companion specs cover the editor side:
   `## Steps` follow the same grammar, so a skill body may define and invoke
   its own sections.
 - **Definitions do not nest.** There is no `#### SubSection` — a `####`
-  heading never defines anything (with text it is inert prose; hashes-only
-  is the empty-name error above). A section gets sub-flows by *calling*
+  heading never defines anything (with text it opens an ignored region, so
+  nothing under it runs; hashes-only is the empty-name error above). A section gets sub-flows by *calling*
   sibling `###` sections by name; call nesting is arbitrary-depth (shared
   `MAX_DEPTH`/cycle guards with skills), definition structure is flat.
   This keeps every span parser single-level and reserves the `####`
@@ -461,8 +466,8 @@ behaviour change for existing files; see Migration).
 ## Testing
 
 - **Parser unit tests:** section capture (names, casing, heading lines,
-  body lines, raw text); main flow ends at first `###`; `####`-with-text
-  and prose inside bodies are inert; hashes-only lines (`###`, `####`,
+  body lines, raw text); main flow ends at first `###`; prose inside bodies
+  is inert, and `####`-with-text makes every numbered item under it inert; hashes-only lines (`###`, `####`,
   `#######`) inside `## Steps` throw the empty-name error at every depth;
   duplicate / reserved / `[`-prefixed / `{{`-containing names throw;
   `###` outside `## Steps` remains a no-op; a file without `###` parses

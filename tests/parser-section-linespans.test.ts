@@ -90,7 +90,10 @@ describe('cull rules agree between the two passes', () => {
 
   it('keeps #### noise inside a body out of both passes', () => {
     const md = ['# T', '', '## Steps', '1. Call', '', '### S', '1. A', '', '#### Note', '', '2. B'].join('\n');
-    expect(parseTestContent(md).sections['s']!.steps).toEqual(['A', 'B']);
+    // Both passes must drop the SAME items or the zip below them throws
+    // its step/line mismatch: B is inert in each (contract §5 rule 4a).
+    expect(parseTestContent(md).sections['s']!.steps).toEqual(['A']);
+    expect(scanStepSpans(md, 't.md').entries.map((e) => e.raw)).toEqual(['Call', 'A']);
   });
 });
 
@@ -312,8 +315,10 @@ describe('alignment holds across a mixed document', () => {
 
     const helper = parsed.sections['helper']!;
     expect(helper.headingLine).toBe(15);
-    expect(helper.steps).toEqual(['Helper one', 'Helper two']);
-    expect(helper.stepLines).toEqual([17, 21]);
-    expect(helper.rawSteps).toEqual(['Helper one', 'Helper two']);
+    // `#### Inert` on line 19 opens an ignored region, so "Helper two" on
+    // line 21 is not one of Helper's steps.
+    expect(helper.steps).toEqual(['Helper one']);
+    expect(helper.stepLines).toEqual([17]);
+    expect(helper.rawSteps).toEqual(['Helper one']);
   });
 });
