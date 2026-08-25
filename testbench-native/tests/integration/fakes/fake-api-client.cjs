@@ -14,6 +14,14 @@ class FakeApiClient {
   constructor() {
     /** @type {Stream | null} */
     this.activeStream = null;
+    /**
+     * Every stream still open, in the order streamSteps was called, as
+     * { index, stream }. `activeStream` is the most recent one and stays the
+     * handle every single-document test uses; this is what a test driving TWO
+     * documents at once needs, since ending "the" stream is ambiguous the
+     * moment a second run starts. See `endAt` / `endAll`.
+     */
+    this.openStreams = [];
     this.closeSessionCalls = 0;
     /** Session ids passed to closeSession(), in call order. Lets tests assert
      *  WHICH session was closed (e.g. a batch's unique `<path>::run-N`). */
@@ -110,6 +118,7 @@ class FakeApiClient {
     };
     this.activeStream = stream;
     const idx = this.streamCallCount;
+    this.openStreams.push({ index: idx, stream });
     this.streamCallCount += 1;
     this.requests.push(request);
 
@@ -155,6 +164,7 @@ class FakeApiClient {
       }
     } finally {
       signal.removeEventListener('abort', onAbort);
+      this.openStreams = this.openStreams.filter((s) => s.stream !== stream);
       if (this.activeStream === stream) this.activeStream = null;
     }
   }
@@ -256,8 +266,34 @@ class FakeApiClient {
     if (w) w.resolve();
   }
 
+  /** End the stream opened by the Nth streamSteps call (0-based), whether or
+   *  not it is the most recent. Two concurrent runs need this: `end()` can
+   *  only reach the latest. */
+  endAt(index) {
+    const found = this.openStreams.find((s) => s.index === index);
+    if (!found) return false;
+    found.stream.ended = true;
+    const w = found.stream.waiters.shift();
+    if (w) w.resolve();
+    return true;
+  }
+
+  /** End every open stream. Safe to call when none are. */
+  endAll() {
+    for (const { stream } of [...this.openStreams]) {
+      stream.ended = true;
+      const w = stream.waiters.shift();
+      if (w) w.resolve();
+    }
+  }
+
   get hasActiveStream() {
     return this.activeStream !== null;
+  }
+
+  /** How many streams are open right now. */
+  get openStreamCount() {
+    return this.openStreams.length;
   }
 }
 

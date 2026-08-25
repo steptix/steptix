@@ -298,7 +298,10 @@ function TestBenchRunner() {
           // (rather than via useEffect on [running]) avoids the React-batching
           // race where parametersResolved — which arrives moments after — would
           // already be merged into runtimeVariables before the effect fires.
-          if (msg.running && !runningRef.current) {
+          // `sync` means the ACTIVE DOCUMENT changed and this is its run
+          // state, not a run starting. Switching to an already-running test
+          // must not wipe the variables that run has collected.
+          if (msg.running && !runningRef.current && !msg.sync) {
             setRuntimeVariables({});
             setRuntimeSources({});
             // A new run invalidates any parked skill-failure re-run offer (its

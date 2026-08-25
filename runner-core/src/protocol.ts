@@ -497,6 +497,16 @@ export interface HostParametersResolvedMsg {
 export interface HostRunningMsg {
   type: 'running';
   running: boolean;
+  /**
+   * This is the ACTIVE DOCUMENT's run state being re-synced after an editor
+   * switch, not a run starting or ending.
+   *
+   * The panel resets its runtime variables on the leading edge of `running`
+   * — a new run must not inherit the last one's values — and looking at a
+   * different, already-running test is not a new run. Without this flag,
+   * switching to a running test would wipe the variables it had collected.
+   */
+  sync?: boolean;
 }
 
 /**
