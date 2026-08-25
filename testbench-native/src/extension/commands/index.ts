@@ -10,6 +10,7 @@ import {
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
+import { computeRenumberEdits } from '../renumber-core.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
 import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
@@ -627,6 +628,43 @@ export function registerCommands(
       void controller
         .runLines([line], { breakpoints })
         .finally(() => registry.notifyRunning(false));
+    }),
+
+    // "Renumber Steps" (stories/specs/step-renumbering.md). Rewrites the
+    // leading ordinal of the selected steps — or of every step, when the
+    // selection names none — so numbering runs sequentially again, each
+    // `### Section` body restarting at 1.
+    //
+    // The gutter menu passes `{ lineNumber }` and it is deliberately ignored:
+    // renumbering the one step the user happened to right-click would make the
+    // two modes hard to predict. Selection is the only input, for parity with
+    // Run Selected.
+    vscode.commands.registerCommand('testbench-native.renumberSteps', async () => {
+      const editor = tracker.activeEditor;
+      if (!editor || !tracker.isActiveTestFile) return notifyNoActive();
+      const edits = computeRenumberEdits(editor.document.getText(), selectionLines(editor));
+      if (edits.length === 0) {
+        // No `editor.edit` call at all — an empty one still pushes an undo
+        // stop, so running the command twice would cost the author an undo
+        // that restores nothing.
+        vscode.window.setStatusBarMessage('TestBench: steps already numbered', 2500);
+        return;
+      }
+      // Every replacement in ONE edit, so the whole renumber is one undo step.
+      // Each range runs from column 0 to the end of the digit run, leaving the
+      // `.`, the spacing and the instruction text byte-identical.
+      await editor.edit((builder) => {
+        for (const edit of edits) {
+          builder.replace(
+            new vscode.Range(edit.line - 1, 0, edit.line - 1, edit.digits),
+            String(edit.ordinal),
+          );
+        }
+      });
+      vscode.window.setStatusBarMessage(
+        `TestBench: renumbered ${edits.length} step(s)`,
+        2500,
+      );
     }),
 
     vscode.commands.registerCommand('testbench-native.clearBreakpoints', () => {

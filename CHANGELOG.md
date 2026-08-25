@@ -6,6 +6,19 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — TestBench: Renumber Steps
+
+Right-click the line-number gutter in a test file and pick **TestBench:
+Renumber Steps** to fix the ordinals after inserting a step in the middle.
+With step lines selected, only those are renumbered, each continuing from the
+step above it; with nothing selected, the whole file goes sequential — the
+main flow 1..N, every `### Section` body restarting at 1. Only the leading
+digits change, so the instruction text, its spacing, and any code-behind
+binding are byte-identical afterwards. What counts as a step is runner-core's
+classifier, so numbered items that never run — those under a `####` heading,
+or outside the `## Steps` span — are left alone rather than being claimed as
+steps.
+
 ### Added — per-test viewport
 
 A test file can now declare the page size it runs at:
