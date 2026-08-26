@@ -23,16 +23,37 @@ const ITEM_RE = /^\s*-\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?)\s*$/;
 
 export type SectionMap = Record<string, string>;
 
-/** Parse a section by name (case-insensitive). Returns {} if absent. */
-export function parseSection(text: string, sectionName: string): SectionMap {
+/** One `- key: value` bullet located in a section's source text. */
+export interface SectionItem {
+  key: string;
+  value: string;
+  /** 0-based line index of the bullet. */
+  line: number;
+  /** 0-based column where the key token starts, and its length — so an
+   *  editor can select exactly the key. */
+  column: number;
+  length: number;
+}
+
+/**
+ * Scan a section's `- key: value` bullets with their source positions, in
+ * file order (duplicates included — the caller decides which wins).
+ *
+ * `parseSection` builds its map from this, so the heading/bullet grammar and
+ * the section-entry/exit rules exist exactly once: the FIRST section whose
+ * name matches (case-insensitive) opens the span, and the next heading at the
+ * same or shallower depth closes it.
+ */
+export function scanSectionItems(text: string, sectionName: string): SectionItem[] {
   const lines = text.split(/\r?\n/);
   const target = sectionName.toLowerCase();
 
   let inSection = false;
   let sectionDepth = 0;
-  const out: SectionMap = {};
+  const out: SectionItem[] = [];
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? '';
     const headingMatch = HEADING_RE.exec(raw);
     if (headingMatch) {
       const depth = headingMatch[1]!.length;
@@ -52,10 +73,19 @@ export function parseSection(text: string, sectionName: string): SectionMap {
     const itemMatch = ITEM_RE.exec(raw);
     if (!itemMatch) continue;
     const key = itemMatch[1]!;
-    const value = itemMatch[2]!;
-    out[key] = value;
+    // ITEM_RE anchors the key after `\s*-\s+`, so nothing but whitespace and
+    // the bullet marker precedes it and indexOf finds its exact column.
+    out.push({ key, value: itemMatch[2]!, line: i, column: raw.indexOf(key), length: key.length });
   }
 
+  return out;
+}
+
+/** Parse a section by name (case-insensitive). Returns {} if absent.
+ *  A duplicated key takes its LAST value, the way the scan order lands. */
+export function parseSection(text: string, sectionName: string): SectionMap {
+  const out: SectionMap = {};
+  for (const { key, value } of scanSectionItems(text, sectionName)) out[key] = value;
   return out;
 }
 

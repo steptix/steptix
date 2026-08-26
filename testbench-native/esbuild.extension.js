@@ -15,6 +15,15 @@ const opts = {
   outfile: path.resolve(__dirname, 'dist/extension/extension.js'),
   // VS Code provides `vscode` at runtime; never bundle it.
   external: ['vscode'],
+  // Prefer a dependency's ESM build over its CommonJS one. For `platform:
+  // 'node'` esbuild defaults to ['main', 'module'], which picks jsonc-parser's
+  // UMD bundle — and a UMD wrapper's `require('./impl/parser')` calls are not
+  // statically analysable, so they survive into the output and then throw
+  // "Cannot find module './impl/format'" at activation, since the .vsix ships
+  // no node_modules. The ESM build inlines cleanly. Only two non-builtin
+  // packages reach this bundle (runner-core and jsonc-parser), so the wider
+  // effect of the flip is small.
+  mainFields: ['module', 'main'],
   sourcemap: true,
   minify: false,
   logLevel: 'info',

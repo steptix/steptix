@@ -41,19 +41,22 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import {
   classifyLines,
   isTestFile,
-  parseEnv,
   parseFrontmatter,
   parseParameters,
   resolveSection,
-  type TestFrontmatter,
 } from 'ai-ui-automation-runner-core';
-import { EnvSelector } from './env-selector.js';
-import { resolveProjectDirs } from './aiui-config.js';
 import { DEFAULT_DATA_DIR } from './aiui-config-parse.js';
+import {
+  activeEnvFor,
+  composedEnv,
+  displayPath,
+  envPaths,
+  readDataJson,
+  resolveSourcePath,
+} from './env-data-resolve.js';
 import {
   captureNamesBefore,
   envVarCompletions,
@@ -62,9 +65,7 @@ import {
   paramCompletions,
   paramContextAt,
   refContextAt,
-  resolveDataTree,
   treeCompletions,
-  type DataObject,
   type PlainCompletion,
 } from './env-data-completion-core.js';
 
@@ -228,147 +229,4 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     if (CLOSES_WITH_BRACE.has(c.kind)) item.commitCharacters = ['}'];
     return item;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Shared file/env resolution (both halves of the grammar ask the same two
-// questions: which env is in force, and where does it live)
-// ---------------------------------------------------------------------------
-
-/**
- * The env in force for a file. A present `env:` key pins it — even a blank
- * one, which pins "no env": the batch runner sends the pin verbatim and blank
- * trims to none. Only when the key is absent does the workspace EnvSelector
- * apply.
- */
-function activeEnvFor(fm: TestFrontmatter): string | null {
-  return (fm.env !== undefined ? fm.env.trim() : EnvSelector.activeEnv()) || null;
-}
-
-/**
- * Where a run would read this file's env from. The server resolves `.env`,
- * `.env.<name>`, and `<dataDir>/<name>.json` against the aiui.config.json
- * directory (= the workspace root in the common layout, which is also where
- * the EnvSelector enumerates) with no walk-up, so `projectRoot` is that
- * directory and nothing else.
- *
- * `overlayPath` is null when no env is selected: there is no `.env.<name>` to
- * name, and `composedEnv` then yields the base file alone.
- */
-function envPaths(
-  document: vscode.TextDocument,
-  envName: string | null,
-): {
-  dirs: ReturnType<typeof resolveProjectDirs>;
-  projectRoot: string;
-  baseEnvPath: string;
-  overlayPath: string | null;
-} {
-  const dirs = resolveProjectDirs(document.uri);
-  const workspaceRoot =
-    vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath ??
-    path.dirname(document.uri.fsPath);
-  const projectRoot = dirs ? path.dirname(dirs.configPath) : workspaceRoot;
-  return {
-    dirs,
-    projectRoot,
-    baseEnvPath: path.join(projectRoot, '.env'),
-    overlayPath: envName === null ? null : path.join(projectRoot, `.env.${envName}`),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// mtime-cached file reads (same idea as readProjectDirs in aiui-config-parse)
-// ---------------------------------------------------------------------------
-
-/** Cache keyed by absolute path → { mtimeMs, parsed }. Entries for missing
- *  files are not kept — a stat miss is cheap and the file may appear. */
-const parseCache = new Map<string, { mtimeMs: number; value: unknown }>();
-
-/** Read + parse `absPath` through the mtime cache. Returns undefined when
- *  the file is missing, unreadable, or `parse` throws — the lenient shape
- *  every consumer here wants on a keystroke path. */
-function readParsedCached<T>(absPath: string, parse: (text: string) => T): T | undefined {
-  let mtimeMs: number;
-  try {
-    mtimeMs = fs.statSync(absPath).mtimeMs;
-  } catch {
-    parseCache.delete(absPath);
-    return undefined;
-  }
-  const cached = parseCache.get(absPath);
-  if (cached && cached.mtimeMs === mtimeMs) return cached.value as T;
-  let value: T;
-  try {
-    value = parse(fs.readFileSync(absPath, 'utf8'));
-  } catch {
-    return undefined;
-  }
-  parseCache.set(absPath, { mtimeMs, value });
-  return value;
-}
-
-/** `.env`-format file → map; missing or malformed reads as empty. */
-function readEnvLenient(absPath: string): Record<string, string> {
-  return readParsedCached(absPath, parseEnv) ?? {};
-}
-
-/** Base `.env` + `.env.<name>` overlay composed, overlay winning — the same
- *  relationship `composeEnv` establishes on the run paths. A null overlay
- *  (no env selected) leaves the base file standing alone, which is what a run
- *  with no env composes too. */
-function composedEnv(baseEnvPath: string, overlayPath: string | null): Record<string, string> {
-  return {
-    ...readEnvLenient(baseEnvPath),
-    ...(overlayPath === null ? {} : readEnvLenient(overlayPath)),
-  };
-}
-
-/** JSON data file → `$VAR`-resolved tree; missing / bad JSON / non-object
- *  top level all read as "no tree" (undefined → no suggestions). The raw
- *  parse is cached by mtime; `$VAR` resolution runs per call because it
- *  depends on the composed env, and the trees are small. */
-function readDataJson(absPath: string, env: Record<string, string>): DataObject | undefined {
-  const parsed = readParsedCached<unknown>(absPath, JSON.parse);
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
-  return resolveDataTree(parsed as DataObject, env) as DataObject;
-}
-
-/**
- * A declared dataSources path → absolute, the way the parser resolves it:
- * `~` expanded, relative against the declaring file's directory. Skill paths
- * first interpolate `${env.X}` / `${envName}` (test paths are literal); a
- * placeholder that can't resolve makes the source unavailable (null).
- */
-function resolveSourcePath(
-  declared: string,
-  declaringFile: string,
-  isSkill: boolean,
-  env: Record<string, string>,
-  envName: string,
-): string | null {
-  let p = declared;
-  if (isSkill) {
-    let failed = false;
-    p = p
-      .replace(/\$\{\s*envName\s*\}/g, () => envName)
-      .replace(/\$\{\s*env\.([A-Za-z0-9_]+)\s*\}/g, (_m, name: string) => {
-        const v = env[name];
-        if (v === undefined) failed = true;
-        return v ?? '';
-      });
-    if (failed) return null;
-  }
-  if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) {
-    p = path.join(os.homedir(), p.slice(1));
-  }
-  return path.isAbsolute(p) ? p : path.resolve(path.dirname(declaringFile), p);
-}
-
-/** Project-relative display form of an absolute path (forward slashes),
- *  falling back to the absolute path outside the root. */
-function displayPath(absPath: string, projectRoot: string): string {
-  const rel = path.relative(projectRoot, absPath);
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return absPath;
-  return rel.replace(/\\/g, '/');
 }
