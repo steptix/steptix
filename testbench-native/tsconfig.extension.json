@@ -9,6 +9,7 @@
     "declaration": false,
     "sourceMap": true,
     "strict": true,
+    "allowImportingTsExtensions": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "esModuleInterop": true,

@@ -79,6 +79,7 @@ describe('TestBench extension — structural smoke', function () {
       'testbench-native.resume',
       'testbench-native.toggleBreakpoint',
       'testbench-native.runStepHere',
+      'testbench-native.renumberSteps',
       'testbench-native.clearBreakpoints',
       'testbench-native.clearStatuses',
       'testbench-native.revealEnvFile',

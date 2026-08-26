@@ -10,6 +10,7 @@ import {
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
+import { computeRenumberEdits } from '../renumber-core.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
 import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
@@ -629,6 +630,58 @@ export function registerCommands(
         .finally(() => registry.notifyRunning(false));
     }),
 
+    // "Renumber Steps" (stories/specs/step-renumbering.md). Rewrites the
+    // leading ordinal of the selected steps — or of every step, when the
+    // selection names none — so numbering runs sequentially again, each
+    // `### Section` body restarting at 1.
+    //
+    // The gutter menu passes `{ lineNumber }` and it is deliberately ignored:
+    // renumbering the one step the user happened to right-click would make the
+    // two modes hard to predict. Selection is the only input, for parity with
+    // Run Selected — except for how a selection's END line counts, see
+    // `selectionLinesForEdit`.
+    vscode.commands.registerCommand('testbench-native.renumberSteps', async () => {
+      const editor = tracker.activeEditor;
+      if (!editor || !tracker.isActiveTestFile) return notifyNoActive();
+      const edits = computeRenumberEdits(editor.document.getText(), selectionLinesForEdit(editor));
+      if (edits.length === 0) {
+        // No `editor.edit` call at all: there is nothing to apply, and the
+        // distinct message is the point — "renumbered 0 step(s)" would read
+        // as failure. (An empty edit happens to be a host-side no-op with no
+        // undo stop in current VS Code, so this is about the message, not
+        // undo hygiene.)
+        vscode.window.setStatusBarMessage('TestBench: steps already numbered', 2500);
+        return;
+      }
+      // Every replacement in ONE edit, so the whole renumber is one undo step.
+      // Each range runs from column 0 to the end of the digit run, leaving the
+      // `.`, the spacing and the instruction text byte-identical.
+      const applied = await editor.edit((builder) => {
+        for (const edit of edits) {
+          builder.replace(
+            new vscode.Range(edit.line - 1, 0, edit.line - 1, edit.digits),
+            String(edit.ordinal),
+          );
+        }
+      });
+      // The apply is version-checked against the live buffer: a keystroke or
+      // a disk-change reload landing between getText() and the edit rejects
+      // the whole batch (resolves false, nothing applied, no undo stop). Say
+      // so instead of claiming success — same discipline as the applyEdit
+      // check in codebehind-diff.ts.
+      if (!applied) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: renumber not applied — the document changed; run it again',
+          2500,
+        );
+        return;
+      }
+      vscode.window.setStatusBarMessage(
+        `TestBench: renumbered ${edits.length} step(s)`,
+        2500,
+      );
+    }),
+
     vscode.commands.registerCommand('testbench-native.clearBreakpoints', () => {
       const editor = tracker.activeEditor;
       if (!editor) return notifyNoActive();
@@ -883,6 +936,28 @@ function selectionLines(editor: vscode.TextEditor): number[] {
     const start = sel.start.line;
     const end = sel.end.line;
     for (let i = start; i <= end; i++) set.add(i + 1);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
+/**
+ * `selectionLines` narrowed for MUTATING commands: a selection ending at
+ * column 0 of a line stops before any of that line's content, so it does not
+ * target it — the same rule the anchor math applies to edits
+ * (`effectiveEndLine`, ../step-lines.ts). Every line-wise gesture (gutter
+ * click/drag, Ctrl+L, Shift+Down, triple-click) produces exactly that shape,
+ * so without the trim, renumbering a whole-line selection would also rewrite
+ * the step BELOW it. Run Selected keeps the untrimmed helper on purpose: an
+ * extra step in a run is visible (it executes and paints), a silent rewrite
+ * is not. Spec §4.2.
+ */
+function selectionLinesForEdit(editor: vscode.TextEditor): number[] {
+  const set = new Set<number>();
+  for (const sel of editor.selections) {
+    if (sel.isEmpty) continue;
+    const end =
+      sel.end.character === 0 && sel.end.line > sel.start.line ? sel.end.line - 1 : sel.end.line;
+    for (let i = sel.start.line; i <= end; i++) set.add(i + 1);
   }
   return [...set].sort((a, b) => a - b);
 }
