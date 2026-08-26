@@ -370,6 +370,45 @@ export function captureNamesBefore(
 }
 
 /**
+ * Where on a raw line the capture write of `name` sits — the name token
+ * inside `[store as: name]` / `[input: name]` / `[output: name]` /
+ * `out.k="name"` — as a column + length, or null when the line doesn't write
+ * it. Serves go-to-definition, which navigates to the write that
+ * `captureNamesBefore` reported: same patterns, same instruction derivation
+ * (the `N. ` step prefix, or a hook entry's `- scope:` lead-in), so the two
+ * cannot disagree about what counts as a write.
+ */
+export function captureWriteRange(
+  rawLine: string,
+  name: string,
+): { column: number; length: number } | null {
+  let offset = 0;
+  let instruction = rawLine;
+  const step = STEP_PREFIX_RE.exec(rawLine);
+  if (step) {
+    offset = step[0].length;
+    instruction = rawLine.slice(offset);
+  } else {
+    const hook = HOOK_ENTRY_RE.exec(rawLine);
+    // Group 2 runs to end-of-line, so it is a suffix of the raw line.
+    if (hook) {
+      offset = rawLine.length - hook[2]!.length;
+      instruction = hook[2]!;
+    }
+  }
+  for (const { re } of CAPTURE_PATTERNS) {
+    for (const m of instruction.matchAll(re)) {
+      if (m[1] !== name) continue;
+      // The captured name is the last name-shaped token of every pattern's
+      // match, so lastIndexOf finds it even when an earlier word echoes it
+      // (`[store as: as]`).
+      return { column: offset + (m.index ?? 0) + m[0].lastIndexOf(name), length: name.length };
+    }
+  }
+  return null;
+}
+
+/**
  * The section body containing `lineIdx` when the cursor is on a blank or
  * prose line inside one (a step being typed classifies as prose until it has
  * content, so the owner map alone would miss exactly the live case).

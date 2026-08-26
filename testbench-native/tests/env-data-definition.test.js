@@ -1,0 +1,436 @@
+/**
+ * Core logic of `${...}` go-to-definition — hit-testing the cursor against
+ * complete references, locating a dotted path inside raw JSON text, and
+ * locating an assignment inside .env text. The vscode wiring (file
+ * resolution, Locations, warning toasts) lives in env-data-definition.ts and
+ * is covered by the integration suite.
+ */
+
+import { test } from 'node:test';
+import { strict as assert } from 'node:assert';
+import {
+  findEnvLine,
+  findParameterBullet,
+  locateJsonPath,
+  paramRefAtPosition,
+  refAtPosition,
+} from '../src/extension/env-data-definition-core.ts';
+import { captureWriteRange } from '../src/extension/env-data-completion-core.ts';
+
+// ---------------------------------------------------------------------------
+// refAtPosition — which reference, and which of its tokens, the cursor is on
+// ---------------------------------------------------------------------------
+
+//            0123456789...
+const LINE = '1. Use ${data.users.admin.email} now';
+
+test('cursor on the namespace token reports segmentIndex -1', () => {
+  const ref = refAtPosition(LINE, LINE.indexOf('data') + 2);
+  assert.deepEqual(ref, {
+    namespace: 'data',
+    path: ['users', 'admin', 'email'],
+    segmentIndex: -1,
+  });
+});
+
+test('cursor on each path segment reports its index', () => {
+  assert.equal(refAtPosition(LINE, LINE.indexOf('users')).segmentIndex, 0);
+  assert.equal(refAtPosition(LINE, LINE.indexOf('admin')).segmentIndex, 1);
+  assert.equal(refAtPosition(LINE, LINE.indexOf('email')).segmentIndex, 2);
+});
+
+test('a dot belongs to the segment it closes, its next char to the following one', () => {
+  const firstDot = LINE.indexOf('.', LINE.indexOf('data'));
+  assert.equal(refAtPosition(LINE, firstDot).segmentIndex, -1);
+  assert.equal(refAtPosition(LINE, firstDot + 1).segmentIndex, 0);
+});
+
+test('the ${ edge clamps to the namespace, the } edge to the last segment', () => {
+  const open = LINE.indexOf('${');
+  const close = LINE.indexOf('}');
+  assert.equal(refAtPosition(LINE, open).segmentIndex, -1);
+  assert.equal(refAtPosition(LINE, close).segmentIndex, 2);
+  // Just past the closing brace still counts (F12 at either token edge).
+  assert.equal(refAtPosition(LINE, close + 1).segmentIndex, 2);
+  assert.equal(refAtPosition(LINE, close + 2), null);
+});
+
+test('cursor outside any reference is null', () => {
+  assert.equal(refAtPosition(LINE, 0), null);
+  assert.equal(refAtPosition(LINE, LINE.length), null);
+});
+
+test('whitespace padding inside the braces is tolerated, like the runtime', () => {
+  const line = 'Go to ${  data.url  } now';
+  const ref = refAtPosition(line, line.indexOf('url'));
+  assert.deepEqual(ref, { namespace: 'data', path: ['url'], segmentIndex: 0 });
+});
+
+test('an unclosed reference is not a jump target', () => {
+  const line = '1. Use ${data.users';
+  assert.equal(refAtPosition(line, line.indexOf('users')), null);
+});
+
+test('a dotless ${data} is not a runtime reference and yields null', () => {
+  const line = 'See ${data} here';
+  assert.equal(refAtPosition(line, line.indexOf('data')), null);
+});
+
+test('${envName} resolves as its own namespace with no path', () => {
+  const line = 'Env is ${ envName } today';
+  assert.deepEqual(refAtPosition(line, line.indexOf('envName')), {
+    namespace: 'envName',
+    path: [],
+    segmentIndex: -1,
+  });
+});
+
+test('${{name}} is the {{...}} grammar, not a ${...} reference', () => {
+  const line = 'Use ${{name}} here';
+  assert.equal(refAtPosition(line, line.indexOf('name')), null);
+});
+
+test('with two references on a line, the one under the cursor wins', () => {
+  const line = 'A ${env.API_URL} and ${data.user.name} end';
+  assert.deepEqual(refAtPosition(line, line.indexOf('API_URL')), {
+    namespace: 'env',
+    path: ['API_URL'],
+    segmentIndex: 0,
+  });
+  assert.deepEqual(refAtPosition(line, line.indexOf('name')), {
+    namespace: 'data',
+    path: ['user', 'name'],
+    segmentIndex: 1,
+  });
+});
+
+test('digit and hyphen segments parse, matching the runtime path class', () => {
+  const line = 'Item ${data.items.0.unit-price} here';
+  const ref = refAtPosition(line, line.indexOf('unit-price'));
+  assert.deepEqual(ref, {
+    namespace: 'data',
+    path: ['items', '0', 'unit-price'],
+    segmentIndex: 2,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// locateJsonPath — where a dotted path lives inside raw JSON text
+// ---------------------------------------------------------------------------
+
+const PRETTY = [
+  '{',
+  '  "users": {',
+  '    "admin": { "email": "a@x.com", "password": "$TOK" }',
+  '  },',
+  '  "fixtures": { "currency": "USD" }',
+  '}',
+].join('\n');
+
+test('a top-level key locates at its name inside the quotes', () => {
+  assert.deepEqual(locateJsonPath(PRETTY, ['users']), {
+    line: 1,
+    column: 3,
+    length: 5,
+    depth: 1,
+  });
+});
+
+test('a nested key locates on its own line and column', () => {
+  assert.deepEqual(locateJsonPath(PRETTY, ['users', 'admin', 'email']), {
+    line: 2,
+    column: 16,
+    length: 5,
+    depth: 3,
+  });
+});
+
+test('a missing tail reports the deepest existing ancestor and its depth', () => {
+  assert.deepEqual(locateJsonPath(PRETTY, ['users', 'nope', 'deeper']), {
+    line: 1,
+    column: 3,
+    length: 5,
+    depth: 1,
+  });
+});
+
+test('a fully missing path reports depth 0 at the top of the file', () => {
+  assert.deepEqual(locateJsonPath(PRETTY, ['absent']), {
+    line: 0,
+    column: 0,
+    length: 0,
+    depth: 0,
+  });
+});
+
+test('array segments locate the element value, zero-length', () => {
+  const text = '{"list": ["a", "b", {"x": 1}]}';
+  assert.deepEqual(locateJsonPath(text, ['list', '1']), {
+    line: 0,
+    column: 15,
+    length: 0,
+    depth: 2,
+  });
+  assert.deepEqual(locateJsonPath(text, ['list', '2', 'x']), {
+    line: 0,
+    column: 22,
+    length: 1,
+    depth: 3,
+  });
+});
+
+test('array index matching mirrors lookupDataPath: Number("01") is index 1', () => {
+  const text = '{"arr": ["x","y"]}';
+  assert.deepEqual(locateJsonPath(text, ['arr', '01']), {
+    line: 0,
+    column: 13,
+    length: 0,
+    depth: 2,
+  });
+});
+
+test('an out-of-range index stops at the array itself', () => {
+  const text = '{"arr": ["x"]}';
+  assert.deepEqual(locateJsonPath(text, ['arr', '5']), {
+    line: 0,
+    column: 2,
+    length: 3,
+    depth: 1,
+  });
+});
+
+test('a duplicated key resolves to its LAST occurrence, like JSON.parse', () => {
+  const text = '{"a": 1, "a": {"b": 2}}';
+  assert.deepEqual(locateJsonPath(text, ['a']), {
+    line: 0,
+    column: 10,
+    length: 1,
+    depth: 1,
+  });
+  assert.deepEqual(locateJsonPath(text, ['a', 'b']), {
+    line: 0,
+    column: 16,
+    length: 1,
+    depth: 2,
+  });
+});
+
+test('escaped quotes in other keys and brace-laden string values are skipped over', () => {
+  const escapedKey = '{"we\\"ird": 0, "plain": 1}';
+  assert.deepEqual(locateJsonPath(escapedKey, ['plain']), {
+    line: 0,
+    column: 16,
+    length: 5,
+    depth: 1,
+  });
+  const bracesInValue = '{"s": "a{b[\\"", "t": 2}';
+  assert.deepEqual(locateJsonPath(bracesInValue, ['t']), {
+    line: 0,
+    column: 17,
+    length: 1,
+    depth: 1,
+  });
+});
+
+test('CRLF line endings still yield the right line and column', () => {
+  const text = '{\r\n  "k": 1\r\n}';
+  assert.deepEqual(locateJsonPath(text, ['k']), {
+    line: 1,
+    column: 3,
+    length: 1,
+    depth: 1,
+  });
+});
+
+test('a top-level array is walkable by index', () => {
+  const text = '[\n  {"id": 1},\n  {"id": 2}\n]';
+  assert.deepEqual(locateJsonPath(text, ['1', 'id']), {
+    line: 2,
+    column: 4,
+    length: 2,
+    depth: 2,
+  });
+});
+
+test('a scalar in the middle of the path stops the walk there', () => {
+  const text = '{"a": "leaf"}';
+  assert.deepEqual(locateJsonPath(text, ['a', 'b']), {
+    line: 0,
+    column: 2,
+    length: 1,
+    depth: 1,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findEnvLine — where a key is assigned in .env text
+// ---------------------------------------------------------------------------
+
+test('a plain assignment locates the key token', () => {
+  const text = '# comment\nAPI_URL=http://x\nOTHER=1\n';
+  assert.deepEqual(findEnvLine(text, 'API_URL'), { line: 1, column: 0, length: 7 });
+});
+
+test('an export prefix and indentation shift the column, like parseEnv strips them', () => {
+  const text = '  export API_URL=http://x\n';
+  assert.deepEqual(findEnvLine(text, 'API_URL'), { line: 0, column: 9, length: 7 });
+});
+
+test('space before the = still matches the trimmed key', () => {
+  const text = 'API_URL =http://x\n';
+  assert.deepEqual(findEnvLine(text, 'API_URL'), { line: 0, column: 0, length: 7 });
+});
+
+test('the LAST assignment wins, matching the composed map', () => {
+  const text = 'TOKEN=first\nTOKEN=second\n';
+  assert.deepEqual(findEnvLine(text, 'TOKEN'), { line: 1, column: 0, length: 5 });
+});
+
+test('comment lines mentioning the key do not match', () => {
+  const text = '# TOKEN=old\nTOKEN=real\n';
+  assert.deepEqual(findEnvLine(text, 'TOKEN'), { line: 1, column: 0, length: 5 });
+});
+
+test('a key does not match its own prefix or superstring', () => {
+  const text = 'FOOBAR=1\nFOO=2\n';
+  assert.deepEqual(findEnvLine(text, 'FOO'), { line: 1, column: 0, length: 3 });
+  assert.equal(findEnvLine(text, 'BAR'), null);
+});
+
+test('malformed lines elsewhere do not stop the scan (lenient, unlike parseEnv)', () => {
+  const text = 'not a pair\n=nokey\nGOOD=yes\n';
+  assert.deepEqual(findEnvLine(text, 'GOOD'), { line: 2, column: 0, length: 4 });
+});
+
+test('an absent key is null', () => {
+  assert.equal(findEnvLine('A=1\n', 'B'), null);
+});
+
+// ---------------------------------------------------------------------------
+// paramRefAtPosition — the complete {{name}} under the cursor
+// ---------------------------------------------------------------------------
+
+test('cursor anywhere inside {{name}}, edges included, yields the name', () => {
+  const line = '6. Sign in as {{username}} now';
+  const open = line.indexOf('{{');
+  const close = line.indexOf('}}') + 2;
+  assert.deepEqual(paramRefAtPosition(line, open), { name: 'username' });
+  assert.deepEqual(paramRefAtPosition(line, line.indexOf('username') + 3), { name: 'username' });
+  assert.deepEqual(paramRefAtPosition(line, close), { name: 'username' });
+  assert.equal(paramRefAtPosition(line, open - 1), null);
+  assert.equal(paramRefAtPosition(line, close + 1), null);
+});
+
+test('${{name}} yields the inner {{name}}, as the runtime resolves it', () => {
+  const line = 'Use ${{name}} here';
+  assert.deepEqual(paramRefAtPosition(line, line.indexOf('name')), { name: 'name' });
+});
+
+test('unclosed or non-word {{...}} forms are not references', () => {
+  assert.equal(paramRefAtPosition('Use {{name here', 6), null);
+  const spaced = 'Use {{two words}} here';
+  assert.equal(paramRefAtPosition(spaced, spaced.indexOf('two')), null);
+});
+
+test('with two {{}} refs on a line, the one under the cursor wins', () => {
+  const line = 'Check {{a}} vs {{b}} now';
+  assert.deepEqual(paramRefAtPosition(line, line.indexOf('a}}')), { name: 'a' });
+  assert.deepEqual(paramRefAtPosition(line, line.indexOf('b}}')), { name: 'b' });
+});
+
+// ---------------------------------------------------------------------------
+// findParameterBullet — the `- name:` line under ## Parameters
+// ---------------------------------------------------------------------------
+
+const PARAMS_DOC = [
+  '# Title',
+  '',
+  '## Parameters',
+  '- username: demo@x.com',
+  '  - password: $PW',
+  '',
+  '## Steps',
+  '- username: not-a-parameter-here',
+].join('\n');
+
+test('a declared parameter locates its bullet key, indentation included', () => {
+  assert.deepEqual(findParameterBullet(PARAMS_DOC, 'username'), {
+    line: 3,
+    column: 2,
+    length: 8,
+  });
+  assert.deepEqual(findParameterBullet(PARAMS_DOC, 'password'), {
+    line: 4,
+    column: 4,
+    length: 8,
+  });
+});
+
+test('the section ends at the next heading — later bullets do not count', () => {
+  // `username` re-declared under ## Steps must not shadow line 3.
+  assert.equal(findParameterBullet(PARAMS_DOC, 'username').line, 3);
+  assert.equal(findParameterBullet(PARAMS_DOC, 'nope'), null);
+});
+
+test('heading match is case-insensitive and any ##+ depth, like parseSection', () => {
+  const doc = '### parameters\n- key_name: v\n';
+  assert.deepEqual(findParameterBullet(doc, 'key_name'), { line: 1, column: 2, length: 8 });
+});
+
+test('among duplicate bullets the LAST wins, matching the parsed map', () => {
+  const doc = '## Parameters\n- user: first\n- user: second\n';
+  assert.equal(findParameterBullet(doc, 'user').line, 2);
+});
+
+test('only the FIRST Parameters section is read, like parseSection', () => {
+  const doc = '## Parameters\n- a: 1\n## Steps\n## Parameters\n- b: 2\n';
+  assert.equal(findParameterBullet(doc, 'b'), null);
+});
+
+// ---------------------------------------------------------------------------
+// captureWriteRange — the name token of a capture write on a raw line
+// ---------------------------------------------------------------------------
+
+test('[store as:] on a step line locates the name after the step prefix', () => {
+  const line = '7. Read the balance [store as: balance]';
+  assert.deepEqual(captureWriteRange(line, 'balance'), {
+    column: line.lastIndexOf('balance'),
+    length: 7,
+  });
+});
+
+test('[input:] anchors to the instruction start, prefix stripped', () => {
+  const line = '3. [input: user] something';
+  assert.deepEqual(captureWriteRange(line, 'user'), {
+    column: line.indexOf('user]'),
+    length: 4,
+  });
+  // Mid-instruction [input:] binds nothing at run time, so it is no write.
+  assert.equal(captureWriteRange('5. Then [input: user] later', 'user'), null);
+});
+
+test('a hook entry derives its instruction after the `- scope:` lead-in', () => {
+  const line = '- before: log in [store as: session]';
+  assert.deepEqual(captureWriteRange(line, 'session'), {
+    column: line.indexOf('session'),
+    length: 7,
+  });
+});
+
+test('an out.k="alias" write locates the quoted alias', () => {
+  const line = '2. [skill: checkout out.total="grand"]';
+  assert.deepEqual(captureWriteRange(line, 'grand'), {
+    column: line.indexOf('grand'),
+    length: 5,
+  });
+});
+
+test('a name echoed by an earlier word still locates the real token', () => {
+  //            0123456789012345
+  const line = '4. [store as: as]';
+  assert.deepEqual(captureWriteRange(line, 'as'), { column: 14, length: 2 });
+});
+
+test('a line that does not write the name is null', () => {
+  assert.equal(captureWriteRange('8. Verify {{balance}} here', 'balance'), null);
+});

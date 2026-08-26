@@ -11,6 +11,7 @@ import {
   toolFileFor,
   type InvocationLine,
 } from './invocation-target-core.js';
+import { DedupedWarnings } from './warnings.js';
 
 /**
  * "Go to Definition" (F12 / Ctrl+Click / Peek) for `[skill: ...]` and
@@ -28,9 +29,9 @@ import {
  * located by walking up from the test file (see `aiui-config.ts`).
  */
 export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
-  /** Last warning shown + when, to avoid stacking identical toasts when a
-   *  hover-peek and an F12 land on the same broken invocation. */
-  private lastWarning: { message: string; at: number } | null = null;
+  /** Deduped so a hover-peek and an F12 landing on the same broken
+   *  invocation don't stack identical toasts. */
+  private warnings = new DedupedWarnings();
 
   provideDefinition(
     document: vscode.TextDocument,
@@ -207,16 +208,7 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
   }
 
   private warn(message: string): void {
-    const now = Date.now();
-    if (
-      this.lastWarning &&
-      this.lastWarning.message === message &&
-      now - this.lastWarning.at < 3000
-    ) {
-      return;
-    }
-    this.lastWarning = { message, at: now };
-    void vscode.window.showWarningMessage(message);
+    this.warnings.warn(message);
   }
 }
 

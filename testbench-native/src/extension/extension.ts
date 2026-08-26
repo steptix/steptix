@@ -22,6 +22,7 @@ import {
   SectionDiagnostics,
 } from './section-providers.js';
 import { EnvDataCompletionProvider } from './env-data-completion.js';
+import { EnvDataDefinitionProvider } from './env-data-definition.js';
 import { CallStackTreeProvider } from './call-stack-view.js';
 import { VariablesTreeProvider } from './variables-view.js';
 import { resolveInspectorTarget, shouldReuseDebugSession } from './inspector-target.js';
@@ -1362,6 +1363,15 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     vscode.languages.registerDefinitionProvider(
       { language: 'markdown', scheme: 'file' },
       new InvocationDefinitionProvider(),
+    ),
+    // …and on `${data.…}` / `${env.…}` / `${<source>.…}` references — the
+    // key inside the environment's JSON data file, or the assignment line in
+    // its .env files (same file resolution as the completion provider below)
+    // — plus `{{name}}` runtime variables, which resolve within the document
+    // to their Parameters bullet and/or the step that captures them.
+    vscode.languages.registerDefinitionProvider(
+      { language: 'markdown', scheme: 'file' },
+      new EnvDataDefinitionProvider(),
     ),
     // Inline-section authoring: links on resolved calls, completion of
     // section names after a step number, and diagnostics for typos /
