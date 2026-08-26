@@ -43,6 +43,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import {
+  classifyLines,
   isTestFile,
   parseEnv,
   parseFrontmatter,
@@ -193,16 +194,18 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
   ): vscode.CompletionItem[] {
     const text = document.getText();
     if (!isTestFile(text)) return [];
-    if (inFrontmatter(text, position.line)) return [];
+    // One classification serves both the frontmatter gate and the scope walk;
+    // this runs on keystrokes, and classifying is a whole-document pass.
+    const classified = classifyLines(text);
+    if (inFrontmatter(text, position.line, classified)) return [];
 
     const { baseEnvPath, overlayPath } = envPaths(document, activeEnvFor(parseFrontmatter(text)));
     // `parseParameters` + `resolveSection` is the same pair the run path uses
     // to build its parameter map (run-controller.ts), so the preview is what
     // would actually be substituted.
     const params = resolveSection(parseParameters(text), composedEnv(baseEnvPath, overlayPath));
-    return paramCompletions(params, captureNamesBefore(text, position.line)).map((c) =>
-      this.toItem(c, position, replaceStart),
-    );
+    const captures = captureNamesBefore(text, position.line, classified);
+    return paramCompletions(params, captures).map((c) => this.toItem(c, position, replaceStart));
   }
 
   private toItem(

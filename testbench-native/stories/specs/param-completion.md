@@ -58,17 +58,28 @@ Two sources, in this order:
      (`/\bout\.\w+\s*=\s*"([^"]+)"/g`, variables-panel.js:43). Offer the
      alias only when it is `\w+`-shaped — `{{...}}` cannot express other
      names (runtime grammar below).
-   - prose storage: `store/save (it) as {{x}}` — the runtime treats this as
-     an explicit storage pattern (src/runner/step-executor.ts:305-306), and
-     the name is right there in the step text. Extract with
-     `/(?:store|save)\s+(?:it\s+)?as\s+\{\{(\w+)\}\}/gi`; report it under
-     the same `'as'` marker as `[store as:]`.
+   `[input:]` and `[output:]` are matched **anchored** to the start of the
+   instruction (the text after `N. `), because that is the only place the
+   runner honours them (`INPUT_STEP_PATTERN` / `OUTPUT_STEP_PATTERN`,
+   src/runner/test-runner.ts:43,49). `[store as:]` and `out.k="alias"` are
+   matched anywhere.
 
-   That is the full statically-knowable set. A variable the AI *invents*
-   during a run from loose prose ("note the order number for later" with no
-   `{{name}}` or marker) has no name until the run happens — completion
-   cannot and does not guess it. Authors who want a prose capture to
-   complete downstream write the `store as {{name}}` form.
+   Also in scope, ahead of every step: `## Hooks` entries whose scope is
+   `before` or `beforeEach` (`- before: … [store as: x]`). They run before
+   step 1 wherever they are authored. `after` / `afterEach` run later and
+   are never in scope for a step.
+
+   That is the full statically-knowable set. **Prose storage is deliberately
+   excluded**: `... and store it as {{x}}` is read by the runtime only in
+   `isExtractionStep` (src/runner/step-executor.ts:296-306), which selects a
+   richer DOM snapshot and binds nothing — the name comes from the AI's
+   `read`/`count` action, and the model is told to use a supplied name only
+   when the step carries `[store as: name]`, deriving its own snake_case
+   name otherwise (src/ai/prompts.ts:195). Offering a prose name would
+   promise a binding the run does not make. A variable the AI invents from
+   loose prose ("note the order number for later") likewise has no name
+   until the run happens. Authors who want a capture to complete downstream
+   write `[store as: name]`.
 
    Detail text: the marker form and 1-based line, e.g. `[store as:] on
    line 9`. No value preview — there is none at authoring time.
@@ -117,10 +128,19 @@ export interface CaptureName {
   line: number;
 }
 
-/** Capture names written by step lines strictly above 0-based `lineIdx`,
- *  inside the Steps span (use runner-core classifyLines kinds `step` /
- *  `section-step` to identify step lines). Source order, deduped by name. */
-export function captureNamesBefore(text: string, lineIdx: number): CaptureName[];
+/** The runtime variables in scope at 0-based `lineIdx`, in EXECUTION order,
+ *  deduped by name. Scope ≠ "written above": pre-hooks lead wherever they
+ *  are authored; a `### Name` body executes where it is CALLED, so the main
+ *  flow is walked in order with each call splicing its callee's body in
+ *  (transitively, cycle-guarded); inside a body, that body's earlier steps
+ *  plus whatever ran before its earliest call site. Fenced lines excluded —
+ *  `classifyLines` does not track fences. Pass `classified` to reuse one
+ *  classification per request. */
+export function captureNamesBefore(
+  text: string,
+  lineIdx: number,
+  classified?: ReturnType<typeof classifyLines>,
+): CaptureName[];
 
 /** Parameters (declared order, $VAR-resolved values masked by name) first,
  *  then captures (detail: "[<marker>:] on line N"), deduped by name.
@@ -150,10 +170,14 @@ Unit (`tests/env-data-completion.test.js`, same file):
 - `paramContextAt`: `{{`, `{{us`, mid-line after a closed `{{x}}`, not after
   `}}`, not with no `{{`, `${{` yields a param context, non-`\w` partial
   yields null.
-- `captureNamesBefore`: all five marker forms (the prose `store as {{x}}`
-  included); strictly-above rule (a capture on the cursor's own line or
-  below is not offered); Steps-span scoping (markers in prose/frontmatter
-  don't count); dedup; non-`\w+` out-alias excluded.
+- `captureNamesBefore`: all four marker forms plus pre-hook entries; the
+  negatives that must not appear (prose storage, a mid-instruction
+  `[input:]`/`[output:]`, an `after` hook, markers in prose/frontmatter, a
+  capture on the cursor's own line or below, a non-`\w+` out-alias, a step
+  inside a fenced example); execution order over line order (a called
+  section's body is in scope at the call site though defined below; an
+  uncalled section contributes nothing; inside a body, its earlier steps
+  plus what ran before its earliest call site); dedup.
 - `paramCompletions`: order (params then captures), `$VAR`-resolved masked
   previews (a `password: $SB_PASSWORD` parameter previews `********`, and a
   `MACHINE_KEY` name masks under the bare-key rule), capture detail text,
