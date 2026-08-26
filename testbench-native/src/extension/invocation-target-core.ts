@@ -235,7 +235,7 @@ export interface InvocationLine {
 const SEP = String.raw`(?:[ \t]*:[ \t]*|[ \t]+)`;
 const NAME = String.raw`[A-Za-z0-9_/-]`;
 
-const INVOCATION_RE = new RegExp(String.raw`\[(skill|tool)${SEP}(${NAME}+)`);
+const INVOCATION_RE = new RegExp(String.raw`\[(skill|tool)${SEP}(${NAME}+)`, 'g');
 const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
 
 /**
@@ -244,13 +244,34 @@ const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
  * token. Returns null if the line is not a skill/tool invocation.
  */
 export function parseInvocationLine(line: string): InvocationLine | null {
-  const m = INVOCATION_RE.exec(line);
-  if (!m || m.index === undefined) return null;
-  const kind = m[1] as 'skill' | 'tool';
-  const name = m[2]!;
-  // The name starts after the `[skill`/`[tool` keyword and the separator the
-  // regex consumed; recompute its offset from the full match length.
-  const nameStart = m.index + m[0].length - name.length;
+  // Every candidate, not just the first — and each one can be DECLINED, which
+  // must not take the rest of the line with it. Mirrors the scan loop in
+  // `parseInvocation`: `See the [skill guide](./g.md) and then [skill: login]`
+  // really does call `login`, and F12 has to land on the same one the runner
+  // runs.
+  INVOCATION_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  let kind: 'skill' | 'tool';
+  let name: string;
+  let nameStart: number;
+  for (;;) {
+    m = INVOCATION_RE.exec(line);
+    if (m === null || m.index === undefined) return null;
+    INVOCATION_RE.lastIndex = m.index + 1;
+    kind = m[1] as 'skill' | 'tool';
+    name = m[2]!;
+    // The name starts after the `[skill`/`[tool` keyword and the separator the
+    // regex consumed; recompute its offset from the full match length.
+    nameStart = m.index + m[0].length - name.length;
+    const after = line.slice(nameStart + name.length);
+    // The parser accepts only whitespace or `]` after a name, and declines a
+    // markdown link outright. Without these two the editor claimed prose the
+    // runner does not: `Verify the [skill level: expert] badge` navigated to a
+    // skill named `level`, and `[skill guide](./g.md)` to one named `guide`.
+    if (!/^[ \t\]]/.test(after)) continue;
+    if (after.startsWith('](')) continue;
+    break;
+  }
   const nameRange: [number, number] = [nameStart, nameStart + name.length];
 
   const outputKeys: InvocationLine['outputKeys'] = [];

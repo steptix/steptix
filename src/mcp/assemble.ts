@@ -63,18 +63,17 @@ const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
 
 /**
- * A `[skill` / `[tool` invocation token anywhere in a step — anywhere, not
- * anchored, because the invocation grammar allows a prose label before the
- * token on the same line ("Log in [skill: login]").
+ * Does this step invoke a skill or a tool? Re-exported here because
+ * `run_errand` and the project-less `run_steps` guard both refuse such steps,
+ * and this is where "what counts as a code step" used to be defined.
  *
- * BUILT FROM the tokenizer's own rule rather than re-typed, so "what counts as
- * a code step" cannot mean two things — the property `session-manager.ts`'s
- * project-less no-tools guarantee leans on. It was re-typed before, and drifted:
- * a hand-added `/i` made `Verify the button reads [Tool Settings]` a refused
- * "code step" while the runner ran it as ordinary prose, because the scanner is
- * case-sensitive. Deriving it removes the class of bug, not just that instance.
- *
- * Exported for `run_errand`, which refuses the same lines for the same reason.
+ * It is the PARSER, not a look-alike pattern. That matters for the property
+ * `session-manager.ts`'s project-less no-tools guarantee leans on: the scan
+ * must claim every line the runner would dispatch. As a regex it did not —
+ * a hand-added `/i` refused `Verify the button reads [Tool Settings]` as a
+ * "code step" the runner ran as prose, and no pattern can express the
+ * grammar's markdown-link and colon-less-leniency rules at all.
+ * `tests/invocation-mirror-parity.test.ts` pins the equivalence.
  */
 export const isCodeStep = isInvocationStep;
 

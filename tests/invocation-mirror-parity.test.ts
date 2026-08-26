@@ -69,6 +69,13 @@ const LINES = [
   'Read the [tool reference](./ref.md) page',
   'Open the cart and check out',
   'Set the ratio to 3:1',
+  // A DECLINED candidate must not swallow a real call later on the line.
+  // Scanning only the first match made all three of these prose — so the
+  // runner skipped a live call, and `isCodeStep` said "no invocation here"
+  // for a step carrying one, which is the property run_errand relies on.
+  'See the [skill guide](./g.md) and then [skill: login]',
+  'Check the [skill level: expert] badge then [skill: login]',
+  'Verify the [tool "bar"] icon, then [tool: seed_cart items=2]',
 ];
 
 describe('invocation token mirrors agree with the tokenizer', () => {

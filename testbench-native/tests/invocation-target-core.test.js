@@ -350,3 +350,28 @@ test('openSkillNamePrefix stays quiet outside an open token', () => {
     assert.equal(openSkillNamePrefix(prefix), null, `${JSON.stringify(prefix)} must not match`);
   }
 });
+
+test('parseInvocationLine declines links and non-grammar text, like the parser', () => {
+  // The mirror is a regex and cannot parse, but it must not CLAIM what the
+  // parser declines: a markdown link, or a name followed by something the
+  // grammar never allows there (`[skill level: expert]` is English).
+  for (const line of [
+    '1. Read the [skill guide](./docs/guide.md) before running',
+    '1. Open the [tool docs](https://x.com) page',
+    '1. Verify the [skill level: expert] badge',
+    '1. Confirm the [tool tip: hover] text',
+  ]) {
+    assert.equal(parseInvocationLine(line), null, `${JSON.stringify(line)} must stay prose`);
+  }
+});
+
+test('parseInvocationLine resumes past a declined candidate to a real call', () => {
+  // F12 has to land on the call the runner actually runs. Taking only the
+  // first candidate resolved `guide` here — a skill that does not exist.
+  const inv = parseInvocationLine('1. See the [skill guide](./g.md) and then [skill: login]');
+  assert.equal(inv?.kind, 'skill');
+  assert.equal(inv?.name, 'login');
+  // The range must point at THAT occurrence, not the declined one.
+  const line = '1. See the [skill guide](./g.md) and then [skill: login]';
+  assert.equal(line.slice(inv.nameRange[0], inv.nameRange[1]), 'login');
+});

@@ -14,3 +14,8 @@ integration-out.log
 # Created at runtime by env-overlay.test.cjs; its teardown is best-effort
 # (Windows EBUSY), so it can survive a run.
 tests/integration/fixtures/sub/
+# Runtime-generated fixture projects (created in before(), removed in after()).
+# Listed so a killed electron host cannot leave one behind to be committed —
+# or picked up as a real test by a later discovery scan.
+tests/integration/fixtures/snc-project/
+tests/integration/fixtures/dc-project/

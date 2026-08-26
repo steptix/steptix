@@ -97,7 +97,9 @@ What deliberately does **not** change:
   (`protocol.ts` `skillName`) and `[`-leading steps as directives
   (`section-index.ts`). No change needed.
 - **`CODE_STEP_PATTERN`** (MCP's "is this a code step" detector) matches the
-  `[skill:` prefix only. Unchanged.
+  `[skill:` prefix only. Unchanged. *(Later superseded: it is now `isCodeStep`,
+  which calls the parser rather than matching a prefix — see
+  [optional-invocation-colon.md](optional-invocation-colon.md).)*
 
 ## Editor support (testbench-native)
 

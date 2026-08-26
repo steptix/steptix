@@ -126,7 +126,10 @@ file at parse time. Worth recording as the reason those two rules exist.
 
 - tests/skill-call-parser.test.ts — "optional colon" block: equivalence
   with the colon form, whitespace/`: ` variants, full arg shapes,
-  bracketed-prose non-matches, near-miss scanning, `[skill ]` erroring.
+  bracketed-prose non-matches, near-miss scanning, `[skill ]` and other
+  unparseable colon-less tokens degrading to prose (and `[skill: ]` still
+  throwing), markdown links declined, and a declined candidate not
+  swallowing a real call later on the same line.
 - tests/tool-call-parser.test.ts — the same parity for tools.
 - tests/mcp-errands-seam.test.ts — colon-less steps refused by
   `run_errand`; `[skills]` prose not swept in.

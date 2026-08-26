@@ -40,8 +40,13 @@ before the cursor ends with the keyword, a separator, and a partial name
 that is still a valid name prefix:
 
 ```
-/\[skill(?:[ \t]*:[ \t]*|[ \t]+)([A-Za-z0-9_/-]*)$/
+new RegExp(String.raw`\[skill${SEP}(${NAME}*)$`)
 ```
+
+where `SEP` and `NAME` are the shared separator and name-class fragments
+in `invocation-target-core.ts` — the same two the file's
+`INVOCATION_RE` is built from, so the completion anchor and the
+Go-to-Definition matcher cannot disagree about where a name begins.
 
 - `1. [skill │`, `1. [skill: │`, `1. [skill:│`, `1. [skill : │` — all
   separator spellings, empty partial.
@@ -82,7 +87,7 @@ inside skill bodies too.
 
 - `tests/invocation-target-core.test.js` — anchor rows: every separator
   spelling, label prefixes, closed-call lines, bracketed prose,
-  partial/`start` offsets.
+  partial/`replaceStart` offsets.
 - `tests/integration/suite/skill-name-completion.test.cjs` — a
   runtime-generated project (`snc-project/`, own `aiui.config.json`,
   `skills/` with a flat and a subfolder skill) driven through

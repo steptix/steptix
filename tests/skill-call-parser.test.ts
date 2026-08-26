@@ -102,6 +102,20 @@ describe('parseSkillCall — markdown links are not invocations', () => {
     expect(result?.name).toBe('login');
     expect(result?.trailing).toBe(' (smoke only)');
   });
+
+  it('a declined candidate does not swallow a real call later on the line', () => {
+    // The scan resumes past a link or an unparseable colon-less token. Taking
+    // only the FIRST candidate made these prose, silently skipping a live
+    // call the runner should have dispatched.
+    expect(parseSkillCall('See the [skill guide](./g.md) and then [skill: login]')?.name).toBe(
+      'login',
+    );
+    expect(
+      parseSkillCall('Check the [skill level: expert] badge then [skill: login]')?.name,
+    ).toBe('login');
+    // …and a line of nothing but declined candidates is still prose.
+    expect(parseSkillCall('The [skill guide](./g.md) and the [skill matrix](./m.md)')).toBeNull();
+  });
 });
 
 describe('parseSkillCall — label prefix', () => {
