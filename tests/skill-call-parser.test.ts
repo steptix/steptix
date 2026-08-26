@@ -25,6 +25,56 @@ describe('parseSkillCall — non-matches', () => {
   });
 });
 
+describe('parseSkillCall — optional colon', () => {
+  it('parses `[skill name]` identically to `[skill: name]`', () => {
+    // Same call in every field except nameColumn — the name naturally sits
+    // one character earlier when the colon is omitted.
+    const bare = parseSkillCall('[skill login]');
+    const colon = parseSkillCall('[skill: login]');
+    expect(bare).toEqual({ ...colon, nameColumn: 7 });
+  });
+
+  it('records the same nameColumn under both spellings', () => {
+    // `[skill login]` and `[skill: login]` both put `l` at column 8.
+    expect(parseSkillCall('[skill  login]')?.nameColumn).toBe(8);
+    expect(parseSkillCall('[skill: login]')?.nameColumn).toBe(8);
+  });
+
+  it('accepts extra whitespace, and whitespace before the colon', () => {
+    expect(parseSkillCall('[skill   login]')?.name).toBe('login');
+    expect(parseSkillCall('[skill : login]')?.name).toBe('login');
+    expect(parseSkillCall('[skill:login]')?.name).toBe('login');
+  });
+
+  it('parses the full arg shapes without the colon', () => {
+    const result = parseSkillCall(
+      'Sign in [skill auth/login username role="admin" out.session_id] # note',
+    );
+    expect(result?.label).toBe('Sign in');
+    expect(result?.name).toBe('auth/login');
+    expect(result?.args).toEqual({ username: '{{username}}', role: 'admin' });
+    expect(result?.outputAliases).toEqual({ session_id: 'session_id' });
+    expect(result?.trailing).toBe(' # note');
+  });
+
+  it('does not claim bracketed prose that merely contains the keyword', () => {
+    // No `:` and no whitespace directly after `skill` — these never open a call.
+    expect(parseSkillCall('Check the [skillful] animation')).toBeNull();
+    expect(parseSkillCall('Open the [skills] page')).toBeNull();
+    expect(parseSkillCall('A bare [skill] token is not a call either')).toBeNull();
+  });
+
+  it('scans past a near-miss to find the real token', () => {
+    expect(parseSkillCall('see [skillful] then [skill login]')?.name).toBe('login');
+  });
+
+  it('still throws when the token opens a call with no name', () => {
+    // `[skill ]` commits (keyword + whitespace) exactly like `[skill: ]` does.
+    expect(() => parseSkillCall('[skill ]')).toThrow(SkillCallSyntaxError);
+    expect(() => parseSkillCall('[skill ]')).toThrow(/name missing/);
+  });
+});
+
 describe('parseSkillCall — label prefix', () => {
   it('captures text before `[skill:` as the step label, trimmed', () => {
     const result = parseSkillCall('Search with DuckDuckGo [skill: duckduckgo]');

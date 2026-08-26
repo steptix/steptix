@@ -20,14 +20,15 @@ export class ToolCallSyntaxError extends InvocationSyntaxError {
 /**
  * Try to parse `line` as a tool invocation.
  *
- * Returns `null` if the line contains no `[tool:` token at all. Throws
+ * Returns `null` if the line contains no `[tool` token (the keyword followed
+ * by `:` or whitespace — the colon is optional) at all. Throws
  * `ToolCallSyntaxError` if the line contains the token but the bracketed
- * call is malformed. Any text before `[tool:` is captured as `label` —
+ * call is malformed. Any text before the token is captured as `label` —
  * see `parseInvocation` for the full grammar.
  */
 export function parseToolCall(line: string): ToolCall | null {
   const parsed: ParsedInvocation | null = parseInvocation(line, {
-    prefix: '[tool:',
+    kind: 'tool',
     errorClass: ToolCallSyntaxError,
     // Tool references may be path-qualified (`auth/login/login`) to name the
     // file plus the tool inside it — see `parseToolRef` in the registry.

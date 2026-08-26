@@ -6,6 +6,17 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Changed — the colon in `[skill: ...]` / `[tool: ...]` is now optional
+
+`[skill login]` is the same call as `[skill: login]`, and `[tool seed_cart
+items=2]` the same as `[tool: seed_cart items=2]` — every arg form, output
+alias, path-qualified name, and prose label works identically under both
+spellings. The keyword must be followed by the colon or whitespace, so
+bracketed prose such as `[skills]` or `[skillful]` is never mistaken for an
+invocation. Everything that keys off the token moved in lockstep: the
+server's tokenizer, the MCP errand/prose scan, code-behind's
+never-generate rule, and TestBench's F12 targets and tool-line detection.
+
 ### Added — TestBench: Renumber Steps
 
 Right-click the line-number gutter in a test file and pick **TestBench:

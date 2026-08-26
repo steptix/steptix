@@ -5,7 +5,8 @@
  * shorthand into the canonical arg form.
  *
  * Grammar (parameterised by `kind`):
- *   Call         := WS? '[<kind>:' WS Name (WS Arg)* WS? ']' Trailing
+ *   Call         := Label? '[<kind>' Sep Name (WS Arg)* WS? ']' Trailing
+ *   Sep          := WS? ':' WS?  |  WS
  *   Arg          := OutAlias | Param
  *   Param        := Identifier ( '=' (QuotedString | JsonArray | BareLiteral) )?
  *   OutAlias     := 'out.' Identifier ( '=' QuotedString )?
@@ -14,6 +15,11 @@
  *   BareLiteral  := NumberLiteral | BooleanLiteral
  *   NumberLiteral  := -? digit+ ('.' digit+)?
  *   BooleanLiteral := 'true' | 'false'
+ *
+ * The colon after the keyword is optional — `[skill login]` and
+ * `[skill: login]` are the same call. `[<kind>` opens an invocation only when
+ * followed by `:` or inline whitespace, so bracketed prose that merely
+ * contains the keyword's letters (`[skillful]`, `[skills]`) stays prose.
  *
  * Bare `Param`     desugars to `Identifier="{{Identifier}}"`
  * Bare `OutAlias`  desugars to `out.Identifier="Identifier"`
@@ -145,8 +151,9 @@ const BARE_NUMBER_RE = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
 const BARE_BOOLEAN_RE = /^(?:true|false)$/;
 
 export interface InvocationParserOptions {
-  /** The bracketed prefix, e.g. `'[skill:'` or `'[tool:'`. */
-  prefix: string;
+  /** The invocation keyword, e.g. `'skill'` or `'tool'`. The token is
+   *  `[<kind>` followed by `:` or inline whitespace — the colon is optional. */
+  kind: string;
   /** Error subclass to throw for syntax errors. Defaults to `InvocationSyntaxError`. */
   errorClass?: new (reason: string, source: string, column: number) => InvocationSyntaxError;
   /**
@@ -161,11 +168,12 @@ export interface InvocationParserOptions {
 /**
  * Try to parse `line` as an invocation of the configured kind.
  *
- * Returns `null` if the line does not contain the configured prefix
- * (`[skill:` / `[tool:`) at all. Throws the configured error class if the
- * line contains the prefix but the bracketed call is malformed.
+ * Returns `null` if the line does not contain the invocation token — the
+ * keyword bracket (`[skill` / `[tool`) followed by `:` or inline whitespace —
+ * at all. Throws the configured error class if the line contains the token
+ * but the bracketed call is malformed.
  *
- * Any text that appears before the prefix is captured as `label` (trimmed)
+ * Any text that appears before the token is captured as `label` (trimmed)
  * so authors can prefix an invocation with a human-readable description:
  *
  *   `Search with DuckDuckGo [skill: duckduckgo_search query="..."]`
@@ -174,20 +182,43 @@ export interface InvocationParserOptions {
  * resolution. Whitespace-only prefix text produces no label (the canonical
  * `[skill: foo]` form is unchanged).
  */
+/** One finder per kind, built once — `parseInvocation` runs on every step
+ *  line of every parse. `kind` is a bare keyword (`skill` / `tool`), so
+ *  splicing it into the pattern needs no escaping. */
+const tokenFinders = new Map<string, RegExp>();
+
+function tokenFinder(kind: string): RegExp {
+  let re = tokenFinders.get(kind);
+  if (!re) {
+    re = new RegExp(`\\[${kind}(?=[ \\t:])`);
+    tokenFinders.set(kind, re);
+  }
+  return re;
+}
+
 export function parseInvocation(
   line: string,
   options: InvocationParserOptions,
 ): ParsedInvocation | null {
-  const { prefix } = options;
-  const prefixIdx = line.indexOf(prefix);
-  if (prefixIdx === -1) {
+  const { kind } = options;
+  // `[<kind>` counts as an invocation token only when followed by `:` or
+  // inline whitespace, and the scan continues past a near-miss — in
+  // `see [skillful] do [skill: x]` the first `[skill` is inside a longer
+  // word and the real token is still found.
+  const token = tokenFinder(kind).exec(line);
+  if (token === null) {
     return null;
   }
+  const prefixIdx = token.index;
   const labelRaw = line.slice(0, prefixIdx).trim();
   const label = labelRaw === '' ? undefined : labelRaw;
 
   const ErrorCls = options.errorClass ?? InvocationSyntaxError;
-  const scanner = new Scanner(line, prefixIdx + prefix.length, ErrorCls);
+  const scanner = new Scanner(line, prefixIdx + 1 + kind.length, ErrorCls);
+  // Sep := WS? ':' WS? | WS — the lookahead above guarantees at least one
+  // separator character is present, so a bare `[skill]` never gets here.
+  scanner.skipInlineSpace();
+  scanner.tryConsume(':');
   scanner.skipInlineSpace();
 
   const nameColumn = scanner.pos;

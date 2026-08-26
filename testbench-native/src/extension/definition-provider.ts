@@ -6,8 +6,10 @@ import { resolveProjectDirs } from './aiui-config.js';
 import {
   TOOL_FILE_EXTS,
   canonicalSkillName,
+  parseInvocationLine,
   skillHeading,
   toolFileFor,
+  type InvocationLine,
 } from './invocation-target-core.js';
 
 /**
@@ -218,55 +220,14 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
   }
 }
 
-/** A `[skill: ...]` / `[tool: ...]` invocation located on a line. */
-interface InvocationLine {
-  kind: 'skill' | 'tool';
-  name: string;
-  /** [start, end) char range of the name token on the line. */
-  nameRange: [number, number];
-  /** Each `out.<key>` alias key found, with the char range of `<key>`. */
-  outputKeys: Array<{ text: string; range: [number, number] }>;
-}
+// `InvocationLine`, `parseInvocationLine` and the invocation regex live in
+// invocation-target-core.ts (vscode-free, parity-tested against the server's
+// tokenizer). Only the cursor-mapping below is editor-specific.
 
 /** A token the cursor can sit on within an invocation line. */
 interface Token {
   kind: 'name' | 'outputKey';
   text: string;
-}
-
-// The name class admits `/` because both kinds are path-qualified: skills may
-// live in subfolders of `skillsDir` (`auth/login`, leading slash tolerated) and
-// a tool ref names a file plus the tool inside it (`auth/login/login`). Keep it
-// in step with `readIdentifier`'s `allowSlash` class in
-// src/parser/invocation-parser.ts.
-const INVOCATION_RE = /\[(skill|tool):\s*([A-Za-z0-9_/-]+)/;
-const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
-
-/**
- * Parse the invocation prefix + name + any `out.<key>` aliases out of a
- * raw line, recording character ranges so the cursor can be mapped to a
- * token. Returns null if the line is not a skill/tool invocation.
- */
-function parseInvocationLine(line: string): InvocationLine | null {
-  const m = INVOCATION_RE.exec(line);
-  if (!m || m.index === undefined) return null;
-  const kind = m[1] as 'skill' | 'tool';
-  const name = m[2]!;
-  // The name starts after `[skill:`/`[tool:` and the whitespace the regex
-  // consumed; recompute its offset from the full match length.
-  const nameStart = m.index + m[0].length - name.length;
-  const nameRange: [number, number] = [nameStart, nameStart + name.length];
-
-  const outputKeys: InvocationLine['outputKeys'] = [];
-  OUTPUT_KEY_RE.lastIndex = 0;
-  let om: RegExpExecArray | null;
-  while ((om = OUTPUT_KEY_RE.exec(line)) !== null) {
-    const key = om[1]!;
-    const keyStart = om.index + om[0].length - key.length;
-    outputKeys.push({ text: key, range: [keyStart, keyStart + key.length] });
-  }
-
-  return { kind, name, nameRange, outputKeys };
 }
 
 /** Which token, if any, the cursor column falls on. */

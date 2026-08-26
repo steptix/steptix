@@ -30,6 +30,7 @@ import {
   TOOL_FILE_EXTS,
   canonicalSkillName,
   collectSkillNames,
+  parseInvocationLine,
   skillHeading,
   toolFileFor,
 } from '../src/extension/invocation-target-core.ts';
@@ -253,4 +254,56 @@ test('collectSkillNames follows a symlinked skill file', (t) => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── parseInvocationLine: parity with parseInvocation's token finder ──────────
+// One row per shape in tests/skill-call-parser.test.ts ("optional colon") and
+// tests/tool-call-parser.test.ts. The editor and the tokenizer must agree on
+// WHICH lines are invocations, or F12 navigates on a line the runner treats
+// as prose (or vice versa).
+
+test('parseInvocationLine accepts both the colon and colon-less spellings', () => {
+  const rows = [
+    ['1. [skill: login]', 'skill', 'login'],
+    ['1. [skill login]', 'skill', 'login'],
+    ['1. [skill  auth/login]', 'skill', 'auth/login'],
+    ['1. [skill : login]', 'skill', 'login'],
+    ['1. [skill:login]', 'skill', 'login'],
+    ['1. Sign in [skill login user="x"]', 'skill', 'login'],
+    ['1. [tool: seed_cart items=2]', 'tool', 'seed_cart'],
+    ['1. [tool seed_cart items=2]', 'tool', 'seed_cart'],
+    ['1. [tool auth/login/login]', 'tool', 'auth/login/login'],
+  ];
+  for (const [line, kind, name] of rows) {
+    const inv = parseInvocationLine(line);
+    assert.ok(inv, `"${line}" should parse as an invocation`);
+    assert.equal(inv.kind, kind, `kind of "${line}"`);
+    assert.equal(inv.name, name, `name of "${line}"`);
+  }
+});
+
+test('parseInvocationLine reports the name range under both spellings', () => {
+  // `1. [skill login]` — name starts after `1. [skill ` (10 chars).
+  assert.deepEqual(parseInvocationLine('1. [skill login]').nameRange, [10, 15]);
+  // `1. [skill: login]` — the colon shifts it one to the right.
+  assert.deepEqual(parseInvocationLine('1. [skill: login]').nameRange, [11, 16]);
+});
+
+test('parseInvocationLine leaves bracketed prose alone', () => {
+  // No colon and no whitespace directly after the keyword — never a call.
+  for (const line of [
+    '1. Check the [skillful] animation',
+    '1. Open the [skills] page',
+    '1. Open the [toolbox] panel',
+    '1. A bare [skill] token',
+    '1. plain prose with no brackets',
+  ]) {
+    assert.equal(parseInvocationLine(line), null, `"${line}" must stay prose`);
+  }
+});
+
+test('parseInvocationLine scans past a near-miss to the real token', () => {
+  const inv = parseInvocationLine('1. see [skillful] then [skill login]');
+  assert.equal(inv?.kind, 'skill');
+  assert.equal(inv?.name, 'login');
 });

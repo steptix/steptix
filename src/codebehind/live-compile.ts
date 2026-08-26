@@ -185,11 +185,12 @@ export function generationRefusal(input: {
   return undefined;
 }
 
-/** `[skill:` and `[tool:` only. `[input:]`, `[output:]` and `[interactive]`
- *  DO reach generation and are declined there, with the reason, by
- *  `refuseReason` — the difference is that those are still the author's step
- *  and deserve an `ai: true` entry saying why. */
-const BRACKET_CALL_STEP = /^\[\s*(skill|tool)\s*:/i;
+/** `[skill` and `[tool` calls only (colon or whitespace after the keyword —
+ *  the colon is optional in the invocation grammar). `[input:]`, `[output:]`
+ *  and `[interactive]` DO reach generation and are declined there, with the
+ *  reason, by `refuseReason` — the difference is that those are still the
+ *  author's step and deserve an `ai: true` entry saying why. */
+const BRACKET_CALL_STEP = /^\[\s*(skill|tool)(?:\s*:|\s)/i;
 
 export class LiveCompiler {
   private readonly candidate = new Candidate();

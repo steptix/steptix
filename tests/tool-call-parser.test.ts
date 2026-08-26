@@ -17,6 +17,24 @@ describe('parseToolCall — non-matches', () => {
   });
 });
 
+describe('parseToolCall — optional colon (parity with skill calls)', () => {
+  it('parses `[tool name]` identically to `[tool: name]`', () => {
+    const bare = parseToolCall('[tool seed_cart items=2]');
+    expect(bare).toEqual(parseToolCall('[tool: seed_cart items=2]'));
+    expect(bare?.name).toBe('seed_cart');
+    expect(bare?.args).toEqual({ items: '2' });
+  });
+
+  it('accepts a path-qualified ref without the colon', () => {
+    expect(parseToolCall('[tool auth/login/login]')?.name).toBe('auth/login/login');
+  });
+
+  it('does not claim bracketed prose that merely contains the keyword', () => {
+    expect(parseToolCall('Open the [toolbox] panel')).toBeNull();
+    expect(parseToolCall('Check the [tools] menu')).toBeNull();
+  });
+});
+
 describe('parseToolCall — label prefix', () => {
   it('captures text before `[tool:` as the step label, trimmed', () => {
     const result = parseToolCall('Fetch the CSRF token [tool: fetch_csrf_token]');

@@ -62,17 +62,18 @@ const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
 
 /**
- * A `[skill:` / `[tool:` invocation token anywhere in a step — anywhere, not
+ * A `[skill` / `[tool` invocation token anywhere in a step — anywhere, not
  * anchored, because the invocation grammar allows a prose label before the
  * token on the same line ("Log in [skill: login]"). The token itself is
- * matched tight (no space after `[`), mirroring the tokenizers'
- * `prefix: '[skill:'`, so prose that merely *mentions* the bracket syntax
- * with different spacing is not swept in.
+ * matched tight (no space after `[`, and the keyword must be followed by `:`
+ * or inline whitespace), mirroring the tokenizers' finder — the colon is
+ * optional in the invocation grammar, so `[skill login]` counts, while
+ * bracketed prose like `[skills]` or `[skillful]` is not swept in.
  *
  * Exported for `run_errand`, which refuses the same lines for the same reason:
  * one rule, so "what counts as a code step" cannot mean two things.
  */
-export const CODE_STEP_PATTERN = /\[(?:skill|tool):/i;
+export const CODE_STEP_PATTERN = /\[(?:skill|tool)(?=[ \t:])/i;
 
 /** Any `${...}` reference, for the "nothing will interpolate this" warning. */
 const ANY_PLACEHOLDER = /\$\{[^}]*\}/g;

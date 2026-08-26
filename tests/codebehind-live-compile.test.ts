@@ -123,7 +123,16 @@ describe('which steps a compile-mode run generates from', () => {
   });
 
   it('skips a [skill:] or [tool:] call — those are expanded or dispatched, never generated', () => {
-    for (const text of ['[skill: sign in]', '[tool: seedOrder]', '  [SKILL: x]']) {
+    // Both spellings: the colon after the keyword is optional in the
+    // invocation grammar, so `[skill sign_in]` is as much a call as
+    // `[skill: sign in]`.
+    for (const text of [
+      '[skill: sign in]',
+      '[tool: seedOrder]',
+      '  [SKILL: x]',
+      '[skill sign_in]',
+      '[tool seedOrder count=2]',
+    ]) {
       expect(generationRefusal({ text, status: 'passed', binding: binding(text) })).toMatch(
         /expanded or dispatched/,
       );

@@ -9,6 +9,8 @@
  *  - `canonicalSkillName` mirrors `parseSkillCall` (src/skills/skill-call-parser.ts)
  *  - `collectSkillNames`  mirrors `loadSkill`'s `<skillsDir>/<name>.md` layout,
  *                         with `listToolFiles`' walk rules (registry.ts)
+ *  - `parseInvocationLine` mirrors `parseInvocation`'s token finder
+ *                         (src/parser/invocation-parser.ts)
  *
  * A mirror that drifts is worse than no mirror: F12 would open a different file
  * from the one the runner loads, and completion would offer names the parser
@@ -202,4 +204,57 @@ function entryKind(dir: string, entry: fs.Dirent): 'dir' | 'file' | null {
     /* broken link — nothing to offer */
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Invocation-line reading — which lines ARE invocations, extracted from
+// definition-provider.ts for the same testability reason as the resolvers.
+// ---------------------------------------------------------------------------
+
+/** A `[skill: ...]` / `[tool: ...]` invocation located on a line. */
+export interface InvocationLine {
+  kind: 'skill' | 'tool';
+  name: string;
+  /** [start, end) char range of the name token on the line. */
+  nameRange: [number, number];
+  /** Each `out.<key>` alias key found, with the char range of `<key>`. */
+  outputKeys: Array<{ text: string; range: [number, number] }>;
+}
+
+// The name class admits `/` because both kinds are path-qualified: skills may
+// live in subfolders of `skillsDir` (`auth/login`, leading slash tolerated) and
+// a tool ref names a file plus the tool inside it (`auth/login/login`). Keep it
+// in step with `readIdentifier`'s `allowSlash` class in
+// src/parser/invocation-parser.ts. The separator mirrors that parser's finder:
+// a colon with optional inline whitespace around it, or bare whitespace — the
+// colon is optional (`[skill login]` ≡ `[skill: login]`), and `[skillful]`
+// has neither separator so it stays prose.
+const INVOCATION_RE = /\[(skill|tool)(?:[ \t]*:[ \t]*|[ \t]+)([A-Za-z0-9_/-]+)/;
+const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
+
+/**
+ * Parse the invocation prefix + name + any `out.<key>` aliases out of a
+ * raw line, recording character ranges so the cursor can be mapped to a
+ * token. Returns null if the line is not a skill/tool invocation.
+ */
+export function parseInvocationLine(line: string): InvocationLine | null {
+  const m = INVOCATION_RE.exec(line);
+  if (!m || m.index === undefined) return null;
+  const kind = m[1] as 'skill' | 'tool';
+  const name = m[2]!;
+  // The name starts after the `[skill`/`[tool` keyword and the separator the
+  // regex consumed; recompute its offset from the full match length.
+  const nameStart = m.index + m[0].length - name.length;
+  const nameRange: [number, number] = [nameStart, nameStart + name.length];
+
+  const outputKeys: InvocationLine['outputKeys'] = [];
+  OUTPUT_KEY_RE.lastIndex = 0;
+  let om: RegExpExecArray | null;
+  while ((om = OUTPUT_KEY_RE.exec(line)) !== null) {
+    const key = om[1]!;
+    const keyStart = om.index + om[0].length - key.length;
+    outputKeys.push({ text: key, range: [keyStart, keyStart + key.length] });
+  }
+
+  return { kind, name, nameRange, outputKeys };
 }
