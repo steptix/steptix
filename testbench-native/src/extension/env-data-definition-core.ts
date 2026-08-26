@@ -22,9 +22,17 @@
  * The `{{name}}` runtime half lives here too: its cursor hit-test (the
  * runtime's `\{\{(\w+)\}\}`, src/parser/parameters.ts) and the locator for a
  * `- name:` bullet under `## Parameters`. Its other jump target — the step
- * that captures a name — is located by `captureWriteRange` in
- * env-data-completion-core.ts, next to the capture patterns it must mirror.
+ * that captures a name — is reported by `captureNamesBefore` in
+ * env-data-completion-core.ts, which carries each write's column so scope and
+ * position come from one walk.
+ *
+ * Where a grammar is owned elsewhere, this file locates rather than restates
+ * it: the `.env` and `## Parameters` scans delegate to runner-core's
+ * `scanServerEnv` / `scanSectionItems`, which return positions beside the
+ * values their map-building siblings parse.
  */
+import { parseTree, type Node } from 'jsonc-parser';
+import { scanSectionItems, scanServerEnv } from 'ai-ui-automation-runner-core';
 
 // ---------------------------------------------------------------------------
 // Reference under the cursor
@@ -54,7 +62,6 @@ const ENV_NAME_REF_RE = /\$\{\s*envName\s*\}/g;
  * never span lines, so line-local is exact.
  */
 export function refAtPosition(line: string, character: number): RefAtPosition | null {
-  DOTTED_REF_RE.lastIndex = 0;
   for (const m of line.matchAll(DOTTED_REF_RE)) {
     const start = m.index!;
     const end = start + m[0].length;
@@ -85,7 +92,6 @@ export function refAtPosition(line: string, character: number): RefAtPosition | 
     };
   }
 
-  ENV_NAME_REF_RE.lastIndex = 0;
   for (const m of line.matchAll(ENV_NAME_REF_RE)) {
     const start = m.index!;
     if (character >= start && character <= start + m[0].length) {
@@ -105,7 +111,6 @@ const PARAM_REF_RE = /\{\{(\w+)\}\}/g;
  * `line`, or null. Same inclusive-edges rule as `refAtPosition`.
  */
 export function paramRefAtPosition(line: string, character: number): { name: string } | null {
-  PARAM_REF_RE.lastIndex = 0;
   for (const m of line.matchAll(PARAM_REF_RE)) {
     const start = m.index!;
     if (character >= start && character <= start + m[0].length) {
@@ -135,159 +140,73 @@ export interface JsonPathTarget {
 }
 
 /**
- * Walk `path` into raw JSON text, tracking source positions, and return the
- * deepest token reached — the exact key on a full match, the nearest existing
- * ancestor on a partial one (`depth` says which).
+ * Walk `path` into raw JSON text and return the deepest token reached — the
+ * exact key on a full match, the nearest existing ancestor on a partial one
+ * (`depth` says which).
  *
  * Matching mirrors the runtime's `lookupDataPath` (src/env/data-loader.ts):
  * object segments by key equality — where a duplicated key resolves to its
  * LAST occurrence, because that is what `JSON.parse` keeps — and array
- * segments by `Number(segment)` as a bounds-checked integer index.
+ * segments by `Number(segment)` as a bounds-checked integer index. Note
+ * `findNodeAtLocation` cannot serve here: it returns the FIRST of duplicate
+ * keys, and answers `undefined` rather than naming how far it got.
  *
- * The scanner assumes `text` is valid JSON (callers gate on a successful
- * `JSON.parse` first); if it trips anyway it returns what it had matched so
- * far rather than throwing.
+ * Positions come from jsonc-parser's `parseTree` (VS Code's own JSON tooling)
+ * rather than a hand-rolled scanner, so string escapes, number forms, and
+ * whitespace are somebody else's solved problem. A document too malformed to
+ * produce a tree yields the top of the file; callers gate on a successful
+ * `JSON.parse` first, so that is a fallback, not the normal path.
  */
 export function locateJsonPath(text: string, path: string[]): JsonPathTarget {
   let best = { offset: 0, length: 0, depth: 0 };
+  let node = parseTree(text);
 
-  const skipWs = (i: number): number => {
-    while (i < text.length && ' \t\r\n'.includes(text[i]!)) i++;
-    return i;
-  };
-
-  /** Scan the string starting at `i` (an opening quote). Returns the offset
-   *  just past the closing quote and the decoded value. */
-  const scanString = (i: number): { end: number; value: string } => {
-    let out = '';
-    i++; // past the opening quote
-    while (i < text.length && text[i] !== '"') {
-      if (text[i] === '\\') {
-        const esc = text[i + 1]!;
-        if (esc === 'u') {
-          out += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16));
-          i += 6;
-        } else {
-          out += esc === 'b' ? '\b'
-            : esc === 'f' ? '\f'
-            : esc === 'n' ? '\n'
-            : esc === 'r' ? '\r'
-            : esc === 't' ? '\t'
-            : esc; // `"` `\` `/` decode to themselves
-          i += 2;
-        }
-      } else {
-        out += text[i];
-        i++;
-      }
-    }
-    if (text[i] !== '"') throw new Error('unterminated string');
-    return { end: i + 1, value: out };
-  };
-
-  /** Offset just past the value starting at `i`. */
-  const skipValue = (i: number): number => {
-    const c = text[i];
-    if (c === '"') return scanString(i).end;
-    if (c === '{' || c === '[') {
-      const close = c === '{' ? '}' : ']';
-      i = skipWs(i + 1);
-      if (text[i] === close) return i + 1;
-      while (true) {
-        if (c === '{') {
-          i = skipWs(scanString(i).end); // key
-          if (text[i] !== ':') throw new Error('expected :');
-          i = skipWs(i + 1);
-        }
-        i = skipWs(skipValue(i));
-        if (text[i] === ',') {
-          i = skipWs(i + 1);
-          continue;
-        }
-        if (text[i] !== close) throw new Error(`expected ${close}`);
-        return i + 1;
-      }
-    }
-    // Scalar: number / true / false / null.
-    let end = i;
-    while (end < text.length && !' \t\r\n,]}'.includes(text[end]!)) end++;
-    if (end === i) throw new Error('empty value');
-    return end;
-  };
-
-  /** Descend into the value at `i` looking for `path[depth]`. */
-  const descend = (i: number, depth: number): void => {
-    if (depth >= path.length) return;
+  for (let depth = 0; node !== undefined && depth < path.length; depth++) {
     const segment = path[depth]!;
-    const c = text[i];
 
-    if (c === '{') {
-      // Remember the LAST member matching the segment — `JSON.parse` keeps
-      // the last duplicate, so that is the one the runtime resolves.
-      let match: { keyOffset: number; keyLength: number; valueStart: number } | null = null;
-      i = skipWs(i + 1);
-      if (text[i] !== '}') {
-        while (true) {
-          const keyStart = i; // at the opening quote
-          const key = scanString(i);
-          i = skipWs(key.end);
-          if (text[i] !== ':') throw new Error('expected :');
-          const valueStart = skipWs(i + 1);
-          if (key.value === segment) {
-            match = {
-              keyOffset: keyStart + 1,
-              keyLength: key.end - keyStart - 2, // raw text between the quotes
-              valueStart,
-            };
-          }
-          i = skipWs(skipValue(valueStart));
-          if (text[i] === ',') {
-            i = skipWs(i + 1);
-            continue;
-          }
-          break;
-        }
+    if (node.type === 'object') {
+      // Last matching property wins, so scan all of them rather than stopping
+      // at the first — `JSON.parse` keeps the last duplicate.
+      let match: Node | undefined;
+      for (const property of node.children ?? []) {
+        if (property.children?.[0]?.value === segment) match = property;
       }
-      if (match) {
-        best = { offset: match.keyOffset, length: match.keyLength, depth: depth + 1 };
-        descend(match.valueStart, depth + 1);
-      }
-      return;
+      const key = match?.children?.[0];
+      if (!key) return toTarget(text, best);
+      // `offset`/`length` span the quotes; the selection is the text inside.
+      best = { offset: key.offset + 1, length: Math.max(0, key.length - 2), depth: depth + 1 };
+      node = match?.children?.[1];
+      continue;
     }
 
-    if (c === '[') {
-      const idx = Number(segment);
-      if (!Number.isInteger(idx) || idx < 0) return;
-      i = skipWs(i + 1);
-      if (text[i] === ']') return;
-      for (let elem = 0; ; elem++) {
-        if (elem === idx) {
-          best = { offset: i, length: 0, depth: depth + 1 };
-          descend(i, depth + 1);
-          return;
-        }
-        i = skipWs(skipValue(i));
-        if (text[i] !== ',') return; // `]` — index out of range
-        i = skipWs(i + 1);
-      }
+    if (node.type === 'array') {
+      const index = Number(segment);
+      const element = node.children?.[index];
+      if (!Number.isInteger(index) || index < 0 || !element) return toTarget(text, best);
+      // An element has no key token to select — land on its first character.
+      best = { offset: element.offset, length: 0, depth: depth + 1 };
+      node = element;
+      continue;
     }
-    // Scalar — nothing to descend into.
-  };
 
-  try {
-    descend(skipWs(0), 0);
-  } catch {
-    // Fall through with the deepest position reached before the trip.
+    return toTarget(text, best); // a scalar — nothing deeper to address
   }
 
-  const before = text.slice(0, best.offset);
-  const lineBreak = before.lastIndexOf('\n');
-  return {
-    line: (before.match(/\n/g) ?? []).length,
-    column: best.offset - lineBreak - 1,
-    length: best.length,
-    depth: best.depth,
-  };
+  return toTarget(text, best);
+}
+
+/** Offset → line/column, counting newlines without copying the prefix. */
+function toTarget(
+  text: string,
+  best: { offset: number; length: number; depth: number },
+): JsonPathTarget {
+  let line = 0;
+  let lineStart = 0;
+  for (let i = text.indexOf('\n'); i !== -1 && i < best.offset; i = text.indexOf('\n', i + 1)) {
+    line++;
+    lineStart = i + 1;
+  }
+  return { line, column: best.offset - lineStart, length: best.length, depth: best.depth };
 }
 
 // ---------------------------------------------------------------------------
@@ -295,36 +214,22 @@ export function locateJsonPath(text: string, path: string[]): JsonPathTarget {
 // ---------------------------------------------------------------------------
 
 /**
- * The line defining `name` in `.env`-format text, or null. Mirrors
- * runner-core's `parseEnv` line grammar — blank/`#` lines skipped, an
- * `export ` prefix tolerated, the key being everything before the first `=`
- * trimmed — leniently: a malformed line elsewhere (which makes `parseEnv`
- * throw and a run fail) doesn't stop the scan, because "where is this
- * written" is exactly what the author needs to go fix. The LAST assignment
- * wins, as it does in `parseEnv`'s composed map.
+ * The line assigning `name` in `.env`-format text, or null.
+ *
+ * Delegates to runner-core's `scanServerEnv`, which reads the file the way
+ * the SERVER does when it resolves `${env.X}` (`parseEnvFile`,
+ * src/env/loader.ts) rather than the way the stricter `parseEnv` does — so
+ * navigation and the composed values this feature offers come from one
+ * grammar, and it is the grammar a real run applies. The LAST assignment
+ * wins, as it does in that map.
  */
 export function findEnvLine(
   text: string,
   name: string,
 ): { line: number; column: number; length: number } | null {
-  const lines = text.split(/\r?\n/);
   let hit: { line: number; column: number; length: number } | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i]!;
-    const trimmed = raw.trim();
-    if (trimmed === '' || trimmed.startsWith('#')) continue;
-    const stripped = trimmed.startsWith('export ') ? trimmed.slice('export '.length) : trimmed;
-    const eq = stripped.indexOf('=');
-    if (eq <= 0) continue;
-    const key = stripped.slice(0, eq).trim();
-    if (key !== name) continue;
-    // Column of the key's first char in the raw line: leading whitespace,
-    // plus the stripped prefix, plus any padding between it and the key.
-    const column =
-      (raw.length - raw.trimStart().length) +
-      (trimmed.length - stripped.length) +
-      (stripped.length - stripped.trimStart().length);
-    hit = { line: i, column, length: key.length };
+  for (const entry of scanServerEnv(text)) {
+    if (entry.key === name) hit = { line: entry.line, column: entry.column, length: entry.length };
   }
   return hit;
 }
@@ -333,44 +238,21 @@ export function findEnvLine(
 // Locating a `- name:` bullet under `## Parameters`
 // ---------------------------------------------------------------------------
 
-// Mirrors runner-core's `parseSection` (test-meta.ts) exactly — that is what
-// the run path calls (via `parseParameters`) to build the parameter map, but
-// it returns values only, so the line scan is restated here with positions.
-const SECTION_HEADING_RE = /^(#{2,})\s+(\S.*?)\s*$/;
-const SECTION_ITEM_RE = /^\s*-\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?)\s*$/;
-
 /**
- * The bullet declaring parameter `name`, or null. Scope is the FIRST
- * `## Parameters` section (case-insensitive, any `##`+ depth), ending at the
- * next heading of the same or shallower depth; among duplicate bullets the
- * LAST wins — all of it because `parseSection` reads the file that way, and
- * navigation must land on the line whose value the run would use.
+ * The bullet declaring parameter `name`, or null.
+ *
+ * Delegates to runner-core's `scanSectionItems`, the same scan `parseSection`
+ * builds the run's parameter map from — so the section-entry/exit rules and
+ * the bullet grammar are stated once, and F12 cannot disagree with what the
+ * run reads. Among duplicate bullets the LAST wins, matching that map.
  */
 export function findParameterBullet(
   text: string,
   name: string,
 ): { line: number; column: number; length: number } | null {
-  const lines = text.split(/\r?\n/);
-  let inSection = false;
-  let sectionDepth = 0;
   let hit: { line: number; column: number; length: number } | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i]!;
-    const heading = SECTION_HEADING_RE.exec(raw);
-    if (heading) {
-      if (inSection && heading[1]!.length <= sectionDepth) break;
-      if (!inSection && heading[2]!.toLowerCase() === 'parameters') {
-        inSection = true;
-        sectionDepth = heading[1]!.length;
-      }
-      continue;
-    }
-    if (!inSection) continue;
-    const item = SECTION_ITEM_RE.exec(raw);
-    if (!item || item[1] !== name) continue;
-    // The key is the line's first word-run (nothing before it but whitespace
-    // and `-`), so indexOf finds its exact column.
-    hit = { line: i, column: raw.indexOf(name), length: name.length };
+  for (const item of scanSectionItems(text, 'Parameters')) {
+    if (item.key === name) hit = { line: item.line, column: item.column, length: item.length };
   }
   return hit;
 }

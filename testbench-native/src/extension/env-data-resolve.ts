@@ -11,12 +11,20 @@
  * resolve against the `aiui.config.json` directory with NO walk-up, and
  * `dataSources` paths resolve against the declaring file (skills additionally
  * interpolating `${env.X}` / `${envName}`).
+ *
+ * That parity extends to the env GRAMMAR, which is easy to get wrong: the
+ * server reads these files with `parseEnvFile` (src/env/loader.ts), not with
+ * runner-core's stricter `parseEnv`, so `runner-core`'s `parseServerEnv`
+ * mirror is what belongs here. Using `parseEnv` would make the editor affirm
+ * references a run cannot resolve — `export FOO=1` keys as `export FOO` on the
+ * server — and would blank the whole map on one malformed line the server
+ * simply skips.
  */
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { parseEnv, type TestFrontmatter } from 'ai-ui-automation-runner-core';
+import { parseServerEnv, type TestFrontmatter } from 'ai-ui-automation-runner-core';
 import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
 import { resolveDataTree, type DataObject } from './env-data-completion-core.js';
@@ -107,17 +115,26 @@ export const readTextCached = makeCachedReader((text) => text);
  *  pair with `readTextCached` to tell the two apart. */
 export const readJsonCached = makeCachedReader<unknown>(JSON.parse);
 
-const readEnvCached = makeCachedReader(parseEnv);
+const readEnvCached = makeCachedReader(parseServerEnv);
 
-/** `.env`-format file → map; missing or malformed reads as empty. */
+/** `.env`-format file → map under the server's grammar; a missing file reads
+ *  as empty (a malformed LINE can't blank the map — the server skips it). */
 export function readEnvLenient(absPath: string): Record<string, string> {
   return readEnvCached(absPath) ?? {};
 }
 
-/** Base `.env` + `.env.<name>` overlay composed, overlay winning — the same
- *  relationship `composeEnv` establishes on the run paths. A null overlay
- *  (no env selected) leaves the base file standing alone, which is what a run
- *  with no env composes too. */
+/**
+ * Base `.env` + `.env.<name>` overlay composed, overlay winning — the same
+ * relationship `composeEnv` establishes on the run paths.
+ *
+ * A null overlay (no env selected) leaves the base file standing alone. Note
+ * that is NOT what a run with no env composes: `resolveEnvBundle` gates the
+ * whole bundle on `if (envName)` and reads neither project file, so a run
+ * interpolates no `${env.X}` at all. Both `${...}` editor features refuse
+ * outright with no env for exactly that reason, so this base-only map is only
+ * ever consumed by the `{{}}` half, where it previews what a `$VAR` parameter
+ * would resolve to.
+ */
 export function composedEnv(baseEnvPath: string, overlayPath: string | null): Record<string, string> {
   return {
     ...readEnvLenient(baseEnvPath),

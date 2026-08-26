@@ -23,6 +23,7 @@ const PROJECT_DIR = path.join(FIXTURES_DIR, 'dd-project');
 
 const STEPS_MD = path.join(PROJECT_DIR, 'dd-steps.md');
 const SKILL_MD = path.join(PROJECT_DIR, 'dd-skill.md');
+const HOOKED_MD = path.join(PROJECT_DIR, 'dd-hooked.md');
 const DATA_JSON = path.join(PROJECT_DIR, 'data', 'dd1.json');
 const CATALOG_JSON = path.join(PROJECT_DIR, 'data', 'dd-catalog.json');
 const BASE_ENV = path.join(PROJECT_DIR, '.env');
@@ -45,7 +46,10 @@ const DATA_LINES = [
   '}',
 ];
 const CATALOG_LINES = ['{', '  "product": { "name": "Anvil" }', '}'];
-const BASE_ENV_LINES = ['DD_BASE=hello', 'DD_SHARED=base'];
+// `export DD_EXPORTED=1` defines the key `export DD_EXPORTED` as far as the
+// SERVER is concerned (parseEnvFile has no export handling), so `${env.DD_EXPORTED}`
+// would not resolve in a run — and must not navigate as if it would.
+const BASE_ENV_LINES = ['DD_BASE=hello', 'DD_SHARED=base', 'export DD_EXPORTED=1'];
 const OVERLAY_ENV_LINES = ['DD_TOKEN=sekret', 'DD_SHARED=overlay'];
 
 /** The steps fixture, hoisted so `{{...}}` assertions can derive their
@@ -67,7 +71,7 @@ const STEPS_LINES = [
   '2. Base is ${env.DD_BASE} and ${env.DD_SHARED}',
   '3. Catalog ${catalog.product.name}',
   '4. Missing ${data.users.ghost}',
-  '5. Unknown ${nonesuch.thing}',
+  '5. Unknown ${nonesuch.thing} and ${env.DD_EXPORTED}',
   '6. Sign in as {{username}}',
   '7. Read the balance [store as: balance]',
   '8. Also store [store as: shadowed]',
@@ -75,6 +79,31 @@ const STEPS_LINES = [
   '10. Check {{early}} before its write',
   '11. Read the total [store as: early]',
   '12. And {{ghost}} resolves to nothing',
+  '13. Reread the balance [store as: balance]',
+  '14. Verify {{balance}} once more',
+  '15. Documented example:',
+  '```',
+  '16. Fenced ${data.users.ghost} and {{nowhere}}',
+  '```',
+  '',
+  // A trailing section body: the shape that made the "written later" probe
+  // adopt this section's scope and lose the main-flow write on step 11.
+  '### Helper',
+  '1. Helper step',
+  '',
+];
+
+/** A file whose `after` hook is authored ABOVE the step that captures the
+ *  name it reads — legitimate, since after-hooks run last. */
+const HOOKED_LINES = [
+  '# DD hook fixture',
+  '',
+  '## Hooks',
+  '- after: verify {{token}}',
+  '',
+  '## Steps',
+  '1. Sign in',
+  '2. Read the token [store as: token]',
   '',
 ];
 
@@ -160,6 +189,7 @@ describe('TestBench ${...} go-to-definition', function () {
     fs.writeFileSync(CATALOG_JSON, CATALOG_LINES.join('\n') + '\n');
 
     fs.writeFileSync(STEPS_MD, STEPS_LINES.join('\n'));
+    fs.writeFileSync(HOOKED_MD, HOOKED_LINES.join('\n'));
     fs.writeFileSync(
       SKILL_MD,
       [
@@ -245,8 +275,29 @@ describe('TestBench ${...} go-to-definition', function () {
     assertNoFileTargets(await defsAt(STEPS_MD, '5. Unknown', 'thing'));
   });
 
+  it('env navigation uses the SERVER grammar: `export K=v` does not define K', async () => {
+    // The editor must not affirm a reference a real run cannot resolve. The
+    // key on that line is `export DD_EXPORTED`, so DD_EXPORTED is defined
+    // nowhere: navigation falls back to the top of the file that WOULD carry
+    // it (the overlay), and must not land on the `export` line.
+    await setEnv('dd1');
+    const defs = await defsAt(STEPS_MD, '5. Unknown', 'DD_EXPORTED');
+    const hit = targeting(defs, OVERLAY_ENV);
+    assert.equal(hit.range.start.line, 0, 'top of the winning file, not a match');
+    assert.deepEqual(
+      defs.filter((d) => d.fsPath.toLowerCase() === BASE_ENV.toLowerCase()),
+      [],
+      'the `export DD_EXPORTED=1` line is not a definition of DD_EXPORTED',
+    );
+  });
+
   it('skills never navigate ${data...} — they cannot see the caller data file', async () => {
     await setEnv('dd1');
+    assertNoFileTargets(await defsAt(SKILL_MD, '1. Use ${data', 'email'));
+    // …and with NO env either: the refusal is about being a skill, so it must
+    // not be pre-empted by advice to select an environment, which could not
+    // make this navigable.
+    await setEnv(undefined);
     assertNoFileTargets(await defsAt(SKILL_MD, '1. Use ${data', 'email'));
   });
 
@@ -309,5 +360,38 @@ describe('TestBench ${...} go-to-definition', function () {
       defs.filter((d) => d.fsPath.toLowerCase() === STEPS_MD.toLowerCase()),
       [],
     );
+  });
+
+  it('a name captured twice peeks BOTH writes, not just the superseded first', async () => {
+    // The run's last write is the live value, so offering only the first
+    // would send the reader to a value that had already been replaced.
+    await setEnv('dd1');
+    const defs = await defsAt(STEPS_MD, '14. Verify', 'balance');
+    const lines = defs
+      .filter((d) => d.fsPath.toLowerCase() === STEPS_MD.toLowerCase())
+      .map((d) => d.range.start.line)
+      .sort((a, b) => a - b);
+    assert.deepEqual(lines, [stepsLine('7. Read the balance'), stepsLine('13. Reread')]);
+  });
+
+  it('references inside a fenced example are inert — no navigation', async () => {
+    // Both halves of the grammar: a run interpolates nothing in a fence, so
+    // the editor must not navigate there (nor, as it once did, warn).
+    await setEnv('dd1');
+    assertNoFileTargets(await defsAt(STEPS_MD, '16. Fenced', 'ghost'));
+    const param = await defsAt(STEPS_MD, '16. Fenced', 'nowhere');
+    assert.deepEqual(
+      param.filter((d) => d.fsPath.toLowerCase() === STEPS_MD.toLowerCase()),
+      [],
+    );
+  });
+
+  it('an after-hook reads what the whole flow wrote, wherever it is authored', async () => {
+    // `after` runs once every step has, so a capture from step 3 is in scope
+    // even though the hook is authored above the steps.
+    await setEnv('dd1');
+    const defs = await defsAt(HOOKED_MD, '- after:', 'token');
+    const hit = targeting(defs, HOOKED_MD);
+    assert.equal(hit.range.start.line, HOOKED_LINES.findIndex((l) => l.includes('[store as:')));
   });
 });

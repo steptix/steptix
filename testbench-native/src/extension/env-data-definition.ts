@@ -3,9 +3,12 @@ import * as path from 'node:path';
 import { classifyLines, isTestFile, parseFrontmatter } from 'ai-ui-automation-runner-core';
 import { DEFAULT_DATA_DIR } from './aiui-config-parse.js';
 import {
+  POST_HOOK_SCOPES,
+  allCaptureWrites,
   captureNamesBefore,
-  captureWriteRange,
+  hookScopeAt,
   inFrontmatter,
+  isFencedLine,
 } from './env-data-completion-core.js';
 import {
   activeEnvFor,
@@ -37,9 +40,8 @@ import { DedupedWarnings } from './warnings.js';
  *   - `${env.X}`        → the `X=` line in `.env.<envName>`, else `.env`
  *                         (the overlay wins composition, so it wins here)
  *   - `{{name}}`        → what writes it, in the file itself: the `- name:`
- *                         bullet under `## Parameters` and/or the first
- *                         in-scope capturing step (both when a step
- *                         overwrites a declared parameter — a peek list)
+ *                         bullet under `## Parameters` and every in-scope
+ *                         capturing step (more than one peeks as a list)
  *
  * The cursor's path segment decides the depth: F12 on `user` in
  * `${data.user.name}` jumps to the `"user"` key, on `name` to the key inside
@@ -62,6 +64,9 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     document: vscode.TextDocument,
     position: vscode.Position,
   ): vscode.Definition | undefined {
+    // Line-local bails first: this runs on Ctrl+hover as well as F12, and
+    // almost no position is inside a reference. Nothing document-wide happens
+    // until one of these two probes says it is.
     const line = document.lineAt(position.line).text;
     const ref = refAtPosition(line, position.character);
     if (ref === null) {
@@ -70,17 +75,16 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
       // runtime resolves the inner `{{name}}` — mirroring the completion
       // provider's split.)
       const param = paramRefAtPosition(line, position.character);
-      if (!param) return undefined;
-      const text = document.getText();
-      if (!isTestFile(text)) return undefined;
-      return this.paramTarget(document, position, param.name);
+      if (param === null) return undefined;
+      const text = this.interpolatedText(document, position);
+      return text === null ? undefined : this.paramTarget(document, position, param.name, text);
     }
     // `${envName}` has no on-disk definition — its value is the selector's
     // (or the frontmatter pin's) state, not a file.
     if (ref.namespace === 'envName') return undefined;
 
-    const text = document.getText();
-    if (!isTestFile(text)) return undefined;
+    const text = this.interpolatedText(document, position);
+    if (text === null) return undefined;
 
     const fm = parseFrontmatter(text);
     const isSkill = fm.type === 'skill';
@@ -96,6 +100,18 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     // is not a navigation failure worth a toast.
     const declaredSource = fm.dataSources?.[ref.namespace];
     if (ref.namespace !== 'env' && ref.namespace !== 'data' && declaredSource === undefined) {
+      return undefined;
+    }
+
+    // Refusals that no environment could satisfy come BEFORE the env gate:
+    // telling the author to pick an environment has to be advice that would
+    // actually work. A skill never reads the caller's data file, whatever is
+    // selected.
+    if (ref.namespace === 'data' && isSkill) {
+      this.warnings.warn(
+        'TestBench: ${data...} does not resolve inside a skill — skills read ' +
+          "their own dataSources:, never the caller environment's data file.",
+      );
       return undefined;
     }
 
@@ -116,13 +132,6 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     }
 
     if (ref.namespace === 'data') {
-      if (isSkill) {
-        this.warnings.warn(
-          'TestBench: ${data...} does not resolve inside a skill — skills read ' +
-            "their own dataSources:, never the caller environment's data file.",
-        );
-        return undefined;
-      }
       const dataFile = path.resolve(
         projectRoot,
         dirs?.dataDir ?? DEFAULT_DATA_DIR,
@@ -149,22 +158,29 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
   }
 
   /**
-   * Definitions for a `{{name}}` runtime variable — everything that writes
-   * it before the cursor's step, in the file itself:
+   * Definitions for a `{{name}}` runtime variable — everything that writes it
+   * in scope at the cursor, in the file itself:
    *
    *  - the `- name:` bullet under `## Parameters`, when declared;
-   *  - the first in-scope capture (`[store as:]` / `[input:]` / `[output:]` /
-   *    an `out.k="name"` alias), per `captureNamesBefore`'s execution-order
-   *    walk — pre-hooks lead, section bodies count at their call sites.
+   *  - EVERY in-scope capture (`[store as:]` / `[input:]` / `[output:]` / an
+   *    `out.k="name"` alias), per `captureNamesBefore`'s execution-order walk
+   *    — pre-hooks lead, section bodies count at their call sites.
    *
-   * Both can hold at once (a capture overwriting a declared parameter); both
-   * are returned and VS Code shows its peek list. There is no env gate,
-   * matching the completion split — `{{}}` resolves with no env selected.
+   * All of them are returned, so a name written more than once peeks as a
+   * list rather than silently picking one: the run's LAST write is the live
+   * value, while a reader looking for where a name comes from usually wants
+   * the first, and the editor should not have to guess which question is
+   * being asked. There is no env gate, matching the completion split —
+   * `{{}}` resolves with no env selected.
+   *
+   * Scope depends on what the cursor's line IS, not only where it sits: an
+   * `after`/`afterEach` hook runs once the whole main flow has, so a read
+   * there sees every step's captures however the file is ordered.
    *
    * A name nothing writes toasts instead of silently doing nothing: unlike an
    * undeclared `${namespace}`, a `{{name}}` in a test file is almost
    * certainly meant as a runtime variable, and the two interesting misses —
-   * the write sits BELOW the cursor, or it is prose ("store it as {{x}}"),
+   * the write sits later in the run, or it is prose ("store it as {{x}}"),
    * which deliberately binds nothing — are authoring mistakes worth
    * explaining.
    */
@@ -172,9 +188,9 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     document: vscode.TextDocument,
     position: vscode.Position,
     name: string,
+    text: string,
   ): vscode.Definition | undefined {
-    const text = document.getText();
-    // One classification serves the frontmatter gate and both scope walks.
+    // One classification serves the frontmatter gate and the scope walk.
     const classified = classifyLines(text);
     // `{{}}` interpolates nowhere in frontmatter (a skill's dataSources path
     // takes `${env.X}` / `${envName}` only).
@@ -182,46 +198,70 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
 
     const locations: vscode.Location[] = [];
     const bullet = findParameterBullet(text, name);
-    if (bullet) {
-      locations.push(
-        new vscode.Location(
-          document.uri,
-          new vscode.Range(bullet.line, bullet.column, bullet.line, bullet.column + bullet.length),
-        ),
-      );
-    }
-    const capture = captureNamesBefore(text, position.line, classified).find(
-      (c) => c.name === name,
-    );
-    if (capture) {
-      const lineIdx = capture.line - 1;
-      const range = captureWriteRange(document.lineAt(lineIdx).text, name);
-      locations.push(
-        new vscode.Location(
-          document.uri,
-          range
-            ? new vscode.Range(lineIdx, range.column, lineIdx, range.column + range.length)
-            : new vscode.Range(lineIdx, 0, lineIdx, 0),
-        ),
-      );
+    if (bullet) locations.push(this.locationAt(document.uri, bullet));
+
+    // A post-hook reads after the whole flow; anything else reads where it
+    // sits. `mainFlowOnly` also keeps the hook line — which belongs to no
+    // section — from being attributed to whatever section encloses it.
+    const postHook = POST_HOOK_SCOPES.has(hookScopeAt(text, position.line) ?? '');
+    const writes = captureNamesBefore(
+      text,
+      postHook ? classified.length : position.line,
+      classified,
+      { mainFlowOnly: postHook, dedupe: false },
+    ).filter((c) => c.name === name);
+    for (const write of writes) {
+      locations.push(this.locationAt(document.uri, { ...write, line: write.line - 1 }));
     }
     if (locations.length > 0) return locations;
 
-    // Nothing writes it above the cursor — say why, distinguishing "written
-    // too late" (best-effort: the same walk run from the end of the file)
-    // from "written nowhere".
-    const later = captureNamesBefore(text, classified.length, classified).find(
-      (c) => c.name === name,
-    );
+    // Nothing writes it in scope — say why, distinguishing "written later in
+    // the run" from "written nowhere". This asks whether the name is written
+    // AT ALL, which is not the scope walk run from the end of the file: that
+    // walk resolves an owning section for its position, so a file ending
+    // inside a section body would drop the main-flow steps below its call
+    // site and misreport them as never written.
+    const later = allCaptureWrites(text, classified).find((c) => c.name === name);
     this.warnings.warn(
       later
-        ? `TestBench: {{${name}}} has no value here — its first write is on line ` +
-            `${later.line}, after this step. A step can only read what ran before it.`
-        : `TestBench: {{${name}}} is not a declared parameter, and no step before ` +
-            'this one stores it (prose like "store it as {{x}}" binds nothing — ' +
-            'use [store as: x]).',
+        ? `TestBench: {{${name}}} has no value here — it is written on line ` +
+            `${later.line}, which the run reaches after this point.`
+        : `TestBench: {{${name}}} is not a declared parameter, and no step stores ` +
+            'it (prose like "store it as {{x}}" binds nothing — use [store as: x]).',
     );
     return undefined;
+  }
+
+  /**
+   * The document's text when a reference at `position` would actually be
+   * interpolated by a run, else null — the gates both halves of the grammar
+   * share, stated once and paid for only after a line-local probe has found
+   * a reference.
+   *
+   * A reference inside a fenced block is example text: a run interpolates
+   * nothing there, and `captureNamesBefore` already refuses to read writes
+   * out of fences, so reporting on a fenced READ (worse, warning about one)
+   * would be commentary on prose.
+   */
+  private interpolatedText(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+  ): string | null {
+    const text = document.getText();
+    if (!isTestFile(text)) return null;
+    return isFencedLine(text, position.line) ? null : text;
+  }
+
+  /** A single-line selection of `hit`, which every locator here reports as a
+   *  0-based line plus a column/length. */
+  private locationAt(
+    uri: vscode.Uri,
+    hit: { line: number; column: number; length: number },
+  ): vscode.Location {
+    return new vscode.Location(
+      uri,
+      new vscode.Range(hit.line, hit.column, hit.line, hit.column + hit.length),
+    );
   }
 
   /**
@@ -241,11 +281,11 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
       return undefined;
     }
     const uri = vscode.Uri.file(file);
-    const shown = displayPath(file, projectRoot);
     if (ref.segmentIndex < 0) {
       // Cursor on the namespace itself — the file is the definition.
       return new vscode.Location(uri, new vscode.Position(0, 0));
     }
+    const shown = displayPath(file, projectRoot);
     if (readJsonCached(file) === undefined) {
       this.warnings.warn(`TestBench: ${shown} is not valid JSON — opening the top of the file.`);
       return new vscode.Location(uri, new vscode.Position(0, 0));
@@ -262,17 +302,14 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
         `TestBench: \${${missing}} not found in ${shown} — opening ${landing}.`,
       );
     }
-    return new vscode.Location(
-      uri,
-      new vscode.Range(hit.line, hit.column, hit.line, hit.column + hit.length),
-    );
+    return this.locationAt(uri, hit);
   }
 
   /**
    * A location inside the env files: the assignment line for the referenced
-   * variable, checked in the overlay first because the overlay wins the
-   * composed map. A defined-nowhere name opens the winning file's top with a
-   * toast; only "neither env file exists" refuses to navigate.
+   * variable, searched in composition order so the file that WINS the value
+   * is the file navigated to. A defined-nowhere name opens the winning file's
+   * top with a toast; only "neither env file exists" refuses to navigate.
    */
   private envTarget(
     ref: RefAtPosition,
@@ -281,33 +318,30 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     envName: string,
     projectRoot: string,
   ): vscode.Location | undefined {
-    const overlayText = readTextCached(overlayPath);
-    const baseText = readTextCached(baseEnvPath);
-    if (overlayText === undefined && baseText === undefined) {
+    // Highest precedence first — the overlay overrides the base, so the one
+    // list expresses that once for both the search and the fallback file.
+    const candidates = [overlayPath, baseEnvPath]
+      .map((file) => ({ file, text: readTextCached(file) }))
+      .filter((c): c is { file: string; text: string } => c.text !== undefined);
+    if (candidates.length === 0) {
       this.warnings.warn(`TestBench: no .env or .env.${envName} found in ${projectRoot}.`);
       return undefined;
     }
-    const winnerPath = overlayText !== undefined ? overlayPath : baseEnvPath;
-    if (ref.segmentIndex < 0) {
-      return new vscode.Location(vscode.Uri.file(winnerPath), new vscode.Position(0, 0));
-    }
+    const winner = candidates[0]!;
+    const topOfWinner = new vscode.Location(vscode.Uri.file(winner.file), new vscode.Position(0, 0));
+    if (ref.segmentIndex < 0) return topOfWinner;
 
     // env is flat: whatever follows `env.` — dots included — is the one key
     // the runtime would look up.
     const name = ref.path.join('.');
-    const inOverlay = overlayText !== undefined ? findEnvLine(overlayText, name) : null;
-    const hit = inOverlay ?? (baseText !== undefined ? findEnvLine(baseText, name) : null);
-    if (!hit) {
-      this.warnings.warn(
-        `TestBench: "${name}" is not defined in .env or .env.${envName} — ` +
-          `opening ${displayPath(winnerPath, projectRoot)}.`,
-      );
-      return new vscode.Location(vscode.Uri.file(winnerPath), new vscode.Position(0, 0));
+    for (const candidate of candidates) {
+      const hit = findEnvLine(candidate.text, name);
+      if (hit) return this.locationAt(vscode.Uri.file(candidate.file), hit);
     }
-    const file = inOverlay ? overlayPath : baseEnvPath;
-    return new vscode.Location(
-      vscode.Uri.file(file),
-      new vscode.Range(hit.line, hit.column, hit.line, hit.column + hit.length),
+    this.warnings.warn(
+      `TestBench: "${name}" is not defined in .env or .env.${envName} — ` +
+        `opening ${displayPath(winner.file, projectRoot)}.`,
     );
+    return topOfWinner;
   }
 }

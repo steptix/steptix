@@ -15,7 +15,12 @@ import {
   paramRefAtPosition,
   refAtPosition,
 } from '../src/extension/env-data-definition-core.ts';
-import { captureWriteRange } from '../src/extension/env-data-completion-core.ts';
+import {
+  allCaptureWrites,
+  captureNamesBefore,
+  hookScopeAt,
+  isFencedLine,
+} from '../src/extension/env-data-completion-core.ts';
 
 // ---------------------------------------------------------------------------
 // refAtPosition — which reference, and which of its tokens, the cursor is on
@@ -271,9 +276,18 @@ test('a plain assignment locates the key token', () => {
   assert.deepEqual(findEnvLine(text, 'API_URL'), { line: 1, column: 0, length: 7 });
 });
 
-test('an export prefix and indentation shift the column, like parseEnv strips them', () => {
-  const text = '  export API_URL=http://x\n';
-  assert.deepEqual(findEnvLine(text, 'API_URL'), { line: 0, column: 9, length: 7 });
+test('indentation shifts the column', () => {
+  const text = '   API_URL=http://x\n';
+  assert.deepEqual(findEnvLine(text, 'API_URL'), { line: 0, column: 3, length: 7 });
+});
+
+test('an `export ` prefix is part of the key, as the SERVER reads it', () => {
+  // parseEnvFile (src/env/loader.ts) has no export handling, so this line
+  // defines `export API_URL` and ${env.API_URL} would NOT resolve in a run.
+  // Navigation must agree with the run, not with the friendlier parseEnv.
+  const text = 'export API_URL=http://x\n';
+  assert.equal(findEnvLine(text, 'API_URL'), null);
+  assert.deepEqual(findEnvLine(text, 'export API_URL'), { line: 0, column: 0, length: 14 });
 });
 
 test('space before the = still matches the trimmed key', () => {
@@ -297,9 +311,14 @@ test('a key does not match its own prefix or superstring', () => {
   assert.equal(findEnvLine(text, 'BAR'), null);
 });
 
-test('malformed lines elsewhere do not stop the scan (lenient, unlike parseEnv)', () => {
+test('malformed lines are skipped, not thrown on — the server skips them too', () => {
   const text = 'not a pair\n=nokey\nGOOD=yes\n';
   assert.deepEqual(findEnvLine(text, 'GOOD'), { line: 2, column: 0, length: 4 });
+});
+
+test('CRLF files locate the same, since the server trims each line', () => {
+  const text = 'A=1\r\nTARGET=2\r\n';
+  assert.deepEqual(findEnvLine(text, 'TARGET'), { line: 1, column: 0, length: 6 });
 });
 
 test('an absent key is null', () => {
@@ -388,49 +407,149 @@ test('only the FIRST Parameters section is read, like parseSection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// captureWriteRange — the name token of a capture write on a raw line
+// Capture writes — scope AND position from one walk
 // ---------------------------------------------------------------------------
 
-test('[store as:] on a step line locates the name after the step prefix', () => {
-  const line = '7. Read the balance [store as: balance]';
-  assert.deepEqual(captureWriteRange(line, 'balance'), {
-    column: line.lastIndexOf('balance'),
-    length: 7,
-  });
+/** The write of `name` in scope at 0-based `lineIdx`, as {line, column}. */
+const writeOf = (text, lineIdx, name, opts) =>
+  captureNamesBefore(text, lineIdx, undefined, opts).find((c) => c.name === name);
+
+const STEPS = [
+  '## Steps',
+  '1. Read the balance [store as: balance]',
+  '2. [input: user] sign in',
+  '3. [skill: checkout out.total="grand"]',
+  '4. Verify {{balance}}',
+].join('\n');
+
+test('a capture carries the column of its name token, not the line start', () => {
+  const write = writeOf(STEPS, 4, 'balance');
+  const line = STEPS.split('\n')[1];
+  assert.equal(write.line, 2, '1-based line of the storing step');
+  assert.equal(write.column, line.lastIndexOf('balance'));
+  assert.equal(write.length, 7);
 });
 
-test('[input:] anchors to the instruction start, prefix stripped', () => {
-  const line = '3. [input: user] something';
-  assert.deepEqual(captureWriteRange(line, 'user'), {
-    column: line.indexOf('user]'),
-    length: 4,
-  });
-  // Mid-instruction [input:] binds nothing at run time, so it is no write.
-  assert.equal(captureWriteRange('5. Then [input: user] later', 'user'), null);
-});
-
-test('a hook entry derives its instruction after the `- scope:` lead-in', () => {
-  const line = '- before: log in [store as: session]';
-  assert.deepEqual(captureWriteRange(line, 'session'), {
-    column: line.indexOf('session'),
-    length: 7,
-  });
-});
-
-test('an out.k="alias" write locates the quoted alias', () => {
-  const line = '2. [skill: checkout out.total="grand"]';
-  assert.deepEqual(captureWriteRange(line, 'grand'), {
-    column: line.indexOf('grand'),
-    length: 5,
-  });
+test('[input:] and an out.k="alias" locate their own name tokens', () => {
+  const lines = STEPS.split('\n');
+  assert.equal(writeOf(STEPS, 4, 'user').column, lines[2].indexOf('user]'));
+  assert.equal(writeOf(STEPS, 4, 'grand').column, lines[3].indexOf('grand'));
 });
 
 test('a name echoed by an earlier word still locates the real token', () => {
-  //            0123456789012345
-  const line = '4. [store as: as]';
-  assert.deepEqual(captureWriteRange(line, 'as'), { column: 14, length: 2 });
+  //           0123456789012345
+  const text = '## Steps\n1. [store as: as]';
+  assert.equal(writeOf(text, 2, 'as').column, 14);
 });
 
-test('a line that does not write the name is null', () => {
-  assert.equal(captureWriteRange('8. Verify {{balance}} here', 'balance'), null);
+test('two writes on one line are attributed in POSITION order, both located', () => {
+  // The `[as:]` pattern is declared before the out-alias one, so a
+  // pattern-ordered scan would pick the wrong token here.
+  const text = '## Steps\n1. [skill: login out.token="tok"] then confirm [as: tok]';
+  const line = text.split('\n')[1];
+  const all = captureNamesBefore(text, 2, undefined, { dedupe: false }).filter(
+    (c) => c.name === 'tok',
+  );
+  assert.equal(all.length, 2, 'both writes reported');
+  assert.equal(all[0].marker, 'out-alias', 'the leftmost write leads');
+  assert.equal(all[0].column, line.indexOf('tok"') , 'located at the alias, not the [as:]');
+  assert.equal(all[1].column, line.lastIndexOf('tok'));
+});
+
+test('dedupe keeps the first write; dedupe:false keeps every one', () => {
+  const text = ['## Steps', '1. Read [store as: code]', '2. Reread [store as: code]'].join('\n');
+  assert.equal(captureNamesBefore(text, 3).filter((c) => c.name === 'code').length, 1);
+  const all = captureNamesBefore(text, 3, undefined, { dedupe: false }).filter(
+    (c) => c.name === 'code',
+  );
+  assert.deepEqual(all.map((c) => c.line), [2, 3]);
+});
+
+test('a hook write locates its token past the `- scope:` lead-in', () => {
+  const text = ['## Hooks', '- before: log in [store as: session]', '', '## Steps', '1. Go'].join(
+    '\n',
+  );
+  const write = writeOf(text, 4, 'session');
+  assert.equal(write.column, text.split('\n')[1].indexOf('session'));
+  assert.equal(write.length, 7);
+});
+
+// ---------------------------------------------------------------------------
+// hookScopeAt / POST_HOOK_SCOPES — a read on an after-hook line
+// ---------------------------------------------------------------------------
+
+const HOOKED = [
+  '## Hooks',
+  '- after: verify {{token}}',
+  '',
+  '## Steps',
+  '1. Read the token [store as: token]',
+].join('\n');
+
+test('hookScopeAt names the scope of a hook entry line, null elsewhere', () => {
+  assert.equal(hookScopeAt(HOOKED, 1), 'after');
+  assert.equal(hookScopeAt(HOOKED, 4), null, 'a step line is not a hook entry');
+});
+
+test('an after-hook read sees writes from the whole main flow', () => {
+  // By file position alone nothing precedes line 1, which is why the hook
+  // scope has to override it: `after` runs once every step has.
+  assert.equal(writeOf(HOOKED, 1, 'token'), undefined, 'position alone finds nothing');
+  const seen = writeOf(HOOKED, HOOKED.split('\n').length, 'token', { mainFlowOnly: true });
+  assert.equal(seen.line, 5, 'the storing step is in scope for an after-hook');
+});
+
+// ---------------------------------------------------------------------------
+// allCaptureWrites — "is it written at all", independent of cursor scope
+// ---------------------------------------------------------------------------
+
+test('allCaptureWrites finds a main-flow write below a trailing section body', () => {
+  // The scope walk asked about EOF would adopt the trailing section and miss
+  // step 5 entirely; this is why the diagnosis uses its own scan.
+  const text = [
+    '## Steps',
+    '1. Open the site',
+    '2. Login',
+    '3. Verify {{code}}',
+    '4. Continue',
+    '5. Copy the confirmation [store as: code]',
+    '',
+    '### Login',
+    '1. Sign in [store as: token]',
+  ].join('\n');
+  const names = allCaptureWrites(text).map((c) => c.name);
+  assert.ok(names.includes('code'), 'the main-flow write below the call site is found');
+  assert.ok(names.includes('token'), 'the section body write is found too');
+  assert.equal(
+    captureNamesBefore(text, text.split('\n').length).find((c) => c.name === 'code'),
+    undefined,
+    'the scope walk at EOF really does miss it — the reason allCaptureWrites exists',
+  );
+});
+
+test('allCaptureWrites reports writes in file order with their positions', () => {
+  const text = ['## Steps', '1. A [store as: one]', '2. B [store as: two]'].join('\n');
+  assert.deepEqual(
+    allCaptureWrites(text).map((c) => [c.name, c.line]),
+    [
+      ['one', 2],
+      ['two', 3],
+    ],
+  );
+});
+
+test('fenced example writes are excluded from every walk', () => {
+  const text = ['## Steps', '```', '1. [store as: fake]', '```', '1. Real'].join('\n');
+  assert.deepEqual(allCaptureWrites(text), []);
+});
+
+// ---------------------------------------------------------------------------
+// isFencedLine — a reference inside an example fence
+// ---------------------------------------------------------------------------
+
+test('isFencedLine marks the fenced body and its delimiters, not the prose', () => {
+  const text = ['Intro', '```', 'use {{x}}', '```', 'After'].join('\n');
+  assert.equal(isFencedLine(text, 0), false);
+  assert.equal(isFencedLine(text, 2), true);
+  assert.equal(isFencedLine(text, 4), false);
 });

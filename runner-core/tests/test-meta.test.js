@@ -6,6 +6,7 @@ import {
   parseSection,
   resolveSection,
   resolveValueFromEnv,
+  scanSectionItems,
 } from '../dist/test-meta.js';
 
 test('parseConfig: reads `- key: value` items under ## Config', () => {
@@ -123,4 +124,46 @@ test('resolveSection: resolves every value', () => {
 test('resolveSection: missing $VARs left untouched', () => {
   const got = resolveSection({ k: '$MISSING' }, {});
   assert.deepEqual(got, { k: '$MISSING' });
+});
+
+// ---------------------------------------------------------------------------
+// scanSectionItems — the same scan parseSection builds its map from, with
+// source positions, so an editor can navigate to a bullet without restating
+// the grammar.
+// ---------------------------------------------------------------------------
+
+test('scanSectionItems: locates each key token, indentation included', () => {
+  const text = ['# Title', '## Parameters', '- username: demo', '  - password: $PW'].join('\n');
+  assert.deepEqual(scanSectionItems(text, 'Parameters'), [
+    { key: 'username', value: 'demo', line: 2, column: 2, length: 8 },
+    { key: 'password', value: '$PW', line: 3, column: 4, length: 8 },
+  ]);
+});
+
+test('scanSectionItems: stops at the next same-or-shallower heading', () => {
+  const text = ['## Parameters', '- a: 1', '## Steps', '- b: 2'].join('\n');
+  assert.deepEqual(scanSectionItems(text, 'Parameters').map((i) => i.key), ['a']);
+});
+
+test('scanSectionItems: keeps duplicates in order; parseSection takes the last', () => {
+  const text = ['## Parameters', '- user: first', '- user: second'].join('\n');
+  assert.deepEqual(scanSectionItems(text, 'Parameters').map((i) => [i.key, i.value, i.line]), [
+    ['user', 'first', 1],
+    ['user', 'second', 2],
+  ]);
+  assert.deepEqual(parseSection(text, 'Parameters'), { user: 'second' });
+});
+
+test('scanSectionItems: only the FIRST matching section is read', () => {
+  const text = ['## Parameters', '- a: 1', '## Steps', '## Parameters', '- b: 2'].join('\n');
+  assert.deepEqual(scanSectionItems(text, 'Parameters').map((i) => i.key), ['a']);
+});
+
+test('scanSectionItems: heading match is case-insensitive at any ##+ depth', () => {
+  const text = ['### parameters', '- key_name: v'].join('\n');
+  assert.deepEqual(scanSectionItems(text, 'Parameters').map((i) => i.key), ['key_name']);
+});
+
+test('scanSectionItems: absent section yields nothing', () => {
+  assert.deepEqual(scanSectionItems('# Title\n', 'Parameters'), []);
 });

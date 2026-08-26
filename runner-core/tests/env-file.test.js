@@ -7,8 +7,10 @@ import {
   EnvParseError,
   composeEnv,
   parseEnv,
+  parseServerEnv,
   readEnvOverlayFile,
   resolveEnvFile,
+  scanServerEnv,
 } from '../dist/env-file.js';
 
 /** Create a throwaway dir, run `fn(dir)`, then remove it. */
@@ -193,4 +195,62 @@ test('composeEnv: does not mutate its inputs', () => {
   composeEnv(base, overlay);
   assert.deepEqual(base, { A: '1' });
   assert.deepEqual(overlay, { A: '2', B: '3' });
+});
+
+// ---------------------------------------------------------------------------
+// scanServerEnv / parseServerEnv — the grammar the SERVER applies
+//
+// These mirror `parseEnvFile` (src/env/loader.ts), which is what actually
+// resolves `${env.X}` for a run — deliberately NOT `parseEnv` above. Every
+// case here is one where the two disagree, so a regression would show up as
+// the editor promising a reference the runtime cannot resolve.
+// ---------------------------------------------------------------------------
+
+test('scanServerEnv: `export ` is part of the key, unlike parseEnv', () => {
+  const text = 'export FOO=1\n';
+  assert.deepEqual(parseServerEnv(text), { 'export FOO': '1' });
+  assert.deepEqual(parseEnv(text), { FOO: '1' }, 'the strict parser differs — that is the point');
+});
+
+test('scanServerEnv: inline # comments stay in the value (dotenv behaviour)', () => {
+  assert.deepEqual(parseServerEnv('FOO=1 # note\n'), { FOO: '1 # note' });
+  assert.deepEqual(parseEnv('FOO=1 # note\n'), { FOO: '1' });
+});
+
+test('scanServerEnv: a malformed line is skipped, never thrown on', () => {
+  const text = 'junk\n=nokey\nGOOD=yes\n';
+  assert.deepEqual(parseServerEnv(text), { GOOD: 'yes' });
+  assert.throws(() => parseEnv(text), EnvParseError);
+});
+
+test('scanServerEnv: no key validation — a run would accept this key', () => {
+  assert.deepEqual(parseServerEnv('9lives=cat\n'), { '9lives': 'cat' });
+  assert.throws(() => parseEnv('9lives=cat\n'), EnvParseError);
+});
+
+test('scanServerEnv: matched surrounding quotes are stripped', () => {
+  assert.deepEqual(parseServerEnv(`A="x"\nB='y'\nC="mismatched'\n`), {
+    A: 'x',
+    B: 'y',
+    C: `"mismatched'`,
+  });
+});
+
+test('scanServerEnv: later assignments win, as the server loop overwrites', () => {
+  assert.deepEqual(parseServerEnv('A=first\nA=second\n'), { A: 'second' });
+});
+
+test('scanServerEnv: positions locate the key token in the raw line', () => {
+  const text = '# comment\n  PADDED=1\nPLAIN=2\n';
+  assert.deepEqual(scanServerEnv(text), [
+    { key: 'PADDED', value: '1', line: 1, column: 2, length: 6 },
+    { key: 'PLAIN', value: '2', line: 2, column: 0, length: 5 },
+  ]);
+});
+
+test('scanServerEnv: CRLF lines report the same key positions', () => {
+  assert.deepEqual(scanServerEnv('A=1\r\nB=2\r\n').map((e) => [e.key, e.line, e.column]), [
+    ['A', 0, 0],
+    ['B', 1, 0],
+  ]);
 });

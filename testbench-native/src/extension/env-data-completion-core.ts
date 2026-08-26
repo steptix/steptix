@@ -186,12 +186,18 @@ type ClassifiedLines = ReturnType<typeof classifyLines>;
 // Capture names — the `{{}}` variables a step *writes*
 // ---------------------------------------------------------------------------
 
-/** A runtime variable that is in scope at a given point in the run. */
+/** A runtime variable that is in scope at a given point in the run, located
+ *  at the exact token that writes it so navigation and scope come from one
+ *  walk (an editor selecting a different token than the walk attributed the
+ *  write to is a drift that no test can see). */
 export interface CaptureName {
   name: string;
   marker: 'input' | 'output' | 'as' | 'out-alias';
   /** 1-based line of the capturing step or hook entry. */
   line: number;
+  /** 0-based column of the name token on that line, and its length. */
+  column: number;
+  length: number;
 }
 
 /**
@@ -267,11 +273,19 @@ const PRE_HOOK_SCOPES = new Set(['before', 'beforeeach']);
  * why `isInsideFence` exists next door), so a numbered line inside an example
  * fence classifies as a `step` and would otherwise contribute captures no run
  * ever makes.
+ *
+ * `opts.mainFlowOnly` forces the main-flow reading, ignoring any section that
+ * encloses `lineIdx`. It exists for readers that are not themselves steps —
+ * an `after` hook runs once the whole main flow has, so its scope is the flow
+ * entire, not "whatever section this line happens to sit in".
+ * `opts.dedupe: false` keeps every write of a name rather than the first,
+ * which is what navigation wants: the run's last write is the live value.
  */
 export function captureNamesBefore(
   text: string,
   lineIdx: number,
   classified: ClassifiedLines = classifyLines(text),
+  { mainFlowOnly = false, dedupe = true }: { mainFlowOnly?: boolean; dedupe?: boolean } = {},
 ): CaptureName[] {
   const lines = text.split(/\r?\n/);
   const fenced = fenceMask(lines);
@@ -321,7 +335,9 @@ export function captureNamesBefore(
   };
 
   const executed: number[] = [];
-  const owner = ownerOf.get(lineIdx) ?? nearestSectionAbove(lineIdx, sections, classified, fenced);
+  const owner =
+    mainFlowOnly ? null
+    : ownerOf.get(lineIdx) ?? nearestSectionAbove(lineIdx, sections, classified, fenced);
   if (owner !== null) {
     // Inside a section body: everything before its earliest call site, then
     // this body's own steps above the cursor.
@@ -338,74 +354,94 @@ export function captureNamesBefore(
   }
 
   const out: CaptureName[] = [];
-  const seen = new Set<string>();
-  const collect = (instruction: string, line: number): void => {
-    // Merge every pattern's hits back into left-to-right order: one step can
-    // both invoke a skill and store a capture of its own.
-    const hits: Array<{ at: number; name: string; marker: CaptureName['marker'] }> = [];
-    for (const { re, marker } of CAPTURE_PATTERNS) {
-      for (const m of instruction.matchAll(re)) {
-        hits.push({ at: m.index ?? 0, name: m[1]!, marker });
-      }
-    }
-    hits.sort((a, b) => a.at - b.at);
-    for (const hit of hits) {
-      // `{{...}}` can only express `\w+`, so a quoted alias like "order id"
-      // has no reference form and must not be offered — accepting it would
-      // author a placeholder the run can never resolve. The other patterns
-      // capture `(\w+)` already; testing uniformly means the guard cannot be
-      // lost when a pattern is added.
-      if (!/^\w+$/.test(hit.name) || seen.has(hit.name)) continue;
-      seen.add(hit.name);
-      out.push({ name: hit.name, marker: hit.marker, line });
-    }
-  };
-
   // Pre-hooks first — they run before step 1 wherever they are authored.
-  for (const hook of preHookEntries(lines, fenced)) collect(hook.instruction, hook.line);
-  for (const line of executed) {
-    collect((lines[line] ?? '').replace(STEP_PREFIX_RE, ''), line + 1);
+  for (const hook of preHookEntries(lines, fenced)) {
+    out.push(...writesIn(hook.instruction, hook.line, hook.column));
   }
-  return out;
+  for (const line of executed) {
+    const raw = lines[line] ?? '';
+    const instruction = raw.replace(STEP_PREFIX_RE, '');
+    out.push(...writesIn(instruction, line + 1, raw.length - instruction.length));
+  }
+  return dedupe ? dedupeByName(out) : out;
 }
 
 /**
- * Where on a raw line the capture write of `name` sits — the name token
- * inside `[store as: name]` / `[input: name]` / `[output: name]` /
- * `out.k="name"` — as a column + length, or null when the line doesn't write
- * it. Serves go-to-definition, which navigates to the write that
- * `captureNamesBefore` reported: same patterns, same instruction derivation
- * (the `N. ` step prefix, or a hook entry's `- scope:` lead-in), so the two
- * cannot disagree about what counts as a write.
+ * Every capture write anywhere in the file, in file order — regardless of
+ * whether it is reachable from any particular cursor position.
+ *
+ * This answers "is this name ever written, and where", which is a different
+ * question from `captureNamesBefore`'s "what is in scope here" and must not
+ * be approximated by asking the latter about the end of the file: that walk
+ * resolves an owning section for its position, so a file ending inside a
+ * `### Section` body would silently drop the main-flow steps below that
+ * section's call site.
  */
-export function captureWriteRange(
-  rawLine: string,
-  name: string,
-): { column: number; length: number } | null {
-  let offset = 0;
-  let instruction = rawLine;
-  const step = STEP_PREFIX_RE.exec(rawLine);
-  if (step) {
-    offset = step[0].length;
-    instruction = rawLine.slice(offset);
-  } else {
-    const hook = HOOK_ENTRY_RE.exec(rawLine);
-    // Group 2 runs to end-of-line, so it is a suffix of the raw line.
-    if (hook) {
-      offset = rawLine.length - hook[2]!.length;
-      instruction = hook[2]!;
-    }
+export function allCaptureWrites(
+  text: string,
+  classified: ClassifiedLines = classifyLines(text),
+): CaptureName[] {
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const out: CaptureName[] = [];
+  for (const hook of hookEntries(lines, fenced)) {
+    out.push(...writesIn(hook.instruction, hook.line, hook.column));
   }
-  for (const { re } of CAPTURE_PATTERNS) {
+  for (let i = 0; i < lines.length; i++) {
+    const kind = classified[i]?.kind;
+    if (fenced[i] || (kind !== 'step' && kind !== 'section-step')) continue;
+    const raw = lines[i] ?? '';
+    const instruction = raw.replace(STEP_PREFIX_RE, '');
+    out.push(...writesIn(instruction, i + 1, raw.length - instruction.length));
+  }
+  return out.sort((a, b) => a.line - b.line || a.column - b.column);
+}
+
+/**
+ * The writes an instruction makes, left to right, each located in the raw
+ * line via `offset` — the width of whatever preceded the instruction there
+ * (a `N. ` ordinal, or a hook entry's `- scope: ` lead-in).
+ *
+ * Hits from every pattern are merged back into positional order because one
+ * step can both invoke a skill and store a capture of its own, and the
+ * left-to-right reading is the one an author would predict.
+ */
+function writesIn(instruction: string, line: number, offset: number): CaptureName[] {
+  const hits: Array<{ at: number; name: string; marker: CaptureName['marker'] }> = [];
+  for (const { re, marker } of CAPTURE_PATTERNS) {
     for (const m of instruction.matchAll(re)) {
-      if (m[1] !== name) continue;
       // The captured name is the last name-shaped token of every pattern's
       // match, so lastIndexOf finds it even when an earlier word echoes it
       // (`[store as: as]`).
-      return { column: offset + (m.index ?? 0) + m[0].lastIndexOf(name), length: name.length };
+      hits.push({
+        at: (m.index ?? 0) + m[0].lastIndexOf(m[1]!),
+        name: m[1]!,
+        marker,
+      });
     }
   }
-  return null;
+  hits.sort((a, b) => a.at - b.at);
+  // `{{...}}` can only express `\w+`, so a quoted alias like "order id" has no
+  // reference form and must not be offered — accepting it would author a
+  // placeholder the run can never resolve. The other patterns capture `(\w+)`
+  // already; testing uniformly means the guard cannot be lost when a pattern
+  // is added.
+  return hits
+    .filter((hit) => /^\w+$/.test(hit.name))
+    .map((hit) => ({
+      name: hit.name,
+      marker: hit.marker,
+      line,
+      column: offset + hit.at,
+      length: hit.name.length,
+    }));
+}
+
+/** First write of each name wins — the value a `{{}}` holds until something
+ *  overwrites it, and the one completion previews. */
+function dedupeByName(writes: CaptureName[]): CaptureName[] {
+  const seen = new Set<string>();
+  return writes.filter((w) => (seen.has(w.name) ? false : (seen.add(w.name), true)));
 }
 
 /**
@@ -436,12 +472,18 @@ function nearestSectionAbove(
   return owner;
 }
 
-/** `## Hooks` entries that run before the steps, as instruction + 1-based line. */
-function preHookEntries(
-  lines: string[],
-  fenced: boolean[],
-): Array<{ instruction: string; line: number }> {
-  const out: Array<{ instruction: string; line: number }> = [];
+/** One `## Hooks` entry: its instruction, 1-based line, the scope it declares,
+ *  and the column the instruction starts at within the raw line. */
+interface HookEntry {
+  instruction: string;
+  line: number;
+  scope: string;
+  column: number;
+}
+
+/** Every `## Hooks` entry, whatever its scope. */
+function hookEntries(lines: string[], fenced: boolean[]): HookEntry[] {
+  const out: HookEntry[] = [];
   let depth = 0;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? '';
@@ -454,11 +496,47 @@ function preHookEntries(
     }
     if (depth === 0) continue;
     const entry = HOOK_ENTRY_RE.exec(raw);
-    if (entry && PRE_HOOK_SCOPES.has(entry[1]!.toLowerCase())) {
-      out.push({ instruction: entry[2]!.trim(), line: i + 1 });
-    }
+    if (!entry) continue;
+    const body = entry[2]!;
+    const instruction = body.trim();
+    // Group 2 runs to end-of-line, so it is a suffix of the raw line; the
+    // trim then shifts the start by whatever padding it removed.
+    const column = raw.length - body.length + (body.length - body.trimStart().length);
+    out.push({ instruction, line: i + 1, scope: entry[1]!.toLowerCase(), column });
   }
   return out;
+}
+
+/** `## Hooks` entries that run before the steps. */
+function preHookEntries(lines: string[], fenced: boolean[]): HookEntry[] {
+  return hookEntries(lines, fenced).filter((h) => PRE_HOOK_SCOPES.has(h.scope));
+}
+
+/**
+ * The hook scope declared on `lineIdx` (0-based), or null when that line is
+ * not a hook entry. A `{{}}` READ on a post-hook line is in scope for
+ * everything the main flow wrote, since the hook runs after it — the mirror
+ * of `PRE_HOOK_SCOPES`, which handles the same asymmetry for writes.
+ */
+export function hookScopeAt(text: string, lineIdx: number): string | null {
+  const lines = text.split(/\r?\n/);
+  const entry = hookEntries(lines, fenceMask(lines)).find((h) => h.line === lineIdx + 1);
+  return entry ? entry.scope : null;
+}
+
+/** Hook scopes that run AFTER the steps, so a `{{}}` read on one of their
+ *  lines sees everything the flow wrote. */
+export const POST_HOOK_SCOPES: ReadonlySet<string> = new Set(['after', 'aftereach']);
+
+/**
+ * Whether 0-based `lineIdx` sits inside a fenced code block.
+ *
+ * `captureNamesBefore` already excludes fenced lines as writes; a reference
+ * READ inside a fence is the same kind of non-thing — a run interpolates
+ * nothing there — so editor features must not report on it either.
+ */
+export function isFencedLine(text: string, lineIdx: number): boolean {
+  return fenceMask(text.split(/\r?\n/))[lineIdx] ?? false;
 }
 
 /** Per-line "is inside a fenced block" mask, one pass. Delimiter lines count

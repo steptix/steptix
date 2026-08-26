@@ -161,6 +161,79 @@ export function parseEnv(text: string): Record<string, string> {
   return out;
 }
 
+/** One `KEY=value` assignment located in `.env` source text. */
+export interface ServerEnvAssignment {
+  key: string;
+  value: string;
+  /** 0-based line index of the assignment. */
+  line: number;
+  /** 0-based column where the key token starts, and its length — so an
+   *  editor can select exactly the key. */
+  column: number;
+  length: number;
+}
+
+/**
+ * Scan `.env` text the way the SERVER does when it resolves `${env.X}` for a
+ * run — `parseEnvFile` in src/env/loader.ts, reached via `resolveEnvBundle`.
+ * That parser is deliberately NOT `parseEnv` above, and differs from it in
+ * every way that matters to a reader of a real `.env`:
+ *
+ *  - no `export ` prefix handling: `export FOO=1` keys as `export FOO`;
+ *  - no key validation, and a malformed line is SKIPPED, never thrown on;
+ *  - inline `#` comments are not stripped (dotenv behaviour), so
+ *    `FOO=1 # note` has the value `1 # note`;
+ *  - surrounding quotes are stripped only when both ends match.
+ *
+ * `parseEnv` stays as it is: it backs the client-side `$VAR` parameter pass
+ * and its TB005 diagnostics, which want the strict, throwing reading.
+ *
+ * Returning positions alongside values lets one scan answer both "what would
+ * a run see" and "where is this written", so the two cannot drift.
+ */
+export function scanServerEnv(text: string): ServerEnvAssignment[] {
+  const out: ServerEnvAssignment[] = [];
+  // The server splits on '\n' alone; a trailing '\r' is absorbed by the
+  // per-line trim, which is why CRLF files parse the same either way.
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? '';
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const eq = trimmed.indexOf('=');
+    if (eq < 1) continue;
+
+    const key = trimmed.substring(0, eq).trim();
+    if (!key) continue;
+
+    let value = trimmed.substring(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    // Column of the key's first character in the RAW line: the leading
+    // whitespace the trim removed, plus any the key itself was padded with.
+    const column =
+      raw.length - raw.trimStart().length + (trimmed.length - trimmed.trimStart().length);
+    out.push({ key, value, line: i, column, length: key.length });
+  }
+  return out;
+}
+
+/**
+ * `.env` text → the map a run would see, under the server's grammar above.
+ * Later assignments win, as they do in the server's own loop.
+ */
+export function parseServerEnv(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { key, value } of scanServerEnv(text)) out[key] = value;
+  return out;
+}
+
 /**
  * Read + parse `.env` at `absPath`. Errors are surfaced as `EnvParseError`
  * with line metadata. I/O errors propagate as-is.
