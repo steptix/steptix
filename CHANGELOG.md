@@ -6,6 +6,20 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — TestBench: parameter completion inside a skill call
+
+With the cursor in the argument position of a skill call — `1. [skill
+login │` — the dropdown now lists that skill's declared parameters, read
+from its own `## Parameters` section, each with the bullet's text as
+documentation. Accepting `username` inserts `username="│"` with the
+caret between the quotes (Tab jumps past them), parameters the call
+already passes drop out of the list — on either side of the cursor — and
+the skill's outputs ride along as `out.<name>` items. Inside the quotes
+the existing `{{` and `${` completions take over, so
+`username="{{username}}"` composes out of three completions without
+hand-typing a name. Value positions (inside quotes, arrays, after `=`)
+stay quiet.
+
 ### Added — TestBench: skill-name completion inside `[skill …`
 
 Typing `[skill ` (or `[skill: `) in a step now completes the skill

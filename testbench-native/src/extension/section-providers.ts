@@ -25,7 +25,13 @@ import {
   sectionNameError,
 } from 'ai-ui-automation-runner-core';
 import { resolveProjectDirs } from './aiui-config.js';
-import { collectSkillNames, openSkillNamePrefix } from './invocation-target-core.js';
+import {
+  collectSkillNames,
+  openSkillArgsContext,
+  openSkillNamePrefix,
+  skillIoFor,
+  type SkillIo,
+} from './invocation-target-core.js';
 import {
   computeSectionDiagnostics,
   type PlainDiagnostic,
@@ -89,7 +95,10 @@ export class SectionLinkProvider implements vscode.DocumentLinkProvider {
  *     — the project's skill NAMES, each replacing exactly the typed partial.
  *     The author has committed to a skill call there, so sections and
  *     whole-call snippets stay out of the list.
- *  2. Right after a step number — `1. │` — the file's section names plus
+ *  2. At an ARGUMENT position of an open call — `1. [skill login │` — that
+ *     skill's declared parameters (minus those already passed) as
+ *     `name="│"` snippets, then its outputs as `out.<name>`.
+ *  3. Right after a step number — `1. │` — the file's section names plus
  *     `[skill: name]` whole-call snippets for the project's skills.
  *
  * Sections sort first (they're the file-local reuse mechanism); skills are a
@@ -107,11 +116,15 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     // so the common case has to bail on a one-line regex. Measured before
     // this gate: ~19ms per keystroke on a 10KB file with a fenced block.
     //
-    // Both branches below are AND-gated by `inStepRegion`, so hoisting their
+    // All branches below are AND-gated by `inStepRegion`, so hoisting their
     // cheap tests changes nothing about which positions get completions.
-    const prefix = document.lineAt(position.line).text.slice(0, position.character);
+    const lineText = document.lineAt(position.line).text;
+    const prefix = lineText.slice(0, position.character);
     const open = openSkillNamePrefix(prefix);
-    if (!open && !STEP_START_RE.test(prefix)) return [];
+    // Argument position of an open call — a line-local walk, so it belongs
+    // with the cheap gates. Skipped when the cursor is still in the name.
+    const args = open ? null : openSkillArgsContext(lineText, position.character);
+    if (!open && !args && !STEP_START_RE.test(prefix)) return [];
 
     const text = document.getText();
     if (!isTestFile(text)) return [];
@@ -139,6 +152,52 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
         item.sortText = `0_${skill}`;
         return item;
       });
+    }
+
+    // Argument position inside an open call: the skill's declared parameters
+    // (minus those already passed, either side of the cursor), then its
+    // outputs as `out.<name>`. Accepting a parameter leaves the caret between
+    // the quotes — `username="│"` — and Tab lands past them; inside the
+    // quotes the `{{`/`${` completions take over, so a full
+    // `username="{{username}}"` composes without hand-typing a name.
+    if (args) {
+      const io = this.skillIo(document.uri, args.skillName);
+      if (!io) return [];
+      const range = new vscode.Range(
+        position.line,
+        args.replaceStart,
+        position.line,
+        position.character,
+      );
+      const argItems: vscode.CompletionItem[] = [];
+      let argOrder = 0;
+      for (const p of io.params) {
+        if (args.usedParams.has(p.name)) continue;
+        const item = new vscode.CompletionItem(p.name, vscode.CompletionItemKind.Field);
+        item.detail = 'parameter';
+        // The bullet's literal text — a default or a description. Never
+        // resolved through the env, so a `$SB_PASSWORD` stays four words.
+        if (p.value !== '') item.documentation = p.value;
+        item.insertText = new vscode.SnippetString(`${p.name}="$1"$0`);
+        item.range = range;
+        // Declaration order, before outputs, before markdown's word soup.
+        item.sortText = `0_${String(argOrder++).padStart(3, '0')}`;
+        argItems.push(item);
+      }
+      for (const out of io.outputs) {
+        if (args.usedOuts.has(out)) continue;
+        // Inserted bare — the shorthand that exposes the output under its
+        // own name; add `="alias"` by hand to rename it.
+        const item = new vscode.CompletionItem(
+          `out.${out}`,
+          vscode.CompletionItemKind.Property,
+        );
+        item.detail = 'output';
+        item.range = range;
+        item.sortText = `1_${out}`;
+        argItems.push(item);
+      }
+      return argItems;
     }
 
     const items: vscode.CompletionItem[] = [];
@@ -195,6 +254,12 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     const dirs = resolveProjectDirs(docUri);
     if (!dirs?.skillsDir) return [];
     return collectSkillNames(dirs.skillsDir);
+  }
+
+  private skillIo(docUri: vscode.Uri, skillName: string): SkillIo | null {
+    const dirs = resolveProjectDirs(docUri);
+    if (!dirs?.skillsDir) return null;
+    return skillIoFor(dirs.skillsDir, skillName);
   }
 }
 
