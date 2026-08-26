@@ -14,7 +14,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
-  CODE_STEP_PATTERN,
+  isCodeStep,
   assembleSteps,
   assembleTestFile,
   unresolvablePlaceholderWarning,
@@ -2008,7 +2008,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       if (args.session_id !== undefined && args.session_id.trim() !== '') {
         return errorResult(errandsHaveNoSessions(args.session_id));
       }
-      const codeSteps = args.steps.filter((step) => CODE_STEP_PATTERN.test(step));
+      const codeSteps = args.steps.filter((step) => isCodeStep(step));
       if (codeSteps.length > 0) return errorResult(errandCodeSteps(codeSteps));
 
       return withProject(

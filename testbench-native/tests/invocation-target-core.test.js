@@ -30,6 +30,8 @@ import {
   TOOL_FILE_EXTS,
   canonicalSkillName,
   collectSkillNames,
+  openSkillNamePrefix,
+  parseInvocationLine,
   skillHeading,
   toolFileFor,
 } from '../src/extension/invocation-target-core.ts';
@@ -253,4 +255,123 @@ test('collectSkillNames follows a symlinked skill file', (t) => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── parseInvocationLine: parity with parseInvocation's token finder ──────────
+// One row per shape in tests/skill-call-parser.test.ts ("optional colon") and
+// tests/tool-call-parser.test.ts. The editor and the tokenizer must agree on
+// WHICH lines are invocations, or F12 navigates on a line the runner treats
+// as prose (or vice versa).
+
+test('parseInvocationLine accepts both the colon and colon-less spellings', () => {
+  const rows = [
+    ['1. [skill: login]', 'skill', 'login'],
+    ['1. [skill login]', 'skill', 'login'],
+    ['1. [skill  auth/login]', 'skill', 'auth/login'],
+    ['1. [skill : login]', 'skill', 'login'],
+    ['1. [skill:login]', 'skill', 'login'],
+    ['1. Sign in [skill login user="x"]', 'skill', 'login'],
+    ['1. [tool: seed_cart items=2]', 'tool', 'seed_cart'],
+    ['1. [tool seed_cart items=2]', 'tool', 'seed_cart'],
+    ['1. [tool auth/login/login]', 'tool', 'auth/login/login'],
+  ];
+  for (const [line, kind, name] of rows) {
+    const inv = parseInvocationLine(line);
+    assert.ok(inv, `"${line}" should parse as an invocation`);
+    assert.equal(inv.kind, kind, `kind of "${line}"`);
+    assert.equal(inv.name, name, `name of "${line}"`);
+  }
+});
+
+test('parseInvocationLine reports the name range under both spellings', () => {
+  // `1. [skill login]` — name starts after `1. [skill ` (10 chars).
+  assert.deepEqual(parseInvocationLine('1. [skill login]').nameRange, [10, 15]);
+  // `1. [skill: login]` — the colon shifts it one to the right.
+  assert.deepEqual(parseInvocationLine('1. [skill: login]').nameRange, [11, 16]);
+});
+
+test('parseInvocationLine leaves bracketed prose alone', () => {
+  // No colon and no whitespace directly after the keyword — never a call.
+  for (const line of [
+    '1. Check the [skillful] animation',
+    '1. Open the [skills] page',
+    '1. Open the [toolbox] panel',
+    '1. A bare [skill] token',
+    '1. plain prose with no brackets',
+  ]) {
+    assert.equal(parseInvocationLine(line), null, `"${line}" must stay prose`);
+  }
+});
+
+test('parseInvocationLine scans past a near-miss to the real token', () => {
+  const inv = parseInvocationLine('1. see [skillful] then [skill login]');
+  assert.equal(inv?.kind, 'skill');
+  assert.equal(inv?.name, 'login');
+});
+
+// ── openSkillNamePrefix: where in-place name completion fires ────────────────
+// Anchored to the cursor (the argument is the text BEFORE it). Separator rule
+// matches the tokenizer's finder: colon optional, `[skillful]` never opens.
+
+test('openSkillNamePrefix matches every open-token spelling', () => {
+  const rows = [
+    // [linePrefix, partial, start]
+    ['1. [skill ', '', 10],
+    ['1. [skill: ', '', 11],
+    ['1. [skill:', '', 10],
+    ['1. [skill : ', '', 12],
+    ['1. [skill au', 'au', 10],
+    ['1. [skill: auth/lo', 'auth/lo', 11],
+    ['1. [skill auth/', 'auth/', 10],
+    ['1. Log in [skill au', 'au', 17],
+    // A closed call earlier on the line does not confuse the anchor.
+    ['1. [skill: x] then [skill au', 'au', 26],
+  ];
+  for (const [prefix, partial, replaceStart] of rows) {
+    assert.deepEqual(
+      openSkillNamePrefix(prefix),
+      { partial, replaceStart },
+      `openSkillNamePrefix(${JSON.stringify(prefix)})`,
+    );
+  }
+});
+
+test('openSkillNamePrefix stays quiet outside an open token', () => {
+  for (const prefix of [
+    '1. [skill: login]', // call is closed
+    '1. [skill: login] then more prose',
+    '1. see [skillful] anim', // no separator — bracketed prose
+    '1. [skills ', // wrong keyword: `[skills` is not `[skill`+separator
+    '1. [skill', // separator not typed yet — the step-start path owns this
+    '1. [skill: login arg=', // author moved on to args
+    '1. plain prose',
+    '',
+  ]) {
+    assert.equal(openSkillNamePrefix(prefix), null, `${JSON.stringify(prefix)} must not match`);
+  }
+});
+
+test('parseInvocationLine declines links and non-grammar text, like the parser', () => {
+  // The mirror is a regex and cannot parse, but it must not CLAIM what the
+  // parser declines: a markdown link, or a name followed by something the
+  // grammar never allows there (`[skill level: expert]` is English).
+  for (const line of [
+    '1. Read the [skill guide](./docs/guide.md) before running',
+    '1. Open the [tool docs](https://x.com) page',
+    '1. Verify the [skill level: expert] badge',
+    '1. Confirm the [tool tip: hover] text',
+  ]) {
+    assert.equal(parseInvocationLine(line), null, `${JSON.stringify(line)} must stay prose`);
+  }
+});
+
+test('parseInvocationLine resumes past a declined candidate to a real call', () => {
+  // F12 has to land on the call the runner actually runs. Taking only the
+  // first candidate resolved `guide` here — a skill that does not exist.
+  const inv = parseInvocationLine('1. See the [skill guide](./g.md) and then [skill: login]');
+  assert.equal(inv?.kind, 'skill');
+  assert.equal(inv?.name, 'login');
+  // The range must point at THAT occurrence, not the declined one.
+  const line = '1. See the [skill guide](./g.md) and then [skill: login]';
+  assert.equal(line.slice(inv.nameRange[0], inv.nameRange[1]), 'login');
 });

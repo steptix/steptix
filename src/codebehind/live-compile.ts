@@ -6,6 +6,7 @@ import {
   resolveEnvDataRef,
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
+import { isCodeStep } from '../parser/invocation-parser.js';
 import { logger } from '../utils/logger.js';
 import {
   actionsOf,
@@ -173,7 +174,18 @@ export function generationRefusal(input: {
   fromCodeBehind?: boolean | undefined;
   codeBehindStale?: unknown;
 }): string | undefined {
-  if (BRACKET_CALL_STEP.test(input.text.trim())) {
+  // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
+  // `[interactive]` DO reach generation and are declined there, with the
+  // reason, by `refuseReason`; those are still the author's step and deserve
+  // an `ai: true` entry saying why.
+  //
+  // The parser, not a look-alike pattern. The regex this replaces was wrong
+  // in both directions: `\s` claimed `[skill<NBSP>login]`, which the scanner
+  // calls prose (so the step was refused generation for a reason that wasn't
+  // true, permanently), while the `^` anchor missed every LABELLED call —
+  // `Seed the cart [tool: seed_cart]` is dispatched to the tool, yet the
+  // compiler paid to generate a Playwright entry for it on every run.
+  if (isCodeStep(input.text.trim())) {
     return 'a [skill:] or [tool:] step is expanded or dispatched, never generated';
   }
   if (!input.binding) return 'the step has no code-behind file to bind into';
@@ -184,12 +196,6 @@ export function generationRefusal(input: {
   if (input.fromCodeBehind === true && !input.codeBehindStale) return 'the step ran as code';
   return undefined;
 }
-
-/** `[skill:` and `[tool:` only. `[input:]`, `[output:]` and `[interactive]`
- *  DO reach generation and are declined there, with the reason, by
- *  `refuseReason` — the difference is that those are still the author's step
- *  and deserve an `ai: true` entry saying why. */
-const BRACKET_CALL_STEP = /^\[\s*(skill|tool)\s*:/i;
 
 export class LiveCompiler {
   private readonly candidate = new Candidate();

@@ -6,6 +6,41 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — TestBench: skill-name completion inside `[skill …`
+
+Typing `[skill ` (or `[skill: `) in a step now completes the skill
+*names* right there — every skill under the project's `skills/`
+directory, subfolder skills path-qualified (`auth/login`) — replacing
+exactly what you've typed, so `1. Log in [skill: au` accepts to
+`1. Log in [skill: auth/login`. The list keeps completing across `/`
+for subfolder names, stays quiet inside bracketed prose (`[skillful]`)
+and after a closed call, and the existing whole-call snippets offered
+after a step number now replace the typed token — accepting at
+`1. [sk` no longer pastes a second bracket.
+
+### Changed — the colon in `[skill: ...]` / `[tool: ...]` is now optional
+
+`[skill login]` is the same call as `[skill: login]`, and `[tool seed_cart
+items=2]` the same as `[tool: seed_cart items=2]` — every arg form, output
+alias, path-qualified name, and prose label works identically under both
+spellings. This applies to `[skill:` and `[tool:` only; `[input:`,
+`[output:]` and `[interactive]` still require their colon.
+
+Bracketed prose is left alone: the keyword must be followed by the colon
+or whitespace (so `[skills]` and `[skillful]` are prose), a markdown link
+such as `[skill guide](./guide.md)` is never an invocation, and a
+colon-less token that doesn't parse is treated as prose rather than
+erroring — `Verify the [skill level: expert] badge` is a sentence, and
+failing it would have failed the whole file. The explicit `[skill: ...]`
+spelling keeps the strict reading: a malformed one is still a parse error
+pointing at the problem.
+
+Everything that keys off the token moved with it. The MCP errand/prose
+scan and code-behind's never-generate rule now call the parser instead of
+matching a look-alike regex, so they cannot disagree with the runner about
+what a call is; TestBench's F12 targets, tool-line detection and
+root-frame step filter share one matcher.
+
 ### Added — TestBench: Renumber Steps
 
 Right-click the line-number gutter in a test file and pick **TestBench:

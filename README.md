@@ -392,6 +392,10 @@ mobile user agent, or devicePixelRatio emulation); see
 - `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory; `[skill: subfolder/name args]` for a skill in a subfolder (see [Skills](#skills))
 - `[tool: name args]` -- run deterministic TypeScript code with full Playwright access (see [Tools](#tools))
 
+For `[skill:` and `[tool:` — and only those two — the colon is optional: `[skill login]` is the same call as `[skill: login]`. (`[input:`, `[output:]` and `[interactive]` are unchanged and still need their colon.) The keyword must be followed by the colon or whitespace, so bracketed prose like `[skills]` or `[skillful]` is never mistaken for an invocation, and neither is a markdown link such as `[skill guide](./guide.md)`.
+
+The two spellings differ in one way, deliberately. `[skill: ...]` is unambiguous intent, so a malformed one is a parse error pointing at the problem. The colon-less form is reachable by ordinary English — `Verify the [skill level: expert] badge` — so when it doesn't parse it is simply treated as prose rather than failing the file. Write the colon if you want the strict reading.
+
 ## Skills
 
 A skill is a reusable sequence of steps shared **across** tests, kept in its own `.md` file under your project's `skills/` directory. Unlike inline sections (below), a skill has its own parameters and outputs, so it's the right tool when a flow — logging in, seeding data, completing checkout — is used by more than one test.

@@ -25,6 +25,99 @@ describe('parseSkillCall — non-matches', () => {
   });
 });
 
+describe('parseSkillCall — optional colon', () => {
+  it('parses `[skill name]` identically to `[skill: name]`', () => {
+    // Same call in every field except nameColumn — the name naturally sits
+    // one character earlier when the colon is omitted.
+    const bare = parseSkillCall('[skill login]');
+    const colon = parseSkillCall('[skill: login]');
+    expect(bare).toEqual({ ...colon, nameColumn: 7 });
+  });
+
+  it('records the same nameColumn under both spellings', () => {
+    // `[skill login]` and `[skill: login]` both put `l` at column 8.
+    expect(parseSkillCall('[skill  login]')?.nameColumn).toBe(8);
+    expect(parseSkillCall('[skill: login]')?.nameColumn).toBe(8);
+  });
+
+  it('accepts extra whitespace, and whitespace before the colon', () => {
+    expect(parseSkillCall('[skill   login]')?.name).toBe('login');
+    expect(parseSkillCall('[skill : login]')?.name).toBe('login');
+    expect(parseSkillCall('[skill:login]')?.name).toBe('login');
+  });
+
+  it('parses the full arg shapes without the colon', () => {
+    const result = parseSkillCall(
+      'Sign in [skill auth/login username role="admin" out.session_id] # note',
+    );
+    expect(result?.label).toBe('Sign in');
+    expect(result?.name).toBe('auth/login');
+    expect(result?.args).toEqual({ username: '{{username}}', role: 'admin' });
+    expect(result?.outputAliases).toEqual({ session_id: 'session_id' });
+    expect(result?.trailing).toBe(' # note');
+  });
+
+  it('does not claim bracketed prose that merely contains the keyword', () => {
+    // No `:` and no whitespace directly after `skill` — these never open a call.
+    expect(parseSkillCall('Check the [skillful] animation')).toBeNull();
+    expect(parseSkillCall('Open the [skills] page')).toBeNull();
+    expect(parseSkillCall('A bare [skill] token is not a call either')).toBeNull();
+  });
+
+  it('scans past a near-miss to find the real token', () => {
+    expect(parseSkillCall('see [skillful] then [skill login]')?.name).toBe('login');
+  });
+
+  it('a colon-less token that does not parse is prose, not an error', () => {
+    // The colon-less spelling is reachable by ordinary English, and
+    // `extractSteps` throws at PARSE time — so committing to it would let one
+    // prose sentence fail the whole test file. `[skill:` keeps the strict
+    // reading (next test); the space form degrades to prose.
+    expect(parseSkillCall('[skill ]')).toBeNull();
+    expect(parseSkillCall('Verify the [skill level: expert] badge')).toBeNull();
+    expect(parseSkillCall('Click the [skill (beta)] badge')).toBeNull();
+    expect(parseSkillCall('Confirm the [skill 50%] chip')).toBeNull();
+  });
+
+  it('the COLON form still commits and throws — deliberate intent is unchanged', () => {
+    expect(() => parseSkillCall('[skill: ]')).toThrow(SkillCallSyntaxError);
+    expect(() => parseSkillCall('[skill: ]')).toThrow(/name missing/);
+    expect(() => parseSkillCall('[skill: foo bar="x"baz="y"]')).toThrow(SkillCallSyntaxError);
+  });
+});
+
+describe('parseSkillCall — markdown links are not invocations', () => {
+  // `[text](url)` is the likeliest way a bracketed keyword appears in a
+  // markdown-authored suite. Claiming it resolved a skill named after the
+  // link text and failed the ENTIRE file when no such skill existed.
+  it('does not claim a link, in either spelling', () => {
+    expect(parseSkillCall('Click the [skill guide](https://example.com) link')).toBeNull();
+    expect(parseSkillCall('Open the [skill matrix](./m.md) and verify')).toBeNull();
+    expect(parseSkillCall('See [skill: guide](./g.md) for details')).toBeNull();
+  });
+
+  it('still parses a real call followed by a parenthesised comment', () => {
+    // Only an IMMEDIATELY adjacent `(` is a link.
+    const result = parseSkillCall('[skill: login] (smoke only)');
+    expect(result?.name).toBe('login');
+    expect(result?.trailing).toBe(' (smoke only)');
+  });
+
+  it('a declined candidate does not swallow a real call later on the line', () => {
+    // The scan resumes past a link or an unparseable colon-less token. Taking
+    // only the FIRST candidate made these prose, silently skipping a live
+    // call the runner should have dispatched.
+    expect(parseSkillCall('See the [skill guide](./g.md) and then [skill: login]')?.name).toBe(
+      'login',
+    );
+    expect(
+      parseSkillCall('Check the [skill level: expert] badge then [skill: login]')?.name,
+    ).toBe('login');
+    // …and a line of nothing but declined candidates is still prose.
+    expect(parseSkillCall('The [skill guide](./g.md) and the [skill matrix](./m.md)')).toBeNull();
+  });
+});
+
 describe('parseSkillCall — label prefix', () => {
   it('captures text before `[skill:` as the step label, trimmed', () => {
     const result = parseSkillCall('Search with DuckDuckGo [skill: duckduckgo]');

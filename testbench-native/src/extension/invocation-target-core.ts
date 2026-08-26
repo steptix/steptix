@@ -9,6 +9,8 @@
  *  - `canonicalSkillName` mirrors `parseSkillCall` (src/skills/skill-call-parser.ts)
  *  - `collectSkillNames`  mirrors `loadSkill`'s `<skillsDir>/<name>.md` layout,
  *                         with `listToolFiles`' walk rules (registry.ts)
+ *  - `parseInvocationLine` mirrors `parseInvocation`'s token finder
+ *                         (src/parser/invocation-parser.ts)
  *
  * A mirror that drifts is worse than no mirror: F12 would open a different file
  * from the one the runner loads, and completion would offer names the parser
@@ -202,4 +204,114 @@ function entryKind(dir: string, entry: fs.Dirent): 'dir' | 'file' | null {
     /* broken link — nothing to offer */
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Invocation-line reading — which lines ARE invocations, extracted from
+// definition-provider.ts for the same testability reason as the resolvers.
+// ---------------------------------------------------------------------------
+
+/** A `[skill: ...]` / `[tool: ...]` invocation located on a line. */
+export interface InvocationLine {
+  kind: 'skill' | 'tool';
+  name: string;
+  /** [start, end) char range of the name token on the line. */
+  nameRange: [number, number];
+  /** Each `out.<key>` alias key found, with the char range of `<key>`. */
+  outputKeys: Array<{ text: string; range: [number, number] }>;
+}
+
+// The name class admits `/` because both kinds are path-qualified: skills may
+// live in subfolders of `skillsDir` (`auth/login`, leading slash tolerated) and
+// a tool ref names a file plus the tool inside it (`auth/login/login`). Keep it
+// in step with `readIdentifier`'s `allowSlash` class in
+// src/parser/invocation-parser.ts. The separator mirrors that parser's finder:
+// a colon with optional inline whitespace around it, or bare whitespace — the
+// colon is optional (`[skill login]` ≡ `[skill: login]`), and `[skillful]`
+// has neither separator so it stays prose.
+/** `Sep := WS? ':' WS? | WS` and the name class, written once — the two
+ *  regexes below had them character-identical and 37 lines apart, which is one
+ *  edit away from F12 resolving a name the dropdown will not complete. */
+const SEP = String.raw`(?:[ \t]*:[ \t]*|[ \t]+)`;
+const NAME = String.raw`[A-Za-z0-9_/-]`;
+
+const INVOCATION_RE = new RegExp(String.raw`\[(skill|tool)${SEP}(${NAME}+)`, 'g');
+const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
+
+/**
+ * Parse the invocation prefix + name + any `out.<key>` aliases out of a
+ * raw line, recording character ranges so the cursor can be mapped to a
+ * token. Returns null if the line is not a skill/tool invocation.
+ */
+export function parseInvocationLine(line: string): InvocationLine | null {
+  // Every candidate, not just the first — and each one can be DECLINED, which
+  // must not take the rest of the line with it. Mirrors the scan loop in
+  // `parseInvocation`: `See the [skill guide](./g.md) and then [skill: login]`
+  // really does call `login`, and F12 has to land on the same one the runner
+  // runs.
+  INVOCATION_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  let kind: 'skill' | 'tool';
+  let name: string;
+  let nameStart: number;
+  for (;;) {
+    m = INVOCATION_RE.exec(line);
+    if (m === null || m.index === undefined) return null;
+    INVOCATION_RE.lastIndex = m.index + 1;
+    kind = m[1] as 'skill' | 'tool';
+    name = m[2]!;
+    // The name starts after the `[skill`/`[tool` keyword and the separator the
+    // regex consumed; recompute its offset from the full match length.
+    nameStart = m.index + m[0].length - name.length;
+    const after = line.slice(nameStart + name.length);
+    // The parser accepts only whitespace or `]` after a name, and declines a
+    // markdown link outright. Without these two the editor claimed prose the
+    // runner does not: `Verify the [skill level: expert] badge` navigated to a
+    // skill named `level`, and `[skill guide](./g.md)` to one named `guide`.
+    if (!/^[ \t\]]/.test(after)) continue;
+    if (after.startsWith('](')) continue;
+    break;
+  }
+  const nameRange: [number, number] = [nameStart, nameStart + name.length];
+
+  const outputKeys: InvocationLine['outputKeys'] = [];
+  OUTPUT_KEY_RE.lastIndex = 0;
+  let om: RegExpExecArray | null;
+  while ((om = OUTPUT_KEY_RE.exec(line)) !== null) {
+    const key = om[1]!;
+    const keyStart = om.index + om[0].length - key.length;
+    outputKeys.push({ text: key, range: [keyStart, keyStart + key.length] });
+  }
+
+  return { kind, name, nameRange, outputKeys };
+}
+
+// The cursor sits inside an OPEN `[skill` token: keyword, separator (the
+// colon is optional, same rule as the tokenizer's finder), then a partial
+// name that is still a valid name prefix — anchored to the cursor, so a
+// closed call earlier on the line (`[skill: x] then [skill au│`) can't
+// satisfy it and a complete call (`[skill: x]│`) no longer does. Once the
+// author types anything the name grammar can't lex (a space onto args, the
+// closing `]`), the anchor breaks and completion goes quiet.
+const OPEN_SKILL_NAME_RE = new RegExp(String.raw`\[skill${SEP}(${NAME}*)$`);
+
+/**
+ * The partial skill name being typed at the end of `linePrefix` (the text
+ * before the cursor), or `null` when the cursor is not inside an open
+ * `[skill` token. `replaceStart` is the 0-based column where the partial
+ * begins — equal to the cursor column while the partial is still empty — so a
+ * completion item can replace exactly what was typed.
+ *
+ * `replaceStart`, not `start`: `refContextAt` and `paramContextAt` in
+ * env-data-completion-core.ts are the same shape and already use that name,
+ * and a third spelling of one concept leaves the next completion surface with
+ * two precedents and no canonical one.
+ */
+export function openSkillNamePrefix(
+  linePrefix: string,
+): { partial: string; replaceStart: number } | null {
+  const m = OPEN_SKILL_NAME_RE.exec(linePrefix);
+  if (!m) return null;
+  const partial = m[1]!;
+  return { partial, replaceStart: linePrefix.length - partial.length };
 }

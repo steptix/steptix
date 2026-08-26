@@ -2465,7 +2465,7 @@ export class SessionManager {
     // re-sends steps without re-sending `toolsDir`) still dispatches tools.
     //
     // stories/mcp-no-project.md's "no tools project-less" guarantee is enforced
-    // MCP-side instead (`CODE_STEP_PATTERN` in assemble.ts refuses `[skill:]`/
+    // MCP-side instead (`isCodeStep` in assemble.ts refuses `[skill:]`/
     // `[tool:]` before a user-scope run reaches here), not by dropping the
     // catalogue on a bare batch — that would regress Continue to close a hole
     // the client scan already closes. The scan was reviewed to be a strict

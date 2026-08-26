@@ -21,6 +21,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
+import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
 import {
@@ -62,17 +63,19 @@ const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
 
 /**
- * A `[skill:` / `[tool:` invocation token anywhere in a step — anywhere, not
- * anchored, because the invocation grammar allows a prose label before the
- * token on the same line ("Log in [skill: login]"). The token itself is
- * matched tight (no space after `[`), mirroring the tokenizers'
- * `prefix: '[skill:'`, so prose that merely *mentions* the bracket syntax
- * with different spacing is not swept in.
+ * Does this step invoke a skill or a tool? Re-exported here because
+ * `run_errand` and the project-less `run_steps` guard both refuse such steps,
+ * and this is where "what counts as a code step" used to be defined.
  *
- * Exported for `run_errand`, which refuses the same lines for the same reason:
- * one rule, so "what counts as a code step" cannot mean two things.
+ * It is the PARSER, not a look-alike pattern. That matters for the property
+ * `session-manager.ts`'s project-less no-tools guarantee leans on: the scan
+ * must claim every line the runner would dispatch. As a regex it did not —
+ * a hand-added `/i` refused `Verify the button reads [Tool Settings]` as a
+ * "code step" the runner ran as prose, and no pattern can express the
+ * grammar's markdown-link and colon-less-leniency rules at all.
+ * `tests/invocation-mirror-parity.test.ts` pins the equivalence.
  */
-export const CODE_STEP_PATTERN = /\[(?:skill|tool):/i;
+export const isCodeStep = isInvocationStep;
 
 /** Any `${...}` reference, for the "nothing will interpolate this" warning. */
 const ANY_PLACEHOLDER = /\$\{[^}]*\}/g;
@@ -345,7 +348,7 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
   // prose — a silent, expensive wrong answer three layers down. Refused here,
   // before any session exists, with the reason and the fix.
   if (project.scope === 'user') {
-    const offending = args.steps.filter((step) => CODE_STEP_PATTERN.test(step));
+    const offending = args.steps.filter((step) => isCodeStep(step));
     if (offending.length > 0) {
       fail(projectlessCodeSteps(offending, project.configSearch));
     }

@@ -21,7 +21,7 @@ export class SkillCallSyntaxError extends InvocationSyntaxError {
 
 export function parseSkillCall(line: string): ParsedSkillCall | null {
   const parsed = parseInvocation(line, {
-    prefix: '[skill:',
+    kind: 'skill',
     errorClass: SkillCallSyntaxError,
     // Skills may live in subfolders of `skillsDir`, referenced path-qualified:
     // `[skill: auth/login]` resolves `<skillsDir>/auth/login.md`. A leading

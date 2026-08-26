@@ -10,6 +10,7 @@ import {
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
+import { parseInvocationLine } from '../invocation-target-core.js';
 import { computeRenumberEdits } from '../renumber-core.js';
 import type { ActiveFileTracker } from '../active-file-tracker.js';
 import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
@@ -1080,7 +1081,12 @@ function rootFrameSteps(text: string): { line: number; instruction: string }[] {
     .map((s) => ({ line: s.line, instruction: s.instruction.trim() }))
     .filter(
       (s) =>
-        !/^\[\s*skill\s*:/i.test(s.instruction) && !sectionNames.has(s.instruction.toLowerCase()),
+        // Not a hand-rolled `\[skill\s*:` — that spelling missed the
+        // colon-less form, so `1. [skill login]` twice in a file was counted
+        // as two root-frame steps and Compile This Step refused it as an
+        // ambiguous duplicate, while `[skill: login]` compiled fine.
+        parseInvocationLine(s.instruction)?.kind !== 'skill' &&
+        !sectionNames.has(s.instruction.toLowerCase()),
     );
 }
 
@@ -1116,7 +1122,7 @@ function isAtToolLine(registry: Registry, controller: RunController): boolean {
   const lineIdx = entry.line - 1;
   if (lineIdx < 0 || lineIdx >= doc.lineCount) return false;
   const text = doc.lineAt(lineIdx).text;
-  return /\[tool:\s*[A-Za-z0-9_-]+/.test(text);
+  return parseInvocationLine(text)?.kind === 'tool';
 }
 
 /**
@@ -1240,7 +1246,7 @@ async function dispatchStep(
     // command is Step Into, seed the run with `pauseAtNextTool: true`
     // so the server emits `tool:awaiting-debugger` before that step.
     const lineText = editor.document.lineAt(Math.max(0, startLine - 1)).text;
-    const isToolLine = /\[tool:\s*[A-Za-z0-9_-]+/.test(lineText);
+    const isToolLine = parseInvocationLine(lineText)?.kind === 'tool';
     const pauseAtNextTool = mode === 'into' && isToolLine;
     registry.notifyRunning(true);
     await controller

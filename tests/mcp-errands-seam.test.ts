@@ -301,6 +301,23 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
     expect(h.errands).toEqual([]);
   });
 
+  it('refuses the colon-less invocation spelling, but not bracketed prose', async () => {
+    // The invocation grammar's colon is optional (`[skill login]` is a call),
+    // so the errand scan must keep pace — while `[skills]` / `[toolbox]`,
+    // which the tokenizer would never claim, must keep flowing as prose.
+    const h = await connect();
+
+    const result = await errand(h, {
+      steps: ['Open the [skills] page', 'Log in [skill login]', '[tool seed_cart items=2]'],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('[skill login]');
+    expect(text(result)).toContain('[tool seed_cart items=2]');
+    expect(text(result)).not.toContain('[skills] page');
+    expect(h.errands).toEqual([]);
+  });
+
   it('carries the whose-browser decision rule, now split by read-vs-act, in its description', async () => {
     // §Routing 1. A tool description is the only text guaranteed to be in front
     // of the model at the moment of the call, and the counter-example is the
