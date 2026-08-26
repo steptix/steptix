@@ -498,6 +498,11 @@ export async function runTest(
         index: i + 1,
         source: binding?.source ?? test.expansion?.rawSteps[i] ?? test.steps[i] ?? '',
         ...(binding?.section !== undefined && { section: binding.section }),
+        // The entry's target file, so a later repair cannot conflate a
+        // skill-body step with an identically-worded test step. The sidecar is
+        // rewritten wholesale, so omitting it here would make every row unfiled
+        // after a CLI run and silently restore the conflation.
+        ...(binding?.file !== undefined && { file: binding.file }),
         status: result.status,
         fromCodeBehind: result.fromCodeBehind === true,
         stale: stale !== undefined,

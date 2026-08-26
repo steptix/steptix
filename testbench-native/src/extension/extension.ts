@@ -9,6 +9,7 @@ import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
 import { registerCommands } from './commands/index.js';
+import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
@@ -169,6 +170,36 @@ class RunControllerRegistry implements vscode.Disposable {
     yield* this.controllers.values();
     yield* this.batchControllers.values();
   }
+
+  /** Editor-attached controllers — the skill-file session picker's candidate
+   *  pool. Batch controllers are excluded on purpose: their sessions are
+   *  unique per run and torn down when the batch ends, so there is never one
+   *  to inject a step into. */
+  editorControllers(): RunController[] {
+    return [...this.controllers.values()];
+  }
+
+  /**
+   * Re-sync the Variables panel's "re-run this skill step" affordance with
+   * what is actually parked.
+   *
+   * An injected run CONSUMES its host's parked failure — `resetFrameState`
+   * wipes it even on a continuation — and nothing else tells the panel, which
+   * would keep offering an action that can only refuse. Blanking it outright
+   * was wrong in the other direction: the panel has ONE slot shared by every
+   * test, so a `null` post also erased a second test's still-valid failure.
+   * Re-posting whatever is still parked covers both.
+   */
+  refreshSkillRerunPanel(): void {
+    const failure = this.controllerWithSkillFailure()?.skillRerunPayload() ?? null;
+    this.view.post({ type: 'skillRerunAvailable', failure });
+  }
+
+  /** Test-only: the skill session picker resolves through this instead of a
+   *  QuickPick when set — integration tests cannot drive native UI. */
+  pickSkillSessionForTest:
+    | ((targets: SkillRunTarget[]) => SkillRunTarget | undefined)
+    | null = null;
 
   /** Test-only: swap the health probe / spawn used by every controller.
    *  Discards existing controllers for the same reason the client factory
@@ -1221,6 +1252,10 @@ export interface TestBenchTestHooks {
    *  notification — or null when it succeeded or none has run. Reset at the
    *  start of every compile, so it always describes the latest one. */
   lastCompileError: () => string | null;
+  /** The compile mode a controller still remembers for its logical run, by
+   *  test URI. A Stop must leave nothing behind for a later caller to
+   *  inherit; nothing else makes that observable. */
+  rememberedCompileMode: (uri: vscode.Uri) => 'run' | 'steps' | undefined;
   /** True when any controller has a parked skill-step failure (the Variables
    *  re-run panel would be offered). Used to assert a refused dead-session
    *  re-run does NOT wipe the parked failure. */
@@ -1233,6 +1268,13 @@ export interface TestBenchTestHooks {
   skillDebugContext: () =>
     | { testUri: string; testLine: number; skillUri: string; skillName: string; frameId: string }
     | null;
+  /** Test-only: resolve the skill-file session picker without a QuickPick —
+   *  integration tests cannot drive native UI. Pass null to restore the
+   *  interactive picker. The callback receives the rows in presentation
+   *  order and returns the pick (or undefined to cancel). */
+  setSkillSessionPicker: (
+    fn: ((targets: SkillRunTarget[]) => SkillRunTarget | undefined) | null,
+  ) => void;
   /** Drive the webview→host message path directly so tests can verify it
    *  mirrors the registered command behavior (markRunningStopped, etc).
    *  Guards the two-handler regression class. */
@@ -1600,6 +1642,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       },
       lastDoneStatus: () => registry.lastDoneStatus,
       lastCompileError: () => registry.lastCompileError,
+      rememberedCompileMode: (uri) =>
+        registry.controllerForUri(uri.toString())?.rememberedCompileMode,
       skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
       skillDebugActive: () => registry.skillDebug !== null,
       skillDebugContext: () => {
@@ -1613,6 +1657,9 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
               frameId: c.frameId,
             }
           : null;
+      },
+      setSkillSessionPicker: (fn) => {
+        registry.pickSkillSessionForTest = fn;
       },
       dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker),
       discoveredTests: () =>

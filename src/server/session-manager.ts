@@ -49,7 +49,12 @@ import {
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
-import { spliceRecording, writeRecording, type RecordingInput } from '../codebehind/recording.js';
+import {
+  recordingDirFor,
+  spliceRecording,
+  writeRecording,
+  type RecordingInput,
+} from '../codebehind/recording.js';
 import { LiveCompiler } from '../codebehind/live-compile.js';
 import type { CompilePhase, CompileStatus, CompileSummary } from '../codebehind/compile.js';
 import { compileLock, compileLockKey } from './compile-lock.js';
@@ -795,7 +800,15 @@ interface OpenCompile {
    *  earlier one's. */
   steps: StepResult[];
   /** Splice identities by run-global 1-based step index. */
-  identities: Record<number, { source: string; section?: string | undefined; occurrence?: number | undefined }>;
+  identities: Record<
+    number,
+    {
+      source: string;
+      section?: string | undefined;
+      occurrence?: number | undefined;
+      file?: string | undefined;
+    }
+  >;
   /** When the first block started — the recording's `startedAt`. */
   startedAt: string;
   /** True once any block of this run failed, for the recording's status. */
@@ -2256,6 +2269,60 @@ export class SessionManager {
       }
     };
 
+    /**
+     * A compile-mode request that refuses before (or without) reaching its
+     * steps must still answer the compile. The proposal only exists as a
+     * `compile:result` frame, and a stream that ends with none looks — to the
+     * client's no-outcome branch — exactly like an older server that dropped
+     * the `compile` field, so the author would be told to check their server
+     * build instead of being shown the refusal. A minimal failed result whose
+     * `error` is the refusal itself, emitted before `done`.
+     */
+    const emitCompileRefusal = (message: string): void => {
+      if (request.compile === undefined || !request.testFilePath) return;
+      emit({
+        type: 'compile:result',
+        status: 'failed',
+        files: {},
+        summary: {
+          test: request.testFilePath,
+          totalSteps: 0,
+          compiled: 0,
+          kept: 0,
+          keptAi: 0,
+          rounds: 0,
+          tokensUsed: session.tokenTracker.runTotal,
+          written: [],
+          unproven: [],
+          writtenOffAi: [],
+          notAttempted: [],
+          recordingDir: recordingDirFor(request.testFilePath),
+          error: message,
+        },
+      });
+    };
+
+    /**
+     * End a compile this request was carrying, whatever stage it is at.
+     *
+     * The two halves belong together and were previously the caller's job to
+     * pair: a site that discarded without emitting left the client waiting on
+     * a `compile:result` that never came (and reading the silence as an older
+     * server), and one that emitted without discarding told the client the
+     * compile was over while its queue kept spending model calls on the
+     * session. Reads `session.liveCompile` rather than the local, so it also
+     * covers the refusals that fire BEFORE the local compiler is built — where
+     * a retained compiler from an earlier block of a split run is exactly what
+     * would otherwise be stranded.
+     */
+    const refuseOpenCompile = async (message: string): Promise<void> => {
+      if (request.compile === undefined || !request.testFilePath) return;
+      if (session.liveCompile) {
+        await this.discardLiveCompile(session, `the run refused: ${message}`);
+      }
+      emitCompileRefusal(message);
+    };
+
     // Record the step that was in flight when the user STOPPED the run, so the
     // on-disk report marks where it stopped (issue 021). Called from the three
     // mid-step abort handlers (post-step, per-step catch, branched) — NOT the
@@ -2502,6 +2569,7 @@ export class SessionManager {
         const message = err instanceof Error ? err.message : String(err);
         logger.error(`Session "${sessionId}": failed to load tool catalogue "${request.toolsDir}": ${message}`);
         emit({ type: 'output', msg: `Tool catalogue load failed: ${message}`, kind: 'error' });
+        await refuseOpenCompile(`Tool catalogue load failed: ${message}`);
         emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
@@ -2644,6 +2712,7 @@ export class SessionManager {
         const message = err instanceof Error ? err.message : String(err);
         logger.error(`Session "${sessionId}": skill expansion failed: ${message}`);
         emit({ type: 'output', msg: `Skill expansion failed: ${message}`, kind: 'error' });
+        await refuseOpenCompile(`Skill expansion failed: ${message}`);
         emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
@@ -3293,6 +3362,11 @@ export class SessionManager {
           `The skill may have changed since the failed run.`;
         logger.error(`Session "${sessionId}": ${message}`);
         emit({ type: 'output', msg: message, kind: 'error' });
+        // A refusal must terminate the compile it rides on: the queue is
+        // disposed (nothing ran, nothing is owed) and a failed
+        // `compile:result` carries the refusal, so the client never
+        // misreads the silence as an older server.
+        await refuseOpenCompile(message);
         emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
@@ -3420,6 +3494,9 @@ export class SessionManager {
           `line ${endLine} in ${endUri}. The skill may have changed since the run was stopped.`;
         logger.error(`Session "${sessionId}": ${message}`);
         emit({ type: 'output', msg: message, kind: 'error' });
+        // Same contract as the start-anchor refusal: end the compile with the
+        // refusal rather than leaving it open and unanswered.
+        await refuseOpenCompile(message);
         emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
@@ -3448,6 +3525,83 @@ export class SessionManager {
       logger.info(
         `Session "${sessionId}": bounded re-run to step ${endIndex + 1}/${stepsTotal} (${endUri}:${endLine})`,
       );
+    }
+
+    // The compile's plan was built before the slice was known — it must stay
+    // full-length (offers index it by absolute position, and the whole-test
+    // prompt reads it all), but a step outside `[startIndex, endIndex]` is not
+    // one this compile means to write, and the summary must not report it as
+    // "not attempted". Bound the plan before any step is offered, so a
+    // single-step compile reads "1 of 1" rather than "1 of 6, 5 not
+    // attempted".
+    if (liveCompile && (request.startAt !== undefined || request.endAt !== undefined)) {
+      liveCompile.setSlice(startIndex, endIndex);
+
+      // A slice cannot write an entry for occurrence k of a repeated step
+      // while an EARLIER occurrence sits outside the slice with no entry yet:
+      // `spliceEntry` places an entry at `spans[occurrence]` and APPENDS when
+      // that slot does not exist, so the new entry would land at the wrong
+      // occurrence and serve a different step. The client refuses exactly
+      // this for test files (`resolveCompileTarget`'s repeated-step gate); a
+      // skill-file slice reaches the server without that gate, so it is
+      // enforced here — before anything runs or spends a token. An earlier
+      // occurrence INSIDE the slice is fine: the queue generates in step
+      // order, so its entry exists by the time the later one is placed; and
+      // one that already has an entry is a replacement, not a placement.
+      //
+      // Scoped to a FRESH `'steps'` compile, which is the only shape that can
+      // place an entry into a file it read from disk. A `'run'` continuation
+      // carries `startAt` too (a Continue that resumes inside a section body),
+      // and there the earlier occurrence's entry sits in the RETAINED
+      // compiler's candidate rather than on disk — so this test would see it
+      // missing and kill the author's whole run over the compile's own
+      // bookkeeping.
+      const guardOccurrences =
+        request.compile === 'steps' && request.compileContinues !== true;
+      for (let i = startIndex; guardOccurrences && i <= endIndex; i++) {
+        const b = generationBindings.bindingFor(i);
+        if (!b || b.occurrence === 0 || b.entry !== undefined) continue;
+        // Occurrence is counted per FRAME INSTANCE (`buildCodeBehindRegistry`
+        // keys its counter on the frame id), so a second invocation of the
+        // same skill restarts at 0 and its steps are not siblings of the
+        // first's — comparing across frames refuses a selection that is
+        // already complete, with advice the author cannot act on.
+        const frameOf = (k: number): string | undefined => expansionOrigins?.[k]?.frameId;
+        const bFrame = frameOf(i);
+        let blocked = false;
+        for (let j = 0; j < startIndex && !blocked; j++) {
+          const sib = generationBindings.bindingFor(j);
+          blocked =
+            sib !== undefined &&
+            frameOf(j) === bFrame &&
+            sib.file === b.file &&
+            (sib.section ?? '') === (b.section ?? '') &&
+            sib.source === b.source &&
+            sib.occurrence < b.occurrence &&
+            sib.entry === undefined;
+        }
+        if (!blocked) continue;
+        const message =
+          `"${b.source}" appears more than once in its scope, and a partial compile ` +
+          `cannot place the entry for just one of them — it would land on the wrong ` +
+          `occurrence. Include every occurrence in the selection, or compile the whole body.`;
+        logger.error(`Session "${sessionId}": ${message}`);
+        emit({ type: 'output', msg: message, kind: 'error' });
+        await this.discardLiveCompile(session, 'a repeated step cannot be partially compiled');
+        emitCompileRefusal(message);
+        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          outputSources: { ...session.outputSources },
+          error: { step: i + 1, message },
+          pageTitle: '',
+        };
+      }
     }
 
     // Step indexes that have already had their breakpoint pause consumed
@@ -3488,10 +3642,14 @@ export class SessionManager {
         // on the first tail step, so nothing runs before the refusal.
         if (isPartialRerun && /\{\{__skill\w*\}\}/.test(interpolated)) {
           const frame = frameInfoFor(i);
+          // Advice that serves every surface this refusal reaches: the
+          // Variables-panel re-run, the Stop-debug selection, and a
+          // skill-file single-step run/compile. The old wording said "Use
+          // Continue", which only exists on the first of those.
           const message =
             `Can't re-run from this step on its own — it uses a value an earlier step ` +
             `in the skill produced, which can't be restored for a partial re-run. ` +
-            `Use Continue to re-run the whole skill instead.`;
+            `Start the run from the step that produces it, or re-run the whole skill.`;
           logger.info(`Session "${sessionId}": partial re-run refused at step ${i + 1}: ${message}`);
           emit({
             type: 'step:fail',
@@ -3499,6 +3657,10 @@ export class SessionManager {
             error: message,
             ...(frame && { frame }),
           });
+          // Mid-loop, so the compiler may exist and even hold earlier steps'
+          // work; the refusal aborts the compile, and a failed
+          // `compile:result` says why (see the anchor refusals above).
+          await refuseOpenCompile(message);
           emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
           return {
             sessionId,
@@ -4452,6 +4614,9 @@ export class SessionManager {
           index: result.index,
           source: binding?.source ?? expansionRawSteps[i] ?? effectiveSteps[i] ?? '',
           ...(binding?.section !== undefined && { section: binding.section }),
+          // The entry's target file, so a repair looking this row up cannot
+          // conflate a skill-body step with an identically-worded test step.
+          ...(binding?.file !== undefined && { file: binding.file }),
           status: result.status,
           fromCodeBehind: result.fromCodeBehind === true,
           stale: stale !== undefined,
@@ -4486,6 +4651,7 @@ export class SessionManager {
             source: binding.source,
             ...(binding.section !== undefined && { section: binding.section }),
             occurrence: binding.occurrence,
+            file: binding.file,
           };
         }
       }
@@ -4500,7 +4666,12 @@ export class SessionManager {
       // same thing twice.
       const identities: Record<
         number,
-        { source: string; section?: string | undefined; occurrence?: number | undefined }
+        {
+          source: string;
+          section?: string | undefined;
+          occurrence?: number | undefined;
+          file?: string | undefined;
+        }
       > = {};
       for (const result of fullStepResults) {
         const binding = generationBindings.bindingFor(result.index - 1);
@@ -4509,6 +4680,10 @@ export class SessionManager {
           source: binding.source,
           ...(binding.section !== undefined && { section: binding.section }),
           occurrence: binding.occurrence,
+          // The binding's target `.steps.ts` — the discriminator that keeps a
+          // skill-body step from claiming (or clobbering) the recording slot
+          // of a test-frame step with identical authored text.
+          file: binding.file,
         };
       }
       // A compile-mode run writes from the accumulation, so a split run's
@@ -4550,8 +4725,12 @@ export class SessionManager {
           .filter((r) => !r.hookScope && !r.interactiveAdHoc && !r.interactiveChild)
           .map((r) => offset + r.index),
       );
+      // Bounded to the slice: a request that ran `[startIndex, endIndex]`
+      // never meant to attempt the steps outside it, and reporting them would
+      // caption a clean single-step compile with "N step(s) not attempted".
+      // Without a slice the bounds are the whole expansion, as before.
       const notAttempted: number[] = [];
-      for (let n = offset + 1; n <= offset + stepsTotal; n++) {
+      for (let n = offset + startIndex + 1; n <= offset + endIndex + 1; n++) {
         if (!recorded.has(n)) notAttempted.push(n);
       }
       const failed = fullStepResults.find((r) => r.status === 'failed' && !r.interrupted);
@@ -4571,6 +4750,17 @@ export class SessionManager {
         files: outcome.files,
         summary: outcome.summary,
       });
+      // A `'steps'` compile is terminal by construction — it compiles the
+      // steps it was sent and is never continued — so it must not stay on the
+      // session. Left there, the next Continue of the test (which inherits
+      // `'run'` and stamps `compileContinues`) matches it by file path and
+      // appends its tail to a FINISHED `'steps'` compiler: no Review, step
+      // numbers shifted by the old block's offset, and a wholesale recording
+      // write built from the other compile's steps. A `'run'` compile is
+      // retained on purpose: that is what carries a split run across blocks.
+      if (request.compile === 'steps' && session.liveCompile?.compiler === liveCompile) {
+        session.liveCompile = undefined;
+      }
     }
 
     // Hand the whole run to an in-process caller (the compiler): it drove this

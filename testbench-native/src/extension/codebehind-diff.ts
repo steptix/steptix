@@ -20,6 +20,12 @@ export interface CompileProposal {
   /** Absolute `.steps.ts` path → proposed content. More than one when the
    *  test invokes skills, whose entries compile into the skill's own file. */
   files: Record<string, string>;
+  /** Where Apply should land the author afterwards, when it is not the test
+   *  file — a skill-file single-step compile returns to the SKILL, whose
+   *  step the author is iterating on, not the test whose session recorded
+   *  it. Absent means `testFilePath`, the behaviour every other compile
+   *  keeps. */
+  returnTo?: string;
 }
 
 export class CodeBehindDiffs implements vscode.Disposable {

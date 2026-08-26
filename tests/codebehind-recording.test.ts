@@ -427,3 +427,125 @@ describe('splicing when a test repeats a step', () => {
     expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
   });
 });
+
+describe('the splice identity carries the binding\'s target file', () => {
+  // A test-frame step and a skill-body step can share authored text, an empty
+  // section and occurrence 0 — the section/source/occurrence key is identical
+  // for both, and the first slot in file order used to win. Measured victim:
+  // a skill-step splice overwrote the TEST step's evidence while the skill
+  // step's slot kept stale content.
+  const TEST_FILE = 'checkout.steps.ts';
+  const SKILL_FILE = 'login.steps.ts';
+
+  async function seedBothFrames(test: string, withFiles: boolean): Promise<void> {
+    await writeRecording(test, {
+      steps: [
+        step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/from-test-frame' }),
+        step(2, { instruction: 'Press the go button', pageUrl: 'https://app.test/from-skill-frame' }),
+      ],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: {
+        1: { source: 'Press the go button', occurrence: 0, ...(withFiles && { file: TEST_FILE }) },
+        2: { source: 'Press the go button', occurrence: 0, ...(withFiles && { file: SKILL_FILE }) },
+      },
+    });
+  }
+
+  it('a filed splice claims its own file\'s slot, never the identically-worded other frame\'s', async () => {
+    const test = path.join(dir, 'checkout.md');
+    await seedBothFrames(test, true);
+    const before = (await readRecording(test))!;
+    expect(before.steps[0]!.file).toBe(TEST_FILE);
+    expect(before.steps[1]!.file).toBe(SKILL_FILE);
+
+    await new Promise((r) => setTimeout(r, 5));
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/spliced' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press the go button', occurrence: 0, file: SKILL_FILE } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(2);
+    // The SKILL slot took the splice — slot 2, not the first in file order…
+    expect(after.steps[1]!.pageUrl).toBe('https://app.test/spliced');
+    expect(after.steps[1]!.recordedAt).not.toBe(before.steps[1]!.recordedAt);
+    // …and the test-frame step's evidence is byte-for-byte what it was.
+    expect(after.steps[0]!.pageUrl).toBe('https://app.test/from-test-frame');
+    expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
+  });
+
+  it('a filed splice never claims a slot recorded for a DIFFERENT file — it opens a new one', async () => {
+    const test = path.join(dir, 'checkout.md');
+    await writeRecording(test, {
+      steps: [step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/from-test-frame' })],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press the go button', occurrence: 0, file: TEST_FILE } },
+    });
+
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/spliced' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press the go button', occurrence: 0, file: SKILL_FILE } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(2);
+    expect(after.steps[0]!.pageUrl).toBe('https://app.test/from-test-frame');
+    expect(after.steps[1]!.pageUrl).toBe('https://app.test/spliced');
+    expect(after.steps[1]!.file).toBe(SKILL_FILE);
+  });
+
+  it('a filed splice still matches a recording written before the field existed', async () => {
+    const test = path.join(dir, 'checkout.md');
+    await seedBothFrames(test, false);
+    const before = (await readRecording(test))!;
+    expect(before.steps[0]!.file).toBeUndefined();
+
+    await new Promise((r) => setTimeout(r, 5));
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/spliced' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press the go button', occurrence: 0, file: SKILL_FILE } },
+    });
+
+    // No same-file slot exists; the unfiled slot (first in file order) is
+    // claimed — the pre-field behaviour, kept so old recordings still splice.
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(2);
+    expect(after.steps[0]!.pageUrl).toBe('https://app.test/spliced');
+  });
+
+  it('an unfiled splice keeps the pre-field behaviour: first slot in file order', async () => {
+    const test = path.join(dir, 'checkout.md');
+    await seedBothFrames(test, true);
+
+    await spliceRecording(test, {
+      steps: [step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/spliced' })],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Press the go button', occurrence: 0 } },
+    });
+
+    const after = (await readRecording(test))!;
+    expect(after.steps).toHaveLength(2);
+    expect(after.steps[0]!.pageUrl).toBe('https://app.test/spliced');
+  });
+});

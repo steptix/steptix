@@ -237,6 +237,22 @@ export function spliceEntry(
   const spans = findEntrySpans(s, request.source, request.section);
   const target = spans[request.occurrence];
 
+  // Appending is only ever "this is the NEXT occurrence". Placing occurrence 3
+  // in a file that holds one span would append it as span 1, where the runtime
+  // — which binds by position within the scope — serves it to a step it was
+  // never generated from. Nothing downstream can detect that, so it is refused
+  // here rather than in any one caller: a partial compile whose earlier
+  // occurrence declined or errored reaches this point with no slot to fill,
+  // and so does a hand-edited file someone deleted an entry from.
+  if (!target && request.occurrence > spans.length) {
+    throw new Error(
+      `Cannot place the entry for occurrence ${request.occurrence} of ` +
+        `"${request.source}": the file has ${spans.length} matching entr${spans.length === 1 ? 'y' : 'ies'}, ` +
+        `so it would be appended as occurrence ${spans.length} and serve a different step. ` +
+        `Compile the earlier occurrence(s) too.`,
+    );
+  }
+
   if (target) {
     const lineIndent = indentOfLineAt(original, target.start);
     const replacement = indent(entryText, lineIndent).slice(lineIndent.length);
