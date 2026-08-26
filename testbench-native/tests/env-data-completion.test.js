@@ -105,12 +105,15 @@ test('malformed bodies are not references (space inside, digit-first namespace)'
 // inFrontmatter
 // ---------------------------------------------------------------------------
 
-test('inFrontmatter covers the body lines, not the delimiters or the rest', () => {
+test('inFrontmatter covers the span, delimiters included, and not the rest', () => {
   const text = ['---', 'type: skill', 'dataSources:', '---', '', '## Steps'].join('\n');
-  assert.equal(inFrontmatter(text, 0), false); // opening ---
+  // Delimiter lines classify as frontmatter too (runner-core classifyLines).
+  // Immaterial to the provider: a `---` fence line can never contain `${`.
+  assert.equal(inFrontmatter(text, 0), true);
   assert.equal(inFrontmatter(text, 1), true);
   assert.equal(inFrontmatter(text, 2), true);
-  assert.equal(inFrontmatter(text, 3), false); // closing ---
+  assert.equal(inFrontmatter(text, 3), true);
+  assert.equal(inFrontmatter(text, 4), false);
   assert.equal(inFrontmatter(text, 5), false);
 });
 
@@ -157,7 +160,7 @@ test('resolveDataTree substitutes $VAR leaves and keeps unset ones literal', () 
 // ---------------------------------------------------------------------------
 
 test('object nodes offer their keys in author order, shaped by kind', () => {
-  const items = treeCompletions(TREE, []);
+  const items = treeCompletions(TREE, [], 'data');
   assert.deepEqual(
     items.map((i) => [i.label, i.kind]),
     [
@@ -172,7 +175,7 @@ test('object nodes offer their keys in author order, shaped by kind', () => {
 });
 
 test('array nodes offer their indices', () => {
-  const items = treeCompletions(TREE, ['users', 'list']);
+  const items = treeCompletions(TREE, ['users', 'list'], 'data');
   assert.deepEqual(
     items.map((i) => [i.label, i.detail]),
     [
@@ -183,12 +186,29 @@ test('array nodes offer their indices', () => {
 });
 
 test('leaves and misses offer nothing further', () => {
-  assert.deepEqual(treeCompletions(TREE, ['count']), []);
-  assert.deepEqual(treeCompletions(TREE, ['no', 'such']), []);
+  assert.deepEqual(treeCompletions(TREE, ['count'], 'data'), []);
+  assert.deepEqual(treeCompletions(TREE, ['no', 'such'], 'data'), []);
+});
+
+test('keys the reference grammar cannot express are not offered', () => {
+  // `${data.user.name}` would walk `user` → miss, and a key with a space or
+  // `@` falls outside the runtime path class entirely — offering them
+  // authors references the run can never resolve.
+  const tree = {
+    'user.name': 'paul',
+    'has space': 'x',
+    'alice@example.com': 'y',
+    plain: 'ok',
+  };
+  const items = treeCompletions(tree, [], 'data');
+  assert.deepEqual(
+    items.map((i) => i.label),
+    ['plain'],
+  );
 });
 
 test('secret-named leaves are masked in the preview', () => {
-  const items = treeCompletions(TREE, ['users', 'admin']);
+  const items = treeCompletions(TREE, ['users', 'admin'], 'data');
   const password = items.find((i) => i.label === 'password');
   assert.equal(password.detail, '*******'); // hunter2 → 7 stars, never the value
   const email = items.find((i) => i.label === 'email');
@@ -197,20 +217,32 @@ test('secret-named leaves are masked in the preview', () => {
 
 test('a secret-named ancestor masks everything beneath it', () => {
   const tree = { passwords: { admin: 'hunter2' } };
-  const items = treeCompletions(tree, ['passwords']);
+  const items = treeCompletions(tree, ['passwords'], 'data');
   assert.equal(items[0].detail, '*******');
+});
+
+test('bare *Key names mask — the runtime isSecretName rule, not maskIfSecret', () => {
+  // The runtime redacts anything matching /password|secret|token|key/i from
+  // recordings and reports; the dropdown must not show what a report hides.
+  const tree = { privateKey: 'BEGIN RSA PRIVATE', api: { url: 'http://x' } };
+  const items = treeCompletions(tree, [], 'data');
+  const key = items.find((i) => i.label === 'privateKey');
+  assert.equal(key.detail, '********');
+  // A secret-named SOURCE taints its whole tree, so the namespace matters.
+  const bySource = treeCompletions({ admin: 'hunter2' }, [], 'passwords');
+  assert.equal(bySource[0].detail, '*******');
 });
 
 test('long previews truncate; newlines flatten', () => {
   const tree = { big: 'x'.repeat(80), lines: 'a\nb' };
-  const items = treeCompletions(tree, []);
+  const items = treeCompletions(tree, [], 'data');
   assert.ok(items[0].detail.endsWith('…'));
   assert.ok(items[0].detail.length < 60);
   assert.equal(items[1].detail, 'a␤b');
 });
 
 test('null / boolean leaves preview like the runtime stringifies them', () => {
-  const items = treeCompletions({ n: null, b: false }, []);
+  const items = treeCompletions({ n: null, b: false }, [], 'data');
   assert.equal(items[0].detail, '');
   assert.equal(items[1].detail, 'false');
 });
@@ -220,13 +252,19 @@ test('null / boolean leaves preview like the runtime stringifies them', () => {
 // ---------------------------------------------------------------------------
 
 test('env vars sort alphabetically and secret names are masked', () => {
-  const items = envVarCompletions({ SB_PASSWORD: 'pw12345678', BASE_URL: 'http://x' });
+  const items = envVarCompletions({
+    SB_PASSWORD: 'pw12345678',
+    BASE_URL: 'http://x',
+    MACHINE_KEY: 'mk-123456789',
+  });
   assert.deepEqual(
     items.map((i) => i.label),
-    ['BASE_URL', 'SB_PASSWORD'],
+    ['BASE_URL', 'MACHINE_KEY', 'SB_PASSWORD'],
   );
   assert.equal(items[0].detail, 'http://x');
-  assert.equal(items[1].detail, '********'); // capped at 8 stars
+  // Bare *_KEY masks — the runtime's isSecretName rule.
+  assert.equal(items[1].detail, '********');
+  assert.equal(items[2].detail, '********'); // capped at 8 stars
 });
 
 // ---------------------------------------------------------------------------
@@ -235,7 +273,6 @@ test('env vars sort alphabetically and secret names are masked', () => {
 
 const FULL = {
   envName: 'local',
-  isSkill: false,
   dataDetail: 'fixtures/data/local.json',
   sources: [{ name: 'catalog', detail: '../data/demo-catalog.json' }],
   envDetail: '.env + .env.local',
@@ -256,19 +293,11 @@ test('a test with an active env offers data, sources, env, and envName', () => {
   assert.equal(items[3].detail, 'local');
 });
 
-test('skills never see the caller-env data namespace', () => {
-  const items = namespaceCompletions({ ...FULL, isSkill: true });
+test('null dataDetail suppresses data — how the wiring handles skills', () => {
+  const items = namespaceCompletions({ ...FULL, dataDetail: null });
   assert.deepEqual(
     items.map((i) => i.label),
     ['catalog', 'env', 'envName'],
-  );
-});
-
-test('with no env selected there is no data and no envName', () => {
-  const items = namespaceCompletions({ ...FULL, envName: null, dataDetail: null });
-  assert.deepEqual(
-    items.map((i) => i.label),
-    ['catalog', 'env'],
   );
 });
 

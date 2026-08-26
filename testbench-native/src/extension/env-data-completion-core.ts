@@ -14,7 +14,7 @@
  * file could disagree about what a reference is, the runtime wins — completion
  * only ever *offers*; it never validates.
  */
-import { maskIfSecret } from 'ai-ui-automation-runner-core';
+import { classifyLines, resolveValueFromEnv } from 'ai-ui-automation-runner-core';
 
 // ---------------------------------------------------------------------------
 // Data tree shape (mirrors src/env/data-loader.ts — the extension package
@@ -65,6 +65,12 @@ export type RefContext = NamespaceContext | PathContext;
  *  hyphens, same as the runtime's `[A-Za-z0-9_.\-]+` path class. */
 const BODY_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_-]*)*$/;
 
+/** One path segment as the runtime can address it: `lookupDataPath` splits
+ *  the reference on `.`, so a completable key must be a single non-empty run
+ *  of this class — a key containing a dot, space, or `@` has no reference
+ *  that reaches it and must not be offered. */
+const SEGMENT_RE = /^[A-Za-z0-9_-]+$/;
+
 /**
  * What `${...` reference, if any, the cursor at `character` is inside on
  * `line`. Null when the cursor is not inside an open reference (no `${`
@@ -105,17 +111,19 @@ export function refContextAt(line: string, character: number): RefContext | null
 // ---------------------------------------------------------------------------
 
 /**
- * Whether 0-based `lineIdx` sits inside the YAML frontmatter block. Inside
- * it, `${...}` is a *path* placeholder (skill `dataSources:` values), where
- * the runtime allows only `${env.X}` and `${envName}` — and only for skills.
+ * Whether 0-based `lineIdx` sits inside the YAML frontmatter block, per
+ * runner-core's `classifyLines` — the same span every other editor feature
+ * uses (decorations, diagnostics, step regions), so completion cannot invent
+ * a fourth frontmatter grammar. Delimiter lines count as inside; that is
+ * immaterial here because a `---` fence line can never also contain the open
+ * `${` that gets this function consulted.
+ *
+ * Inside the span, `${...}` is a *path* placeholder (skill `dataSources:`
+ * values), where the runtime allows only `${env.X}` and `${envName}` — and
+ * only for skills.
  */
 export function inFrontmatter(text: string, lineIdx: number): boolean {
-  const lines = text.split(/\r?\n/);
-  if ((lines[0] ?? '').trim() !== '---') return false;
-  for (let i = 1; i < lines.length; i++) {
-    if (/^---\s*$/.test(lines[i]!)) return lineIdx > 0 && lineIdx < i;
-  }
-  return false;
+  return classifyLines(text)[lineIdx]?.kind === 'frontmatter';
 }
 
 // ---------------------------------------------------------------------------
@@ -144,18 +152,16 @@ export function walkTree(tree: DataValue | undefined, parts: string[]): DataValu
 }
 
 /**
- * Replace `$NAME` string leaves with the env var's value, like the loader's
- * `resolveSecrets`, so previews show what the run would substitute. An unset
- * var keeps the literal — same as the runtime.
+ * Replace `$NAME` string leaves with the env var's value, so previews show
+ * what the run would substitute (the loader's `resolveSecrets`). Leaves
+ * delegate to runner-core's `resolveValueFromEnv` — the same lookup the
+ * `## Parameters` `$VAR` path uses; an unset var keeps the literal, same as
+ * the runtime. (The loader's `/^\$[A-Z_][A-Z0-9_]*$/i` gate is observably
+ * equivalent here: these env maps come from `parseEnv`, whose keys are
+ * always identifier-shaped.)
  */
 export function resolveDataTree(value: DataValue, env: Record<string, string>): DataValue {
-  if (typeof value === 'string') {
-    if (/^\$[A-Z_][A-Z0-9_]*$/i.test(value)) {
-      const resolved = env[value.slice(1)];
-      if (resolved !== undefined) return resolved;
-    }
-    return value;
-  }
+  if (typeof value === 'string') return resolveValueFromEnv(value, env);
   if (Array.isArray(value)) return value.map((v) => resolveDataTree(v, env));
   if (value && typeof value === 'object') {
     const out: DataObject = {};
@@ -163,6 +169,35 @@ export function resolveDataTree(value: DataValue, env: Record<string, string>): 
     return out;
   }
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// Secret masking
+// ---------------------------------------------------------------------------
+
+/**
+ * The runtime's one rule for what a secret is — `isSecretName` in
+ * src/parser/parameters.ts (and src/utils/secrets.ts), which matches bare
+ * "key" (`MACHINE_KEY`, `privateKey`) on top of the obvious names. The
+ * dropdown must mask everything a recording or report would redact, so this
+ * deliberately does NOT reuse runner-core's narrower `maskIfSecret` pattern
+ * (no bare "key") — a completion detail is as public as a report.
+ */
+const SECRET_NAME_RE = /password|secret|token|key/i;
+
+/** Star-mask in the same shape `maskIfSecret` renders elsewhere. */
+function maskValue(value: string): string {
+  if (value.length === 0) return '(empty)';
+  return '*'.repeat(Math.min(value.length, 8));
+}
+
+/** Mask `value` when the name (a single env var, or a '.'-joined data path)
+ *  is secret-shaped anywhere along it — matching the runtime's
+ *  `envDataSecretValues`, which treats a secret-named key as tainting
+ *  everything beneath it. Works on the joined path because no pattern word
+ *  contains '.'. */
+function maskIfSecretName(name: string, value: string): string {
+  return SECRET_NAME_RE.test(name) ? maskValue(value) : value;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,38 +232,29 @@ function previewValue(v: DataValue): string {
 }
 
 /**
- * Value preview for `path` (the full dotted path including the leaf key),
- * masked when any part of the path is secret-named. Delegating the name test
- * to `maskIfSecret` over the '.'-joined path gives ancestor masking for free:
- * `users.admin.password` and `passwords.admin` both match, exactly like the
- * runtime's `envDataSecretValues` walk treats a secret-named key as tainting
- * everything beneath it.
- */
-function maskedPreview(pathName: string, v: DataValue): string {
-  return maskIfSecret(pathName, previewValue(v));
-}
-
-/**
  * Completions for the node at `parentPath` inside `tree`: the keys of an
  * object, the indices of an array, nothing for a leaf (there is nothing
- * deeper to type). `pathPrefix` is the already-typed lead-in used only for
- * secret masking (namespace included is fine — extra context never unmasks).
+ * deeper to type). Keys the reference grammar cannot address (a dot, space,
+ * `@`, …) are not offered — accepting one would author a reference the
+ * runtime can never resolve. `namespace` is the already-typed lead-in,
+ * required because it participates in secret masking (a source *named*
+ * `passwords` taints its whole tree).
  */
 export function treeCompletions(
   tree: DataValue | undefined,
   parentPath: string[],
-  pathPrefix: string[] = [],
+  namespace: string,
 ): PlainCompletion[] {
   const node = walkTree(tree, parentPath);
   if (node === undefined || node === null || typeof node !== 'object') return [];
 
   const entries: Array<[string, DataValue]> = Array.isArray(node)
     ? node.map((v, i) => [String(i), v] as [string, DataValue])
-    : Object.entries(node);
+    : Object.entries(node).filter(([key]) => SEGMENT_RE.test(key));
 
   return entries.map(([key, value], i) => {
     const isBranch = value !== null && typeof value === 'object';
-    const fullPath = [...pathPrefix, ...parentPath, key].join('.');
+    const fullPath = [namespace, ...parentPath, key].join('.');
     return {
       label: key,
       kind: isBranch ? 'branch' : 'leaf',
@@ -236,7 +262,7 @@ export function treeCompletions(
         ? Array.isArray(value)
           ? `[${value.length} item${value.length === 1 ? '' : 's'}]`
           : `{${Object.keys(value).length} key${Object.keys(value).length === 1 ? '' : 's'}}`
-        : maskedPreview(fullPath, value),
+        : maskIfSecretName(fullPath, previewValue(value)),
       // JSON author order, not alphabetical — data files group related keys.
       sortText: String(i).padStart(4, '0'),
     };
@@ -250,19 +276,19 @@ export function envVarCompletions(env: Record<string, string>): PlainCompletion[
     .map((name, i) => ({
       label: name,
       kind: 'env-var' as const,
-      detail: maskIfSecret(name, previewValue(env[name]!)),
+      detail: maskIfSecretName(name, previewValue(env[name]!)),
       sortText: String(i).padStart(4, '0'),
     }));
 }
 
 export interface NamespaceOptions {
-  /** Active env name (frontmatter pin, else the EnvSelector) — null if none. */
-  envName: string | null;
-  /** `type: skill` file — no `data` namespace (skills never see the caller's
-   *  env-default data file). */
-  isSkill: boolean;
+  /** Active env name. Callers only ask for completions when an env is
+   *  selected — with none, a run interpolates nothing, so nothing is
+   *  offerable (the wiring returns [] before reaching here). */
+  envName: string;
   /** Detail for the `data` item, e.g. `fixtures/data/local.json` (possibly
-   *  suffixed ` (not found)`). Null suppresses the item (no env / a skill). */
+   *  suffixed ` (not found)`). Null suppresses the item — the caller passes
+   *  null for skills, which never see the caller-env data file. */
   dataDetail: string | null;
   /** Declared `dataSources` names with their declared paths as detail. */
   sources: Array<{ name: string; detail: string }>;
@@ -281,7 +307,7 @@ export interface NamespaceOptions {
 export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] {
   const out: PlainCompletion[] = [];
   if (!opts.pathPosition) {
-    if (opts.dataDetail !== null && !opts.isSkill && opts.envName) {
+    if (opts.dataDetail !== null) {
       out.push({
         label: 'data',
         kind: 'namespace',
@@ -310,13 +336,11 @@ export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] 
     chain: true,
     sortText: '2',
   });
-  if (opts.envName) {
-    out.push({
-      label: 'envName',
-      kind: 'env-name',
-      detail: opts.envName,
-      sortText: '3',
-    });
-  }
+  out.push({
+    label: 'envName',
+    kind: 'env-name',
+    detail: opts.envName,
+    sortText: '3',
+  });
   return out;
 }

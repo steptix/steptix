@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { getOutputChannel } from './output-channel.js';
-import { readProjectDirs } from './aiui-config-parse.js';
+import { DEFAULT_DATA_DIR, readProjectDirs } from './aiui-config-parse.js';
 
 const SETTING_KEY = 'activeEnv';
 const COMMAND_ID = 'testbench-native.selectEnv';
@@ -123,10 +123,6 @@ interface DiscoveredEnv {
   /** Which evidence sources this env was discovered from — `.env.foo`, `fixtures/data/foo.json`. */
   sources: string[];
 }
-
-/** Default data directory, relative to the project root. Overridable via
- *  `tests.dataDir` in `aiui.config.json`. */
-const DEFAULT_DATA_DIR = 'data';
 
 /**
  * Scan workspace root for `.env.*` files (excluding `.env.example`) and
