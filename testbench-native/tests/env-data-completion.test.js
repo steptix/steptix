@@ -1,16 +1,22 @@
 /**
  * Core logic of `${env.X}` / `${data.X.Y}` / `${<source>.X}` completion —
  * cursor-context parsing, tree walking, `$VAR` leaf resolution, and item
- * generation with secret masking. The vscode wiring (file loading, item
- * mapping) lives in env-data-completion.ts and is not under test here.
+ * generation with secret masking — plus the `{{name}}` runtime half: its
+ * cursor context, the capture names earlier steps write, and its items. The
+ * vscode wiring (file loading, item mapping) lives in env-data-completion.ts
+ * and is not under test here.
  */
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { resolveValueFromEnv } from 'ai-ui-automation-runner-core';
 import {
+  captureNamesBefore,
   envVarCompletions,
   inFrontmatter,
   namespaceCompletions,
+  paramCompletions,
+  paramContextAt,
   refContextAt,
   resolveDataTree,
   treeCompletions,
@@ -306,5 +312,317 @@ test('path position (skill dataSources path) restricts to env + envName', () => 
   assert.deepEqual(
     items.map((i) => i.label),
     ['env', 'envName'],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// paramContextAt — where the cursor is inside a `{{...` runtime reference
+// ---------------------------------------------------------------------------
+
+test('right after {{ is a param position with an empty partial', () => {
+  const line = '3. Verify {{';
+  assert.deepEqual(paramContextAt(line, line.length), {
+    partial: '',
+    replaceStart: line.length,
+  });
+});
+
+test('a name being typed carries the partial and its start column', () => {
+  const line = '1. Sign in as {{us';
+  assert.deepEqual(paramContextAt(line, line.length), {
+    partial: 'us',
+    replaceStart: line.length - 2,
+  });
+});
+
+test('only the last unclosed {{ counts — a closed one earlier in the line is ignored', () => {
+  const line = '1. Sign in as {{username}} with {{pa';
+  assert.deepEqual(paramContextAt(line, line.length), {
+    partial: 'pa',
+    replaceStart: line.length - 2,
+  });
+});
+
+test('a cursor after the closing }} is not in a reference', () => {
+  const line = '1. Sign in as {{username}}';
+  assert.equal(paramContextAt(line, line.length), null);
+});
+
+test('a line with no {{ offers nothing — one brace is not an opener', () => {
+  assert.equal(paramContextAt('1. Click the login button.', 12), null);
+  const single = '1. Type {';
+  assert.equal(paramContextAt(single, single.length), null);
+});
+
+test('${{ is a param context — the runtime resolves the {{name}} inside it', () => {
+  // The `${` parse rejects `${{` (`{` is not a namespace character), so the
+  // inner `{{` wins here, which is also what the runtime resolves.
+  const line = '1. Go to ${{base';
+  assert.equal(refContextAt(line, line.length), null);
+  assert.deepEqual(paramContextAt(line, line.length), {
+    partial: 'base',
+    replaceStart: line.length - 4,
+  });
+});
+
+test('a partial the {{}} grammar cannot hold is not a context', () => {
+  // `\{\{(\w+)\}\}` admits neither the space nor the hyphen.
+  const spaced = '1. Sign in as {{ user';
+  assert.equal(paramContextAt(spaced, spaced.length), null);
+  const hyphen = '1. Sign in as {{order-id';
+  assert.equal(paramContextAt(hyphen, hyphen.length), null);
+});
+
+// ---------------------------------------------------------------------------
+// captureNamesBefore — the names earlier steps write
+// ---------------------------------------------------------------------------
+
+/** Every capture form, plus the shapes that must NOT count: markers outside
+ *  the Steps span, an `after` hook, a mid-instruction `[output:]`, and prose
+ *  storage. Comments carry the 1-based line, which is what CaptureName does. */
+const CAPTURES = [
+  '---', //                                                     1
+  'env: local', //                                              2
+  'note: [output: fm_ignored]', //                              3
+  '---', //                                                     4
+  '', //                                                        5
+  'Prose mentioning [store as: prose_ignored].', //             6
+  '', //                                                        7
+  '## Hooks', //                                                8
+  '- before: Sign in and note the session [store as: sid]', //   9
+  '- after: Sign out [store as: after_ignored]', //             10
+  '', //                                                       11
+  '## Steps', //                                                12
+  '', //                                                       13
+  '1. [input: username] Enter the account name', //             14
+  '2. [output: balance] Read the shown balance', //             15
+  '3. Copy the confirmation [as: code]', //                     16
+  '4. Grab the reference [store as: order_id]', //              17
+  '5. Read the fee and record it [output: mid_line]', //        18
+  '6. Capture the total and store it as {{prose_total}}', //    19
+  '7. [skill: login out.token="session" out.k="not a name"]', // 20
+  '8. Verify {{', //                                            21
+  '9. Sign out [store as: too_late]', //                        22
+].join('\n');
+
+test('every capture form in scope is offered, pre-hooks first then execution order', () => {
+  // Cursor on step 8 — 1-based line 21, so 0-based 20.
+  assert.deepEqual(
+    captureNamesBefore(CAPTURES, 20).map((c) => [c.name, c.marker, c.line]),
+    [
+      ['sid', 'as', 9], // `before` hook — runs ahead of step 1
+      ['username', 'input', 14],
+      ['balance', 'output', 15],
+      ['code', 'as', 16],
+      ['order_id', 'as', 17],
+      ['session', 'out-alias', 20],
+    ],
+  );
+});
+
+test('an out-alias {{}} cannot express is not offered', () => {
+  // `out.k="not a name"` is a real capture the run performs; it just has no
+  // `{{...}}` form, so completing it would author an unresolvable reference.
+  const names = captureNamesBefore(CAPTURES, 20).map((c) => c.name);
+  assert.ok(names.includes('session'));
+  assert.ok(!names.includes('not a name'));
+});
+
+test('[input:] / [output:] only count anchored, where the runner honours them', () => {
+  // `INPUT_STEP_PATTERN` / `OUTPUT_STEP_PATTERN` match at the instruction's
+  // start only, so a marker later in the step binds nothing at run time.
+  const names = captureNamesBefore(CAPTURES, 20).map((c) => c.name);
+  assert.ok(names.includes('balance'), 'anchored [output:] binds');
+  assert.ok(!names.includes('mid_line'), 'a mid-instruction [output:] does not');
+});
+
+test('prose storage names nothing — the runtime binds no name from it', () => {
+  // `store it as {{x}}` only makes the runner send a richer DOM snapshot; the
+  // AI names the capture itself unless the step carries [store as: name].
+  const names = captureNamesBefore(CAPTURES, 20).map((c) => c.name);
+  assert.ok(!names.includes('prose_total'));
+});
+
+test('captures on the cursor line and below are not offered', () => {
+  // On step 1's own line nothing has been captured yet — at run time the
+  // step's own `{{x}}` is interpolated before the step writes anything. The
+  // pre-hook has still run, so it is the one name in scope.
+  assert.deepEqual(
+    captureNamesBefore(CAPTURES, 13).map((c) => c.name),
+    ['sid'],
+  );
+  assert.deepEqual(
+    captureNamesBefore(CAPTURES, 14).map((c) => c.name),
+    ['sid', 'username'],
+  );
+  assert.ok(!captureNamesBefore(CAPTURES, 20).some((c) => c.name === 'too_late'));
+});
+
+test('markers outside the executed flow are not captures', () => {
+  const names = captureNamesBefore(CAPTURES, 21).map((c) => c.name);
+  assert.ok(!names.includes('fm_ignored')); // frontmatter
+  assert.ok(!names.includes('prose_ignored')); // prose above ## Steps
+  assert.ok(!names.includes('after_ignored')); // `after` hook runs later
+});
+
+test('a name captured twice lists once, at its first write', () => {
+  const doc = [
+    '## Steps', //                              1
+    '1. [output: total] Read the total', //     2
+    '2. Re-read it [store as: total]', //       3
+    '3. Verify {{', //                          4
+  ].join('\n');
+  assert.deepEqual(
+    captureNamesBefore(doc, 3).map((c) => [c.name, c.marker, c.line]),
+    [['total', 'output', 2]],
+  );
+});
+
+test('a called section body is in scope at the call site, though defined below', () => {
+  // The repo's own reuse shape: bodies sit below the main flow but execute
+  // where they are called, so line order is the wrong model.
+  const doc = [
+    '## Steps', //                          1
+    '1. Login', //                          2
+    '2. Verify {{', //                      3
+    '', //                                  4
+    '### Login', //                         5
+    '1. Sign in [store as: token]', //      6
+  ].join('\n');
+  assert.deepEqual(
+    captureNamesBefore(doc, 2).map((c) => [c.name, c.line]),
+    [['token', 6]],
+  );
+});
+
+test('a section never called contributes nothing', () => {
+  const doc = [
+    '## Steps', //                          1
+    '1. Do something', //                   2
+    '2. Verify {{', //                      3
+    '', //                                  4
+    '### Unused', //                        5
+    '1. Sign in [store as: ghost]', //      6
+  ].join('\n');
+  assert.deepEqual(captureNamesBefore(doc, 2), []);
+});
+
+test('inside a body: its earlier steps, plus what ran before its earliest call', () => {
+  const doc = [
+    '## Steps', //                              1
+    '1. Read the id [store as: acct]', //       2
+    '2. Login', //                              3
+    '3. Done [store as: after_call]', //        4
+    '', //                                      5
+    '### Login', //                             6
+    '1. Enter the code [as: otp]', //           7
+    '2. Verify {{', //                          8
+  ].join('\n');
+  assert.deepEqual(
+    captureNamesBefore(doc, 7).map((c) => [c.name, c.line]),
+    [
+      ['acct', 2], // main flow before the call site
+      ['otp', 7], // this body's own earlier step
+    ],
+  );
+});
+
+test('a step inside a fenced example is not a capture', () => {
+  // classifyLines does not track fences, so without the mask the example
+  // below would contribute a name no run ever binds.
+  const doc = [
+    '## Steps', //                              1
+    '1. Real step [store as: real]', //         2
+    '', //                                      3
+    '```markdown', //                           4
+    '1. Example [store as: fake]', //           5
+    '```', //                                   6
+    '', //                                      7
+    '2. Verify {{', //                          8
+  ].join('\n');
+  assert.deepEqual(
+    captureNamesBefore(doc, 7).map((c) => c.name),
+    ['real'],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// paramCompletions
+// ---------------------------------------------------------------------------
+
+test('parameters come first in declared order, then the captures', () => {
+  const items = paramCompletions({ username: 'demo@securebank.com', region: 'eu' }, [
+    { name: 'balance', marker: 'as', line: 9 },
+    { name: 'otp', marker: 'input', line: 4 },
+  ]);
+  assert.deepEqual(
+    items.map((i) => [i.label, i.kind]),
+    [
+      ['username', 'parameter'],
+      ['region', 'parameter'],
+      ['balance', 'capture'],
+      ['otp', 'capture'],
+    ],
+  );
+  // sortText is what VS Code actually orders on, so it has to agree.
+  const sorted = [...items].sort((a, b) => a.sortText.localeCompare(b.sortText));
+  assert.deepEqual(
+    sorted.map((i) => i.label),
+    items.map((i) => i.label),
+  );
+});
+
+test('parameter previews are $VAR-resolved and masked by name', () => {
+  // Composed the way the wiring does it: parseParameters values run through
+  // runner-core's resolveValueFromEnv against the composed .env.
+  const declared = {
+    username: 'demo@securebank.com',
+    password: '$SB_PASSWORD',
+    MACHINE_KEY: '$AIUI_MACHINE_KEY',
+    missing: '$NOT_SET',
+  };
+  const env = { SB_PASSWORD: 'sw0rdf1sh!', AIUI_MACHINE_KEY: 'mk-123456789' };
+  const items = paramCompletions(
+    Object.fromEntries(
+      Object.entries(declared).map(([k, v]) => [k, resolveValueFromEnv(v, env)]),
+    ),
+    [],
+  );
+  const detail = Object.fromEntries(items.map((i) => [i.label, i.detail]));
+  assert.equal(detail.username, 'demo@securebank.com');
+  assert.equal(detail.password, '********'); // capped at 8 stars, never the value
+  // Bare *_KEY masks — the runtime isSecretName rule, not maskIfSecret.
+  assert.equal(detail.MACHINE_KEY, '********');
+  // An unset $VAR previews as its own literal, exactly as the run substitutes.
+  assert.equal(detail.missing, '$NOT_SET');
+  assert.ok(!JSON.stringify(items).includes('sw0rdf1sh!'));
+});
+
+test('capture detail names the marker form and the line that writes it', () => {
+  const items = paramCompletions({}, [
+    { name: 'otp', marker: 'input', line: 4 },
+    { name: 'balance', marker: 'output', line: 7 },
+    { name: 'order_id', marker: 'as', line: 9 },
+    { name: 'session', marker: 'out-alias', line: 12 },
+  ]);
+  assert.deepEqual(
+    items.map((i) => i.detail),
+    ['[input:] on line 4', '[output:] on line 7', '[as:] on line 9', '[out-alias:] on line 12'],
+  );
+  // No value preview — a capture has none until the run produces it.
+  assert.ok(items.every((i) => i.insertText === undefined && i.chain === undefined));
+});
+
+test('a name that is both a parameter and a capture lists once, as the parameter', () => {
+  const items = paramCompletions({ balance: '0.00' }, [
+    { name: 'balance', marker: 'as', line: 9 },
+    { name: 'otp', marker: 'input', line: 4 },
+  ]);
+  assert.deepEqual(
+    items.map((i) => [i.label, i.kind, i.detail]),
+    [
+      ['balance', 'parameter', '0.00'],
+      ['otp', 'capture', '[input:] on line 4'],
+    ],
   );
 });

@@ -13,8 +13,29 @@
  * with optional whitespace just inside the braces. Where the runtime and this
  * file could disagree about what a reference is, the runtime wins — completion
  * only ever *offers*; it never validates.
+ *
+ * The same file also holds the `{{name}}` half — the *runtime* variables a run
+ * fills in per step, as opposed to the parse-time `${...}` references above.
+ * That grammar is one line (src/parser/parameters.ts:102):
+ *
+ *   {{name}}                             name: \w+, no whitespace
+ *
+ * flat by construction: no namespaces, no dotted paths, and nothing to read
+ * off disk — a `{{}}` resolves against the run's variable map, which is fed by
+ * the file's `## Parameters` and by whatever earlier steps capture.
  */
-import { classifyLines, resolveValueFromEnv } from 'ai-ui-automation-runner-core';
+import {
+  buildSectionIndex,
+  classifyLines,
+  extractSections,
+  matchText,
+  resolveValueFromEnv,
+} from 'ai-ui-automation-runner-core';
+// `.ts` specifier, not the usual `.js`: this module is loaded directly by
+// `node --test` (see tests/env-data-completion.test.js), whose ESM resolver
+// will not map a `.js` specifier onto a `.ts` file. esbuild and tsc both
+// accept it. Sibling core modules are otherwise import-free by convention.
+import { isFenceDelimiter } from './step-region-core.ts';
 
 // ---------------------------------------------------------------------------
 // Data tree shape (mirrors src/env/data-loader.ts — the extension package
@@ -106,6 +127,33 @@ export function refContextAt(line: string, character: number): RefContext | null
   };
 }
 
+/**
+ * What `{{...` runtime reference, if any, the cursor at `character` is inside
+ * on `line`: the nearest `{{` before it, plus whatever has been typed since.
+ * Null when there is no `{{`, when the reference is already closed, or when
+ * the text since it isn't a name the runtime could resolve.
+ *
+ * The `/^\w*$/` gate is the runtime's `\{\{(\w+)\}\}` name class relaxed to
+ * admit the empty partial (nothing typed yet). It subsumes the "no `}` in
+ * between" rule rather than restating it — `}` is not a `\w` character, so a
+ * cursor sitting past a closed `{{x}}` fails the same test.
+ *
+ * `${{` yields the *inner* `{{`: the `${` parse above rejects it (`{` is not a
+ * namespace character) while the runtime does find a resolvable `{{name}}`
+ * inside it, so the `{{` at offset+1 is the one that wins here too.
+ */
+export function paramContextAt(
+  line: string,
+  character: number,
+): { partial: string; replaceStart: number } | null {
+  const before = line.slice(0, character);
+  const open = before.lastIndexOf('{{');
+  if (open === -1) return null;
+  const partial = before.slice(open + 2);
+  if (!/^\w*$/.test(partial)) return null;
+  return { partial, replaceStart: open + 2 };
+}
+
 // ---------------------------------------------------------------------------
 // Frontmatter span (for the skill dataSources-path special case)
 // ---------------------------------------------------------------------------
@@ -122,8 +170,273 @@ export function refContextAt(line: string, character: number): RefContext | null
  * values), where the runtime allows only `${env.X}` and `${envName}` — and
  * only for skills.
  */
-export function inFrontmatter(text: string, lineIdx: number): boolean {
-  return classifyLines(text)[lineIdx]?.kind === 'frontmatter';
+export function inFrontmatter(
+  text: string,
+  lineIdx: number,
+  classified: ClassifiedLines = classifyLines(text),
+): boolean {
+  return classified[lineIdx]?.kind === 'frontmatter';
+}
+
+/** What `classifyLines` returns — accepted by the functions here so one
+ *  classification can serve a whole completion request. */
+type ClassifiedLines = ReturnType<typeof classifyLines>;
+
+// ---------------------------------------------------------------------------
+// Capture names — the `{{}}` variables a step *writes*
+// ---------------------------------------------------------------------------
+
+/** A runtime variable that is in scope at a given point in the run. */
+export interface CaptureName {
+  name: string;
+  marker: 'input' | 'output' | 'as' | 'out-alias';
+  /** 1-based line of the capturing step or hook entry. */
+  line: number;
+}
+
+/**
+ * Every statically-knowable way a step names something it writes, each mirrored
+ * from the component that already binds it.
+ *
+ * What is deliberately NOT here: prose storage (`... and store it as {{x}}`).
+ * The runtime reads that shape only in `isExtractionStep`
+ * (src/runner/step-executor.ts:296-306), which picks a richer DOM snapshot and
+ * binds nothing; the name itself comes from the AI's `read`/`count` action,
+ * and the model is told to use a given name only when the step carries
+ * `[store as: name]`, deriving its own snake_case name otherwise
+ * (src/ai/prompts.ts:195). Offering a prose name would promise a binding the
+ * run does not make. Authors who want a capture to complete downstream write
+ * `[store as: name]`, which the third pattern below covers.
+ *
+ * Patterns are matched against a step's INSTRUCTION — the text after the `N. `
+ * ordinal, or after a hook entry's `scope:` — because that is what the runner
+ * matches, and two of these are anchored to its start.
+ */
+const CAPTURE_PATTERNS: ReadonlyArray<{
+  re: RegExp;
+  marker: CaptureName['marker'];
+}> = [
+  // Runtime prompt answers and DOM captures. Anchored, because the runner
+  // anchors: `INPUT_STEP_PATTERN` / `OUTPUT_STEP_PATTERN`
+  // (src/runner/test-runner.ts:43,49) only match at the instruction's start, so
+  // a marker anywhere else binds nothing. (`^` with no `/m` also makes these
+  // single-match, which is the other half of the runner's behaviour.)
+  { re: /^\[input:\s*(\w+)\]/gi, marker: 'input' },
+  { re: /^\[output:\s*(\w+)\]/gi, marker: 'output' },
+  // Inline captures, both spellings (cf. STORE_AS_RE, src/skills/expander.ts),
+  // anywhere in the instruction — that is how the AI prompt reads them, and how
+  // the runner's own `[output:]` enrichment appends one.
+  { re: /\[(?:store\s+)?as:\s*(\w+)\]/gi, marker: 'as' },
+  // `[skill: n out.k="alias"]` — the QUOTED alias is what enters the caller's
+  // scope (variables-panel.js:43); `out.k` is the callee's own name and is not
+  // addressable from here. One invocation may expose several.
+  { re: /\bout\.\w+\s*=\s*"([^"]+)"/g, marker: 'out-alias' },
+];
+
+/** `N. ` ordinal prefix — stripped to get the instruction the runner sees. */
+const STEP_PREFIX_RE = /^\s*\d+\.\s+/;
+/** `## Hooks` heading, and its `- scope: instruction` entries. Scope names
+ *  match the parser's `HOOK_SCOPES` (src/parser/markdown.ts:25). */
+const HOOKS_HEADING_RE = /^(#{2,})\s+hooks\s*$/i;
+const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
+const HOOK_ENTRY_RE = /^\s*-\s+(\w+)\s*:\s*(.+)$/;
+/** Hook scopes that run BEFORE the steps, so their captures are in scope for
+ *  a `{{}}` in any step. `after` / `afterEach` run later and are not. */
+const PRE_HOOK_SCOPES = new Set(['before', 'beforeeach']);
+
+/**
+ * The runtime variables in scope at 0-based `lineIdx`, in execution order,
+ * deduped by name (the first write wins).
+ *
+ * Scope is what has *executed* by this point, which is not the same as what is
+ * written above it in the file:
+ *
+ *  - `## Hooks` `before` / `beforeEach` entries run ahead of every step
+ *    wherever they are authored, so they always lead. `after` / `afterEach`
+ *    run later and are never in scope for a step.
+ *  - A `### Name` section body executes where it is CALLED, not where it is
+ *    defined — bodies sit below the main flow. So the main flow is walked in
+ *    order and each call splices its callee's body in (transitively, with a
+ *    cycle guard), rather than reading the file top to bottom.
+ *  - With the cursor inside a section body, that body's own earlier steps are
+ *    in scope, plus whatever ran before the section's *earliest* call site.
+ *    A section called from several places has several truths; the earliest is
+ *    the conservative one — it is what every call site has in common.
+ *
+ * Fenced code blocks are excluded. `classifyLines` does not track fences (it is
+ * why `isInsideFence` exists next door), so a numbered line inside an example
+ * fence classifies as a `step` and would otherwise contribute captures no run
+ * ever makes.
+ */
+export function captureNamesBefore(
+  text: string,
+  lineIdx: number,
+  classified: ClassifiedLines = classifyLines(text),
+): CaptureName[] {
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const isStep = (i: number): boolean => {
+    const kind = classified[i]?.kind;
+    return !fenced[i] && (kind === 'step' || kind === 'section-step');
+  };
+
+  // Which section (if any) each step line belongs to, and the body of each —
+  // keyed the way `buildSectionIndex` keys them, so a call resolves to the
+  // same definition the expander would pick (first definition wins).
+  const sections = extractSections(text);
+  const index = buildSectionIndex(text);
+  const bodyOf = new Map<string, number[]>();
+  const ownerOf = new Map<number, string>();
+  for (const section of sections) {
+    const key = matchText(section.name);
+    if (key === '') continue;
+    const body = section.steps.map((s) => s.line - 1).filter(isStep);
+    if (!bodyOf.has(key)) bodyOf.set(key, body);
+    for (const line of body) if (!ownerOf.has(line)) ownerOf.set(line, key);
+  }
+  const callAt = new Map<number, string>();
+  for (const call of index.calls) {
+    const key = matchText(call.name);
+    if (index.sections.has(key)) callAt.set(call.line - 1, key);
+  }
+
+  /** Push a step line and, when it calls a section, that section's body. */
+  const walk = (line: number, acc: number[], open: Set<string>): void => {
+    acc.push(line);
+    const key = callAt.get(line);
+    if (!key || open.has(key)) return; // unresolved call, or a cycle
+    open.add(key);
+    for (const bodyLine of bodyOf.get(key) ?? []) walk(bodyLine, acc, open);
+    open.delete(key);
+  };
+
+  /** Main-flow steps executing strictly before `stopLine`, expanded. */
+  const mainFlowBefore = (stopLine: number): number[] => {
+    const acc: number[] = [];
+    for (let i = 0; i < stopLine && i < classified.length; i++) {
+      if (classified[i]?.kind !== 'step' || fenced[i]) continue;
+      walk(i, acc, new Set());
+    }
+    return acc;
+  };
+
+  const executed: number[] = [];
+  const owner = ownerOf.get(lineIdx) ?? nearestSectionAbove(lineIdx, sections, classified, fenced);
+  if (owner !== null) {
+    // Inside a section body: everything before its earliest call site, then
+    // this body's own steps above the cursor.
+    const callLines = [...callAt.entries()]
+      .filter(([, key]) => key === owner)
+      .map(([line]) => line);
+    if (callLines.length > 0) executed.push(...mainFlowBefore(Math.min(...callLines)));
+    for (const bodyLine of bodyOf.get(owner) ?? []) {
+      if (bodyLine >= lineIdx) break;
+      walk(bodyLine, executed, new Set([owner]));
+    }
+  } else {
+    executed.push(...mainFlowBefore(lineIdx));
+  }
+
+  const out: CaptureName[] = [];
+  const seen = new Set<string>();
+  const collect = (instruction: string, line: number): void => {
+    // Merge every pattern's hits back into left-to-right order: one step can
+    // both invoke a skill and store a capture of its own.
+    const hits: Array<{ at: number; name: string; marker: CaptureName['marker'] }> = [];
+    for (const { re, marker } of CAPTURE_PATTERNS) {
+      for (const m of instruction.matchAll(re)) {
+        hits.push({ at: m.index ?? 0, name: m[1]!, marker });
+      }
+    }
+    hits.sort((a, b) => a.at - b.at);
+    for (const hit of hits) {
+      // `{{...}}` can only express `\w+`, so a quoted alias like "order id"
+      // has no reference form and must not be offered — accepting it would
+      // author a placeholder the run can never resolve. The other patterns
+      // capture `(\w+)` already; testing uniformly means the guard cannot be
+      // lost when a pattern is added.
+      if (!/^\w+$/.test(hit.name) || seen.has(hit.name)) continue;
+      seen.add(hit.name);
+      out.push({ name: hit.name, marker: hit.marker, line });
+    }
+  };
+
+  // Pre-hooks first — they run before step 1 wherever they are authored.
+  for (const hook of preHookEntries(lines, fenced)) collect(hook.instruction, hook.line);
+  for (const line of executed) {
+    collect((lines[line] ?? '').replace(STEP_PREFIX_RE, ''), line + 1);
+  }
+  return out;
+}
+
+/**
+ * The section body containing `lineIdx` when the cursor is on a blank or
+ * prose line inside one (a step being typed classifies as prose until it has
+ * content, so the owner map alone would miss exactly the live case).
+ */
+function nearestSectionAbove(
+  lineIdx: number,
+  sections: ReturnType<typeof extractSections>,
+  classified: ClassifiedLines,
+  fenced: boolean[],
+): string | null {
+  let owner: string | null = null;
+  for (let i = 0; i < lineIdx && i < classified.length; i++) {
+    const kind = classified[i]?.kind;
+    if (fenced[i]) continue;
+    if (kind === 'section-heading') {
+      const section = sections.find((s) => s.headingLine === i + 1);
+      const key = section ? matchText(section.name) : '';
+      owner = key === '' ? null : key;
+    } else if (kind === 'heading' || kind === 'step') {
+      // Back out to the main flow: a `## ` heading closes the Steps span, and
+      // a main-flow step can only appear before any section body.
+      owner = null;
+    }
+  }
+  return owner;
+}
+
+/** `## Hooks` entries that run before the steps, as instruction + 1-based line. */
+function preHookEntries(
+  lines: string[],
+  fenced: boolean[],
+): Array<{ instruction: string; line: number }> {
+  const out: Array<{ instruction: string; line: number }> = [];
+  let depth = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? '';
+    if (fenced[i]) continue;
+    const heading = ANY_HEADING_RE.exec(raw);
+    if (heading) {
+      const hooks = HOOKS_HEADING_RE.exec(raw);
+      depth = hooks ? hooks[1]!.length : 0;
+      continue;
+    }
+    if (depth === 0) continue;
+    const entry = HOOK_ENTRY_RE.exec(raw);
+    if (entry && PRE_HOOK_SCOPES.has(entry[1]!.toLowerCase())) {
+      out.push({ instruction: entry[2]!.trim(), line: i + 1 });
+    }
+  }
+  return out;
+}
+
+/** Per-line "is inside a fenced block" mask, one pass. Delimiter lines count
+ *  as inside — they are never steps anyway. Same naive delimiter rule as
+ *  `isInsideFence`, whose trade-offs are documented there. */
+function fenceMask(lines: string[]): boolean[] {
+  const mask = new Array<boolean>(lines.length).fill(false);
+  let open = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (isFenceDelimiter(lines[i] ?? '')) {
+      open = !open;
+      mask[i] = true;
+      continue;
+    }
+    mask[i] = open;
+  }
+  return mask;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +519,9 @@ function maskIfSecretName(name: string, value: string): string {
 
 export interface PlainCompletion {
   label: string;
-  kind: 'namespace' | 'env-var' | 'branch' | 'leaf' | 'env-name';
-  /** Short right-hand text: a masked value preview or the node shape. */
+  kind: 'namespace' | 'env-var' | 'branch' | 'leaf' | 'env-name' | 'parameter' | 'capture';
+  /** Short right-hand text: a masked value preview, the node shape, or where
+   *  a capture is written. */
   detail?: string;
   /** Text to insert when it differs from the label (`data.` for a namespace). */
   insertText?: string;
@@ -342,5 +656,58 @@ export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] 
     detail: opts.envName,
     sortText: '3',
   });
+  return out;
+}
+
+/**
+ * The `{{` dropdown: declared parameters first, then the names earlier steps
+ * capture. Deduped across both — a name that is both lists once, as the
+ * parameter, which is what the run resolves it to until a step overwrites it.
+ *
+ * `params` values arrive already `$VAR`-resolved: the caller composes `.env`
+ * with `.env.<envName>` and runs runner-core's `resolveValueFromEnv`, exactly
+ * as the run does, so the preview is what would be substituted. Masking is by
+ * the parameter's own name under the runtime rule above, so the dropdown never
+ * shows what a report would redact — and an unset `$VAR`, which previews as
+ * its own literal, is masked all the same when the name is secret-shaped.
+ *
+ * Captures carry no preview: their values exist only mid-run. Their detail
+ * names the marker form and the 1-based line that writes it, derived from the
+ * `CaptureName` union rather than the spelling found in the source (`[as:]`
+ * covers `[store as: x]` and the prose `store it as {{x}}` alike).
+ */
+export function paramCompletions(
+  params: Record<string, string>,
+  captures: CaptureName[],
+): PlainCompletion[] {
+  const out: PlainCompletion[] = [];
+  const seen = new Set<string>();
+
+  for (const [name, value] of Object.entries(params)) {
+    seen.add(name);
+    out.push({
+      label: name,
+      kind: 'parameter',
+      detail: maskIfSecretName(name, previewValue(value)),
+      // Declared order inside the group; the group prefix keeps every
+      // parameter above every capture.
+      sortText: `0_${String(out.length).padStart(4, '0')}`,
+    });
+  }
+
+  const paramCount = out.length;
+  for (const capture of captures) {
+    // `captureNamesBefore` already deduped its own list; this catches the
+    // cross-source collision and keeps the function total for any caller.
+    if (seen.has(capture.name)) continue;
+    seen.add(capture.name);
+    out.push({
+      label: capture.name,
+      kind: 'capture',
+      detail: `[${capture.marker}:] on line ${capture.line}`,
+      sortText: `1_${String(out.length - paramCount).padStart(4, '0')}`,
+    });
+  }
+
   return out;
 }

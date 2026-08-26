@@ -25,6 +25,14 @@
  *    against the file's directory (skills additionally interpolate
  *    `${env.X}` / `${envName}` in the path, tests take it literally).
  *
+ * The same provider serves the `{{name}}` half — the *runtime* variables a run
+ * fills in per step. That side reads no data files at all: its names come from
+ * the document's own `## Parameters` bullets (previewed `$VAR`-resolved against
+ * the same composed env, masked by the same secret rule) and from the captures
+ * earlier steps write. Its one gate difference is deliberate — `{{}}` resolves
+ * with no env selected, so unlike `${...}` it is offered anyway, composing the
+ * base `.env` alone.
+ *
  * Everything is best-effort and silent: a missing or malformed file yields
  * fewer suggestions, never a toast — this runs on keystrokes. File reads are
  * mtime-cached (the `readProjectDirs` convention) since the same files are
@@ -34,14 +42,25 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { isTestFile, parseEnv, parseFrontmatter } from 'ai-ui-automation-runner-core';
+import {
+  classifyLines,
+  isTestFile,
+  parseEnv,
+  parseFrontmatter,
+  parseParameters,
+  resolveSection,
+  type TestFrontmatter,
+} from 'ai-ui-automation-runner-core';
 import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
 import { DEFAULT_DATA_DIR } from './aiui-config-parse.js';
 import {
+  captureNamesBefore,
   envVarCompletions,
   inFrontmatter,
   namespaceCompletions,
+  paramCompletions,
+  paramContextAt,
   refContextAt,
   resolveDataTree,
   treeCompletions,
@@ -55,7 +74,20 @@ const ITEM_KINDS: Record<PlainCompletion['kind'], vscode.CompletionItemKind> = {
   branch: vscode.CompletionItemKind.Struct,
   leaf: vscode.CompletionItemKind.Value,
   'env-name': vscode.CompletionItemKind.Constant,
+  parameter: vscode.CompletionItemKind.Variable,
+  capture: vscode.CompletionItemKind.Reference,
 };
+
+/** Kinds that finish a whole reference rather than a path segment, so `}`
+ *  accepts and closes it in one keystroke — every `${...}` leaf, and every
+ *  flat `{{...}}` name. */
+const CLOSES_WITH_BRACE: ReadonlySet<PlainCompletion['kind']> = new Set([
+  'leaf',
+  'env-var',
+  'env-name',
+  'parameter',
+  'capture',
+]);
 
 export class EnvDataCompletionProvider implements vscode.CompletionItemProvider {
   provideCompletionItems(
@@ -63,11 +95,18 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     position: vscode.Position,
   ): vscode.CompletionItem[] {
     // Line-local bail first: the provider fires on every '{' and '.' in any
-    // markdown file, and almost none of those sit inside an open `${...`.
-    // Nothing document-wide runs until this says the cursor does.
+    // markdown file, and almost none of those sit inside an open reference.
+    // Nothing document-wide runs until one of these two probes — both
+    // line-local — says the cursor does.
     const line = document.lineAt(position.line).text;
     const ref = refContextAt(line, position.character);
-    if (!ref) return [];
+    if (!ref) {
+      // Not a `${...}` reference — the other half of the grammar, `{{name}}`,
+      // is the remaining possibility. (`${{` lands here too: the parse above
+      // rejects it, and the runtime does find a `{{name}}` inside it.)
+      const param = paramContextAt(line, position.character);
+      return param ? this.paramItems(document, position, param.replaceStart) : [];
+    }
 
     const text = document.getText();
     if (!isTestFile(text)) return [];
@@ -80,31 +119,19 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     const pathPosition = inFrontmatter(text, position.line);
     if (pathPosition && !isSkill) return [];
 
-    // A present `env:` key pins the file — even a blank one, which pins "no
-    // env": the batch runner sends the pin verbatim and blank trims to none.
-    // Only when the key is absent does the workspace EnvSelector apply.
-    const envName =
-      (fm.env !== undefined ? fm.env.trim() : EnvSelector.activeEnv()) || null;
+    const envName = activeEnvFor(fm);
     // No env → the run interpolates nothing; completing a reference here
-    // would hand the AI literal `${...}` text.
+    // would hand the AI literal `${...}` text. (`{{...}}` above is deliberately
+    // not behind this gate: it resolves without an env.)
     if (!envName) return [];
 
-    const dirs = resolveProjectDirs(document.uri);
-    const workspaceRoot =
-      vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath ??
-      path.dirname(document.uri.fsPath);
-    // The server resolves `.env`, `.env.<name>`, and `<dataDir>/<name>.json`
-    // against the aiui.config.json directory (= the workspace root in the
-    // common layout, which is also where the EnvSelector enumerates).
-    const projectRoot = dirs ? path.dirname(dirs.configPath) : workspaceRoot;
-    const baseEnvPath = path.join(projectRoot, '.env');
-    const overlayPath = path.join(projectRoot, `.env.${envName}`);
+    const { dirs, projectRoot, baseEnvPath, overlayPath } = envPaths(document, envName);
     const dataFile = path.resolve(projectRoot, dirs?.dataDir ?? DEFAULT_DATA_DIR, `${envName}.json`);
 
     if (ref.kind === 'namespace') {
       const envParts = [
         ...(fs.existsSync(baseEnvPath) ? ['.env'] : []),
-        ...(fs.existsSync(overlayPath) ? [`.env.${envName}`] : []),
+        ...(overlayPath !== null && fs.existsSync(overlayPath) ? [`.env.${envName}`] : []),
       ];
       const plain = namespaceCompletions({
         envName,
@@ -149,6 +176,38 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     );
   }
 
+  /**
+   * The `{{` dropdown: the file's declared parameters, then the names its
+   * earlier steps capture.
+   *
+   * Same file gates as the `${...}` half minus one: `{{}}` interpolates
+   * nowhere in frontmatter (a skill's dataSources path takes `${env.X}` only),
+   * and — the deliberate difference — there is **no env gate**. A run resolves
+   * `{{}}` from its parameter map whether or not an env is selected; the env
+   * only decides what a `$VAR` parameter value previews as, and with none the
+   * base `.env` still resolves what it can.
+   */
+  private paramItems(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    replaceStart: number,
+  ): vscode.CompletionItem[] {
+    const text = document.getText();
+    if (!isTestFile(text)) return [];
+    // One classification serves both the frontmatter gate and the scope walk;
+    // this runs on keystrokes, and classifying is a whole-document pass.
+    const classified = classifyLines(text);
+    if (inFrontmatter(text, position.line, classified)) return [];
+
+    const { baseEnvPath, overlayPath } = envPaths(document, activeEnvFor(parseFrontmatter(text)));
+    // `parseParameters` + `resolveSection` is the same pair the run path uses
+    // to build its parameter map (run-controller.ts), so the preview is what
+    // would actually be substituted.
+    const params = resolveSection(parseParameters(text), composedEnv(baseEnvPath, overlayPath));
+    const captures = captureNamesBefore(text, position.line, classified);
+    return paramCompletions(params, captures).map((c) => this.toItem(c, position, replaceStart));
+  }
+
   private toItem(
     c: PlainCompletion,
     position: vscode.Position,
@@ -166,11 +225,56 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     // trigger then reopens the widget one level deeper). `}` accepts anything
     // completable and closes the reference in one keystroke.
     if (c.kind === 'branch') item.commitCharacters = ['.', '}'];
-    if (c.kind === 'leaf' || c.kind === 'env-var' || c.kind === 'env-name') {
-      item.commitCharacters = ['}'];
-    }
+    if (CLOSES_WITH_BRACE.has(c.kind)) item.commitCharacters = ['}'];
     return item;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Shared file/env resolution (both halves of the grammar ask the same two
+// questions: which env is in force, and where does it live)
+// ---------------------------------------------------------------------------
+
+/**
+ * The env in force for a file. A present `env:` key pins it — even a blank
+ * one, which pins "no env": the batch runner sends the pin verbatim and blank
+ * trims to none. Only when the key is absent does the workspace EnvSelector
+ * apply.
+ */
+function activeEnvFor(fm: TestFrontmatter): string | null {
+  return (fm.env !== undefined ? fm.env.trim() : EnvSelector.activeEnv()) || null;
+}
+
+/**
+ * Where a run would read this file's env from. The server resolves `.env`,
+ * `.env.<name>`, and `<dataDir>/<name>.json` against the aiui.config.json
+ * directory (= the workspace root in the common layout, which is also where
+ * the EnvSelector enumerates) with no walk-up, so `projectRoot` is that
+ * directory and nothing else.
+ *
+ * `overlayPath` is null when no env is selected: there is no `.env.<name>` to
+ * name, and `composedEnv` then yields the base file alone.
+ */
+function envPaths(
+  document: vscode.TextDocument,
+  envName: string | null,
+): {
+  dirs: ReturnType<typeof resolveProjectDirs>;
+  projectRoot: string;
+  baseEnvPath: string;
+  overlayPath: string | null;
+} {
+  const dirs = resolveProjectDirs(document.uri);
+  const workspaceRoot =
+    vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath ??
+    path.dirname(document.uri.fsPath);
+  const projectRoot = dirs ? path.dirname(dirs.configPath) : workspaceRoot;
+  return {
+    dirs,
+    projectRoot,
+    baseEnvPath: path.join(projectRoot, '.env'),
+    overlayPath: envName === null ? null : path.join(projectRoot, `.env.${envName}`),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -210,9 +314,14 @@ function readEnvLenient(absPath: string): Record<string, string> {
 }
 
 /** Base `.env` + `.env.<name>` overlay composed, overlay winning — the same
- *  relationship `composeEnv` establishes on the run paths. */
-function composedEnv(baseEnvPath: string, overlayPath: string): Record<string, string> {
-  return { ...readEnvLenient(baseEnvPath), ...readEnvLenient(overlayPath) };
+ *  relationship `composeEnv` establishes on the run paths. A null overlay
+ *  (no env selected) leaves the base file standing alone, which is what a run
+ *  with no env composes too. */
+function composedEnv(baseEnvPath: string, overlayPath: string | null): Record<string, string> {
+  return {
+    ...readEnvLenient(baseEnvPath),
+    ...(overlayPath === null ? {} : readEnvLenient(overlayPath)),
+  };
 }
 
 /** JSON data file → `$VAR`-resolved tree; missing / bad JSON / non-object
