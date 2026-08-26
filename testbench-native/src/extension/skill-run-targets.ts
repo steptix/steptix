@@ -20,7 +20,7 @@ import * as path from 'node:path';
 import { extractSteps, parseFrontmatter } from 'ai-ui-automation-runner-core';
 // `.ts` specifier so this module stays loadable under `node --test`'s
 // type-stripping (the same reason renumber-core imports step-region-core.ts).
-import { canonicalSkillName, SKILL_INVOCATION_RE } from './invocation-target-core.ts';
+import { canonicalSkillName, parseInvocationLine } from './invocation-target-core.ts';
 
 /** Case-folded absolute-path identity. TestBench paths arrive in both drive
  *  cases on win32 (`uri.fsPath` lower-cases the drive; server echoes may
@@ -56,17 +56,20 @@ export function isSkillDocument(
 
 /**
  * The step lines of `documentText` that invoke the skill at `skillFsPath`,
- * resolved the way go-to-definition resolves them: `SKILL_INVOCATION_RE` +
+ * resolved the way go-to-definition resolves them: `parseInvocationLine` +
  * `canonicalSkillName` + `<skillsDir>/<name>.md`. Each line is a distinct
  * picker row — the call line decides the input parameters, so it is part of
  * the target.
  *
- * The regex is the shared one for a reason measured against the runtime: an
- * `^`-anchored variant missed every LABELLED call (`Sign in [skill: login]`,
- * which `parseInvocation` accepts by locating the prefix anywhere on the line
- * and keeping the text before it as the step's label), so those tests never
- * appeared in the picker at all; and a whitespace-tolerant one accepted
- * `[ skill : login]`, which the runtime does not treat as a call.
+ * Locating the call is `parseInvocationLine`'s job, not a regex of our own.
+ * This started as one and was measured wrong twice: an `^`-anchored version
+ * missed every LABELLED call (`Sign in [skill: login]`, which the runtime
+ * executes, keeping the prefix as the step's label), and a colon-requiring
+ * one missed `[skill login]` once the separator became optional. Both would
+ * silently drop a test from the picker — the failure mode is invisible,
+ * because a missing row looks exactly like a test that does not call this
+ * skill. The shared parser also declines what the runtime declines: a
+ * markdown link (`[skill guide](./g.md)`) and prose (`[skill level: expert]`).
  */
 export function skillCallLines(
   documentText: string,
@@ -79,9 +82,9 @@ export function skillCallLines(
     ? path.resolve(skillFsPath).toLowerCase()
     : path.resolve(skillFsPath);
   for (const step of extractSteps(documentText)) {
-    const m = SKILL_INVOCATION_RE.exec(step.instruction);
-    if (!m) continue;
-    const name = canonicalSkillName(m[1]!);
+    const parsed = parseInvocationLine(step.instruction);
+    if (!parsed || parsed.kind !== 'skill') continue;
+    const name = canonicalSkillName(parsed.name);
     if (name === null) continue;
     const target = path.resolve(path.join(skillsDir, `${name}.md`));
     if ((process.platform === 'win32' ? target.toLowerCase() : target) === want) {

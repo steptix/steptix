@@ -70,15 +70,37 @@ test("isSkillDocument: frontmatterless file under the skills dir still forks", (
 test("skillCallLines: a LABELLED call is still a call", () => {
   // Measured against the runtime: `parseSkillCall('Sign in [skill: login]')`
   // returns name=login (the text before the prefix becomes the step's label),
-  // so an anchored regex hid those tests from the picker entirely. The
-  // opposite spelling `[ skill : login]` is NOT a call at runtime and must
-  // not produce a phantom row.
+  // so an anchored regex hid those tests from the picker entirely.
   const text = callerText([
     "1. Sign in as admin [skill: login]",
-    "2. [ skill : login]",
-    "3. Do something else",
+    "2. Do something else",
   ]);
   assert.deepEqual(skillCallLines(text, LOGIN, SKILLS), [4]);
+});
+
+test("skillCallLines: the colon is optional, as the runtime's separator is", () => {
+  // `[skill login]` ≡ `[skill: login]` since the invocation grammar made the
+  // separator optional. Measured: the runtime resolves all three of these to
+  // `login`, and a colon-requiring regex silently dropped every caller that
+  // wrote them — a missing picker row is indistinguishable from a test that
+  // does not call the skill at all.
+  const text = callerText([
+    "1. [skill login]",
+    "2. Sign in [skill login]",
+    "3. [skill  login]",
+  ]);
+  assert.deepEqual(skillCallLines(text, LOGIN, SKILLS), [4, 5, 6]);
+});
+
+test("skillCallLines: declines what the runtime declines", () => {
+  // A markdown link and a prose bracket are not calls — the shared parser
+  // refuses both, so the picker cannot offer a row the server would then
+  // fail to anchor.
+  const text = callerText([
+    "1. See the [skill guide](./g.md)",
+    "2. Verify the [skill level: expert] badge",
+  ]);
+  assert.deepEqual(skillCallLines(text, LOGIN, SKILLS), []);
 });
 
 test("skillCallLines: resolves names the way go-to-definition does", () => {
