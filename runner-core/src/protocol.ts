@@ -224,6 +224,29 @@ export interface ToolAwaitingDebuggerEvent {
   frame?: FrameInfo;
 }
 
+/**
+ * Emitted right before the server hits its `debugger;` pause at a step's
+ * code-behind entry (stories/codebehind-debugging.md). Same contract as
+ * `tool:awaiting-debugger`, one seam over: the client attaches VS Code's
+ * Node debugger and then POSTs `/sessions/:id/tool-debugger-ack` (the ack
+ * route is shared — it means "a debugger is attached, proceed", which is
+ * not tool-specific).
+ *
+ * Only fires when the client opted in via `pauseAtNextCodeBehind` AND the
+ * next step actually has a bound entry — a step with no code-behind
+ * consumes the flag silently, so F11 degrades to a plain step pause.
+ */
+export interface CodeBehindAwaitingDebuggerEvent {
+  type: 'codebehind:awaiting-debugger';
+  /** Absolute path of the `.steps.ts` whose entry is about to run. */
+  file: string;
+  /** 1-based source line of the step in its test/skill file. The yellow ▶
+   *  stays parked here while the Node debugger drives the entry body. */
+  line: number;
+  /** Origin frame the step belongs to. */
+  frame?: FrameInfo;
+}
+
 export type RunEvent =
   | StepStartEvent
   | StepPassEvent
@@ -236,6 +259,7 @@ export type RunEvent =
   | FrameScopeEvent
   | StepAwaitingEvent
   | ToolAwaitingDebuggerEvent
+  | CodeBehindAwaitingDebuggerEvent
   // A compile-mode run's own frames (stories/compile-as-you-go.md §On the
   // wire). Deliberately the SAME shapes the compile stream carries, so a
   // client's folding code works on either stream: `compile:step` as each
@@ -831,6 +855,7 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'frame:scope' ||
     t === 'step:awaiting' ||
     t === 'tool:awaiting-debugger' ||
+    t === 'codebehind:awaiting-debugger' ||
     // Only a compile-mode run emits these; an ordinary one never does.
     t === 'compile:step' ||
     t === 'compile:result'

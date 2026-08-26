@@ -36,6 +36,14 @@ export interface RunCodeBehindOptions {
    */
   envData?: EnvDataContext | undefined;
   baseUrl?: string | undefined;
+  /**
+   * Code-behind step-into (stories/codebehind-debugging.md) — hit a
+   * `debugger;` immediately before `entry.run(ctx)`. Set only after the
+   * session manager's awaiting-debugger/ack round-trip, so an inspector is
+   * attached by the time it fires. No-op when none is (a plain `debugger;`
+   * without an inspector does nothing).
+   */
+  pauseBeforeRun?: boolean | undefined;
   /** Step label used in log lines, e.g. `codebehind:12`. */
   label: string;
 }
@@ -83,6 +91,15 @@ export async function runCodeBehindEntry(
   };
 
   try {
+    if (options.pauseBeforeRun) {
+      // Cooperative pause point for code-behind step-into. The session
+      // manager has already emitted `codebehind:awaiting-debugger` and
+      // waited for the client's ack, so a debugger is attached. Stepping
+      // past this line lands the user inside `entry.run` — the author's
+      // `.steps.ts`, via the bundle's inline sourcemap.
+      // eslint-disable-next-line no-debugger
+      debugger;
+    }
     await Promise.resolve(entry.run(ctx));
     return {
       status: 'passed',

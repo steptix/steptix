@@ -47,6 +47,7 @@ const KNOWN_EVENTS = new Set([
   'frame:scope',
   'step:awaiting',
   'tool:awaiting-debugger',
+  'codebehind:awaiting-debugger',
 ]);
 
 /**
@@ -170,8 +171,9 @@ function shapeProblem(type: string, event: Record<string, unknown>): string | nu
     case 'frame:push':
       return isFrame(event['frame']) ? null : 'frame is malformed';
     default:
-      // frame:pop, frame:scope, step:awaiting, tool:awaiting-debugger — the
-      // fold ignores these entirely, so their shape cannot hurt it.
+      // frame:pop, frame:scope, step:awaiting, tool:awaiting-debugger,
+      // codebehind:awaiting-debugger — the fold ignores these entirely, so
+      // their shape cannot hurt it.
       return null;
   }
 }

@@ -25,13 +25,18 @@ import { EnvDataCompletionProvider } from './env-data-completion.js';
 import { EnvDataDefinitionProvider } from './env-data-definition.js';
 import { CallStackTreeProvider } from './call-stack-view.js';
 import { VariablesTreeProvider } from './variables-view.js';
-import { resolveInspectorTarget, shouldReuseDebugSession } from './inspector-target.js';
+import {
+  resolveInspectorTarget,
+  shouldReuseDebugSession,
+  stepsFileBreakpoints,
+} from './inspector-target.js';
 import { ServerStatusBar } from './server-status-bar.js';
 import { registerServerCommands } from './server-commands.js';
 import {
   AutoStartGuard,
   defaultHealthProbe,
   defaultServerSpawner,
+  isLoopbackUrl,
   type HealthProbe,
   type ServerSpawner,
 } from './server-manager.js';
@@ -243,7 +248,18 @@ class RunControllerRegistry implements vscode.Disposable {
       // context (the banner + "run on stopped session" affordance go stale).
       () => this.clearSkillDebugIfOwnedBy(document.uri.toString()),
       undefined, // pollSleep — real timer
-      { healthProbe: this.healthProbe, spawnServer: this.spawnServer, logPath: this.serverLogPath, keepAliveIntervalMs: this.keepAliveIntervalMs, autoStartGuard: this.autoStartGuard },
+      {
+        healthProbe: this.healthProbe,
+        spawnServer: this.spawnServer,
+        logPath: this.serverLogPath,
+        keepAliveIntervalMs: this.keepAliveIntervalMs,
+        autoStartGuard: this.autoStartGuard,
+        // `.steps.ts`-breakpoint auto-attach (stories/codebehind-debugging.md
+        // §Flow 1). Editor controllers only — batch runs ignore breakpoints
+        // by design, and an attach from an earlier editor run covers them
+        // anyway if its breakpoints hit.
+        onServerReady: (info) => this.autoAttachForStepsBreakpoints({ ...info, folder }),
+      },
     );
     this.controllers.set(key, controller);
     // Re-fire the controller's frame-stack changes through the registry
@@ -652,6 +668,16 @@ class RunControllerRegistry implements vscode.Disposable {
           void this.handleToolAwaitingDebugger(controller, ev);
           break;
         }
+        case 'codebehind:awaiting-debugger': {
+          // Code-behind step-into (stories/codebehind-debugging.md) — the
+          // exact sibling of the tool case: attach (or reuse) the Node
+          // debugger, then ack so the server proceeds into the `debugger;`
+          // in front of the entry's `run()`.
+          const controller = this.controllers.get(uri.toString());
+          if (!controller) break;
+          void this.handleCodeBehindAwaitingDebugger(controller, ev);
+          break;
+        }
         case 'done':
           this.lastDoneStatus = ev.status;
           this.refreshRunningContext();
@@ -869,67 +895,13 @@ class RunControllerRegistry implements vscode.Disposable {
       return;
     }
 
-    const cfg = vscode.workspace.getConfiguration('testbench-native');
-    // §7: attach to what /health reported, not to a hardcoded setting. The
-    // settings are the fallback for servers whose /health predates this
-    // story. Getting this wrong is silent: if another node process holds the
-    // settings port, the attach succeeds against THAT process, the ack
-    // releases the server, its `debugger;` is a no-op, and the user's
-    // breakpoint never hits with nothing to explain why.
-    const target = resolveInspectorTarget(controller.inspectorUrl, {
-      host: cfg.get<string>('inspectorHost', '127.0.0.1'),
-      port: cfg.get<number>('inspectorPort', 9229),
+    const result = await this.attachServerDebugger({
+      inspectorUrl: controller.inspectorUrl,
+      folder: controller.workspaceFolder,
     });
-
-    if (target.kind === 'none') {
-      await ackAndExit(
-        `server has no inspector — restart it with --inspect to enable step-into (running "${ev.toolName}" without one)`,
-      );
+    if (!result.ok) {
+      await ackAndExit(`${result.reason} — running "${ev.toolName}" without a debugger`);
       return;
-    }
-
-    const { host, port } = target;
-
-    // If our pwa-node session is already attached (a previous tool
-    // in this run brought it up), reuse it. Filter to `pwa-node`
-    // only — a Chrome devtools (`chrome` / `pwa-chrome`) session is
-    // not the inspector we want and treating it as "attached" would
-    // skip the real attach call.
-    //
-    // The port comparison matters as much as the type: a user debugging some
-    // unrelated node process would otherwise suppress our attach entirely,
-    // and we would ack against a debugger pointed somewhere else.
-    const alreadyAttached = shouldReuseDebugSession(vscode.debug.activeDebugSession, {
-      host,
-      port,
-    });
-
-    if (!alreadyAttached) {
-      try {
-        const folder = controller.workspaceFolder;
-        const started = await vscode.debug.startDebugging(folder, {
-          type: 'pwa-node',
-          request: 'attach',
-          name: 'TestBench: tool step-into',
-          address: host,
-          port,
-          skipFiles: ['<node_internals>/**'],
-          sourceMaps: true,
-        });
-        if (!started) {
-          await ackAndExit(
-            `Couldn't attach Node debugger on ${host}:${port}` +
-              (target.source === 'health'
-                ? ' (reported by the server\'s /health).'
-                : `. Launch the server with --inspect=${port} to enable tool step-into.`),
-          );
-          return;
-        }
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        await ackAndExit(`Debugger attach failed (${reason})`);
-        return;
-      }
     }
 
     if (ev.toolFilePath) {
@@ -939,6 +911,174 @@ class RunControllerRegistry implements vscode.Disposable {
       );
     }
     await controller.ackToolDebugger();
+  }
+
+  /**
+   * Handle a `codebehind:awaiting-debugger` event
+   * (stories/codebehind-debugging.md §Flow 2). Sibling of the tool handler
+   * above: attach (or reuse) the Node debugger, then ack so the server
+   * proceeds into the cooperative `debugger;` in front of the entry's
+   * `run()`. Every failure takes the ack-and-exit path — the step still
+   * runs, just undebugged, with a status-bar note saying why.
+   */
+  private async handleCodeBehindAwaitingDebugger(
+    controller: RunController,
+    ev: { type: 'codebehind:awaiting-debugger'; file: string; line: number },
+  ): Promise<void> {
+    const ackAndExit = async (note?: string): Promise<void> => {
+      if (note) vscode.window.setStatusBarMessage(`TestBench: ${note}`, 3500);
+      await controller.ackToolDebugger();
+    };
+
+    if (!controller.isLocalServer()) {
+      await ackAndExit(
+        'Code-behind step-into requires a local server (SERVER_URL must be 127.0.0.1) — running the entry without a debugger',
+      );
+      return;
+    }
+
+    const result = await this.attachServerDebugger({
+      inspectorUrl: controller.inspectorUrl,
+      folder: controller.workspaceFolder,
+    });
+    if (!result.ok) {
+      await ackAndExit(`${result.reason} — running the entry without a debugger`);
+      return;
+    }
+
+    const fileName = ev.file.split(/[\\/]/).pop() ?? ev.file;
+    vscode.window.setStatusBarMessage(
+      `TestBench: stepping into code-behind for step ${ev.line} (${fileName}) — use the Debug toolbar`,
+      4000,
+    );
+    await controller.ackToolDebugger();
+  }
+
+  /**
+   * Attach VS Code's Node debugger to the server the controller's pre-run
+   * probe answered for — the one attach implementation behind tool
+   * step-into, code-behind step-into, and the `.steps.ts`-breakpoint
+   * auto-attach. Callers do their own local-server gate first (the message
+   * differs per flow) and decide what a failure means.
+   *
+   * §7: attach to what /health reported, not to a hardcoded setting. The
+   * settings are the fallback for servers whose /health predates that
+   * story. Getting this wrong is silent: if another node process holds the
+   * settings port, the attach succeeds against THAT process, the ack
+   * releases the server, its `debugger;` is a no-op, and the user's
+   * breakpoint never hits with nothing to explain why.
+   */
+  private async attachServerDebugger(args: {
+    inspectorUrl: string | null | undefined;
+    folder: vscode.WorkspaceFolder | undefined;
+  }): Promise<{ ok: true; reused: boolean } | { ok: false; reason: string }> {
+    const cfg = vscode.workspace.getConfiguration('testbench-native');
+    const target = resolveInspectorTarget(args.inspectorUrl, {
+      host: cfg.get<string>('inspectorHost', '127.0.0.1'),
+      port: cfg.get<number>('inspectorPort', 9229),
+    });
+
+    if (target.kind === 'none') {
+      return { ok: false, reason: 'server has no inspector — restart it with --inspect' };
+    }
+
+    const { host, port } = target;
+
+    // If our pwa-node session is already attached (a previous pause in this
+    // run brought it up, or the user launched the server from the Run
+    // panel), reuse it. Filter to `pwa-node` only — a Chrome devtools
+    // (`chrome` / `pwa-chrome`) session is not the inspector we want, and
+    // the port comparison matters as much as the type: a user debugging
+    // some unrelated node process would otherwise suppress our attach
+    // entirely.
+    if (shouldReuseDebugSession(vscode.debug.activeDebugSession, { host, port })) {
+      return { ok: true, reused: true };
+    }
+
+    try {
+      const started = await vscode.debug.startDebugging(args.folder, {
+        type: 'pwa-node',
+        request: 'attach',
+        name: 'TestBench: server',
+        address: host,
+        port,
+        skipFiles: ['<node_internals>/**'],
+        sourceMaps: true,
+      });
+      if (!started) {
+        return {
+          ok: false,
+          reason:
+            `couldn't attach Node debugger on ${host}:${port}` +
+            (target.source === 'health'
+              ? " (reported by the server's /health)"
+              : ` — launch the server with --inspect=${port}`),
+        };
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: `debugger attach failed (${reason})` };
+    }
+    return { ok: true, reused: false };
+  }
+
+  /**
+   * Run-start auto-attach (stories/codebehind-debugging.md §Flow 1): when
+   * the user has enabled breakpoints in any `.steps.ts`, attach the Node
+   * debugger before the run's first steps request, so the breakpoints bind
+   * by the time the code-behind module loads and its entries execute.
+   * Injected into each editor controller's `onServerReady` hook — the seam
+   * right after the pre-run health probe, whose `inspector` answer this
+   * consumes. Never fails the run: every negative outcome is a log line
+   * and (when the user clearly wanted debugging) a status-bar note.
+   */
+  private async autoAttachForStepsBreakpoints(info: {
+    inspectorUrl: string | null | undefined;
+    serverUrl: string;
+    folder: vscode.WorkspaceFolder | undefined;
+    log: (line: string) => void;
+  }): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration('testbench-native');
+    if (cfg.get<boolean>('autoAttachStepsBreakpoints', true) !== true) return;
+
+    const hits = stepsFileBreakpoints(
+      vscode.debug.breakpoints
+        .filter(
+          (bp): bp is vscode.SourceBreakpoint =>
+            bp instanceof vscode.SourceBreakpoint && bp.enabled,
+        )
+        .map((bp) => bp.location.uri.fsPath),
+    );
+    if (hits.length === 0) return;
+
+    // Same wrong-process gate as the F11 flows: a LOCAL attach for a REMOTE
+    // server would land on some unrelated process holding the settings port.
+    if (!isLoopbackUrl(info.serverUrl)) {
+      info.log('.steps.ts breakpoints set, but SERVER_URL is not local — not attaching a debugger');
+      return;
+    }
+
+    const result = await this.attachServerDebugger({
+      inspectorUrl: info.inspectorUrl,
+      folder: info.folder,
+    });
+    if (result.ok) {
+      info.log(
+        `.steps.ts breakpoints in ${hits.length} file(s) — debugger ${result.reused ? 'already attached' : 'attached'}`,
+      );
+      if (!result.reused) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: attached debugger for .steps.ts breakpoints',
+          3000,
+        );
+      }
+    } else {
+      info.log(`.steps.ts breakpoints set, but no debugger: ${result.reason}`);
+      vscode.window.setStatusBarMessage(
+        `TestBench: ${result.reason} — .steps.ts breakpoints won't bind`,
+        4000,
+      );
+    }
   }
 
   /**
