@@ -346,6 +346,53 @@ describe('skill-file session picker', function () {
       await waitFor('idle', () => !hooks.isRunning());
     });
 
+it('a Stop at a breakpoint releases the parked flag, so the picker can still see the session', async () => {
+      // Regression (found reviewing #97/#100 after merge). `parkedAtPause` was
+      // cleared only at the START of the next runLines, so Stopping a run that
+      // was parked at a breakpoint left it true forever — and
+      // `collectSkillRunTargets` filters parked candidates out. The most
+      // natural setup for this whole feature (park inside a skill, Stop, then
+      // drive that browser from the skill file) was the one state the picker
+      // could not see, and a missing row is indistinguishable there from a
+      // test that never calls the skill.
+      const testUri = fixtureUri('test-with-steps.md');
+      const doc = await vscode.workspace.openTextDocument(testUri);
+      await vscode.window.showTextDocument(doc, { preview: false });
+
+      vscode.debug.addBreakpoints([
+        new vscode.SourceBreakpoint(
+          new vscode.Location(testUri, new vscode.Position(8, 0)),
+        ),
+      ]);
+      try {
+        void vscode.commands.executeCommand('testbench-native.runAll');
+        await waitFor('run requested', () => fake.requests.length > 0);
+        fake.end();
+        await waitFor(
+          'parked at the breakpoint',
+          () => hooks.isParkedAtPause(testUri),
+          10_000,
+        );
+        assert.equal(
+          hooks.isParkedAtPause(testUri),
+          true,
+          'precondition: the run really is parked before the Stop',
+        );
+
+        await vscode.commands.executeCommand('testbench-native.stop');
+        await waitFor('idle after stop', () => !hooks.isRunning());
+
+        assert.equal(
+          hooks.isParkedAtPause(testUri),
+          false,
+          'a Stop must release the parked flag — otherwise the session is ' +
+            'invisible to the skill-step picker for the rest of its life',
+        );
+      } finally {
+        vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
+      }
+    });
+
     it('a Stop clears the remembered compile mode outright', async () => {
       // Belt and braces behind the flag: after a Stop there is no logical run
       // whose mode is worth remembering, so even a future caller that gets the

@@ -3611,6 +3611,27 @@ export class SessionManager {
 
     try {
       for (let i = startIndex; i <= endIndex; i++) {
+        // ONE-SHOT DEBUGGER FLAGS — read and cleared here, at the top of the
+        // iteration, before ANY path can skip past them.
+        //
+        // Both used to be consumed further down: `pauseAtNextCodeBehind` below
+        // the conditional-group `continue`s and the skippable-step `continue`,
+        // `pauseAtNextTool` inside the tool branch itself (so a run with no
+        // tool step never cleared it at all). Neither survived contact with a
+        // loop that has four ways out. A flag left set outlives the RUN, and
+        // it lives on the SESSION — which stories/specs/run-and-compile-a-skill-step.md
+        // then hands to another document via the picker. The result was an F11
+        // in one test arming a `debugger;` in an unrelated run of another file;
+        // with an inspector attached that freezes the whole server process.
+        //
+        // Clearing before the abort `break` is deliberate: a stopped run must
+        // not leave the next one armed. `!signal?.aborted` still gates ACTING
+        // on them, so a stop between steps disarms rather than descends.
+        const wantCodeBehindStepInto = session.pauseAtNextCodeBehind;
+        const wantToolStepInto = session.pauseAtNextTool;
+        session.pauseAtNextCodeBehind = false;
+        session.pauseAtNextTool = false;
+
         // Check abort BEFORE starting each step — the cheap, clean halt point
         // when a stop lands between steps. Mid-step aborts are also handled now
         // (issue 020): the run `signal` is threaded into every AI call so an
@@ -3927,14 +3948,11 @@ export class SessionManager {
 
         emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread, ...(await tabSpread()) });
 
-        // Code-behind step-into (stories/codebehind-debugging.md): consume
-        // the one-shot flag AT THIS STEP whichever branch it takes below —
-        // F11 means "descend into *this* step", and a flag that lingered
-        // (say the client's line classification missed a tool line) would
-        // ambush a later step, the bug class the run-control delivery guard
-        // exists to prevent. Only the non-tool branch can act on it.
-        const codeBehindStepInto = session.pauseAtNextCodeBehind && !signal?.aborted;
-        session.pauseAtNextCodeBehind = false;
+        // Code-behind step-into (stories/codebehind-debugging.md). The flag was
+        // already consumed at the top of the iteration — F11 means "descend
+        // into *this* step", and a flag that lingered would ambush a later one.
+        // Only the non-tool branch can act on it.
+        const codeBehindStepInto = wantCodeBehindStepInto && !signal?.aborted;
 
         // Tool-step branch — when the step is a `[tool: ...]` invocation
         // AND we have a loaded catalogue, dispatch through `executeToolStep`
@@ -3957,8 +3975,7 @@ export class SessionManager {
             // The flag is consumed here so each F11 yields exactly one
             // pause.
             let pauseBeforeRun = false;
-            if (session.pauseAtNextTool && !signal?.aborted) {
-              session.pauseAtNextTool = false;
+            if (wantToolStepInto && !signal?.aborted) {
               // Resolve (and lazily import) the tool so its filePath is known
               // for the debugger-attach. Swallow failures — the imminent
               // executeToolStep will surface the real error as a failed step.
@@ -4050,7 +4067,16 @@ export class SessionManager {
             // compile runs never send the flag.
             let codeBehindPause = false;
             const debugBinding = codeBehindStepInto ? codeBehind.bindingFor(i) : undefined;
-            if (debugBinding?.entry) {
+            // `ai: true` must be excluded, matching `executeStep`'s own gate
+            // (`binding?.entry && binding.entry.ai !== true`, step-executor.ts).
+            // Without it the server announced `codebehind:awaiting-debugger`,
+            // blocked for the ack, and threaded `codeBehindPauseBeforeRun`
+            // through — and then the executor skipped the entry, so no
+            // `debugger;` ever ran. The story's Limits section promises the
+            // opposite ("F11 degrades to a plain step pause"), and these are
+            // not rare: compile writes off every step it could not compile as
+            // an `ai: true` entry, so real `.steps.ts` files are full of them.
+            if (debugBinding?.entry && debugBinding.entry.ai !== true) {
               emit({
                 type: 'codebehind:awaiting-debugger',
                 file: debugBinding.file,

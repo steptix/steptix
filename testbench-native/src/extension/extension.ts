@@ -1089,6 +1089,18 @@ class RunControllerRegistry implements vscode.Disposable {
       return;
     }
 
+    // Only attach when /health actually REPORTED an inspector. `undefined`
+    // means we never got an answer — the server is down, or the probe was
+    // skipped — and `resolveInspectorTarget` then falls back to the settings
+    // default (127.0.0.1:9229). Dialling that blind costs js-debug's ~10s
+    // attach retry on EVERY run, unprompted, for anyone holding a stale
+    // enabled breakpoint in any `.steps.ts`. F11 keeps the fallback: it is a
+    // deliberate gesture, and the author can be told why it failed.
+    if (info.inspectorUrl === undefined) {
+      info.log('.steps.ts breakpoints set, but the server reported no inspector — not attaching');
+      return;
+    }
+
     const result = await this.attachServerDebugger({
       inspectorUrl: info.inspectorUrl,
       folder: info.folder,
@@ -1256,6 +1268,10 @@ export interface TestBenchTestHooks {
    *  test URI. A Stop must leave nothing behind for a later caller to
    *  inherit; nothing else makes that observable. */
   rememberedCompileMode: (uri: vscode.Uri) => 'run' | 'steps' | undefined;
+  /** Whether that document's run is parked at a breakpoint. The skill-step
+   *  picker filters parked sessions out, so a value left stale by Stop makes
+   *  the session permanently invisible there. */
+  isParkedAtPause: (uri: vscode.Uri) => boolean;
   /** True when any controller has a parked skill-step failure (the Variables
    *  re-run panel would be offered). Used to assert a refused dead-session
    *  re-run does NOT wipe the parked failure. */
@@ -1644,6 +1660,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       lastCompileError: () => registry.lastCompileError,
       rememberedCompileMode: (uri) =>
         registry.controllerForUri(uri.toString())?.rememberedCompileMode,
+      isParkedAtPause: (uri) =>
+        registry.controllerForUri(uri.toString())?.isParkedAtPause === true,
       skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
       skillDebugActive: () => registry.skillDebug !== null,
       skillDebugContext: () => {

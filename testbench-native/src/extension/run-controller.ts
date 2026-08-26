@@ -1278,6 +1278,15 @@ export class RunController {
   stop(): void {
     this.pauseRequested = false;
     this.cancelPrompt();
+    // A Stop ends the parked run, so the pause marker goes with it. It used to
+    // be cleared only at the START of the next `runLines`, which left a
+    // Stopped-at-a-breakpoint session flagged `parkedAtPause` forever — and
+    // `skill-run-targets.ts` filters those out of the session picker, so the
+    // most natural setup for that whole feature (park inside a skill, Stop,
+    // then drive that browser from the skill file) was the one state the
+    // picker could not see. A missing row is indistinguishable there from a
+    // test that never calls the skill.
+    this.parkedAtPause = false;
     // Also the disposal path: the registry tears controllers down by calling
     // stop() (see RunControllerRegistry.setApiClientFactory / dispose), so
     // this is where a paused run's keep-alive timer must be released.
@@ -2081,7 +2090,19 @@ export class RunController {
     // purpose: an attach that raced the first batch would miss the module
     // load. The hook owns its failures.
     if (this.server.onServerReady) {
-      await this.server.onServerReady({ inspectorUrl: this.currentInspectorUrl, serverUrl, log });
+      // Swallowed on purpose, and the hook's own contract says so: "failures
+      // are the hook's to swallow — a run must never break because an attach
+      // did." It was unguarded, and this `await` sits OUTSIDE the run's
+      // try/finally, so a rejection escaped `runLines` without ever emitting
+      // `done` — leaving `active` and the event listener set and the gutter
+      // stuck on "running" with no way back except reloading the window.
+      try {
+        await this.server.onServerReady({ inspectorUrl: this.currentInspectorUrl, serverUrl, log });
+      } catch (err) {
+        log(
+          `debugger auto-attach failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     const client = this.clientFactory({ serverUrl, apiKey });

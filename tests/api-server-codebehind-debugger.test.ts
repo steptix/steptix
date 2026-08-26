@@ -383,4 +383,155 @@ describe('api-server code-behind step-into', () => {
     expect(events.filter((e) => e.type === 'codebehind:awaiting-debugger')).toHaveLength(0);
     expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
   });
+
+  // ── Regressions found reviewing #100/#97 after merge ──────────────────
+  // Each of these failed before the fix in the same commit. They share one
+  // root: the one-shot flags were consumed too far down the step loop (and,
+  // for `pauseAtNextTool`, inside the tool branch), so any early `continue`
+  // or the abort `break` carried them past their step — and they live on the
+  // SESSION, which the skill-step picker hands to another document.
+
+  it('a SKIPPED step still consumes the flag — no ambush of the step after it', async () => {
+    // `[input: …]` takes the `isSkippableStep` continue, which sat ABOVE the
+    // consumption. The flag survived and fired on the bound step after it:
+    // an awaiting-debugger event for a step the user never pressed F11 on.
+    const sessionId = 'cb-debug-skip-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const events: any[] = [];
+
+    for await (const ev of sseEvents(url, {
+      steps: ['[input: foo] supply a value', BOUND_STEP],
+      sourceLines: [1, 2],
+      testFilePath,
+      pauseAtNextCodeBehind: true,
+    })) {
+      events.push(ev);
+      // Deliberately no ack: an awaiting event here would park the run and
+      // time the test out, which is itself the failure signal.
+      if (ev.type === 'done') break;
+    }
+
+    expect(events.filter((e) => e.type === 'codebehind:awaiting-debugger')).toHaveLength(0);
+  });
+
+  it('an `ai: true` entry does NOT park for a debugger — it has no code to pause in', async () => {
+    // The server gated on `binding.entry` while the executor gates on
+    // `entry && entry.ai !== true`. So the server announced the pause, blocked
+    // for an ack and threaded the flag through — and then the executor skipped
+    // the entry, so no `debugger;` ever ran. The story promises F11 degrades
+    // to a plain step pause here, and compile writes off every step it could
+    // not compile as `ai: true`, so these are common in real files.
+    const aiDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codebehind-ai-'));
+    try {
+      const aiTestPath = path.join(aiDir, 'aientry.md');
+      const defineStepsImport = path
+        .resolve(__dirname, '..', 'src', 'codebehind', 'index.ts')
+        .replace(/\\/g, '/');
+      await fs.writeFile(
+        path.join(aiDir, 'aientry.steps.ts'),
+        `
+import { defineSteps } from '${defineStepsImport}';
+
+export default defineSteps([
+  { source: ${JSON.stringify(BOUND_STEP)}, ai: true, async run() {} },
+]);
+`,
+      );
+
+      const sessionId = 'cb-debug-ai-' + Date.now();
+      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+      const events: any[] = [];
+      for await (const ev of sseEvents(url, {
+        steps: [BOUND_STEP],
+        sourceLines: [1],
+        testFilePath: aiTestPath,
+        pauseAtNextCodeBehind: true,
+      })) {
+        events.push(ev);
+        if (ev.type === 'done') break;
+      }
+
+      expect(events.filter((e) => e.type === 'codebehind:awaiting-debugger')).toHaveLength(0);
+      expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
+    } finally {
+      await fs.rm(aiDir, { recursive: true, force: true });
+    }
+  });
+
+  it('an unconsumed flag does not leak into the NEXT run on the same session', async () => {
+    // The session outlives the run, and the picker hands a live session to a
+    // different document. A flag left armed by run 1 therefore fired inside
+    // run 2 — an F11 in one test arming a `debugger;` in another file's run.
+    // Run 1 is all skippable steps, so nothing can consume the flag "in
+    // passing"; run 2 must still start disarmed.
+    const sessionId = 'cb-debug-leak-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+
+    for await (const ev of sseEvents(url, {
+      steps: ['[input: foo] supply a value'],
+      sourceLines: [1],
+      testFilePath,
+      pauseAtNextCodeBehind: true,
+    })) {
+      if (ev.type === 'done') break;
+    }
+
+    // Second run on the SAME session, not asking for any pause.
+    const events: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: [BOUND_STEP],
+      sourceLines: [1],
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+
+    expect(events.filter((e) => e.type === 'codebehind:awaiting-debugger')).toHaveLength(0);
+    expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
+  });
+
+  it('Stop while parked for the debugger does not arm the next run', async () => {
+    // HONEST SCOPE: this one passes with or without the fix, because aborting
+    // at the awaiting event happens AFTER the flag was consumed on either
+    // code path. It pins the Stop-mid-pause gesture end to end (no ack ever
+    // sent, session still usable afterwards), not the consumption ordering —
+    // the three tests above carry that. Kept because Stop-while-parked is the
+    // gesture most likely to wedge a session, and nothing else covers it.
+    const sessionId = 'cb-debug-abort-' + Date.now();
+    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+    const ac = new AbortController();
+
+    try {
+      for await (const ev of sseEvents(
+        url,
+        {
+          steps: [BOUND_STEP, BOUND_STEP],
+          sourceLines: [1, 2],
+          testFilePath,
+          pauseAtNextCodeBehind: true,
+        },
+        ac.signal,
+      )) {
+        // Abort as soon as the run parks for the debugger — the Stop-mid-pause
+        // gesture. No ack is ever sent.
+        if (ev.type === 'codebehind:awaiting-debugger') ac.abort();
+      }
+    } catch {
+      // The abort surfaces as a fetch/stream error; that is the point.
+    }
+
+    // A fresh run on the same session must not inherit the pause.
+    const events: any[] = [];
+    for await (const ev of sseEvents(url, {
+      steps: [BOUND_STEP],
+      sourceLines: [1],
+      testFilePath,
+    })) {
+      events.push(ev);
+      if (ev.type === 'done') break;
+    }
+    expect(events.filter((e) => e.type === 'codebehind:awaiting-debugger')).toHaveLength(0);
+  });
+
 });
