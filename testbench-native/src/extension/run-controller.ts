@@ -2107,7 +2107,14 @@ export class RunController {
      */
     const compileMode =
       options.compile ?? (options.isResume === true ? this.compileModeOfRun : undefined);
-    if (options.isContinuation !== true) this.compileModeOfRun = options.compile;
+    // Recorded for every run that is not a RESUME — a resume continues the
+    // mode it inherited, and everything else (a fresh run, and an injected
+    // one) is its own logical run and owns the field. Keying this on
+    // `isContinuation` left an injected compile's `'steps'` unrecorded, so the
+    // stale `'run'` from the last fresh run survived and the NEXT resume
+    // inherited it — the silent inheritance `isResume` exists to stop, one
+    // site short.
+    if (options.isResume !== true) this.compileModeOfRun = options.compile;
     /** Step-blocks already sent in THIS call — the second onwards continues
      *  the compiler the first opened. */
     let compileBlocksSent = 0;

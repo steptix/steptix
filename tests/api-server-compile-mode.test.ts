@@ -907,6 +907,61 @@ describe('recompiling a step whose entry broke', () => {
       expect((proposed.match(/source: 'Press the go button'/g) ?? []).length).toBe(2);
     });
 
+    it('does not refuse a Run & Compile CONTINUATION that carries a slice', async () => {
+      // The occurrence guard belongs to the single-step path. A `'run'`-mode
+      // continuation also carries `startAt` — a Continue that resumes inside a
+      // section body sends `rerun` — and there the earlier occurrence's entry
+      // lives in the RETAINED compiler's candidate, not on disk, so the guard's
+      // "no entry yet" test would see it missing and kill the user's whole run
+      // over a compile bookkeeping rule.
+      const session = `compile-run-slice-${Date.now()}`;
+      const post = async (body: Record<string, unknown>) => {
+        const res = await fetch(`${baseUrl}/sessions/${session}/steps?stream=1`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY,
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify(body),
+        });
+        expect(res.status).toBe(200);
+        return readSse(res);
+      };
+
+      await post({
+        steps: ['[skill: repeated]'],
+        sourceLines: [4],
+        testFilePath: repeatedCallerPath,
+        skillsDir,
+        compile: 'run',
+      });
+      const second = await post({
+        steps: ['[skill: repeated]'],
+        sourceLines: [4],
+        testFilePath: repeatedCallerPath,
+        skillsDir,
+        compile: 'run',
+        compileContinues: true,
+        startAt: { uri: repeatedPath, line: 5 },
+        endAt: { uri: repeatedPath, line: 5 },
+      });
+
+      const result = second.find((f) => f.type === 'compile:result')!;
+      expect(result.summary.error ?? '').not.toMatch(/appears more than once/);
+      expect(second.find((f) => f.type === 'done')!.status).not.toBe('error');
+
+      // A `'run'` compile is RETAINED on the session by design (that is what
+      // carries a split run across blocks), and its candidate keeps writing
+      // under the shared cache dir. Left open, it races the next case's
+      // `beforeEach` cleanup — measured as ENOTEMPTY plus a cascade of
+      // timeouts. Closing the session discards it.
+      await fetch(`${baseUrl}/sessions/${session}`, {
+        method: 'DELETE',
+        headers: { 'x-api-key': API_KEY },
+      });
+    });
+
     it('a plain slice with no compile stays a plain slice — no compile frames, no refusal result', async () => {
       const { frames } = await runSteps({
         steps: ['[skill: login]'],

@@ -180,17 +180,19 @@ class RunControllerRegistry implements vscode.Disposable {
   }
 
   /**
-   * Withdraw the Variables panel's "re-run this skill step" affordance.
+   * Re-sync the Variables panel's "re-run this skill step" affordance with
+   * what is actually parked.
    *
-   * An injected run on a paused controller CONSUMES the parked failure —
-   * `resetFrameState` wipes it even on a continuation — and nothing else
-   * tells the panel, which would keep offering an action that can only
-   * refuse. A run that fails inside the skill re-parks and re-posts through
-   * the normal step:fail route, so callers withdraw only when no fresh
-   * failure is held.
+   * An injected run CONSUMES its host's parked failure — `resetFrameState`
+   * wipes it even on a continuation — and nothing else tells the panel, which
+   * would keep offering an action that can only refuse. Blanking it outright
+   * was wrong in the other direction: the panel has ONE slot shared by every
+   * test, so a `null` post also erased a second test's still-valid failure.
+   * Re-posting whatever is still parked covers both.
    */
-  withdrawSkillRerunPanel(): void {
-    this.view.post({ type: 'skillRerunAvailable', failure: null });
+  refreshSkillRerunPanel(): void {
+    const failure = this.controllerWithSkillFailure()?.skillRerunPayload() ?? null;
+    this.view.post({ type: 'skillRerunAvailable', failure });
   }
 
   /** Test-only: the skill session picker resolves through this instead of a

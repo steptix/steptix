@@ -143,6 +143,13 @@ export function recordingDirFor(testFilePath: string): string {
  *  learned them here. */
 export { isSecretName, secretValues, redact };
 
+/** Comparable form of a `.steps.ts` path — see `fileKey` below. Exported so
+ *  every consumer of the recording/sidecar `file` discriminator folds drive
+ *  case the same way. */
+export function codeBehindFileKey(file: string | undefined): string | undefined {
+  return fileKey(file);
+}
+
 /**
  * Write a run's recording. Replaces any earlier one for the test, so the
  * directory always describes the latest recording and nothing else.
@@ -287,6 +294,21 @@ function identityKey(step: {
 }
 
 /**
+ * A comparable form of a `.steps.ts` path.
+ *
+ * The discriminator is compared across writers that do not agree on drive
+ * case — TestBench's paths come from `uri.fsPath`, which lower-cases the
+ * drive, while a CLI or MCP caller's usually does not (the same hazard
+ * `compileLockKey` folds for the lock). Comparing raw would leave a splice
+ * with no slot to claim, and it would append a duplicate rather than replace.
+ */
+function fileKey(file: string | undefined): string | undefined {
+  if (file === undefined) return undefined;
+  const resolved = path.resolve(file);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/**
  * The slot an incoming step may claim from its identity bucket, or undefined
  * when it must open a new one. Removes the claimed slot from the bucket.
  *
@@ -305,7 +327,8 @@ function claimSlot(
   if (!bucket || bucket.length === 0) return undefined;
   let pick = 0;
   if (incomingFile !== undefined) {
-    pick = bucket.findIndex((s) => s.file === incomingFile);
+    const want = fileKey(incomingFile);
+    pick = bucket.findIndex((s) => fileKey(s.file) === want);
     if (pick < 0) pick = bucket.findIndex((s) => s.file === undefined);
     if (pick < 0) return undefined;
   }

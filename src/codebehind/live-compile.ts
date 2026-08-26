@@ -31,7 +31,7 @@ import { buildRepairPrompt } from './repair.js';
 import { readLastRun, type LastRunStep } from './last-run.js';
 import { entryTextIn } from './writer.js';
 import type { CodeBehindBinding } from './loader.js';
-import { recordingDirFor } from './recording.js';
+import { codeBehindFileKey as fileKey, recordingDirFor } from './recording.js';
 import { reviewCandidate } from './review.js';
 import type { CompileStatus, CompileSummary } from './compile.js';
 
@@ -429,11 +429,12 @@ export class LiveCompiler {
     // test-frame step can share text and (empty) section, and without the
     // file the repair could be fed the other one's failure. A row written
     // before the field existed matches as it always did.
+    const want = fileKey(binding.file);
     const same = rows.filter(
       (r) =>
         (r.section ?? '') === (binding.section ?? '') &&
         r.source === binding.source &&
-        (r.file === undefined || r.file === binding.file),
+        (r.file === undefined || fileKey(r.file) === want),
     );
     const row = same[binding.occurrence];
     return row?.stale ? (row.error ?? 'the entry failed on the last run') : undefined;

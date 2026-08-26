@@ -409,6 +409,9 @@ Three details the generalization owns, beyond the routing:
 | ⏸ pick runs and **fails in the skill** | Fresh anchors re-park via `recordSkillFailure`; the test stays a ⏸ row; edit-and-re-run works on the new failure |
 | Breakpoint set inside the skill body slice | Suppressed for the injected request — a one-step slice pausing at its only step runs (and proposes) nothing |
 | Picked test's document was closed | Row filtered out (`document.isClosed`) — controllers are never deleted, so "has a controller" proves nothing; a stale `testLine` that no longer names the call refuses |
+| Test is parked at a BREAKPOINT (mid Run & Compile, awaiting Continue) | Not a candidate at all: an injected run clears its resume marker and supersedes its retained compiler, so picking it would strand a run the author is in the middle of and discard entries already paid for. Re-checked after the pick, for the window between |
+| Test is paused ON ERROR inside this skill | A ⏸ row, and picking it consumes those anchors by design (§3.4) — that is the debugging loop the feature exists for |
+| Skill step is inside the skill's own `### Section` body | Runs: lines are classified, so a `section-step` is a step here as it is everywhere else. Test-session rows still refuse via `sectionedSkillRefusal`; the standalone row works |
 | `login.steps.ts` diff left unapplied, second compile of another step | Fresh compile supersedes the abandoned one (existing `discardLiveCompile` path); the second diff carries only the second entry against disk |
 
 ## 5. Testing
@@ -547,6 +550,72 @@ Where the build deviated or settled details the spec left open:
   `setSkillSessionPicker` test hook in integration runs.
 - The panel withdrawal happens only when the injected run left no fresh
   failure parked (a failing pick re-parks and re-posts on its own).
+
+## 9. What the code review changed (2026-08-26)
+
+A max-effort review of the merged-shape branch (ten finder angles over the
+diff, then verification) found fifteen defects. All are fixed; several were
+regressions this feature introduced into flows that already worked.
+
+**The three that broke existing behaviour.** Stop's widened controller
+routing was shared with Close Session, so closing an idle test's session
+stopped whatever else was running — Stop now opts in (`preferRunning`) and
+Close Session keeps the active controller. The picker offered a
+breakpoint-paused test as a row, and picking it cleared that test's resume
+marker and superseded its retained compiler, losing entries the author had
+already paid for; parked controllers are no longer candidates, with a
+post-pick re-check for the window between. And the picker gated on
+`extractSteps`, which reports only `kind: 'step'`, so a step inside a skill's
+inline `### Section` body was refused as "not a step" on both commands —
+lines are classified now, and body steps run as they did before.
+
+**The corruption the guard was guarding.** `spliceEntry` silently appends
+when `spans[occurrence]` is absent, which renumbers an entry to serve a
+different step. The pre-run guard could not actually prevent it (an in-slice
+earlier occurrence that declines or errors produces no entry either), so the
+refusal moved to where the corruption happens: `spliceEntry` now throws when
+`occurrence > spans.length`, covering every caller — the CLI, the boxed
+compile and the writer — instead of one request shape. The pre-run guard
+stays as the early, cheap refusal, now scoped to a fresh `'steps'` compile
+(a `'run'` continuation carrying a slice was being refused, killing the
+author's whole run — reproduced with an HTTP-seam test) and frame-aware
+(occurrence is counted per frame instance, so a second invocation of the
+same skill was mistaken for an unfinished earlier occurrence and refused
+with advice no selection could satisfy).
+
+**The identity work was half-wired.** `SKILL_CALL_RE` was `^`-anchored, so
+every labelled call (`1. Sign in [skill: login]` — which the runtime
+executes, keeping the prefix as the step's label) was invisible to the
+picker and those tests simply never appeared; it also accepted
+`[ skill : login]`, which the runtime rejects. Both measured against
+`parseSkillCall`, and the shared `SKILL_INVOCATION_RE` now backs the editor
+and matches the runtime on every spelling. The new `file` discriminator was
+compared with raw `===` on absolute paths (drive case differs between
+TestBench and CLI writers, as `compileLockKey` documents) and was never
+written by the CLI's own last-run producer, which rewrites the sidecar
+wholesale — so after any `aiui run` the conflation it exists to prevent came
+straight back. Both fixed.
+
+**Compile lifecycle.** `refuseOpenCompile` replaces the per-site pairing:
+every compile-mode refusal now both discards the open compiler and emits a
+terminal `compile:result`, including the two exits that had one half or
+neither (a tool-catalogue failure answered with silence, which the client
+reads as "is your server too old?"; a skill-expansion failure answered
+without discarding a retained compiler). `compileModeOfRun` is written for
+every non-resume run, so an injected compile records its own `'steps'`
+instead of leaving a stale `'run'` for the next Continue to inherit, and a
+terminal `'steps'` compile is cleared off the session so a later Continue
+cannot append a test's tail to it and rewrite the recording wholesale.
+
+**Client contract.** The picker's compile branch now resets and records
+`lastCompileError` before its refusals (not after), applies
+`runAndCompile`'s parked-at-pause guard before opening a diff, saves the
+document before resolving anchors (a formatting save can move the step the
+anchors name, and the sectioned-skill refusal reads from disk), runs the
+same resolved range on every row so the prompt cannot mean two different
+things, and re-syncs the Variables panel rather than blanking it — a
+`null` post erased a second test's still-valid affordance, while the guard
+that sent it skipped the open/stopped picks that consume anchors too.
 
 Verified by running: root vitest full (incl. 8 new HTTP-seam slice tests in
 `api-server-compile-mode.test.ts` — binding into the skill's file, "1 of 1"

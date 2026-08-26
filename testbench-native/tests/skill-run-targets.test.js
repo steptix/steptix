@@ -27,15 +27,17 @@ const LOGIN = path.join(SKILLS, "login.md");
 const callerText = (lines) => ["# Caller", "", "## Steps", ...lines, ""].join("\n");
 
 function candidate(over = {}) {
+  const { documentText, ...rest } = over;
   return {
     id: "file:///proj/checkout.md",
     testFsPath: path.join(ROOT, "checkout.md"),
-    documentText: callerText(["1. [skill: login]"]),
+    documentText: () => documentText ?? callerText(["1. [skill: login]"]),
     documentClosed: false,
     isRunning: false,
+    parkedAtPause: false,
     sessionProbablyOpen: true,
     pausedInSkill: null,
-    ...over,
+    ...rest,
   };
 }
 
@@ -63,6 +65,20 @@ test("isSkillDocument: frontmatterless file under the skills dir still forks", (
   assert.equal(isSkillDocument(text, LOGIN, null), false);
   // The skills dir itself is not "under" the skills dir.
   assert.equal(isSkillDocument(text, SKILLS, SKILLS), false);
+});
+
+test("skillCallLines: a LABELLED call is still a call", () => {
+  // Measured against the runtime: `parseSkillCall('Sign in [skill: login]')`
+  // returns name=login (the text before the prefix becomes the step's label),
+  // so an anchored regex hid those tests from the picker entirely. The
+  // opposite spelling `[ skill : login]` is NOT a call at runtime and must
+  // not produce a phantom row.
+  const text = callerText([
+    "1. Sign in as admin [skill: login]",
+    "2. [ skill : login]",
+    "3. Do something else",
+  ]);
+  assert.deepEqual(skillCallLines(text, LOGIN, SKILLS), [4]);
 });
 
 test("skillCallLines: resolves names the way go-to-definition does", () => {
@@ -121,6 +137,57 @@ test("a paused anchor at another line says which line, not 'this step'", () => {
     skillsDirFor,
   });
   assert.match(targets[0].description, /line 5/);
+});
+
+test("a breakpoint-paused test is never a row", () => {
+  // Picking one clears its resume marker (runLines posts breakpointStop:null)
+  // and supersedes its retained compiler, so the author loses both the ability
+  // to Continue and every entry the paused Run & Compile had generated.
+  const targets = collectSkillRunTargets({
+    skillFsPath: LOGIN,
+    clickedLine: 5,
+    candidates: [
+      candidate({ id: "a", parkedAtPause: true }),
+      candidate({
+        id: "b",
+        parkedAtPause: true,
+        pausedInSkill: { skillFsPath: LOGIN, skillLine: 5, callLine: 4 },
+      }),
+    ],
+    stopAnchor: null,
+    skillsDirFor,
+  });
+  assert.deepEqual(targets.map((t) => t.kind), ["standalone"]);
+});
+
+test("documentText is read only for rows that are actually scanned", () => {
+  let reads = 0;
+  const counted = (over) =>
+    candidate({ ...over, documentText: undefined, ...{} });
+  const anchored = {
+    ...counted({ id: "anchored", testFsPath: path.join(ROOT, "a.md") }),
+    pausedInSkill: { skillFsPath: LOGIN, skillLine: 5, callLine: 4 },
+    documentText: () => {
+      reads++;
+      return callerText(["1. [skill: login]"]);
+    },
+  };
+  const running = {
+    ...counted({ id: "running", testFsPath: path.join(ROOT, "b.md") }),
+    isRunning: true,
+    documentText: () => {
+      reads++;
+      return callerText(["1. [skill: login]"]);
+    },
+  };
+  collectSkillRunTargets({
+    skillFsPath: LOGIN,
+    clickedLine: 5,
+    candidates: [anchored, running],
+    stopAnchor: null,
+    skillsDirFor,
+  });
+  assert.equal(reads, 0, "an anchored row and a running one are never scanned");
 });
 
 test("running and closed-document controllers are never rows", () => {

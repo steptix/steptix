@@ -85,6 +85,20 @@ export function toolFileFor(ref: string): string | null {
 }
 
 /**
+ * Where a `[skill: name]` invocation sits on a step line, capturing the name.
+ *
+ * Deliberately UNANCHORED and case-sensitive, mirroring `parseInvocation`
+ * (src/parser/invocation-parser.ts), which locates the prefix with
+ * `line.indexOf('[skill:')` and keeps whatever precedes it as the step's
+ * label. Measured against the real parser: `Sign in [skill: login]` IS a call
+ * (name `login`) and must match; `[ skill : login]` is NOT and must not.
+ *
+ * Shared so the editor cannot drift from the runtime — a mirror that drifts
+ * is worse than no mirror, per this module's header.
+ */
+export const SKILL_INVOCATION_RE = /\[skill:\s*([A-Za-z0-9_/-]+)/;
+
+/**
  * The canonical form of a skill name — no leading slash — or `null` when the
  * name has an empty path segment.
  *

@@ -20,7 +20,7 @@ import * as path from 'node:path';
 import { extractSteps, parseFrontmatter } from 'ai-ui-automation-runner-core';
 // `.ts` specifier so this module stays loadable under `node --test`'s
 // type-stripping (the same reason renumber-core imports step-region-core.ts).
-import { canonicalSkillName } from './invocation-target-core.ts';
+import { canonicalSkillName, SKILL_INVOCATION_RE } from './invocation-target-core.ts';
 
 /** Case-folded absolute-path identity. TestBench paths arrive in both drive
  *  cases on win32 (`uri.fsPath` lower-cases the drive; server echoes may
@@ -54,13 +54,19 @@ export function isSkillDocument(
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
-const SKILL_CALL_RE = /^\[\s*skill\s*:\s*([A-Za-z0-9_/-]+)/i;
-
 /**
  * The step lines of `documentText` that invoke the skill at `skillFsPath`,
- * resolved the way go-to-definition resolves them: `canonicalSkillName` +
- * `<skillsDir>/<name>.md`. Each line is a distinct picker row — the call
- * line decides the input parameters, so it is part of the target.
+ * resolved the way go-to-definition resolves them: `SKILL_INVOCATION_RE` +
+ * `canonicalSkillName` + `<skillsDir>/<name>.md`. Each line is a distinct
+ * picker row — the call line decides the input parameters, so it is part of
+ * the target.
+ *
+ * The regex is the shared one for a reason measured against the runtime: an
+ * `^`-anchored variant missed every LABELLED call (`Sign in [skill: login]`,
+ * which `parseInvocation` accepts by locating the prefix anywhere on the line
+ * and keeping the text before it as the step's label), so those tests never
+ * appeared in the picker at all; and a whitespace-tolerant one accepted
+ * `[ skill : login]`, which the runtime does not treat as a call.
  */
 export function skillCallLines(
   documentText: string,
@@ -69,12 +75,18 @@ export function skillCallLines(
 ): number[] {
   if (skillsDir === null) return [];
   const lines: number[] = [];
+  const want = process.platform === 'win32'
+    ? path.resolve(skillFsPath).toLowerCase()
+    : path.resolve(skillFsPath);
   for (const step of extractSteps(documentText)) {
-    const m = SKILL_CALL_RE.exec(step.instruction.trim());
+    const m = SKILL_INVOCATION_RE.exec(step.instruction);
     if (!m) continue;
     const name = canonicalSkillName(m[1]!);
     if (name === null) continue;
-    if (samePath(path.join(skillsDir, `${name}.md`), skillFsPath)) lines.push(step.line);
+    const target = path.resolve(path.join(skillsDir, `${name}.md`));
+    if ((process.platform === 'win32' ? target.toLowerCase() : target) === want) {
+      lines.push(step.line);
+    }
   }
   return lines;
 }
@@ -83,12 +95,20 @@ export function skillCallLines(
 export interface SessionCandidate {
   id: string;
   testFsPath: string;
-  documentText: string;
+  /** Read lazily — only the "open sessions of callers" rows are scanned. */
+  documentText: () => string;
   /** Controllers are never deleted from the registry, so one can outlive its
    *  editor with a stale buffer — a closed document is not a candidate. */
   documentClosed: boolean;
   /** A session mid-run cannot accept an injected step. */
   isRunning: boolean;
+  /**
+   * The test is parked at a breakpoint (or paused on error) and waiting for
+   * Continue. NOT a candidate: an injected run clears the resume marker and
+   * supersedes the retained compiler, so picking one silently strands a run
+   * the author is in the middle of — with entries they already paid for.
+   */
+  parkedAtPause: boolean;
   /** A steps stream has answered since the last close/recycle — worth
    *  listing. The post-pick liveness pre-flight is the truth. */
   sessionProbablyOpen: boolean;
@@ -131,7 +151,9 @@ export function collectSkillRunTargets(input: {
 }): SkillRunTarget[] {
   const { skillFsPath, clickedLine, candidates, stopAnchor, skillsDirFor } = input;
   const skillName = path.basename(skillFsPath, path.extname(skillFsPath));
-  const eligible = candidates.filter((c) => !c.documentClosed && !c.isRunning);
+  const eligible = candidates.filter(
+    (c) => !c.documentClosed && !c.isRunning && !c.parkedAtPause,
+  );
   const rows: SkillRunTarget[] = [];
   const rowed = new Set<string>();
 
@@ -167,7 +189,7 @@ export function collectSkillRunTargets(input: {
 
   for (const c of eligible) {
     if (rowed.has(c.id) || !c.sessionProbablyOpen) continue;
-    const calls = skillCallLines(c.documentText, skillFsPath, skillsDirFor(c.testFsPath));
+    const calls = skillCallLines(c.documentText(), skillFsPath, skillsDirFor(c.testFsPath));
     for (const callLine of calls) {
       rows.push({
         kind: 'open',
