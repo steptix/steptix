@@ -12,6 +12,14 @@ import * as fs from 'node:fs';
  */
 
 /**
+ * Default data directory when `tests.dataDir` is undeclared — the loader's
+ * default (src/config/defaults.ts). `ProjectDirs.dataDir` is null in that
+ * case and every caller applies this; exported so the EnvSelector's env
+ * discovery and the `${data.*}` completion can never disagree about it.
+ */
+export const DEFAULT_DATA_DIR = 'data';
+
+/**
  * Resolve a declared directory value against `configDir`. Returns an absolute
  * path for a non-empty string, otherwise null (missing / non-string / empty).
  *

@@ -21,6 +21,7 @@ import {
   SectionCompletionProvider,
   SectionDiagnostics,
 } from './section-providers.js';
+import { EnvDataCompletionProvider } from './env-data-completion.js';
 import { CallStackTreeProvider } from './call-stack-view.js';
 import { VariablesTreeProvider } from './variables-view.js';
 import { resolveInspectorTarget, shouldReuseDebugSession } from './inspector-target.js';
@@ -1374,6 +1375,15 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       new SectionCompletionProvider(),
       // Re-offer as the author types the name, and right after the space.
       ' ',
+    ),
+    // `${data.…}` / `${env.…}` / `${<source>.…}` / `${envName}` references,
+    // fed by the active environment's files. `{` opens the namespace list as
+    // `${` is typed; `.` steps into the next path segment.
+    vscode.languages.registerCompletionItemProvider(
+      { language: 'markdown', scheme: 'file' },
+      new EnvDataCompletionProvider(),
+      '{',
+      '.',
     ),
     new SectionDiagnostics(),
     // Target of the document links above — reveal a heading line in place.
