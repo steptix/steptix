@@ -13,6 +13,16 @@
  * with optional whitespace just inside the braces. Where the runtime and this
  * file could disagree about what a reference is, the runtime wins — completion
  * only ever *offers*; it never validates.
+ *
+ * The same file also holds the `{{name}}` half — the *runtime* variables a run
+ * fills in per step, as opposed to the parse-time `${...}` references above.
+ * That grammar is one line (src/parser/parameters.ts:102):
+ *
+ *   {{name}}                             name: \w+, no whitespace
+ *
+ * flat by construction: no namespaces, no dotted paths, and nothing to read
+ * off disk — a `{{}}` resolves against the run's variable map, which is fed by
+ * the file's `## Parameters` and by whatever earlier steps capture.
  */
 import { classifyLines, resolveValueFromEnv } from 'ai-ui-automation-runner-core';
 
@@ -106,6 +116,33 @@ export function refContextAt(line: string, character: number): RefContext | null
   };
 }
 
+/**
+ * What `{{...` runtime reference, if any, the cursor at `character` is inside
+ * on `line`: the nearest `{{` before it, plus whatever has been typed since.
+ * Null when there is no `{{`, when the reference is already closed, or when
+ * the text since it isn't a name the runtime could resolve.
+ *
+ * The `/^\w*$/` gate is the runtime's `\{\{(\w+)\}\}` name class relaxed to
+ * admit the empty partial (nothing typed yet). It subsumes the "no `}` in
+ * between" rule rather than restating it — `}` is not a `\w` character, so a
+ * cursor sitting past a closed `{{x}}` fails the same test.
+ *
+ * `${{` yields the *inner* `{{`: the `${` parse above rejects it (`{` is not a
+ * namespace character) while the runtime does find a resolvable `{{name}}`
+ * inside it, so the `{{` at offset+1 is the one that wins here too.
+ */
+export function paramContextAt(
+  line: string,
+  character: number,
+): { partial: string; replaceStart: number } | null {
+  const before = line.slice(0, character);
+  const open = before.lastIndexOf('{{');
+  if (open === -1) return null;
+  const partial = before.slice(open + 2);
+  if (!/^\w*$/.test(partial)) return null;
+  return { partial, replaceStart: open + 2 };
+}
+
 // ---------------------------------------------------------------------------
 // Frontmatter span (for the skill dataSources-path special case)
 // ---------------------------------------------------------------------------
@@ -124,6 +161,102 @@ export function refContextAt(line: string, character: number): RefContext | null
  */
 export function inFrontmatter(text: string, lineIdx: number): boolean {
   return classifyLines(text)[lineIdx]?.kind === 'frontmatter';
+}
+
+// ---------------------------------------------------------------------------
+// Capture names — the `{{}}` variables a step *writes*
+// ---------------------------------------------------------------------------
+
+/** A runtime variable an earlier step puts into scope. */
+export interface CaptureName {
+  name: string;
+  marker: 'input' | 'output' | 'as' | 'out-alias';
+  /** 1-based line of the capturing step. */
+  line: number;
+}
+
+/**
+ * Every statically-knowable way a step names something it writes, each mirrored
+ * from the component that already reads it so this stays a mirror rather than a
+ * sixth grammar. A variable the AI *invents* mid-run from loose prose ("note
+ * the order number") has no name until the run happens and is not guessable —
+ * authors who want one to complete downstream write the `store as {{name}}`
+ * form, which is the last pattern here.
+ */
+const CAPTURE_PATTERNS: ReadonlyArray<{
+  re: RegExp;
+  marker: CaptureName['marker'];
+  /** Whether every hit on the line counts, or only the first. */
+  all: boolean;
+}> = [
+  // Runtime prompt answers and DOM captures. The Variables panel reads both
+  // with one non-global match per row (variables-panel.js:36), and the host
+  // runner's `[input:]` classifier is anchored at the start of the step, so a
+  // second marker on one line names nothing the run would bind — `all: false`
+  // keeps completion from offering it.
+  { re: /\[input:\s*(\w+)\]/gi, marker: 'input', all: false },
+  { re: /\[output:\s*(\w+)\]/gi, marker: 'output', all: false },
+  // Inline captures, both spellings (cf. STORE_AS_RE, src/skills/expander.ts).
+  { re: /\[(?:store\s+)?as:\s*(\w+)\]/gi, marker: 'as', all: true },
+  // Prose storage — one of the runtime's explicit-storage patterns
+  // (`isExtractionStep`, src/runner/step-executor.ts:305), and the only prose
+  // form that spells the name out. Reported as `as`: it is the same write.
+  { re: /(?:store|save)\s+(?:it\s+)?as\s+\{\{(\w+)\}\}/gi, marker: 'as', all: true },
+  // `[skill: n out.k="alias"]` — the QUOTED alias is what enters the caller's
+  // scope (variables-panel.js:43); `out.k` is the callee's own name and is not
+  // addressable from here. One invocation may expose several.
+  { re: /\bout\.\w+\s*=\s*"([^"]+)"/g, marker: 'out-alias', all: true },
+];
+
+/**
+ * Capture names written by step lines strictly above 0-based `lineIdx`, in
+ * source order, deduped by name (the first write wins).
+ *
+ * "Strictly above" is the whole point. Steps execute in order, so a `{{x}}`
+ * authored above x's capture — including one on the capturing line itself —
+ * reaches the AI as an unresolved placeholder. Completion models the run, not
+ * the document.
+ *
+ * Step lines are runner-core's `step` / `section-step` kinds, the same
+ * classifier every other editor feature uses. That scopes the scan to the
+ * `## Steps` span for free (frontmatter, prose and headings are other kinds)
+ * and excludes `inert-step`, which nothing runs and so nothing writes.
+ */
+export function captureNamesBefore(text: string, lineIdx: number): CaptureName[] {
+  const lines = text.split(/\r?\n/);
+  const classified = classifyLines(text);
+  const out: CaptureName[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < lineIdx && i < classified.length; i++) {
+    const kind = classified[i]?.kind;
+    if (kind !== 'step' && kind !== 'section-step') continue;
+    const raw = lines[i] ?? '';
+
+    // Merge every pattern's hits back into left-to-right order: one step can
+    // both invoke a skill and store a capture of its own.
+    const hits: Array<{ at: number; name: string; marker: CaptureName['marker'] }> = [];
+    for (const { re, marker, all } of CAPTURE_PATTERNS) {
+      for (const m of raw.matchAll(re)) {
+        hits.push({ at: m.index ?? 0, name: m[1]!, marker });
+        if (!all) break;
+      }
+    }
+    hits.sort((a, b) => a.at - b.at);
+
+    for (const hit of hits) {
+      // `{{...}}` can only express `\w+`, so a quoted alias like "order id"
+      // has no reference form and must not be offered — accepting it would
+      // author a placeholder the run can never resolve. The other four
+      // patterns capture `(\w+)` already; testing uniformly means the guard
+      // cannot be lost when a pattern is added.
+      if (!/^\w+$/.test(hit.name) || seen.has(hit.name)) continue;
+      seen.add(hit.name);
+      out.push({ name: hit.name, marker: hit.marker, line: i + 1 });
+    }
+  }
+
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +339,9 @@ function maskIfSecretName(name: string, value: string): string {
 
 export interface PlainCompletion {
   label: string;
-  kind: 'namespace' | 'env-var' | 'branch' | 'leaf' | 'env-name';
-  /** Short right-hand text: a masked value preview or the node shape. */
+  kind: 'namespace' | 'env-var' | 'branch' | 'leaf' | 'env-name' | 'parameter' | 'capture';
+  /** Short right-hand text: a masked value preview, the node shape, or where
+   *  a capture is written. */
   detail?: string;
   /** Text to insert when it differs from the label (`data.` for a namespace). */
   insertText?: string;
@@ -342,5 +476,58 @@ export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] 
     detail: opts.envName,
     sortText: '3',
   });
+  return out;
+}
+
+/**
+ * The `{{` dropdown: declared parameters first, then the names earlier steps
+ * capture. Deduped across both — a name that is both lists once, as the
+ * parameter, which is what the run resolves it to until a step overwrites it.
+ *
+ * `params` values arrive already `$VAR`-resolved: the caller composes `.env`
+ * with `.env.<envName>` and runs runner-core's `resolveValueFromEnv`, exactly
+ * as the run does, so the preview is what would be substituted. Masking is by
+ * the parameter's own name under the runtime rule above, so the dropdown never
+ * shows what a report would redact — and an unset `$VAR`, which previews as
+ * its own literal, is masked all the same when the name is secret-shaped.
+ *
+ * Captures carry no preview: their values exist only mid-run. Their detail
+ * names the marker form and the 1-based line that writes it, derived from the
+ * `CaptureName` union rather than the spelling found in the source (`[as:]`
+ * covers `[store as: x]` and the prose `store it as {{x}}` alike).
+ */
+export function paramCompletions(
+  params: Record<string, string>,
+  captures: CaptureName[],
+): PlainCompletion[] {
+  const out: PlainCompletion[] = [];
+  const seen = new Set<string>();
+
+  for (const [name, value] of Object.entries(params)) {
+    seen.add(name);
+    out.push({
+      label: name,
+      kind: 'parameter',
+      detail: maskIfSecretName(name, previewValue(value)),
+      // Declared order inside the group; the group prefix keeps every
+      // parameter above every capture.
+      sortText: `0_${String(out.length).padStart(4, '0')}`,
+    });
+  }
+
+  const paramCount = out.length;
+  for (const capture of captures) {
+    // `captureNamesBefore` already deduped its own list; this catches the
+    // cross-source collision and keeps the function total for any caller.
+    if (seen.has(capture.name)) continue;
+    seen.add(capture.name);
+    out.push({
+      label: capture.name,
+      kind: 'capture',
+      detail: `[${capture.marker}:] on line ${capture.line}`,
+      sortText: `1_${String(out.length - paramCount).padStart(4, '0')}`,
+    });
+  }
+
   return out;
 }

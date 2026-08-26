@@ -19,6 +19,10 @@ bare `${` position lists the namespaces themselves, plus `envName`. Leaf items
 preview the value they would substitute (`email  demo@securebank.com`), so
 the dropdown doubles as a peek into the data file.
 
+The other half of the grammar — `{{name}}`, the *runtime* variables filled in
+per step — completes too, from the same provider; see
+[param-completion.md](param-completion.md).
+
 ## Where the suggestions come from
 
 Completion mirrors what the **server** — the component that actually resolves
