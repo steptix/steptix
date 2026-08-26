@@ -553,6 +553,14 @@ export function createApiServer(
         request.config = body.config as {
           baseUrl?: string;
           timeout?: string;
+          // Raw `## Config: viewport:` spec (stories/per-test-viewport.md §3).
+          // Cast, not validated, exactly like its neighbours — the session
+          // manager owns the one validator and refuses a bad value before it
+          // launches anything. The cast is a type assertion rather than a
+          // projection, so the key would travel even unlisted; naming it keeps
+          // this declaration an honest description of the wire shape instead
+          // of a stale one that happens to work.
+          viewport?: string;
           // `profile` is a descriptive label only — `port` selects the browser.
           // Retained so `GET /sessions` can say which browser a session drives.
           cdp?: { port: number; tab?: string; profile?: string };

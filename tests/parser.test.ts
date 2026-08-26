@@ -99,6 +99,17 @@ dataSources:
     expect(result.config.cdpTab).toBe('url~example.com');
   });
 
+  it('parses ## Config section viewport onto TestConfig', () => {
+    // The Config scan is generic, so this is one assertion rather than a suite:
+    // what it pins is that `viewport` reaches `TestConfig` as the RAW string
+    // (stories/per-test-viewport.md §3) — the parser resolves nothing, and a
+    // future "helpful" normalisation here would put a second validator in the
+    // pipeline.
+    const md = `# Test\n\n## Config\n- viewport: mobile\n\n## Steps\n- Visit home\n`;
+    const result = parseTestContent(md);
+    expect(result.config.viewport).toBe('mobile');
+  });
+
   it('parses ## Parameters section', () => {
     const md = `# Test\n\n## Parameters\n- email: user@example.com\n- password: $TEST_PASS\n\n## Steps\n- Login\n`;
     const result = parseTestContent(md);

@@ -6,6 +6,29 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — per-test viewport
+
+A test file can now declare the page size it runs at:
+
+```markdown
+## Config
+- viewport: mobile
+```
+
+`mobile` (390×844), `tablet` (768×1024), `desktop` (1440×900), or an explicit
+`<width>x<height>` such as `390x844`. The size applies to that test only —
+other tests on the same server keep the default — and it is exact in both
+headed and headless modes, unlike `browser.viewport`, which headed runs
+ignore. Aimed at sites that branch on CSS breakpoints; it is not device
+emulation (no touch, mobile user agent, or devicePixelRatio change).
+
+TestBench restarts the browser session automatically when the value changes
+between runs, so an edited size takes effect on the next Run. Combining
+`viewport:` with `cdp:` is refused — a viewport cannot be imposed on an
+attached browser. A whole project can be pinned with `browser.fixedViewport`
+in `aiui.config.json`; a test's own key overrides it. See
+stories/per-test-viewport.md.
+
 ### Added — inline sections
 
 A `### Name` heading inside `## Steps` now defines a named block of steps,

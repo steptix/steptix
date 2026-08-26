@@ -122,6 +122,11 @@ export interface AssembleArgs {
     | {
         baseUrl?: string | undefined;
         timeout?: string | undefined;
+        /** Raw `## Config: viewport:` spec (stories/per-test-viewport.md §7).
+         *  A plain string, so it rides the same per-key merge as `baseUrl` —
+         *  an agent can run a file at a different size without editing it, and
+         *  supplying only `viewport` leaves the file's `baseUrl` alone. */
+        viewport?: string | undefined;
         // Unresolved: this may address a browser by `profile` instead of
         // `port`, and only `tools.ts` has the client to turn one into the
         // other.
@@ -567,6 +572,12 @@ function projectConfig(
   const out: WireConfig = {};
   if (resolved['baseUrl'] !== undefined) out.baseUrl = resolved['baseUrl'];
   if (resolved['timeout'] !== undefined) out.timeout = resolved['timeout'];
+  // The raw spec, unvalidated (stories/per-test-viewport.md §7). This whitelist
+  // is a real projection — a key absent from here never reaches the wire, so an
+  // MCP-run test would silently lose its `viewport:` and pass at the wrong size.
+  // Not resolved here on purpose: §3 puts the one validator on the server, so
+  // `run_test_file` and a Run in TestBench refuse `390` with the same words.
+  if (resolved['viewport'] !== undefined) out.viewport = resolved['viewport'];
 
   // A file-declared `cdp` is read from the FILE's config, never the merged
   // map, and that separation is now doing MORE work than when it was written,

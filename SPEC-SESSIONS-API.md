@@ -50,7 +50,8 @@ Execute a batch of test steps within a named session.
 {
   "config": {
     "baseUrl": "http://localhost:3000",
-    "timeout": "30s"
+    "timeout": "30s",
+    "viewport": "mobile"
   },
   "steps": [
     "Navigate to the login page",
@@ -69,6 +70,35 @@ Execute a batch of test steps within a named session.
 | `config`     | No       | Session configuration. Only allowed on the **first request** for a session. Sending `config` on subsequent requests returns `400 Bad Request`. |
 | `config.baseUrl` | No  | Base URL for the application under test. |
 | `config.timeout` | No  | Timeout per step (e.g. `"30s"`, `"2m"`). |
+| `config.viewport` | No | Render this session's pages at exactly this size, headed **and** headless. See below. |
+
+#### `config.viewport`
+
+The raw `## Config: viewport:` value from the test file, forwarded verbatim —
+clients do not resolve it, the server does. One validator means the CLI, the
+editor and an MCP agent all refuse the same values with the same words.
+
+| Value | Page size |
+|---|---|
+| `mobile` | 390 × 844 |
+| `tablet` | 768 × 1024 |
+| `desktop` | 1440 × 900 |
+| `<width>x<height>` (e.g. `390x844`) | exactly that |
+
+- Case-insensitive, surrounding whitespace trimmed. Each dimension must be
+  between 100 and 10000.
+- Anything else is refused with
+  ``Invalid '## Config: viewport: <value>' — expected a preset (mobile | tablet | desktop) or `<width>x<height>` (e.g. `390x844`).``
+  Validation runs **before the browser launches**, so an invalid value fails the
+  batch with no browser side effects.
+- Refused alongside `config.cdp`: a viewport cannot be imposed on a browser the
+  user started and sized themselves.
+- Like the rest of `config`, it is write-once — see the note on the `config`
+  row above. A client that wants a different size on a live session closes the
+  session first (`DELETE /sessions/:id`) and sends the new value on the next
+  batch.
+- CSS breakpoints only. No touch events, no mobile user agent, no
+  `devicePixelRatio` change.
 | `steps`      | Yes      | Array of natural language step strings. At least one step is required. |
 | `parameters` | No       | Key-value object for `{{variable}}` interpolation in steps. Can override previously captured output variables. |
 

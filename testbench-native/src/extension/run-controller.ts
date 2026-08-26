@@ -37,6 +37,7 @@ import { getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
 import { buildSectionsPayload, preflightSections, sectionedSkillRefusal } from './sections.js';
+import { decideViewportRecycle } from './viewport-recycle.js';
 import {
   decideServerAction,
   defaultHealthProbe,
@@ -326,6 +327,19 @@ export class RunController {
   private runGeneration = 0;
   private lastResolvedEnvPath: string | null = null;
   private configSentForSession = false;
+  /**
+   * WHICH viewport spec the live session was created with — the value that
+   * rode its (write-once) `config` block, or `null` when that block carried no
+   * `viewport` key. Only meaningful while `configSentForSession` is true, so
+   * the two always move together: every write goes through `markConfigSent` /
+   * `forgetSentConfig` rather than assigning the flag directly.
+   *
+   * Read by the recycle-on-change gate at the top of a run
+   * (stories/per-test-viewport.md §5): config cannot be re-sent to a session
+   * the server already created, so a changed viewport can only take effect by
+   * closing that session first.
+   */
+  private viewportSentForSession: string | null = null;
   /** The `compile:result` a compile-mode run produced, collected as the
    *  stream folds and attached to the outcome by `runLines`. Reset per run,
    *  so a plain Run after a Run & Compile never carries the old proposal. */
@@ -1362,6 +1376,81 @@ export class RunController {
     }
   }
 
+  /**
+   * Record that a session now exists on the server, and — the FIRST time it is
+   * called for that session — which viewport spec the `config` block that
+   * created it named (`undefined` ⇒ none).
+   *
+   * The two fields are written together on purpose: `configSentForSession`
+   * decides whether a request may carry `config` at all, and
+   * `viewportSentForSession` is only interpretable while that flag is true.
+   *
+   * Why only the first call writes the viewport: `config` is write-once, so
+   * every request after the first in a session OMITS the block — its
+   * `sessionConfig.viewport` is what the file says now, not what the live
+   * browser was launched at. Re-recording it would quietly claim a relaunch
+   * that never happened, which is exactly how a stale session escapes the
+   * recycle gate: edit the viewport, Continue past a breakpoint (no recycle,
+   * by design), and a later fresh Run would compare "tablet" against "tablet"
+   * and reuse a session still rendering at 390px.
+   */
+  private markConfigSent(viewport: string | undefined): void {
+    if (!this.configSentForSession) this.viewportSentForSession = viewport ?? null;
+    this.configSentForSession = true;
+  }
+
+  /** The inverse: no session of ours is live, so the next request both may and
+   *  must carry `config`, and there is no sent viewport to compare against. */
+  private forgetSentConfig(): void {
+    this.configSentForSession = false;
+    this.viewportSentForSession = null;
+  }
+
+  /**
+   * Close the live server session so the run that is starting creates a fresh
+   * one at the file's new viewport (stories/per-test-viewport.md §5).
+   *
+   * Deliberately NOT `closeSession()`, even though the work overlaps: that
+   * method is the Close Session COMMAND's path and opens with
+   * `this.active?.abort()`, which is right when the user asks to tear down a
+   * run in flight and wrong here. This runs at the top of a NEW run — the
+   * `isRunning` guard has already established none is in flight, and the
+   * `finally` of the previous run nulled `this.active`, so an abort here could
+   * only ever fire at the wrong target.
+   *
+   * The rest is shared with the command: drop the server session, forget the
+   * config we sent it, and withdraw the parked skill-step re-run affordance —
+   * its page is about to be gone. Best-effort throughout: an unreachable
+   * server is not a reason to refuse the run, which will report the failure
+   * itself moments later with a proper TBxxx code.
+   */
+  private async recycleSessionForViewportChange(): Promise<void> {
+    const out = getOutputChannel();
+    const ts = () => new Date().toISOString().slice(11, 23);
+    try {
+      const resolved = await this.resolveClient();
+      if (!resolved) {
+        // No client resolvable (no .env / no key). Nothing of ours can be live
+        // on a server we cannot address, so treat the session as gone: the
+        // upcoming request will carry `config` again.
+        this.forgetSentConfig();
+        return;
+      }
+      out.appendLine(`[${ts()}] recycling server session ${resolved.sessionId} (viewport changed)`);
+      await resolved.client.closeSession(resolved.sessionId);
+      this.forgetSentConfig();
+      this.clearSkillFailure();
+      out.appendLine(`[${ts()}] session closed — the next request starts a fresh browser`);
+    } catch {
+      // A failed close leaves the server session in an unknown state, but the
+      // client's belief has to move regardless: re-sending `config` to a
+      // session that survived is refused loudly (an error the user can act on),
+      // whereas omitting it silently runs at the old size — the exact failure
+      // this whole path exists to prevent.
+      this.forgetSentConfig();
+    }
+  }
+
   async closeSession(): Promise<void> {
     const out = getOutputChannel();
     const ts = () => new Date().toISOString().slice(11, 23);
@@ -1370,7 +1459,7 @@ export class RunController {
     out.appendLine(`[${ts()}] closing server session for ${resolved.sessionId}`);
     this.active?.abort();
     await resolved.client.closeSession(resolved.sessionId);
-    this.configSentForSession = false;
+    this.forgetSentConfig();
     // The session (and its live page) is gone — a parked skill-step re-run
     // can no longer reuse it, so withdraw the affordance.
     this.clearSkillFailure();
@@ -1823,11 +1912,17 @@ export class RunController {
     const rawConfig = parseConfig(text);
     const rawParameters = parseParameters(text);
     const resolvedParameters = resolveSection(rawParameters, env);
-    const sessionConfig: { baseUrl?: string; timeout?: string } = {};
+    const sessionConfig: { baseUrl?: string; timeout?: string; viewport?: string } = {};
     const baseUrl = rawConfig['baseUrl'];
     if (baseUrl) sessionConfig.baseUrl = resolveValue(baseUrl, env);
     const timeout = rawConfig['timeout'];
     if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
+    // Forwarded raw, exactly like baseUrl: the server resolves the preset and
+    // owns the one validator + error message (stories/per-test-viewport.md §3).
+    // `resolveValue` still runs so `viewport: $VIEWPORT` works off the .env
+    // overlay — that is client-side $VAR resolution, not viewport parsing.
+    const viewport = rawConfig['viewport'];
+    if (viewport) sessionConfig.viewport = resolveValue(viewport, env);
 
     const logging = resolveLoggingOverride(rawConfig, settings);
 
@@ -1838,10 +1933,45 @@ export class RunController {
     log(
       `running ${classified.length} item(s) on ${serverUrl}` +
         (sessionConfig.baseUrl ? ` baseUrl=${sessionConfig.baseUrl}` : '') +
+        (sessionConfig.viewport ? ` viewport=${sessionConfig.viewport}` : '') +
         (Object.keys(resolvedParameters).length > 0
           ? ` parameters=[${Object.keys(resolvedParameters).join(',')}]`
           : ''),
     );
+
+    // Recycle-on-change (stories/per-test-viewport.md §5). Per-session `config`
+    // is write-once on the wire: a session created at 390×844 keeps that size
+    // for its whole life, and a batch that re-sent `config` would be refused.
+    // So the only way an edited `viewport:` can take effect is for the CLIENT
+    // to close the session and let this run create a fresh one — otherwise the
+    // browser silently keeps the old size while the file, the log and the
+    // report all say the new one, which defeats the feature outright.
+    //
+    // Restricted to a FRESH start of an interactive run:
+    //  - a continuation (Continue after a breakpoint) and a parked skill-step
+    //    re-run both resume against the live page. Closing it would throw away
+    //    the very state the user paused to inspect, and the viewport can only
+    //    have "changed" because they edited the file while parked.
+    //  - a batch run mints its own `<path>::run-N` session and tears it down
+    //    afterwards, so it always launches fresh; there is nothing to recycle.
+    //
+    // `baseUrl` / `timeout` edits keep their current (non-recycling) behaviour
+    // — §5 scopes the restart to viewport on purpose.
+    const freshInteractiveStart =
+      options.batchMode !== true &&
+      options.isContinuation !== true &&
+      options.rerun === undefined;
+    const viewportChange = decideViewportRecycle({
+      // `configSentForSession` is the client's own record that a session of
+      // ours exists on the server (it is set the moment a stream yields).
+      sessionLive: freshInteractiveStart && this.configSentForSession,
+      sentViewport: this.viewportSentForSession,
+      requestedViewport: sessionConfig.viewport,
+    });
+    if (viewportChange.recycle) {
+      log(viewportChange.logLine);
+      await this.recycleSessionForViewportChange();
+    }
 
     // The AbortController is created BEFORE the server-readiness phase so the
     // Stop button cancels a wedged health wait or spawn poll. An abort during
@@ -2042,7 +2172,7 @@ export class RunController {
         }
       }
 
-      this.configSentForSession = true;
+      this.markConfigSent(sessionConfig.viewport);
 
       const status: 'passed' | 'failed' | 'aborted' =
         ac.signal.aborted ? 'aborted' : anyFailed ? 'failed' : 'passed';
@@ -2170,6 +2300,15 @@ export class RunController {
         } catch {
           /* swallow — teardown must not break the run */
         }
+        // The session that `config` was sent for no longer exists, and the
+        // next batch run of this file gets a NEW `::run-N` id — so the block
+        // must ride again, or that run's browser would launch without the
+        // test's baseUrl/timeout/viewport. Safe to reset unconditionally here:
+        // batch runs go through their own RunController (see
+        // RunControllerRegistry.getBatchController), so this never clears the
+        // flag for a live interactive session, which would re-send `config`
+        // into the server's write-once refusal.
+        this.forgetSentConfig();
       }
     }
   }
@@ -2182,7 +2321,7 @@ export class RunController {
     /** Resolved env name to send to the server. `null` means none active. */
     envName: string | null;
     params: Record<string, string>;
-    sessionConfig: { baseUrl?: string; timeout?: string };
+    sessionConfig: { baseUrl?: string; timeout?: string; viewport?: string };
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
@@ -2305,7 +2444,12 @@ export class RunController {
     let staleCount = 0;
     let passCount = 0;
     for await (const event of events) {
-      this.configSentForSession = true;
+      // The first event proves the server accepted the request and now holds a
+      // session for it — created with this request's `config` when this was the
+      // request that carried one (`includeConfig`); `markConfigSent` ignores
+      // the value on every later call, which is what keeps the remembered
+      // viewport describing the live browser rather than the current file.
+      this.markConfigSent(sessionConfig.viewport);
       // The compile riding this run (stories/compile-as-you-go.md). Logged,
       // never folded into the gutter: by the time an entry is generated its
       // step has already painted ✓, and repainting ▶ on it would undo that.
@@ -2390,7 +2534,7 @@ export class RunController {
     env: Record<string, string>;
     envName: string | null;
     params: Record<string, string>;
-    sessionConfig: { baseUrl?: string; timeout?: string };
+    sessionConfig: { baseUrl?: string; timeout?: string; viewport?: string };
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
@@ -2449,7 +2593,10 @@ export class RunController {
             signal,
           );
           for await (const event of events) {
-            this.configSentForSession = true;
+            // Same contract as the step-block loop: first mark wins, so an
+            // interactive turn that omitted `config` never overwrites the
+            // viewport the session's browser actually launched with.
+            this.markConfigSent(sessionConfig.viewport);
             if (event.type === 'done') continue;
             this.emitRunEvent(event);
           }

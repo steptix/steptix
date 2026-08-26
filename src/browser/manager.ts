@@ -4,7 +4,23 @@ import { chromium, firefox, webkit, type Browser, type BrowserContext, type Dial
 import { chromium as stealthChromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
+import { formatViewport } from '../config/viewport.js';
 import { logger } from '../utils/logger.js';
+
+/**
+ * How much bigger the headed OS window is than the page inside it, when
+ * `fixedViewport` sizes the page (stories/per-test-viewport.md §2).
+ *
+ * Implementer-tuned, and deliberately approximate: ~88px of Chrome tab strip +
+ * omnibox on Windows, and no meaningful side chrome. Nothing depends on these
+ * being exact — the context's `viewport` pins the page at the requested size
+ * whatever the window turns out to be, so being ten pixels off costs a sliver
+ * of grey, not a wrong test result. The intent is only that a headed
+ * `viewport: mobile` run LOOKS like a phone rather than a phone-width strip in
+ * the corner of a desktop window.
+ */
+const HEADED_CHROME_HEIGHT_PX = 88;
+const HEADED_CHROME_WIDTH_PX = 0;
 
 /**
  * Resolved video-recording mode. The user-facing config (`BrowserConfig.video`)
@@ -1192,6 +1208,14 @@ export interface LaunchOverrides {
    *  positional param) because `overrides` already carries per-launch context
    *  not present in the shared `BrowserConfig`. */
   videoDir?: string;
+  /** Where `config.fixedViewport` came from, for the launch log line
+   *  (stories/per-test-viewport.md §4) — e.g. `mobile, from test config`.
+   *  Provenance, not a value: the resolved size is already on the config, but
+   *  only the caller that read the test file knows whether it is the test's own
+   *  choice or a project-wide pin (§8), and §4's line has to say which. Log-only
+   *  — nothing branches on it. Absent on the `openBrowser` relaunch, which
+   *  inherits a size it did not choose. */
+  viewportSource?: string;
 }
 
 /** Contexts already guarded, so a double-install cannot make two listeners
@@ -1281,11 +1305,32 @@ export async function launchBrowser(
   const headed = overrides?.headed ?? config.headed;
   const channel = overrides?.channel; // undefined = default ('chrome' for chromium)
   const channelLabel = channel ? `/${channel}` : '';
+  // stories/per-test-viewport.md §4: name the size AND where it came from, so
+  // "what am I looking at" is never inferred from the shape of a window.
+  const fixedViewport = config.fixedViewport;
+  const viewportLabel = fixedViewport
+    ? ` — viewport ${formatViewport(fixedViewport)}` +
+      (overrides?.viewportSource ? ` (${overrides.viewportSource})` : '')
+    : '';
   logger.info(
-    `Launching ${browserType}${channelLabel} browser (${headed ? 'headed' : 'headless'})`,
+    `Launching ${browserType}${channelLabel} browser (${headed ? 'headed' : 'headless'})${viewportLabel}`,
   );
 
-  const { width, height } = headed ? config.windowSize : config.viewport;
+  // `--window-size` is the OS window; the context's `viewport` below is the
+  // page. With `fixedViewport` the page size is already pinned exactly, so this
+  // arm is purely cosmetic (stories/per-test-viewport.md §2): the window is
+  // grown by a chrome allowance so a headed phone-width run LOOKS like a phone
+  // instead of a 390px page letterboxed in a desktop window. Headless keeps the
+  // window and the page the same size — there is no chrome and nobody is
+  // watching.
+  let width: number;
+  let height: number;
+  if (fixedViewport) {
+    width = fixedViewport.width + (headed ? HEADED_CHROME_WIDTH_PX : 0);
+    height = fixedViewport.height + (headed ? HEADED_CHROME_HEIGHT_PX : 0);
+  } else {
+    ({ width, height } = headed ? config.windowSize : config.viewport);
+  }
   const launchOptions = {
     headless: !headed,
     slowMo: config.slowMo,
@@ -1323,12 +1368,20 @@ export async function launchBrowser(
   // Record video into `<outputDir>/videos` when the caller threaded a videoDir
   // AND the resolved mode isn't 'off'. Playwright records the whole context at
   // the viewport/window size (headed mode uses `viewport: null` → real window
-  // size); the .webm is finalised on context close. The CDP path short-circuits
+  // size; with `fixedViewport` it is that size, so a mobile test records a
+  // phone-shaped video for free — stories/per-test-viewport.md §2); the .webm
+  // is finalised on context close. The CDP path short-circuits
   // above before reaching newContext, so recording is never attached to an
   // attached browser (Playwright can't record those).
   const videoMode = resolveVideoMode(config.video);
   const context = await browser.newContext({
-    viewport: headed ? null : config.viewport,
+    // `fixedViewport` wins in BOTH modes — that is the whole point of it
+    // (stories/per-test-viewport.md §2). The headed default of `null` means
+    // "take the window's size", which is exactly what a CSS-breakpoint test
+    // cannot rely on: the same test on a laptop and on a 4K monitor would
+    // render two different layouts. An explicit viewport makes Playwright pin
+    // the page at that size whatever the window does.
+    viewport: config.fixedViewport ?? (headed ? null : config.viewport),
     // Accept all permissions by default
     permissions: ['clipboard-read', 'clipboard-write'],
     // Do not override userAgent — on the `chrome` channel, the real Chrome UA
@@ -1388,6 +1441,26 @@ async function connectOverCdpSession(
   config: BrowserConfig,
   cdp: CdpLaunchOptions,
 ): Promise<BrowserSession> {
+  // REFUSED, not warned (stories/per-test-viewport.md §2). Everything in
+  // `incompatibleCdpConfig` below is a preference this mode cannot honour;
+  // `fixedViewport` is different in kind — the whole test was authored around
+  // a size, so a run that quietly used the user's own window size would report
+  // a pass for a layout nobody asked to see. Thrown before the connect, so
+  // nothing is attached to and no dialog guard is installed.
+  //
+  // The CLI (§6) and the server (§4) both refuse `viewport:` + `cdp:` earlier,
+  // with a message naming both keys. This is the backstop for every other way a
+  // `fixedViewport` can reach here — notably a project-wide pin (§8) in an
+  // `aiui.config.json` whose tests attach over CDP.
+  if (config.fixedViewport) {
+    throw new Error(
+      `A fixed viewport (${formatViewport(config.fixedViewport)}) cannot be applied to a ` +
+      `browser attached to over CDP on port ${cdp.port} — the window is the user's own and ` +
+      `this mode cannot resize it. Remove the viewport, or drop the CDP attach and let the ` +
+      `run launch its own browser.`,
+    );
+  }
+
   // Warn loudly about config that won't apply, so the user isn't left wondering
   // why their viewport / stealth / bypassCSP setting did nothing.
   warnOnIncompatibleConfigForCdp(config);
@@ -1509,6 +1582,11 @@ async function connectOverCdpSession(
  * running Chrome controls them, or — for `video` — Playwright cannot record a
  * browser it attached to rather than launched). Pure + exported so the list is
  * unit-testable without a real CDP connection.
+ *
+ * `fixedViewport` is deliberately NOT in this list and must not be added:
+ * `connectOverCdpSession` throws on it before this runs
+ * (stories/per-test-viewport.md §2), so listing it here would describe a
+ * warn-and-continue that never happens.
  */
 export function incompatibleCdpConfig(config: BrowserConfig): string[] {
   const ignored: string[] = [];

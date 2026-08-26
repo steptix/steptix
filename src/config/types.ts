@@ -97,6 +97,20 @@ export interface BrowserConfig {
   viewport: { width: number; height: number };
   /** Headed browser window dimensions */
   windowSize: { width: number; height: number };
+  /** When set, every context this launch creates gets EXACTLY this viewport —
+   *  headed or headless — instead of the viewport/windowSize pair. Set by the
+   *  runner/server from a test's `## Config: viewport:`; settable in
+   *  aiui.config.json to pin a whole project (stories/per-test-viewport.md §8).
+   *
+   *  The three sizing keys are NOT interchangeable, and the distinction is the
+   *  reason this one exists: `viewport` applies headless only, `windowSize`
+   *  sizes the headed WINDOW (whose page area is then whatever is left after
+   *  browser chrome), and `fixedViewport` pins the PAGE in both modes — which
+   *  is the only one of the three a CSS-breakpoint test can rely on.
+   *
+   *  Refused by the CDP attach path: the browser is the user's own and its
+   *  size is theirs (§2). */
+  fixedViewport?: { width: number; height: number };
   /** Milliseconds to wait between Playwright actions (for debugging) */
   slowMo: number;
   /** Browser engine to use */

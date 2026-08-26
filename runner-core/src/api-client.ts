@@ -69,7 +69,20 @@ export interface StreamStepsRequest {
    */
   dataSources?: Record<string, string>;
   parameters?: Record<string, string>;
-  config?: { baseUrl?: string; timeout?: string };
+  /**
+   * Per-session config, write-once: the server refuses a batch that carries
+   * `config` for a session it already created, so clients send it on the
+   * first request of a session and omit it thereafter.
+   *
+   * `viewport` is the RAW `## Config: viewport:` string as authored — a
+   * preset name (`mobile` | `tablet` | `desktop`) or `<width>x<height>`
+   * (stories/per-test-viewport.md §3). The client does not resolve or
+   * validate it: the server owns the one resolver and the one error message,
+   * so a client that pre-parsed it could only disagree with the server. `$VAR`
+   * resolution still happens client-side (TestBench's `.env` overlay), same as
+   * `baseUrl` — what travels is the post-`$VAR`, pre-preset string.
+   */
+  config?: { baseUrl?: string; timeout?: string; viewport?: string };
   /** Map of 1-based step index → original source line in the test file. Echoed back in events. */
   sourceLines?: number[];
   /**
