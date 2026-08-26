@@ -29,8 +29,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 
-const SERVER_PORT = 3199;
-const INSPECTOR_PORT = 9231;
+// Overridable, because a fixed port is exactly what CLAUDE.md warns about for
+// worktrees: "nothing else may be listening on 3100, or the suite silently
+// tests the OTHER checkout's src/". The readiness probe below cannot tell our
+// server from a stranger's, so a collision would assert against a different
+// checkout's dist/ and still print PASS.
+const SERVER_PORT = Number(process.env.CB_E2E_SERVER_PORT ?? 3199);
+const INSPECTOR_PORT = Number(process.env.CB_E2E_INSPECTOR_PORT ?? 9231);
 const BASE_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
 let serverProc = null;
@@ -200,6 +205,22 @@ export default defineSteps([
   }, 'api-server', 30_000);
 
   const health = await (await fetch(`${BASE_URL}/health`)).json();
+  // Is this OUR server? The probe above only proves SOMETHING answers on the
+  // port. Another checkout's server (or a stale one) would be asserted
+  // against instead, reporting PASS for a `dist/` this run never built — the
+  // silent-wrong-checkout failure CLAUDE.md calls out for worktrees.
+  if (serverProc.exitCode !== null) {
+    fail(
+      `server exited before readiness (code ${serverProc.exitCode}) — ` +
+        `something else is serving :${SERVER_PORT}. Set CB_E2E_SERVER_PORT.`,
+    );
+  }
+  if (health.pid !== serverProc.pid) {
+    fail(
+      `:${SERVER_PORT} is served by pid ${health.pid}, not the server this run ` +
+        `spawned (pid ${serverProc.pid}). Set CB_E2E_SERVER_PORT to a free port.`,
+    );
+  }
   console.log('       /health inspector =', health.inspector);
   if (typeof health.inspector !== 'string' || !health.inspector.startsWith('ws://')) {
     fail('/health did not report a ws:// inspector URL');
@@ -323,9 +344,18 @@ export default defineSteps([
   console.error('harness threw:', err);
   exitCode = 1;
 } finally {
-  if (serverProc && !serverProc.killed) {
+  // `exitCode === null` means still running. `killed` is NOT that test: it
+  // only records whether a signal was ever delivered, so a server that died
+  // on its own (EADDRINUSE, no dist/) left `killed === false`, the kill a
+  // no-op on a dead pid, and `once('exit')` waiting for an event that had
+  // already fired — the script hung instead of reporting the failure, on
+  // exactly the case the fixed port makes likely.
+  if (serverProc && serverProc.exitCode === null && serverProc.signalCode === null) {
+    const exited = new Promise((r) => serverProc.once('exit', r));
     serverProc.kill('SIGTERM');
-    await new Promise((r) => serverProc.once('exit', r));
+    // SIGTERM is TerminateProcess on Windows, so the server's own shutdown
+    // handler does not run; don't wait on it forever either.
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
   }
   if (scratchDir) await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => {});
   process.exit(exitCode);

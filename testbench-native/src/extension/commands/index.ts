@@ -1617,6 +1617,15 @@ async function dispatchStep(
         refuseStaleResume(tracker, controller.document.uri);
         return;
       }
+      // The same Step-Into seeds the main-flow branch below sends. Without
+      // them, F11 at a breakpoint parked inside a `### Section` body silently
+      // degraded to a plain step pause while the identical gesture one branch
+      // over descended into the entry — so the feature looked broken to
+      // anyone whose breakpoint happened to be in a section.
+      const sectionLineText = editor.document.lineAt(Math.max(0, startLine - 1)).text;
+      const sectionLineKind = classifyStepLine(sectionLineText);
+      const sectionPauseAtNextTool = mode === 'into' && sectionLineKind === 'tool';
+      const sectionPauseAtNextCodeBehind = mode === 'into' && sectionLineKind === 'plain';
       registry.notifyRunning(true);
       await controller
         .runLines(plan.lines, {
@@ -1626,6 +1635,8 @@ async function dispatchStep(
           isResume: true,
           stepMode: mode,
           ...(plan.rerun && { rerun: plan.rerun }),
+          ...(sectionPauseAtNextTool && { pauseAtNextTool: true }),
+          ...(sectionPauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
         })
         .finally(() => registry.notifyRunning(false));
       return;
