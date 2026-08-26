@@ -34,10 +34,29 @@ bare `[skill]`) has no separator and stays prose. The finder also scans
 past near-misses: in `see [skillful] then [skill login]` the first
 `[skill` sits inside a longer word and the real token is still found.
 
-Committing works like it always has: once the token opens a call
-(keyword + separator), any deviation from the grammar throws with a
-caret — `[skill ]` errors with "name missing" exactly as `[skill: ]`
-does.
+## Committing differs by spelling — on purpose
+
+`[skill:` commits: once that token opens a call, any deviation from the
+grammar throws with a caret. That is the original tokenizer's whole
+point (stories/skill-call-syntax.md) — a malformed call the author
+clearly meant should not silently become an AI prose step.
+
+The colon-less spelling cannot carry that rule, because ordinary English
+produces it. `Verify the [skill level: expert] badge` and
+`Click the [skill (beta)] badge` are prose, and `extractSteps` throws at
+PARSE time — so committing to them fails the **entire test file**, not
+the step. One sentence would take down the suite.
+
+So: a colon-less token that does not parse is **not a call**. It returns
+`null` and flows through as prose. The cost is that a typo'd colon-less
+call (`[skill login pass=]`) reaches the AI instead of erroring; authors
+who want the strict reading write the colon.
+
+Markdown links are declined in **both** spellings. `[skill guide](./g.md)`
+otherwise parses as a call to a skill named `guide` and fails the file
+when no such skill exists — and a link is the likeliest way a bracketed
+keyword appears in a markdown-authored suite. Only an immediately
+adjacent `(` counts, so `[skill: login] (smoke only)` still parses.
 
 ## What moves in lockstep
 
@@ -50,22 +69,34 @@ step the server would happily run:
    (src/parser/invocation-parser.ts). The `prefix: '[skill:'` option
    became `kind: 'skill'`; the finder is `/\[<kind>(?=[ \t:])/` and the
    scanner then consumes `WS? ':'? WS?` before the name.
-2. **The MCP code-step scan** — `CODE_STEP_PATTERN`
-   (src/mcp/assemble.ts), which flags invocation tokens in `run_steps`
-   prose warnings and refuses them in `run_errand` and project-less
-   runs. Now `/\[(?:skill|tool)(?=[ \t:])/i` — still a strict superset
-   of the tokenizer's match set, which the session-manager's
-   no-tools-project-less guarantee relies on.
-3. **Code-behind's never-generate rule** — `BRACKET_CALL_STEP`
-   (src/codebehind/live-compile.ts): a call step is expanded or
-   dispatched, never generated from, under either spelling.
+2. **The MCP code-step scan** — `isCodeStep` (re-exported by
+   src/mcp/assemble.ts), which refuses invocation steps in `run_errand`
+   and project-less runs. It does not imitate the tokenizer, it **calls**
+   it — so the property the session-manager's no-tools-project-less
+   guarantee relies on holds by construction rather than by comment.
+3. **Code-behind's never-generate rule**
+   (src/codebehind/live-compile.ts): the same `isCodeStep` predicate.
 4. **TestBench's line matcher** — `parseInvocationLine`, which backs F12
-   / Ctrl+Click targets and the step-into tool-line detection. It moved
-   from definition-provider.ts into invocation-target-core.ts (the
-   vscode-free mirror file) so `node --test` parity rows can pin it
-   against the tokenizer's own test table, and the two hand-rolled
-   `\[tool:` regexes in commands/index.ts now call it instead of
-   carrying private copies.
+   / Ctrl+Click targets, the step-into tool-line detection, and
+   `rootFrameSteps`' skill filter. It moved from definition-provider.ts
+   into invocation-target-core.ts (the vscode-free mirror file) so
+   `node --test` parity rows can pin it, and the three hand-rolled
+   regexes in commands/index.ts now call it instead of carrying private
+   copies. testbench-native is a separate package and genuinely cannot
+   import the parser; everything in `src/` can, and now does.
+
+**Why the two in-package mirrors became calls rather than regexes.** They
+were look-alike patterns, and they had already drifted in both
+directions: an `/i` the case-sensitive scanner does not have (so
+`Verify the button reads [Tool Settings]` was refused by `run_errand` as
+a code step while the runner ran it as prose), and a `\s` plus a `^`
+anchor (so a non-breaking space opened a call the scanner calls prose,
+while every *labelled* call — a documented feature — escaped the
+never-generate rule and got AI-generated code written for a step that is
+always dispatched to its tool). Beyond that, no regex can stay honest
+now: the link and colon-less-leniency decisions above live inside the
+parser. `tests/invocation-mirror-parity.test.ts` asserts the equivalence
+directly — the test whose absence let them drift.
 
 Line *classifiers* that key on the bracket alone needed nothing:
 runner-core's section index and the section-name validator treat any
@@ -74,13 +105,22 @@ construction.
 
 ## The accepted trade
 
-Prose that literally contains `[skill <word>]` or `[tool <word>]`
-mid-step used to flow to the AI as text; now it parses as an invocation
-(or throws, if what follows is not grammar). That is the same trade the
-original tokenizer story made for `[skill: dismiss the modal]` — a hard
-rule beats a silent guess — extended to the colon-less spelling. The
-guard is the separator rule above: only the exact keyword followed by
-`:` or whitespace commits.
+Prose that contains a well-formed `[skill <word>]` or `[tool <word>]`
+mid-step used to flow to the AI as text; now it parses as an invocation.
+`Open the [tool bar] and pick Save` calls a tool named `bar`.
+
+That is the residue of the feature, and it is bounded by three rules
+above: the separator (so `[skills]`, `[skillful]`, `[skill]` are prose),
+the link guard (so `[tool docs](url)` is prose), and colon-less leniency
+(so anything that does not *parse* is prose rather than an error). What
+remains is the case where the bracketed prose happens to be a valid call
+— rare, and visible in the editor, since a resolved call renders as a
+link and an unresolved name gets a squiggle.
+
+An earlier draft of this change had no link guard and no leniency, and
+committed on any colon-less token. Both `Click the [skill guide](./g.md)`
+and `Verify the [skill level: expert] badge` then failed the entire test
+file at parse time. Worth recording as the reason those two rules exist.
 
 ## Tests
 

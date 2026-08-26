@@ -34,6 +34,10 @@ const STEPS_LINES = [
   '4. see [skillful] anim',
   '5. [skill: capture_url] then prose',
   '6. [sk',
+  // A bracket token preceded by other non-space text. STEP_START_RE admits
+  // any single non-space run, so a `\S*$` replace range spanned `"Save"[sk`
+  // and accepting a completion DELETED the author's `"Save"`.
+  '7. "Save"[sk',
   '',
 ];
 
@@ -166,6 +170,23 @@ describe('TestBench skill-name completion in [skill …', function () {
     const line = lineText('6. [sk');
     for (const i of snippets) {
       assert.equal(i.rangeStart, line.length - '[sk'.length, `${i.label} range start`);
+      assert.equal(i.rangeEnd, line.length, `${i.label} range end`);
+    }
+  });
+
+  it('the snippet range covers ONLY the bracket token, never preceding text', async () => {
+    // Regression: the range was `\S*$`, which at `7. "Save"[sk` spanned
+    // `"Save"[sk` — accepting a completion silently deleted `"Save"`.
+    const items = await completionsAt('7. "Save"[sk');
+    const snippets = snippetItems(items);
+    assert.ok(snippets.length > 0, 'snippets should still be offered here');
+    const line = lineText('7. "Save"[sk');
+    for (const i of snippets) {
+      assert.equal(
+        i.rangeStart,
+        line.length - '[sk'.length,
+        `${i.label} must replace only "[sk", not the preceding "Save"`,
+      );
       assert.equal(i.rangeEnd, line.length, `${i.label} range end`);
     }
   });

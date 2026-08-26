@@ -327,10 +327,10 @@ test('openSkillNamePrefix matches every open-token spelling', () => {
     // A closed call earlier on the line does not confuse the anchor.
     ['1. [skill: x] then [skill au', 'au', 26],
   ];
-  for (const [prefix, partial, start] of rows) {
+  for (const [prefix, partial, replaceStart] of rows) {
     assert.deepEqual(
       openSkillNamePrefix(prefix),
-      { partial, start },
+      { partial, replaceStart },
       `openSkillNamePrefix(${JSON.stringify(prefix)})`,
     );
   }

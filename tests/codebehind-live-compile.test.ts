@@ -129,13 +129,38 @@ describe('which steps a compile-mode run generates from', () => {
     for (const text of [
       '[skill: sign in]',
       '[tool: seedOrder]',
-      '  [SKILL: x]',
       '[skill sign_in]',
       '[tool seedOrder count=2]',
+      // Labelled calls too. These used to slip through — the rule was
+      // anchored at `^` while labels are a documented feature — so the
+      // compiler paid to generate a Playwright entry for a step that is
+      // always dispatched to the tool.
+      'Seed the cart [tool: seedOrder items=2]',
+      'Log in as admin [skill login role="admin"]',
     ]) {
       expect(generationRefusal({ text, status: 'passed', binding: binding(text) })).toMatch(
         /expanded or dispatched/,
       );
+    }
+  });
+
+  it('does NOT skip lines the runner treats as prose, however bracket-ish', () => {
+    // The rule now asks the real parser, so it agrees with the runner by
+    // construction. Each of these is prose to the scanner — an uppercase
+    // keyword (the scanner is case-sensitive), a space before the keyword,
+    // a non-breaking space separator, or a markdown link — and refusing
+    // them told the author "expanded or dispatched", which was false, and
+    // left the step permanently ineligible for code-behind.
+    for (const text of [
+      '  [SKILL: x]',
+      '[ skill: x]',
+      `[skill${String.fromCharCode(160)}login]`,
+      'Read the [tool reference](./ref.md) page',
+    ]) {
+      expect(
+        generationRefusal({ text, status: 'passed', binding: binding(text) }),
+        `should not be refused as a call: ${JSON.stringify(text)}`,
+      ).toBeUndefined();
     }
     // The other bracket markers DO reach generation, where `refuseReason`
     // declines them with a reason that lands in the file as an `ai: true`

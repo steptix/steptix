@@ -1081,7 +1081,12 @@ function rootFrameSteps(text: string): { line: number; instruction: string }[] {
     .map((s) => ({ line: s.line, instruction: s.instruction.trim() }))
     .filter(
       (s) =>
-        !/^\[\s*skill\s*:/i.test(s.instruction) && !sectionNames.has(s.instruction.toLowerCase()),
+        // Not a hand-rolled `\[skill\s*:` — that spelling missed the
+        // colon-less form, so `1. [skill login]` twice in a file was counted
+        // as two root-frame steps and Compile This Step refused it as an
+        // ambiguous duplicate, while `[skill: login]` compiled fine.
+        parseInvocationLine(s.instruction)?.kind !== 'skill' &&
+        !sectionNames.has(s.instruction.toLowerCase()),
     );
 }
 

@@ -21,6 +21,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
+import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
 import {
@@ -64,16 +65,18 @@ const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
 /**
  * A `[skill` / `[tool` invocation token anywhere in a step — anywhere, not
  * anchored, because the invocation grammar allows a prose label before the
- * token on the same line ("Log in [skill: login]"). The token itself is
- * matched tight (no space after `[`, and the keyword must be followed by `:`
- * or inline whitespace), mirroring the tokenizers' finder — the colon is
- * optional in the invocation grammar, so `[skill login]` counts, while
- * bracketed prose like `[skills]` or `[skillful]` is not swept in.
+ * token on the same line ("Log in [skill: login]").
  *
- * Exported for `run_errand`, which refuses the same lines for the same reason:
- * one rule, so "what counts as a code step" cannot mean two things.
+ * BUILT FROM the tokenizer's own rule rather than re-typed, so "what counts as
+ * a code step" cannot mean two things — the property `session-manager.ts`'s
+ * project-less no-tools guarantee leans on. It was re-typed before, and drifted:
+ * a hand-added `/i` made `Verify the button reads [Tool Settings]` a refused
+ * "code step" while the runner ran it as ordinary prose, because the scanner is
+ * case-sensitive. Deriving it removes the class of bug, not just that instance.
+ *
+ * Exported for `run_errand`, which refuses the same lines for the same reason.
  */
-export const CODE_STEP_PATTERN = /\[(?:skill|tool)(?=[ \t:])/i;
+export const isCodeStep = isInvocationStep;
 
 /** Any `${...}` reference, for the "nothing will interpolate this" warning. */
 const ANY_PLACEHOLDER = /\$\{[^}]*\}/g;
@@ -346,7 +349,7 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
   // prose — a silent, expensive wrong answer three layers down. Refused here,
   // before any session exists, with the reason and the fix.
   if (project.scope === 'user') {
-    const offending = args.steps.filter((step) => CODE_STEP_PATTERN.test(step));
+    const offending = args.steps.filter((step) => isCodeStep(step));
     if (offending.length > 0) {
       fail(projectlessCodeSteps(offending, project.configSearch));
     }

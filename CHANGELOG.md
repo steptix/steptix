@@ -23,11 +23,23 @@ after a step number now replace the typed token — accepting at
 `[skill login]` is the same call as `[skill: login]`, and `[tool seed_cart
 items=2]` the same as `[tool: seed_cart items=2]` — every arg form, output
 alias, path-qualified name, and prose label works identically under both
-spellings. The keyword must be followed by the colon or whitespace, so
-bracketed prose such as `[skills]` or `[skillful]` is never mistaken for an
-invocation. Everything that keys off the token moved in lockstep: the
-server's tokenizer, the MCP errand/prose scan, code-behind's
-never-generate rule, and TestBench's F12 targets and tool-line detection.
+spellings. This applies to `[skill:` and `[tool:` only; `[input:`,
+`[output:]` and `[interactive]` still require their colon.
+
+Bracketed prose is left alone: the keyword must be followed by the colon
+or whitespace (so `[skills]` and `[skillful]` are prose), a markdown link
+such as `[skill guide](./guide.md)` is never an invocation, and a
+colon-less token that doesn't parse is treated as prose rather than
+erroring — `Verify the [skill level: expert] badge` is a sentence, and
+failing it would have failed the whole file. The explicit `[skill: ...]`
+spelling keeps the strict reading: a malformed one is still a parse error
+pointing at the problem.
+
+Everything that keys off the token moved with it. The MCP errand/prose
+scan and code-behind's never-generate rule now call the parser instead of
+matching a look-alike regex, so they cannot disagree with the runner about
+what a call is; TestBench's F12 targets, tool-line detection and
+root-frame step filter share one matcher.
 
 ### Added — TestBench: Renumber Steps
 

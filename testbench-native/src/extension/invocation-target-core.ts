@@ -229,7 +229,13 @@ export interface InvocationLine {
 // a colon with optional inline whitespace around it, or bare whitespace — the
 // colon is optional (`[skill login]` ≡ `[skill: login]`), and `[skillful]`
 // has neither separator so it stays prose.
-const INVOCATION_RE = /\[(skill|tool)(?:[ \t]*:[ \t]*|[ \t]+)([A-Za-z0-9_/-]+)/;
+/** `Sep := WS? ':' WS? | WS` and the name class, written once — the two
+ *  regexes below had them character-identical and 37 lines apart, which is one
+ *  edit away from F12 resolving a name the dropdown will not complete. */
+const SEP = String.raw`(?:[ \t]*:[ \t]*|[ \t]+)`;
+const NAME = String.raw`[A-Za-z0-9_/-]`;
+
+const INVOCATION_RE = new RegExp(String.raw`\[(skill|tool)${SEP}(${NAME}+)`);
 const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
 
 /**
@@ -266,20 +272,25 @@ export function parseInvocationLine(line: string): InvocationLine | null {
 // satisfy it and a complete call (`[skill: x]│`) no longer does. Once the
 // author types anything the name grammar can't lex (a space onto args, the
 // closing `]`), the anchor breaks and completion goes quiet.
-const OPEN_SKILL_NAME_RE = /\[skill(?:[ \t]*:[ \t]*|[ \t]+)([A-Za-z0-9_/-]*)$/;
+const OPEN_SKILL_NAME_RE = new RegExp(String.raw`\[skill${SEP}(${NAME}*)$`);
 
 /**
  * The partial skill name being typed at the end of `linePrefix` (the text
  * before the cursor), or `null` when the cursor is not inside an open
- * `[skill` token. `start` is the 0-based column where the partial begins —
- * equal to the cursor column while the partial is still empty — so a
+ * `[skill` token. `replaceStart` is the 0-based column where the partial
+ * begins — equal to the cursor column while the partial is still empty — so a
  * completion item can replace exactly what was typed.
+ *
+ * `replaceStart`, not `start`: `refContextAt` and `paramContextAt` in
+ * env-data-completion-core.ts are the same shape and already use that name,
+ * and a third spelling of one concept leaves the next completion surface with
+ * two precedents and no canonical one.
  */
 export function openSkillNamePrefix(
   linePrefix: string,
-): { partial: string; start: number } | null {
+): { partial: string; replaceStart: number } | null {
   const m = OPEN_SKILL_NAME_RE.exec(linePrefix);
   if (!m) return null;
   const partial = m[1]!;
-  return { partial, start: linePrefix.length - partial.length };
+  return { partial, replaceStart: linePrefix.length - partial.length };
 }

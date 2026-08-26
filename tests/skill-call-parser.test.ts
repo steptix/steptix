@@ -68,10 +68,39 @@ describe('parseSkillCall — optional colon', () => {
     expect(parseSkillCall('see [skillful] then [skill login]')?.name).toBe('login');
   });
 
-  it('still throws when the token opens a call with no name', () => {
-    // `[skill ]` commits (keyword + whitespace) exactly like `[skill: ]` does.
-    expect(() => parseSkillCall('[skill ]')).toThrow(SkillCallSyntaxError);
-    expect(() => parseSkillCall('[skill ]')).toThrow(/name missing/);
+  it('a colon-less token that does not parse is prose, not an error', () => {
+    // The colon-less spelling is reachable by ordinary English, and
+    // `extractSteps` throws at PARSE time — so committing to it would let one
+    // prose sentence fail the whole test file. `[skill:` keeps the strict
+    // reading (next test); the space form degrades to prose.
+    expect(parseSkillCall('[skill ]')).toBeNull();
+    expect(parseSkillCall('Verify the [skill level: expert] badge')).toBeNull();
+    expect(parseSkillCall('Click the [skill (beta)] badge')).toBeNull();
+    expect(parseSkillCall('Confirm the [skill 50%] chip')).toBeNull();
+  });
+
+  it('the COLON form still commits and throws — deliberate intent is unchanged', () => {
+    expect(() => parseSkillCall('[skill: ]')).toThrow(SkillCallSyntaxError);
+    expect(() => parseSkillCall('[skill: ]')).toThrow(/name missing/);
+    expect(() => parseSkillCall('[skill: foo bar="x"baz="y"]')).toThrow(SkillCallSyntaxError);
+  });
+});
+
+describe('parseSkillCall — markdown links are not invocations', () => {
+  // `[text](url)` is the likeliest way a bracketed keyword appears in a
+  // markdown-authored suite. Claiming it resolved a skill named after the
+  // link text and failed the ENTIRE file when no such skill existed.
+  it('does not claim a link, in either spelling', () => {
+    expect(parseSkillCall('Click the [skill guide](https://example.com) link')).toBeNull();
+    expect(parseSkillCall('Open the [skill matrix](./m.md) and verify')).toBeNull();
+    expect(parseSkillCall('See [skill: guide](./g.md) for details')).toBeNull();
+  });
+
+  it('still parses a real call followed by a parenthesised comment', () => {
+    // Only an IMMEDIATELY adjacent `(` is a link.
+    const result = parseSkillCall('[skill: login] (smoke only)');
+    expect(result?.name).toBe('login');
+    expect(result?.trailing).toBe(' (smoke only)');
   });
 });
 

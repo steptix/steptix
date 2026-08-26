@@ -33,7 +33,8 @@ The only language-feature provider in testbench-native is the
 ([src/extension/definition-provider.ts](../../src/extension/definition-provider.ts)),
 registered for `markdown` in
 [src/extension/extension.ts](../../src/extension/extension.ts). It matches
-`INVOCATION_RE = /\[(skill|tool):\s*([A-Za-z0-9_-]+)/`, resolves skills to
+`INVOCATION_RE` (since moved to `src/extension/invocation-target-core.ts`,
+where it also admits `/` in the name and makes the colon optional), resolves skills to
 `<skillsDir>/<name>.md`, and has a `findLine`-style helper for locating a
 heading/bullet inside a target file — directly reusable for same-file
 `###` targets. There are no completion, hover, code-lens, folding, or

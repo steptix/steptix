@@ -150,10 +150,74 @@ function readArgValue(
 const BARE_NUMBER_RE = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
 const BARE_BOOLEAN_RE = /^(?:true|false)$/;
 
+/** The invocation keywords, in the order the code-step scans alternate them. */
+export const INVOCATION_KINDS = ['skill', 'tool'] as const;
+export type InvocationKind = (typeof INVOCATION_KINDS)[number];
+
+/**
+ * THE token rule, in one place: `[<kind>` followed by `:` or inline
+ * whitespace. Everything in this package that asks "does this step open an
+ * invocation?" builds its pattern from here rather than re-typing the class —
+ * `src/mcp/assemble.ts` (the errand / project-less code-step scan) and
+ * `src/codebehind/live-compile.ts` (never-generate) both do.
+ *
+ * The separator class is deliberately `[ \t:]` and NOT `\s`: the scanner's
+ * `skipInlineSpace` only ever consumes a space or a tab, so admitting a
+ * newline or a non-breaking space here would claim tokens the scanner then
+ * refuses to name — a mirror that says "call" where the parser says "prose".
+ *
+ * Case-SENSITIVE, matching the scanner. `[SKILL: x]` is prose to the runner,
+ * so a mirror that claims it would refuse a step the server runs happily.
+ *
+ * (testbench-native cannot import this — separate package — and mirrors it in
+ * `invocation-target-core.ts`, pinned by that package's parity tests.)
+ */
+export function invocationTokenPattern(kinds: readonly string[] = INVOCATION_KINDS): RegExp {
+  return new RegExp(`\\[(?:${kinds.join('|')})(?=[ \\t:])`);
+}
+
+/** One finder per kind, built once — `parseInvocation` runs on every step
+ *  line of every parse. */
+const TOKEN_FINDERS: Record<InvocationKind, RegExp> = {
+  skill: invocationTokenPattern(['skill']),
+  tool: invocationTokenPattern(['tool']),
+};
+
+/**
+ * Does this step open an invocation the runner will expand or dispatch?
+ *
+ * THE predicate for "is this a code step", used by the errand / project-less
+ * scan (`src/mcp/assemble.ts`) and by code-behind's never-generate rule
+ * (`src/codebehind/live-compile.ts`). It runs the real parser rather than a
+ * look-alike regex, so it cannot disagree with what the runner does — which a
+ * regex demonstrably did, in both directions, and which no regex can get right
+ * now that the grammar declines markdown links and unparseable colon-less
+ * tokens. Those decisions live inside `parseInvocation`; a mirror would have
+ * to re-implement them to stay honest, so it doesn't mirror, it calls.
+ *
+ * A line that COMMITS and then fails to parse counts as a call: it is a
+ * malformed `[skill:`, and the contexts asking this question exist to keep
+ * such lines out of runs that cannot execute them.
+ *
+ * Cost is two parses per step, on paths that already parse the file — the
+ * scans run over a handful of steps at request assembly, not in a hot loop.
+ */
+export function isCodeStep(line: string): boolean {
+  for (const kind of INVOCATION_KINDS) {
+    try {
+      if (parseInvocation(line, { kind, allowSlashInName: true }) !== null) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface InvocationParserOptions {
-  /** The invocation keyword, e.g. `'skill'` or `'tool'`. The token is
-   *  `[<kind>` followed by `:` or inline whitespace — the colon is optional. */
-  kind: string;
+  /** The invocation keyword. The token is `[<kind>` followed by `:` or inline
+   *  whitespace — the colon is optional. Narrowed to the two real kinds so the
+   *  finder table is total and nothing unvalidated reaches a `RegExp`. */
+  kind: InvocationKind;
   /** Error subclass to throw for syntax errors. Defaults to `InvocationSyntaxError`. */
   errorClass?: new (reason: string, source: string, column: number) => InvocationSyntaxError;
   /**
@@ -182,20 +246,6 @@ export interface InvocationParserOptions {
  * resolution. Whitespace-only prefix text produces no label (the canonical
  * `[skill: foo]` form is unchanged).
  */
-/** One finder per kind, built once — `parseInvocation` runs on every step
- *  line of every parse. `kind` is a bare keyword (`skill` / `tool`), so
- *  splicing it into the pattern needs no escaping. */
-const tokenFinders = new Map<string, RegExp>();
-
-function tokenFinder(kind: string): RegExp {
-  let re = tokenFinders.get(kind);
-  if (!re) {
-    re = new RegExp(`\\[${kind}(?=[ \\t:])`);
-    tokenFinders.set(kind, re);
-  }
-  return re;
-}
-
 export function parseInvocation(
   line: string,
   options: InvocationParserOptions,
@@ -205,16 +255,54 @@ export function parseInvocation(
   // inline whitespace, and the scan continues past a near-miss — in
   // `see [skillful] do [skill: x]` the first `[skill` is inside a longer
   // word and the real token is still found.
-  const token = tokenFinder(kind).exec(line);
+  const token = TOKEN_FINDERS[kind].exec(line);
   if (token === null) {
     return null;
   }
   const prefixIdx = token.index;
+
+  // Does the separator include a colon? That is the difference between a
+  // token an author can only have typed deliberately (`[skill:`) and one
+  // that ordinary prose produces by accident (`[skill ` — see COMMITMENT
+  // below). Peeked here rather than after the fact so the decision is made
+  // before any error can be thrown.
+  const sepEnd = prefixIdx + 1 + kind.length;
+  const sawColon = /^[ \t]*:/.test(line.slice(sepEnd));
+
+  try {
+    return parseFromToken(line, options, prefixIdx, sepEnd);
+  } catch (err) {
+    // COMMITMENT. `[skill:` is unambiguous authorial intent, so a malformed
+    // one throws with a caret rather than silently becoming prose — that is
+    // the whole point of the tokenizer (stories/skill-call-syntax.md).
+    //
+    // The colon-less spelling cannot carry that rule. `[tool "hammer"]` and
+    // `Verify the [skill level: expert] badge` are English, and throwing on
+    // them fails the ENTIRE test file at parse time (`extractSteps`), not
+    // just the step — a prose sentence taking down the suite. So a
+    // colon-less token that does not parse is simply not a call.
+    //
+    // The cost is a typo'd colon-less call (`[skill login pass=]`) reaching
+    // the AI as prose instead of erroring. Authors who want the strict
+    // reading have it: write the colon.
+    if (!sawColon && err instanceof InvocationSyntaxError) return null;
+    throw err;
+  }
+}
+
+/** The grammar proper, from a located token. Split out so `parseInvocation`
+ *  can decide what a thrown error MEANS without duplicating the scan. */
+function parseFromToken(
+  line: string,
+  options: InvocationParserOptions,
+  prefixIdx: number,
+  sepEnd: number,
+): ParsedInvocation | null {
   const labelRaw = line.slice(0, prefixIdx).trim();
   const label = labelRaw === '' ? undefined : labelRaw;
 
   const ErrorCls = options.errorClass ?? InvocationSyntaxError;
-  const scanner = new Scanner(line, prefixIdx + 1 + kind.length, ErrorCls);
+  const scanner = new Scanner(line, sepEnd, ErrorCls);
   // Sep := WS? ':' WS? | WS — the lookahead above guarantees at least one
   // separator character is present, so a bare `[skill]` never gets here.
   scanner.skipInlineSpace();
@@ -238,12 +326,21 @@ export function parseInvocation(
 
     if (scanner.peek() === ']') {
       scanner.advance();
+      const trailing = scanner.rest();
+      // `[text](url)` is a markdown LINK, not an invocation — and in a
+      // markdown-authored suite it is the likeliest way for a bracketed
+      // keyword to appear. `[skill guide](./guide.md)` otherwise parses as
+      // a call to a skill named `guide` and fails the whole file when no
+      // such skill exists. Only an IMMEDIATELY adjacent `(` is a link, so
+      // a genuine call with a parenthesised comment after it —
+      // `[skill: login] (smoke only)` — still parses.
+      if (trailing.startsWith('(')) return null;
       return {
         name,
         nameColumn,
         args,
         outputAliases,
-        trailing: scanner.rest(),
+        trailing,
         ...(label !== undefined && { label }),
       };
     }
