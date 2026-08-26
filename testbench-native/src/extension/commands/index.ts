@@ -18,6 +18,12 @@ import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codeb
 import { getOutputChannel } from '../output-channel.js';
 import { cacheDirsForTestAllEnvs } from '../cache-paths.js';
 import { sectionedSkillRefusal } from '../sections.js';
+import { resolveProjectDirs } from '../aiui-config.js';
+import {
+  collectSkillRunTargets,
+  isSkillDocument,
+  type SkillRunTarget,
+} from '../skill-run-targets.js';
 
 interface Registry {
   active(): RunController | undefined;
@@ -54,6 +60,16 @@ interface Registry {
    *  did not fail. The notification it went into is not readable from the
    *  extension host. */
   lastCompileError: string | null;
+  /** Editor-attached controllers — the skill-file session picker's
+   *  candidate pool (batch controllers have no session to inject into). */
+  editorControllers(): RunController[];
+  /** Tell the Variables panel its parked skill-failure affordance is gone —
+   *  an injected run consumed the paused anchors. */
+  withdrawSkillRerunPanel(): void;
+  /** Test-only: resolves the skill session picker without a QuickPick. */
+  pickSkillSessionForTest:
+    | ((targets: SkillRunTarget[]) => SkillRunTarget | undefined)
+    | null;
 }
 
 /**
@@ -158,6 +174,11 @@ export function registerCommands(
     controller: RunController,
     label: string,
     result: { ok: boolean; error?: { message: string }; compile?: CompileOutcome },
+    opts: {
+      /** Where Apply lands the author — a skill-file compile returns to the
+       *  SKILL, not the test whose session recorded it. */
+      returnTo?: string;
+    } = {},
   ): Promise<void> => {
     const outcome = result.compile;
     if (!outcome && !result.ok && result.error) {
@@ -217,7 +238,11 @@ export function registerCommands(
       return;
     }
 
-    await diffs.open({ testFilePath: controller.document.uri.fsPath, files });
+    await diffs.open({
+      testFilePath: controller.document.uri.fsPath,
+      files,
+      ...(opts.returnTo !== undefined && { returnTo: opts.returnTo }),
+    });
     const tokens = summary ? summary.tokensUsed.toLocaleString() : '?';
     const compiled = summary?.compiled ?? 0;
     const total = summary?.totalSteps ?? 0;
@@ -247,12 +272,261 @@ export function registerCommands(
           await vscode.commands.executeCommand('testbench-native.applyCodeBehind');
         }
         if (choice === 'Open diff') {
-          await diffs.open({ testFilePath: controller.document.uri.fsPath, files });
+          await diffs.open({
+            testFilePath: controller.document.uri.fsPath,
+            files,
+            ...(opts.returnTo !== undefined && { returnTo: opts.returnTo }),
+          });
         }
         if (choice === 'Open recording' && summary?.recordingDir) await revealRecording(summary.recordingDir);
         if (choice === 'Show log') getOutputChannel().show(true);
       });
   };
+  /** Is the active editor a SKILL document — frontmatter `type: skill`, or a
+   *  file under the project's skills directory (the server invokes those with
+   *  or without frontmatter, so detection must too)? */
+  const activeDocIsSkill = (editor: vscode.TextEditor): boolean =>
+    isSkillDocument(
+      editor.document.getText(),
+      editor.document.uri.fsPath,
+      resolveProjectDirs(editor.document.uri)?.skillsDir ?? null,
+    );
+
+  /**
+   * The skill-file fork of Run Step Here / Compile This Step
+   * (stories/specs/run-and-compile-a-skill-step.md).
+   *
+   * In a skill file the step commands never act directly: they open a picker
+   * of the sessions the step could run in — tests paused or stopped inside
+   * this skill first, then other open sessions of tests that call it, then a
+   * fresh standalone session (today's behaviour, one click further away).
+   * The answer to "two tests use this skill in two browsers — which one?" is
+   * "the one you point at, every time": nothing is ever chosen silently.
+   *
+   * A test-session pick routes the test's own `[skill:]` call line through
+   * that test's controller with a `startAt`/`endAt` slice bounding execution
+   * to the chosen step(s) — the merged Stop-debug wiring — plus, for a
+   * compile pick, `compile: 'steps'` riding the same request. The run
+   * executes inside the real skill frame, so entries bind into the SKILL's
+   * `.steps.ts` exactly where a whole-test compile puts them.
+   */
+  const openSkillSessionPicker = async (
+    mode: 'run' | 'compile',
+    editor: vscode.TextEditor,
+    clickedLine: number,
+  ): Promise<void> => {
+    const text = editor.document.getText();
+    const inert = inertLineRefusal(text, clickedLine);
+    if (inert) {
+      vscode.window.showWarningMessage(inert);
+      return;
+    }
+    const stepLineSet = new Set(extractSteps(text).map((s) => s.line));
+    if (!stepLineSet.has(clickedLine)) {
+      vscode.window.showWarningMessage(
+        'TestBench: that line is not a step. Put the cursor on a numbered step.',
+      );
+      return;
+    }
+    // Range = the clicked step, or the selection's step lines when the
+    // selection covers it — a contiguous [start, end] slice, gaps included,
+    // exactly as the Stop-debug flow resolves its range.
+    const selected = selectionLines(editor).filter((l) => stepLineSet.has(l));
+    const targetLines =
+      selected.length > 1 && selected.includes(clickedLine) ? selected : [clickedLine];
+    const startLine = targetLines[0]!;
+    const endLine = targetLines[targetLines.length - 1]!;
+    const skillFsPath = editor.document.uri.fsPath;
+    const skillName = path.basename(skillFsPath, path.extname(skillFsPath));
+
+    const candidates = registry.editorControllers().map((c) => {
+      const f = c.lastSkillFailure;
+      return {
+        id: c.document.uri.toString(),
+        testFsPath: c.document.uri.fsPath,
+        documentText: c.document.getText(),
+        documentClosed: c.document.isClosed,
+        isRunning: c.isRunning,
+        sessionProbablyOpen: c.sessionProbablyOpen,
+        pausedInSkill:
+          f && f.kind === 'skill'
+            ? { skillFsPath: f.skillUri, skillLine: f.skillLine, callLine: f.testLine }
+            : null,
+      };
+    });
+    const ctx = registry.skillDebug;
+    const targets = collectSkillRunTargets({
+      skillFsPath,
+      clickedLine,
+      candidates,
+      stopAnchor: ctx
+        ? { id: ctx.testUri.toString(), skillFsPath: ctx.skillUri, callLine: ctx.testLine }
+        : null,
+      skillsDirFor: (testFsPath) =>
+        resolveProjectDirs(vscode.Uri.file(testFsPath))?.skillsDir ?? null,
+    });
+
+    const verb = mode === 'compile' ? 'compile' : 'run';
+    const what =
+      targetLines.length > 1
+        ? `steps ${startLine}–${endLine} of ${skillName}`
+        : `the step on line ${clickedLine} of ${skillName}`;
+    const hasSessions = targets.some((t) => t.kind !== 'standalone');
+    const picked = registry.pickSkillSessionForTest
+      ? registry.pickSkillSessionForTest(targets)
+      : await (async () => {
+          const items = targets.map((t) => ({
+            label: t.label,
+            description: t.description,
+            target: t,
+          }));
+          const choice = await vscode.window.showQuickPick(items, {
+            placeHolder: hasSessions
+              ? `Where should TestBench ${verb} ${what}?`
+              : `No open test session calls ${skillName} — run a test first to ${verb} against its browser`,
+          });
+          return choice?.target;
+        })();
+    if (!picked) return;
+
+    if (picked.kind === 'standalone') {
+      // Today's semantics, verbatim: the skill file's own controller and its
+      // own fresh session.
+      if (mode === 'run') return runStepStandalone(targetLines);
+      return compileStepOnActive(editor, clickedLine);
+    }
+
+    const controller = registry.controllerForUri(picked.id);
+    if (!controller) {
+      vscode.window.setStatusBarMessage('TestBench: that test is no longer open', 3000);
+      return;
+    }
+    if (controller.isRunning) {
+      vscode.window.showWarningMessage(
+        `TestBench: a run of ${path.basename(controller.document.uri.fsPath)} is in progress — ` +
+          'stop it, or wait for it to finish.',
+      );
+      return;
+    }
+    // Liveness pre-flight — a dead session refuses (and, when it was the
+    // Stop-debug anchor, clears that context) rather than silently spinning
+    // up a blank browser.
+    const live = await controller.isRerunSessionLive();
+    if (!live) {
+      if (picked.kind === 'stopped') registry.clearSkillDebug();
+      vscode.window.setStatusBarMessage(
+        'TestBench: that session is no longer alive — run the test again first',
+        4000,
+      );
+      return;
+    }
+    // Line anchors into a skill that defines inline sections are provably
+    // unsafe — same refusal as both merged siblings.
+    const unsupported = sectionedSkillRefusal({
+      kind: 'skill',
+      skillUri: skillFsPath,
+      skillName,
+    });
+    if (unsupported) {
+      vscode.window.setStatusBarMessage(unsupported, 6000);
+      return;
+    }
+    // The server expands the skill from DISK, and a compile's diff and
+    // recording must describe what is on disk too.
+    if (editor.document.isDirty) await editor.document.save();
+
+    const rerun = {
+      startAt: { uri: skillFsPath, line: startLine },
+      endAt: { uri: skillFsPath, line: endLine },
+    };
+    // A ⏸ pick CONSUMES the paused anchors (`resetFrameState` wipes them even
+    // on a continuation). If the run fails inside the skill it re-parks fresh
+    // ones through the normal step:fail route; when it does not, the panel
+    // must be told its edit-and-re-run affordance is gone.
+    const settleConsumedAnchor = (): void => {
+      if (picked.kind === 'paused' && !controller.lastSkillFailure) {
+        registry.withdrawSkillRerunPanel();
+      }
+    };
+
+    if (mode === 'run') {
+      registry.notifyRunning(true);
+      await controller
+        .runLines([picked.callLine], {
+          isContinuation: true,
+          suppressServerBreakpoints: true,
+          rerun,
+        })
+        .finally(() => registry.notifyRunning(false));
+      settleConsumedAnchor();
+      return;
+    }
+
+    // Compile pick: the same slice with `compile: 'steps'` riding it. No
+    // resolveCompileTarget gates here — occurrence is counted over the full
+    // expansion server-side (the client's repeated-step gate would spuriously
+    // refuse), and no `compileScope` is sent: the run's real skill frame is
+    // the binding.
+    registry.lastCompileError = null;
+    if (controller.document.isDirty) await controller.document.save();
+    registry.notifyRunning(true);
+    let result;
+    try {
+      result = await controller.runLines([picked.callLine], {
+        isContinuation: true,
+        suppressServerBreakpoints: true,
+        rerun,
+        compile: 'steps',
+      });
+    } finally {
+      registry.notifyRunning(false);
+    }
+    settleConsumedAnchor();
+    await presentCompile(
+      controller,
+      // The shared-file caveat, visible: this entry will serve every caller,
+      // and this is the session whose page state it recorded against.
+      `${path.basename(skillFsPath)} (recorded in ${path.basename(controller.document.uri.fsPath)}'s session)`,
+      result,
+      { returnTo: skillFsPath },
+    );
+  };
+
+  /** Run Step Here's standalone body — the skill picker's last row reuses it
+   *  with the resolved selection range. */
+  const runStepStandalone = (lines: number[]): void => {
+    const controller = registry.active();
+    if (!controller) return notifyNoActive();
+    const breakpoints = tracker.breakpoints(controller.document.uri);
+    registry.notifyRunning(true);
+    void controller
+      .runLines(lines, { breakpoints })
+      .finally(() => registry.notifyRunning(false));
+  };
+
+  /** Compile This Step's test-file body — also the skill picker's standalone
+   *  row. Resolves the clicked line (selection, scope, occurrence gates) and
+   *  compiles in the ACTIVE document's own session. */
+  const compileStepOnActive = async (
+    editor: vscode.TextEditor,
+    line: number,
+  ): Promise<void> => {
+    const target = resolveCompileTarget(editor.document.getText(), line, selectionLines(editor));
+    if (!target.ok) {
+      // Recorded as well as shown: a notification is not readable from the
+      // extension host, and these refusals are the ones a test has to be
+      // able to tell apart from "the request went out".
+      registry.lastCompileError = target.refusal;
+      vscode.window.showWarningMessage(target.refusal);
+      return;
+    }
+    await runAndCompile({
+      lines: target.lines,
+      mode: 'steps',
+      ...(target.section !== undefined && { section: target.section }),
+    });
+  };
+
   const runSelected = async (): Promise<void> => {
     const controller = registry.active();
     const editor = tracker.activeEditor;
@@ -286,7 +560,13 @@ export function registerCommands(
    * spinners and the yellow ▶ stay painted with no session behind them.
    */
   const performStop = (opts: { setSkillDebug?: boolean } = {}): void => {
-    const controller = registry.active();
+    // Prefer the ACTIVE editor's controller, falling back to the running one
+    // (dispatchStep's routing rule): with a skill file focused during an
+    // injected run — the session picker's, or the Stop-debug flow's — the
+    // active controller is the skill's own idle one, and stopping THAT wipes
+    // UI state while the injected run keeps going on the test's controller.
+    const active = registry.active();
+    const controller = active?.isRunning ? active : (registry.runningController() ?? active);
     // On an explicit Stop (not Close Session), park a skill-debug context for a
     // parked TOP-LEVEL skill failure — read BEFORE resetFrameState wipes
     // lastSkillFailure. Latest Stop wins (setSkillDebug replaces any prior).
@@ -344,7 +624,10 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand('testbench-native.pause', () => {
-      const controller = registry.active();
+      // Same routing as Stop: from a skill file during an injected run, the
+      // active controller is the skill's idle one — pause the running one.
+      const active = registry.active();
+      const controller = active?.isRunning ? active : registry.runningController();
       if (!controller || !controller.isRunning) {
         vscode.window.setStatusBarMessage('TestBench: nothing to pause', 1500);
         return;
@@ -524,6 +807,7 @@ export function registerCommands(
               breakpoints,
               skipBreakpointAtStart: true,
               isContinuation: true,
+              isResume: true,
               ...(plan.rerun && { rerun: plan.rerun }),
             })
             .finally(() => registry.notifyRunning(false));
@@ -541,7 +825,12 @@ export function registerCommands(
         }
         registry.notifyRunning(true);
         const resumed = await controller
-          .runLines(resumeLines, { breakpoints, skipBreakpointAtStart: true, isContinuation: true })
+          .runLines(resumeLines, {
+            breakpoints,
+            skipBreakpointAtStart: true,
+            isContinuation: true,
+            isResume: true,
+          })
           .finally(() => registry.notifyRunning(false));
         // A Continue inherits the compile mode of the run it is continuing
         // (see `compileModeOfRun`), so it can be the block that finishes a
@@ -613,22 +902,26 @@ export function registerCommands(
 
     vscode.commands.registerCommand('testbench-native.runStepHere', (target?: { lineNumber?: number }) => {
       const editor = tracker.activeEditor;
-      const controller = registry.active();
-      if (!editor || !controller) return notifyNoActive();
+      if (!editor) return notifyNoActive();
       const line =
         typeof target?.lineNumber === 'number'
           ? target.lineNumber
           : editor.selection.active.line + 1;
+      // In a SKILL file the command opens the session picker instead of
+      // acting immediately: the browsers worth running against belong to the
+      // tests that call this skill, and standalone is the picker's last row
+      // (stories/specs/run-and-compile-a-skill-step.md).
+      if (activeDocIsSkill(editor)) {
+        return void openSkillSessionPicker('run', editor, line);
+      }
+      const controller = registry.active();
+      if (!controller) return notifyNoActive();
       const inert = inertLineRefusal(editor.document.getText(), line);
       if (inert) {
         vscode.window.showWarningMessage(inert);
         return;
       }
-      const breakpoints = tracker.breakpoints(controller.document.uri);
-      registry.notifyRunning(true);
-      void controller
-        .runLines([line], { breakpoints })
-        .finally(() => registry.notifyRunning(false));
+      runStepStandalone([line]);
     }),
 
     // "Renumber Steps" (stories/specs/step-renumbering.md). Rewrites the
@@ -773,29 +1066,18 @@ export function registerCommands(
           typeof target?.lineNumber === 'number'
             ? target.lineNumber
             : editor.selection.active.line + 1;
+        // The skill-file fork: pick the session (a paused/stopped/open test,
+        // or standalone), then compile the step in it. Test files keep the
+        // direct path below, `resolveCompileTarget`'s gates included.
+        if (activeDocIsSkill(editor)) {
+          return openSkillSessionPicker('compile', editor, line);
+        }
         // A multi-line selection that covers the clicked line compiles every
         // step in it, in order — the session advances between them, so a
         // selection is just this flow k times. The resolver also decides the
         // scope the entries bind under, which for a section body is not the
         // scope the steps EXECUTE in.
-        const target2 = resolveCompileTarget(
-          editor.document.getText(),
-          line,
-          selectionLines(editor),
-        );
-        if (!target2.ok) {
-          // Recorded as well as shown: a notification is not readable from the
-          // extension host, and these refusals are the ones a test has to be
-          // able to tell apart from "the request went out".
-          registry.lastCompileError = target2.refusal;
-          vscode.window.showWarningMessage(target2.refusal);
-          return;
-        }
-        await runAndCompile({
-          lines: target2.lines,
-          mode: 'steps',
-          ...(target2.section !== undefined && { section: target2.section }),
-        });
+        await compileStepOnActive(editor, line);
       },
     ),
 
@@ -843,8 +1125,10 @@ export function registerCommands(
     ),
 
     vscode.commands.registerCommand('testbench-native.applyCodeBehind', async () => {
-      // Read before applying — `apply` consumes the proposal.
-      const testFilePath = diffs.pending?.testFilePath;
+      // Read before applying — `apply` consumes the proposal. `returnTo`
+      // wins when set: a skill-file compile lands the author back in the
+      // skill they are iterating on.
+      const testFilePath = diffs.pending?.returnTo ?? diffs.pending?.testFilePath;
       const written = await diffs.apply();
       if (written.length === 0) {
         vscode.window.setStatusBarMessage('TestBench: nothing to apply', 2000);
@@ -1266,6 +1550,7 @@ async function dispatchStep(
           breakpoints,
           skipBreakpointAtStart: true,
           isContinuation: true,
+          isResume: true,
           stepMode: mode,
           ...(plan.rerun && { rerun: plan.rerun }),
         })
@@ -1298,8 +1583,11 @@ async function dispatchStep(
         // Resuming from a breakpoint pause is a continuation (same as
         // Continue) — without this, runLines clears all statuses and the
         // pass marks earned by steps before the breakpoint disappear when
-        // the user Steps Into the next step.
+        // the user Steps Into the next step. It is also a true RESUME of
+        // the same logical run, which is what lets a paused Run & Compile
+        // keep compiling through a step command.
         isContinuation: true,
+        isResume: true,
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
         ...(pauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
       })

@@ -9,6 +9,7 @@ import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
 import { registerCommands } from './commands/index.js';
+import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
@@ -169,6 +170,34 @@ class RunControllerRegistry implements vscode.Disposable {
     yield* this.controllers.values();
     yield* this.batchControllers.values();
   }
+
+  /** Editor-attached controllers — the skill-file session picker's candidate
+   *  pool. Batch controllers are excluded on purpose: their sessions are
+   *  unique per run and torn down when the batch ends, so there is never one
+   *  to inject a step into. */
+  editorControllers(): RunController[] {
+    return [...this.controllers.values()];
+  }
+
+  /**
+   * Withdraw the Variables panel's "re-run this skill step" affordance.
+   *
+   * An injected run on a paused controller CONSUMES the parked failure —
+   * `resetFrameState` wipes it even on a continuation — and nothing else
+   * tells the panel, which would keep offering an action that can only
+   * refuse. A run that fails inside the skill re-parks and re-posts through
+   * the normal step:fail route, so callers withdraw only when no fresh
+   * failure is held.
+   */
+  withdrawSkillRerunPanel(): void {
+    this.view.post({ type: 'skillRerunAvailable', failure: null });
+  }
+
+  /** Test-only: the skill session picker resolves through this instead of a
+   *  QuickPick when set — integration tests cannot drive native UI. */
+  pickSkillSessionForTest:
+    | ((targets: SkillRunTarget[]) => SkillRunTarget | undefined)
+    | null = null;
 
   /** Test-only: swap the health probe / spawn used by every controller.
    *  Discards existing controllers for the same reason the client factory
@@ -1233,6 +1262,13 @@ export interface TestBenchTestHooks {
   skillDebugContext: () =>
     | { testUri: string; testLine: number; skillUri: string; skillName: string; frameId: string }
     | null;
+  /** Test-only: resolve the skill-file session picker without a QuickPick —
+   *  integration tests cannot drive native UI. Pass null to restore the
+   *  interactive picker. The callback receives the rows in presentation
+   *  order and returns the pick (or undefined to cancel). */
+  setSkillSessionPicker: (
+    fn: ((targets: SkillRunTarget[]) => SkillRunTarget | undefined) | null,
+  ) => void;
   /** Drive the webview→host message path directly so tests can verify it
    *  mirrors the registered command behavior (markRunningStopped, etc).
    *  Guards the two-handler regression class. */
@@ -1613,6 +1649,9 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
               frameId: c.frameId,
             }
           : null;
+      },
+      setSkillSessionPicker: (fn) => {
+        registry.pickSkillSessionForTest = fn;
       },
       dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker),
       discoveredTests: () =>

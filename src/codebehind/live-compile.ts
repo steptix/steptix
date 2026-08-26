@@ -243,8 +243,15 @@ export class LiveCompiler {
   /** The last-run sidecar's rows, read once and shared by every step. */
   private lastRun: Promise<LastRunStep[]> | undefined;
 
+  /** How many steps this compile is FOR, blocks included — the summary's
+   *  `totalSteps`. Starts as the plan's length and shrinks when a block is
+   *  bounded to a slice (`setSlice`): a single-step compile of a six-step
+   *  skill is "1 of 1", not "1 of 6". */
+  private scopedTotal: number;
+
   constructor(private readonly options: LiveCompileOptions) {
     this.plan = [...options.plan];
+    this.scopedTotal = this.plan.length;
     this.signal = options.signal;
     this.emit = options.emit;
     this.note = options.note;
@@ -265,11 +272,35 @@ export class LiveCompiler {
   ): void {
     this.offset = this.plan.length;
     this.plan.push(...plan);
+    this.scopedTotal += plan.length;
     this.signal = signal;
     if (stream) {
       this.emit = stream.emit;
       this.note = stream.note;
     }
+  }
+
+  /**
+   * Bound the CURRENT block to a slice: the request expanded the whole
+   * document (occurrence counting and the whole-test prompt need it all) but
+   * executes only `[startIndex, endIndex]` of it — a skill-file single-step
+   * run/compile, or any `startAt`/`endAt` re-run with `compile` riding it.
+   *
+   * The plan stays full-length — `offer` and `stepEvent` index it by absolute
+   * position — but out-of-slice steps drop out of scope, and the summary's
+   * `totalSteps` counts only the slice. Indexes are 0-based within this
+   * block's own plan segment. Called before any of the block's steps is
+   * offered.
+   */
+  setSlice(startIndex: number, endIndex: number): void {
+    const blockLen = this.plan.length - this.offset;
+    const start = Math.max(0, startIndex);
+    const end = Math.min(blockLen - 1, endIndex);
+    for (let i = 0; i < blockLen; i++) {
+      if (i < start || i > end) this.plan[this.offset + i]!.inScope = false;
+    }
+    const size = Math.max(0, end - start + 1);
+    this.scopedTotal += size - blockLen;
   }
 
   /** How many steps of this run the compiler has seen, blocks included. Used
@@ -393,9 +424,16 @@ export class LiveCompiler {
     const rows = await this.lastRunRows();
     // Matched by the identity the binding uses — section scope, authored text,
     // and the occurrence of that pair — because a body that says the same
-    // thing twice has two rows and only one of them failed.
+    // thing twice has two rows and only one of them failed. The target file
+    // joins the match where both sides carry it: a skill-body step and a
+    // test-frame step can share text and (empty) section, and without the
+    // file the repair could be fed the other one's failure. A row written
+    // before the field existed matches as it always did.
     const same = rows.filter(
-      (r) => (r.section ?? '') === (binding.section ?? '') && r.source === binding.source,
+      (r) =>
+        (r.section ?? '') === (binding.section ?? '') &&
+        r.source === binding.source &&
+        (r.file === undefined || r.file === binding.file),
     );
     const row = same[binding.occurrence];
     return row?.stale ? (row.error ?? 'the entry failed on the last run') : undefined;
@@ -588,7 +626,7 @@ export class LiveCompiler {
     const nothingToDo = this.attempted === 0 && final.stoppedAt === undefined && !final.aborted;
     const summary: CompileSummary = {
       test: this.options.testFilePath,
-      totalSteps: this.plan.length,
+      totalSteps: this.scopedTotal,
       compiled: this.compiled.length,
       kept: this.kept,
       keptAi: this.keptAiExisting + this.declined.length,

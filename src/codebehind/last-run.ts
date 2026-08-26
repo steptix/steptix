@@ -25,6 +25,13 @@ export interface LastRunStep {
   source: string;
   /** Section scope, for a step defined in a `### Section` body. */
   section?: string;
+  /**
+   * The entry's target `.steps.ts` (the binding's `file`). Part of the row's
+   * identity where present: a skill-body step and a test-frame step can share
+   * `source` and an empty `section`, and only the file tells them apart.
+   * Optional so sidecars written before the field still read back.
+   */
+  file?: string;
   status: StepStatus;
   /** True when the step ran its code-behind entry rather than calling the AI. */
   fromCodeBehind: boolean;

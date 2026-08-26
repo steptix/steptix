@@ -67,6 +67,15 @@ export interface RecordedStep {
    */
   occurrence?: number;
   /**
+   * The entry's target `.steps.ts` (the binding's `file`) — the fourth part
+   * of the splice identity. A skill-body step and a test-frame step can share
+   * authored text, an empty section and occurrence 0; only the file they bind
+   * into tells them apart, and without it a skill-step splice would claim the
+   * test step's slot (first in file order) and overwrite its evidence.
+   * Optional so recordings written before the field still read and splice.
+   */
+  file?: string;
+  /**
    * When THIS step's files were written. A wholesale recording stamps them
    * all the same; a splice stamps only the step it replaced, so the author
    * can see that step 3's recording is from Tuesday and step 7's from just
@@ -110,7 +119,12 @@ export interface RecordingInput {
   identities?:
     | Record<
         number,
-        { source: string; section?: string | undefined; occurrence?: number | undefined }
+        {
+          source: string;
+          section?: string | undefined;
+          occurrence?: number | undefined;
+          file?: string | undefined;
+        }
       >
     | undefined;
 }
@@ -191,7 +205,12 @@ async function writeRecordedStep(
     at: number;
     secrets: string[];
     recordedAt: string;
-    identity?: { source: string; section?: string | undefined; occurrence?: number | undefined };
+    identity?: {
+      source: string;
+      section?: string | undefined;
+      occurrence?: number | undefined;
+      file?: string | undefined;
+    };
   },
 ): Promise<RecordedStep> {
   const { at, secrets, recordedAt, identity } = options;
@@ -216,6 +235,7 @@ async function writeRecordedStep(
     ...(identity?.source !== undefined && { source: redact(identity.source, secrets) }),
     ...(identity?.section !== undefined && { section: identity.section }),
     ...(identity?.occurrence !== undefined && { occurrence: identity.occurrence }),
+    ...(identity?.file !== undefined && { file: identity.file }),
     recordedAt,
     status: result.status,
     ...(result.error !== undefined && { error: redact(result.error, secrets) }),
@@ -247,7 +267,9 @@ async function writeRecordedStep(
  * The identity a splice matches a recorded step by: section scope, the
  * authored text, and the occurrence of that pair within its frame — the same
  * three parts the code-behind binding uses, so a spliced step lands in the
- * slot the runtime would bind to.
+ * slot the runtime would bind to. The binding's target FILE is deliberately
+ * not part of this key — it is the claim's tie-break (`claimSlot`), so a
+ * recording written before the field existed still matches.
  *
  * Falls back to the executed instruction for a recording written before
  * `source` existed, and to occurrence 0 for one written before `occurrence`
@@ -262,6 +284,32 @@ function identityKey(step: {
 }): string {
   const nul = String.fromCharCode(0);
   return [step.section ?? '', (step.source ?? step.instruction).trim(), step.occurrence ?? 0].join(nul);
+}
+
+/**
+ * The slot an incoming step may claim from its identity bucket, or undefined
+ * when it must open a new one. Removes the claimed slot from the bucket.
+ *
+ * The bucket key carries no file, so a skill-body step and a test-frame step
+ * with the same text, empty section and occurrence 0 share a bucket — and
+ * the first slot in file order used to win, letting a skill-step splice
+ * overwrite the test step's evidence. The file settles it: a filed incoming
+ * step claims its own file's slot first, then an unfiled (pre-field) slot,
+ * and NEVER a slot recorded for a different file. An unfiled incoming step —
+ * an older caller — claims the first slot, as it always did.
+ */
+function claimSlot(
+  bucket: Array<{ index: number; file?: string | undefined }> | undefined,
+  incomingFile: string | undefined,
+): number | undefined {
+  if (!bucket || bucket.length === 0) return undefined;
+  let pick = 0;
+  if (incomingFile !== undefined) {
+    pick = bucket.findIndex((s) => s.file === incomingFile);
+    if (pick < 0) pick = bucket.findIndex((s) => s.file === undefined);
+    if (pick < 0) return undefined;
+  }
+  return bucket.splice(pick, 1)[0]!.index;
 }
 
 /**
@@ -294,13 +342,14 @@ export async function spliceRecording(
     // Every recorded step, by identity, in file order — each claimed at most
     // once so two sends of the same text splice into two different slots.
     const bySlot = new Map<number, RecordedStep>();
-    const unclaimed = new Map<string, number[]>();
+    const unclaimed = new Map<string, Array<{ index: number; file?: string | undefined }>>();
     for (const step of existing.steps) {
       bySlot.set(step.index, step);
       const key = identityKey(step);
+      const slot = { index: step.index, file: step.file };
       const bucket = unclaimed.get(key);
-      if (bucket) bucket.push(step.index);
-      else unclaimed.set(key, [step.index]);
+      if (bucket) bucket.push(slot);
+      else unclaimed.set(key, [slot]);
     }
     let nextFree = existing.steps.reduce((max, s) => Math.max(max, s.index), 0) + 1;
 
@@ -315,8 +364,7 @@ export async function spliceRecording(
         ...(identity?.section !== undefined && { section: identity.section }),
         ...(identity?.occurrence !== undefined && { occurrence: identity.occurrence }),
       });
-      const bucket = unclaimed.get(key);
-      const at = bucket && bucket.length > 0 ? bucket.shift()! : nextFree++;
+      const at = claimSlot(unclaimed.get(key), identity?.file) ?? nextFree++;
       const written = await writeRecordedStep(dir, result, {
         at,
         secrets,

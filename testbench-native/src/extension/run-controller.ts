@@ -340,6 +340,18 @@ export class RunController {
    * closing that session first.
    */
   private viewportSentForSession: string | null = null;
+  /**
+   * Whether this controller PROBABLY has a live server session: a steps
+   * stream has answered since the last close/recycle. The truth is the
+   * server's — callers that act on a session still run the
+   * `isRerunSessionLive` pre-flight — but enumeration (the skill-file
+   * session picker) needs a no-network signal for "worth listing".
+   * Controller-lifetime only: a session that survived a window reload is
+   * invisible here until this window runs the test again.
+   */
+  get sessionProbablyOpen(): boolean {
+    return this.configSentForSession;
+  }
   /** The `compile:result` a compile-mode run produced, collected as the
    *  stream folds and attached to the outcome by `runLines`. Reset per run,
    *  so a plain Run after a Run & Compile never carries the old proposal. */
@@ -1588,6 +1600,28 @@ export class RunController {
        *  skill-file URIs revealed in the first batch are carried forward so
        *  the NEXT fresh re-run still cleans them up correctly. */
       isContinuation?: boolean;
+      /**
+       * True ONLY when this call resumes the SAME logical run — Continue /
+       * Resume / a step command re-opening a breakpoint-paused run. Distinct
+       * from `isContinuation`, which several INJECTED runs also set (the
+       * Variables-panel skill re-run, the Stop-debug slice, the skill-file
+       * session picker) purely for its status-preserving side: those are new
+       * logical runs, and riding them into the paused run's compile would
+       * silently inherit `compileModeOfRun` (a model spend the caller never
+       * sees, plus — in `'run'` mode — a wholesale recording write that
+       * replaces the test's recording with a one-step one) and stamp
+       * `compileContinues` on the first block (re-opening a RETAINED compiler
+       * from a previously COMPLETED compile instead of superseding it).
+       * Compile inheritance and the first block's `compileContinues` key on
+       * THIS flag alone.
+       */
+      isResume?: boolean;
+      /**
+       * Suppress the server-side breakpoint map for this run. The skill-file
+       * single-step flows send it: a one-step slice pausing at its own
+       * breakpoint runs (and, with compile, proposes) nothing.
+       */
+      suppressServerBreakpoints?: boolean;
       /** "Re-run a skill step with its variables" (see
        *  `rerunSkillStepFromFailure`). When set, the single step in `lines` is
        *  the failed `[skill: …]` invocation; the server re-expands it, starts
@@ -2072,7 +2106,7 @@ export class RunController {
      * plain Run and its entries were never generated.
      */
     const compileMode =
-      options.compile ?? (options.isContinuation === true ? this.compileModeOfRun : undefined);
+      options.compile ?? (options.isResume === true ? this.compileModeOfRun : undefined);
     if (options.isContinuation !== true) this.compileModeOfRun = options.compile;
     /** Step-blocks already sent in THIS call — the second onwards continues
      *  the compiler the first opened. */
@@ -2117,12 +2151,16 @@ export class RunController {
             ...(options.pauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
             ...(pendingRerun && { rerun: pendingRerun }),
             ...(compileMode && { compile: compileMode }),
-            // Blocks 2..n of this call, and every block of a Continue: the
-            // compiler for this run is already open on the session.
-            ...(compileMode && (compileBlocksSent > 0 || options.isContinuation === true) && {
+            // Blocks 2..n of this call, and every block of a true RESUME: the
+            // compiler for this run is already open on the session. Never an
+            // injected run's first block — its `isContinuation` preserves
+            // marks, not the previous run's compiler, and the server must
+            // supersede whatever a completed or abandoned compile left open.
+            ...(compileMode && (compileBlocksSent > 0 || options.isResume === true) && {
               compileContinues: true,
             }),
             ...(options.compileScope && { compileScope: options.compileScope }),
+            ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
           });
           compileBlocksSent++;
           pendingRerun = undefined;
@@ -2394,8 +2432,11 @@ export class RunController {
     compileContinues?: boolean;
     /** Section attribution for the entries this block compiles. */
     compileScope?: { section: string };
+    /** Omit the per-URI breakpoint map from the request — a single-step
+     *  slice pausing at its own breakpoint runs nothing. */
+    suppressServerBreakpoints?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, suppressServerBreakpoints } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -2467,7 +2508,7 @@ export class RunController {
           ...(rerun.endAt && { endAt: rerun.endAt }),
           ...(rerun.seedScope && { seedScope: rerun.seedScope }),
         }),
-        ...(this.breakpointsByUriProvider && (() => {
+        ...(this.breakpointsByUriProvider && suppressServerBreakpoints !== true && (() => {
           const map = this.breakpointsByUriProvider!();
           return Object.keys(map).length > 0 ? { breakpointsByUri: map } : {};
         })()),
