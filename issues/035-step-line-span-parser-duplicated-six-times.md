@@ -111,6 +111,15 @@ schedule allows), or (b) any other change needs to touch the line model, or
 (c) a real bug lands in the strict/loose gap (e.g. a user's indented list
 runs in TestBench but not via CLI).
 
+Update 2026-08-26: the family gained its first **mutating** consumer —
+`testbench-native/src/extension/renumber-core.ts` (Renumber Steps, PR #92)
+re-states the ordinal shape as `/^(\d+)\./` plus a column-0 assumption
+carried by its edit shape. A strict/loose drift there rewrites documents,
+not just decorations, so when this consolidation lands, export the ordinal
+matcher (e.g. `stepOrdinal(rawLine)` → `{start, length, value}`) from
+runner-core and adopt it in renumber-core first; `locateMatchText` in
+section-index.ts already wants the same shape.
+
 ## Why this matters
 
 Six hand-synced implementations of one grammar means every line-model change

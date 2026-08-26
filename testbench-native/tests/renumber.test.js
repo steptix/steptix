@@ -9,7 +9,7 @@
  * is how the spec states them. `computeRenumberEdits` is asserted directly
  * wherever the edit SHAPE carries the contract: the digit run's length (a
  * shortening or lengthening rewrite), and the zero-edit result the command
- * turns into "already numbered" rather than an empty undo stop.
+ * turns into "already numbered" without calling the editor at all.
  */
 
 import { test } from 'node:test';
@@ -218,6 +218,63 @@ test("a wrapped step's continuation lines are untouched", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fenced code blocks — literal text wearing a step's shape
+// ---------------------------------------------------------------------------
+
+test('fenced numbered lines are untouched and feed nothing to the counter', () => {
+  // classifyLines calls the fenced `1.`/`9.` steps (its documented fence
+  // blindness); the walk must not — they are example text, and letting them
+  // advance the counter would shift the real steps below the fence.
+  const before = doc(
+    '## Steps',
+    '1. real one',
+    '```',
+    '1. fenced item',
+    '9. fenced item',
+    '```',
+    '5. real two',
+  );
+  const after = doc(
+    '## Steps',
+    '1. real one',
+    '```',
+    '1. fenced item',
+    '9. fenced item',
+    '```',
+    '2. real two',
+  );
+  assert.equal(renumberText(before, []), after);
+});
+
+test('a fenced ### does not restart the numbering', () => {
+  const before = doc('## Steps', '1. a', '```', '### Fenced', '```', '5. b');
+  const after = doc('## Steps', '1. a', '```', '### Fenced', '```', '2. b');
+  assert.equal(renumberText(before, []), after);
+});
+
+test('a document whose numbered lines are ALL fenced yields zero edits', () => {
+  // The shape of a spec/docs file: a fenced worked example containing its own
+  // `## Steps` and deliberately wrong ordinals. Renumber must leave it be.
+  const text = doc(
+    '# Some spec',
+    '',
+    '```markdown',
+    '## Steps',
+    '1. Open the site',
+    '2. Login',
+    '2. Check the dashboard',
+    '```',
+  );
+  assert.deepEqual(computeRenumberEdits(text, []), []);
+});
+
+test('a selection covering only fenced lines falls back to renumber-all', () => {
+  const before = doc('## Steps', '1. real', '5. real two', '```', '7. fenced', '```');
+  const after = doc('## Steps', '1. real', '2. real two', '```', '7. fenced', '```');
+  assert.equal(renumberText(before, [lineOf(before, '7. fenced')]), after);
+});
+
+// ---------------------------------------------------------------------------
 // Selection mode
 // ---------------------------------------------------------------------------
 
@@ -336,6 +393,15 @@ test('a leading-zero ordinal is replaced wholesale with the decimal ordinal', ()
 test('an unselected leading-zero ordinal feeds the counter as a decimal number', () => {
   const before = doc('## Steps', '007. a', '1. b');
   assert.equal(renumberText(before, [3]), doc('## Steps', '007. a', '8. b'));
+});
+
+test('an unselected ordinal beyond safe-integer range does not seed the counter', () => {
+  // Number("1000000000000000000000") is 1e21; +1 later would String() to
+  // "1e+21", turning the target below into a non-step. The huge line keeps
+  // its text and the counter keeps the last exact value instead.
+  const before = doc('## Steps', '1. a', '1000000000000000000000. big', '1. c');
+  const after = doc('## Steps', '1. a', '1000000000000000000000. big', '2. c');
+  assert.equal(renumberText(before, [lineOf(before, '1. c')]), after);
 });
 
 // ---------------------------------------------------------------------------

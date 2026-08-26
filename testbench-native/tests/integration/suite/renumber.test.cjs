@@ -3,8 +3,10 @@
  *
  * The numbering DECISION is unit-tested without a host
  * (`tests/renumber.test.js`); what only a host can prove is the wiring —
- * the command is registered, it reads the editor's selection, and it applies
- * every replacement as ONE edit so a single undo restores the file.
+ * the command reads the editor's real selection shapes and applies every
+ * replacement as ONE edit so a single undo restores the file. (Registration
+ * itself is pinned centrally by activation.test.cjs's command sweep; every
+ * executeCommand here would reject if it broke.)
  *
  * Nothing here saves. The fixture on disk stays misnumbered (later runs open
  * it fresh), so every case reverts its buffer instead.
@@ -81,18 +83,10 @@ describe('TestBench renumber steps', function () {
 
   afterEach(async () => {
     // Never save. Reverting also keeps the next case's `vscode.open` from
-    // reusing a renumbered buffer.
+    // reusing a renumbered buffer; the beforeEach closeAllEditors is the
+    // backstop, per suite convention.
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
-    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
     assert.equal(fs.readFileSync(uri.fsPath, 'utf8'), onDisk, 'the fixture on disk must not change');
-  });
-
-  it('registers testbench-native.renumberSteps', async () => {
-    const commands = await vscode.commands.getCommands(true);
-    assert.ok(
-      commands.includes('testbench-native.renumberSteps'),
-      'command missing from the registry — the manifest and the registration must agree',
-    );
   });
 
   it('with no selection, renumbers the main flow and restarts the body at 1', async () => {
@@ -135,10 +129,13 @@ describe('TestBench renumber steps', function () {
 
   it('with the tail of the main flow selected, only those lines change', async () => {
     const editor = vscode.window.activeTextEditor;
-    // Lines 14-15 (0-based 13-14): the duplicate `2.` and the `3.` below it.
+    // Whole-line select of lines 14-15 (0-based 13-14) the way gutter drags
+    // and Shift+Down produce it: the range ends at COLUMN 0 OF THE NEXT
+    // LINE. The trimmed-end rule (selectionLinesForEdit) must not target
+    // that trailing line.
     editor.selection = new vscode.Selection(
       new vscode.Position(13, 0),
-      new vscode.Position(14, 5),
+      new vscode.Position(15, 0),
     );
 
     await vscode.commands.executeCommand('testbench-native.renumberSteps');
@@ -154,5 +151,43 @@ describe('TestBench renumber steps', function () {
       '1. Type the username',
       '2. Click Sign in',
     ]);
+  });
+
+  it('a whole-line selection does not renumber the step below it', async () => {
+    const editor = vscode.window.activeTextEditor;
+    // Gutter-click the line number of line 13 (`2. Login`, correctly
+    // numbered): the selection runs [12,0]→[13,0]. Untrimmed, line 13's
+    // trailing neighbour — the duplicate `2.` on line 14 — was silently
+    // rewritten too; the correct outcome is no edit at all.
+    editor.selection = new vscode.Selection(
+      new vscode.Position(12, 0),
+      new vscode.Position(13, 0),
+    );
+
+    await vscode.commands.executeCommand('testbench-native.renumberSteps');
+
+    assert.equal(editor.document.getText(), onDisk);
+  });
+
+  it('a breakpoint on a renumbered line survives (acceptance #5)', async () => {
+    const editor = vscode.window.activeTextEditor;
+    const bpAt = (line0) =>
+      vscode.debug.breakpoints.some(
+        (bp) =>
+          bp instanceof vscode.SourceBreakpoint &&
+          bp.location.uri.toString() === uri.toString() &&
+          bp.location.range.start.line === line0,
+      );
+    // Gutter form: toggleBreakpoint takes the clicked line directly. Line 14
+    // (1-based) is the duplicate `2.` whose ordinal the renumber rewrites.
+    await vscode.commands.executeCommand('testbench-native.toggleBreakpoint', { lineNumber: 14 });
+    await waitFor('breakpoint added', () => bpAt(13));
+
+    await vscode.commands.executeCommand('testbench-native.renumberSteps');
+
+    assert.notEqual(editor.document.getText(), onDisk, 'the renumber must have applied');
+    assert.ok(bpAt(13), 'the breakpoint must stay on its line after the renumber');
+
+    vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
   });
 });

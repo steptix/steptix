@@ -86,19 +86,29 @@ no new grammar, no fourth copy of the rules:
 - A wrapped step's continuation lines classify as `prose` — only the first
   physical line carries the ordinal, so wrapping needs no special handling.
 
+One correction on top of the classifier: `classifyLines` deliberately does
+not track ``` fences, so a numbered line inside a fence within the Steps
+span classifies as a step (the same blindness step-region-core.ts guards for
+completion). Completion merely offers a dropdown there; renumbering REWRITES
+text, so fenced lines are invisible to the walk — never rewritten, never
+feeding the counter, and a fenced `###` never restarting it. A docs file
+whose numbered examples are all fenced therefore yields zero edits.
+
 ## 3. Numbering rules
 
 One walk over the classified lines, top to bottom, with a counter `prev`
 (starting at 0):
 
-1. On a `section-heading`: reset `prev` to 0.
-2. On a renumberable line that is a **target**: its new ordinal is
+1. On a line inside a ``` fence: no effect, whatever it classifies as (§2).
+2. On a `section-heading`: reset `prev` to 0.
+3. On a renumberable line that is a **target**: its new ordinal is
    `prev + 1`. Record an edit if that differs from what's written;
    `prev` = the new ordinal.
-3. On a renumberable line that is **not** a target: `prev` = the ordinal as
-   written (parse `/^(\d+)\./`). This is what "continuing from the step
-   above" means.
-4. Anything else: no effect.
+4. On a renumberable line that is **not** a target: `prev` = the ordinal as
+   written (parse `/^(\d+)\./`) — unless that value exceeds JS's safe-integer
+   range, in which case it doesn't feed the counter (an inexact seed would
+   corrupt every target below it, `String(1e21 + 1)` being `"1e+21"`).
+5. Anything else: no effect.
 
 Targets are the selected step lines when the selection contains any, else
 every renumberable line. Renumber-all is therefore the same algorithm with
@@ -135,11 +145,19 @@ after it, and the instruction text are byte-identical before and after.
 
 ### 4.2 What "selected" means
 
-The same thing it means for Run Selected Step(s): the lines covered by every
-*range* selection, via the existing `selectionLines(editor)` helper in
-[commands/index.ts](../../src/extension/commands/index.ts). A cursor with no
-highlighted range is not a selection — that's the renumber-all case, exactly
-as the gutter items around it treat a bare click.
+The same thing it means for Run Selected Step(s) — the lines covered by
+every *range* selection, a cursor with no highlighted range not counting
+(that's the renumber-all case) — with **one narrowing**: a selection that
+ends at column 0 of a line does not target that line
+(`selectionLinesForEdit` in
+[commands/index.ts](../../src/extension/commands/index.ts)). Every line-wise
+gesture — gutter click/drag, Shift+Down, Ctrl+L, triple-click — produces
+exactly that shape, so without the trim a whole-line selection would also
+rewrite the step *below* it. This is the same rule the anchor math applies
+to edits (`effectiveEndLine`, step-lines.ts: a range ending at column 0
+stops before any of that line's content). Run Selected keeps the untrimmed
+helper deliberately — an extra step in a run is visible; a silent rewrite is
+not.
 
 The gutter menu passes `{ lineNumber }` to the command; it is accepted and
 ignored. Renumbering one step because the user happened to right-click on it
@@ -155,19 +173,30 @@ parity with Run Selected.
 - Nothing to change (numbering already correct, or the file has no steps) →
   status bar: `TestBench: steps already numbered` (2.5 s). No error — the
   command is idempotent.
+- Edit rejected (the buffer changed between compute and apply — a keystroke
+  or a disk-change reload in flight) → status bar: `TestBench: renumber not
+  applied — the document changed; run it again` (2.5 s). Never a success
+  message for an edit that didn't land.
 
 ### 4.4 How the edit applies
 
 One `editor.edit(...)` call containing every per-line replacement — a single
-undo step, applied to the buffer (dirty or not), never saved. No gating on
-run state: line numbers don't move, so breakpoints, run statuses, and the
-resume anchor all stay where they are (the anchor's touched-line snap
-re-resolves to the same line, which is still a step).
+undo step, applied to the buffer (dirty or not), never saved. The call's
+boolean result is checked: VS Code rejects the whole batch if the document
+changed underneath it, and the command reports that (§4.3) rather than
+claiming success — the same discipline as the `applyEdit` check in
+codebehind-diff.ts. No gating on run state: line numbers don't move, so
+breakpoints, run statuses, and the resume anchor all stay where they are
+(the anchor's touched-line snap re-resolves to the same line, which is
+still a step).
 
 ## 5. Edge cases
 
 | Scenario | Behavior |
 |---|---|
+| Numbered lines inside a ``` fence | Invisible to the walk: never rewritten, never feed the counter, a fenced `###` never resets it. A selection covering only fenced lines counts as "no steps selected". |
+| Whole-line selection (gutter drag, Shift+Down, Ctrl+L — ends at column 0 of the next line) | The trailing line is not targeted (§4.2). |
+| Unselected step with an ordinal beyond `Number.MAX_SAFE_INTEGER` | Keeps its text and does not seed the counter — the next target continues from the last exact ordinal. |
 | Selection covers only prose/headings/blank lines | No step lines selected → renumber-all. |
 | Selection includes a step line plus prose around it | The step lines in it are the targets; the prose contributes nothing. |
 | Multi-cursor / multiple selections | Union of all range selections, same as Run Selected. |
@@ -217,12 +246,18 @@ patch-version bump (CLAUDE.md rule).
   untouched; tail selection continues from the step above; selection at
   scope start gets 1; selection spanning main flow + body; prose-only
   selection falls back to all; already-correct returns no edits; multi-digit
-  and leading-zero ordinals; wrapped-step continuation untouched; CRLF text.
-- One integration case (`tests/integration/suite/`, the fast FakeApiClient
-  harness): open a fixture, execute the command with no selection, assert
-  the document text renumbered; then with a tail selection, assert only the
-  tail changed. This proves the wiring (registration, selection reading,
-  edit application), which the pure tests can't.
+  and leading-zero ordinals; wrapped-step continuation untouched; CRLF text;
+  fenced lines (untouched, no counter feed, no reset from a fenced `###`,
+  all-fenced document yields zero edits, fenced-only selection falls back to
+  renumber-all); unsafe-integer ordinal not seeding the counter.
+- Integration cases (`tests/integration/suite/`, the fast FakeApiClient
+  harness): no-selection renumber of a fixture; single undo restores;
+  second run changes nothing; a whole-line tail selection (ending at column
+  0 of the next line) changes only the selected steps; a whole-line
+  selection of one correct step changes nothing; a breakpoint set on a
+  renumbered line survives. These prove the wiring — real selection shapes,
+  one-edit application — which the pure tests can't. (Registration is
+  pinned centrally by activation.test.cjs's command sweep.)
 
 ## 7. Acceptance criteria
 
@@ -236,6 +271,13 @@ patch-version bump (CLAUDE.md rule).
    duplicate `1.`s.
 4. Running the command twice in a row: the second run makes no edit at all
    (so no undo step) and reports "already numbered".
-5. Breakpoints and painted run statuses survive a renumber on the same lines.
-6. `npm run typecheck:extension`, `npm test`, and `npm run build` pass in
+5. Breakpoints and painted run statuses survive a renumber on the same lines
+   (the breakpoint half is pinned by an integration case).
+6. Numbered lines inside ``` fences are never rewritten and never shift the
+   ordinals of real steps; a docs file whose examples are all fenced reports
+   "already numbered".
+7. A whole-line selection — the shape gutter drags, Shift+Down, Ctrl+L and
+   triple-click produce — never touches the line below the visually selected
+   block.
+8. `npm run typecheck:extension`, `npm test`, and `npm run build` pass in
    `testbench-native/`; the new unit and integration tests are green.

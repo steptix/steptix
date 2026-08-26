@@ -16,8 +16,11 @@ main flow 1..N, every `### Section` body restarting at 1. Only the leading
 digits change, so the instruction text, its spacing, and any code-behind
 binding are byte-identical afterwards. What counts as a step is runner-core's
 classifier, so numbered items that never run — those under a `####` heading,
-or outside the `## Steps` span — are left alone rather than being claimed as
-steps.
+inside a ``` fence, or outside the `## Steps` span — are left alone rather
+than being claimed as steps; fenced example lines don't shift real steps'
+numbers either. A selection that ends at column 0 of a line (the shape
+gutter drags, Shift+Down and Ctrl+L produce) doesn't renumber that trailing
+line — only what you visibly selected changes.
 
 ### Added — per-test viewport
 
