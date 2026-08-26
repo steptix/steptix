@@ -258,3 +258,28 @@ export function parseInvocationLine(line: string): InvocationLine | null {
 
   return { kind, name, nameRange, outputKeys };
 }
+
+// The cursor sits inside an OPEN `[skill` token: keyword, separator (the
+// colon is optional, same rule as the tokenizer's finder), then a partial
+// name that is still a valid name prefix — anchored to the cursor, so a
+// closed call earlier on the line (`[skill: x] then [skill au│`) can't
+// satisfy it and a complete call (`[skill: x]│`) no longer does. Once the
+// author types anything the name grammar can't lex (a space onto args, the
+// closing `]`), the anchor breaks and completion goes quiet.
+const OPEN_SKILL_NAME_RE = /\[skill(?:[ \t]*:[ \t]*|[ \t]+)([A-Za-z0-9_/-]*)$/;
+
+/**
+ * The partial skill name being typed at the end of `linePrefix` (the text
+ * before the cursor), or `null` when the cursor is not inside an open
+ * `[skill` token. `start` is the 0-based column where the partial begins —
+ * equal to the cursor column while the partial is still empty — so a
+ * completion item can replace exactly what was typed.
+ */
+export function openSkillNamePrefix(
+  linePrefix: string,
+): { partial: string; start: number } | null {
+  const m = OPEN_SKILL_NAME_RE.exec(linePrefix);
+  if (!m) return null;
+  const partial = m[1]!;
+  return { partial, start: linePrefix.length - partial.length };
+}

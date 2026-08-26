@@ -6,6 +6,18 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — TestBench: skill-name completion inside `[skill …`
+
+Typing `[skill ` (or `[skill: `) in a step now completes the skill
+*names* right there — every skill under the project's `skills/`
+directory, subfolder skills path-qualified (`auth/login`) — replacing
+exactly what you've typed, so `1. Log in [skill: au` accepts to
+`1. Log in [skill: auth/login`. The list keeps completing across `/`
+for subfolder names, stays quiet inside bracketed prose (`[skillful]`)
+and after a closed call, and the existing whole-call snippets offered
+after a step number now replace the typed token — accepting at
+`1. [sk` no longer pastes a second bracket.
+
 ### Changed — the colon in `[skill: ...]` / `[tool: ...]` is now optional
 
 `[skill login]` is the same call as `[skill: login]`, and `[tool seed_cart

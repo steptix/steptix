@@ -1373,8 +1373,13 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     vscode.languages.registerCompletionItemProvider(
       { language: 'markdown', scheme: 'file' },
       new SectionCompletionProvider(),
-      // Re-offer as the author types the name, and right after the space.
+      // Re-offer as the author types: after the ordinal's space, at `[` (the
+      // whole-call snippets), after a `[skill` separator (`:` or the space
+      // again — names in place), and at `/` stepping into a subfolder name.
       ' ',
+      '[',
+      ':',
+      '/',
     ),
     // `${data.…}` / `${env.…}` / `${<source>.…}` / `${envName}` references,
     // fed by the active environment's files. `{` opens the namespace list as

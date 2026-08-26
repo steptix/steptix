@@ -30,6 +30,7 @@ import {
   TOOL_FILE_EXTS,
   canonicalSkillName,
   collectSkillNames,
+  openSkillNamePrefix,
   parseInvocationLine,
   skillHeading,
   toolFileFor,
@@ -306,4 +307,46 @@ test('parseInvocationLine scans past a near-miss to the real token', () => {
   const inv = parseInvocationLine('1. see [skillful] then [skill login]');
   assert.equal(inv?.kind, 'skill');
   assert.equal(inv?.name, 'login');
+});
+
+// ── openSkillNamePrefix: where in-place name completion fires ────────────────
+// Anchored to the cursor (the argument is the text BEFORE it). Separator rule
+// matches the tokenizer's finder: colon optional, `[skillful]` never opens.
+
+test('openSkillNamePrefix matches every open-token spelling', () => {
+  const rows = [
+    // [linePrefix, partial, start]
+    ['1. [skill ', '', 10],
+    ['1. [skill: ', '', 11],
+    ['1. [skill:', '', 10],
+    ['1. [skill : ', '', 12],
+    ['1. [skill au', 'au', 10],
+    ['1. [skill: auth/lo', 'auth/lo', 11],
+    ['1. [skill auth/', 'auth/', 10],
+    ['1. Log in [skill au', 'au', 17],
+    // A closed call earlier on the line does not confuse the anchor.
+    ['1. [skill: x] then [skill au', 'au', 26],
+  ];
+  for (const [prefix, partial, start] of rows) {
+    assert.deepEqual(
+      openSkillNamePrefix(prefix),
+      { partial, start },
+      `openSkillNamePrefix(${JSON.stringify(prefix)})`,
+    );
+  }
+});
+
+test('openSkillNamePrefix stays quiet outside an open token', () => {
+  for (const prefix of [
+    '1. [skill: login]', // call is closed
+    '1. [skill: login] then more prose',
+    '1. see [skillful] anim', // no separator — bracketed prose
+    '1. [skills ', // wrong keyword: `[skills` is not `[skill`+separator
+    '1. [skill', // separator not typed yet — the step-start path owns this
+    '1. [skill: login arg=', // author moved on to args
+    '1. plain prose',
+    '',
+  ]) {
+    assert.equal(openSkillNamePrefix(prefix), null, `${JSON.stringify(prefix)} must not match`);
+  }
 });
