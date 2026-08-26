@@ -19,3 +19,4 @@ tests/integration/fixtures/sub/
 # or picked up as a real test by a later discovery scan.
 tests/integration/fixtures/snc-project/
 tests/integration/fixtures/dc-project/
+tests/integration/fixtures/sac-project/

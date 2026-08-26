@@ -30,9 +30,11 @@ import {
   TOOL_FILE_EXTS,
   canonicalSkillName,
   collectSkillNames,
+  openSkillArgsContext,
   openSkillNamePrefix,
   parseInvocationLine,
   skillHeading,
+  skillIoFor,
   toolFileFor,
 } from '../src/extension/invocation-target-core.ts';
 
@@ -374,4 +376,171 @@ test('parseInvocationLine resumes past a declined candidate to a real call', () 
   // The range must point at THAT occurrence, not the declined one.
   const line = '1. See the [skill guide](./g.md) and then [skill: login]';
   assert.equal(line.slice(inv.nameRange[0], inv.nameRange[1]), 'login');
+});
+
+// ── openSkillArgsContext: the argument-position walker ───────────────────────
+// `|` marks the cursor in every row; the helper splits it out. Rows compose
+// deliberately — a value containing `]`/`[`, a closed call before an open one,
+// used args on BOTH sides of the cursor — because testing shapes only in
+// isolation is how the last review round shipped a scan that gave up early.
+
+function argsAt(marked) {
+  const cursor = marked.indexOf('|');
+  assert.ok(cursor !== -1, `row needs a | cursor marker: ${marked}`);
+  const line = marked.slice(0, cursor) + marked.slice(cursor + 1);
+  return { line, ctx: openSkillArgsContext(line, cursor), cursor };
+}
+
+test('openSkillArgsContext: fresh and partial argument positions', () => {
+  // [marked, skillName, partial]
+  const rows = [
+    ['1. [skill login |', 'login', ''],
+    ['1. [skill: login |', 'login', ''],
+    ['1. [skill login user|', 'login', 'user'],
+    ['1. [skill auth/login user|', 'auth/login', 'user'],
+    ['1. Log in [skill: login  us|', 'login', 'us'],
+    ['1. [skill login username="x" |', 'login', ''],
+    ['1. [skill login username="x" pass|', 'login', 'pass'],
+    ['1. [skill login out.|', 'login', 'out.'],
+    ['1. [skill login out.ses|', 'login', 'out.ses'],
+    ['1. [skill login count=3 |', 'login', ''],
+    ['1. [skill login ids=[1, 2] |', 'login', ''],
+    // A quoted value CONTAINING a `]` does not close the call.
+    ['1. [skill login msg="a ] b" |', 'login', ''],
+    // …nor does one inside an array literal string.
+    ['1. [skill login ids=["a ]", 2] |', 'login', ''],
+    // Editing the middle of a complete call is an argument position too.
+    ['1. [skill login | role="admin"]', 'login', ''],
+    // A closed call earlier on the line, then an open one.
+    ['1. [skill: a] then [skill login |', 'login', ''],
+  ];
+  for (const [marked, skillName, partial] of rows) {
+    const { ctx, cursor } = argsAt(marked);
+    assert.ok(ctx, `${JSON.stringify(marked)} should be an argument position`);
+    assert.equal(ctx.skillName, skillName, `skillName of ${JSON.stringify(marked)}`);
+    assert.equal(ctx.partial, partial, `partial of ${JSON.stringify(marked)}`);
+    assert.equal(
+      ctx.replaceStart,
+      cursor - partial.length,
+      `replaceStart of ${JSON.stringify(marked)}`,
+    );
+  }
+});
+
+test('openSkillArgsContext: quiet everywhere else', () => {
+  const rows = [
+    // Still the name — the name-completion surface owns these.
+    '1. [skill |',
+    '1. [skill login|',
+    // Value territory.
+    '1. [skill login count=|',
+    '1. [skill login count=3|',
+    '1. [skill login role="ad|min"',
+    '1. [skill login msg="unterminated |',
+    '1. [skill login ids=[1, |',
+    // Glued to a finished value or name=value — the scanner demands
+    // whitespace before the next argument.
+    '1. [skill login role="admin"|',
+    '1. [skill login ids=[1]|',
+    // The call is closed.
+    '1. [skill: login] |',
+    '1. [skill: login role="x"] then |',
+    // No call at all / a tool call (different story).
+    '1. plain prose |',
+    '1. [tool seed_cart |',
+  ];
+  for (const marked of rows) {
+    const { ctx } = argsAt(marked);
+    assert.equal(ctx, null, `${JSON.stringify(marked)} must be quiet`);
+  }
+});
+
+test('openSkillArgsContext: used args collected from BOTH sides of the cursor', () => {
+  const { ctx } = argsAt(
+    '1. [skill login username="x" bare | role="admin" out.session_id="sid"]',
+  );
+  assert.ok(ctx);
+  assert.deepEqual([...ctx.usedParams].sort(), ['bare', 'role', 'username']);
+  assert.deepEqual([...ctx.usedOuts], ['session_id']);
+});
+
+test('openSkillArgsContext: the partial being typed is not counted as used', () => {
+  const { ctx } = argsAt('1. [skill login username="x" pass|');
+  assert.ok(ctx);
+  assert.deepEqual([...ctx.usedParams], ['username']);
+  assert.equal(ctx.partial, 'pass');
+});
+
+// ── skillIoFor / parseOutputs: what a call site may pass ─────────────────────
+
+test('skillIoFor reads parameters (with literal values) and outputs', () => {
+  const root = makeSkillsDir([]);
+  try {
+    fs.mkdirSync(path.join(root, 'auth'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'auth', 'login.md'),
+      [
+        '# login',
+        '',
+        '## Parameters',
+        '- username: the account to sign in as',
+        '- password: $SB_PASSWORD',
+        '',
+        '## Outputs',
+        '- session_id: the logged-in session identifier',
+        '- bare_output',
+        '- not a lexable name: skipped',
+        '',
+        '## Steps',
+        '1. Sign in as {{username}}',
+        '',
+      ].join('\n'),
+    );
+    const io = skillIoFor(root, 'auth/login');
+    assert.ok(io);
+    assert.deepEqual(io.params, [
+      { name: 'username', value: 'the account to sign in as' },
+      // The literal file text — NEVER resolved through the env.
+      { name: 'password', value: '$SB_PASSWORD' },
+    ]);
+    assert.deepEqual(io.outputs, ['session_id', 'bare_output']);
+    // Leading-slash sugar canonicalises to the same file.
+    assert.deepEqual(skillIoFor(root, '/auth/login'), io);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('skillIoFor is null for a missing file or malformed name, empty for a bare skill', () => {
+  const root = makeSkillsDir(['plain.md']);
+  try {
+    assert.equal(skillIoFor(root, 'nope'), null);
+    assert.equal(skillIoFor(root, 'a//b'), null);
+    const io = skillIoFor(root, 'plain');
+    assert.ok(io);
+    assert.deepEqual(io.params, []);
+    assert.deepEqual(io.outputs, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('skillIoFor re-reads when the file changes on disk', () => {
+  const root = makeSkillsDir([]);
+  try {
+    const file = path.join(root, 'login.md');
+    fs.writeFileSync(file, '## Parameters\n- username: a\n');
+    assert.deepEqual(
+      skillIoFor(root, 'login')?.params.map((p) => p.name),
+      ['username'],
+    );
+    fs.writeFileSync(file, '## Parameters\n- username: a\n- password: b\n');
+    // A same-mtime rewrite is defeated by the size half of the cache key.
+    assert.deepEqual(
+      skillIoFor(root, 'login')?.params.map((p) => p.name),
+      ['username', 'password'],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

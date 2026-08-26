@@ -11,6 +11,10 @@
  *                         with `listToolFiles`' walk rules (registry.ts)
  *  - `parseInvocationLine` mirrors `parseInvocation`'s token finder
  *                         (src/parser/invocation-parser.ts)
+ *  - `openSkillArgsContext` mirrors that parser's argument scanner
+ *  - `skillIoFor`        reads `## Parameters` via runner-core's
+ *                         `parseParameters` and `## Outputs` mirroring
+ *                         `extractOutputs` (src/parser/markdown.ts)
  *
  * A mirror that drifts is worse than no mirror: F12 would open a different file
  * from the one the runner loads, and completion would offer names the parser
@@ -27,6 +31,10 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+// A bare package import stays loadable under `node --test`'s direct-.ts
+// loading (env-data-completion-core.ts set the precedent) — it resolves
+// through node_modules to runner-core's built JS either way.
+import { parseParameters } from 'ai-ui-automation-runner-core';
 
 /**
  * Extensions a tool file may carry, in the order the registry probes them.
@@ -314,4 +322,271 @@ export function openSkillNamePrefix(
   if (!m) return null;
   const partial = m[1]!;
   return { partial, replaceStart: linePrefix.length - partial.length };
+}
+
+// ---------------------------------------------------------------------------
+// Argument-position reading — where in an open skill call the cursor sits,
+// and which parameters the call has already passed. Backs parameter
+// completion (stories/specs/skill-arg-completion.md).
+// ---------------------------------------------------------------------------
+
+/** The cursor sits at an argument-name position of an open `[skill` call. */
+export interface OpenSkillArgs {
+  /** The call's skill name, exactly as written (leading slash and all). */
+  skillName: string;
+  /** The partial argument token being typed — possibly starting `out.` —
+   *  or `''` at a fresh position after whitespace. */
+  partial: string;
+  /** 0-based column where `partial` begins (=== cursor when empty). */
+  replaceStart: number;
+  /** Parameter names already passed, bare or `name=…`, on EITHER side of
+   *  the cursor — so the dropdown only offers what is left to pass. */
+  usedParams: Set<string>;
+  /** `out.<name>` keys already present, both sides of the cursor. */
+  usedOuts: Set<string>;
+}
+
+/** `[skill` + separator + a complete name — the head of a call whose
+ *  argument region the walker below then follows. */
+const CALL_HEAD_RE = new RegExp(String.raw`\[skill${SEP}(${NAME}+)`, 'g');
+
+type ArgWalk =
+  | { kind: 'closed'; at: number; used: string[]; outs: string[] }
+  | { kind: 'blocked'; used: string[]; outs: string[] }
+  | {
+      kind: 'at-arg';
+      partial: string;
+      replaceStart: number;
+      used: string[];
+      outs: string[];
+    };
+
+/**
+ * Walk a call's argument region from `i` toward `cursor`, mirroring the
+ * runner's scanner: skip inline space, identifier (optionally `out.`-
+ * prefixed), optional `=` + (quoted string | `[...]` array with quote-aware
+ * depth | bare literal), repeat. Argument text can contain whitespace, `]`
+ * and `[` inside quotes and array literals, which is why this is a walk and
+ * not a regex.
+ *
+ * `cursor = Infinity` turns it into a pure collector — how the caller
+ * gathers the used names AFTER the cursor, up to the call's real `]`.
+ */
+function walkArgs(line: string, i: number, cursor: number): ArgWalk {
+  const used: string[] = [];
+  const outs: string[] = [];
+  // A completed value must be followed by whitespace before the next
+  // argument (the scanner errors otherwise), so a cursor glued to the end
+  // of one (`role="admin"│`) is not an argument position.
+  let sepSeen = true;
+  for (;;) {
+    const preSkip = i;
+    while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+    if (i > preSkip) sepSeen = true;
+    if (i >= cursor) {
+      if (!sepSeen) return { kind: 'blocked', used, outs };
+      return { kind: 'at-arg', partial: '', replaceStart: cursor, used, outs };
+    }
+    if (i >= line.length) return { kind: 'blocked', used, outs };
+    if (line[i] === ']') return { kind: 'closed', at: i, used, outs };
+
+    // Argument token: optional `out.` (exact, as the scanner's tryConsume),
+    // then a plain-identifier name — `readIdentifier()` with no options, so
+    // no hyphen and no slash.
+    const tokStart = i;
+    const isOut = line.startsWith('out.', i);
+    if (isOut) i += 4;
+    const idStart = i;
+    while (i < line.length && /\w/.test(line[i]!)) i++;
+    if (i === idStart && !isOut) {
+      // Something the grammar never puts at an argument position (a quote,
+      // a stray `=`…). The parser errors here; completion stays quiet.
+      return { kind: 'blocked', used, outs };
+    }
+    if (cursor <= i) {
+      if (!sepSeen) return { kind: 'blocked', used, outs };
+      return {
+        kind: 'at-arg',
+        partial: line.slice(tokStart, cursor),
+        replaceStart: tokStart,
+        used,
+        outs,
+      };
+    }
+    const name = line.slice(idStart, i);
+
+    if (line[i] === '=') {
+      i++;
+      // Right after `=` a VALUE is expected, never an argument name.
+      if (cursor <= i) return { kind: 'blocked', used, outs };
+      const v = line[i];
+      if (v === '"') {
+        i++;
+        while (i < line.length && line[i] !== '"') i++;
+        // Inside the quotes (an unterminated one runs to end-of-line and
+        // swallows the cursor with it — correct: the author is mid-value).
+        if (cursor <= i) return { kind: 'blocked', used, outs };
+        i++;
+      } else if (v === '[') {
+        // Array literal — bracket depth with quote awareness, mirroring
+        // readBracketedLiteral, so `ids=["a ]", 2]` neither closes the
+        // call nor ends the value early.
+        let depth = 0;
+        let inStr = false;
+        let esc = false;
+        while (i < line.length) {
+          const ch = line[i]!;
+          if (inStr) {
+            if (esc) esc = false;
+            else if (ch === '\\') esc = true;
+            else if (ch === '"') inStr = false;
+          } else if (ch === '"') inStr = true;
+          else if (ch === '[') depth++;
+          else if (ch === ']') {
+            depth--;
+            if (depth === 0) {
+              i++;
+              break;
+            }
+          }
+          i++;
+        }
+        if (cursor < i) return { kind: 'blocked', used, outs };
+      } else {
+        // Bare literal (number / boolean) — runs to whitespace or `]`. A
+        // cursor at its end is still typing the value.
+        while (i < line.length && line[i] !== ' ' && line[i] !== '\t' && line[i] !== ']') i++;
+        if (cursor <= i) return { kind: 'blocked', used, outs };
+      }
+    }
+
+    (isOut ? outs : used).push(name);
+    sepSeen = false;
+  }
+}
+
+/**
+ * The argument-name position the cursor occupies in an open `[skill` call on
+ * `line`, or `null` when it occupies none: still inside the name (name
+ * completion owns that), inside a quoted / array / bare value, right after
+ * `=`, glued to a finished value, or in no call at all. Used names are
+ * collected from BOTH sides of the cursor, so editing the middle of
+ * `[skill login │ role="admin"]` still excludes `role`.
+ */
+export function openSkillArgsContext(line: string, cursor: number): OpenSkillArgs | null {
+  CALL_HEAD_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CALL_HEAD_RE.exec(line)) !== null && m.index < cursor) {
+    CALL_HEAD_RE.lastIndex = m.index + 1;
+    const skillName = m[1]!;
+    const nameEnd = m.index + m[0].length;
+    // Cursor still inside (or at the end of) the name token: the name
+    // completion surface owns it.
+    if (cursor <= nameEnd) return null;
+
+    const walk = walkArgs(line, nameEnd, cursor);
+    if (walk.kind === 'closed') {
+      // This call ends before the cursor — scan on for a later one.
+      CALL_HEAD_RE.lastIndex = walk.at + 1;
+      continue;
+    }
+    if (walk.kind === 'blocked') return null;
+
+    // Also collect what sits between the cursor and the call's real `]`,
+    // so already-passed arguments to the RIGHT of the cursor drop out too.
+    const after = walkArgs(line, cursor, Infinity);
+    return {
+      skillName,
+      partial: walk.partial,
+      replaceStart: walk.replaceStart,
+      usedParams: new Set([...walk.used, ...after.used]),
+      usedOuts: new Set([...walk.outs, ...after.outs]),
+    };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Skill parameters/outputs — what a call site may pass, read from the skill
+// file with the same rules the runner uses.
+// ---------------------------------------------------------------------------
+
+export interface SkillIo {
+  /** Declared parameters, in file order. `value` is the bullet's literal
+   *  text after the colon — a default like `$SB_PASSWORD` or a description
+   *  — NEVER resolved through the env, so no secret can reach a dropdown. */
+  params: Array<{ name: string; value: string }>;
+  /** Declared output names the invocation grammar can lex (`\w+`). */
+  outputs: string[];
+}
+
+/** `- name` / `- name: description` bullets under `## Outputs`. Mirrors
+ *  `extractOutputs` (src/parser/markdown.ts), which tolerates the bare form
+ *  `parseParameters` doesn't, with `parseSection`'s heading rules: the
+ *  section is `#{2,}` case-insensitive and ends at the next heading of the
+ *  same or shallower depth. */
+function parseOutputs(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  let inSection = false;
+  let sectionDepth = 0;
+  for (const raw of lines) {
+    const heading = /^(#{2,})\s+(\S.*?)\s*$/.exec(raw);
+    if (heading) {
+      const depth = heading[1]!.length;
+      if (inSection && depth <= sectionDepth) break;
+      if (!inSection && heading[2]!.toLowerCase() === 'outputs') {
+        inSection = true;
+        sectionDepth = depth;
+      }
+      continue;
+    }
+    if (!inSection) continue;
+    const item = /^\s*-\s+(.+?)\s*$/.exec(raw);
+    if (!item) continue;
+    const textPart = item[1]!;
+    const colon = textPart.indexOf(':');
+    const name = (colon === -1 ? textPart : textPart.slice(0, colon)).trim();
+    // Only names an `out.<key>` can lex — same never-offer-what-cannot-parse
+    // rule collectSkillNames applies to file names.
+    if (/^\w+$/.test(name)) out.push(name);
+  }
+  return out;
+}
+
+const skillIoCache = new Map<string, { mtimeMs: number; size: number; io: SkillIo }>();
+
+/**
+ * The parameters and outputs of the skill named `name` under `skillsDir`, or
+ * `null` when the name is malformed or the file is missing/unreadable.
+ * Parameters come from runner-core's `parseParameters` — the parser the
+ * `{{}}` completion already trusts for server parity. Cached on mtime+size:
+ * the argument walker runs per keystroke while typing inside a call.
+ */
+export function skillIoFor(skillsDir: string, name: string): SkillIo | null {
+  const rel = canonicalSkillName(name);
+  if (rel === null) return null;
+  const file = path.resolve(skillsDir, `${rel}.md`);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return null;
+  }
+  const cached = skillIoCache.get(file);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.io;
+  }
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  const io: SkillIo = {
+    params: Object.entries(parseParameters(text)).map(([n, value]) => ({ name: n, value })),
+    outputs: parseOutputs(text),
+  };
+  skillIoCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, io });
+  return io;
 }
