@@ -1106,23 +1106,50 @@ function sectionOwningLine(text: string, line: number): string | null {
 }
 
 /**
- * True when the controller's step-paused yellow ▶ is parked on a
- * `[tool: ...]` invocation. Reads the document at the paused line.
- * Returns false on any miss (no pause, document not open, no match) —
- * the caller falls back to normal stepInto behaviour, which is correct
- * for skill lines and inline AI steps.
+ * What kind of invocation the parked step-pause line is — decides which
+ * one-shot debugger flag (if any) an F11 sends.
+ *
+ *  - `tool`  → `pauseAtNextTool` (Phase 5 tool step-into).
+ *  - `skill` → neither: F11 on a `[skill:]` line must keep meaning "pause on
+ *    the skill's first step in the `.md`", not "jump into whatever
+ *    code-behind that first body step has". Descending further is one more
+ *    F11 from inside the body.
+ *  - `plain` → `pauseAtNextCodeBehind` (stories/codebehind-debugging.md).
+ *    Harmless when the step has no entry — the server consumes the flag
+ *    silently and F11 degrades to the ordinary step pause. A bare-name
+ *    section call also lands here (indistinguishable from prose without
+ *    expanding), so F11 on one descends into the body's first step's code
+ *    when that step is compiled — one level deeper than the `.md` pause,
+ *    still "into".
+ *  - `unknown` → no paused entry / no document; send no flag.
  */
-function isAtToolLine(registry: Registry, controller: RunController): boolean {
+type PausedLineKind = 'tool' | 'skill' | 'plain' | 'unknown';
+
+function pausedLineKind(registry: Registry, controller: RunController): PausedLineKind {
   const entry = registry.stepPausedEntry(controller.document.uri);
-  if (!entry) return false;
+  if (!entry) return 'unknown';
   const doc = vscode.workspace.textDocuments.find(
     (d) => d.uri.toString() === entry.uri.toString(),
   );
-  if (!doc) return false;
+  if (!doc) return 'unknown';
   const lineIdx = entry.line - 1;
-  if (lineIdx < 0 || lineIdx >= doc.lineCount) return false;
-  const text = doc.lineAt(lineIdx).text;
-  return parseInvocationLine(text)?.kind === 'tool';
+  if (lineIdx < 0 || lineIdx >= doc.lineCount) return 'unknown';
+  return classifyStepLine(doc.lineAt(lineIdx).text);
+}
+
+/**
+ * Line-text half of {@link pausedLineKind}, shared with the
+ * breakpoint-relaunch branch (which reads the text straight off the editor).
+ *
+ * Delegates to `parseInvocationLine` rather than matching `[tool:` itself:
+ * that parser mirrors the runner's grammar, where the colon is OPTIONAL
+ * (`[tool echo]` ≡ `[tool: echo]`) and a markdown link or prose like
+ * `[skill level: expert]` is declined. A local regex would disagree with the
+ * runner on exactly those lines — and disagreeing here means arming the
+ * code-behind flag on a line the server is about to dispatch as a tool.
+ */
+function classifyStepLine(text: string): 'tool' | 'skill' | 'plain' {
+  return parseInvocationLine(text)?.kind ?? 'plain';
 }
 
 /**
@@ -1193,11 +1220,21 @@ async function dispatchStep(
     }
     // Phase 5 — Step Into on a `[tool: ...]` line asks the server to
     // pause at the tool dispatcher so VS Code's Node debugger can
-    // attach. Detected by reading the line text at the parked
-    // step-pause position; falls back to normal `into` otherwise.
-    if (mode === 'into' && isAtToolLine(registry, controller)) {
-      await controller.sendRunControl('into', { pauseAtNextTool: true });
-      return;
+    // attach; a plain line asks the same for the step's code-behind
+    // entry, if it has one (stories/codebehind-debugging.md). Detected
+    // by reading the line text at the parked step-pause position; a
+    // `[skill:]` line (and the unknown case) falls back to normal
+    // `into`.
+    if (mode === 'into') {
+      const kind = pausedLineKind(registry, controller);
+      if (kind === 'tool') {
+        await controller.sendRunControl('into', { pauseAtNextTool: true });
+        return;
+      }
+      if (kind === 'plain') {
+        await controller.sendRunControl('into', { pauseAtNextCodeBehind: true });
+        return;
+      }
     }
     await controller.sendRunControl(mode);
     return;
@@ -1244,10 +1281,14 @@ async function dispatchStep(
     }
     // Phase 5 — if the breakpoint sat on a `[tool: ...]` line and the
     // command is Step Into, seed the run with `pauseAtNextTool: true`
-    // so the server emits `tool:awaiting-debugger` before that step.
+    // so the server emits `tool:awaiting-debugger` before that step. A
+    // plain line seeds `pauseAtNextCodeBehind` the same way — the pause
+    // only materialises when the step actually has a code-behind entry
+    // (stories/codebehind-debugging.md); a `[skill:]` line seeds neither.
     const lineText = editor.document.lineAt(Math.max(0, startLine - 1)).text;
-    const isToolLine = parseInvocationLine(lineText)?.kind === 'tool';
-    const pauseAtNextTool = mode === 'into' && isToolLine;
+    const lineKind = classifyStepLine(lineText);
+    const pauseAtNextTool = mode === 'into' && lineKind === 'tool';
+    const pauseAtNextCodeBehind = mode === 'into' && lineKind === 'plain';
     registry.notifyRunning(true);
     await controller
       .runLines(resumeLines, {
@@ -1260,6 +1301,7 @@ async function dispatchStep(
         // the user Steps Into the next step.
         isContinuation: true,
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
+        ...(pauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
       })
       .finally(() => registry.notifyRunning(false));
     return;

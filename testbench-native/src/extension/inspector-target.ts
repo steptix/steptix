@@ -112,3 +112,20 @@ export function parseInspectorUrl(
  *  `isLoopbackUrl` in server-manager.ts; kept local so this module stays
  *  dependency-free. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/**
+ * Which of the given breakpoint file paths are code-behind files — the
+ * signal the run-start debugger auto-attach keys on
+ * (stories/codebehind-debugging.md §Flow 1). The caller feeds it the fsPaths
+ * of the ENABLED source breakpoints; a match anywhere is enough, because the
+ * filename pattern is the user's intent ("I want to debug steps code"), not
+ * a claim about which steps this particular run binds — that matching is
+ * server-side, and a spurious attach is harmless.
+ *
+ * Pure and VS Code-free for the same reason the rest of this module is: the
+ * integration harness cannot exercise a real attach, so the decision is the
+ * part that gets tested.
+ */
+export function stepsFileBreakpoints(paths: string[]): string[] {
+  return paths.filter((p) => /\.steps\.ts$/i.test(p));
+}

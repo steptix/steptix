@@ -376,8 +376,9 @@ export function foldRun(input: FoldInput): FoldedRun {
       }
 
       default:
-        // frame:pop, frame:scope, step:awaiting, tool:awaiting-debugger —
-        // debugger protocol, deliberately out of scope here.
+        // frame:pop, frame:scope, step:awaiting, tool:awaiting-debugger,
+        // codebehind:awaiting-debugger — debugger protocol, deliberately
+        // out of scope here.
         break;
     }
   }

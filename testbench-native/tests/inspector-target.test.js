@@ -127,3 +127,28 @@ test('a string port from the debug configuration still matches', () => {
   // a string; a strict === would silently re-attach every time.
   assert.equal(shouldReuseDebugSession({ type: 'pwa-node', configuration: { port: '53012' } }, T), true);
 });
+
+// ── stepsFileBreakpoints (stories/codebehind-debugging.md §Flow 1) ─────────
+
+test('stepsFileBreakpoints: keeps only .steps.ts paths', async () => {
+  const { stepsFileBreakpoints } = await import('../src/extension/inspector-target.ts');
+  assert.deepEqual(
+    stepsFileBreakpoints([
+      'C:\p\tests\login.steps.ts',
+      '/p/tests/login.md',
+      '/p/skills/auth.steps.ts',
+      '/p/src/steps.ts', // not a .steps.ts — no dot before "steps"
+      '/p/tests/LOGIN.STEPS.TS', // case-insensitive (Windows paths)
+    ]),
+    [
+      'C:\p\tests\login.steps.ts',
+      '/p/skills/auth.steps.ts',
+      '/p/tests/LOGIN.STEPS.TS',
+    ],
+  );
+});
+
+test('stepsFileBreakpoints: empty in, empty out', async () => {
+  const { stepsFileBreakpoints } = await import('../src/extension/inspector-target.ts');
+  assert.deepEqual(stepsFileBreakpoints([]), []);
+});

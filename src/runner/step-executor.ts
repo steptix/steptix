@@ -140,6 +140,14 @@ export interface StepExecutorOptions {
    */
   codeBehindStrict?: boolean;
   /**
+   * Code-behind step-into (stories/codebehind-debugging.md): hit a
+   * `debugger;` immediately before this step's entry `run()`. The session
+   * manager sets it only after emitting `codebehind:awaiting-debugger` and
+   * receiving the client's debugger-attach ack, so by the time the entry
+   * runs an inspector is listening. No-op without one.
+   */
+  codeBehindPauseBeforeRun?: boolean;
+  /**
    * Capture the DOM + URL either side of the step onto `StepResult.stepContext`
    * — compile's Record phase input. Off for ordinary runs: it costs one extra
    * DOM snapshot per step and nothing else reads it.
@@ -551,6 +559,7 @@ async function runCodeBehindStep(
     resolvedParameters: opts.resolvedParameters ?? {},
     ...(opts.envData && { envData: opts.envData }),
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
+    ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
     label: `codebehind:${stepIndex}`,
   });
 

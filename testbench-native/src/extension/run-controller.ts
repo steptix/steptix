@@ -71,7 +71,7 @@ export interface ApiClientLike {
   runControl?(
     sessionId: string,
     mode: StepMode,
-    opts?: { pauseAtNextTool?: boolean },
+    opts?: { pauseAtNextTool?: boolean; pauseAtNextCodeBehind?: boolean },
   ): Promise<void>;
   /** Optional Phase-5 ack used by tool step-into. Tests that don't
    *  exercise the tool-debugger flow omit it. */
@@ -553,6 +553,25 @@ export class RunController {
        *  own doc comment invites — would silently turn this into a
        *  wall-clock-bounded busy-spin issuing thousands of probes. */
       pollSleep?: (ms: number) => Promise<void>;
+      /**
+       * Called once per run, after the pre-run health phase resolves to
+       * "proceed" and before any session/steps request — the seam the
+       * `.steps.ts`-breakpoint auto-attach hangs off
+       * (stories/codebehind-debugging.md). `inspectorUrl` is what /health
+       * reported (`null` = server has no inspector, `undefined` = no health
+       * data / legacy server — the settings fallback applies). Injected like
+       * `healthProbe` because the harness cannot exercise a real
+       * `vscode.debug.startDebugging`; failures are the hook's to swallow —
+       * a run must never break because an attach did.
+       */
+      onServerReady?: (info: {
+        inspectorUrl: string | null | undefined;
+        /** The run's resolved SERVER_URL — the hook's loopback check, since
+         *  attaching a LOCAL debugger for a REMOTE server is the
+         *  wrong-process bug §7 exists to prevent. */
+        serverUrl: string;
+        log: (line: string) => void;
+      }) => Promise<void> | void;
     } = {},
   ) {}
 
@@ -920,7 +939,7 @@ export class RunController {
    */
   async sendRunControl(
     mode: StepMode,
-    opts?: { pauseAtNextTool?: boolean },
+    opts?: { pauseAtNextTool?: boolean; pauseAtNextCodeBehind?: boolean },
   ): Promise<void> {
     const client = this.currentClient;
     const sessionId = this.currentSessionId;
@@ -1557,6 +1576,12 @@ export class RunController {
        *  run isn't in flight yet — we have to seed the flag in the
        *  initial steps request). */
       pauseAtNextTool?: boolean;
+      /** Code-behind sibling (stories/codebehind-debugging.md): seed the
+       *  one-shot pauseAtNextCodeBehind flag so the server pauses into the
+       *  first step's code-behind entry, if it has one. Used when F11 is
+       *  hit on a plain (non-tool, non-skill) line from a breakpoint
+       *  pause. */
+      pauseAtNextCodeBehind?: boolean;
       /** True when this call is a continuation of a breakpoint-paused run
        *  (i.e. Continue / Resume). Skips the status-clear that a fresh run
        *  performs so that pass marks from the first batch are preserved. The
@@ -1998,6 +2023,15 @@ export class RunController {
       return this.fail(serverReady.payload, log);
     }
 
+    // Server is up and the probe's inspector answer is fresh — let the
+    // injected hook attach a debugger BEFORE any step (or code-behind module
+    // load) can execute, so `.steps.ts` breakpoints bind in time. Awaited on
+    // purpose: an attach that raced the first batch would miss the module
+    // load. The hook owns its failures.
+    if (this.server.onServerReady) {
+      await this.server.onServerReady({ inspectorUrl: this.currentInspectorUrl, serverUrl, log });
+    }
+
     const client = this.clientFactory({ serverUrl, apiKey });
     // Monotonic run id — a background post-stop report poll (issue 021) uses it
     // to avoid clobbering a newer run's report path if one starts meanwhile.
@@ -2080,6 +2114,7 @@ export class RunController {
             log,
             ...(options.stepMode && { stepMode: options.stepMode }),
             ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
+            ...(options.pauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
             ...(pendingRerun && { rerun: pendingRerun }),
             ...(compileMode && { compile: compileMode }),
             // Blocks 2..n of this call, and every block of a Continue: the
@@ -2337,6 +2372,10 @@ export class RunController {
      *  The server emits `tool:awaiting-debugger` before the next
      *  `[tool: ...]` step and parks for a debugger-attach ack. */
     pauseAtNextTool?: boolean;
+    /** Code-behind sibling: the body carries `pauseAtNextCodeBehind: true`
+     *  so the server pauses into the first step's entry, if any
+     *  (stories/codebehind-debugging.md). */
+    pauseAtNextCodeBehind?: boolean;
     /** "Re-run a skill step with its variables": start the (re-expanded)
      *  invocation partway in at `startAt` and seed `seedScope` before running.
      *  Forces the per-step cache off for this request (the server also does,
@@ -2356,7 +2395,7 @@ export class RunController {
     /** Section attribution for the entries this block compiles. */
     compileScope?: { section: string };
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, rerun, compile, compileContinues, compileScope } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -2422,6 +2461,7 @@ export class RunController {
         testFilePath,
         ...(stepMode && { stepMode }),
         ...(pauseAtNextTool && { pauseAtNextTool: true }),
+        ...(pauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
         ...(rerun && {
           startAt: rerun.startAt,
           ...(rerun.endAt && { endAt: rerun.endAt }),

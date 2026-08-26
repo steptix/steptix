@@ -289,6 +289,16 @@ export interface StepRequest {
    */
   pauseAtNextTool?: boolean;
   /**
+   * One-shot pause-at-next-code-behind flag (stories/codebehind-debugging.md).
+   * Same lifecycle as `pauseAtNextTool`, one seam over: consumed at the next
+   * step the loop executes. If that step has a bound code-behind entry, the
+   * server emits `codebehind:awaiting-debugger`, parks for the debugger-ack,
+   * then runs the entry with a cooperative `debugger;` before its `run()`.
+   * A step with no entry consumes the flag silently (F11 degrades to the
+   * plain step pause).
+   */
+  pauseAtNextCodeBehind?: boolean;
+  /**
    * Initial step-mode for this batch. `continue` (default) runs until the
    * next breakpoint or end. `into` / `over` / `out` start the run paused
    * between steps and emit `step:awaiting` events so the client can drive
@@ -518,6 +528,7 @@ export type RunEvent =
   | { type: 'frame:scope'; frameId: string; scope: Record<string, string> }
   | { type: 'step:awaiting'; line: number; frame?: FrameInfo }
   | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo }
+  | { type: 'codebehind:awaiting-debugger'; file: string; line: number; frame?: FrameInfo }
   /**
    * A compile-mode run's own frames (stories/compile-as-you-go.md §On the
    * wire). Shaped like the compile stream's so a client's folding carries
@@ -952,6 +963,13 @@ interface ManagedSession {
    */
   pauseAtNextTool: boolean;
   /**
+   * One-shot sibling of `pauseAtNextTool` for code-behind entries
+   * (stories/codebehind-debugging.md). Consumed — unconditionally — at the
+   * next step the loop executes, so an F11 can never ambush a later step;
+   * it only produces a pause when that step's binding has an entry.
+   */
+  pauseAtNextCodeBehind: boolean;
+  /**
    * Dead-section warning messages this session has already emitted.
    *
    * The warning is a DOCUMENT diagnostic, but the server sees batches — a run
@@ -1221,6 +1239,19 @@ export class SessionManager {
   }
 
   /**
+   * Sibling of `setPauseAtNextTool` for code-behind step-into
+   * (stories/codebehind-debugging.md) — the run-control endpoint sets it
+   * only after the control was actually delivered, for the same
+   * no-stuck-flag reason.
+   */
+  setPauseAtNextCodeBehind(sessionId: string, value: boolean): boolean {
+    const session = this.sessions.get(this.sessionKey(sessionId));
+    if (!session) return false;
+    session.pauseAtNextCodeBehind = value;
+    return true;
+  }
+
+  /**
    * Resolve the per-session debugger-ack wait. Returns `true` if a run
    * was actually parked on the ack (so the HTTP handler can 200), `false`
    * if no run is awaiting (handler returns 409).
@@ -1232,6 +1263,45 @@ export class SessionManager {
     session.pendingDebuggerAck = null;
     resolve();
     return true;
+  }
+
+  /**
+   * Park the step loop on the per-session debugger-ack promise, after an
+   * `*:awaiting-debugger` event has been emitted. Shared by the tool and
+   * code-behind pause points so their abort semantics cannot diverge.
+   *
+   * Returns `true` when the ack actually arrived — the only case where the
+   * caller may arm its cooperative `debugger;`. If the run is aborted while
+   * parked, resolves immediately (so the next-iteration abort check picks it
+   * up) and returns `false`: there is no debugger attached on that path, and
+   * hitting `debugger;` anyway would pause nothing for no one.
+   */
+  private async awaitDebuggerAck(
+    session: ManagedSession,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    let abortedDuringWait = false;
+    await new Promise<void>((resolve) => {
+      session.pendingDebuggerAck = { resolve };
+      if (signal?.aborted) {
+        session.pendingDebuggerAck = null;
+        abortedDuringWait = true;
+        resolve();
+        return;
+      }
+      signal?.addEventListener(
+        'abort',
+        () => {
+          if (session.pendingDebuggerAck?.resolve === resolve) {
+            session.pendingDebuggerAck = null;
+            abortedDuringWait = true;
+            resolve();
+          }
+        },
+        { once: true },
+      );
+    });
+    return !abortedDuringWait;
   }
 
   /**
@@ -2029,6 +2099,7 @@ export class SessionManager {
         pendingRunControl: null,
         pendingDebuggerAck: null,
         pauseAtNextTool: false,
+        pauseAtNextCodeBehind: false,
         deadSectionsReported: new Set<string>(),
       };
 
@@ -3035,6 +3106,11 @@ export class SessionManager {
     if (request.pauseAtNextTool) {
       session.pauseAtNextTool = true;
     }
+    // Same seeding for the code-behind sibling — used when F11 relaunches a
+    // run from a breakpoint pause (stories/codebehind-debugging.md).
+    if (request.pauseAtNextCodeBehind) {
+      session.pauseAtNextCodeBehind = true;
+    }
 
     // Per-URI breakpoint sets for the server-side pause check. Skill-
     // file (and any non-test-file) breakpoints land here; the test file's
@@ -3689,6 +3765,15 @@ export class SessionManager {
 
         emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread, ...(await tabSpread()) });
 
+        // Code-behind step-into (stories/codebehind-debugging.md): consume
+        // the one-shot flag AT THIS STEP whichever branch it takes below —
+        // F11 means "descend into *this* step", and a flag that lingered
+        // (say the client's line classification missed a tool line) would
+        // ambush a later step, the bug class the run-control delivery guard
+        // exists to prevent. Only the non-tool branch can act on it.
+        const codeBehindStepInto = session.pauseAtNextCodeBehind && !signal?.aborted;
+        session.pauseAtNextCodeBehind = false;
+
         // Tool-step branch — when the step is a `[tool: ...]` invocation
         // AND we have a loaded catalogue, dispatch through `executeToolStep`
         // (the same code path the CLI runner uses) and shape the outcome
@@ -3723,36 +3808,9 @@ export class SessionManager {
                 line: sourceLineFor(i),
                 ...frameSpread,
               });
-              // Park on the ack. If the run is aborted while we're
-              // parked, resolve immediately so the next-iteration abort
-              // check picks it up — and skip the cooperative pause
-              // because there's no debugger attached on this path.
-              let abortedDuringWait = false;
-              await new Promise<void>((resolve) => {
-                session.pendingDebuggerAck = { resolve };
-                if (signal?.aborted) {
-                  session.pendingDebuggerAck = null;
-                  abortedDuringWait = true;
-                  resolve();
-                  return;
-                }
-                signal?.addEventListener(
-                  'abort',
-                  () => {
-                    if (session.pendingDebuggerAck?.resolve === resolve) {
-                      session.pendingDebuggerAck = null;
-                      abortedDuringWait = true;
-                      resolve();
-                    }
-                  },
-                  { once: true },
-                );
-              });
-              // Only arm the cooperative pause when the ack actually
-              // arrived (vs. abort). Otherwise we'd hit `debugger;`
-              // with no attached inspector even though the user
-              // cancelled.
-              pauseBeforeRun = !abortedDuringWait;
+              // Park on the ack; arm the cooperative pause only when the
+              // ack actually arrived (vs. abort) — see awaitDebuggerAck.
+              pauseBeforeRun = await this.awaitDebuggerAck(session, signal);
             }
             const startedAt = Date.now();
             const outcome = await executeToolStep(toolCall, {
@@ -3821,6 +3879,24 @@ export class SessionManager {
               expansionOrigins?.[i]?.frameId,
               stepSourceLine,
             );
+            // Code-behind step-into: only a step with a bound entry pauses.
+            // Emit the awaiting event, park for the debugger-attach ack,
+            // then arm the cooperative `debugger;` that sits immediately
+            // before the entry's `run()` (src/codebehind/execute.ts). The
+            // binding names the canonical `.steps.ts` — where the user's
+            // breakpoints and editor live — even on a compile replay, though
+            // compile runs never send the flag.
+            let codeBehindPause = false;
+            const debugBinding = codeBehindStepInto ? codeBehind.bindingFor(i) : undefined;
+            if (debugBinding?.entry) {
+              emit({
+                type: 'codebehind:awaiting-debugger',
+                file: debugBinding.file,
+                line: sourceLineFor(i),
+                ...frameSpread,
+              });
+              codeBehindPause = await this.awaitDebuggerAck(session, signal);
+            }
             stepResult = await executeStep(
               stepSourceLine,
               stepsTotal,
@@ -3850,6 +3926,7 @@ export class SessionManager {
                   !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== ''),
                 cacheKey: stepCacheKey,
                 ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
+                ...(codeBehindPause && { codeBehindPauseBeforeRun: true }),
                 // What `${data.url}` in the step text was resolved against,
                 // so the entry's `step.getVar('data.url')` reads the same value.
                 ...(envDataCtx && { envData: envDataCtx }),

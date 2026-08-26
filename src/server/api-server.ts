@@ -712,6 +712,9 @@ export function createApiServer(
       if (body.pauseAtNextTool === true) {
         request.pauseAtNextTool = true;
       }
+      if (body.pauseAtNextCodeBehind === true) {
+        request.pauseAtNextCodeBehind = true;
+      }
       // Step-cache control fields. Caching is opt-in: the server enables it
       // only when `cacheEnabled: true` is sent explicitly (and a testFilePath
       // is present). An absent flag means off. We pass through whichever
@@ -1088,6 +1091,9 @@ export function createApiServer(
     }
     if (body.pauseAtNextTool === true) {
       sessionManager.setPauseAtNextTool(sessionId, true);
+    }
+    if (body.pauseAtNextCodeBehind === true) {
+      sessionManager.setPauseAtNextCodeBehind(sessionId, true);
     }
     res.status(200).json({ ok: true });
   });

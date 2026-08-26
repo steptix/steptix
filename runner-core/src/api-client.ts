@@ -200,6 +200,22 @@ export interface StreamStepsRequest {
    */
   stepMode?: StepMode;
   /**
+   * One-shot tool step-into trigger (Phase 5). When true, the server emits
+   * `tool:awaiting-debugger` before the next `[tool: ...]` step and parks
+   * for the debugger-attach ack. Seeded on the initial body when the run is
+   * relaunched from a breakpoint pause; the step-paused path sends the same
+   * flag via `runControl` instead.
+   */
+  pauseAtNextTool?: boolean;
+  /**
+   * One-shot code-behind step-into trigger (stories/codebehind-debugging.md).
+   * Consumed at the next executed step: if that step has a bound code-behind
+   * entry the server emits `codebehind:awaiting-debugger`, parks for the ack,
+   * then pauses on a `debugger;` right before the entry's `run()`. A step
+   * with no entry consumes the flag silently.
+   */
+  pauseAtNextCodeBehind?: boolean;
+  /**
    * Per-request logging override. Each field falls back to the server's
    * configured default when omitted. Override scope is this request only —
    * the server restores its default after the run completes.
@@ -587,7 +603,7 @@ export class ApiClient {
   async runControl(
     sessionId: string,
     mode: StepMode,
-    opts?: { pauseAtNextTool?: boolean },
+    opts?: { pauseAtNextTool?: boolean; pauseAtNextCodeBehind?: boolean },
   ): Promise<void> {
     const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/run-control`;
     let response: Response;
@@ -601,6 +617,7 @@ export class ApiClient {
         body: JSON.stringify({
           mode,
           ...(opts?.pauseAtNextTool && { pauseAtNextTool: true }),
+          ...(opts?.pauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
         }),
       });
     } catch (err) {
@@ -627,8 +644,10 @@ export class ApiClient {
 
   /**
    * Acknowledge that VS Code's Node debugger is attached and the server
-   * may now hit its `debugger;` pause at the tool dispatcher. Resolves
-   * the per-session debugger-attach Promise the step loop is awaiting.
+   * may now hit its `debugger;` pause — at the tool dispatcher, or at a
+   * step's code-behind entry (the route name predates the second use; the
+   * ack itself is generic "debugger attached, proceed"). Resolves the
+   * per-session debugger-attach Promise the step loop is awaiting.
    *
    * 409 when no run is currently awaiting an ack — handled by the
    * caller via the standard `not-found` mapping.

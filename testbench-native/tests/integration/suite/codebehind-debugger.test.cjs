@@ -1,21 +1,19 @@
 /**
- * Phase 5 — tool step-into wire flow inside the extension host.
+ * Code-behind step-into dispatch (stories/codebehind-debugging.md §Flow 2).
  *
  * Coverage:
- *  1. F11 on a tool line while step-paused sends runControl with
- *     `pauseAtNextTool: true` (the cooperative-pause request).
- *  2. F11 on a non-tool line keeps the existing runControl('into')
- *     behaviour (no opts).
- *  3. A `tool:awaiting-debugger` event triggers the ackToolDebugger
- *     call after the (mocked) debugger attach completes. The local-
- *     server check short-circuits when SERVER_URL isn't a loopback,
- *     and the ack still fires so the run isn't left hanging.
+ *  1. F11 while step-paused on a plain (non-tool, non-skill) line sends
+ *     runControl with `pauseAtNextCodeBehind: true` — the server decides
+ *     whether the step actually has an entry.
+ *  2. F11 while step-paused on a `[skill: ...]` line sends NEITHER debugger
+ *     flag: it must keep meaning "pause on the skill's first step in the
+ *     .md", not "jump into that step's code-behind".
  *
- * The Node debugger attach itself can't be exercised in this harness
- * (`vscode.debug.startDebugging` would actually try to attach to port
- * 9229). Instead, we point the fake at a non-loopback server URL so
- * the extension's local-server check fails first, takes the
- * "ack-and-exit" branch, and we assert on that path.
+ * The tool-line branch (`pauseAtNextTool`) is pinned by
+ * tool-debugger.test.cjs. The attach/ack halves can't run in this harness
+ * (`vscode.debug.startDebugging` would really dial an inspector port); the
+ * server side of the wire flow is covered by
+ * tests/api-server-codebehind-debugger.test.ts.
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -38,7 +36,7 @@ async function waitFor(label, predicate, timeoutMs = 5_000) {
   throw new Error(`timeout waiting for: ${label}`);
 }
 
-describe('TestBench tool step-into (Phase 5)', function () {
+describe('TestBench code-behind step-into dispatch', function () {
   this.timeout(20_000);
 
   /** @type {FakeApiClient} */
@@ -61,47 +59,30 @@ describe('TestBench tool step-into (Phase 5)', function () {
     }
     fake = new FakeApiClient();
     hooks.setApiClientFactory(() => fake);
+  });
 
-    const uri = fixtureUri('test-with-tool.md');
+  async function openFixture(name) {
+    const uri = fixtureUri(name);
     await vscode.commands.executeCommand('vscode.open', uri);
     await waitFor('fixture active', () => {
       const editor = vscode.window.activeTextEditor;
       return editor && editor.document.uri.toString() === uri.toString();
     });
-    const editor = vscode.window.activeTextEditor;
-    // Park on the [tool: echo] line so step-paused state lives on it.
-    editor.selection = new vscode.Selection(
-      new vscode.Position(8, 0),
-      new vscode.Position(8, 5),
-    );
     await waitFor('active file detected', () => hooks.tracker.snapshot().isTestFile);
-  });
+    return vscode.window.activeTextEditor;
+  }
 
-  it('F11 while step-paused on a [tool:] line sends pauseAtNextTool=true', async () => {
+  it('F11 while step-paused on a plain line sends pauseAtNextCodeBehind=true', async () => {
+    const editor = await openFixture('test-with-tool.md');
+    editor.selection = new vscode.Selection(
+      new vscode.Position(7, 0),
+      new vscode.Position(7, 5),
+    );
+
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    // Park the yellow ▶ on line 9 — the tool invocation.
-    fake.push({ type: 'step:awaiting', line: 9 });
-    await waitFor('step-paused', () => hooks.isStepPaused());
-
-    // F11 — should detect the tool line and request a debugger pause.
-    await vscode.commands.executeCommand('testbench-native.stepInto');
-    await waitFor('runControl recorded', () => fake.runControlCalls.length > 0);
-
-    const call = fake.runControlCalls[0];
-    assert.equal(call.mode, 'into');
-    assert.deepEqual(call.opts, { pauseAtNextTool: true });
-
-    fake.end();
-    await waitFor('idle', () => !hooks.isRunning());
-  });
-
-  it('F11 while step-paused on a non-tool line arms code-behind step-into, not the tool pause', async () => {
-    void vscode.commands.executeCommand('testbench-native.runSelected');
-    await waitFor('stream active', () => fake.hasActiveStream);
-
-    // Park on the inline navigate step (line 8) — not a tool line.
+    // Park the yellow ▶ on line 8 — the plain navigate step.
     fake.push({ type: 'step:awaiting', line: 8 });
     await waitFor('step-paused', () => hooks.isStepPaused());
 
@@ -110,24 +91,38 @@ describe('TestBench tool step-into (Phase 5)', function () {
 
     const call = fake.runControlCalls[0];
     assert.equal(call.mode, 'into');
-    // A plain line arms the code-behind pause (harmless server-side when the
-    // step has no entry — stories/codebehind-debugging.md) and must NOT arm
-    // the tool pause.
-    assert.ok(
-      call.opts !== null && !call.opts.pauseAtNextTool && call.opts.pauseAtNextCodeBehind === true,
-      `expected pauseAtNextCodeBehind only, got ${JSON.stringify(call.opts)}`,
-    );
+    assert.deepEqual(call.opts, { pauseAtNextCodeBehind: true });
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  // Note: a direct end-to-end test of `tool:awaiting-debugger →
-  // ackToolDebugger` can't run reliably inside this harness because
-  // `vscode.debug.startDebugging` would actually try to attach to the
-  // inspector port (no inspector is listening, so the attempt hangs
-  // for ~10s before failing). The wire flow is covered server-side
-  // by `tests/api-server-tools.test.ts` — F11-on-tool-line dispatching
-  // `pauseAtNextTool=true` (covered above) is the only piece that
-  // genuinely lives inside the extension.
+  it('F11 while step-paused on a [skill:] line sends neither debugger flag', async () => {
+    const editor = await openFixture('test-shared-a.md');
+    editor.selection = new vscode.Selection(
+      new vscode.Position(7, 0),
+      new vscode.Position(7, 5),
+    );
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Park on line 8 — `[skill: shared_skill] run the shared skill`.
+    fake.push({ type: 'step:awaiting', line: 8 });
+    await waitFor('step-paused', () => hooks.isStepPaused());
+
+    await vscode.commands.executeCommand('testbench-native.stepInto');
+    await waitFor('runControl recorded', () => fake.runControlCalls.length > 0);
+
+    const call = fake.runControlCalls[0];
+    assert.equal(call.mode, 'into');
+    assert.ok(
+      call.opts === null ||
+        (!call.opts.pauseAtNextTool && !call.opts.pauseAtNextCodeBehind),
+      `expected no debugger flags on a skill line, got ${JSON.stringify(call.opts)}`,
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
 });

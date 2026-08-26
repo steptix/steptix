@@ -201,3 +201,20 @@ test('step:pass carries the code-behind flags through the narrower', () => {
   assert.equal(isRunEvent(stale), true);
   assert.equal(stale.codeBehindStale.file, '/p/tests/a.steps.ts');
 });
+
+test('isRunEvent: accepts both awaiting-debugger variants', () => {
+  // Tool step-into (Phase 5) and its code-behind sibling
+  // (stories/codebehind-debugging.md). Same contract: the client attaches
+  // the Node debugger and POSTs the shared tool-debugger-ack route.
+  assert.equal(
+    isRunEvent({ type: 'tool:awaiting-debugger', toolName: 'echo', line: 3 }),
+    true,
+  );
+  const cb = {
+    type: 'codebehind:awaiting-debugger',
+    file: '/p/tests/a.steps.ts',
+    line: 7,
+  };
+  assert.equal(isRunEvent(cb), true);
+  assert.equal(cb.file, '/p/tests/a.steps.ts');
+});
