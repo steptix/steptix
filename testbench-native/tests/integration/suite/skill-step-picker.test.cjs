@@ -293,6 +293,83 @@ describe('skill-file session picker', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  // The two MERGED rerun flows that also pass `isContinuation: true` without
+  // asking for a compile. They predate the picker and are the reason the
+  // inheritance had to be decoupled at all: a Run & Compile leaves
+  // `compileModeOfRun` set, nothing clears it on failure, and an injected
+  // re-run that inherited it would generate entries nobody asked for (the
+  // outcome is dropped — neither command calls presentCompile) and, because
+  // the mode is 'run', make the server replace the test's whole recording
+  // directory with a recording of just the slice.
+  describe('the merged re-run flows never inherit a compile', () => {
+    it('Stop, then "Run selected skill steps on stopped session"', async () => {
+      await parkPausedFailure({ compile: true });
+      assert.equal(fake.requests[0].compile, 'run', 'precondition: Run & Compile armed it');
+
+      await vscode.commands.executeCommand('testbench-native.stop');
+      await waitFor('debug context parked after Stop', () => hooks.skillDebugActive());
+
+      await openSkillEditor();
+      const before = fake.requests.length;
+      void vscode.commands.executeCommand('testbench-native.runSkillStepsOnStoppedSession');
+      await waitFor('slice request issued', () => fake.requests.length > before);
+
+      const req = fake.requests[fake.requests.length - 1];
+      assert.ok(req.startAt, 'precondition: it is the bounded skill slice');
+      assert.equal(req.compile, undefined, 'the slice carries no compile mode');
+      assert.equal(req.compileContinues, undefined, 'and never compileContinues');
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('the Variables-panel "re-run from the failed step"', async () => {
+      await parkPausedFailure({ compile: true });
+      assert.equal(fake.requests[0].compile, 'run', 'precondition: Run & Compile armed it');
+
+      const before = fake.requests.length;
+      // The panel posts this message; driving it through the host bridge is
+      // the same path the webview button takes.
+      void hooks.dispatchWebviewMessage({
+        type: 'rerunSkillStep',
+        testUri: fixtureUri('test-with-steps.md').toString(),
+        edits: {},
+      });
+      await waitFor('re-run request issued', () => fake.requests.length > before);
+
+      const req = fake.requests[fake.requests.length - 1];
+      assert.ok(req.startAt, 'precondition: it is the seeded partial re-run');
+      assert.equal(req.compile, undefined, 'the re-run carries no compile mode');
+      assert.equal(req.compileContinues, undefined, 'and never compileContinues');
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('a Stop clears the remembered compile mode outright', async () => {
+      // Belt and braces behind the flag: after a Stop there is no logical run
+      // whose mode is worth remembering, so even a future caller that gets the
+      // resume flag wrong has nothing to inherit. Asserted on the field,
+      // because the clear has no other observable effect — every inheriting
+      // path is gated on `isResume`, and a Stop wipes the resume marker.
+      const testUri = fixtureUri('test-with-steps.md');
+      await parkPausedFailure({ compile: true });
+      assert.equal(
+        hooks.rememberedCompileMode(testUri),
+        'run',
+        'precondition: Run & Compile is remembered while the run is parked',
+      );
+
+      await vscode.commands.executeCommand('testbench-native.stop');
+      await waitFor('idle after stop', () => !hooks.isRunning());
+      assert.equal(
+        hooks.rememberedCompileMode(testUri),
+        undefined,
+        'a stopped run leaves no compile mode behind',
+      );
+    });
+  });
+
   it('a cancelled picker runs nothing', async () => {
     await parkPausedFailure();
     await openSkillEditor();

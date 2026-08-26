@@ -1252,6 +1252,10 @@ export interface TestBenchTestHooks {
    *  notification — or null when it succeeded or none has run. Reset at the
    *  start of every compile, so it always describes the latest one. */
   lastCompileError: () => string | null;
+  /** The compile mode a controller still remembers for its logical run, by
+   *  test URI. A Stop must leave nothing behind for a later caller to
+   *  inherit; nothing else makes that observable. */
+  rememberedCompileMode: (uri: vscode.Uri) => 'run' | 'steps' | undefined;
   /** True when any controller has a parked skill-step failure (the Variables
    *  re-run panel would be offered). Used to assert a refused dead-session
    *  re-run does NOT wipe the parked failure. */
@@ -1638,6 +1642,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       },
       lastDoneStatus: () => registry.lastDoneStatus,
       lastCompileError: () => registry.lastCompileError,
+      rememberedCompileMode: (uri) =>
+        registry.controllerForUri(uri.toString())?.rememberedCompileMode,
       skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
       skillDebugActive: () => registry.skillDebug !== null,
       skillDebugContext: () => {

@@ -363,6 +363,13 @@ export class RunController {
   /** The compile mode of the logical run in progress, so a Continue after a
    *  breakpoint keeps compiling rather than silently becoming a plain Run. */
   private compileModeOfRun: 'run' | 'steps' | undefined;
+  /** Test-only readback of the remembered mode. A Stop clearing it has no
+   *  other observable effect — every path that would inherit is already gated
+   *  on `isResume`, and a Stop wipes the resume marker — so without this the
+   *  clear could rot untested. */
+  get rememberedCompileMode(): 'run' | 'steps' | undefined {
+    return this.compileModeOfRun;
+  }
   /**
    * Did the run that just finished park at a breakpoint (or a pause)?
    *
@@ -1275,6 +1282,17 @@ export class RunController {
     // stop() (see RunControllerRegistry.setApiClientFactory / dispose), so
     // this is where a paused run's keep-alive timer must be released.
     this.stopKeepAlive();
+    // A stopped run is over, so there is no logical run whose compile mode is
+    // worth remembering. Inheritance is already gated on `isResume` — and a
+    // Stop clears the resume marker, so nothing can legitimately resume into
+    // this value — but leaving a spent `'run'` parked here means any future
+    // caller that gets the flag wrong inherits a compile the author never
+    // asked for, which costs model calls and (in `'run'` mode) rewrites the
+    // test's whole recording. Cheaper to make the field honest.
+    //
+    // Deliberately NOT done in `pause()`: that parks the run for a Resume,
+    // which SHOULD inherit.
+    this.compileModeOfRun = undefined;
     this.active?.abort();
   }
 
