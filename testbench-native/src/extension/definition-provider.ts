@@ -3,6 +3,12 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { buildSectionIndex, matchText } from 'ai-ui-automation-runner-core';
 import { resolveProjectDirs } from './aiui-config.js';
+import {
+  TOOL_FILE_EXTS,
+  canonicalSkillName,
+  skillHeading,
+  toolFileFor,
+} from './invocation-target-core.js';
 
 /**
  * "Go to Definition" (F12 / Ctrl+Click / Peek) for `[skill: ...]` and
@@ -111,12 +117,18 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
       this.warn(`TestBench: aiui.config does not declare a skillsDir.`);
       return undefined;
     }
-    const file = path.join(skillsDir, `${name}.md`);
-    if (!fs.existsSync(file)) {
-      this.warn(`TestBench: skill "${name}" not found — looked for ${file}`);
+    const rel = canonicalSkillName(name);
+    if (rel === null) {
+      this.warnBadSkillName(name);
       return undefined;
     }
-    const lineNo = findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(name)}\\b`)) ?? 0;
+    const file = path.join(skillsDir, `${rel}.md`);
+    if (!fs.existsSync(file)) {
+      this.warn(`TestBench: skill "${rel}" not found — looked for ${file}`);
+      return undefined;
+    }
+    const lineNo =
+      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillHeading(rel))}\\b`)) ?? 0;
     return new vscode.Location(vscode.Uri.file(file), new vscode.Position(lineNo, 0));
   }
 
@@ -129,16 +141,21 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
       this.warn(`TestBench: aiui.config does not declare a skillsDir.`);
       return undefined;
     }
-    const file = path.join(skillsDir, `${skillName}.md`);
+    const rel = canonicalSkillName(skillName);
+    if (rel === null) {
+      this.warnBadSkillName(skillName);
+      return undefined;
+    }
+    const file = path.join(skillsDir, `${rel}.md`);
     if (!fs.existsSync(file)) {
-      this.warn(`TestBench: skill "${skillName}" not found — looked for ${file}`);
+      this.warn(`TestBench: skill "${rel}" not found — looked for ${file}`);
       return undefined;
     }
     // Prefer the `- <key>:` bullet under an `## Outputs` heading; fall back
     // to the skill heading, then the top of the file.
     const lineNo =
       findOutputBullet(file, outputKey) ??
-      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillName)}\\b`)) ??
+      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillHeading(rel))}\\b`)) ??
       0;
     return new vscode.Location(vscode.Uri.file(file), new vscode.Position(lineNo, 0));
   }
@@ -151,12 +168,40 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
       this.warn(`TestBench: aiui.config does not declare a toolsDir.`);
       return undefined;
     }
-    const file = path.join(toolsDir, `${name}.ts`);
-    if (!fs.existsSync(file)) {
-      this.warn(`TestBench: tool "${name}" not found — looked for ${file}`);
+    // A tool reference addresses a file *and* a tool inside it: the last
+    // `/`-separated segment is the tool name, everything before it is the file
+    // path — `auth/login/login` → `<toolsDir>/auth/login.<ext>`. A lone segment
+    // is sugar for "the tool named after the file". Mirrors `parseToolRef` in
+    // src/tools/registry.ts; see `toolFileFor` for the still-typing leniency.
+    const rel = toolFileFor(name);
+    if (rel === null) {
+      this.warn(
+        `TestBench: invalid tool reference "${name}": empty path segment (no leading or doubled '/')`,
+      );
       return undefined;
     }
-    return new vscode.Location(vscode.Uri.file(file), new vscode.Position(0, 0));
+    // The registry indexes `.ts`, `.mts`, `.js` and `.mjs` alike, so probe them
+    // in the same order rather than assuming a TypeScript project.
+    const base = path.join(toolsDir, rel);
+    for (const ext of TOOL_FILE_EXTS) {
+      const file = `${base}${ext}`;
+      if (fs.existsSync(file)) {
+        return new vscode.Location(vscode.Uri.file(file), new vscode.Position(0, 0));
+      }
+    }
+    this.warn(
+      `TestBench: tool "${name}" not found — looked for ${base}{${TOOL_FILE_EXTS.join(',')}}`,
+    );
+    return undefined;
+  }
+
+  /** The editor must not navigate on a name the runner rejects: `path.join`
+   *  collapses `auth//login` into a real file, while `parseSkillCall` throws
+   *  `SkillCallSyntaxError` on it. Same wording as the parser's message. */
+  private warnBadSkillName(name: string): void {
+    this.warn(
+      `TestBench: invalid skill name "${name}": empty path segment (no trailing or doubled '/')`,
+    );
   }
 
   private warn(message: string): void {
@@ -189,7 +234,12 @@ interface Token {
   text: string;
 }
 
-const INVOCATION_RE = /\[(skill|tool):\s*([A-Za-z0-9_-]+)/;
+// The name class admits `/` because both kinds are path-qualified: skills may
+// live in subfolders of `skillsDir` (`auth/login`, leading slash tolerated) and
+// a tool ref names a file plus the tool inside it (`auth/login/login`). Keep it
+// in step with `readIdentifier`'s `allowSlash` class in
+// src/parser/invocation-parser.ts.
+const INVOCATION_RE = /\[(skill|tool):\s*([A-Za-z0-9_/-]+)/;
 const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
 
 /**

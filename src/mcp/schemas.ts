@@ -279,8 +279,9 @@ export const runStepsInput = toolSchema({
     .min(1)
     .describe(
       'Natural-language steps, one per entry. Supports the same syntax as a ' +
-        'test file: `[skill: name]`, `[tool: name]`, `[input: ...]`, section ' +
-        'calls, and ${env.X} substitution.',
+        'test file: `[skill: name]` (`sub/name` for a skill in a subfolder), ' +
+        '`[tool: name]`, `[input: ...]`, section calls, and ${env.X} ' +
+        'substitution.',
     ),
   session_id: sessionId,
   project_root: projectRoot,

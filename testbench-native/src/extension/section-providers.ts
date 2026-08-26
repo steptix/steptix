@@ -18,7 +18,6 @@
  * testbench-native/stories/specs/inline-sections-authoring.md.
  */
 import * as vscode from 'vscode';
-import * as fs from 'node:fs';
 import {
   buildSectionIndex,
   isTestFile,
@@ -26,6 +25,7 @@ import {
   sectionNameError,
 } from 'ai-ui-automation-runner-core';
 import { resolveProjectDirs } from './aiui-config.js';
+import { collectSkillNames } from './invocation-target-core.js';
 import {
   computeSectionDiagnostics,
   type PlainDiagnostic,
@@ -87,7 +87,7 @@ export class SectionLinkProvider implements vscode.DocumentLinkProvider {
  * snippet items for the project's skills.
  *
  * Sections sort first (they're the file-local reuse mechanism); skills are a
- * cheap `readdir` and a bonus.
+ * cheap walk of `skillsDir` (see `collectSkillNames`) and a bonus.
  */
 export class SectionCompletionProvider implements vscode.CompletionItemProvider {
   provideCompletionItems(
@@ -145,15 +145,7 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
   private skillNames(docUri: vscode.Uri): string[] {
     const dirs = resolveProjectDirs(docUri);
     if (!dirs?.skillsDir) return [];
-    try {
-      return fs
-        .readdirSync(dirs.skillsDir)
-        .filter((f) => f.endsWith('.md'))
-        .map((f) => f.slice(0, -3))
-        .sort();
-    } catch {
-      return [];
-    }
+    return collectSkillNames(dirs.skillsDir);
   }
 }
 

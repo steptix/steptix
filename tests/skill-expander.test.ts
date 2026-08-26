@@ -16,8 +16,13 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+/** Write `<tmpDir>/<name>.md`. `name` may be path-qualified (`auth/login`),
+ *  in which case the subfolder is created — that is how a skill reached by
+ *  `[skill: auth/login]` sits on disk. */
 async function writeSkill(name: string, content: string): Promise<void> {
-  await fs.writeFile(path.join(tmpDir, `${name}.md`), content);
+  const file = path.join(tmpDir, `${name}.md`);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, content);
 }
 
 describe('expandSkills', () => {
@@ -216,6 +221,214 @@ type: skill
     ).rejects.toThrow(/Skill "missing_skill" not found/);
   });
 
+  it('resolves a path-qualified name into a subfolder of skillsDir', async () => {
+    await writeSkill(
+      'auth/login',
+      `---
+type: skill
+---
+# login
+## Parameters
+- username: the account
+## Steps
+1. Navigate to the login page
+2. Type "{{username}}" into the username field
+`,
+    );
+
+    const result = await expandSkills(
+      ['[skill: auth/login username="admin"]', 'Verify the dashboard loads'],
+      tmpDir,
+    );
+
+    expect(result.steps).toEqual([
+      'Navigate to the login page',
+      'Type "admin" into the username field',
+      'Verify the dashboard loads',
+    ]);
+    expect(result.sourceSkills).toEqual(['auth/login', 'auth/login', null]);
+  });
+
+  it('treats a leading slash as sugar for the same subfolder skill', async () => {
+    await writeSkill(
+      'auth/login',
+      `---
+type: skill
+---
+# login
+## Parameters
+- username: the account
+## Steps
+1. Navigate to the login page
+2. Type "{{username}}" into the username field
+`,
+    );
+
+    const bare = await expandSkills(['[skill: auth/login username="admin"]'], tmpDir);
+    const slashed = await expandSkills(['[skill: /auth/login username="admin"]'], tmpDir);
+
+    expect(slashed.steps).toEqual(bare.steps);
+    // The canonical (slash-free) name is what everything downstream sees, so a
+    // report badge and a frame name read the same either way it was authored.
+    expect(slashed.sourceSkills).toEqual(['auth/login', 'auth/login']);
+    expect(slashed.sourceSkills).toEqual(bare.sourceSkills);
+  });
+
+  it('names the skill and the full resolved path when a subfolder skill is missing', async () => {
+    await expect(expandSkills(['[skill: auth/nope]'], tmpDir)).rejects.toThrow(
+      /Skill "auth\/nope" not found at .*auth[\\/]nope\.md/,
+    );
+  });
+
+  it('resolves a leading-slash name INSIDE skillsDir, not at the filesystem root', async () => {
+    // The containment property, asserted through the not-found message: the
+    // leading slash must be stripped BEFORE `path.resolve`, which would
+    // otherwise read `/nope.md` as absolute and land on the drive root. The
+    // message also proves the canonical (slash-free) name is what surfaces.
+    const escaped = tmpDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await expect(expandSkills(['[skill: /nope]'], tmpDir)).rejects.toThrow(
+      new RegExp(`Skill "nope" not found at ${escaped}[\\\\/]nope\\.md`),
+    );
+  });
+
+  it('expands a subfolder skill that calls another subfolder skill', async () => {
+    await writeSkill(
+      'flows/inner',
+      `---
+type: skill
+---
+# inner
+## Parameters
+- text: input
+## Steps
+1. Type "{{text}}"
+`,
+    );
+    await writeSkill(
+      'flows/outer',
+      `---
+type: skill
+---
+# outer
+## Parameters
+- name: input
+## Steps
+1. Click start
+2. [skill: flows/inner text="hello {{name}}"]
+3. Click finish
+`,
+    );
+
+    const result = await expandSkills(['[skill: flows/outer name="world"]'], tmpDir);
+
+    expect(result.steps).toEqual([
+      'Click start',
+      'Type "hello world"',
+      'Click finish',
+    ]);
+    // Outermost-skill attribution survives the path-qualified hop: every step
+    // is tagged `flows/outer`, including the one authored in `flows/inner`.
+    expect(result.sourceSkills).toEqual(['flows/outer', 'flows/outer', 'flows/outer']);
+  });
+
+  it('renames a subfolder skill output when the caller aliases it', async () => {
+    await writeSkill(
+      'flows/count',
+      `---
+type: skill
+---
+# count
+## Outputs
+- result_count
+## Steps
+1. Count rows [store as: result_count]
+`,
+    );
+
+    const result = await expandSkills(
+      ['[skill: flows/count out.result_count="my_count"]', 'Total: {{my_count}}'],
+      tmpDir,
+    );
+
+    expect(result.steps[0]).toBe('Count rows [store as: my_count]');
+    expect(result.steps[1]).toBe('Total: {{my_count}}');
+  });
+
+  it('resolves a `### Section` inside a subfolder skill', async () => {
+    // A skill-private section is called by bare name from the skill's own body.
+    // The section index is built from the skill file, so a subfolder skill's
+    // sections must resolve exactly like a flat one's.
+    await writeSkill(
+      'flows/greet',
+      `---
+type: skill
+---
+# greet
+## Parameters
+- who: the name
+## Steps
+1. Say hello
+
+### Say hello
+1. Greet {{who}}
+`,
+    );
+
+    const result = await expandSkills(['[skill: flows/greet who="alice"]'], tmpDir);
+
+    expect(result.steps).toEqual(['Greet alice']);
+    expect(result.sourceSkills).toEqual(['flows/greet']);
+  });
+
+  it('names the invocation too when the H1 differs from the path-qualified call', async () => {
+    // `skill.name` is the H1, so two subfolders can hold the same one
+    // (`auth/login.md` and `admin/login.md` are both `# login`). Without the
+    // suffix, the error names neither file.
+    await writeSkill(
+      'auth/login',
+      `---
+type: skill
+---
+# login
+## Parameters
+- username: the account
+## Steps
+1. Type "{{username}}"
+`,
+    );
+
+    await expect(expandSkills(['[skill: auth/login]'], tmpDir)).rejects.toThrow(
+      /Skill "login" requires parameter "username" but caller did not supply it \(invoked as "auth\/login"\)/,
+    );
+
+    // The undeclared-output refusal carries the same suffix — with
+    // auth/login.md and admin/login.md both conventionally `# login`, a
+    // message naming only the H1 identifies neither file.
+    await expect(
+      expandSkills(['[skill: auth/login username="u" out.token="t"]'], tmpDir),
+    ).rejects.toThrow(
+      /Skill "login" has no declared output "token" — declared outputs: \[none\] \(invoked as "auth\/login"\)/,
+    );
+  });
+
+  it('expands a deeply nested skill', async () => {
+    await writeSkill(
+      'a/b/c/d',
+      `---
+type: skill
+---
+# d
+## Steps
+1. Deep step ran
+`,
+    );
+
+    const result = await expandSkills(['[skill: a/b/c/d]'], tmpDir);
+
+    expect(result.steps).toEqual(['Deep step ran']);
+    expect(result.sourceSkills).toEqual(['a/b/c/d']);
+  });
+
   it('detects direct cycles', async () => {
     await writeSkill(
       'a',
@@ -257,6 +470,37 @@ type: skill
 
     await expect(expandSkills(['[skill: a]'], tmpDir)).rejects.toThrow(
       /Skill cycle detected: a -> b -> a/,
+    );
+  });
+
+  it('sees through both spellings when detecting a cycle', async () => {
+    // The two skills reference each other with the *other* spelling to the one
+    // the entry point uses. Only because `parseSkillCall` canonicalises does
+    // the `visited` set recognise `/a/x` as the `a/x` already on the stack —
+    // otherwise this recurses until the depth guard instead of naming a cycle.
+    await writeSkill(
+      'a/x',
+      `---
+type: skill
+---
+# x
+## Steps
+1. [skill: /a/y]
+`,
+    );
+    await writeSkill(
+      'a/y',
+      `---
+type: skill
+---
+# y
+## Steps
+1. [skill: /a/x]
+`,
+    );
+
+    await expect(expandSkills(['[skill: a/x]'], tmpDir)).rejects.toThrow(
+      /Skill cycle detected: a\/x -> a\/y -> a\/x/,
     );
   });
 

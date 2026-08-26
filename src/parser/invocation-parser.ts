@@ -36,6 +36,11 @@
 
 export interface ParsedInvocation {
   name: string;
+  /** Zero-based column in the source line where `name`'s first character sits.
+   *  Recorded at read time so callers can point a caret at the name without
+   *  re-deriving the offset with `indexOf` — which finds the wrong occurrence
+   *  when the same text also appears in the call's `label`. */
+  nameColumn: number;
   args: Record<string, string>;
   outputAliases: Record<string, string>;
   /** Text after the closing `]` — preserved for callers that want to log it. */
@@ -145,8 +150,10 @@ export interface InvocationParserOptions {
   /** Error subclass to throw for syntax errors. Defaults to `InvocationSyntaxError`. */
   errorClass?: new (reason: string, source: string, column: number) => InvocationSyntaxError;
   /**
-   * Allow `/` in the name token so callers can use path-qualified references
-   * (e.g. `auth/login/login`). Used by tool calls; skill names stay flat.
+   * Allow `/` in the name token so callers can use path-qualified references.
+   * Tool calls use it to name a file plus the tool inside it
+   * (`auth/login/login`); skill calls use it to reach skills in subfolders
+   * of `skillsDir` (`auth/login`, leading slash tolerated).
    */
   allowSlashInName?: boolean;
 }
@@ -183,6 +190,7 @@ export function parseInvocation(
   const scanner = new Scanner(line, prefixIdx + prefix.length, ErrorCls);
   scanner.skipInlineSpace();
 
+  const nameColumn = scanner.pos;
   const name = scanner.readIdentifier({
     allowHyphen: true,
     allowSlash: options.allowSlashInName === true,
@@ -201,6 +209,7 @@ export function parseInvocation(
       scanner.advance();
       return {
         name,
+        nameColumn,
         args,
         outputAliases,
         trailing: scanner.rest(),
@@ -301,9 +310,12 @@ class Scanner {
 
   readIdentifier(opts: { allowHyphen?: boolean; allowSlash?: boolean } = {}): string {
     const start = this.pos;
-    // `allowSlash` is for path-qualified tool references (`auth/login/login`):
-    // the name token may contain `/` to name a file path. Hyphens are always
-    // allowed alongside slashes since each path segment is `[\w-]+`.
+    // `allowSlash` is for path-qualified references — a tool's file plus the
+    // tool inside it (`auth/login/login`), or a skill in a subfolder of
+    // `skillsDir` (`auth/login`): the name token may contain `/` to name a
+    // path. Hyphens are always allowed alongside slashes since each path
+    // segment is `[\w-]+`. Note there is deliberately no `.` and no `\` in
+    // the class, so no path-qualified name can traverse out of its root.
     const re = opts.allowSlash ? /[\w\-/]/ : opts.allowHyphen ? /[\w-]/ : /\w/;
     while (!this.atEnd() && re.test(this.peek())) this.pos++;
     return this.source.slice(start, this.pos);

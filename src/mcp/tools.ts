@@ -1639,6 +1639,7 @@ function summarizeErrand(
 const STEP_SYNTAX = `
 Step syntax: plain English, one action per step. Also supported:
   [skill: name arg=value]   run a reusable skill from the project's skills dir
+                            (sub/name for one kept in a subfolder of it)
   [tool: name arg=value]    call a project tool (JS/TS) directly
   [input: label]            needs a human — SKIPPED in an unattended run
   Section Name              call an inline "### Section Name" from the same file

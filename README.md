@@ -381,7 +381,7 @@ timeout: 60s
 
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
 - `[interactive] optional hint` -- opens an interactive REPL (commands are `/`-prefixed: `/continue` advance, `/resume` jump to any step, `/screenshot` capture, `/help` for the full list)
-- `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory (see [Skills](#skills))
+- `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory; `[skill: subfolder/name args]` for a skill in a subfolder (see [Skills](#skills))
 - `[tool: name args]` -- run deterministic TypeScript code with full Playwright access (see [Tools](#tools))
 
 ## Skills
@@ -419,6 +419,19 @@ Invoke it from any test step, passing arguments and aliasing outputs into the ca
 ```
 
 Skills expand inline before the run, so the runner and the report see the fully-expanded flow, and TestBench (Native) can step **into** a skill body, set breakpoints in it, and show a call stack. The skills directory defaults to `skills/` and is configurable via `tests.skillsDir` in `aiui.config.json`.
+
+Skills may be grouped into subfolders of that directory and referenced path-qualified — `skills/auth/login.md` is `[skill: auth/login]`. A leading slash is optional sugar for the same file (`[skill: /auth/login]`), and the unqualified form (`[skill: login]`) still means a skill sitting directly in `skills/`:
+
+```markdown
+## Steps
+1. [skill: auth/login username="admin@test.com" password="$ADMIN_PW"]
+2. [skill: admin/users/create_user role="viewer"]
+```
+
+Two things worth knowing about how those names resolve:
+
+- **A `[skill: ...]` inside a skill body is resolved against the skills root too**, never against the calling skill's own folder. `[skill: mfa]` written inside `skills/auth/login.md` means `skills/mfa.md`, not `skills/auth/mfa.md` — write `[skill: auth/mfa]` for the sibling. One name always means one file, wherever it is written.
+- **Names are file paths, so they are case-sensitive wherever the filesystem is** (Linux, macOS by default). Windows will happily open `skills/Auth/Login.md` for `[skill: auth/login]`, so a mismatch that works locally can fail in CI. Match the case on disk.
 
 ## Inline Sections
 
