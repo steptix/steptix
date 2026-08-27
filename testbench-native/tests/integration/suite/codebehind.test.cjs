@@ -1162,8 +1162,29 @@ describe('TestBench code-behind compile', function () {
      * taken before the command under test.
      */
     let mark = 0;
+    /**
+     * Every toast this test raised. A real notification cannot be read back
+     * from the extension host and would sit on screen for the length of the
+     * suite, so the reporter is swapped for every test in this block rather
+     * than inside the one that asserts on it.
+     */
+    let toasts = [];
     beforeEach(() => {
       mark = hooks.hostMessageCount();
+      toasts = [];
+      hooks.setCompileProgressReporter((options, task) => {
+        const toast = {
+          title: options.title,
+          cancellable: options.cancellable,
+          details: [],
+          done: false,
+        };
+        toasts.push(toast);
+        const progress = { report: (v) => toast.details.push(v) };
+        return Promise.resolve(task(progress, { isCancellationRequested: false })).then(() => {
+          toast.done = true;
+        });
+      });
     });
     const posted = (type) => hooks.hostMessagesSince(mark).filter((m) => m.type === type);
     const strips = () => posted('compileProgress');
@@ -1325,6 +1346,67 @@ describe('TestBench code-behind compile', function () {
       assert.ok(states.some((s) => s !== null), 'the strip never went up');
       assert.equal(states[states.length - 1], null, 'the strip outlived the run');
       assert.deepEqual(hooks.compileTails(), []);
+    });
+
+it('raises one toast per compile, names the file, and resolves it on the result', async () => {
+      fake.streamScripts = [tailScript(() => stepsPath, 'export default defineSteps([]);\n')];
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      await waitFor('idle', () => !hooks.isRunning());
+      await waitFor('toast resolved', () => toasts.length > 0 && toasts[0].done);
+
+      assert.equal(toasts.length, 1, 'one toast per compile');
+      assert.equal(toasts[0].title, 'Compiling code-behind for compile-me.md');
+      // Stop in the panel already aborts the tail; a Cancel link on a toast is
+      // a destructive control in a place people click reflexively.
+      assert.equal(toasts[0].cancellable, false);
+      // It tracks the counts rather than sitting at 0 until it disappears.
+      const messages = toasts[0].details.map((d) => d.message).filter(Boolean);
+      assert.ok(
+        messages.some((m) => /entries generated/.test(m)),
+        JSON.stringify(messages),
+      );
+    });
+
+    it('aggregates two files compiling at once, and clears as each finishes', async () => {
+      // Reachable today: the compile lock is per test file, so two DIFFERENT
+      // files compile concurrently while a second compile of the same one is
+      // refused with a 409.
+      const otherMd = path.resolve(FIXTURES_DIR, 'compile-me-too.md');
+      const otherSteps = path.resolve(FIXTURES_DIR, 'compile-me-too.steps.ts');
+      fs.writeFileSync(otherMd, TEST_MD, 'utf-8');
+      // Neither stream is ended by its script: both tails stay up until this
+      // test finishes them, which is the state the status bar has to describe.
+      const openTail = (steps) => (f) => {
+        f.push({ type: 'step:start', line: 8 });
+        f.push({ type: 'step:pass', line: 8 });
+        f.push({ type: 'compile:progress', done: 0, total: 2, phase: 'generate', reviewPending: true, runEnded: true });
+        void steps;
+      };
+      fake.streamScripts = [openTail(stepsPath), openTail(otherSteps)];
+
+      try {
+        void vscode.commands.executeCommand('testbench-native.runAndCompile');
+        await waitFor('first run requested', () => fake.requests.length > 0);
+        await waitFor('first tail up', () => hooks.compileTails().length === 1);
+
+        await openFixture(otherMd);
+        void vscode.commands.executeCommand('testbench-native.runAndCompile');
+        await waitFor('second run requested', () => fake.requests.length > 1);
+        await waitFor('both tails up', () => hooks.compileTails().length === 2);
+
+        const files = hooks.compileTails().map((t) => t.file).sort();
+        assert.deepEqual(files, ['compile-me-too.md', 'compile-me.md']);
+      } finally {
+        // Stop both runs; each tail resolves with its (empty) result.
+        await vscode.commands.executeCommand('testbench-native.stop');
+        await openFixture(mdPath);
+        await vscode.commands.executeCommand('testbench-native.stop');
+        await waitFor('tails cleared', () => hooks.compileTails().length === 0, 10_000);
+        fs.rmSync(otherMd, { force: true });
+        fs.rmSync(otherSteps, { force: true });
+      }
     });
 
     it('an ordinary run raises no strip — its steps are their own progress', async () => {

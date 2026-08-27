@@ -1456,6 +1456,10 @@ export interface TestBenchTestHooks {
   hostMessagesSince: (mark: number) => import('ai-ui-automation-runner-core').HostToWebviewMsg[];
   /** The mark to pass back to `hostMessagesSince`. */
   hostMessageCount: () => number;
+  /** Replace how the compile toast is raised, so the harness can observe it. */
+  setCompileProgressReporter: (
+    reporter: import('./compile-tail-signals.js').ProgressReporter,
+  ) => void;
   /** The compile tails the workbench status bar item is aggregating. */
   compileTails: () => import('./compile-progress-core.js').CompileTail[];
   /** The ⚠ decoration's hover text. Applied decorations are not readable back
@@ -1842,6 +1846,11 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
        *  buffer drops from the front once full, and an index would then point
        *  at a different message than it did when it was taken. */
       hostMessageCount: () => view.sentMessageCount,
+      /** Swap how the compile toast is raised. The harness cannot read a real
+       *  notification back, and a real one would sit on screen for the length
+       *  of the suite. */
+      setCompileProgressReporter: (reporter) =>
+        registry.compileTailSignals.setProgressReporter(reporter),
       /** Every compile tail the status bar item is currently aggregating. */
       compileTails: () => registry.compileTailSignals.tails,
       pendingCodeBehind: () => codeBehindDiffs.pending,

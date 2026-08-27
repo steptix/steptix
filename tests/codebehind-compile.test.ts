@@ -272,10 +272,16 @@ describe('compileTest — the happy path', () => {
     expect(prompts[1]).toContain('## The whole test');
     expect(prompts[1]).toContain('## The code-behind file as it stands');
     expect(prompts[1]).toContain('Enter the booking code');
+    // Review announces the file BEFORE its model call — the boxed pipeline
+    // inherits that from `reviewCandidate` for free
+    // (stories/compile-tail-progress.md), and it is the longest single call
+    // this pipeline makes.
+    const reviewMessages = events
+      .filter((e) => e.kind === 'phase' && e.phase === 'review')
+      .map((e) => e.message);
+    expect(reviewMessages[0]).toBe('reviewing booking.steps.ts…');
     // Review ran over the assembled file and changed nothing.
-    expect(
-      events.some((e) => e.kind === 'phase' && e.phase === 'review' && e.message.startsWith('no changes')),
-    ).toBe(true);
+    expect(reviewMessages.some((m) => m.startsWith('no changes'))).toBe(true);
     // Tokens: the record run's, plus whatever the prompts cost (0 with a stub).
     expect(result.summary.tokensUsed).toBe(1_000);
   });

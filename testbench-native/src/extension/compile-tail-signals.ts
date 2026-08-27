@@ -31,15 +31,17 @@ export class CompileTailSignals implements vscode.Disposable {
   private readonly running = new Map<string, Entry>();
   private item: vscode.StatusBarItem | undefined;
 
-  constructor(
-    /**
-     * Seam for the Electron harness: a test drives the aggregator without a
-     * real notification, which `withProgress` would otherwise leave on screen
-     * for the length of the suite. Production passes nothing.
-     */
-    private readonly withProgress: typeof vscode.window.withProgress = vscode.window.withProgress
-      .bind(vscode.window),
-  ) {}
+  /**
+   * How a toast is raised. Swappable for the Electron harness, which has no
+   * way to read a real notification back — and would otherwise leave one on
+   * screen for the length of the suite.
+   */
+  private withProgress: ProgressReporter = vscode.window.withProgress.bind(vscode.window);
+
+  /** Replace the reporter. Test-only; production never calls it. */
+  setProgressReporter(reporter: ProgressReporter): void {
+    this.withProgress = reporter;
+  }
 
   /**
    * A tail has begun for `uri`. Idempotent: a second call for a file already
@@ -163,6 +165,15 @@ export class CompileTailSignals implements vscode.Disposable {
     this.item.show();
   }
 }
+
+/** The shape of `vscode.window.withProgress` this class actually uses. */
+export type ProgressReporter = (
+  options: vscode.ProgressOptions,
+  task: (
+    progress: vscode.Progress<{ message?: string; increment?: number }>,
+    token: vscode.CancellationToken,
+  ) => Thenable<void>,
+) => Thenable<void>;
 
 interface Entry {
   uri: vscode.Uri;
