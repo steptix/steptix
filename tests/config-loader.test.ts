@@ -243,7 +243,7 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
 
 describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
   let tmpDir: string;
-  const AI_KEYS = ['AI_API_KEY', 'AI_MODEL', 'AI_EFFORT'] as const;
+  const AI_KEYS = ['AI_API_KEY', 'AI_MODEL', 'AI_EFFORT', 'AI_GATEWAY_URL'] as const;
   const preservedAi: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
@@ -336,6 +336,73 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
 
     expect(config.ai.apiKey).toBeUndefined();
     expect(config.ai.model).toBe('openai/gpt-5.6-luna');
+  });
+
+  // -------------------------------------------------------------------------
+  // AI_GATEWAY_URL (stories/keyless-replay-and-gateway-env.md Part A)
+  //
+  // The same four-level chain as AI_MODEL — environment → config file →
+  // machine `.env` → built-in default — with one thing the model cases cannot
+  // exercise: `gatewayUrl` HAS a built-in default, so the merged config always
+  // carries a value and "did the file set one?" is only answerable from the
+  // raw file config.
+  // -------------------------------------------------------------------------
+
+  it('AI_GATEWAY_URL from the environment beats the config file', async () => {
+    process.env['AI_GATEWAY_URL'] = 'https://env.gateway.test';
+    const config = await loadConfig(
+      await writeConfig({ ai: { gatewayUrl: 'https://file.gateway.test' } }),
+    );
+
+    expect(config.ai.gatewayUrl).toBe('https://env.gateway.test');
+  });
+
+  it('trims AI_GATEWAY_URL and reads a blank one as absent', async () => {
+    process.env['AI_GATEWAY_URL'] = '  https://env.gateway.test  ';
+    expect((await loadConfig(await writeConfig({}))).ai.gatewayUrl).toBe(
+      'https://env.gateway.test',
+    );
+
+    process.env['AI_GATEWAY_URL'] = '   ';
+    expect((await loadConfig(await writeConfig({}))).ai.gatewayUrl).toBe(
+      'https://llm.corp.example',
+    );
+  });
+
+  it('a config-file gatewayUrl beats the machine .env', async () => {
+    await writeUserRootEnv('AI_GATEWAY_URL=https://machine.gateway.test\n');
+    const config = await loadConfig(
+      await writeConfig({ ai: { gatewayUrl: 'https://file.gateway.test' } }),
+    );
+
+    // THE test for this var. The floor asks `fileAi`, not the merged result —
+    // read the merged result and the answer is "someone set it" every time
+    // (the built-in default is a string too), so the machine value could never
+    // apply. Read only `fileAi` and forget the default exists, and it applies
+    // even here, silently re-pointing a project that pinned its own endpoint.
+    expect(config.ai.gatewayUrl).toBe('https://file.gateway.test');
+  });
+
+  it('the machine .env applies when neither the environment nor the file set one', async () => {
+    await writeUserRootEnv('AI_GATEWAY_URL=https://machine.gateway.test\n');
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.gatewayUrl).toBe('https://machine.gateway.test');
+  });
+
+  it('the environment beats the machine .env', async () => {
+    await writeUserRootEnv('AI_GATEWAY_URL=https://machine.gateway.test\n');
+    process.env['AI_GATEWAY_URL'] = 'https://env.gateway.test';
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.gatewayUrl).toBe('https://env.gateway.test');
+  });
+
+  it('no gateway anywhere leaves the built-in default', async () => {
+    await writeUserRootEnv('AI_GATEWAY_URL=   \n');
+    const config = await loadConfig(await writeConfig({}));
+
+    expect(config.ai.gatewayUrl).toBe('https://llm.corp.example');
   });
 });
 

@@ -68,6 +68,19 @@ export interface CacheCapture {
   turns: CachedStepData[];
 }
 
+/**
+ * What a step whose entry broke says on a keyless run
+ * (stories/keyless-replay-and-gateway-env.md §Part B).
+ *
+ * Written for the person reading a red step on a corporate laptop: the entry
+ * ran and failed, nothing tried to repair it, and the repair happens on a
+ * machine that has a model. It deliberately does not mention API keys — the
+ * reader here did not break their config, and the app most likely changed.
+ */
+export const KEYLESS_HEAL_SKIPPED_ERROR =
+  'replay failed and was not healed: AI is not configured on this machine. ' +
+  'Recompile or repair this step where AI is available.';
+
 export interface StepExecutorOptions {
   page: Page;
   config: Config;
@@ -139,6 +152,23 @@ export interface StepExecutorOptions {
    * runs as pure code, and a silent heal would make a red compile look green.
    */
   codeBehindStrict?: boolean;
+  /**
+   * This run has no AI key at all, so a broken entry **fails the step**
+   * instead of falling through to AI
+   * (stories/keyless-replay-and-gateway-env.md §Part B).
+   *
+   * A proactive skip, not a caught crash: healing would build a request, log
+   * a POST line and come back with `AiNotConfiguredError`, and the report
+   * would read as a broken config rather than "this machine has no AI to
+   * repair the step with".
+   *
+   * Passed in rather than read off `opts.config.ai` because the two disagree
+   * on the server path: `executeStep` is handed the server's startup config
+   * with only run settings re-sourced, while the key a client's `.env`
+   * shipped lives in `applyEnvToAiConfig`'s result. Absent means "not
+   * keyless" — every caller that doesn't know stays on today's behaviour.
+   */
+  keyless?: boolean;
   /**
    * Code-behind step-into (stories/codebehind-debugging.md): hit a
    * `debugger;` immediately before this step's entry `run()`. The session
@@ -535,14 +565,17 @@ function tryGetActiveSession(
  * Run a step's code-behind entry.
  *
  * Returns `{ result }` when the step is decided — passed, failed by a
- * `step.expect`, or failed outright under `codeBehindStrict` — and
- * `{ stale }` when the entry threw and the step falls through to AI, which
- * discards the entry for the rest of the run and hands the step to the AI flow
- * with a clean slate.
+ * `step.expect`, or failed outright under `codeBehindStrict` or on a keyless
+ * run — and `{ stale }` when the entry threw and the step falls through to
+ * AI, which discards the entry for the rest of the run and hands the step to
+ * the AI flow with a clean slate.
  *
  * The `expect` distinction is the assertion code cache's rule, lifted: broken
- * code heals, a failed assertion fails. Strict mode suspends the healing half:
- * compile's replay has to see broken code as a red step, not a slow one.
+ * code heals, a failed assertion fails. Two things suspend the healing half.
+ * Strict mode, because compile's replay has to see broken code as a red step,
+ * not a slow one. And a keyless run, because there is no AI to heal with —
+ * an entry that passes still replays, so only the broken step is affected
+ * (stories/keyless-replay-and-gateway-env.md §Part B).
  */
 async function runCodeBehindStep(
   stepIndex: number,
@@ -574,7 +607,10 @@ async function runCodeBehindStep(
   });
 
   const brokenCode = outcome.status === 'failed' && !outcome.expectationFailed;
-  if (brokenCode && !opts.codeBehindStrict) {
+  // Strict first: a compile replay that also happens to run keyless is still a
+  // replay, and its own copy is the one that explains the red step.
+  const healingDeclined = opts.codeBehindStrict || opts.keyless;
+  if (brokenCode && !healingDeclined) {
     logger.warn(
       `Code-behind failed for step ${stepIndex} — falling through to AI: ${outcome.error ?? 'unknown error'}`,
     );
@@ -616,7 +652,7 @@ async function runCodeBehindStep(
     return { result: { ...base, aiExplanation: 'Ran this step\'s code-behind — no AI call.' } };
   }
 
-  if (brokenCode) {
+  if (brokenCode && opts.codeBehindStrict) {
     logger.error(`Step ${stepIndex} FAILED (code-behind, strict): ${outcome.error ?? ''}`);
     return {
       result: {
@@ -626,6 +662,30 @@ async function runCodeBehindStep(
           'The code-behind entry threw and strict mode is on, so the step was ' +
           'not re-run under AI. This is a compile replay: the point is to find ' +
           'out whether the code works on its own.',
+      },
+    };
+  }
+
+  if (brokenCode) {
+    // Keyless — the only other way healing gets declined above.
+    //
+    // The `error` is the instruction rather than the thrown message on
+    // purpose: it is what the console step line, the report row and the
+    // client all render, and the author's next move ("recompile where AI is
+    // available") is the useful thing to put there. The thrown message is one
+    // line down, in the explanation and the log. The entry stays bound and
+    // nothing is flagged stale — nothing healed, so `healedSteps` /
+    // `healedTokens`, both counted off `codeBehindStale`, must not move.
+    logger.error(`Step ${stepIndex} FAILED (code-behind, no AI configured): ${outcome.error ?? ''}`);
+    return {
+      result: {
+        ...base,
+        error: KEYLESS_HEAL_SKIPPED_ERROR,
+        aiExplanation:
+          'The code-behind entry threw, and this machine has no AI configured, ' +
+          `so the step was not re-run under AI. The entry failed with: ${
+            outcome.error ?? 'unknown error'
+          }`,
       },
     };
   }

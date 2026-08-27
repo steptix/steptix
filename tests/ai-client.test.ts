@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AiClient } from '../src/ai/client.js';
+import { AiClient, AiNotConfiguredError, AI_NOT_CONFIGURED_MESSAGE } from '../src/ai/client.js';
 import type { AiConfig } from '../src/config/types.js';
 
 vi.mock('../src/utils/logger.js', () => ({
@@ -135,16 +135,79 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(constructorMock).toHaveBeenCalledTimes(1);
     });
 
-    it('passes an empty string for the key when apiKey is absent', async () => {
+    it('refuses the request rather than building a gateway with no key', async () => {
+      // It used to build one with `''` and let the gateway answer
+      // `invalid_api_key` (stories/keyless-replay-and-gateway-env.md §Part B):
+      // an auth error on a machine that was never meant to have a key.
       const cfg = { ...baseConfig };
       delete (cfg as Partial<AiConfig>).apiKey;
       const client = new AiClient(cfg as AiConfig, tokenTracker as any);
-      await client.complete([{ role: 'user', content: 'Hi' }]);
-      expect(constructorMock).toHaveBeenCalledWith(
-        'aibroker/openai/chatgpt-5.5',
-        '',
-        expect.anything(),
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiNotConfiguredError,
       );
+      expect(constructorMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('keyless — the reactive backstop', () => {
+    /** Every shape of "no key" the resolved config can be in. */
+    const noKey: Array<[string, string | undefined]> = [
+      ['absent', undefined],
+      ['empty', ''],
+      ['whitespace', '   '],
+    ];
+
+    for (const [label, apiKey] of noKey) {
+      it(`throws AiNotConfiguredError with the spec's copy when the key is ${label}`, async () => {
+        const cfg = { ...baseConfig };
+        if (apiKey === undefined) delete (cfg as Partial<AiConfig>).apiKey;
+        else cfg.apiKey = apiKey;
+
+        // Construction still succeeds — the lazy-build contract is unchanged,
+        // which is what lets a keyless run build a client and replay a
+        // compiled test without ever reaching a request.
+        const client = new AiClient(cfg, tokenTracker as any);
+        expect(constructorMock).not.toHaveBeenCalled();
+
+        await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(
+          new AiNotConfiguredError(),
+        );
+        // The whole message, verbatim: this is the copy every AI operation —
+        // compile, errand, an AI step in an uncompiled test — inherits.
+        await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(
+          'AI is not configured: no AI_API_KEY in the project .env, machine .env, or ' +
+            'environment. Compiled tests replay without AI; this operation needs a model. ' +
+            'Set AI_API_KEY — and AI_GATEWAY_URL if your org routes through its own endpoint.',
+        );
+        expect(AI_NOT_CONFIGURED_MESSAGE).toBe(new AiNotConfiguredError().message);
+        expect(chatMock).not.toHaveBeenCalled();
+        expect(streamMock).not.toHaveBeenCalled();
+      });
+    }
+
+    it('refuses the streaming path on the same terms', async () => {
+      const client = new AiClient(
+        { ...baseConfig, apiKey: '', streamResponses: true },
+        tokenTracker as any,
+      );
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiNotConfiguredError,
+      );
+      expect(streamMock).not.toHaveBeenCalled();
+    });
+
+    it('leaves a keyed client on exactly today\'s behaviour', async () => {
+      // The control the keyless cases are only meaningful against: one
+      // character of key and the request goes through untouched.
+      const client = new AiClient({ ...baseConfig, apiKey: 'k' }, tokenTracker as any);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      expect(result.text).toBe('{}');
+      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'k', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+      expect(chatMock).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -396,7 +459,10 @@ describe('AiClient — @pkent/aigateway integration', () => {
       );
     });
 
-    it('rebuilds with an empty key when the key goes undefined', async () => {
+    it('goes keyless when the key is removed — the next request refuses, and builds nothing', async () => {
+      // A saved `.env` edit that deletes AI_API_KEY. It used to rebuild the
+      // gateway with `''`; now the session simply has no AI until a key comes
+      // back (stories/keyless-replay-and-gateway-env.md §Part B).
       const client = new AiClient(baseConfig, tokenTracker as any);
       await client.complete([{ role: 'user', content: 'Hi' }]);
       expect(constructorMock).toHaveBeenCalledTimes(1);
@@ -404,9 +470,20 @@ describe('AiClient — @pkent/aigateway integration', () => {
       const change = client.syncAuth(baseConfig.model, undefined);
       expect(change).toBe('AI API key changed');
 
-      await client.complete([{ role: 'user', content: 'Hi again' }]);
+      await expect(client.complete([{ role: 'user', content: 'Hi again' }])).rejects.toBeInstanceOf(
+        AiNotConfiguredError,
+      );
+      expect(constructorMock).toHaveBeenCalledTimes(1);
+
+      // …and the reverse edit puts it straight back, with no session recycle.
+      client.syncAuth(baseConfig.model, 'back-again');
+      await client.complete([{ role: 'user', content: 'Hi once more' }]);
       expect(constructorMock).toHaveBeenCalledTimes(2);
-      expect(constructorMock).toHaveBeenLastCalledWith(baseConfig.model, '', expect.anything());
+      expect(constructorMock).toHaveBeenLastCalledWith(
+        baseConfig.model,
+        'back-again',
+        expect.anything(),
+      );
     });
 
     it('reports both a model AND key change together', () => {
@@ -426,6 +503,59 @@ describe('AiClient — @pkent/aigateway integration', () => {
       // Nothing changed → gateway NOT invalidated → no rebuild on the next call.
       await client.complete([{ role: 'user', content: 'Hi again' }]);
       expect(constructorMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds the gateway on a GATEWAY URL change and points the new one at it', async () => {
+      // AI_GATEWAY_URL (stories/keyless-replay-and-gateway-env.md Part A). The
+      // URL is baked into `baseURL` at construction, exactly like the model is
+      // bound there — so re-applying a changed one has to invalidate the memo
+      // or the session keeps talking to the endpoint it was born with.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(constructorMock).toHaveBeenCalledWith(baseConfig.model, 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+
+      const change = client.syncAuth(baseConfig.model, baseConfig.apiKey, 'https://llm.corp.example');
+      expect(change).toBe('AI gateway https://llm.corp.example → https://llm.corp.example');
+
+      await client.complete([{ role: 'user', content: 'Hi again' }]);
+      expect(constructorMock).toHaveBeenCalledTimes(2);
+      expect(constructorMock).toHaveBeenLastCalledWith(baseConfig.model, 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+    });
+
+    it('leaves the gateway alone when the URL is unchanged or not passed at all', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      // Same URL, and then the two-argument form every other call site uses:
+      // an omitted `gatewayUrl` means "not managed here", not "cleared".
+      expect(client.syncAuth(baseConfig.model, baseConfig.apiKey, baseConfig.gatewayUrl)).toBeNull();
+      expect(client.syncAuth(baseConfig.model, baseConfig.apiKey)).toBeNull();
+
+      await client.complete([{ role: 'user', content: 'Hi again' }]);
+      expect(constructorMock).toHaveBeenCalledTimes(1);
+      // And the omitted form did not blank the config out from under the build.
+      expect(constructorMock).toHaveBeenLastCalledWith(baseConfig.model, 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+    });
+
+    it('reports a model, key AND gateway change together, without the key', () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      const change = client.syncAuth(
+        'aibroker/openai/chatgpt-6',
+        'new-key',
+        'https://llm.corp.example',
+      );
+      expect(change).toBe(
+        'AI model aibroker/openai/chatgpt-5.5 → aibroker/openai/chatgpt-6; ' +
+          'AI API key changed; ' +
+          'AI gateway https://llm.corp.example → https://llm.corp.example',
+      );
+      expect(change).not.toContain('new-key');
     });
   });
 });

@@ -1,0 +1,213 @@
+# Keyless replay + `AI_GATEWAY_URL` — corporate config groundwork
+
+Status: draft, not yet reviewed.
+
+> **Verification rule for this story.** "Done" means: (1) on a machine with no
+> `AI_API_KEY` anywhere (project `.env`, machine `.env`, environment), a
+> compiled test replays green with **zero** AI requests, and the same run with
+> one deliberately broken code-behind entry fails that step with the exact
+> keyless copy below — no `invalid_api_key` anywhere in the report, console,
+> or log, and no diagnosis attempt; (2) `AI_GATEWAY_URL` set in a project's
+> `.env` reaches the AiClient on **both** paths — a CLI run in that project,
+> and a server run where the TestBench extension shipped that `.env` as env
+> overrides — proven at the api-server seam, not just in loader units;
+> (3) with neither env nor config-file value, a machine-wide
+> `%LOCALAPPDATA%\aiui\.env` `AI_GATEWAY_URL` applies, and a project
+> `aiui.config.json` `gatewayUrl` still beats the machine value; (4) editing
+> `AI_GATEWAY_URL` in a workspace `.env` between two runs on a reused session
+> takes effect on the second run without recycling the session, same as
+> `AI_MODEL` today.
+
+## What we're building
+
+Two small changes that together make one corporate story true:
+
+> A machine inside a restricted network can **run** compiled tests with no AI
+> configured at all — nothing leaves the network, there is nothing to
+> security-review. When a step breaks, the run says plainly that this machine
+> has no AI to repair it, instead of surfacing an auth error. And when the org
+> *does* approve an internal OpenAI-compatible endpoint, pointing at it is one
+> line in `.env` — no tracked-file edit, no code.
+
+Example — corporate laptop, no key, app changed under a compiled test:
+
+```
+Step 4: Click the "Transfers" tab
+  ✗ failed — replay failed and was not healed: AI is not configured on
+    this machine. Recompile or repair this step where AI is available.
+```
+
+Today that same situation dies inside the heal fall-through with a gateway
+`invalid_api_key` error, and then a second one from the diagnosis pass —
+which reads as "my config is broken", not "the app changed". (Implementation
+should capture the actual before-output in the PR description.)
+
+Example — org-approved endpoint, shared repo, nothing committed:
+
+```ini
+# .env (gitignored) — routes AI through the org's internal gateway
+AI_API_KEY=sk-internal-....
+AI_MODEL=aibroker/gpt-4.1
+AI_GATEWAY_URL=https://llm.corp.example
+```
+
+`aibroker/` already means "OpenAI-compatible endpoint at `gatewayUrl`"
+([SPEC-aibroker-routing.md](../SPEC-aibroker-routing.md)); today the URL can
+only come from `defaults.ts` or the tracked `aiui.config.json`. This story
+adds the env var; it changes **no** routing semantics.
+
+## Part A — `AI_GATEWAY_URL`
+
+One new env var, mirroring `AI_MODEL` exactly. `gatewayUrl` is the same kind
+of value as `model` — non-secret routing the caller may export explicitly —
+so it takes model's precedence, not `apiKey`'s fill-only rule:
+
+```
+process env / project .env  >  aiui.config.json  >  user-root .env  >  built-in default
+```
+
+Three write sites, and all three are required (each covers a path the others
+don't):
+
+1. **`withEnvDefaults`** ([loader.ts](../src/config/loader.ts)) — trimmed,
+   non-empty `AI_GATEWAY_URL` overrides the merged config, exactly like the
+   `AI_MODEL` block. Covers CLI runs and server startup.
+2. **`withMachineAiFloor`** (same file) — machine value applies only when
+   neither env nor the config **file** set one. `gatewayUrl` has a built-in
+   default (unlike `apiKey`), so post-merge a file value and the default are
+   indistinguishable — the check MUST read the *raw* `fileAi.gatewayUrl`,
+   the same trap the function already documents for `model`. A floor, never
+   an override (stories/machine-key.md).
+3. **`applyEnvToAiConfig`** ([run-helpers.ts](../src/server/run-helpers.ts))
+   — the server-path overlay for client-shipped `.env` values, which today
+   honours **only** `apiKey` and `model` and would silently drop this var.
+   This is the exact per-project-bundle trap from the codebehind-env-data
+   work: without this site, the loader change works in every unit test and
+   does nothing on the TestBench path. Add `AI_GATEWAY_URL` (trimmed,
+   non-empty) beside `AI_MODEL`. Grep for any sibling overlay sites
+   (errand-runner's `desiredAi` assembly, compile path) — every consumer of
+   env overrides must honour the same set.
+
+Reused sessions: `AI_MODEL` / `AI_API_KEY` are re-applied per batch so a
+saved `.env` edit lands without recycling
+([session-manager.ts:107](../src/server/session-manager.ts)), and
+`syncAuth` nulls the memoized gateway so the next call rebuilds it.
+`gatewayUrl` is baked into the gateway at build time
+([client.ts](../src/ai/client.ts) `buildGateway`), so the re-apply path must
+treat a changed `gatewayUrl` the same way model changes are treated: null
+the gateway. Extend `syncAuth` (or its caller) accordingly.
+
+Out of scope, on purpose: no new config key (the config key already exists),
+no `runSettings` surface for it (per-run model/settings live in
+stories/run-settings.md), no URL validation beyond what `buildGateway`
+already does (trailing-slash strip). Docs: mention the var wherever
+`AI_MODEL`'s env handling is documented, and in the `init` template's `.env`
+comments ([init.ts](../src/cli/commands/init.ts)) — commented out, since the
+default is right for non-corporate users.
+
+## Part B — keyless mode
+
+**Definition.** A run is *keyless* when the resolved `ai.apiKey` is
+`undefined` or empty **after** all sources have applied (env, project `.env`,
+config file, machine floor, server-path overlay). Detected, never declared:
+there is no `ai.enabled` flag to drift out of sync with reality. Endpoints
+that need no key (Ollama) keep today's contract — set a dummy
+`AI_API_KEY=ollama`; this story does not change that.
+
+**Two proactive skips** (the runner checks keyless *before* calling AI, so
+the report states intent, not a caught crash):
+
+1. **Heal fall-through.** `runCodeBehindEntry` never throws — the caller
+   decides heal-and-fall-through vs fail
+   ([execute.ts](../src/codebehind/execute.ts)). There is already a branch
+   that fails instead of healing (a failed assertion). Keyless adds a second:
+   when the entry fails and the run is keyless, fail the step with
+
+   > `replay failed and was not healed: AI is not configured on this
+   > machine. Recompile or repair this step where AI is available.`
+
+   The step is `failed` (not `error`), `healedSteps` / `healedTokens`
+   accounting is untouched (nothing healed), and steps whose entries succeed
+   keep replaying — one broken step must not poison the rest of the run.
+
+2. **Diagnosis pass.** The gate at
+   [test-runner.ts:1219](../src/runner/test-runner.ts) becomes
+   `failed && diagnoseFailures && !keyless`. When skipped for keylessness,
+   the report carries a one-line note in the diagnosis slot:
+
+   > `Diagnosis skipped: AI is not configured.`
+
+   `diagnoseFailures` stays default-`true`; keyless is a runtime condition,
+   not a config edit the user must know to make.
+
+**One reactive backstop.** `AiClient` currently builds its gateway lazily and
+lets `@pkent/aigateway` throw `invalid_api_key` on first use. Add an explicit
+check at first use: when keyless, throw a typed `AiNotConfiguredError`:
+
+> `AI is not configured: no AI_API_KEY in the project .env, machine .env, or
+> environment. Compiled tests replay without AI; this operation needs a
+> model. Set AI_API_KEY — and AI_GATEWAY_URL if your org routes through its
+> own endpoint.`
+
+Every operation that genuinely needs AI — compile, errands, AI-executed
+steps in an uncompiled test, skill AI steps — inherits this message
+reactively with no per-call-site work, replacing the bare gateway error. The
+lazy-build behaviour ("construct succeeds; fail at request time") is
+unchanged; only the error the request-time failure produces changes.
+
+**What still works keyless / what fails fast:**
+
+| Operation | Keyless behaviour |
+|---|---|
+| Replay of fully compiled test, all entries green | passes, zero AI calls |
+| Replay, an entry fails | that step fails with the heal-skip copy; run continues |
+| Post-failure diagnosis | skipped with note |
+| Uncompiled / partially compiled test (AI steps) | step errors with `AiNotConfiguredError` copy |
+| Compile, errand, `run_steps` with AI | fails fast with `AiNotConfiguredError` copy |
+
+Report/wire shape: additive only — the step `error` string and the existing
+diagnosis slot carry the copy; no new required fields, no `TBxxx` code, so
+the runner-core audit suite is untouched and no extension change or version
+bump is needed (the extensions are HTTP clients; this ships by server
+restart).
+
+## Tests
+
+- **Loader units** (extend `tests/config-loader.test.ts`): env beats file;
+  file beats machine; machine beats default; the raw-`fileAi` nuance —
+  a config-file `gatewayUrl` equal to nothing (absent) plus a machine value
+  applies the machine value, while an explicit file value blocks it.
+- **Api-server seam** (the client-seam rule): POST a run through the real
+  api-server entry with env overrides carrying `AI_GATEWAY_URL`, assert the
+  AiConfig the run was built with — beside the existing
+  `applyEnvToAiConfig` coverage. A loader-only test would have passed while
+  the TestBench path dropped the value.
+- **Minimum scenario** (no primed inputs): keyless tests must fake
+  `readUserRootEnv` and clear `AI_API_KEY` from the process env — on a dev
+  machine the machine-wide key silently un-keylesses the test and conditions
+  the bug out of the test path.
+- **Runner**: compiled fixture replays green keyless with an AiClient spy
+  that throws if any request is attempted; same fixture with one broken
+  entry → step failed with the exact copy, later steps still executed,
+  diagnosis note present, spy untouched.
+- **Live check** (manual): worktree server started with `AI_API_KEY`
+  removed; `templates/init/tests/securebank.md` compiled beforehand on a
+  keyed machine; run once green, then break one selector in the app fixture
+  and re-run for the keyless failure copy.
+
+## Non-goals
+
+- **Wire redaction** — masking secrets in the AI request payload is its own
+  story (reports/logs mask today; the wire deliberately doesn't).
+- **Proxy/CA support** — the AI path honours no `HTTP(S)_PROXY` and undici
+  ignores those env vars by default; known gap, separate story.
+- **Copilot bridges** — assessed 2026-08-27 (memory:
+  copilot-integration-assessment); not building any.
+- **Per-run gateway override via runSettings** — stories/run-settings.md
+  owns per-run knobs.
+
+## Rollout
+
+Server-side only: `npm run build`, restart the `:3100` server. No
+`testbench-native` version bump. `.env.example`/init-template comment update
+rides along.

@@ -78,6 +78,17 @@ function withEnvDefaults(config: Config): Config {
     result = { ...result, ai: { ...result.ai, model: model.trim() } };
   }
 
+  // The org's own OpenAI-compatible endpoint, for `aibroker/` models
+  // (stories/keyless-replay-and-gateway-env.md). It takes `model`'s
+  // precedence — overriding the config file — rather than `apiKey`'s fill-only
+  // rule: this is non-secret routing the caller may deliberately export, and
+  // pointing a run at a different gateway for one command is the same kind of
+  // act as pointing it at a different model.
+  const gatewayUrl = process.env['AI_GATEWAY_URL'];
+  if (gatewayUrl !== undefined && gatewayUrl.trim().length > 0) {
+    result = { ...result, ai: { ...result.ai, gatewayUrl: gatewayUrl.trim() } };
+  }
+
   // Reasoning effort for routine steps. Deliberately NOT validated here: the
   // gateway owns the vocabulary and throws AIGatewayError ('invalid_effort') on
   // the first call, which the existing AI error path already surfaces. A second
@@ -135,7 +146,7 @@ function withEnvDefaults(config: Config): Config {
  * override).
  *
  * `fileAi` is the *raw* user config, pre-merge — after the merge a file model
- * and the built-in default are indistinguishable on the result.
+ * (or gatewayUrl) and the built-in default are indistinguishable on the result.
  */
 function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Config {
   const userRoot = readUserRootEnv();
@@ -166,7 +177,51 @@ function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Co
     result = { ...result, ai: { ...result.ai, model: machineModel.trim() } };
   }
 
+  // Same floor, same shape — and the same trap, only sharper: `gatewayUrl` has
+  // a built-in default, so `result.ai.gatewayUrl` is never undefined and a
+  // "did anyone set this?" check against the merged config can only ever
+  // answer yes. The question has to be asked of the RAW file config, or a
+  // machine-wide gateway would quietly beat every project that pinned one.
+  const envGatewayUrl = process.env['AI_GATEWAY_URL'];
+  const envSetGatewayUrl = envGatewayUrl !== undefined && envGatewayUrl.trim() !== '';
+  const fileGatewayUrl = fileAi?.gatewayUrl;
+  const fileSetGatewayUrl = typeof fileGatewayUrl === 'string' && fileGatewayUrl.trim() !== '';
+  const machineGatewayUrl = userRoot['AI_GATEWAY_URL'];
+  if (
+    !envSetGatewayUrl &&
+    !fileSetGatewayUrl &&
+    machineGatewayUrl !== undefined &&
+    machineGatewayUrl.trim() !== ''
+  ) {
+    result = { ...result, ai: { ...result.ai, gatewayUrl: machineGatewayUrl.trim() } };
+  }
+
   return result;
+}
+
+/**
+ * Is there a key to make an AI request with?
+ *
+ * Detected from the resolved config, never declared: there is no `ai.enabled`
+ * flag to drift out of sync with reality
+ * (stories/keyless-replay-and-gateway-env.md §Part B). Whitespace counts as
+ * absent — an `AI_API_KEY=` line with a stray space is the same "no key" the
+ * author meant, and letting it through would only move the failure to the
+ * gateway.
+ *
+ * It lives here, beside the three sources it is asking about — the env
+ * overlay, the config file and the machine floor above — rather than on the
+ * AI client, for two reasons. It is a question about a config, not about a
+ * client; and the runners hold stub clients in a great many tests, so a
+ * predicate that lived on the client could be mocked into lying about whether
+ * the run has AI.
+ *
+ * Callers pass the config the run will ACTUALLY use. On the server path that
+ * is `applyEnvToAiConfig`'s result, not the server's startup `config.ai` — the
+ * two differ whenever a client ships its own `.env`.
+ */
+export function aiConfigured(ai: AiConfig): boolean {
+  return (ai.apiKey ?? '').trim() !== '';
 }
 
 /**

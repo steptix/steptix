@@ -1,6 +1,7 @@
 import { AIGateway } from '@pkent/aigateway';
 import type { CallOptions, Effort, V2ContentBlock } from '@pkent/aigateway';
 import type { AiConfig } from '../config/types.js';
+import { aiConfigured } from '../config/loader.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
@@ -63,6 +64,39 @@ const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> 
   authoring: { effort: 'high', maxTokens: 16384 },
 };
 
+/**
+ * What every AI request says when the machine has no key
+ * (stories/keyless-replay-and-gateway-env.md §Part B, "One reactive
+ * backstop"). Named rather than inlined so the runner's tests can assert the
+ * exact wording without restating it — a second copy is how the message and
+ * the promise drift apart.
+ *
+ * It replaces the gateway's bare `invalid_api_key`, which reads as "my config
+ * is broken" on a machine that was never meant to have a key. The three
+ * sentences are the three things the reader needs: where the key was looked
+ * for, that replay itself is unaffected, and what to set.
+ */
+export const AI_NOT_CONFIGURED_MESSAGE =
+  'AI is not configured: no AI_API_KEY in the project .env, machine .env, or ' +
+  'environment. Compiled tests replay without AI; this operation needs a ' +
+  'model. Set AI_API_KEY — and AI_GATEWAY_URL if your org routes through its ' +
+  'own endpoint.';
+
+/**
+ * Thrown by any AI request made on a keyless run. Typed (rather than a bare
+ * `Error`) so a caller that wants to distinguish "no AI here" from "the model
+ * failed" can, without matching on prose.
+ *
+ * Every operation that genuinely needs AI — compile, errands, AI-executed
+ * steps in an uncompiled test — inherits it with no per-call-site work.
+ */
+export class AiNotConfiguredError extends Error {
+  constructor(message: string = AI_NOT_CONFIGURED_MESSAGE) {
+    super(message);
+    this.name = 'AiNotConfiguredError';
+  }
+}
+
 /** Per-call knobs beyond the messages themselves. */
 export interface CompleteOptions {
   /** Defaults to `routine` — today's behavior. */
@@ -112,26 +146,47 @@ export class AiClient {
     return new AIGateway(this.config.model, this.config.apiKey ?? '', opts);
   }
 
-  /** Lazily build + memoize the gateway on first use. */
+  /**
+   * Lazily build + memoize the gateway on first use.
+   *
+   * The single choke point every request passes through, which is why the
+   * keyless check sits here rather than in `complete()`: a future request
+   * method inherits it for free, and the check can never disagree with the
+   * build it guards. The lazy-build contract is unchanged — construction
+   * still succeeds with no key, so a keyless run can build a client, replay a
+   * compiled test and never come near this line
+   * (stories/keyless-replay-and-gateway-env.md §Part B).
+   */
   private getGateway(): AIGateway {
+    if (!aiConfigured(this.config)) throw new AiNotConfiguredError();
     return (this.gateway ??= this.buildGateway());
   }
 
   /**
-   * Re-point the client at a new `model` / `apiKey` — used when a saved `.env`
-   * edit changes `AI_MODEL` / `AI_API_KEY` between runs on a reused session.
-   * Only these two fields are env-mutable; every other field (gatewayUrl,
-   * maxInputTokens, streaming) is server-level and left untouched.
+   * Re-point the client at a new `model` / `apiKey` / `gatewayUrl` — used when
+   * a saved `.env` edit changes `AI_MODEL` / `AI_API_KEY` / `AI_GATEWAY_URL`
+   * between runs on a reused session. Only these three fields are env-mutable;
+   * every other field (maxInputTokens, streaming) is server-level and left
+   * untouched.
    *
    * `@pkent/aigateway` binds the model at construction AND the `baseURL` choice
    * depends on the model prefix, so a model change OR a key change invalidates
-   * the cached gateway — it's rebuilt on the next {@link getGateway} call.
+   * the cached gateway — it's rebuilt on the next {@link getGateway} call. The
+   * gateway URL is baked into that same `baseURL`, which is why it belongs
+   * here rather than in the "server-level, left untouched" list it used to sit
+   * in: a project's `.env` can now move it
+   * (stories/keyless-replay-and-gateway-env.md), and a memoized gateway would
+   * keep talking to the old endpoint for the life of the session.
+   *
+   * `gatewayUrl` is optional so that a caller which does not manage it — the
+   * config's value is a required string, so there is no "cleared" state to
+   * express — leaves today's URL alone rather than reading as a change.
    *
    * Returns a short, key-safe description of what changed (for logging), or
    * `null` when nothing changed. The returned string NEVER contains the key
    * value — only the fact that it changed.
    */
-  syncAuth(model: string, apiKey: string | undefined): string | null {
+  syncAuth(model: string, apiKey: string | undefined, gatewayUrl?: string): string | null {
     const changes: string[] = [];
     if (model !== this.config.model) {
       changes.push(`AI model ${this.config.model} → ${model}`);
@@ -145,8 +200,15 @@ export class AiClient {
       if (apiKey === undefined) delete this.config.apiKey;
       else this.config.apiKey = apiKey;
     }
-    // A model or key change invalidates the cached gateway (the model is bound
-    // at construction and the baseURL choice depends on the model prefix).
+    if (gatewayUrl !== undefined && gatewayUrl !== this.config.gatewayUrl) {
+      // Safe to log in full: an endpoint is routing, not a secret — the same
+      // reason it takes AI_MODEL's precedence rather than AI_API_KEY's.
+      changes.push(`AI gateway ${this.config.gatewayUrl} → ${gatewayUrl}`);
+      this.config.gatewayUrl = gatewayUrl;
+    }
+    // A model, key or gateway change invalidates the cached gateway (the model
+    // is bound at construction, and the baseURL — both whether there is one and
+    // what it points at — is fixed there too).
     if (changes.length > 0) this.gateway = null;
     return changes.length > 0 ? changes.join('; ') : null;
   }
