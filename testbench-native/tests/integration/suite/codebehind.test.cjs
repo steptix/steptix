@@ -724,6 +724,93 @@ describe('TestBench code-behind compile', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  // ── Failure text pinned to the line (the ✗/⚠ hovers + panel rows) ────────
+  //
+  // The marks used to be all the editor knew — the error itself lived only in
+  // the scrolling run log, and for a heal whose AI attempt also failed the
+  // code-behind crash reached the client not at all. The tracker now pins a
+  // StepFailureDetail per line; these cover the event→tracker mapping.
+  it('pins the failure text to the line — ✗ and ⚠ both carry their error', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Line 8: the step's own code-behind failed (step.expect / strict).
+    fake.push({
+      type: 'step:fail',
+      line: 8,
+      error: 'the confirmation banner never appeared',
+      fromCodeBehind: true,
+    });
+    // Line 9: entry threw, healed under AI.
+    fake.push({
+      type: 'step:pass',
+      line: 9,
+      codeBehindStale: { file: '/x/compile-me.steps.ts', error: 'locator timeout' },
+    });
+    await waitFor('details pinned', () => {
+      const failures = Object.fromEntries(hooks.tracker.snapshot().failures);
+      return (
+        failures[8]?.error === 'the confirmation banner never appeared' &&
+        failures[9]?.codeBehindStale?.error === 'locator timeout'
+      );
+    });
+
+    const failures = Object.fromEntries(hooks.tracker.snapshot().failures);
+    assert.equal(failures[8].fromCodeBehind, true);
+    assert.equal(failures[9].codeBehindStale.file, '/x/compile-me.steps.ts');
+    // The ⚠'s detail carries no step error — the step passed.
+    assert.equal(failures[9].error, undefined);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a ✗ after a failed heal carries BOTH errors', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({
+      type: 'step:fail',
+      line: 8,
+      error: 'AI could not find the button either',
+      codeBehindStale: { file: '/x/compile-me.steps.ts', error: 'boom' },
+    });
+    await waitFor('detail pinned', () => {
+      const failures = Object.fromEntries(hooks.tracker.snapshot().failures);
+      return failures[8]?.codeBehindStale?.error === 'boom';
+    });
+    const failures = Object.fromEntries(hooks.tracker.snapshot().failures);
+    assert.equal(failures[8].error, 'AI could not find the button either');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a retry that passes clears the pinned failure with the ✗', async () => {
+    // Fail then pass on the SAME line in the SAME stream — the paused-on-error
+    // edit-and-Continue shape. Not two runs: run-start clears everything
+    // anyway, and what's under test is the per-line replacement, so a green
+    // mark can never sit on top of last attempt's failure text.
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:fail', line: 8, error: 'no such button' });
+    await waitFor('detail pinned', () => {
+      const failures = Object.fromEntries(hooks.tracker.snapshot().failures);
+      return failures[8]?.error === 'no such button';
+    });
+
+    fake.push({ type: 'step:pass', line: 8 });
+    await waitFor('pass painted', () => {
+      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
+      return statuses[8] === 'pass';
+    });
+    const failures = Object.fromEntries(hooks.tracker.snapshot().failures);
+    assert.equal(failures[8], undefined, 'the failure text must not survive a green retry');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
   it('a compile:step never repaints a step the run has already marked', async () => {
     // By the time an entry is generated its step has painted ✓. Painting ▶ on
     // it from the compile frame would undo that — which is why the run
@@ -834,6 +921,22 @@ describe('TestBench code-behind compile', function () {
       const hover = hooks.staleHoverMessage();
       assert.match(hover, /Repair this step/);
       assert.match(hover, /re-runs this step in the current session/);
+
+      // And the variant an author actually sees: once the run pins the crash
+      // to the line, the hover leads with it and names the entry's file — but
+      // must not lose the action line while doing so. The hook takes the same
+      // detail the decoration passes, so this is the rendered string, not a
+      // second copy of it.
+      const withDetail = hooks.staleHoverMessage({
+        codeBehindStale: {
+          file: '/x/compile-me.steps.ts',
+          error: 'locator resolved to 2 elements',
+        },
+      });
+      assert.match(withDetail, /locator resolved to 2 elements/);
+      assert.match(withDetail, /compile-me\.steps\.ts/);
+      assert.match(withDetail, /Repair this step/);
+      assert.match(withDetail, /re-runs this step in the current session/);
     });
 
     it('is offered on the ⚠ line and on no other', async () => {

@@ -31,7 +31,13 @@ export interface FrameInfo {
   parentId: string | null;
   kind: 'test' | 'skill' | 'section';
   /**
-   * Absolute path (file:// URI form) of the file this frame's steps live in.
+   * Absolute **filesystem path** of the file this frame's steps live in —
+   * despite the field's name, NOT a `file://` URI. Every producer passes a
+   * plain path (`skill.filePath`, `ctx.sectionsFilePath`, the synthesised
+   * test frame's `request.testFilePath`). A client turning it into a URI
+   * must use the equivalent of `Uri.file`, never `Uri.parse`, which reads a
+   * Windows drive letter as a scheme.
+   *
    * For `kind === 'section'` that is the file that **defines** the section:
    * the test file for a test-file section, the skill file for one declared
    * inside a skill body.
@@ -91,6 +97,20 @@ export interface StepFailEvent {
   error: string;
   screenshot?: string;
   frame?: FrameInfo;
+  /**
+   * True when the failure came from the step's own code-behind entry — a
+   * failed `step.expect`, or the entry throwing under strict replay. Tells
+   * the client to present `error` as "the code-behind failed", not as an
+   * AI-run failure.
+   */
+  fromCodeBehind?: boolean;
+  /**
+   * Present when the step's entry threw, the step fell through to AI, and
+   * the AI attempt then failed too. `error` above is the AI failure; this is
+   * the code crash that put the step on that path — without it the client
+   * could only report the second failure of the two.
+   */
+  codeBehindStale?: { file: string; error: string };
 }
 
 /**
@@ -448,6 +468,86 @@ export interface CompileRequest {
 // ---------------------------------------------------------------------------
 
 /**
+ * Why a step line wears a ✗ (or a ⚠) — the failure text, pinned to the line
+ * so every surface that paints the mark can also say what went wrong. Shapes
+ * mirror the `step:fail` / `step:pass` wire fields they are captured from.
+ *
+ * Both error strings are CLIPPED at capture (`clipFailureText`), not at
+ * render: this struct is held per line for the session, persisted into
+ * `.testbench/run-state.json`, and re-posted to the webview on every snapshot
+ * — including the ones a bare cursor move emits. A Playwright call log runs to
+ * kilobytes, and no surface shows more than the clip. The untruncated text
+ * stays in the run log, the report, and the server's own logs.
+ */
+export interface StepFailureDetail {
+  /** The step's own failure message. Absent on a ⚠ line — the step passed;
+   *  it is the entry that failed. */
+  error?: string;
+  /** The failure in `error` came from the step's code-behind (a failed
+   *  `step.expect`, or the entry throwing under strict replay). */
+  fromCodeBehind?: boolean;
+  /** The code-behind crash, when the entry threw and the step fell through
+   *  to AI: the whole story of a ⚠, the first half of a ✗ whose AI attempt
+   *  then failed too. */
+  codeBehindStale?: { file: string; error: string };
+}
+
+/**
+ * A step's failure with its code-behind context folded in — the one sentence
+ * every single-line surface prints: the run log, the compile fold, the panel's
+ * Output log, and Test Explorer's failure message.
+ *
+ * One function because the wording is user-facing and was drifting: the same
+ * event was rendered "(code-behind) X" in one place and "Code-behind failed:
+ * X" in another. Structured surfaces that legitimately show more — the editor
+ * hovers and the panel's inline step row — build their own multi-line text
+ * from the same `StepFailureDetail` fields.
+ */
+export function describeStepFailure(failure: StepFailureDetail): string {
+  const error = failure.error ?? 'Step failed';
+  // The stale case names BOTH: `error` is the AI failure that followed, and
+  // dropping the crash would hide the reason the step ran under AI at all.
+  if (failure.codeBehindStale) {
+    return `${error} (its code-behind threw first: ${failure.codeBehindStale.error})`;
+  }
+  if (failure.fromCodeBehind) return `${error} (in its code-behind)`;
+  return error;
+}
+
+/** How much of one error string a `StepFailureDetail` keeps. Comfortably more
+ *  than any hover or panel row shows, so the clip is invisible in practice. */
+export const MAX_FAILURE_TEXT_CHARS = 2000;
+
+/** Clip one error string for storage in a `StepFailureDetail`. */
+export function clipFailureText(text: string): string {
+  return text.length > MAX_FAILURE_TEXT_CHARS
+    ? `${text.slice(0, MAX_FAILURE_TEXT_CHARS)}… (truncated — see the run log)`
+    : text;
+}
+
+/**
+ * Build the pinned detail for a `step:fail` / `step:pass` event, clipping both
+ * error strings. The one place a detail is constructed, so every surface that
+ * pins one gets the same bounds and the same field rules.
+ */
+export function stepFailureDetail(event: {
+  error?: string;
+  fromCodeBehind?: boolean;
+  codeBehindStale?: { file: string; error: string };
+}): StepFailureDetail {
+  return {
+    ...(event.error !== undefined && { error: clipFailureText(event.error) }),
+    ...(event.fromCodeBehind && { fromCodeBehind: true }),
+    ...(event.codeBehindStale && {
+      codeBehindStale: {
+        file: event.codeBehindStale.file,
+        error: clipFailureText(event.codeBehindStale.error),
+      },
+    }),
+  };
+}
+
+/**
  * Mirror of the active TextEditor's TestBench state: file text, breakpoints,
  * statuses, paused-at marker. The webview renders against this; the host is
  * the source of truth.
@@ -474,6 +574,8 @@ export interface FileStateSnapshot {
     ]
   >;
   errors: Array<[number, ErrorPayload]>;
+  /** Per-line failure text for ✗ and ⚠ statuses — same keying as `statuses`. */
+  failures: Array<[number, StepFailureDetail]>;
   breakpointStop: number | null;
   selectedLines: number[];
   cursorLine: number;

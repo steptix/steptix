@@ -1,10 +1,15 @@
 import * as vscode from 'vscode';
 import {
   type HostToWebviewMsg,
+  type StepFailureDetail,
   type WebviewToHostMsg,
+  stepFailureDetail,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
-import { DecorationManager, computeStepsSummary, STALE_HOVER_MESSAGE } from './decorations.js';
+import { DecorationManager, computeStepsSummary } from './decorations.js';
+// The same builder the ⚠ decoration calls, so the test hook cannot drift from
+// what actually renders.
+import { staleHoverMessage } from './failure-hover-core.js';
 import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
@@ -13,7 +18,7 @@ import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
-import { workspaceFolderFor } from './workspace.js';
+import { frameTargetUri, workspaceFolderFor } from './workspace.js';
 import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
 import { InvocationDefinitionProvider } from './definition-provider.js';
@@ -577,12 +582,27 @@ class RunControllerRegistry implements vscode.Disposable {
               : ev.fromCache
                 ? 'pass-cached'
                 : 'pass';
-          this.tracker.setStatus(target, ev.line, status);
+          // A ⚠ pins the code-behind crash to the line, so the hover and the
+          // panel row can say WHAT threw, not just that something did. No
+          // `error`: the STEP passed, it is the entry that failed.
+          this.tracker.setStatus(
+            target,
+            ev.line,
+            status,
+            ev.codeBehindStale
+              ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
+              : undefined,
+          );
           break;
         }
         case 'step:fail': {
           const target = this.targetUriFor(uri, ev.frame);
-          this.tracker.setStatus(target, ev.line, 'fail');
+          // Pin the failure text to the line: the ✗ hover and the panel's
+          // step row read it back from the tracker. When the failure came out
+          // of the step's code-behind (strict replay, `step.expect`, or a
+          // heal whose AI attempt failed too) the detail says so.
+          const failureDetail = stepFailureDetail(ev);
+          this.tracker.setStatus(target, ev.line, 'fail', failureDetail);
           // Propagate the failure to the originating test-file `[skill:]` line
           // so the user sees the red icon on the line they actually authored,
           // not just on the skill's body line they may not even have open.
@@ -590,7 +610,9 @@ class RunControllerRegistry implements vscode.Disposable {
           if (ev.frame) {
             const controller = this.controllers.get(uri.toString());
             root = controller?.markFrameFailed(ev.frame.id) ?? null;
-            if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail');
+            // The invocation line carries the same failure text as the body
+            // line it descends to — the user may only have the test file open.
+            if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail', failureDetail);
             // Park the failure context so the Variables panel can offer
             // "re-run this skill step with its variables". No-ops on the
             // controller for nested frames (v1 is top-level skills only), in
@@ -763,10 +785,16 @@ class RunControllerRegistry implements vscode.Disposable {
                 : ev.fromCache
                   ? 'pass-cached'
                   : 'pass',
+            ev.codeBehindStale
+              ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
+              : undefined,
           );
           break;
         case 'step:fail':
-          this.tracker.setStatus(uri, ev.line, 'fail');
+          // A Replay's red step is the compile's whole point (strict mode:
+          // broken code fails instead of healing) — pin the error so the ✗
+          // says what the code did wrong.
+          this.tracker.setStatus(uri, ev.line, 'fail', stepFailureDetail(ev));
           break;
         default:
           break;
@@ -788,8 +816,7 @@ class RunControllerRegistry implements vscode.Disposable {
    * the controller's own document.
    */
   private targetUriFor(testUri: vscode.Uri, frame: import('ai-ui-automation-runner-core').FrameInfo | undefined): vscode.Uri {
-    if (!frame) return testUri;
-    return vscode.Uri.file(frame.uri);
+    return frameTargetUri(testUri, frame);
   }
 
   /**
@@ -1319,6 +1346,11 @@ export interface TestBenchTestHooks {
   /** Lines streamed to the in-flight (or most recent) test's Test Results
    *  output. Lets a test prove output is emitted DURING the run, not buffered. */
   batchOutput: () => string[];
+  /** Test-only readback of the most recent failed test's TestMessages and the
+   *  file+line each was anchored at. WHERE a failure is anchored is not
+   *  readable back from VS Code, and an in-skill failure must peek at the
+   *  skill file — not at that line number in the test file. */
+  batchFailureMessages: () => Array<{ text: string; file: string | null; line: number | null }>;
   /** Test-only: run a batch identified by file URIs. Returns the counts
    *  once the TestRun has ended. */
   runBatchByUris: (uris: vscode.Uri[]) => Promise<{ passed: number; failed: number; skipped: number }>;
@@ -1387,8 +1419,13 @@ export interface TestBenchTestHooks {
   /** The ⚠ decoration's hover text. Applied decorations are not readable back
    *  from the extension host, so this is how a test asserts the mark names the
    *  action AND its precondition ("re-runs this step in the current session")
-   *  rather than leaving the author with a bare warning glyph. */
-  staleHoverMessage: () => string;
+   *  rather than leaving the author with a bare warning glyph.
+   *
+   *  Takes the same optional detail the decoration passes, so a test asserts
+   *  the string that ACTUALLY renders. Called with no argument it returns the
+   *  detail-less fallback; called with one it returns the crash-first text a
+   *  ⚠ shows in the normal case, which is what the decoration builds. */
+  staleHoverMessage: (failure?: StepFailureDetail) => string;
 }
 
 export interface TestBenchExports {
@@ -1704,6 +1741,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       stepSignatureForText: (text: string) => tracker.stepSignatureForTests(text),
       lastBatchRun: () => testController.lastRun,
       batchOutput: () => [...testController.liveOutput],
+      batchFailureMessages: () => [...testController.lastFailureMessages],
       runBatchByUris: (uris) => testController.runByUris(uris),
       controllerItemIds: () => testController.controllerItemIds(),
       triggerInitialResolve: () => testController.triggerInitialResolve(),
@@ -1747,7 +1785,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
       lastRunTokens: () => registry.active()?.lastRunTokens ?? null,
       pendingCodeBehind: () => codeBehindDiffs.pending,
-      staleHoverMessage: () => STALE_HOVER_MESSAGE,
+      staleHoverMessage: (failure) => staleHoverMessage(failure),
     },
   };
 }

@@ -20,6 +20,7 @@ import {
   readEnvOverlayFile,
   readMachineKey,
   reportError,
+  describeStepFailure,
   resolveEnvFile,
   resolveSection,
   userRootEnvPath,
@@ -207,7 +208,10 @@ export function compileLogLine(event: CompileEvent): string | null {
         return `  ${' '.repeat(11)} ✓ step on line ${inner.line}${how}`;
       }
       if (inner.type === 'step:fail') {
-        return `  ${' '.repeat(11)} ✗ step on line ${inner.line} — ${inner.error}`;
+        // Replay runs strict, so a red step here IS the code-behind failing —
+        // but say so only when the event does, in the same words every other
+        // single-line surface uses.
+        return `  ${' '.repeat(11)} ✗ step on line ${inner.line} — ${describeStepFailure(inner)}`;
       }
       if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${inner.msg}`;
       return null;
@@ -2617,6 +2621,12 @@ export class RunController {
         } else {
           log(`✓ step ${event.line} passed`);
         }
+      } else if (event.type === 'step:fail') {
+        // The error, in the run log — with the code-behind crash when the
+        // failure has one behind it (the entry itself failing, or a heal
+        // whose AI attempt failed too). Same vocabulary as every other
+        // single-line surface.
+        log(`✗ step ${event.line} failed: ${describeStepFailure(event)}`);
       } else {
         log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
       }

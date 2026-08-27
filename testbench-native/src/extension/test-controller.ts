@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import type { ErrorPayload, RunEvent } from 'ai-ui-automation-runner-core';
+import type { ErrorPayload, FrameInfo, RunEvent } from 'ai-ui-automation-runner-core';
+import { describeStepFailure } from 'ai-ui-automation-runner-core';
+import { frameTargetUri } from './workspace.js';
 import type { TestDiscovery, DiscoveredTest, DiscoveryEvent } from './test-discovery.js';
 import type { RunController } from './run-controller.js';
 import { getOutputChannel } from './output-channel.js';
@@ -63,6 +65,12 @@ export class TestBenchTestController implements vscode.Disposable {
    *  appended live as events arrive, so the integration suite can prove output
    *  is emitted DURING the run rather than buffered until it finishes. */
   private _liveOutput: string[] = [];
+  /** Test-only mirror of the TestMessages handed to `run.failed`, with each
+   *  message's location flattened to `{file, line}`. VS Code does not read
+   *  TestMessages back, and WHERE a failure is anchored is the whole point of
+   *  the frame resolution in `runOne` — an in-skill failure must peek at the
+   *  skill file, not at that line number in the test. Reset per runOne. */
+  private _lastFailureMessages: Array<{ text: string; file: string | null; line: number | null }> = [];
 
   constructor(
     private readonly discovery: TestDiscovery,
@@ -121,6 +129,12 @@ export class TestBenchTestController implements vscode.Disposable {
    *  (or most recent) test — see `_liveOutput`. */
   get liveOutput(): string[] {
     return this._liveOutput;
+  }
+
+  /** Test-only readback of the most recent failure's TestMessages and where
+   *  each was anchored — see `_lastFailureMessages`. */
+  get lastFailureMessages(): Array<{ text: string; file: string | null; line: number | null }> {
+    return this._lastFailureMessages;
   }
 
   /**
@@ -433,13 +447,31 @@ export class TestBenchTestController implements vscode.Disposable {
     const filename = item.uri ? path.basename(item.uri.fsPath) : item.label;
     run.appendOutput(`─── ${filename} ───\r\n`, undefined, item);
     this._liveOutput = []; // test-only mirror of streamed lines (see `liveOutput`)
+    this._lastFailureMessages = []; // test-only mirror (see `lastFailureMessages`)
     const emit = (line: string): void => {
       this._liveOutput.push(line);
       run.appendOutput(`${line}\r\n`, undefined, item);
     };
 
     // Collect step:fail events so we can attach TestMessages on failure.
-    const failures: Array<{ line: number; error: string }> = [];
+    //
+    // `uri` is the file the LINE belongs to, which is not always this test:
+    // a run that descends into a `[skill: ...]` reports body steps with lines
+    // in the skill's file. Anchoring those on `item.uri` pointed the failure
+    // peek at whatever sat on that line number in the test — prose, an
+    // unrelated step, or past the end of the file.
+    const failures: Array<{ uri: vscode.Uri; line: number; error: string }> = [];
+    /** The file a step event's line belongs to — same rule the editor's
+     *  decorations use, so the two surfaces cannot disagree. */
+    const fileOf = (event: { frame?: FrameInfo }): vscode.Uri =>
+      frameTargetUri(item.uri!, event.frame);
+    /** ` of login.md`, when the line is not in the test file. Without it a
+     *  bare "line 12" in the streamed output is unreadable — Test Explorer
+     *  shows no gutter to disambiguate it against. */
+    const whereOf = (event: { frame?: FrameInfo }): string => {
+      const uri = fileOf(event);
+      return uri.toString() === item.uri!.toString() ? '' : ` of ${path.basename(uri.fsPath)}`;
+    };
     // Collect server-level error output (kind 'error', e.g. "Server error: …")
     // so a failure with no step:fail still gets a meaningful TestMessage rather
     // than the generic "no specific step failure recorded".
@@ -447,28 +479,34 @@ export class TestBenchTestController implements vscode.Disposable {
     const onEvent = (event: RunEvent): void => {
       switch (event.type) {
         case 'step:start':
-          emit(`▶ step on line ${event.line}`);
+          emit(`▶ step on line ${event.line}${whereOf(event)}`);
           break;
         case 'step:pass':
           // Same vocabulary as the interactive run log, so the two surfaces
           // never disagree about how a step passed.
           if (event.codeBehindStale) {
             emit(
-              `⚠ step on line ${event.line} passed under AI — code-behind failed: ` +
-                event.codeBehindStale.error,
+              `⚠ step on line ${event.line}${whereOf(event)} passed under AI — ` +
+                `code-behind failed: ${event.codeBehindStale.error}`,
             );
           } else {
             emit(
-              `✓ step on line ${event.line} passed` +
+              `✓ step on line ${event.line}${whereOf(event)} passed` +
                 (event.fromCodeBehind ? '  (code-behind)' : event.fromCache ? '  (cached)' : ''),
             );
           }
           if (event.output) emit(`  ${event.output}`);
           break;
-        case 'step:fail':
-          emit(`✗ step on line ${event.line} failed — ${event.error}`);
-          failures.push({ line: event.line, error: event.error });
+        case 'step:fail': {
+          // Fold the code-behind context into the one string both surfaces
+          // share — the streamed line and the TestMessage the failure peek
+          // shows. Without it a broken entry's crash never reaches Test
+          // Explorer at all when the AI attempt failed too.
+          const detail = describeStepFailure(event);
+          emit(`✗ step on line ${event.line}${whereOf(event)} failed — ${detail}`);
+          failures.push({ uri: fileOf(event), line: event.line, error: detail });
           break;
+        }
         case 'output':
           emit(`[${event.kind}] ${event.msg}`);
           if (event.kind === 'error') serverErrors.push(event.msg);
@@ -517,7 +555,10 @@ export class TestBenchTestController implements vscode.Disposable {
       const messages: vscode.TestMessage[] = [];
       for (const f of failures) {
         const msg = new vscode.TestMessage(f.error);
-        msg.location = new vscode.Location(item.uri, new vscode.Position(f.line - 1, 0));
+        // `f.uri`, not `item.uri`: an in-skill failure's line belongs to the
+        // skill file. VS Code is happy to peek a location outside the test
+        // item's own file, and that is the line the user needs to see.
+        msg.location = new vscode.Location(f.uri, new vscode.Position(f.line - 1, 0));
         messages.push(msg);
       }
       if (outcome.error) {
@@ -538,6 +579,11 @@ export class TestBenchTestController implements vscode.Disposable {
       if (messages.length === 0) {
         messages.push(new vscode.TestMessage('Test failed (no specific step failure recorded).'));
       }
+      this._lastFailureMessages = messages.map((m) => ({
+        text: typeof m.message === 'string' ? m.message : m.message.value,
+        file: m.location ? m.location.uri.fsPath : null,
+        line: m.location ? m.location.range.start.line + 1 : null,
+      }));
       run.failed(item, messages, duration);
       return 'failed';
     }

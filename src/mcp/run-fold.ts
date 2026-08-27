@@ -327,9 +327,18 @@ export function foldRun(input: FoldInput): FoldedRun {
 
       case 'step:fail': {
         if (!open) open = beginRow(event.line, event.frame, at);
-        open.row.error = event.error;
+        // Fold the code-behind story into the one error string the summary
+        // carries: the entry failing itself, or — codeBehindStale — the entry
+        // throwing and the AI attempt failing too, where `event.error` alone
+        // would silently drop the crash that started it.
+        const error = event.codeBehindStale
+          ? `${event.error} (its code-behind threw first: ${event.codeBehindStale.error})`
+          : event.fromCodeBehind
+            ? `Code-behind failed: ${event.error}`
+            : event.error;
+        open.row.error = error;
         open.row.tab = event.tab ?? open.row.tab;
-        lastFailError = event.error;
+        lastFailError = error;
         sawFailure = true;
         if (event.screenshot) {
           lastFailScreenshot = event.screenshot;

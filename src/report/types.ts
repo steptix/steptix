@@ -180,12 +180,17 @@ export interface StepResult {
     logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }>;
   };
   /**
-   * This step's entry threw and the step then passed under AI
+   * This step's entry threw and the step fell through to AI
    * (stories/codebehind-compile.md, "The runtime stops generating").
    *
    * Runs no longer rewrite the file, so the failure has to be *flagged*
    * instead: the report renders ⚠, the summary counts it, and `aiui compile
    * --only-stale` regenerates exactly these steps.
+   *
+   * The flag says the ENTRY broke — it does NOT say the step recovered. The
+   * AI attempt that took over can fail too, and then this rides a `failed`
+   * step alongside `error` (the AI failure). Anything that means "healed"
+   * must pair this with `status === 'passed'` — use `isHealedStep`.
    */
   codeBehindStale?: {
     /** Absolute path of the `.steps.ts` the failing entry lives in. */
@@ -368,6 +373,24 @@ export interface RunSummary {
 // ---------------------------------------------------------------------------
 // Helpers for migrating consumers that used the old flat arrays
 // ---------------------------------------------------------------------------
+
+/**
+ * Did this step HEAL — its code-behind entry threw and the AI covered for it?
+ *
+ * `codeBehindStale` alone only says the entry broke. The step then falls
+ * through to AI, and that attempt can fail too, which leaves the flag on a
+ * `failed` step. Every surface that means "healed" — the report's ⚠ badge and
+ * Stale count, the run's `healed` summary — must ask this instead of testing
+ * the flag, or it will describe a red step as one that ran fine under AI.
+ *
+ * Lives here rather than in report/generator.ts because the server needs it
+ * too, and a dozen api-server suites replace that module wholesale with a
+ * three-export `vi.mock` — importing a fourth name from it would make every
+ * one of them throw.
+ */
+export function isHealedStep(step: StepResult): boolean {
+  return step.codeBehindStale !== undefined && step.status === 'passed';
+}
 
 /** Extract all sub-actions from a step's turns (replaces step.subActions) */
 export function getAllSubActions(step: StepResult): SubActionResult[] {

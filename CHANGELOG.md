@@ -6,6 +6,53 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Fixed — TestBench: a failed code-behind step now says what failed, where you're looking
+
+When a code-behind step failed in TestBench, the error was one line in the
+scrolling Output log — and in the worst case (the entry threw, the step fell
+through to AI, and the AI attempt failed too) the code-behind crash was
+dropped before it ever reached the client. Now the failure text is pinned to
+the step line everywhere the marks are:
+
+- **Editor hovers** — hovering a ✗ shows the step's error (labelled
+  "code-behind failed" when it came from the entry); hovering a ⚠ now leads
+  with the actual crash and the `.steps.ts` file instead of only the static
+  Repair hint. Hovers survive window reloads with the rest of the run state.
+- **TestBench panel** — the error renders inline under the failed step's row
+  in the Steps list (red for ✗, yellow for ⚠), so no log-scrolling. The ⚠
+  log line is now warning-coloured, and a failed heal logs both errors.
+- **Failed heals keep their story** — a step whose entry threw and whose AI
+  retry also failed now carries `codeBehindStale` on the `step:fail` wire
+  event, in the report (the ⚠ block renders alongside the failure), in the
+  last-run sidecar (so `--only-stale` / Repair see the broken entry), in
+  Test Explorer failure messages, and in the MCP run summary. `step:fail`
+  also carries `fromCodeBehind` so a failed `step.expect` / strict replay is
+  distinguishable from an AI failure.
+- **"Stale" no longer implies "recovered".** `codeBehindStale` used to reach
+  only passing steps, so several surfaces read it as "healed". Now that a
+  failed step can carry it, anything meaning *healed* asks `isHealedStep`
+  (flag **and** `status === 'passed'`): the run-complete `healed` summary,
+  the report's ⚠ badge — a failed step reads "⚠ code-behind failed" rather
+  than claiming it "ran under AI" next to its own ✗ Step Failed block — and
+  the report's "Stale" stat, which counts a failed step as AI, not stale.
+- One phrasing for the whole failure vocabulary: `describeStepFailure` in
+  runner-core (mirrored for the webview bundle and pinned by a copy-parity
+  test) replaces five hand-written variants that had already drifted apart —
+  the same event rendered "(code-behind) X" on one surface and "Code-behind
+  failed: X" on another.
+- Pinned failure text is clipped at capture, so the per-line detail held in
+  `.testbench/run-state.json` and re-posted on every snapshot stays bounded
+  no matter how long a Playwright call log runs.
+- **Test Explorer anchors an in-skill failure at the skill file.** A run that
+  descends into a `[skill: ...]` reports its body steps with lines in the
+  skill's file, but every failure was anchored on the test file's URI — so
+  clicking the failure jumped to that line number in the test, which could be
+  prose, an unrelated step, or past the end of a shorter file. The streamed
+  output names the file too (`✗ step on line 7 of login.md failed — …`),
+  since Test Explorer shows no gutter to disambiguate a bare line number.
+  `FrameInfo.uri`'s doc comment claimed "file:// URI form"; it has always
+  been a plain absolute filesystem path, and now says so.
+
 ### Added — TestBench: parameter completion inside a skill call
 
 With the cursor in the argument position of a skill call — `1. [skill

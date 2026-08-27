@@ -223,3 +223,70 @@ describe('the run-complete payload', () => {
     });
   });
 });
+
+// ── Failures keep their code-behind story on the wire ───────────────────────
+//
+// The step:fail event used to carry only the (final) error string, so a
+// TestBench user could not see what the code-behind died of: a broken entry
+// whose AI fallback also failed lost the crash entirely, and a failed
+// `step.expect` was indistinguishable from an AI-run failure.
+describe('the step:fail payload', () => {
+  function failedAfterHeal(index: number, instruction: string): StepResult {
+    return {
+      index, instruction, status: 'failed', turns: [], durationMs: 1,
+      retried: true, error: 'AI could not find the button either',
+      codeBehindStale: {
+        file: '/p/tests/checkout.steps.ts',
+        source: instruction,
+        error: 'locator resolved to 2 elements',
+      },
+    };
+  }
+
+  it('carries the code-behind crash when the heal failed too', async () => {
+    executeStepMock.mockImplementationOnce(async () => failedAfterHeal(1, 'step one'));
+
+    const events = await run(['step one']);
+
+    const fail = events.find((e) => e.type === 'step:fail')!;
+    expect(fail).toMatchObject({
+      type: 'step:fail',
+      error: 'AI could not find the button either',
+      codeBehindStale: {
+        file: '/p/tests/checkout.steps.ts',
+        error: 'locator resolved to 2 elements',
+      },
+    });
+  });
+
+  it('says when the failure came from the step\'s own code-behind', async () => {
+    executeStepMock.mockImplementationOnce(async (): Promise<StepResult> => ({
+      index: 1, instruction: 'step one', status: 'failed', turns: [],
+      durationMs: 1, retried: false,
+      error: 'the confirmation banner never appeared',
+      fromCodeBehind: true,
+    }));
+
+    const events = await run(['step one']);
+
+    const fail = events.find((e) => e.type === 'step:fail')!;
+    expect(fail).toMatchObject({
+      type: 'step:fail',
+      fromCodeBehind: true,
+      error: 'the confirmation banner never appeared',
+    });
+  });
+
+  it('does not count a heal that then failed in the healed summary', async () => {
+    executeStepMock.mockImplementationOnce(async () => {
+      spentTokens += 900;
+      return failedAfterHeal(1, 'step one');
+    });
+
+    const events = await run(['step one']);
+
+    const done = events.at(-1)!;
+    expect(done).toMatchObject({ type: 'done', status: 'failed' });
+    expect(done).not.toHaveProperty('healed');
+  });
+});

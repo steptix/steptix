@@ -486,6 +486,86 @@ describe('TestBench batch-run mode', function () {
     );
   });
 
+  // ── Where a failure is anchored ─────────────────────────────────────────
+  //
+  // A run that descends into a `[skill: ...]` reports its body steps with
+  // lines in the SKILL's file. Test Explorer anchored every TestMessage on
+  // the test file's URI, so an in-skill failure pointed at that line number
+  // in the test — prose, an unrelated step, or (as below) past the end of a
+  // shorter file. The line is only meaningful together with its frame.
+  it('anchors an in-skill failure at the SKILL file, not that line of the test', async () => {
+    const uri = fixtureUri('batch-fail.tmp.md');
+    // The path the SERVER would send (a plain fsPath from Node), and the same
+    // path as VS Code canonicalises it. They differ on Windows — `Uri.file`
+    // lowercases the drive letter — so the assertion compares the canonical
+    // form, which is what "same file" actually means here.
+    const skillPath = path.resolve(FIXTURES_DIR, 'skill-fixture.tmp.md');
+    const skillCanonical = vscode.Uri.file(skillPath).fsPath;
+    // The test fixture is 5 lines; the skill's step is on line 7. Anchoring
+    // line 7 on the test file would land past its end — which is exactly the
+    // bug, and why this fixture pairing is the one to assert on.
+    const counts = await runBatchWithScript(hooks, fake, [uri], [
+      async (f) => {
+        f.push({
+          type: 'step:fail',
+          line: 7,
+          error: 'no such button',
+          frame: { id: 'f1', parentId: null, kind: 'skill', uri: skillPath, line: 4, skillName: 'skill-fixture' },
+        });
+        f.end();
+      },
+    ]);
+
+    assert.equal(counts.failed, 1, `the test should fail. Got ${JSON.stringify(counts)}`);
+    const messages = hooks.batchFailureMessages();
+    const anchored = messages.find((m) => m.text.includes('no such button'));
+    assert.ok(anchored, `the failure message must survive. Got ${JSON.stringify(messages)}`);
+    assert.equal(
+      anchored.file,
+      skillCanonical,
+      `the failure must peek at the skill file the line belongs to. ` +
+        `actual=${anchored.file} expected=${skillCanonical}`,
+    );
+    assert.notEqual(
+      anchored.file,
+      uri.fsPath,
+      'and must NOT be anchored on the test file — line 7 is past its end',
+    );
+    assert.equal(anchored.line, 7, 'and at the line the skill reported');
+
+    // The streamed line has no gutter to disambiguate it, so it names the
+    // file too — "line 7" alone is unreadable when it isn't this test's.
+    assert.ok(
+      hooks.batchOutput().some((l) => l.includes('line 7 of skill-fixture.tmp.md')),
+      `output must name the skill file. Got ${JSON.stringify(hooks.batchOutput())}`,
+    );
+  });
+
+  it('still anchors a plain failure on the test file itself', async () => {
+    // The frame-less case (and the `kind: 'test'` case) must be untouched:
+    // resolution only kicks in when the frame names a different file.
+    const uri = fixtureUri('batch-fail.tmp.md');
+    const counts = await runBatchWithScript(hooks, fake, [uri], [
+      async (f) => {
+        f.push({ type: 'step:fail', line: 4, error: 'simulated failure' });
+        f.end();
+      },
+    ]);
+
+    assert.equal(counts.failed, 1, `the test should fail. Got ${JSON.stringify(counts)}`);
+    const anchored = hooks
+      .batchFailureMessages()
+      .find((m) => m.text.includes('simulated failure'));
+    assert.ok(anchored, 'the failure message must survive');
+    assert.equal(anchored.file, uri.fsPath, 'a frame-less failure stays on the test file');
+    assert.equal(anchored.line, 4);
+    // And no file qualifier, because there is nothing to disambiguate.
+    assert.ok(
+      hooks.batchOutput().some((l) => l.includes('✗ step on line 4 failed')),
+      `Got ${JSON.stringify(hooks.batchOutput())}`,
+    );
+  });
+
   it('a server error (done: error with no step:fail) FAILS the test, not passes', async () => {
     // Regression: runStepBlock returned `!sawFail` and only set `sawFail` on a
     // step:fail event, ignoring the done event's status. A session-setup error

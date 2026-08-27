@@ -465,6 +465,12 @@ export async function executeStep(
     // or snap a failure screenshot (the page may already be closing); the run
     // loop detects `signal.aborted` after this returns and records the run as
     // aborted, bypassing the step:fail path. See issues/020.
+    // Deliberately NOT `withStale`: a step the user pressed Stop on made no
+    // claim about its entry. Flagging it stale would put it in the last-run
+    // sidecar for `--only-stale` and render the ⚠ block on a step that was
+    // merely cancelled. (The server's abort path drops the flag anyway —
+    // `recordInterruptedStep` rebuilds the row — so this is about the CLI
+    // path and about not implying an invariant that isn't there.)
     if (opts.signal?.aborted) {
       return {
         index: stepIndex,
@@ -493,7 +499,11 @@ export async function executeStep(
       priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
     }
 
-    return {
+    // `withStale` here too: when the AI attempt was only happening because the
+    // step's entry threw, dropping the flag on failure would erase the
+    // code-behind error entirely — the client would see the AI failure and
+    // nothing about the crash that caused the fall-through.
+    return withStale({
       index: stepIndex,
       instruction,
       status: 'failed',
@@ -504,7 +514,7 @@ export async function executeStep(
       pageUrl: opts.page.url(),
       error: errorMessage,
       aiExplanation: `Failed to execute step after ${opts.config.execution.retries + 1} attempts. Last error: ${errorMessage}`,
-    };
+    });
   }
 }
 
