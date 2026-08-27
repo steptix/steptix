@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — Account Services</title>
+  <!--
+    Fixture for stories/codebehind-selector-ambiguity.md.
+
+    Every block below is a selector-ambiguity case the measurement has to get
+    right. The page is deliberately ordinary-looking: the point is that none of
+    these are exotic markup, they are what real applications ship.
+
+    Served statically as /ambiguous-targets.html (no server.ts route needed —
+    any *.html falls through to serveStatic).
+  -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; }
+    .header { background: #1a1a2e; color: white; padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { font-size: 1.25rem; }
+    .header .user { font-size: 0.875rem; opacity: 0.8; }
+    main { padding: 24px 32px 32px; }
+    section { margin-bottom: 32px; }
+    section h2 { font-size: 1rem; font-weight: 600; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #e2e8f0; }
+    .panel { background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 20px; }
+    .panel p { font-size: 0.9rem; color: #64748b; margin-bottom: 12px; }
+    a { color: #2563eb; }
+    .drawer { display: none; }
+    ul.link-list { list-style: none; }
+    ul.link-list li { padding: 10px 0; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
+    ul.link-list li:last-child { border-bottom: none; }
+    table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; border: 1px solid #e2e8f0; }
+    th { background: #f8fafc; padding: 10px 16px; text-align: left; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; border-bottom: 1px solid #e2e8f0; }
+    td { padding: 10px 16px; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
+    tr:last-child td { border-bottom: none; }
+    .amount-cell { text-align: right; font-variant-numeric: tabular-nums; }
+    button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: white; cursor: pointer; }
+    button:hover { background: #f8fafc; }
+    #outcome { margin-top: 12px; font-size: 0.9rem; font-weight: 600; color: #16a34a; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>SecureBank</h1>
+    <span class="user">Signed in as Dana Whitfield</span>
+  </div>
+
+  <!--
+    A collapsed mobile navigation drawer. Hidden at every viewport, on purpose:
+    this is the second `a[href="transactions.html"]` on the page. Playwright strict
+    mode counts it; the AI runtime's `visible=true` filter does not; and the DOM
+    snapshot strips a hidden element's attributes entirely, so the model cannot
+    see it either. Both halves of the model's evidence say "unique" and only
+    strict mode disagrees. This is the exact shape of the reported failure.
+  -->
+  <nav class="drawer" id="mobile-drawer">
+    <ul class="link-list">
+      <li><a href="transactions.html">Statements</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <!-- CASE 1 — matchCount 2, visibleMatchCount 1. -->
+    <section id="statements">
+      <h2>Statements</h2>
+      <div class="panel">
+        <p>Download a PDF copy of any statement from the last seven years.</p>
+        <a href="transactions.html">Open statements</a>
+      </div>
+    </section>
+
+    <!--
+      CASE 2 — matchCount 2, visibleMatchCount 2. Both are real, both are
+      visible, and the runtime silently takes the first. Nothing here is wrong
+      unless the step meant the other one, which no amount of counting can
+      settle. This is what `browser.ambiguousTarget: 'fail'` exists for.
+    -->
+    <section id="support">
+      <h2>Support</h2>
+      <div class="panel">
+        <p>Two routes to the same place — a page can legitimately link twice.</p>
+        <a href="delegates.html">Contact support</a>
+        <ul class="link-list">
+          <li><a href="delegates.html">Contact support</a></li>
+        </ul>
+      </div>
+    </section>
+
+    <!--
+      CASE 3 — no unique attribute handle anywhere on the target. No id, no
+      data-testid, no name, no aria-label, and the text repeats. The only
+      selector that resolves to one node is positional, so this exercises the
+      fallback `buildSelector` did not previously have.
+    -->
+    <section id="notices">
+      <h2>Notices</h2>
+      <div class="panel">
+        <ul class="link-list">
+          <li><span>Scheduled maintenance</span></li>
+          <li><span>Scheduled maintenance</span></li>
+          <li><span>Scheduled maintenance</span></li>
+        </ul>
+      </div>
+    </section>
+
+    <!--
+      CASE 4 — data-driven targeting. The right row depends on the run's data,
+      so a compiled entry must build its locator from step.getVar('customer')
+      rather than pinning whichever nth-of-type happened to match today. Issue
+      024's defect, in the one place it is most expensive: a committed file.
+    -->
+    <section id="payees">
+      <h2>Saved payees</h2>
+      <table>
+        <thead>
+          <tr><th>Payee</th><th>Reference</th><th class="amount-cell">Last paid</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Aurora Douglas</td><td>REF-4417</td><td class="amount-cell">$120.00</td><td><button type="button">Pay again</button></td></tr>
+          <tr><td>Bertram Ndlovu</td><td>REF-9032</td><td class="amount-cell">$84.50</td><td><button type="button">Pay again</button></td></tr>
+          <tr><td>Cerys Ahmadi</td><td>REF-2285</td><td class="amount-cell">$310.75</td><td><button type="button">Pay again</button></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!--
+      CASE 5 — the control. One match, a unique data-testid, nothing ambiguous.
+      A measurement that reports anything other than matchCount 1 here is wrong.
+    -->
+    <section id="preferences">
+      <h2>Preferences</h2>
+      <div class="panel">
+        <button type="button" data-testid="save-preferences">Save preferences</button>
+        <div id="outcome" hidden>Preferences saved</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // Minimal behaviour so a step has a post-condition to assert on.
+    document.querySelector('[data-testid="save-preferences"]').addEventListener('click', function () {
+      document.getElementById('outcome').hidden = false;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('#payees button'), function (btn) {
+      btn.addEventListener('click', function () {
+        var payee = btn.closest('tr').querySelector('td').textContent;
+        btn.textContent = 'Paid ' + payee.split(' ')[0];
+      });
+    });
+  </script>
+</body>
+</html>

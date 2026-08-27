@@ -69,15 +69,28 @@ export function renderReport(report: TestReport): string {
   const template = Handlebars.compile(getReportTemplate());
 
   const status = report.status;
-  // A stopped run (issue 021) renders as an amber "ABORTED" banner rather than
-  // the red FAILED its underlying `status` carries for back-compat.
-  const statusClass = report.aborted
+  const origins = countStepOrigins(report.steps);
+  // A run that passed only because broken code-behind entries healed under AI
+  // is not a clean pass (stories/codebehind-selector-ambiguity.md §"A healed
+  // run stops reporting as a clean pass"). It borrows `aborted`'s amber badge
+  // — the precedent for "a display state `status` cannot express".
+  //
+  // `healedSteps` when the producer set it, otherwise the count taken off the
+  // steps themselves: a report assembled by a path that predates the field
+  // still renders the banner, it just has no token figure to name.
+  const healedSteps = report.healedSteps ?? origins.stale;
+  const healed = !report.aborted && status === 'passed' && healedSteps > 0;
+  const statusClass = report.aborted || healed
     ? 'badge-aborted'
     : status === 'passed' ? 'badge-pass' : status === 'failed' ? 'badge-fail' : 'badge-skip';
   const statusIcon = report.aborted
     ? '■'
+    : healed ? '⚠'
     : status === 'passed' ? '✓' : status === 'failed' ? '✗' : '—';
-  const statusText = report.aborted ? 'ABORTED' : status.toUpperCase();
+  const statusText = report.aborted
+    ? 'ABORTED'
+    : healed ? healedBannerText(healedSteps, report.healedTokens)
+    : status.toUpperCase();
 
   const date = new Date(report.date).toLocaleString('en-AU', {
     dateStyle: 'medium',
@@ -93,7 +106,6 @@ export function renderReport(report: TestReport): string {
   const diagnosisHtml = report.diagnosis ? renderDiagnosis(report.diagnosis) : '';
   const modelSummary = summarizeModels(report);
   const scriptText = buildScriptText(report.steps);
-  const origins = countStepOrigins(report.steps);
 
   return template({
     codeBehindSteps: origins.code,
@@ -153,6 +165,37 @@ export function countStepOrigins(steps: StepResult[]): {
     else ai++;
   }
   return { code, ai, stale };
+}
+
+/**
+ * `18234` → `18.2k`. Compact because the banner sits inside a badge, and the
+ * figure is there to be *felt* — the reader needs the order of magnitude, not
+ * the units digit.
+ */
+export function formatTokenCount(tokens: number): string {
+  if (tokens < 1000) return String(tokens);
+  const k = tokens / 1000;
+  return `${k >= 100 ? Math.round(k) : Number(k.toFixed(1))}k`;
+}
+
+/**
+ * The amber banner a healed run wears in place of a plain green PASSED
+ * (stories/codebehind-selector-ambiguity.md): "PASSED — 4 steps healed,
+ * 18.2k tokens".
+ *
+ * The token figure is the point — it is what the author pays again on every
+ * run until the entries are repaired — so it is named whenever it was
+ * attributed. When it wasn't, the banner says the count and stops rather than
+ * printing a number nobody measured.
+ *
+ * Exported so the CLI summary and the tests can read the same sentence the
+ * report renders.
+ */
+export function healedBannerText(healedSteps: number, healedTokens?: number): string {
+  const steps = `${healedSteps} step${healedSteps === 1 ? '' : 's'} healed`;
+  return healedTokens !== undefined && healedTokens > 0
+    ? `PASSED — ${steps}, ${formatTokenCount(healedTokens)} tokens`
+    : `PASSED — ${steps}`;
 }
 
 /**

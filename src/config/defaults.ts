@@ -22,6 +22,9 @@ export const DEFAULT_CONFIG: Config = {
     slowMo: 0,
     browser: 'chromium',
     fullPageScreenshots: false,
+    // Today's behaviour: a singular action takes the first visible match.
+    // 'fail' is the author's opt-in (stories/codebehind-selector-ambiguity.md).
+    ambiguousTarget: 'first',
     maxIframeDepth: 5,
     domSnapshotCharLimit: 300_000,
     captureScreenshotsPerAction: false,

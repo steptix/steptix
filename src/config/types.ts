@@ -124,6 +124,52 @@ export interface BrowserConfig {
   /** Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts
    *  the site itself needs (cascading failures). Default false. */
   bypassCSP?: boolean;
+  /** What a SINGULAR action does when its selector resolves to more than one
+   *  candidate element. `'first'` (default, and today's behaviour) acts on the
+   *  first of them; `'fail'` refuses to act and returns the count, which flows
+   *  into the turn's collected failures and reaches the AI as "3 elements
+   *  matched — use a more specific selector". The AI then re-plans, usually by
+   *  scoping to a container. The rule it enforces: don't let the AI resolve
+   *  ambiguity by accident.
+   *
+   *  "More than one" is measured against EACH ACTION'S OWN tolerance — the
+   *  question is always "did this action's `.first()` pick from more than one
+   *  candidate?". Click, type, select, hover and upload filter to visible
+   *  before taking the first, so they gate on the VISIBLE count. A singular
+   *  `read` takes `.first()` over every match (reading a hidden element is
+   *  legitimate, so it waits for attachment rather than visibility), so it
+   *  gates on the TOTAL. Gating a read on the visible count would let it
+   *  capture out of a hidden first match while reporting one visible
+   *  candidate — the worse of the two failures, since a wrong click fails
+   *  loudly and a wrong read silently poisons a variable later steps trust.
+   *
+   *  For the visible-filtered actions this is deliberately NOT the total, and
+   *  the distinction is the design rather than an implementation detail.
+   *  Gating those on ALL matches was considered and declined: it would give
+   *  literal parity with Playwright's strict mode, but it would fail the
+   *  common case where a selector matches one visible element plus a hidden
+   *  duplicate (the mobile-nav drawer, the print-only copy) — a case where the
+   *  AI is demonstrably right and only the generated code-behind needed
+   *  fixing. Read gating on the total is not an exception to that reasoning
+   *  but an application of it: a read has no visible filter to be right about.
+   *  The recorded measurement already hands generation a verified unique handle
+   *  there, so failing the run would be pure cost.
+   *
+   *  What `'fail'` buys is the case measurement cannot settle: three visible
+   *  matches, the AI took the first, and no amount of counting says whether it
+   *  was the one the step meant. Only the AI can settle it, and only by being
+   *  told its selector was ambiguous.
+   *
+   *  Off by default because it changes the behaviour of a path that currently
+   *  works, costs an AI turn each time it fires, and can turn a green test red
+   *  — which is the point, and is therefore the author's call about a suite
+   *  rather than a guess the framework makes on their behalf.
+   *
+   *  Plural actions are exempt by construction (`read` with `multiple: true`,
+   *  `count`): many matches is their purpose. Unrelated to
+   *  `execution.promptOnAmbiguity`, which asks the HUMAN when the AI cannot
+   *  determine the next action. See stories/codebehind-selector-ambiguity.md. */
+  ambiguousTarget?: 'first' | 'fail' | undefined;
   /** Launch settings for CDP browsers this framework starts. See
    *  CdpBrowserConfig. Nothing here applies to a browser attached to by port. */
   cdp?: CdpBrowserConfig | undefined;

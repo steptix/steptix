@@ -33,21 +33,56 @@
     return '[id="' + escAttr(id) + '"]';
   }
 
+  // Ask the document whether `sel` addresses exactly `el` and nothing else.
+  // Hidden matches count — Playwright's strict mode does not filter by
+  // visibility, and the duplicate that breaks generated code is typically the
+  // hidden one (a mobile-nav drawer copy of a header link).
+  // An invalid or exotic selector makes querySelectorAll throw; a throw is
+  // simply "did not verify", and the next candidate is tried.
+  function verifies(sel, el) {
+    try {
+      var found = document.querySelectorAll(sel);
+      return found.length === 1 && found[0] === el;
+    } catch (err) {
+      return false;
+    }
+  }
+
   // Strong selector or null. "Strong" = uniquely addressable from document root
   // without ancestor context (data-testid / id / name / aria-label / anchor href).
+  // Every candidate is checked against the live document before it is returned,
+  // so the claim in that sentence is a measured fact rather than a hope: a
+  // candidate that matches anything other than exactly `el` is skipped and the
+  // next one tried. Null when none verify — callers fall back to a positional
+  // path, which is unique by construction.
   function strongSelector(el) {
-    var testId = el.getAttribute('data-testid');
-    if (testId) return '[data-testid="' + escAttr(testId) + '"]';
-    var id = el.getAttribute('id');
-    if (id) return idSelector(id);
     var tag = el.tagName.toLowerCase();
+    var testId = el.getAttribute('data-testid');
+    if (testId) {
+      var testIdSel = '[data-testid="' + escAttr(testId) + '"]';
+      if (verifies(testIdSel, el)) return testIdSel;
+    }
+    var id = el.getAttribute('id');
+    if (id) {
+      var idSel = idSelector(id);
+      if (verifies(idSel, el)) return idSel;
+    }
     var name = el.getAttribute('name');
-    if (name) return tag + '[name="' + escAttr(name) + '"]';
+    if (name) {
+      var nameSel = tag + '[name="' + escAttr(name) + '"]';
+      if (verifies(nameSel, el)) return nameSel;
+    }
     var ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel) return tag + '[aria-label="' + escAttr(ariaLabel) + '"]';
+    if (ariaLabel) {
+      var ariaSel = tag + '[aria-label="' + escAttr(ariaLabel) + '"]';
+      if (verifies(ariaSel, el)) return ariaSel;
+    }
     if (tag === 'a') {
       var href = el.getAttribute('href');
-      if (href) return 'a[href="' + escAttr(href) + '"]';
+      if (href) {
+        var hrefSel = 'a[href="' + escAttr(href) + '"]';
+        if (verifies(hrefSel, el)) return hrefSel;
+      }
     }
     return null;
   }
@@ -55,6 +90,9 @@
   // Build a stable CSS selector for el. If el itself has a strong selector, returns it.
   // Otherwise walks up collecting nth-of-type(N) segments until reaching an addressable
   // ancestor, producing e.g. "#orders > tr:nth-of-type(42) > td:nth-of-type(3)".
+  // The chain is unique because its anchor is: strongSelector only returns a
+  // verified selector (and `body` is unique on any document), and a child
+  // combinator chain from a single element can reach only one element.
   function stableSelector(el) {
     var direct = strongSelector(el);
     if (direct) return direct;

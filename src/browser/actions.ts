@@ -64,6 +64,90 @@ async function promoteIframeFromSelector(
   return { frame, selector };
 }
 
+/**
+ * What the runtime found at the instant it acted
+ * (stories/codebehind-selector-ambiguity.md §"Measurement 1").
+ *
+ * The AI runtime puts every selector through two tolerances — hidden matches
+ * are filtered out, and of what remains the first is taken — so a transcript
+ * has never been evidence that one match *exists*. Generated code-behind has
+ * neither tolerance: Playwright's default is strict and throws on the second
+ * match, visible or not. These three facts are what closes that gap.
+ *
+ * Every field is optional and absence is first-class. Measurement is strictly
+ * additive telemetry, so anything that stops it — a detached element, a
+ * cross-origin frame, a CSP that blocks `evaluate` — leaves the field off
+ * rather than recording a number that is not true. A count is never zero: the
+ * hoisted wait proved a match existed, so a zero would describe the gap
+ * between the wait and the measurement, not the action.
+ */
+export interface ActionTargeting {
+  /** Every match, hidden included. This is strict mode's number — the one
+   *  that predicts whether the generated entry will throw. */
+  matchCount?: number;
+  /** Visible matches: what the runtime was actually choosing between when it
+   *  took `.first()`. A different question from `matchCount` — whether the AI
+   *  may have silently acted on the wrong element. */
+  visibleMatchCount?: number;
+  /** A selector for the element that was acted on, VERIFIED in page context
+   *  (`querySelectorAll(sel).length === 1 && [0] === el`). Absent when even a
+   *  positional path does not address it uniquely. */
+  resolvedSelector?: string;
+  /**
+   * How `resolvedSelector` was arrived at — a semantic handle
+   * (`'attribute'`), that handle qualified by an addressable ancestor
+   * (`'scoped'`), or an `nth-of-type` chain (`'positional'`).
+   *
+   * Reported rather than left to be inferred from the string, because
+   * generation has a rule that turns on it: a positional path pins THIS run's
+   * row number into a committed file, so when the step or a parameter names
+   * what distinguishes the element the entry must build its locator from
+   * `step.getVar(...)` instead (issue 024's defect, in the one place it
+   * outlives the cache). "Does it contain `nth-of-type`" is not that question
+   * — an author's own selector can, and a scoped handle never does.
+   *
+   * Travels with `resolvedSelector`: both present, or neither.
+   */
+  resolvedBy?: ResolvedBy;
+}
+
+/** How a `resolvedSelector` was arrived at. See {@link ActionTargeting}. */
+export type ResolvedBy = 'attribute' | 'scoped' | 'positional';
+
+/** What the browser-side selector builder returns. */
+interface ResolvedSelection {
+  selector: string;
+  by: ResolvedBy;
+}
+
+/** Per-call switches for {@link executeAction}. */
+export interface ExecuteActionOptions {
+  /**
+   * Measure {@link ActionTargeting} for this action.
+   *
+   * Compile-only: generation is the only consumer, and an ordinary run would
+   * pay two CDP round-trips per element-targeting action forever for data
+   * nobody reads. The caller gates it on the same flag `captureStepContext`
+   * uses (stories/codebehind-selector-ambiguity.md §"Where the measurement
+   * goes").
+   */
+  measure?: boolean;
+  /**
+   * `browser.ambiguousTarget`. Under `'fail'` a singular action whose
+   * selector resolves to more than one candidate does not act: it returns a
+   * failure carrying the count, which reaches the AI next turn.
+   *
+   * "Candidate" means whatever the action's OWN `.first()` chose from —
+   * visible matches for click/type/select/hover/upload, every match for a
+   * singular `read`. See the gate in `executeAction`.
+   *
+   * This is the stated exception to the compile-only gate: it decides by
+   * reading a count, so it cannot work without one. Setting it turns on that
+   * ONE count whatever the mode; `resolvedSelector` stays compile-only.
+   */
+  ambiguousTarget?: 'first' | 'fail' | undefined;
+}
+
 /** Result of executing a single Playwright action */
 export interface ActionExecutionResult {
   success: boolean;
@@ -79,6 +163,9 @@ export interface ActionExecutionResult {
    *  step-executor JSON-encodes this into the parameter map so downstream
    *  tools can decode it via array-typed parameters. */
   capturedValues?: string[];
+  /** What the runtime found at the instant it acted. Absent unless the caller
+   *  asked to measure, and absent whenever measurement was impossible. */
+  targeting?: ActionTargeting;
 }
 
 /**
@@ -90,6 +177,7 @@ export async function executeAction(
   action: AIAction,
   baseUrl?: string,
   signal?: AbortSignal,
+  options?: ExecuteActionOptions,
 ): Promise<ActionExecutionResult> {
   logger.subAction(action.description);
 
@@ -132,18 +220,83 @@ export async function executeAction(
     ...(effectiveSelector !== undefined ? { selector: effectiveSelector } : {}),
   };
 
+  // Whether the caller wants the full measurement, and whether it wants the
+  // ambiguity gate. The gate needs `visibleMatchCount` on any run, so it turns
+  // the cheap half on by itself.
+  const wantMeasure = options?.measure === true;
+  const wantGate = options?.ambiguousTarget === 'fail';
+  /** What the runtime found. Absent unless we measured and the numbers held. */
+  let targeting: ActionTargeting | undefined;
+  /** What is left of the action's own budget after the wait hoisted out of it. */
+  let remainingMs: number | undefined;
+
   try {
+    // ── Measurement (stories/codebehind-selector-ambiguity.md) ──────────────
+    // Hoist the wait the action was going to do anyway, so the count is taken
+    // at the instant Playwright would have acted. Measuring cold at T0 would
+    // record `matchCount: 0` for the very common case where the element
+    // renders 400ms later and the action then succeeds — a confident lie,
+    // worse than no data. After the wait resolves at least one match exists by
+    // construction, so "zero" is not a measurement outcome at all: it is the
+    // wait timing out, which throws into the catch below exactly as the
+    // action's own wait would have.
+    const singular = wantMeasure || wantGate ? singularTargetOf(root, eff) : null;
+    if (singular && eff.selector !== undefined) {
+      const startedAt = Date.now();
+      await singular.target.waitFor({ state: singular.state, timeout: singular.budgetMs });
+      targeting = await measureTargeting(root, eff.selector, singular, wantMeasure);
+      // The hoisted wait must not add a SECOND timeout budget: giving it a
+      // fresh one would double how long a failing selector takes to report.
+      // Time it, and pass the remainder to the action.
+      remainingMs = Math.max(singular.budgetMs - (Date.now() - startedAt), MIN_ACTION_TIMEOUT_MS);
+
+      // "Did this action's own `.first()` pick from more than one candidate?"
+      // — so each action is gated on the count matching ITS tolerance.
+      // click/type/select/hover/upload filter to `visible=true` first, so they
+      // gate on the visible count; a singular `read` takes `.first()` over
+      // every match, hidden included, so it gates on the total. Gating a read
+      // on the visible count would let it silently capture from a hidden first
+      // match, which is worse than the click case: it poisons a variable
+      // instead of failing loudly.
+      const candidates =
+        singular.state === 'visible' ? targeting?.visibleMatchCount : targeting?.matchCount;
+      if (candidates !== undefined && candidates > 1) {
+        const what = singular.state === 'visible' ? 'visible elements' : 'elements';
+        const took =
+          singular.state === 'visible'
+            ? `${eff.action} took the first visible one`
+            : `${eff.action} took the first of them, hidden included`;
+        if (wantGate) {
+          // Don't let the AI resolve ambiguity by accident. The failure
+          // carries the count into `collectedFailures`, so the next turn is
+          // told its selector was ambiguous and re-plans.
+          const message =
+            `${candidates} ${what} matched "${eff.selector}" — use a more specific selector `
+            + `(browser.ambiguousTarget is "fail")`;
+          logger.error(`Action refused [${eff.action}]: ${message}`);
+          return {
+            success: false,
+            error: message,
+            failedSelector: eff.selector,
+            matchCount: candidates,
+            ...(targeting !== undefined && { targeting }),
+          };
+        }
+        logger.warn(`"${eff.selector}" matched ${candidates} ${what} — ${took}`);
+      }
+    }
+
     switch (eff.action) {
       case 'click':
-        await executeClick(root, eff);
+        await executeClick(root, eff, remainingMs);
         break;
 
       case 'type':
-        await executeType(root, eff);
+        await executeType(root, eff, remainingMs);
         break;
 
       case 'select':
-        await executeSelect(root, eff);
+        await executeSelect(root, eff, remainingMs);
         break;
 
       case 'navigate':
@@ -152,11 +305,11 @@ export async function executeAction(
         break;
 
       case 'upload':
-        await executeUpload(root, eff);
+        await executeUpload(root, eff, remainingMs);
         break;
 
       case 'hover':
-        await executeHover(root, eff);
+        await executeHover(root, eff, remainingMs);
         break;
 
       case 'wait':
@@ -209,16 +362,34 @@ export async function executeAction(
 
       case 'read': {
         if (eff.multiple) {
+          // Plural actions are exempt by construction: `evaluateAll` runs
+          // across every match, so many matches is the PURPOSE. The count is
+          // free here (the page already returned every element), and there is
+          // no `resolvedSelector` because there is no single element.
           const list = await executeReadMultiple(root, eff);
-          return { success: true, capturedValues: list };
+          return {
+            success: true,
+            capturedValues: list.values,
+            ...(wantMeasure && { targeting: { matchCount: list.matchCount } }),
+          };
         }
-        const captured = await executeRead(root, eff);
-        return { success: true, capturedValue: captured };
+        const captured = await executeRead(root, eff, remainingMs);
+        return {
+          success: true,
+          capturedValue: captured,
+          ...(targeting !== undefined && { targeting }),
+        };
       }
 
       case 'count': {
+        // Also plural, and its count IS its result — free, and never gated.
         const counted = await executeCount(root, eff);
-        return { success: true, capturedValue: counted };
+        const total = Number(counted);
+        return {
+          success: true,
+          capturedValue: counted,
+          ...(wantMeasure && Number.isFinite(total) && { targeting: { matchCount: total } }),
+        };
       }
 
       case 'noop':
@@ -229,7 +400,7 @@ export async function executeAction(
         logger.warn(`Unknown action type: ${(eff as AIAction).action}`);
     }
 
-    return { success: true };
+    return { success: true, ...(targeting !== undefined && { targeting }) };
   } catch (err) {
     // A run abort (issue 022) must propagate as a throw, not be swallowed into a
     // failed-action result — the step loop / withRetry recognise it and end the
@@ -259,34 +430,75 @@ export async function executeAction(
       error: errorMessage,
       ...(eff.selector !== undefined && { failedSelector: eff.selector }),
       ...(matchCount !== undefined && { matchCount }),
+      ...(targeting !== undefined && { targeting }),
     };
   }
 }
 
-async function executeClick(root: Page | FrameLocator, action: AIAction): Promise<void> {
+/**
+ * Per-action Playwright budgets, named because the measurement borrows from
+ * them (stories/codebehind-selector-ambiguity.md §"Measurement 1"). Where an
+ * action makes two calls, the hoisted wait draws on the FIRST one's budget and
+ * hands back the remainder, so the total wall clock of a failing selector is
+ * what it was before — not double.
+ */
+const CLICK_TIMEOUT_MS = 10_000;
+const TYPE_CLEAR_TIMEOUT_MS = 5_000;
+const TYPE_FILL_TIMEOUT_MS = 10_000;
+const SELECT_BY_VALUE_TIMEOUT_MS = 5_000;
+const SELECT_BY_LABEL_TIMEOUT_MS = 10_000;
+const UPLOAD_TIMEOUT_MS = 10_000;
+const HOVER_TIMEOUT_MS = 10_000;
+/** `read` passes no timeout today, so its budget is Playwright's own default. */
+const READ_TIMEOUT_MS = 30_000;
+/** Floor on what the hoisted wait hands back, so a slow measurement can never
+ *  starve the action it is telemetry for. */
+const MIN_ACTION_TIMEOUT_MS = 1_000;
+/** All the patience the measurement itself gets. It is telemetry: an element
+ *  that detached in the gap should cost milliseconds and be forgotten, not
+ *  spend Playwright's default 30s retrying before we swallow the throw. */
+const MEASUREMENT_TIMEOUT_MS = 2_000;
+
+async function executeClick(
+  root: Page | FrameLocator,
+  action: AIAction,
+  timeoutMs?: number,
+): Promise<void> {
   const selector = requireSelector(action);
-  await root.locator(selector).locator('visible=true').first().click({ timeout: 10_000 });
+  await root
+    .locator(selector)
+    .locator('visible=true')
+    .first()
+    .click({ timeout: timeoutMs ?? CLICK_TIMEOUT_MS });
 }
 
-async function executeType(root: Page | FrameLocator, action: AIAction): Promise<void> {
+async function executeType(
+  root: Page | FrameLocator,
+  action: AIAction,
+  clearTimeoutMs?: number,
+): Promise<void> {
   const selector = requireSelector(action);
   const value = action.value ?? '';
   const locator = root.locator(selector).locator('visible=true').first();
   // Clear existing content first, then type
-  await locator.clear({ timeout: 5_000 });
-  await locator.fill(value, { timeout: 10_000 });
+  await locator.clear({ timeout: clearTimeoutMs ?? TYPE_CLEAR_TIMEOUT_MS });
+  await locator.fill(value, { timeout: TYPE_FILL_TIMEOUT_MS });
 }
 
-async function executeSelect(root: Page | FrameLocator, action: AIAction): Promise<void> {
+async function executeSelect(
+  root: Page | FrameLocator,
+  action: AIAction,
+  byValueTimeoutMs?: number,
+): Promise<void> {
   const selector = requireSelector(action);
   const value = action.value ?? '';
   const locator = root.locator(selector).locator('visible=true').first();
   try {
     // Try matching by value attribute first
-    await locator.selectOption(value, { timeout: 5_000 });
+    await locator.selectOption(value, { timeout: byValueTimeoutMs ?? SELECT_BY_VALUE_TIMEOUT_MS });
   } catch {
     // Fall back to matching by visible label text
-    await locator.selectOption({ label: value }, { timeout: 10_000 });
+    await locator.selectOption({ label: value }, { timeout: SELECT_BY_LABEL_TIMEOUT_MS });
   }
 }
 
@@ -317,16 +529,337 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 }
 
-async function executeUpload(root: Page | FrameLocator, action: AIAction): Promise<void> {
+async function executeUpload(
+  root: Page | FrameLocator,
+  action: AIAction,
+  timeoutMs?: number,
+): Promise<void> {
   const selector = requireSelector(action);
   const filePath = action.filePath ?? action.value ?? '';
   if (!filePath) throw new Error('upload action requires a filePath');
-  await root.locator(selector).locator('visible=true').first().setInputFiles(filePath, { timeout: 10_000 });
+  await root
+    .locator(selector)
+    .locator('visible=true')
+    .first()
+    .setInputFiles(filePath, { timeout: timeoutMs ?? UPLOAD_TIMEOUT_MS });
 }
 
-async function executeHover(root: Page | FrameLocator, action: AIAction): Promise<void> {
+async function executeHover(
+  root: Page | FrameLocator,
+  action: AIAction,
+  timeoutMs?: number,
+): Promise<void> {
   const selector = requireSelector(action);
-  await root.locator(selector).locator('visible=true').first().hover({ timeout: 10_000 });
+  await root
+    .locator(selector)
+    .locator('visible=true')
+    .first()
+    .hover({ timeout: timeoutMs ?? HOVER_TIMEOUT_MS });
+}
+
+/**
+ * The element an action is about to act on, plus the wait it was going to do
+ * to get there.
+ *
+ * Only SINGULAR element-targeting actions have one. `read multiple` and
+ * `count` are plural by construction — many matches is their purpose — and
+ * navigate/keyboard/assert/prompt/noop and the page/browser actions target no
+ * element at all.
+ *
+ * `state` is the state the action's OWN wait would have waited for, which is
+ * not the same question for every action: click/type/select/hover/upload all
+ * go through `visible=true`, while a singular `read` reads `.first()` of the
+ * raw locator and so waits only for `attached` — reading a hidden element is
+ * ordinary, and hoisting a visibility wait would change what read means.
+ *
+ * It doubles as the action's tolerance, which is what `ambiguousTarget: 'fail'`
+ * has to gate on: `'visible'` means the runtime chose among the visible
+ * matches, `'attached'` means it chose among all of them.
+ */
+interface SingularTarget {
+  target: Locator;
+  state: 'visible' | 'attached';
+  /** The first budget the action would have spent, which the hoisted wait
+   *  borrows from rather than adding to. */
+  budgetMs: number;
+}
+
+function singularTargetOf(root: Page | FrameLocator, action: AIAction): SingularTarget | null {
+  const selector = action.selector;
+  if (!selector) return null;
+  const visibleFirst = (): Locator => root.locator(selector).locator('visible=true').first();
+  switch (action.action) {
+    case 'click':
+      return { target: visibleFirst(), state: 'visible', budgetMs: CLICK_TIMEOUT_MS };
+    case 'type':
+      return { target: visibleFirst(), state: 'visible', budgetMs: TYPE_CLEAR_TIMEOUT_MS };
+    case 'select':
+      return { target: visibleFirst(), state: 'visible', budgetMs: SELECT_BY_VALUE_TIMEOUT_MS };
+    case 'hover':
+      return { target: visibleFirst(), state: 'visible', budgetMs: HOVER_TIMEOUT_MS };
+    case 'upload':
+      return { target: visibleFirst(), state: 'visible', budgetMs: UPLOAD_TIMEOUT_MS };
+    case 'read':
+      if (action.multiple) return null;
+      return { target: root.locator(selector).first(), state: 'attached', budgetMs: READ_TIMEOUT_MS };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Count what the selector matched and identify what is about to be touched.
+ *
+ * NEVER throws and never fails an action: measurement is strictly additive
+ * telemetry, so a mangled selector, a cross-origin frame, a CSP blocking
+ * `evaluate`, a closing page or an element that detached in the gap since the
+ * wait all leave `targeting` absent and the action behaving exactly as it does
+ * today. Absence is first-class downstream; a wrong number would not be.
+ *
+ * `full` is the compile-only half. With it off — the `ambiguousTarget: 'fail'`
+ * exception, which has to read a count on any run — this is ONE call, not
+ * three: the count matching the action's own tolerance, which is the only one
+ * the gate can act on.
+ */
+async function measureTargeting(
+  root: Page | FrameLocator,
+  selector: string,
+  singular: SingularTarget,
+  full: boolean,
+): Promise<ActionTargeting | undefined> {
+  try {
+    const visibleMatchCount =
+      full || singular.state === 'visible'
+        ? await root.locator(selector).locator('visible=true').count()
+        : undefined;
+    const matchCount =
+      full || singular.state === 'attached' ? await root.locator(selector).count() : undefined;
+    // Explicitly `undefined` arg + options, because `evaluate`'s first overload
+    // would otherwise read a lone options object as the page function's
+    // ARGUMENT and silently apply Playwright's 30s default — which is what an
+    // element that detached in the gap would then spend before throwing. Two
+    // seconds is the whole budget telemetry gets.
+    const resolved = full
+      ? await singular.target.evaluate(resolvedSelectorInPage, undefined, {
+          timeout: MEASUREMENT_TIMEOUT_MS,
+        })
+      : null;
+
+    // Never record a zero. The wait proved a match existed in the state the
+    // action needs, so a zero here describes a re-render in the gap rather
+    // than the page the action is about to touch. (A `read` waits for
+    // `attached`, so zero VISIBLE matches is a legitimate answer there — the
+    // field is simply left off rather than discarding the rest.)
+    if (matchCount === 0) return undefined;
+    if (singular.state === 'visible' && visibleMatchCount === 0) return undefined;
+
+    const out: ActionTargeting = {
+      ...(matchCount !== undefined && { matchCount }),
+      ...(visibleMatchCount !== undefined && visibleMatchCount > 0 && { visibleMatchCount }),
+      ...(resolved !== null && { resolvedSelector: resolved.selector, resolvedBy: resolved.by }),
+    };
+    return Object.keys(out).length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `resolvedSelector`'s browser half: a selector that addresses THIS element
+ * and nothing else, verified against the live document, plus how it was
+ * arrived at. Null when nothing verified.
+ *
+ * Three candidates, best first, each verified before it is returned:
+ *
+ *   1. `'attribute'` — the element's own handle (`strongSelector`).
+ *   2. `'scoped'` — that same handle qualified by the nearest addressable
+ *      ancestor, e.g. `#statements a[href="transactions.html"]`. This is the
+ *      form the story's worked example shows, and it is the one the headline
+ *      case needs: a hidden drawer copy makes the bare `href` match twice, so
+ *      the element's own handle cannot verify even though it describes the
+ *      element perfectly well.
+ *   3. `'positional'` — `stableSelector`'s `nth-of-type` chain.
+ *
+ * 2 sits above 3 because the two are not equally good even when both verify.
+ * Insert a sibling above the panel and the positional chain silently
+ * retargets; the scoped form does not. What this function returns is compiled
+ * into a file that gets committed and runs for years, which is exactly where
+ * that difference gets expensive — and it is why `resolvedBy` is reported
+ * rather than left to be sniffed out of the string: generation has to tell
+ * "here is a stable handle" from "this is positional, so build the locator
+ * from `step.getVar(...)` if the step names what distinguishes the element".
+ *
+ * The scope joins with a plain space, not `>`, so an intervening wrapper does
+ * not break it — and, like `stableSelector`'s spaced `' > '`, that is safe
+ * only because this output is ever an ELEMENT selector and never a frame path,
+ * out of reach of `resolveLocatorRoot`'s whitespace split.
+ *
+ * Runs in the BROWSER context, so it must be self-contained — no closures over
+ * Node-side state, no references to other helpers in this module. That is the
+ * same constraint (and the same remedy) as `extractValueInPage` /
+ * `executeReadMultiple`: Playwright cannot serialise references to Node scope,
+ * so the body is duplicated literally and the tests keep the two copies in
+ * lockstep.
+ *
+ * Everything between the MIRROR markers below is copied verbatim from
+ * `src/browser/scripts/find-in-dom.js` — `escAttr`, `idSelector`, `verifies`,
+ * `strongSelector` and `stableSelector`, in that order — because the story's
+ * requirement is that the runtime walks *the existing candidate hierarchy*.
+ * A drift between the two is a silent divergence in what the AI is handed
+ * versus what the entry is generated from, so
+ * `tests/selector-measurement.test.ts` compares the two sources
+ * character-for-character (whitespace and TS annotations normalised).
+ *
+ * The scoped tier is deliberately OUTSIDE those markers: it is this function's
+ * own layer, which find-in-dom.js does not have, and a mirror has to stay a
+ * mirror. Its candidate list is pinned to `strongSelector`'s by a test that
+ * compares the attributes each of them reads, in order.
+ */
+// This package's `lib` is ES2022 with no DOM — it is a Node process that
+// drives a browser, not a browser. Naming `document` (erased at compile time,
+// and referenced only from the browser-context function below) is what lets
+// the mirrored block stay character-identical to the .js it was copied from
+// instead of paraphrasing every reference to it.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const document: any;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolvedSelectorInPage(el: any): ResolvedSelection | null {
+  /* MIRROR-BEGIN find-in-dom.js */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function escAttr(v: any) {
+    return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function idSelector(id: any) {
+    if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(id)) return '#' + id;
+    return '[id="' + escAttr(id) + '"]';
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function verifies(sel: any, el: any) {
+    try {
+      var found = document.querySelectorAll(sel);
+      return found.length === 1 && found[0] === el;
+    } catch (err) {
+      return false;
+    }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function strongSelector(el: any) {
+    var tag = el.tagName.toLowerCase();
+    var testId = el.getAttribute('data-testid');
+    if (testId) {
+      var testIdSel = '[data-testid="' + escAttr(testId) + '"]';
+      if (verifies(testIdSel, el)) return testIdSel;
+    }
+    var id = el.getAttribute('id');
+    if (id) {
+      var idSel = idSelector(id);
+      if (verifies(idSel, el)) return idSel;
+    }
+    var name = el.getAttribute('name');
+    if (name) {
+      var nameSel = tag + '[name="' + escAttr(name) + '"]';
+      if (verifies(nameSel, el)) return nameSel;
+    }
+    var ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) {
+      var ariaSel = tag + '[aria-label="' + escAttr(ariaLabel) + '"]';
+      if (verifies(ariaSel, el)) return ariaSel;
+    }
+    if (tag === 'a') {
+      var href = el.getAttribute('href');
+      if (href) {
+        var hrefSel = 'a[href="' + escAttr(href) + '"]';
+        if (verifies(hrefSel, el)) return hrefSel;
+      }
+    }
+    return null;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function stableSelector(el: any) {
+    var direct = strongSelector(el);
+    if (direct) return direct;
+    var parts = [];
+    var cur = el;
+    while (cur && cur !== document.body && cur.parentElement) {
+      var parent = cur.parentElement;
+      var tag = cur.tagName.toLowerCase();
+      var n = 1;
+      var sib = cur.previousElementSibling;
+      while (sib) {
+        if (sib.tagName.toLowerCase() === tag) n++;
+        sib = sib.previousElementSibling;
+      }
+      parts.unshift(tag + ':nth-of-type(' + n + ')');
+      var parentSel = strongSelector(parent);
+      if (parentSel) {
+        parts.unshift(parentSel);
+        return parts.join(' > ');
+      }
+      cur = parent;
+    }
+    parts.unshift('body');
+    return parts.join(' > ');
+  }
+  /* MIRROR-END */
+
+  // Every attribute handle the hierarchy above would consider for THIS
+  // element, in the same order, but UNVERIFIED — `strongSelector` returns only
+  // handles that already address the element on their own, and the whole point
+  // of the scoped tier is the case where one does not. The two lists are
+  // pinned together by `attributesReadBy` in tests/selector-measurement.test.ts.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function ownAttrSelectors(el: any) {
+    var tag = el.tagName.toLowerCase();
+    var out = [];
+    var testId = el.getAttribute('data-testid');
+    if (testId) out.push('[data-testid="' + escAttr(testId) + '"]');
+    var id = el.getAttribute('id');
+    if (id) out.push(idSelector(id));
+    var name = el.getAttribute('name');
+    if (name) out.push(tag + '[name="' + escAttr(name) + '"]');
+    var ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) out.push(tag + '[aria-label="' + escAttr(ariaLabel) + '"]');
+    if (tag === 'a') {
+      var href = el.getAttribute('href');
+      if (href) out.push('a[href="' + escAttr(href) + '"]');
+    }
+    return out;
+  }
+
+  try {
+    var direct = strongSelector(el);
+    if (direct) return { selector: direct, by: 'attribute' };
+
+    // Nearest addressable ancestor first, and within it the strongest handle
+    // first — so `#panel [data-testid="x"]` beats `#panel a[href="y"]`, and
+    // both beat anything anchored further up the tree.
+    var owns = ownAttrSelectors(el);
+    if (owns.length > 0) {
+      var cur = el.parentElement;
+      while (cur && cur !== document.body && cur.parentElement) {
+        var anchor = strongSelector(cur);
+        if (anchor) {
+          for (var i = 0; i < owns.length; i++) {
+            var scoped = anchor + ' ' + owns[i];
+            if (verifies(scoped, el)) return { selector: scoped, by: 'scoped' };
+          }
+        }
+        cur = cur.parentElement;
+      }
+    }
+
+    // The last word is the document's, not the builder's: `stableSelector`'s
+    // positional chain is unique by construction on ordinary markup, but a
+    // camel-cased SVG tag or an element outside `document.body` can defeat it,
+    // and a `resolvedSelector` that is not verified is worth less than none.
+    var chain = stableSelector(el);
+    if (chain && verifies(chain, el)) return { selector: chain, by: 'positional' };
+    return null;
+  } catch (err) {
+    return null;
+  }
 }
 
 /**
@@ -990,7 +1523,11 @@ const READ_MULTIPLE_MAX = 500;
  * Tries the element's `value` attribute first (for inputs), falls back to `textContent`.
  * Uses locator.evaluate() so it works inside both page and FrameLocator contexts.
  */
-async function executeRead(root: Page | FrameLocator, action: AIAction): Promise<string> {
+async function executeRead(
+  root: Page | FrameLocator,
+  action: AIAction,
+  timeoutMs?: number,
+): Promise<string> {
   const selector = requireSelector(action);
   const attribute = action.attribute;
   const target = attribute ? `@${attribute}` : 'text';
@@ -999,7 +1536,7 @@ async function executeRead(root: Page | FrameLocator, action: AIAction): Promise
   let value = await root
     .locator(selector)
     .first()
-    .evaluate(extractValueInPage, attribute);
+    .evaluate(extractValueInPage, attribute, timeoutMs !== undefined ? { timeout: timeoutMs } : undefined);
 
   // Optional substring extraction (issue 020). Applied in Node after capture so
   // it composes with `attribute`. Fail-hard: an invalid pattern or a non-match
@@ -1039,11 +1576,18 @@ async function executeRead(root: Page | FrameLocator, action: AIAction): Promise
  * Capped at READ_MULTIPLE_MAX. When the selector matches more, the first
  * READ_MULTIPLE_MAX values are returned and a warning names the total — so
  * an over-broad selector is loud rather than silent.
+ *
+ * Returns the count alongside the values because the page has already told us
+ * — it is `targeting.matchCount` for free, useful context for generating the
+ * loop, and the only measurement a plural action gets
+ * (stories/codebehind-selector-ambiguity.md). It counts MATCHED elements, not
+ * captured values: a `pattern` that drops non-matching elements shortens the
+ * list without changing what the selector found.
  */
 async function executeReadMultiple(
   root: Page | FrameLocator,
   action: AIAction,
-): Promise<string[]> {
+): Promise<{ values: string[]; matchCount: number }> {
   const selector = requireSelector(action);
   const attribute = action.attribute;
   const target = attribute ? `@${attribute}` : 'text';
@@ -1080,8 +1624,10 @@ async function executeReadMultiple(
   // We capped inside the page. To tell the author whether anything was
   // truncated, do one cheap follow-up count() — only when the result hit
   // the cap, so the common case stays at one round trip.
+  let matchCount = values.length;
   if (values.length >= READ_MULTIPLE_MAX) {
     const total = await root.locator(selector).count().catch(() => values.length);
+    matchCount = total;
     if (total > values.length) {
       logger.warn(
         `read[multiple] captured the first ${values.length} of ${total} elements matching "${selector}" — narrow the selector if you need all of them (READ_MULTIPLE_MAX=${READ_MULTIPLE_MAX})`,
@@ -1108,5 +1654,5 @@ async function executeReadMultiple(
   logger.info(
     `read[multiple] captured: ${result.length} value${result.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
   );
-  return result;
+  return { values: result, matchCount };
 }

@@ -1,4 +1,5 @@
 import type { AIAction, ChatMessage, MessageContentBlock } from './types.js';
+import type { ActionTargeting } from '../browser/actions.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 
@@ -843,6 +844,44 @@ export function formatStepHistoryEntry(
   return `Step ${index}: [${status}] ${instruction}${urlInfo}`;
 }
 
+/**
+ * One transcript action as generation reads it: what the AI asked for, plus
+ * what the runtime MEASURED when it ran it
+ * (stories/codebehind-selector-ambiguity.md).
+ *
+ * The same shape `RecordedAction` has in src/codebehind/recording.ts, spelled
+ * structurally here so the prompt layer keeps its one-way dependency on the
+ * code-behind one. `targeting` is absent far more often than not — it is
+ * measured only in a compile mode, and only for element-targeting actions —
+ * and its absence is first-class: a transcript without it builds exactly the
+ * prompt it built before the measurement existed.
+ */
+export type TranscriptAction = AIAction & { targeting?: ActionTargeting };
+
+/**
+ * Actions whose runtime target is ONE element, so a `matchCount` above 1 is a
+ * problem for the entry generated from them rather than the point of it.
+ *
+ * Mirrors `singularTargetOf` in src/browser/actions.ts. The distinction is
+ * load-bearing on both sides of generation: `read multiple` and `count` record
+ * a `matchCount` too — useful context for the loop being written — and many
+ * matches is their whole purpose, so neither the prompt rule nor the static
+ * backstop may read their count as ambiguity.
+ */
+const SINGULAR_TARGET_ACTIONS: ReadonlySet<AIAction['action']> = new Set([
+  'click',
+  'type',
+  'select',
+  'hover',
+  'upload',
+  'read',
+]);
+
+/** Did this action target one element? See {@link SINGULAR_TARGET_ACTIONS}. */
+export function isSingularTarget(action: TranscriptAction): boolean {
+  return SINGULAR_TARGET_ACTIONS.has(action.action) && action.multiple !== true;
+}
+
 /** What `buildStepCodePrompt` needs to describe a successful step to the model. */
 export interface StepCodePromptInput {
   /** The step's raw markdown text, `{{param}}` placeholders intact. */
@@ -858,9 +897,10 @@ export interface StepCodePromptInput {
    * is as much a literal to keep out of the file as a parameter's.
    */
   envRefs?: Array<{ ref: string; value: string }>;
-  /** The successful run's action transcript — the same `AIAction[]` the step
-   *  cache stores, selectors included. */
-  actions: AIAction[];
+  /** The successful run's action transcript — the same actions the step cache
+   *  stores, selectors included, each carrying the `targeting` the runtime
+   *  measured for it when there was one. */
+  actions: TranscriptAction[];
   /** Assertions the step evaluated, with what they saw. */
   assertions?: Array<{
     condition: string;
@@ -887,6 +927,14 @@ export interface StepCodePromptInput {
   /** Page state after the step ran — what a post-condition must assert. */
   domAfter?: string | undefined;
   urlAfter?: string | undefined;
+  /**
+   * The one re-ask the static backstop buys
+   * (stories/codebehind-selector-ambiguity.md, "The static backstop"): the
+   * entry that was refused, and why. Present only on that second call, and
+   * never on a third — the backstop asks again once and then takes what it
+   * gets.
+   */
+  retry?: { previousEntry: string; complaint: string };
 }
 
 /**
@@ -908,6 +956,97 @@ export function formatParameterBlock(
         `step.getVar(${JSON.stringify(r.ref)}); the value differs per environment`,
     ),
   ].join('\n');
+}
+
+/**
+ * Rule 8 as it stood before anything was measured: advice, and a question the
+ * model cannot answer from its evidence.
+ *
+ * Kept verbatim for a transcript carrying no `targeting` at all, which is the
+ * fallback whenever measurement was impossible. Absence is first-class and
+ * must read as normal rather than as an error
+ * (stories/codebehind-selector-ambiguity.md, "What generation does with it").
+ */
+const SELECTOR_RULE_INFERRED =
+  `8. **A transcript selector is not evidence that it matches one element.** The recorded actions ran through a visible-only filter and took the first match, so a selector that worked there may match several — while the same selector in generated code is strict and throws on the second one ("resolved to N elements"). Use a handle the DOM above shows to be unique: a role with its accessible name, an \`id\`, a \`data-testid\`. Where the DOM cannot settle it, reproduce the runtime's own tolerance rather than guessing — \`page.locator(sel).locator('visible=true').first()\`.`;
+
+/**
+ * What `targeting` is, said once, above the transcript that carries it.
+ *
+ * The model is told what the object MEANS rather than left to infer it from
+ * four field names — and told where the number came from, because the whole
+ * point is that it did not come from the DOM below. That snapshot is
+ * truncated, attribute-allowlisted, collapse-elided and strips hidden
+ * elements' attributes, so it cannot answer "how many match" and every loss
+ * in it biases toward under-counting.
+ */
+function targetingLegend(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.targeting !== undefined)) return '';
+  return (
+    `An action carrying a \`targeting\` object was MEASURED in the live page at the instant the runtime acted on it. These are facts, not proposals — and they are not readable from the DOM below, which is truncated, attribute-filtered and strips hidden elements' attributes:\n\n` +
+    `- \`matchCount\` — elements the selector matched, hidden ones included. This is the number strict mode counts, so it is the one that decides whether your entry throws.\n` +
+    `- \`visibleMatchCount\` — how many of those were visible: what the runtime chose between when it took the first.\n` +
+    `- \`resolvedSelector\` — a selector for the element that was actually acted on, verified in the page to match it and nothing else.\n` +
+    `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n\n` +
+    `An action with no \`targeting\` was not measured. Nothing follows from its absence.\n\n`
+  );
+}
+
+/**
+ * Rules 8 and 9 for a transcript that WAS measured — the inference replaced by
+ * the number, and the data-driven carve-out keyed on `resolvedBy`.
+ *
+ * Each clause is emitted only when the transcript can trigger it: a step whose
+ * every selector matched once is not lectured about ambiguity, and a step with
+ * no positional handle is not told what to do with one. The rules are read by
+ * a model on every compile, so a branch that cannot apply is pure cost.
+ *
+ * Undefined when the measurement says nothing this rule can key off — a
+ * `targeting` carrying neither a count nor a `resolvedBy`. The caller then
+ * falls back to the inferred rule, because a rule heading over no clauses
+ * would claim a measurement the transcript does not carry.
+ */
+function measuredSelectorRules(actions: TranscriptAction[]): string | undefined {
+  // Counts only mean "ambiguous" for an action that targeted ONE element.
+  const singular = actions.filter(isSingularTarget);
+  const ambiguous = singular.some((a) => (a.targeting?.matchCount ?? 0) > 1);
+  const single = singular.some((a) => a.targeting?.matchCount === 1);
+  const plural = actions.some((a) => !isSingularTarget(a) && a.targeting?.matchCount !== undefined);
+  const unmeasured = actions.some((a) => a.selector !== undefined && a.targeting === undefined);
+  const resolvedBy = new Set(
+    actions.map((a) => a.targeting?.resolvedBy).filter((by) => by !== undefined),
+  );
+  if (!ambiguous && !single && !plural && resolvedBy.size === 0) return undefined;
+
+  const counts = [
+    `8. **How many elements each selector matched is measured for you above. Do not re-decide it from the DOM.**`,
+    ambiguous
+      ? `   - \`matchCount\` above 1 — that selector is NOT usable as written. Use that action's \`resolvedSelector\` verbatim, or reproduce the runtime's own tolerance explicitly: \`page.locator(<the transcript selector>).locator('visible=true').first()\`. There is no third option, and "it looks unique in the DOM" is not one of them.`
+      : '',
+    single
+      ? `   - \`matchCount\` of 1 — that selector matched exactly one element. Use it as written.`
+      : '',
+    plural
+      ? `   - On a \`read\` with \`multiple\` or a \`count\`, \`matchCount\` is context for the loop you are writing, not a problem: many matches is what those actions are for.`
+      : '',
+    unmeasured
+      ? `   - An action with no \`targeting\` was not measured: prefer a stable handle (a role with its accessible name, an \`id\`, a \`data-testid\`), and where you cannot tell, reproduce the runtime's tolerance rather than guessing.`
+      : '',
+  ].filter(Boolean).join('\n');
+
+  if (resolvedBy.size === 0) return counts;
+
+  const handles = [
+    `9. **\`resolvedBy\` says which kind of handle \`resolvedSelector\` is — never work that out from the string.** An author's own selector can contain \`nth-of-type\`, and a scoped handle never does.`,
+    resolvedBy.has('attribute') || resolvedBy.has('scoped')
+      ? `   - \`attribute\` and \`scoped\` are stable handles: use them directly. \`scoped\` (\`#statements a[href="transactions.html"]\`) is the ordinary answer when a hidden duplicate exists, not a second-best one — insert a sibling above that panel and it still points at the same element.`
+      : '',
+    resolvedBy.has('positional')
+      ? `   - \`positional\` means an \`nth-of-type\` chain was the only thing that verified. If the step text or one of its parameters names what distinguishes the element ("click the row for {{customer}}"), build the locator from that value — \`step.getVar('customer')\` with a text filter or a scoped selector — instead of pinning this run's index. The index is this run's DATA, and this file is committed and re-run for years: next run's customer is a different row. Where nothing in the step distinguishes the element, the positional chain is the right answer.`
+      : '',
+  ].filter(Boolean).join('\n');
+
+  return `${counts}\n${handles}`;
 }
 
 /**
@@ -971,6 +1110,23 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
           dom ? `\n\n\`\`\`html\n${dom}\n\`\`\`` : ''
         }`;
 
+  // The selector rules key off the measurement when there is one and stay
+  // today's inference when there is not, so a transcript with no `targeting`
+  // builds byte-for-byte the prompt it built before the measurement existed.
+  const selectorRules = measuredSelectorRules(input.actions) ?? SELECTOR_RULE_INFERRED;
+  // The post-condition rule follows whatever the selector rules ended on —
+  // one numbered rule when nothing was measured or nothing resolved, two when
+  // the `resolvedBy` rule is in play.
+  const numbered = [...selectorRules.matchAll(/^(\d+)\. /gm)];
+  const postConditionNumber = Number(numbered[numbered.length - 1]?.[1] ?? 8) + 1;
+
+  // The one re-ask the static backstop buys. The refused entry goes back with
+  // the complaint, because a model shown only "do it again" tends to return
+  // what it returned.
+  const retryBlock = input.retry
+    ? `\n\n## Your previous answer was refused\n${input.retry.complaint}\n\nThat answer was:\n\n\`\`\`ts\n${input.retry.previousEntry}\n\`\`\`\n\nFix exactly that, keep the rest of the entry, and return it in the same envelope.`
+    : '';
+
   const textContent = `${testInfoBlock}A natural-language test step just passed under AI control. Write the Playwright TypeScript that reproduces it deterministically, so future runs need no model call.
 
 ## The step, exactly as authored
@@ -981,7 +1137,7 @@ ${wholeTestBlock}
 ${paramBlock}
 
 ## The actions the AI performed (this run's transcript)
-${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}
+${targetingLegend(input.actions)}${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}${retryBlock}
 
 ## What to return
 
@@ -1023,8 +1179,8 @@ Rules — all of them are enforced:
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
 6. **No imports.** Everything you need arrives via the context object.
 7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.
-8. **A transcript selector is not evidence that it matches one element.** The recorded actions ran through a visible-only filter and took the first match, so a selector that worked there may match several — while the same selector in generated code is strict and throws on the second one ("resolved to N elements"). Use a handle the DOM above shows to be unique: a role with its accessible name, an \`id\`, a \`data-testid\`. Where the DOM cannot settle it, reproduce the runtime's own tolerance rather than guessing — \`page.locator(sel).locator('visible=true').first()\`.
-9. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
+${selectorRules}
+${postConditionNumber}. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
 
 Respond with ONLY the JSON object — no prose around it.`;
 

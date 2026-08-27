@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AIAction } from '../ai/types.js';
+import type { ActionTargeting } from '../browser/actions.js';
 import type { AssertionResult, StepResult, StepStatus } from '../report/types.js';
 import { logger } from '../utils/logger.js';
 import { isSecretName, secretValues, redact, redactDeep, redactMap } from '../utils/secrets.js';
@@ -26,6 +27,17 @@ import { resolveCodeBehindCacheDir } from './loader.js';
  * by the same name rule; the caller passes them as `secrets`
  * (stories/codebehind-env-data.md).
  */
+
+/**
+ * One action as the generator reads it: what the AI asked for, plus what the
+ * runtime found when it ran it.
+ *
+ * `targeting` is absent far more often than not — it is measured only in a
+ * compile mode, and only for element-targeting actions — and its absence is
+ * first-class: a transcript without it generates exactly as it did before the
+ * measurement existed.
+ */
+export type RecordedAction = AIAction & { targeting?: ActionTargeting };
 
 export interface RecordingManifest {
   /** Absolute path of the test. */
@@ -89,8 +101,9 @@ export interface RecordedStep {
   urlBefore?: string;
   urlAfter?: string;
   pageUrl?: string;
-  /** The step's transcript as the generator reads it: the actions that ran. */
-  actions: AIAction[];
+  /** The step's transcript as the generator reads it: the actions that ran,
+   *  each with what the runtime found when it ran it (see `actionsOf`). */
+  actions: RecordedAction[];
   assertions?: AssertionResult[];
   outputs?: Record<string, string>;
   durationMs: number;
@@ -539,7 +552,31 @@ export async function readRecording(testFilePath: string): Promise<Recording | n
   }
 }
 
-function actionsOf(result: StepResult): AIAction[] {
-  return result.turns.flatMap((t) => t.subActions).filter((sa) => !sa.error).map((sa) => sa.action);
+/**
+ * The step's transcript as the generator reads it: the actions that ran, each
+ * carrying what the runtime found when it ran it
+ * (stories/codebehind-selector-ambiguity.md §"Where the measurement goes").
+ *
+ * The merge happens HERE, and that placement is load-bearing rather than
+ * incidental. `writeRecordedStep` writes the transcript as
+ * `actionsOf(result).map((a) => redactDeep(a, secrets))`, so a `targeting`
+ * merged in after that map would skip redaction entirely — and
+ * `resolvedSelector` can be built from an `aria-label` or an `href` carrying a
+ * secret. Merging anywhere later is a leak.
+ *
+ * Errored sub-actions are dropped: there is nothing to compile from an action
+ * that did not happen, so a timed-out wait — the case where the measurement is
+ * absent by design — never reaches generation either way.
+ *
+ * Lives in this module rather than in `candidate.ts`, which re-exports it,
+ * only because every ordinary run already loads this file while `candidate.ts`
+ * pulls in prettier and esbuild through the writer. One implementation, in the
+ * cheaper of the two places.
+ */
+export function actionsOf(result: StepResult | undefined): RecordedAction[] {
+  return (result?.turns ?? [])
+    .flatMap((t) => t.subActions)
+    .filter((sa) => !sa.error)
+    .map((sa) => (sa.targeting !== undefined ? { ...sa.action, targeting: sa.targeting } : sa.action));
 }
 

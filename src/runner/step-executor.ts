@@ -1553,8 +1553,19 @@ async function executeStepAttempt(
         ? await capturePageSignal(page).catch(() => undefined)
         : undefined;
 
+      // Selector measurement (stories/codebehind-selector-ambiguity.md) rides
+      // the same gate as `captureStepContext`: generation is its only consumer,
+      // so an ordinary run must not pay two CDP round-trips per
+      // element-targeting action for data nobody reads. A cache replay is
+      // excluded for the same reason the DOM capture is — a cache hit
+      // generates nothing. `browser.ambiguousTarget: 'fail'` is the stated
+      // exception: it decides by reading the visible count, so it turns that
+      // one call on whatever the mode.
       const result = await traceOp(`action.${action.action}: ${action.description}`, () =>
-        executeAction(page, action, baseUrl, opts.signal),
+        executeAction(page, action, baseUrl, opts.signal, {
+          measure: opts.captureStepContext === true && !cachedTurnForCapture,
+          ambiguousTarget: config.browser.ambiguousTarget,
+        }),
       );
       const subDuration = Date.now() - subStartTime;
 
@@ -1620,6 +1631,9 @@ async function executeStepAttempt(
         ...(postShotBase64 !== undefined && { screenshotBase64: postShotBase64 }),
         ...(domSnapshotVal !== undefined && { domSnapshot: domSnapshotVal }),
         ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+        // What the runtime found when it ran this action. `actionsOf` merges
+        // it onto the action for generation and for the on-disk recording.
+        ...(result.targeting !== undefined && { targeting: result.targeting }),
         durationMs: subDuration,
         ...(result.error !== undefined && { error: result.error }),
         pageUrl: postUrl,

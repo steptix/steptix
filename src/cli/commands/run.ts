@@ -7,7 +7,7 @@ import { parseTestFile, discoverTestFiles } from '../../parser/markdown.js';
 import { filterByTags, runTests } from '../../runner/test-runner.js';
 import { setVerbose, logger } from '../../utils/logger.js';
 import type { RunSummary } from '../../report/types.js';
-import { countStepOrigins } from '../../report/generator.js';
+import { countStepOrigins, formatTokenCount } from '../../report/generator.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 
 export interface RunOptions {
@@ -20,6 +20,7 @@ export interface RunOptions {
   browser?: 'chromium' | 'firefox' | 'webkit';
   reporter?: string;
   env?: string;
+  failOnHealed?: boolean;
 }
 
 export function registerRunCommand(program: Command): void {
@@ -35,6 +36,11 @@ export function registerRunCommand(program: Command): void {
     .option('--browser <engine>', 'Browser engine: chromium, firefox, webkit')
     .option('--reporter <type>', 'Reporter type (html)', 'html')
     .option('--env <name>', 'Environment name — loads .env.<name> from project root')
+    // Off by default: a healed run passes today and must keep passing today.
+    // The flag is how CI opts into treating "passed, but four broken entries
+    // healed under AI" as a build failure
+    // (stories/codebehind-selector-ambiguity.md).
+    .option('--fail-on-healed', 'Exit non-zero when a step healed under AI after its code-behind failed', false)
     .action(async (target: string | undefined, opts: RunOptions) => {
       await runCommand(target, opts);
     });
@@ -163,8 +169,48 @@ async function runCommand(
   // Print summary
   printSummary(summary);
 
-  // Exit with code 1 if any tests failed
-  process.exit(summary.failedTests > 0 ? 1 : 0);
+  // A run that healed broken code-behind is green today and stays green
+  // unless the author asked otherwise. With `--fail-on-healed` it is a
+  // failure, so CI can gate on the cost instead of paying it silently.
+  const healed = countHealedSteps(summary);
+  if (opts.failOnHealed && healed > 0) {
+    console.log(
+      chalk.red(
+        `  FAILING: ${healed} step(s) healed under AI (--fail-on-healed).`,
+      ),
+    );
+    console.log();
+  }
+
+  process.exit(exitCodeFor(summary, opts.failOnHealed === true));
+}
+
+/**
+ * How many steps across the run healed under AI after their code-behind
+ * entry threw.
+ *
+ * `healedSteps` where the runner set it, and the count off the steps
+ * otherwise — a report from an older path is still gated correctly.
+ */
+export function countHealedSteps(summary: RunSummary): number {
+  return summary.reports.reduce(
+    (n, r) => n + (r.healedSteps ?? countStepOrigins(r.steps).stale),
+    0,
+  );
+}
+
+/**
+ * The process exit code for a finished run: 1 on any failed test, as always,
+ * and — only under `--fail-on-healed` — 1 on a run that passed by healing
+ * broken code-behind entries under AI.
+ *
+ * Split out so the gate is testable without driving a whole run, and so the
+ * "without the flag, nothing changed" half is an assertion rather than a
+ * reading of the expression.
+ */
+export function exitCodeFor(summary: RunSummary, failOnHealed: boolean): number {
+  if (summary.failedTests > 0) return 1;
+  return failOnHealed && countHealedSteps(summary) > 0 ? 1 : 0;
 }
 
 async function resolveTestFiles(
@@ -223,9 +269,13 @@ function printSummary(summary: RunSummary): void {
         (origins.stale > 0 ? chalk.yellow(staleText) : staleText),
     );
     if (origins.stale > 0) {
+      // The token figure is what makes the hint land: it is the price of
+      // leaving the entries broken, charged again on every run.
+      const healedTokens = summary.reports.reduce((n, r) => n + (r.healedTokens ?? 0), 0);
+      const cost = healedTokens > 0 ? ` (${formatTokenCount(healedTokens)} tokens)` : '';
       console.log(
         chalk.yellow(
-          `            ${origins.stale} step(s) ran under AI because their code-behind failed — ` +
+          `            ${origins.stale} step(s) ran under AI because their code-behind failed${cost} — ` +
             `recompile with \`aiui compile <test.md> --only-stale\`.`,
         ),
       );

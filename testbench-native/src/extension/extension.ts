@@ -4,7 +4,7 @@ import {
   type WebviewToHostMsg,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
-import { DecorationManager, computeStepsSummary } from './decorations.js';
+import { DecorationManager, computeStepsSummary, STALE_HOVER_MESSAGE } from './decorations.js';
 import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
@@ -1384,6 +1384,11 @@ export interface TestBenchTestHooks {
    *  code-behind tests: the diff editors themselves are not readable from the
    *  extension host, but what they were opened WITH is. */
   pendingCodeBehind: () => { testFilePath: string; files: Record<string, string> } | null;
+  /** The ⚠ decoration's hover text. Applied decorations are not readable back
+   *  from the extension host, so this is how a test asserts the mark names the
+   *  action AND its precondition ("re-runs this step in the current session")
+   *  rather than leaving the author with a bare warning glyph. */
+  staleHoverMessage: () => string;
 }
 
 export interface TestBenchExports {
@@ -1742,6 +1747,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
       lastRunTokens: () => registry.active()?.lastRunTokens ?? null,
       pendingCodeBehind: () => codeBehindDiffs.pending,
+      staleHoverMessage: () => STALE_HOVER_MESSAGE,
     },
   };
 }

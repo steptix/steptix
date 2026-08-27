@@ -19,6 +19,7 @@ interface ProjectBundleLike {
   projectRoot: string | null;
   config: Config;
   envBundle: { envName: string | null; env: Record<string, string>; data: Record<string, unknown> } | null;
+  ambiguousTarget: 'first' | 'fail';
 }
 
 /** Reach the private resolver. */
@@ -209,5 +210,122 @@ describe('SessionManager.resolveProjectBundle', () => {
 
     const second = await resolveBundle(mgr, t, 'uat');
     expect(second.envBundle?.data).toEqual({ appeared: true });
+  });
+});
+
+/**
+ * `browser.ambiguousTarget` on the SERVER path
+ * (stories/codebehind-selector-ambiguity.md).
+ *
+ * The story's implementation note is the whole point of this block: a new key
+ * under `browser` consumed at session-creation time has to arrive through the
+ * project bundle, or it is honoured only under the CLI and silently ignored
+ * everywhere a server (and therefore TestBench) runs the test. So the
+ * assertions are deliberately about *whose* config decided the value, not just
+ * about the value being readable — a bundle that echoed the server's startup
+ * config would pass a naive "is it 'fail'?" check while shipping the bug.
+ */
+describe("resolveProjectBundle — browser.ambiguousTarget", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), 'aiui-amb-'));
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  /** A SessionManager whose STARTUP config is the server's, not the project's. */
+  function managerWith(startup?: 'first' | 'fail'): SessionManager {
+    const config = structuredClone(DEFAULT_CONFIG);
+    if (startup) config.browser.ambiguousTarget = startup;
+    return new SessionManager(config);
+  }
+
+  it("a project that sets 'fail' is seen as 'fail' by a server started on the default", async () => {
+    const root = path.join(tmp, 'projFail');
+    writeProject(root, { configJson: JSON.stringify({ browser: { ambiguousTarget: 'fail' } }) });
+
+    // Server startup config is the built-in default ('first'). The ONLY place
+    // 'fail' exists is the project's own aiui.config.json.
+    const bundle = await resolveBundle(managerWith(), path.join(root, 'tests', 't.md'), null);
+
+    expect(bundle.projectRoot).toBe(root);
+    expect(bundle.ambiguousTarget).toBe('fail');
+    // Both surfaces agree — the hoisted field and the config it came from.
+    expect(bundle.config.browser.ambiguousTarget).toBe('fail');
+  });
+
+  it("a server started on 'fail' does not impose it on a project that says nothing", async () => {
+    // The other direction, and the one that proves the value is per-PROJECT
+    // rather than merely non-default: the project config exists and is silent,
+    // so it resolves to the built-in 'first' even though the server's own
+    // startup config says 'fail'.
+    const root = path.join(tmp, 'projSilent');
+    writeProject(root, { configJson: JSON.stringify({ tests: { dataDir: 'data' } }) });
+
+    const bundle = await resolveBundle(managerWith('fail'), path.join(root, 'tests', 't.md'), null);
+
+    expect(bundle.projectRoot).toBe(root);
+    expect(bundle.ambiguousTarget).toBe('first');
+    expect(bundle.config.browser.ambiguousTarget).toBe('first');
+  });
+
+  it('two projects on one server get their own answers', async () => {
+    const strict = path.join(tmp, 'strictProj');
+    const lax = path.join(tmp, 'laxProj');
+    writeProject(strict, { configJson: JSON.stringify({ browser: { ambiguousTarget: 'fail' } }) });
+    writeProject(lax, { configJson: JSON.stringify({ browser: { ambiguousTarget: 'first' } }) });
+
+    const mgr = managerWith();
+    const a = await resolveBundle(mgr, path.join(strict, 'tests', 't.md'), null);
+    const b = await resolveBundle(mgr, path.join(lax, 'tests', 't.md'), null);
+
+    expect(a.ambiguousTarget).toBe('fail');
+    expect(b.ambiguousTarget).toBe('first');
+  });
+
+  it('picks up an edit to the setting on the next resolve (mtime invalidation)', async () => {
+    // The bundle now caches a RESOLVED value, not just the config it came from,
+    // so the cache has to invalidate on it like every other bundle input —
+    // otherwise turning the switch on means restarting the server.
+    const root = path.join(tmp, 'projEditAmb');
+    writeProject(root, { configJson: JSON.stringify({ tests: { dataDir: 'data' } }) });
+    const t = path.join(root, 'tests', 't.md');
+    const mgr = managerWith();
+
+    expect((await resolveBundle(mgr, t, null)).ambiguousTarget).toBe('first');
+
+    const configFile = path.join(root, 'aiui.config.json');
+    writeFileSync(configFile, JSON.stringify({ browser: { ambiguousTarget: 'fail' } }));
+    const future = new Date(Date.now() + 5000);
+    utimesSync(configFile, future, future);
+
+    expect((await resolveBundle(mgr, t, null)).ambiguousTarget).toBe('fail');
+  });
+
+  it('falls back to the server startup config when there is no project root', async () => {
+    // No aiui.config.json anywhere above the file: the server's own value is
+    // the only one there is, which is the documented null-project fallback.
+    const stray = mkdtempSync(path.join(tmpdir(), 'aiui-amb-noconfig-'));
+    try {
+      const bundle = await resolveBundle(managerWith('fail'), path.join(stray, 't.md'), null);
+      expect(bundle.projectRoot).toBeNull();
+      expect(bundle.ambiguousTarget).toBe('fail');
+    } finally {
+      rmSync(stray, { recursive: true, force: true });
+    }
+  });
+
+  it("normalises anything that is not 'fail' to 'first'", async () => {
+    // A hand-edited config can carry a value the JSON schema would have flagged
+    // in the editor but the loader never validates. Absence, a typo and
+    // `'first'` all have to mean today's behaviour — the gate is `=== 'fail'`,
+    // so a typo must not read as "on".
+    const root = path.join(tmp, 'projTypo');
+    writeProject(root, { configJson: JSON.stringify({ browser: { ambiguousTarget: 'strict' } }) });
+
+    const bundle = await resolveBundle(managerWith(), path.join(root, 'tests', 't.md'), null);
+    expect(bundle.ambiguousTarget).toBe('first');
   });
 });

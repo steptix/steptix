@@ -590,6 +590,58 @@ export function registerCommands(
     });
   };
 
+  /**
+   * The body behind BOTH "Compile This Step" and "Repair this step".
+   *
+   * Compile This Step: the clicked step (or each step in a multi-line
+   * selection, or the body a `### Section` / `[skill:]` call expands to) runs
+   * NOW in the document's live session, from wherever the browser is, and that
+   * fresh run is the recording (stories/compile-as-you-go.md §Compile This
+   * Step). No step numbers are involved, so the old refusal for a step below a
+   * skill or section call is gone: this binds by what the runtime binds by —
+   * the step's authored text plus its section scope.
+   *
+   * Repair this step: the same call, and deliberately so. `mode: 'steps'` is
+   * precisely the mode where the server's `priorFailure` reads the last-run
+   * sidecar, finds what the compiled entry threw, and routes generation
+   * through the repair prompt carrying that code and its error rather than a
+   * plain generation prompt. Repairing a ⚠ has therefore always worked; what
+   * was missing is that nothing about the ⚠ says a command called "Compile
+   * This Step" is the fix (stories/codebehind-selector-ambiguity.md §Repair,
+   * which already works and cannot be found). So this gets a second name and a
+   * place on the ⚠ — not a second pipeline. Two ids sharing one body is what
+   * keeps them from drifting into two behaviours.
+   *
+   * There is deliberately NO page-precondition gate on either name. Whether
+   * the page satisfies a natural-language step's precondition is answerable
+   * only by looking for the thing the step names, which IS the step; the
+   * provenance that would answer it (did we arrive here by running 1..k?) is
+   * not tracked. `runStepHere` and this command already trust the author about
+   * their own session — their only refusals are about inert lines, numbering
+   * and scope. Repair runs from wherever the session is parked and lets a
+   * wrong page fail the step the ordinary way.
+   */
+  const compileThisStep = async (target?: { lineNumber?: number }): Promise<void> => {
+    const editor = tracker.activeEditor;
+    if (!editor) return notifyNoActive();
+    const line =
+      typeof target?.lineNumber === 'number'
+        ? target.lineNumber
+        : editor.selection.active.line + 1;
+    // The skill-file fork: pick the session (a paused/stopped/open test,
+    // or standalone), then compile the step in it. Test files keep the
+    // direct path below, `resolveCompileTarget`'s gates included.
+    if (activeDocIsSkill(editor)) {
+      return openSkillSessionPicker('compile', editor, line);
+    }
+    // A multi-line selection that covers the clicked line compiles every
+    // step in it, in order — the session advances between them, so a
+    // selection is just this flow k times. The resolver also decides the
+    // scope the entries bind under, which for a section body is not the
+    // scope the steps EXECUTE in.
+    await compileStepOnActive(editor, line);
+  };
+
   const runSelected = async (): Promise<void> => {
     const controller = registry.active();
     const editor = tracker.activeEditor;
@@ -1123,36 +1175,12 @@ export function registerCommands(
     vscode.commands.registerCommand('testbench-native.runAndCompile', () => runAndCompile()),
     vscode.commands.registerCommand('testbench-native.compileCodeBehind', () => runAndCompile()),
 
-    // "Compile This Step" — the clicked step (or each step in a multi-line
-    // selection, or the body a `### Section` / `[skill:]` call expands to)
-    // runs NOW in the document's live session, from wherever the browser is,
-    // and that fresh run is the recording (stories/compile-as-you-go.md
-    // §Compile This Step). No step numbers are involved, so the old refusal
-    // for a step below a skill or section call is gone: this binds by what the
-    // runtime binds by — the step's authored text plus its section scope.
-    vscode.commands.registerCommand(
-      'testbench-native.compileStepCodeBehind',
-      async (target?: { lineNumber?: number }) => {
-        const editor = tracker.activeEditor;
-        if (!editor) return notifyNoActive();
-        const line =
-          typeof target?.lineNumber === 'number'
-            ? target.lineNumber
-            : editor.selection.active.line + 1;
-        // The skill-file fork: pick the session (a paused/stopped/open test,
-        // or standalone), then compile the step in it. Test files keep the
-        // direct path below, `resolveCompileTarget`'s gates included.
-        if (activeDocIsSkill(editor)) {
-          return openSkillSessionPicker('compile', editor, line);
-        }
-        // A multi-line selection that covers the clicked line compiles every
-        // step in it, in order — the session advances between them, so a
-        // selection is just this flow k times. The resolver also decides the
-        // scope the entries bind under, which for a section body is not the
-        // scope the steps EXECUTE in.
-        await compileStepOnActive(editor, line);
-      },
-    ),
+    // Two ids, one flow — the same shape as runAndCompile/compileCodeBehind
+    // above. "Compile This Step" and "Repair this step" are the SAME command
+    // under two names, and identical behaviour is the point: see
+    // `compileThisStep` for why repair needed no pipeline of its own.
+    vscode.commands.registerCommand('testbench-native.compileStepCodeBehind', compileThisStep),
+    vscode.commands.registerCommand('testbench-native.repairStep', compileThisStep),
 
     // "Open Code-behind" — the counterpart of Go to Section: from a step, to
     // the entry that implements it in the sibling `.steps.ts`.

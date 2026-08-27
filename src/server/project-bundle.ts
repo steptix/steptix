@@ -7,6 +7,26 @@ import { resolveEnvBundle, type EnvBundle } from '../env/resolve-bundle.js';
 import { logger } from '../utils/logger.js';
 
 /**
+ * How a singular action treats a selector that resolves to more than one
+ * VISIBLE element — `browser.ambiguousTarget`, normalised so absence and
+ * `'first'` are the same value at every read site
+ * (stories/codebehind-selector-ambiguity.md).
+ */
+export type AmbiguousTargetMode = 'first' | 'fail';
+
+/**
+ * `browser.ambiguousTarget` as a value with no third state.
+ *
+ * The config key is optional, so an unconfigured project, a project that wrote
+ * `'first'`, and a malformed value all have to mean today's behaviour. Deciding
+ * that once, here, is why no caller has to spell `?? 'first'` and get it
+ * subtly wrong — the gate is `=== 'fail'`, and everything else is `'first'`.
+ */
+export function resolveAmbiguousTarget(config: Config): AmbiguousTargetMode {
+  return config.browser.ambiguousTarget === 'fail' ? 'fail' : 'first';
+}
+
+/**
  * Resolved per-project context for a run: the project's config + the env/data
  * bundle, anchored at the test file's project root (NOT the server's cwd).
  * `projectRoot` is null when no `aiui.config.json` was found above the test
@@ -17,6 +37,26 @@ export interface ProjectBundle {
   projectRoot: string | null;
   config: Config;
   envBundle: EnvBundle | null;
+  /**
+   * `browser.ambiguousTarget` for THIS project, hoisted out of `config` so it
+   * cannot be lost on the way to the runtime that reads it.
+   *
+   * Hoisted rather than left for callers to read off `config.browser`, because
+   * on the server path the `Config` the executor is handed is not this one:
+   * `resolveRunSettings` (src/config/run-settings.ts) rebuilds it by spreading
+   * the SERVER's startup config and re-sourcing only the handful of values that
+   * story owns, so `runConfig.browser.ambiguousTarget` is the server's answer
+   * and never the project's. Same shape as `browser.video`, which
+   * `resolveSessionOutput` reads off the bundle at session creation for exactly
+   * this reason. A per-project key consumed at session-creation time that does
+   * not come off the bundle is silently ignored on the server and TestBench
+   * paths and works only under the CLI — see the implementation note in
+   * stories/codebehind-selector-ambiguity.md.
+   *
+   * Always present: the null-project fallback resolves it from the server's
+   * startup config, which carries the `'first'` default.
+   */
+  ambiguousTarget: AmbiguousTargetMode;
 }
 
 /**
@@ -113,7 +153,16 @@ export class ProjectBundleResolver {
       }
     }
 
-    const bundle: ProjectBundle = { projectRoot, config, envBundle };
+    // Resolved from the config this bundle actually loaded — the project's when
+    // there is a root, the server's startup config otherwise — so the answer
+    // travels with the bundle rather than being re-derived from whichever
+    // `Config` a downstream caller happens to hold.
+    const bundle: ProjectBundle = {
+      projectRoot,
+      config,
+      envBundle,
+      ambiguousTarget: resolveAmbiguousTarget(config),
+    };
     const mtimes = await this.inputMtimes(projectRoot, envName, dataDir);
     this.cache.set(key, { mtimes, bundle });
     return bundle;

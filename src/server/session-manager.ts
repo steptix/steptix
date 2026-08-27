@@ -504,6 +504,18 @@ export type RunEvent =
        *  that `effectiveSettings` sits beside it. */
       reportPath?: string;
       /**
+       * Steps that passed only because their code-behind entry threw and the
+       * step healed under AI, and what those AI turns cost
+       * (stories/codebehind-selector-ambiguity.md §"A healed run stops
+       * reporting as a clean pass").
+       *
+       * Absent when nothing healed — a clean run says nothing new — so the
+       * run summary line only grows the "1 healed under AI (4.1k tokens)"
+       * clause when there is something to report. `status` above is
+       * unaffected: a healed run still passed.
+       */
+      healed?: { steps: number; tokens: number };
+      /**
        * What this run actually ran under, and where each value came from
        * (stories/run-settings.md §5).
        *
@@ -2207,6 +2219,19 @@ export class SessionManager {
     let stepsCompleted = 0;
     let overallStatus: 'passed' | 'failed' | 'error' | 'aborted' = 'passed';
     let errorInfo: { step: number; message: string } | null = null;
+    /** What the steps that healed under AI cost this run, for the `done`
+     *  event's healed clause (stories/codebehind-selector-ambiguity.md).
+     *  `TokenTracker` keeps a run-wide total and no per-step figure, so
+     *  attribution is that total's delta across the step — sound because
+     *  steps run one at a time.
+     *
+     *  One known imprecision: on a Run & Compile the generation queue calls
+     *  the model in the background (`liveCompile.offer` deliberately does not
+     *  wait), so its tokens can land inside a step's window and inflate that
+     *  step's share. The figure is advisory — it exists to make a recurring
+     *  cost visible, not to bill anyone — and an ordinary run has no queue. */
+    let healedTokens = 0;
+    let tokensAtStepStart = 0;
 
     // Step-execution view of the inbound request. When skill expansion runs
     // (further down, once envDataCtx is resolved) these get rebound to the
@@ -3645,6 +3670,9 @@ export class SessionManager {
           break;
         }
         const originalStep = effectiveSteps[i]!;
+        // Baseline for this step's token attribution, read back below if the
+        // step turns out to have healed a broken code-behind entry.
+        tokensAtStepStart = session.tokenTracker.runTotal;
 
         // Apply env-data interpolation first (parse-time semantics: fixed for
         // the whole session), then runtime `{{...}}` parameter substitution.
@@ -4297,6 +4325,10 @@ export class SessionManager {
           ...tabAfterStep,
         };
         fullStepResults.push(fullResult);
+        // The AI turn this step needed only because its entry threw.
+        if (fullResult.codeBehindStale) {
+          healedTokens += Math.max(0, session.tokenTracker.runTotal - tokensAtStepStart);
+        }
 
         // Queue this step's code-behind entry and move on
         // (stories/compile-as-you-go.md): the browser does not wait, and a
@@ -4814,10 +4846,25 @@ export class SessionManager {
     // call-stack model consistent.
     transitionToFrame('');
 
+    // Steps that healed a broken code-behind entry under AI, for the run's
+    // closing summary line (stories/codebehind-selector-ambiguity.md §"A
+    // healed run stops reporting as a clean pass").
+    //
+    // The same rows `countStepOrigins` (report/generator.ts) counts as stale,
+    // filtered here rather than through it: a dozen api-server suites replace
+    // that module wholesale with a three-export `vi.mock`, and importing a
+    // fourth name would make every one of them throw on the `done` emit.
+    // Hook and ad-hoc rows are excluded for the helper's reason — they are not
+    // steps of the test.
+    const healedSteps = fullStepResults.filter(
+      (s) => !s.hookScope && !s.interactiveAdHoc && !s.interactiveChild && s.codeBehindStale,
+    ).length;
+
     emit({
       type: 'done',
       status: overallStatus,
       ...(reportPath && { reportPath }),
+      ...(healedSteps > 0 && { healed: { steps: healedSteps, tokens: healedTokens } }),
       effectiveSettings: resolvedSettings.effective,
     });
 

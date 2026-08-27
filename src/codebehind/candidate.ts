@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AIAction } from '../ai/types.js';
 import type { StepResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
 import { aiEntryFor, type GeneratedEntry } from './generate.js';
@@ -237,13 +236,17 @@ export async function applyGenerated(
   }
 }
 
-/** The step's transcript as the generator reads it. */
-export function actionsOf(result: StepResult | undefined): AIAction[] {
-  return (result?.turns ?? [])
-    .flatMap((t) => t.subActions)
-    .filter((sa) => !sa.error)
-    .map((sa) => sa.action);
-}
+/**
+ * The step's transcript as the generator reads it — the actions that ran, each
+ * carrying the `targeting` the runtime measured for it.
+ *
+ * Defined in `recording.ts` and re-exported here, where every generation path
+ * already imports it from. One implementation, because the merge has to happen
+ * before `redactDeep` on the recording path and before the prompt on this one;
+ * two copies would only have to disagree once to leak a secret out of a
+ * `resolvedSelector`.
+ */
+export { actionsOf, type RecordedAction } from './recording.js';
 
 /** The page either side of the step, from the run's `stepContext`. */
 export function contextOf(result: StepResult | undefined): {

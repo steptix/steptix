@@ -161,6 +161,19 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
     expect(config.browser.headed).toBe(true);
   });
 
+  it("browser.ambiguousTarget defaults to 'first' and merges when set", async () => {
+    // The default has to be the string, not absence: the whole point of
+    // 'first' is that it names today's behaviour rather than leaving a reader
+    // to infer it from an undefined (stories/codebehind-selector-ambiguity.md).
+    expect((await loadConfig(await writeConfig({}))).browser.ambiguousTarget).toBe('first');
+    const file = await writeConfig({ browser: { ambiguousTarget: 'fail' } });
+    const config = await loadConfig(file);
+    expect(config.browser.ambiguousTarget).toBe('fail');
+    // Siblings under browser are untouched by the merge.
+    expect(config.browser.headed).toBe(true);
+    expect(config.browser.domNoiseReduction?.collapseRepetitiveDom).toBe(true);
+  });
+
   it('replaces arrays wholesale (does not concatenate)', async () => {
     const file = await writeConfig({
       execution: { defaultHooks: { beforeEach: ['[skill: only_this]'] } },
@@ -364,6 +377,16 @@ describe('aiui.config.schema.json validates configs', () => {
     expect(validate({ browser: { cdp: { hideAutomation: true } } })).toBe(true);
     expect(validate({ browser: { cdp: { hideAutomation: 'yes' } } })).toBe(false);
     expect(validate({ browser: { cdp: { hideAutomaton: true } } })).toBe(false);
+  });
+
+  it("accepts browser.ambiguousTarget as 'first'/'fail' and nothing else", () => {
+    expect(validate({ browser: { ambiguousTarget: 'first' } })).toBe(true);
+    expect(validate({ browser: { ambiguousTarget: 'fail' } })).toBe(true);
+    // No third mode: a `'strict'` arm gating on ALL matches was considered and
+    // declined, so the schema must not quietly accept one.
+    expect(validate({ browser: { ambiguousTarget: 'strict' } })).toBe(false);
+    expect(validate({ browser: { ambiguousTarget: true } })).toBe(false);
+    expect(validate({ browser: { ambiguousTargets: 'fail' } })).toBe(false);
   });
 
   it('rejects an unknown top-level key', () => {

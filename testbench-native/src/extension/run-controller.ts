@@ -2569,6 +2569,8 @@ export class RunController {
     let cachedCount = 0;
     let codeBehindCount = 0;
     let staleCount = 0;
+    /** Server-attributed cost of the steps that healed; 0 when unattributed. */
+    let healedTokens = 0;
     let passCount = 0;
     for await (const event of events) {
       // The first event proves the server accepted the request and now holds a
@@ -2628,6 +2630,11 @@ export class RunController {
         // any previous value in place rather than clearing on every
         // run boundary, matching the spec's lifecycle rules.
         if (event.reportPath) this.lastResolvedReportPath = event.reportPath;
+        // What the healed steps actually cost. The count is already tracked
+        // locally from step events; the tokens can only come from the server,
+        // which is the half that was invisible before — a broken entry looks
+        // like a slightly slower green run forever.
+        if (event.healed) healedTokens = event.healed.tokens;
         // A server-level error (or an explicit failed status) that DIDN'T
         // surface as a step:fail must still fail the block — otherwise a
         // session-setup error like an invalid baseUrl ("Server error:
@@ -2648,7 +2655,17 @@ export class RunController {
       const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
       log(`✓ ${passCount} passed${suffix}`);
       if (staleCount > 0) {
-        log(`  ${staleCount} step(s) ran under AI because their code-behind failed — recompile.`);
+        // Naming the price is the point of the line, not decoration: the
+        // count alone reads as a one-off, and it is not — the entry is still
+        // broken, so the same AI turns are paid on every run until someone
+        // repairs it. Tokens are omitted rather than shown as 0 when the
+        // server did not attribute them (an older server, or a path that
+        // does not track them).
+        const cost = healedTokens > 0 ? ` (${formatTokens(healedTokens)} tokens)` : '';
+        log(
+          `  ${staleCount} step(s) healed under AI because their code-behind failed${cost}.`,
+        );
+        log('  Repair this step from the ⚠ gutter, or it costs that again every run.');
       }
     }
     return !sawFail;
@@ -2799,6 +2816,21 @@ export class RunController {
  * line itself doesn't run) and the line we paused at. `skipFirst=true`
  * lets a Resume run past the breakpoint that triggered the pause.
  */
+/**
+ * `18234` → `18.2k`, for the healed-run cost in the run summary.
+ *
+ * Deliberately a copy of `formatTokenCount` in src/report/generator.ts rather
+ * than an import: the extension bundle cannot reach `src/`, and the two
+ * surfaces describe the SAME number to the same person — someone comparing the
+ * summary line against the HTML report's banner must not see "18.2k" in one
+ * and "18k" in the other. If either changes, change both.
+ */
+function formatTokens(tokens: number): string {
+  if (tokens < 1000) return String(tokens);
+  const k = tokens / 1000;
+  return `${k >= 100 ? Math.round(k) : Number(k.toFixed(1))}k`;
+}
+
 function trimAtBreakpoint(
   items: ClassifiedStep[],
   breakpoints: Set<number>,

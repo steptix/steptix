@@ -764,6 +764,176 @@ describe('TestBench code-behind compile', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  // ── Repair this step (stories/codebehind-selector-ambiguity.md) ─────────
+  //
+  // Repairing a ⚠ has always worked: `mode: 'steps'` is the mode where the
+  // server's `priorFailure` reads the last-run sidecar and routes generation
+  // through the repair prompt. What was missing is that nothing about the ⚠
+  // says a command called "Compile This Step" is the fix. So Repair is that
+  // command under a second name, on the ⚠ — and the tests below are about
+  // exactly that: same request, right lines, no session gate.
+  describe('Repair this step', () => {
+    beforeEach(() => {
+      // Collapse the selection first. The suite reopens one fixture file for
+      // every case and VS Code restores the editor's last selection with it,
+      // so the multi-line selection an earlier case left behind would widen
+      // these one-step compiles to two — `compileStepOnActive` reads the
+      // selection whenever the caller doesn't hand it a range. A gutter
+      // right-click has no highlighted range, which is the state under test.
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      const home = new vscode.Position(0, 0);
+      editor.selection = new vscode.Selection(home, home);
+    });
+
+    it('is registered as a command', async () => {
+      const commands = await vscode.commands.getCommands(true);
+      assert.equal(
+        commands.includes('testbench-native.repairStep'),
+        true,
+        'testbench-native.repairStep is not registered',
+      );
+    });
+
+    it('sends byte-for-byte the request Compile This Step sends', async () => {
+      // The claim the whole slice rests on. Two ids, one body — but a body
+      // that got forked later would still pass a test that only asserted
+      // `compile === 'steps'`, so this compares the WHOLE request rather than
+      // the field anyone would remember to check.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 9,
+      });
+      await waitFor('compile requested', () => fake.requests.length > 0);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+
+      void vscode.commands.executeCommand('testbench-native.repairStep', { lineNumber: 9 });
+      await waitFor('repair requested', () => fake.requests.length > 1);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+
+      // `config` rides the FIRST request of a session only (`includeConfig`),
+      // so it is on the compile and not on the repair for reasons that have
+      // nothing to do with which command was pressed. Everything else must
+      // match.
+      const withoutConfig = (r) => {
+        const { config, ...rest } = r;
+        return rest;
+      };
+      assert.deepEqual(withoutConfig(fake.requests[1]), withoutConfig(fake.requests[0]));
+      assert.equal(fake.requests[1].compile, 'steps');
+      assert.deepEqual(fake.requests[1].sourceLines, [9]);
+      assert.deepEqual(fake.requests[1].steps, ['Click the "Get started" button']);
+    });
+
+    it('the ⚠ hover names the action and states its precondition', async () => {
+      // The mark on its own reads as "something is wrong here" and stops. It
+      // has to say what the fix is called, and — because there is deliberately
+      // no gate — what invoking it will DO, so an author whose session is
+      // parked elsewhere can tell before pressing.
+      const hover = hooks.staleHoverMessage();
+      assert.match(hover, /Repair this step/);
+      assert.match(hover, /re-runs this step in the current session/);
+    });
+
+    it('is offered on the ⚠ line and on no other', async () => {
+      // The gutter item's `when` is `editorLineNumber in
+      // testbench-native.staleStepLines`, so this array IS the visibility
+      // rule. Line 8 passes as code (`</>`), line 9 heals under AI (⚠).
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+
+      fake.push({ type: 'step:pass', line: 8, fromCodeBehind: true });
+      fake.push({
+        type: 'step:pass',
+        line: 9,
+        codeBehindStale: { file: '/x/compile-me.steps.ts', error: 'locator timeout' },
+      });
+      await waitFor(
+        'stale line published',
+        () => hooks.tracker.lastStaleLinesContextValue.length > 0,
+      );
+      assert.deepEqual(
+        hooks.tracker.lastStaleLinesContextValue,
+        [9],
+        'a `</>` step must not be offered a repair, and neither must a plain one',
+      );
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('stops being offered once the entry passes as code again', async () => {
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+      fake.push({
+        type: 'step:pass',
+        line: 9,
+        codeBehindStale: { file: '/x/compile-me.steps.ts', error: 'boom' },
+      });
+      await waitFor('⚠ offered', () => hooks.tracker.lastStaleLinesContextValue.length === 1);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+
+      // The repaired entry proves itself on the next run: `</>`, no ⚠, and
+      // the offer goes away on its own rather than lingering as a to-do.
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('second stream active', () => fake.hasActiveStream);
+      fake.push({ type: 'step:pass', line: 9, fromCodeBehind: true });
+      await waitFor(
+        'offer withdrawn',
+        () => hooks.tracker.lastStaleLinesContextValue.length === 0,
+      );
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('runs from wherever the session is parked — no page-state gate', async () => {
+      // The spec's "Repair after the run finished": the browser is at the end
+      // state, not the step's starting page. The framework cannot tell (and
+      // does not try) — it runs the step and lets a wrong page fail it the
+      // ordinary way. What must NOT happen is a refusal here.
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+      fake.push({ type: 'step:pass', line: 8 });
+      fake.push({ type: 'step:pass', line: 9 });
+      fake.push({ type: 'done', status: 'passed' });
+      fake.end();
+      await waitFor('run finished', () => !hooks.isRunning());
+
+      const before = fake.requests.length;
+      void vscode.commands.executeCommand('testbench-native.repairStep', { lineNumber: 9 });
+      await waitFor('repair requested', () => fake.requests.length > before);
+
+      assert.equal(fake.requests[before].compile, 'steps');
+      assert.deepEqual(fake.requests[before].sourceLines, [9]);
+      // No refusal was recorded. Every gate this flow DOES have (a run in
+      // flight, an inert line, a scope it cannot bind) writes one, so a
+      // page-state gate sneaking in later would show up right here.
+      assert.equal(hooks.lastCompileError(), null);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('refuses nothing when the step has never been marked stale', async () => {
+      // The command itself carries no ⚠ precondition — the MENU decides where
+      // it appears, and invoking it anywhere else (palette, keybinding) is
+      // just Compile This Step, which is a sound thing to do to any step.
+      void vscode.commands.executeCommand('testbench-native.repairStep', { lineNumber: 8 });
+      await waitFor('repair requested', () => fake.requests.length > 0);
+
+      assert.equal(fake.requests[0].compile, 'steps');
+      assert.deepEqual(fake.requests[0].sourceLines, [8]);
+      assert.equal(hooks.lastCompileError(), null);
+      assert.deepEqual(hooks.tracker.lastStaleLinesContextValue, []);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+  });
+
   // ── Reaching the server (issue: "compile failed: fetch failed") ──────────
   //
   // A compile gets to the server the way a Run does — because it IS a run now:

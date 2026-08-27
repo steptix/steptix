@@ -81,7 +81,11 @@ vi.mock('../src/utils/run-log.js', () => ({
   attachRunLogBridges: () => () => {},
 }));
 
-vi.mock('../src/report/generator.js', () => ({
+// Spread the real module so the pure helpers stay real — the runner now counts
+// healed steps through `countStepOrigins` when it assembles the report, and a
+// factory that lists only the three stubbed names would leave it undefined.
+vi.mock('../src/report/generator.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/report/generator.js')>()),
   generateReport: vi.fn().mockResolvedValue(''),
   getPrimaryModel: () => undefined,
   buildReportBaseName: (report: { testName: string }) => report.testName,
