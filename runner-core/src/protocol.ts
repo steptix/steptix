@@ -31,7 +31,13 @@ export interface FrameInfo {
   parentId: string | null;
   kind: 'test' | 'skill' | 'section';
   /**
-   * Absolute path (file:// URI form) of the file this frame's steps live in.
+   * Absolute **filesystem path** of the file this frame's steps live in —
+   * despite the field's name, NOT a `file://` URI. Every producer passes a
+   * plain path (`skill.filePath`, `ctx.sectionsFilePath`, the synthesised
+   * test frame's `request.testFilePath`). A client turning it into a URI
+   * must use the equivalent of `Uri.file`, never `Uri.parse`, which reads a
+   * Windows drive letter as a scheme.
+   *
    * For `kind === 'section'` that is the file that **defines** the section:
    * the test file for a test-file section, the skill file for one declared
    * inside a skill body.

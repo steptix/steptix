@@ -43,6 +43,15 @@ the step line everywhere the marks are:
 - Pinned failure text is clipped at capture, so the per-line detail held in
   `.testbench/run-state.json` and re-posted on every snapshot stays bounded
   no matter how long a Playwright call log runs.
+- **Test Explorer anchors an in-skill failure at the skill file.** A run that
+  descends into a `[skill: ...]` reports its body steps with lines in the
+  skill's file, but every failure was anchored on the test file's URI — so
+  clicking the failure jumped to that line number in the test, which could be
+  prose, an unrelated step, or past the end of a shorter file. The streamed
+  output names the file too (`✗ step on line 7 of login.md failed — …`),
+  since Test Explorer shows no gutter to disambiguate a bare line number.
+  `FrameInfo.uri`'s doc comment claimed "file:// URI form"; it has always
+  been a plain absolute filesystem path, and now says so.
 
 ### Added — TestBench: parameter completion inside a skill call
 

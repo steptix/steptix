@@ -18,7 +18,7 @@ import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
-import { workspaceFolderFor } from './workspace.js';
+import { frameTargetUri, workspaceFolderFor } from './workspace.js';
 import { TestDiscovery } from './test-discovery.js';
 import { TestBenchTestController } from './test-controller.js';
 import { InvocationDefinitionProvider } from './definition-provider.js';
@@ -816,8 +816,7 @@ class RunControllerRegistry implements vscode.Disposable {
    * the controller's own document.
    */
   private targetUriFor(testUri: vscode.Uri, frame: import('ai-ui-automation-runner-core').FrameInfo | undefined): vscode.Uri {
-    if (!frame) return testUri;
-    return vscode.Uri.file(frame.uri);
+    return frameTargetUri(testUri, frame);
   }
 
   /**
@@ -1347,6 +1346,11 @@ export interface TestBenchTestHooks {
   /** Lines streamed to the in-flight (or most recent) test's Test Results
    *  output. Lets a test prove output is emitted DURING the run, not buffered. */
   batchOutput: () => string[];
+  /** Test-only readback of the most recent failed test's TestMessages and the
+   *  file+line each was anchored at. WHERE a failure is anchored is not
+   *  readable back from VS Code, and an in-skill failure must peek at the
+   *  skill file — not at that line number in the test file. */
+  batchFailureMessages: () => Array<{ text: string; file: string | null; line: number | null }>;
   /** Test-only: run a batch identified by file URIs. Returns the counts
    *  once the TestRun has ended. */
   runBatchByUris: (uris: vscode.Uri[]) => Promise<{ passed: number; failed: number; skipped: number }>;
@@ -1737,6 +1741,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       stepSignatureForText: (text: string) => tracker.stepSignatureForTests(text),
       lastBatchRun: () => testController.lastRun,
       batchOutput: () => [...testController.liveOutput],
+      batchFailureMessages: () => [...testController.lastFailureMessages],
       runBatchByUris: (uris) => testController.runByUris(uris),
       controllerItemIds: () => testController.controllerItemIds(),
       triggerInitialResolve: () => testController.triggerInitialResolve(),
