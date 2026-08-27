@@ -1,6 +1,12 @@
 import type { AiClient } from '../ai/client.js';
 import { findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
-import { buildStepCodePrompt, buildSystemPrompt, formatTestInfo } from '../ai/prompts.js';
+import {
+  buildStepCodePrompt,
+  buildSystemPrompt,
+  formatTestInfo,
+  isSingularTarget,
+  type StepCodePromptInput,
+} from '../ai/prompts.js';
 import type { AIAction, ChatMessage } from '../ai/types.js';
 import {
   envDataRefsIn,
@@ -13,6 +19,8 @@ import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
 import type { CodeBehindBinding } from './loader.js';
+import type { RecordedAction } from './recording.js';
+import { scan, type StringToken } from './tokenizer.js';
 
 /**
  * Turning one recorded step into its code-behind entry
@@ -80,8 +88,10 @@ export function refuseReason(
 
 export interface GenerateStepEntryOptions {
   binding: CodeBehindBinding;
-  /** The recorded run's actions for this step, in execution order. */
-  actions: AIAction[];
+  /** The recorded run's actions for this step, in execution order, each
+   *  carrying the `targeting` the runtime measured for it when there was one
+   *  (stories/codebehind-selector-ambiguity.md). */
+  actions: RecordedAction[];
   /** Assertions the step evaluated, if any. */
   assertions?: AssertionResult[] | undefined;
   /** Live parameter map from the recording, for resolving `{{param}}`. */
@@ -144,7 +154,7 @@ export async function generateStepEntry(
     return { kind: 'declined', reason: unresolvedRefsReason(unresolvedInputs, options.envData) };
   }
 
-  const prompt = buildStepCodePrompt({
+  const promptInput: StepCodePromptInput = {
     rawStepText: binding.source,
     parameters,
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
@@ -165,15 +175,133 @@ export async function generateStepEntry(
     ...(options.urlBefore !== undefined && { urlBefore: options.urlBefore }),
     ...(options.domAfter !== undefined && { domAfter: options.domAfter }),
     ...(options.urlAfter !== undefined && { urlAfter: options.urlAfter }),
-  });
+  };
+  const guarded = guardedValues(parameters, envRefs.resolved);
 
-  return askForEntry(
+  const first = await askForEntry(
     options.aiClient,
     options.contextContent,
-    prompt,
-    guardedValues(parameters, envRefs.resolved),
+    buildStepCodePrompt(promptInput),
+    guarded,
     options.signal,
   );
+  if (first.kind !== 'entry') return first;
+
+  // ── The static backstop (stories/codebehind-selector-ambiguity.md) ────────
+  // The measurement is in front of the model; this is for when it reads the
+  // number and writes the bare selector anyway.
+  const complaint = ambiguousSelectorComplaint(first.code, options.actions);
+  if (complaint === undefined) return first;
+
+  logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
+  const second = await askForEntry(
+    options.aiClient,
+    options.contextContent,
+    buildStepCodePrompt({ ...promptInput, retry: { previousEntry: first.code, complaint } }),
+    guarded,
+    options.signal,
+  );
+
+  // ONE re-ask, then take what we get. The second answer is never re-checked
+  // for the same fault, so this cannot spin — and it is never allowed to be
+  // worse than the first: a re-ask that errors (the call failed, or the new
+  // code tripped the leak guard) or declines falls back to the answer that
+  // already passed every guard, rather than turning a heuristic into a failed
+  // compile. `compileTest` treats a generation error as fatal for the whole
+  // run, which is not a power a textual check over generated code should have.
+  if (second.kind !== 'entry') {
+    logger.debug(
+      `The re-ask for "${binding.source}" produced no entry ` +
+        `(${second.kind === 'error' ? second.message : second.reason}); keeping the first answer`,
+    );
+    return first;
+  }
+  if (ambiguousSelectorComplaint(second.code, options.actions) !== undefined) {
+    logger.warn(
+      `Code-behind for "${binding.source}" still targets a selector this run measured as ` +
+        `matching more than one element; it may throw on replay. ${complaint}`,
+    );
+  }
+  return second;
+}
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may.
+ *
+ * The deterministic half of the selector rule: the transcript measured more
+ * than one match for a singular action, and the generated entry uses that
+ * exact selector bare — no `resolvedSelector`, no `.first()`, no scoping — so
+ * strict mode throws on the second match the moment it replays. Costs nothing,
+ * needs no model, and covers the case the prompt cannot: the model read the
+ * measurement and ignored it.
+ *
+ * It fires only when a count is present, and only for a SINGULAR action —
+ * `read multiple` and `count` record a `matchCount` too, and many matches is
+ * their purpose. Absence means the check does not run, never that it fails —
+ * the same first-class absence the prompt rule has.
+ *
+ * Deliberately one-directional in what it will miss: the receiver has to be
+ * `page`/`frame` itself, so anything already chained off a scoped locator is
+ * left alone, and a narrowing later in the same statement (or on the variable
+ * the locator was bound to) counts. It can still ask again about an entry that
+ * narrows on some further line — one model call, no correctness lost, and the
+ * caller keeps the first answer if the second is no better.
+ */
+export function ambiguousSelectorComplaint(
+  code: string,
+  actions: RecordedAction[],
+): string | undefined {
+  let strings: StringToken[] | undefined;
+  for (const action of actions) {
+    const selector = action.selector;
+    const count = action.targeting?.matchCount;
+    if (selector === undefined || count === undefined || count <= 1) continue;
+    if (!isSingularTarget(action)) continue;
+    strings ??= scan(code).strings;
+    if (!strings.some((token) => token.value === selector && isBareUse(code, token))) continue;
+
+    const resolved = action.targeting?.resolvedSelector;
+    return (
+      `The entry uses ${JSON.stringify(selector)} bare, but this run measured ${count} elements ` +
+      `matching it — generated code is strict and throws on the second. ` +
+      (resolved !== undefined
+        ? `Use the verified resolvedSelector ${JSON.stringify(resolved)}`
+        : `Scope it to an ancestor that makes it unique`) +
+      `, or reproduce the runtime's tolerance with .locator('visible=true').first().`
+    );
+  }
+  return undefined;
+}
+
+/** `page.locator(` / `await frame.click(` — a strict-mode call on the raw page.
+ *  Anchored at the end, so it describes the call this literal is an argument
+ *  to. Tolerant APIs (`waitForSelector`, `$`, `$$`) are absent on purpose:
+ *  they take the first match without throwing, so a bare selector in one is
+ *  not the fault being looked for. */
+const STRICT_TARGET_CALL =
+  /(?:^|[^\w$.])(?:page|frame)\s*\.\s*(?:locator|click|dblclick|fill|type|press|check|uncheck|selectOption|hover|focus|tap|setInputFiles|textContent|innerText|innerHTML|inputValue|getAttribute|isVisible|isHidden|isChecked|isEnabled|isDisabled|isEditable)\s*\(\s*$/;
+
+/** `const link = page.locator(` — the name a locator was bound to, so a
+ *  narrowing applied to the variable on a later line still counts. */
+const BOUND_NAME = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?$/;
+
+/** Anything that narrows a locator to one element. */
+const NARROWING = /\.\s*(?:first|last|nth|filter|locator|getBy[A-Za-z]+)\s*\(/;
+
+/** Is this string literal the selector of a strict call that narrows nothing? */
+function isBareUse(code: string, token: StringToken): boolean {
+  const before = code.slice(Math.max(0, token.start - 120), token.start);
+  const call = STRICT_TARGET_CALL.exec(before);
+  if (!call) return false;
+
+  // The rest of this statement: `).first().click()` narrows, `).click()` does not.
+  const after = code.slice(token.end, token.end + 400);
+  const statement = after.split(/[;\n]/, 1)[0] ?? after;
+  if (NARROWING.test(statement)) return false;
+
+  const name = BOUND_NAME.exec(before.slice(0, call.index))?.[1];
+  if (name === undefined) return true;
+  return !new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\s*${NARROWING.source}`).test(code);
 }
 
 /**

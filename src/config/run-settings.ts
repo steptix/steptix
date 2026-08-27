@@ -126,11 +126,18 @@ export interface ResolvedRunSettings {
   /**
    * The complete `Config` to hand the executor.
    *
-   * `serverConfig` spread with ONLY this story's four values re-sourced. It has
-   * to be complete rather than partial — both executor call sites take the
-   * whole object — and it deliberately leaves every other value exactly as the
-   * server startup config has it. Re-basing the executor on the project bundle
-   * wholesale is the correct-but-deferred change §2 describes.
+   * `serverConfig` spread with ONLY named values re-sourced: run-settings' own
+   * four, plus `browser.ambiguousTarget`
+   * (stories/codebehind-selector-ambiguity.md). It has to be complete rather
+   * than partial — both executor call sites take the whole object — and it
+   * deliberately leaves every other value exactly as the server startup config
+   * has it. Re-basing the executor on the project bundle wholesale is the
+   * correct-but-deferred change §2 describes.
+   *
+   * That deferral is why this list has to grow by hand, and the growth is the
+   * trap: a new per-project `browser.*` key that is not named here reaches the
+   * CLI correctly and is silently the server's value everywhere else. Adding
+   * one to `ProjectBundle` alone does not reach the executor.
    */
   config: Config;
   effective: EffectiveSettings;
@@ -187,6 +194,21 @@ export function resolveRunSettings(
     fullPageFrom = 'session';
   }
 
+  // Re-sourced for the same reason the capture settings are, and it is easy to
+  // miss why it has to be: `config.browser` below is spread from the SERVER's
+  // startup config, so any key not named there silently keeps the server's
+  // answer no matter what the project's `aiui.config.json` says. Routing the
+  // value onto the project bundle is necessary but NOT sufficient — this is the
+  // second place it would be dropped, and the only one the executor reads.
+  // Whether an ambiguous click fails belongs to the suite under test, not to
+  // whichever checkout happened to start the server.
+  // No normalising here on purpose: the gate downstream is `=== 'fail'`, so an
+  // absent value or a typo already means 'first'.
+  const ambiguousBase = base(
+    serverConfig.browser.ambiguousTarget,
+    projectConfig.browser.ambiguousTarget,
+  );
+
   const sendBase = base(serverConfig.ai.sendScreenshots, projectConfig.ai.sendScreenshots);
   let sendScreenshots = sendBase.value;
   let sendFrom = sendBase.from;
@@ -210,6 +232,7 @@ export function resolveRunSettings(
         ...serverConfig.browser,
         captureScreenshotsPerAction: perAction,
         fullPageScreenshots: fullPage,
+        ambiguousTarget: ambiguousBase.value,
       },
       execution: { ...serverConfig.execution, screenshotOnFailure: onFailure },
     },

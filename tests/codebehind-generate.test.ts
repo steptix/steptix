@@ -10,7 +10,12 @@ import {
   parseStepCodeOrDecline,
 } from '../src/ai/action-parser.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
-import { aiEntryFor, generateStepEntry, refuseReason } from '../src/codebehind/generate.js';
+import {
+  aiEntryFor,
+  ambiguousSelectorComplaint,
+  generateStepEntry,
+  refuseReason,
+} from '../src/codebehind/generate.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
 import { buildFileReviewPrompt, parseFileRevision } from '../src/codebehind/review.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
@@ -43,9 +48,16 @@ afterAll(async () => {
 
 /** An AI client that answers with `text` and records what it was asked. */
 function stubClient(text: string): { client: AiClient; calls: ChatMessage[][] } {
+  return stubSequence(text);
+}
+
+/** The same, answering with each text in turn — the last one repeating, so a
+ *  test that expects two calls fails loudly on a third rather than hanging. */
+function stubSequence(...texts: string[]): { client: AiClient; calls: ChatMessage[][] } {
   const calls: ChatMessage[][] = [];
   const client = {
     complete: async (messages: ChatMessage[]) => {
+      const text = texts[Math.min(calls.length, texts.length - 1)]!;
       calls.push(messages);
       return { text, model: 'stub-model' };
     },
@@ -242,6 +254,262 @@ describe('buildStepCodePrompt', () => {
   });
 });
 
+/**
+ * stories/codebehind-selector-ambiguity.md — "What generation does with it".
+ *
+ * Rule 8 stops being advice and starts keying off a measured number. The
+ * question the model used to be asked — "is this selector unique in a DOM I
+ * can only partly see?" — is one its evidence structurally cannot answer,
+ * because the snapshot is truncated, attribute-allowlisted and strips hidden
+ * elements' attributes. So it is no longer asked: the count is measured in the
+ * live page and handed over, and the rule keys off it.
+ */
+describe('buildStepCodePrompt — the measurement', () => {
+  const AMBIGUOUS = {
+    action: 'click' as const,
+    selector: 'a[href="transactions.html"]',
+    targeting: {
+      matchCount: 2,
+      visibleMatchCount: 1,
+      resolvedSelector: '#statements a[href="transactions.html"]',
+      resolvedBy: 'scoped' as const,
+    },
+  };
+
+  it('names the resolved selector and forbids the bare one when the run measured two matches', () => {
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Open the statements list',
+        parameters: [],
+        actions: [AMBIGUOUS],
+      }).content,
+    );
+    // The transcript carries the measurement, and the legend says what it is
+    // and — the whole point — where it came from.
+    expect(text).toContain('"matchCount": 2');
+    expect(text).toContain(JSON.stringify(AMBIGUOUS.targeting.resolvedSelector));
+    expect(text).toContain('MEASURED in the live page');
+    // The rule: use the resolved handle or the runtime's own tolerance. No
+    // third option, and no judgement about what looks unique in the DOM.
+    expect(text).toContain('NOT usable as written');
+    expect(text).toContain('`resolvedSelector` verbatim');
+    expect(text).toContain("locator('visible=true').first()");
+    expect(text).toContain('There is no third option');
+  });
+
+  it('does not nag when the run measured exactly one match', () => {
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Click Sign in',
+        parameters: [],
+        actions: [
+          {
+            action: 'click',
+            selector: '#signin',
+            targeting: { matchCount: 1, visibleMatchCount: 1, resolvedSelector: '#signin', resolvedBy: 'attribute' },
+          },
+        ],
+      }).content,
+    );
+    expect(text).toContain('matched exactly one element. Use it as written');
+    // A clause the transcript cannot trigger is pure cost in a prompt read on
+    // every compile — and reads as a warning about a selector that is fine.
+    expect(text).not.toContain('NOT usable as written');
+  });
+
+  it('leaves the prompt exactly as it was when nothing was measured', () => {
+    // Absence is first-class: measurement is compile-only and swallows its
+    // own failures, so a transcript without it is the ordinary case and must
+    // never read as an error.
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Click Sign in',
+        parameters: [],
+        actions: [{ action: 'click', selector: '#signin' }],
+      }).content,
+    );
+    expect(text).toContain('not evidence that it matches one element');
+    expect(text).not.toContain('MEASURED in the live page');
+    expect(text).not.toContain('resolvedBy');
+    expect(text).not.toContain('NOT usable as written');
+    // Numbering stays put, so the rules read the same as they always did.
+    expect(text).toContain('9. **End with a post-condition.**');
+  });
+
+  it('reads a plural action’s count as context for the loop, never as ambiguity', () => {
+    // `read multiple` and `count` record a `matchCount` as well, and many
+    // matches is their whole purpose — a rule that called three matches a
+    // problem would be telling the model to break the loop it is writing.
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Read every notice',
+        parameters: [],
+        actions: [
+          { action: 'read', selector: '#notices span', multiple: true, targeting: { matchCount: 3 } },
+        ],
+      }).content,
+    );
+    expect(text).toContain('not a problem: many matches is what those actions are for');
+    expect(text).not.toContain('NOT usable as written');
+  });
+
+  it('falls back to the inferred rule when the measurement says nothing it can key off', () => {
+    // `ambiguousTarget: 'fail'` measures the ONE count its gate needs and
+    // nothing else, so a `targeting` can arrive with no count of the kind the
+    // rule turns on. A rule heading over no clauses would claim a measurement
+    // the transcript does not carry.
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Click Sign in',
+        parameters: [],
+        actions: [{ action: 'click', selector: '#signin', targeting: { visibleMatchCount: 1 } }],
+      }).content,
+    );
+    expect(text).toContain('not evidence that it matches one element');
+    expect(text).toContain('9. **End with a post-condition.**');
+  });
+
+  it('asks for a data-driven locator on a positional handle, and not on a scoped one', () => {
+    const positional = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Click the row for {{customer}}',
+        parameters: [{ name: 'customer', value: 'Smith' }],
+        actions: [
+          {
+            action: 'click',
+            selector: 'tbody tr td:nth-of-type(1)',
+            targeting: {
+              matchCount: 1,
+              resolvedSelector: 'tbody tr:nth-of-type(42) td:nth-of-type(1)',
+              resolvedBy: 'positional',
+            },
+          },
+        ],
+      }).content,
+    );
+    // Pinning row 42 compiles this run's DATA into a committed file — issue
+    // 024's defect, in the one place it outlives the cache entry.
+    expect(positional).toContain("step.getVar('customer')");
+    expect(positional).toContain("instead of pinning this run's index");
+    // And the model is told to read `resolvedBy`, never to sniff the string.
+    expect(positional).toContain('never work that out from the string');
+
+    const scoped = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Click the row for {{customer}}',
+        parameters: [{ name: 'customer', value: 'Smith' }],
+        actions: [AMBIGUOUS],
+      }).content,
+    );
+    expect(scoped).not.toContain("instead of pinning this run's index");
+    // `scoped` is the COMMON answer to a hidden duplicate, not a worse one.
+    expect(scoped).toContain('not a second-best one');
+  });
+
+  it('carries the refusal and the refused entry on the one re-ask', () => {
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Open the statements list',
+        parameters: [],
+        actions: [AMBIGUOUS],
+        retry: {
+          previousEntry: `{ source: 'Open the statements list', async run() {} }`,
+          complaint: 'the entry uses "a[href=..]" bare, but this run measured 2 elements',
+        },
+      }).content,
+    );
+    expect(text).toContain('## Your previous answer was refused');
+    expect(text).toContain('this run measured 2 elements');
+    // Shown its own answer: a model told only "do it again" returns what it
+    // returned.
+    expect(text).toContain(`{ source: 'Open the statements list', async run() {} }`);
+  });
+});
+
+/**
+ * stories/codebehind-selector-ambiguity.md — "The static backstop".
+ *
+ * Deterministic, costs nothing, and covers the case the prompt cannot: the
+ * model read the measurement and wrote the bare selector anyway.
+ */
+describe('ambiguousSelectorComplaint', () => {
+  const MEASURED = [
+    {
+      action: 'click' as const,
+      selector: 'a[href="/login"]',
+      targeting: {
+        matchCount: 2,
+        visibleMatchCount: 1,
+        resolvedSelector: '#nav a[href="/login"]',
+        resolvedBy: 'scoped' as const,
+      },
+    },
+  ];
+  const entry = (body: string): string =>
+    `{ source: 'Click Sign in', async run({ page }) { ${body} } }`;
+
+  it('refuses the bare selector and names what to use instead', () => {
+    const complaint = ambiguousSelectorComplaint(
+      entry(`await page.locator('a[href="/login"]').click();`),
+      MEASURED,
+    );
+    expect(complaint).toContain('2 elements');
+    expect(complaint).toContain('#nav a[href=\\"/login\\"]');
+    expect(complaint).toContain("visible=true");
+  });
+
+  it('refuses it just as much through a page-level action call', () => {
+    expect(ambiguousSelectorComplaint(entry(`await page.click('a[href="/login"]');`), MEASURED))
+      .toBeDefined();
+  });
+
+  it('accepts the resolved handle, the runtime tolerance, a scoping and a .first()', () => {
+    for (const body of [
+      `await page.locator('#nav a[href="/login"]').click();`,
+      `await page.locator('a[href="/login"]').locator('visible=true').first().click();`,
+      `await page.locator('#nav').locator('a[href="/login"]').click();`,
+      `await page.locator('a[href="/login"]').first().click();`,
+      `const link = page.locator('a[href="/login"]');\nawait link.first().click();`,
+    ]) {
+      expect(ambiguousSelectorComplaint(entry(body), MEASURED)).toBeUndefined();
+    }
+  });
+
+  it('does not run at all when no count was recorded', () => {
+    // Absence means the check does not run, never that it fails.
+    const bare = entry(`await page.locator('a[href="/login"]').click();`);
+    expect(ambiguousSelectorComplaint(bare, [{ action: 'click', selector: 'a[href="/login"]' }]))
+      .toBeUndefined();
+    expect(
+      ambiguousSelectorComplaint(bare, [
+        { action: 'click', selector: 'a[href="/login"]', targeting: { resolvedSelector: '#nav a' } },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('passes a selector the run measured as matching once', () => {
+    expect(
+      ambiguousSelectorComplaint(entry(`await page.locator('#signin').click();`), [
+        { action: 'click', selector: '#signin', targeting: { matchCount: 1 } },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('never refuses a plural action, whose whole purpose is many matches', () => {
+    expect(
+      ambiguousSelectorComplaint(entry(`const rows = await page.locator('li.row').allTextContents();`), [
+        { action: 'read', selector: 'li.row', multiple: true, targeting: { matchCount: 7 } },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('leaves a tolerant API alone — it takes the first match without throwing', () => {
+    expect(
+      ambiguousSelectorComplaint(entry(`await page.waitForSelector('a[href="/login"]');`), MEASURED),
+    ).toBeUndefined();
+  });
+});
+
 describe('refuseReason', () => {
   it('refuses a transcript that changed runner state rather than the page', () => {
     expect(refuseReason('Open a second browser', [
@@ -371,6 +639,115 @@ describe('generateStepEntry', () => {
     expect(result.kind).toBe('entry');
     // The prompt was told the frame's value, so the guard covers it.
     expect(contentBlocksToText(calls[0]![1]!.content)).toContain('alice-from-the-caller');
+  });
+});
+
+/**
+ * The backstop as generation drives it: one re-ask, never two, and never worse
+ * than the answer it already had
+ * (stories/codebehind-selector-ambiguity.md, "The static backstop").
+ */
+describe('generateStepEntry — the static backstop', () => {
+  const MEASURED = [
+    {
+      action: 'click' as const,
+      selector: 'a[href="/login"]',
+      targeting: {
+        matchCount: 2,
+        visibleMatchCount: 1,
+        resolvedSelector: '#nav a[href="/login"]',
+        resolvedBy: 'scoped' as const,
+      },
+    },
+  ];
+  const BARE =
+    `{ source: 'Click Sign in', async run({ page }) { await page.locator('a[href="/login"]').click(); } }`;
+  const FIXED =
+    `{ source: 'Click Sign in', async run({ page }) { await page.locator('#nav a[href="/login"]').click(); } }`;
+
+  const generate = (client: AiClient) =>
+    generateStepEntry({
+      binding: bindingFor('Click Sign in'),
+      actions: MEASURED,
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+
+  it('refuses a bare-selector entry, re-asks once, and takes the corrected one', async () => {
+    const { client, calls } = stubSequence(
+      JSON.stringify({ entry: BARE }),
+      JSON.stringify({ entry: FIXED }),
+    );
+    const result = await generate(client);
+
+    expect(calls).toHaveLength(2);
+    expect(result).toEqual({ kind: 'entry', code: FIXED });
+    // The second ask is the first one plus the refusal and the refused entry.
+    const retry = contentBlocksToText(calls[1]![1]!.content);
+    expect(retry).toContain('## Your previous answer was refused');
+    expect(retry).toContain('this run measured 2 elements');
+    expect(retry).toContain(BARE);
+  });
+
+  it('does not spin when the second answer is bare too', async () => {
+    const { client, calls } = stubSequence(JSON.stringify({ entry: BARE }));
+    const result = await generate(client);
+    // One re-ask, then take what you get: the entry may throw on replay, and
+    // the replay round — or the next run's heal — is what deals with that. A
+    // textual check cannot be allowed to fail the whole compile.
+    expect(calls).toHaveLength(2);
+    expect(result).toEqual({ kind: 'entry', code: BARE });
+  });
+
+  it('keeps the first answer when the re-ask produces nothing usable', async () => {
+    const { client, calls } = stubSequence(
+      JSON.stringify({ entry: BARE }),
+      'I am afraid I cannot do that.',
+    );
+    const result = await generate(client);
+    expect(calls).toHaveLength(2);
+    expect(result).toEqual({ kind: 'entry', code: BARE });
+  });
+
+  it('never re-asks when the transcript carries no count', async () => {
+    const { client, calls } = stubSequence(JSON.stringify({ entry: BARE }));
+    const result = await generateStepEntry({
+      binding: bindingFor('Click Sign in'),
+      actions: [{ action: 'click', selector: 'a[href="/login"]' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    expect(calls).toHaveLength(1);
+    expect(result).toEqual({ kind: 'entry', code: BARE });
+  });
+
+  it('still guards the re-asked entry against an inlined parameter value', async () => {
+    // The backstop must not become a way round the leak guard: the second
+    // answer goes through `askForEntry` exactly as the first did, so a leak
+    // in it is refused and the guarded first answer stands.
+    const leaky =
+      `{ source: 'Sign in as {{username}}', async run({ page }) { await page.fill('#u', 'octocat-the-cat'); } }`;
+    const bare =
+      `{ source: 'Sign in as {{username}}', async run({ page, step }) { await page.locator('a[href="/login"]').click(); await page.fill('#u', step.getVar('username')); } }`;
+    const { client, calls } = stubSequence(
+      JSON.stringify({ entry: bare }),
+      JSON.stringify({ entry: leaky }),
+    );
+    const result = await generateStepEntry({
+      binding: bindingFor('Sign in as {{username}}'),
+      actions: MEASURED,
+      resolvedParameters: { username: 'octocat-the-cat' },
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    expect(calls).toHaveLength(2);
+    expect(result).toEqual({ kind: 'entry', code: bare });
+    expect(result.kind === 'entry' && result.code).not.toContain('octocat-the-cat');
   });
 });
 

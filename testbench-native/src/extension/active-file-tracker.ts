@@ -115,6 +115,12 @@ export class ActiveFileTracker {
    *  pushed. The Continue/Resume button's visibility hinges on this key, and
    *  it is per-active-file (see `refreshPausedContextKey`). */
   lastPausedContextValue = false;
+  /** Test-only readback of the `testbench-native.staleStepLines` context key —
+   *  the active file's ⚠ lines, ascending. Mirrored for the same reason
+   *  `lastPausedContextValue` is: VS Code does not read context keys back, and
+   *  "Repair this step" is visible in the gutter menu only on a line this
+   *  array contains (see `refreshStaleStepsContextKeys`). */
+  lastStaleLinesContextValue: number[] = [];
   private readonly listeners = new Set<Listener>();
   private readonly subs: vscode.Disposable[] = [];
   /** Step-line signature each URI's persisted state was captured against.
@@ -679,6 +685,10 @@ export class ActiveFileTracker {
     // change to the active file's resume point (or to which file is active)
     // re-derives it. Deduped, so the selection-move emits are free.
     this.refreshPausedContextKey();
+    // And the ⚠ lines the gutter's Repair item is gated on — every status
+    // change funnels through here, which is exactly when a step becomes (or
+    // stops being) stale.
+    this.refreshStaleStepsContextKeys();
   }
 
   // ---- persistence -------------------------------------------------------
@@ -873,8 +883,9 @@ export class ActiveFileTracker {
       this.activeTabIsTextEditor && this.isActiveTestFile,
     );
     // Editor switches reach here without an emit() (the webview-focus branch),
-    // so keep the per-file `paused` key in lockstep here too.
+    // so keep the per-file `paused` / ⚠ keys in lockstep here too.
     this.refreshPausedContextKey();
+    this.refreshStaleStepsContextKeys();
   }
 
   /**
@@ -892,6 +903,61 @@ export class ActiveFileTracker {
     if (paused === this.lastPausedContextValue) return;
     this.lastPausedContextValue = paused;
     void vscode.commands.executeCommand('setContext', 'testbench-native.paused', paused);
+  }
+
+  /**
+   * Publish the active file's ⚠ (`pass-stale`) step lines as context keys, so
+   * "Repair this step" appears in the gutter menu on exactly those lines and
+   * nowhere else (stories/codebehind-selector-ambiguity.md §Repair, which
+   * already works and cannot be found).
+   *
+   * Two keys, from one walk:
+   *
+   *  - `testbench-native.staleStepLines` — the array the gutter menu tests
+   *    with `editorLineNumber in ...`. VS Code's line-number context menu puts
+   *    the clicked line in `editorLineNumber`, and its `in` operator does an
+   *    `includes` against an array-valued key, which is the only way a `when`
+   *    clause can be per-line.
+   *  - `testbench-native.hasStaleStep` — the same fact as a boolean, because a
+   *    `when` clause cannot ask whether an array is empty and the command
+   *    palette has no line to test. Keeps Repair off the palette for a file
+   *    with nothing to repair.
+   *
+   * Deduped against the last pushed value, like the `paused` key: emit() also
+   * fires on every keystroke and selection move, which change neither.
+   */
+  private refreshStaleStepsContextKeys(): void {
+    const lines = this.activeFileStaleLines();
+    const previous = this.lastStaleLinesContextValue;
+    if (lines.length === previous.length && lines.every((l, i) => l === previous[i])) return;
+    this.lastStaleLinesContextValue = lines;
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.staleStepLines',
+      lines,
+    );
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.hasStaleStep',
+      lines.length > 0,
+    );
+  }
+
+  /**
+   * The active editor's ⚠ lines, ascending. Reads `states` directly rather
+   * than via `state()` so merely looking at a file with no run state doesn't
+   * lazily allocate one for it — same rule as `activeFileResumeLine`.
+   */
+  private activeFileStaleLines(): number[] {
+    const uri = this.currentEditor?.document.uri;
+    if (!uri) return [];
+    const state = this.states.get(uri.toString());
+    if (!state) return [];
+    const lines: number[] = [];
+    for (const [line, status] of state.statuses) {
+      if (status === 'pass-stale') lines.push(line);
+    }
+    return lines.sort((a, b) => a - b);
   }
 
   /**

@@ -160,6 +160,22 @@ export interface DoneEvent {
    *  Report" button after the run finishes. Backward-compatible: older
    *  servers omit the field, older clients ignore it. */
   reportPath?: string;
+  /**
+   * How many steps healed under AI because their code-behind entry threw,
+   * and what those AI turns cost
+   * (stories/codebehind-selector-ambiguity.md §"A healed run stops reporting
+   * as a clean pass").
+   *
+   * Absent when nothing healed, so a clean run says nothing new. `status` is
+   * deliberately unaffected — a healed run still passed, and the whole point
+   * is that the COST is what was invisible, not the outcome. Clients use it
+   * to name the recurring price of leaving an entry broken: those tokens are
+   * paid again on every subsequent run until the step is repaired.
+   *
+   * Backward-compatible in both directions: older servers omit the field,
+   * older clients ignore it.
+   */
+  healed?: { steps: number; tokens: number };
 }
 
 /**

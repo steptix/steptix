@@ -97,19 +97,104 @@
     return '[id="' + escAttrCss(id) + '"]';
   }
 
-  function buildSelector(el) {
-    var testId = el.getAttribute('data-testid');
-    if (testId) return '[data-testid="' + escAttrCss(testId) + '"]';
-    var id = el.getAttribute('id');
-    if (id) return idSelector(id);
+  // Ask the document whether `sel` addresses exactly `el` and nothing else.
+  // Hidden matches count — the elements this snapshot renders as attribute-less
+  // placeholders are still in the DOM, and are exactly the duplicates that make
+  // an "obviously unique" handle ambiguous. An invalid or exotic selector makes
+  // querySelectorAll throw; a throw is simply "did not verify".
+  function verifies(sel, el) {
+    try {
+      var found = document.querySelectorAll(sel);
+      return found.length === 1 && found[0] === el;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // A selector built from one of el's own attributes, verified to address el
+  // and nothing else, or null when no candidate does. Same candidate order as
+  // strongSelector in find-in-dom.js (plus iframe[src]); deliberately a second
+  // copy rather than shared code — the two scripts are injected independently.
+  function attributeSelector(el) {
     var tag = el.tagName.toLowerCase();
+    var testId = el.getAttribute('data-testid');
+    if (testId) {
+      var testIdSel = '[data-testid="' + escAttrCss(testId) + '"]';
+      if (verifies(testIdSel, el)) return testIdSel;
+    }
+    var id = el.getAttribute('id');
+    if (id) {
+      var idSel = idSelector(id);
+      if (verifies(idSel, el)) return idSel;
+    }
     var name = el.getAttribute('name');
-    if (name) return tag + '[name="' + escAttrCss(name) + '"]';
+    if (name) {
+      var nameSel = tag + '[name="' + escAttrCss(name) + '"]';
+      if (verifies(nameSel, el)) return nameSel;
+    }
     var ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel) return tag + '[aria-label="' + escAttrCss(ariaLabel) + '"]';
-    var src = el.getAttribute('src');
-    if (src && tag === 'iframe') return tag + '[src="' + escAttrCss(src) + '"]';
-    return tag;
+    if (ariaLabel) {
+      var ariaSel = tag + '[aria-label="' + escAttrCss(ariaLabel) + '"]';
+      if (verifies(ariaSel, el)) return ariaSel;
+    }
+    if (tag === 'iframe') {
+      var src = el.getAttribute('src');
+      if (src) {
+        var srcSel = tag + '[src="' + escAttrCss(src) + '"]';
+        if (verifies(srcSel, el)) return srcSel;
+      }
+    }
+    return null;
+  }
+
+  // Positional fallback, the shape stableSelector builds in find-in-dom.js:
+  // walk up collecting nth-of-type(N) steps until an ancestor has a verified
+  // attribute selector, e.g. "#list>li:nth-of-type(3)". Unique by construction,
+  // since the anchor matches exactly one element (or is `body`) and a child
+  // combinator chain from one element reaches one element.
+  //
+  // Joined WITHOUT spaces on purpose. This function's result reaches the AI as
+  // an iframe's frame path, and resolveLocatorRoot (src/browser/actions.ts)
+  // splits a frame selector on whitespace when it carries no " >> " chain — a
+  // spaced chain would be torn into three broken frameLocator segments.
+  function positionalSelector(el) {
+    var parts = [];
+    var cur = el;
+    while (cur && cur !== document.body && cur.parentElement) {
+      var parent = cur.parentElement;
+      var tag = cur.tagName.toLowerCase();
+      // nth-of-type is 1-indexed over same-tag siblings within the parent.
+      // Compare tags lowercase for consistency across HTML (uppercase) and SVG (mixed).
+      var n = 1;
+      var sib = cur.previousElementSibling;
+      while (sib) {
+        if (sib.tagName.toLowerCase() === tag) n++;
+        sib = sib.previousElementSibling;
+      }
+      parts.unshift(tag + ':nth-of-type(' + n + ')');
+      var parentSel = attributeSelector(parent);
+      if (parentSel) {
+        parts.unshift(parentSel);
+        return parts.join('>');
+      }
+      cur = parent;
+    }
+    parts.unshift('body');
+    return parts.join('>');
+  }
+
+  // Build a selector the document confirms addresses el alone: an attribute
+  // handle when one verifies, else a positional path. Never a bare tag — that
+  // was the old last resort, and it made the omission marker's "target directly
+  // with <parent> > li:nth-of-type(N)" hint an instruction that did not work.
+  //
+  // Two call sites, neither per-element: once per iframe, and once per parent
+  // that actually emits an omission marker. Keep it that way — the verification
+  // is a querySelectorAll, so calling this per element would be quadratic.
+  function buildSelector(el) {
+    var direct = attributeSelector(el);
+    if (direct) return direct;
+    return positionalSelector(el);
   }
 
   // HTML-escape an attribute value for emission inside the rendered snapshot
@@ -255,7 +340,14 @@
 
     // nth-of-type is 1-indexed and per-tag, so an omission marker can safely
     // name "nth-of-type(N)" regardless of interleaved text nodes or sibling tags.
-    var parentSel = COLLAPSE ? buildSelector(parent) : '';
+    //
+    // Built lazily, on the first marker this parent actually emits. This
+    // function runs for every element with children, while a collapsed run is
+    // rare — computing it eagerly would put buildSelector's querySelectorAll
+    // verification on the per-element path, which is the one thing it must not
+    // be on. null = not built yet; a parent with several collapsed runs builds
+    // it once.
+    var parentSel = null;
 
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
@@ -284,6 +376,7 @@
 
               var firstOmitted = headCount + 1;
               var lastOmitted = headCount + omittedCount;
+              if (parentSel === null) parentSel = buildSelector(parent);
               var parentPart = parentSel ? parentSel + ' > ' : '';
               output += indent + '<!-- ' + omittedCount + ' similar <' + runTag
                      + '> elements omitted (nth-of-type ' + firstOmitted + '..' + lastOmitted

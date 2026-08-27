@@ -210,3 +210,40 @@ describe('resolveRunSettings', () => {
     expect(effective.sources.capture).toBe('server');
   });
 });
+
+describe('resolveRunSettings — browser.ambiguousTarget', () => {
+  // The executor's `browser` slice is SPREAD from the server's startup config,
+  // so a per-project key that is not re-sourced by name silently keeps the
+  // server's answer. Putting the value on `ProjectBundle` does not fix that —
+  // this is a second, independent drop point, and the only one the executor
+  // actually reads. Both directions are asserted because a resolver that just
+  // echoed the server config would pass a naive one-way check.
+  const failProject: Config = {
+    ...server,
+    browser: { ...server.browser, ambiguousTarget: 'fail' },
+  };
+
+  it("carries the PROJECT's 'fail' into the config handed to the executor", () => {
+    const { config } = resolve({}, failProject);
+
+    expect(config.browser.ambiguousTarget).toBe('fail');
+  });
+
+  it('does not let a server set to "fail" impose it on a silent project', () => {
+    const failServer: Config = {
+      ...server,
+      browser: { ...server.browser, ambiguousTarget: 'fail' },
+    };
+    const { config } = resolveRunSettings(failServer, server, failServer.ai.model, {});
+
+    expect(config.browser.ambiguousTarget).toBe('first');
+  });
+
+  it('leaves the rest of the browser slice untouched', () => {
+    const { config } = resolve({}, failProject);
+
+    expect(config.browser.captureScreenshotsPerAction).toBe(false);
+    expect(config.browser.fullPageScreenshots).toBe(false);
+    expect(config.browser.browser).toBe(server.browser.browser);
+  });
+});

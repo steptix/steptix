@@ -4,6 +4,27 @@ import { classifyLines, extractSteps } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
 
 /**
+ * What the ⚠ says on hover.
+ *
+ * The mark alone reads as "something is wrong here" and stops. This names the
+ * action that fixes it and, in the same breath, states the one precondition
+ * the framework cannot check for the author: Repair re-runs the step, so the
+ * session has to be parked somewhere the step makes sense
+ * (stories/codebehind-selector-ambiguity.md §Repair, which already works and
+ * cannot be found).
+ *
+ * Deliberately static text. It is not a gate and must never become one — the
+ * framework has no way to know whether a page satisfies a natural-language
+ * step's precondition, so the honest move is to say what the action does and
+ * let a wrong page fail the step normally. Exported so a test asserts THIS
+ * string rather than a copy of it.
+ */
+export const STALE_HOVER_MESSAGE =
+  'This step passed under AI — its compiled code-behind threw.\n\n' +
+  '**Repair this step** (right-click the line number) re-runs this step in the ' +
+  'current session and regenerates its entry from the failure.';
+
+/**
  * The N/M pass-summary counts for a snapshot.
  *
  * Exported and pure so the test hook asserts THIS, not a copy of it — the
@@ -243,7 +264,10 @@ export class DecorationManager implements vscode.Disposable {
     const passRanges: vscode.Range[] = [];
     const passCachedRanges: vscode.Range[] = [];
     const codeBehindRanges: vscode.Range[] = [];
-    const staleRanges: vscode.Range[] = [];
+    // Options rather than bare Ranges: the ⚠ is the only status mark that
+    // asks the author to DO something, so it is the only one that carries a
+    // hover saying what (see STALE_HOVER_MESSAGE).
+    const staleRanges: vscode.DecorationOptions[] = [];
     const failRanges: vscode.Range[] = [];
     const runningRanges: vscode.Range[] = [];
     const skipRanges: vscode.Range[] = [];
@@ -257,7 +281,9 @@ export class DecorationManager implements vscode.Disposable {
         case 'pass': passRanges.push(r); break;
         case 'pass-cached': passCachedRanges.push(r); break;
         case 'pass-code-behind': codeBehindRanges.push(r); break;
-        case 'pass-stale': staleRanges.push(r); break;
+        case 'pass-stale':
+          staleRanges.push({ range: r, hoverMessage: STALE_HOVER_MESSAGE });
+          break;
         case 'fail': failRanges.push(r); break;
         case 'running': runningRanges.push(r); break;
         case 'skip': skipRanges.push(r); break;

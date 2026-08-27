@@ -21,7 +21,7 @@ import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
-import { generateReport, getPrimaryModel, buildReportBaseName } from '../report/generator.js';
+import { generateReport, getPrimaryModel, buildReportBaseName, countStepOrigins } from '../report/generator.js';
 import { appendRunHistory } from '../report/history-appender.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { diagnoseFailure } from '../ai/diagnose.js';
@@ -438,6 +438,20 @@ export async function runTest(
   const lastRunSteps: LastRunStep[] = [];
   const keepLastRun = !extras.codeBehindDisabled && !extras.codeBehindCandidates;
 
+  /**
+   * What the steps that healed under AI cost in tokens
+   * (stories/codebehind-selector-ambiguity.md §"A healed run stops reporting
+   * as a clean pass") — the price the author pays again on every run until
+   * the entries are repaired, which is the figure the report's banner names.
+   *
+   * There is no per-step token field to read: `TokenTracker` accumulates a
+   * run-wide total, so attribution is the total's delta across the step.
+   * Steps run one at a time, so between the two reads the only AI calls are
+   * that step's.
+   */
+  let healedTokens = 0;
+  let tokensAtStepStart = 0;
+
   // Hoisted so the `finally` can read the run outcome + mutate the report after
   // the browser is closed (to attach `videoRelPath`). `report` is assigned the
   // SAME object that's returned, so the in-`finally` mutation is visible to the
@@ -494,6 +508,8 @@ export async function runTest(
     const recordLastRun = (i: number, result: StepResult): void => {
       const binding = codeBehind.bindingFor(i);
       const stale = result.codeBehindStale;
+      // The AI turn this step needed only because its entry threw.
+      if (stale) healedTokens += Math.max(0, tokenTracker.total - tokensAtStepStart);
       lastRunSteps.push({
         index: i + 1,
         source: binding?.source ?? test.expansion?.rawSteps[i] ?? test.steps[i] ?? '',
@@ -763,6 +779,11 @@ export async function runTest(
       // resolved password would always print. Masked; the step itself runs
       // with the real value.
       logger.step(i + 1, test.steps.length, redact(instruction, secretsNow()));
+
+      // Baseline for this step's token attribution — taken AFTER the
+      // `beforeEach` hooks so their turns are not billed to the step
+      // (`recordLastRun` reads it back once the step is done).
+      tokensAtStepStart = tokenTracker.total;
 
       // Handle [input: variable_name] steps — pause for user input
       const inputStep = parseInputStep(instruction);
@@ -1157,6 +1178,11 @@ export async function runTest(
     logger.info(`Tokens used: ${tokenTracker.getSummary()}`);
 
     const dataRowVal = dataRowIndex !== undefined ? dataRowIndex + 1 : undefined;
+    // Steps that passed only because a broken entry healed under AI. Counted
+    // by the same helper the report's origins row uses, so the banner and that
+    // row can never disagree — and it already excludes hook and ad-hoc rows,
+    // which are not steps of the test.
+    const healedSteps = countStepOrigins(stepResults).stale;
     // Everything downstream of here — the HTML report, the diagnosis prompt,
     // the run-history line, `aiui run`'s failed-steps summary — sees the
     // masked copy. The step results themselves (and the recording written
@@ -1180,6 +1206,13 @@ export async function runTest(
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
       ...(dataRowVal !== undefined && { dataRow: dataRowVal }),
       ...(humanIntervened && { humanIntervened: true }),
+      // Omitted (not 0) on a run that healed nothing: an unchanged run writes
+      // an unchanged report. `status` above stays 'passed' on purpose — see
+      // the field's doc comment in report/types.ts.
+      ...(healedSteps > 0 && {
+        healedSteps,
+        ...(healedTokens > 0 && { healedTokens }),
+      }),
       ...(strictLoadError !== undefined && { error: strictLoadError }),
     }, secretsNow());
 

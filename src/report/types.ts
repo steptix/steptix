@@ -1,4 +1,5 @@
 import type { AIAction, AssertionEvaluation } from '../ai/types.js';
+import type { ActionTargeting } from '../browser/actions.js';
 
 export type StepStatus = 'passed' | 'failed' | 'skipped';
 
@@ -28,6 +29,19 @@ export interface SubActionResult {
   error?: string;
   /** Populated for api_call sub-actions */
   apiCallData?: ApiCallData;
+  /**
+   * What the runtime found at the instant it acted — how many elements the
+   * selector matched, how many of those were visible, and a verified selector
+   * for the one it touched (stories/codebehind-selector-ambiguity.md).
+   *
+   * The sub-action record is where the measurement rides from the executor to
+   * generation: `actionsOf` merges it onto the action before the transcript is
+   * redacted and written. Absent on ordinary runs — it is measured only in a
+   * compile mode, plus the visible count alone when
+   * `browser.ambiguousTarget: 'fail'` is on — and absent whenever measuring
+   * was impossible, which is never an error.
+   */
+  targeting?: ActionTargeting;
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;
   /** ISO 8601 timestamp when this sub-action completed */
@@ -304,6 +318,34 @@ export interface TestReport {
    *  "FAILED" banner with an amber "ABORTED" state. `status` itself stays a
    *  valid `StepStatus` so older report consumers still parse the file. */
   aborted?: boolean;
+  /**
+   * How many steps healed under AI after their code-behind entry threw — the
+   * steps carrying `codeBehindStale`
+   * (stories/codebehind-selector-ambiguity.md §"A healed run stops reporting
+   * as a clean pass").
+   *
+   * A separate field rather than a new `StepStatus`, for the same reason
+   * `aborted` above and `interrupted` on a step are: `status` is shared with
+   * steps, and `leadingPassed` in codebehind/compile.ts breaks its loop on
+   * `status !== 'passed'` to decide how much of a recording is usable — so a
+   * healed step that stopped being `'passed'` would make a compile silently
+   * truncate the prefix. `status` stays `'passed'`; this drives the distinct
+   * amber "PASSED — N steps healed" banner and `aiui run --fail-on-healed`.
+   *
+   * Omitted (not `0`) on a run that healed nothing, so an unchanged run
+   * writes an unchanged report.
+   */
+  healedSteps?: number;
+  /**
+   * AI tokens spent on those healed steps — the recurring price of leaving the
+   * entries broken, which is the whole point of surfacing the healing at all.
+   *
+   * Measured as the run's token delta across each healed step, so it is only
+   * present on paths that track it. Absent means "not attributed", never
+   * "zero": the banner then names the count alone rather than inventing a
+   * number.
+   */
+  healedTokens?: number;
   /** Path to the session `.webm` RELATIVE to the report HTML (e.g.
    *  `videos/<timestamp>-<test>.webm`). Set only when video recording kept this
    *  run (mode 'on', or 'retain-on-failure' on a failed/aborted run). Drives the
