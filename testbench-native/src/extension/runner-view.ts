@@ -40,6 +40,7 @@ export class TestBenchRunnerView implements vscode.WebviewViewProvider {
     private readonly context: vscode.ExtensionContext,
     private readonly tracker: ActiveFileTracker,
   ) {
+    this.recording = context.extensionMode === vscode.ExtensionMode.Test;
     tracker.onChange((snap) => this.postActiveFile(snap));
   }
 
@@ -58,6 +59,13 @@ export class TestBenchRunnerView implements vscode.WebviewViewProvider {
    */
   private readonly sent: HostToWebviewMsg[] = [];
   private static readonly SENT_CAP = 2000;
+  /**
+   * Only a test window records. In a real one the buffer would hold thousands
+   * of live messages — `activeFile` carries the WHOLE document text and is
+   * posted on every selection change, and a `step:fail` runEvent carries a
+   * base64 screenshot — for the benefit of a hook nothing there ever calls.
+   */
+  private readonly recording: boolean;
   /** How many messages have EVER been posted — the index space a caller marks
    *  in. The buffer drops from the front once it is full, so a plain array
    *  index stops meaning anything the moment that happens. */
@@ -77,10 +85,12 @@ export class TestBenchRunnerView implements vscode.WebviewViewProvider {
   /** Forward a host→webview message to every attached surface. Posts to a
    *  not-yet-ready webview are still safe — VS Code queues them. */
   post(msg: HostToWebviewMsg): void {
-    this.sent.push(msg);
-    this.sentTotal += 1;
-    if (this.sent.length > TestBenchRunnerView.SENT_CAP) {
-      this.sent.splice(0, this.sent.length - TestBenchRunnerView.SENT_CAP);
+    if (this.recording) {
+      this.sent.push(msg);
+      this.sentTotal += 1;
+      if (this.sent.length > TestBenchRunnerView.SENT_CAP) {
+        this.sent.splice(0, this.sent.length - TestBenchRunnerView.SENT_CAP);
+      }
     }
     for (const a of this.attachments) {
       void a.webview.postMessage(msg);

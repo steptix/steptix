@@ -134,15 +134,19 @@ class RunControllerRegistry implements vscode.Disposable {
     // leaves whichever key the last run edge happened to set: a running test
     // shows Run (its Stop and Pause gone for the rest of its run), and a test
     // that is doing nothing shows Stop and Pause for someone else's run.
-    this.trackerSub = tracker.onChange((snap) => {
-      // The strip is the ACTIVE file's, and the webview is one surface shared
-      // by every controller — so whenever the active file changes, tell the
-      // panel what that file's compile is doing (or that it has none). This is
-      // what restores a strip mid-tail when the author switches back.
-      this.postCompileStripFor(snap.uri);
+    this.trackerSub = tracker.onChange(() => {
       const now = this.activeSignature();
       if (now === this.lastActiveSignature) return;
       this.lastActiveSignature = now;
+      // The strip is the ACTIVE file's, and the webview is one surface shared
+      // by every controller — so when the active file changes, tell the panel
+      // what THAT file's compile is doing (or that it has none). This is what
+      // restores a strip mid-tail when the author switches back.
+      //
+      // Behind the dedupe on purpose: `onChange` fires on selection moves and
+      // edits as well as editor switches, and a message per keystroke would
+      // re-render the panel on every cursor move for the length of a compile.
+      this.postCompileStripFor(now === '<none>' ? null : now);
       this.refreshRunningContext();
     });
   }

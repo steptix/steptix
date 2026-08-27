@@ -191,15 +191,15 @@ function CompileStrip({ state }) {
         <div style={{ opacity: 0.7, paddingLeft: 20, marginTop: 1 }}>{detail}</div>
       )}
       <div
-        // A 2px rule under the text: determinate when the server sent counts,
-        // and a full-width dim bar when it did not (an older server sends no
-        // `compile:progress`, and a bar pretending to a position it does not
-        // have would be a lie).
+        // A 2px rule under the text: a dim track, filled to the fraction the
+        // server reported. With no counts (an older server sends no
+        // `compile:progress`) the track stays empty rather than pretending to
+        // a position it does not have — the spinner is what says "working".
         style={{
           height: 2,
           marginTop: 6,
           background: "var(--vscode-progressBar-background, #0e70c0)",
-          opacity: fraction === null ? 0.25 : 0.25,
+          opacity: 0.25,
         }}
       >
         {fraction !== null && (
@@ -449,7 +449,7 @@ function TestBenchRunner() {
           setRerunEdits({});
           break;
         case "compileEvent":
-          log(msg.line, msg.kind ?? "info", msg.uri);
+          log(msg.line, "info", msg.uri);
           break;
         case "compileProgress":
           // `state: null` takes the strip down. Kept per file so switching
@@ -914,7 +914,7 @@ function TestBenchRunner() {
             title="Run this test once and generate code-behind for every step that ran under AI, then offer the result as a diff. The entries are unproven — the next run proves them."
           >
             <CodeBehindIcon style={{ marginRight: 5 }} />
-            Run &amp; Compile
+            {"Run & Compile"}
           </button>
         </div>
         {(passCount > 0 || failCount > 0) && (

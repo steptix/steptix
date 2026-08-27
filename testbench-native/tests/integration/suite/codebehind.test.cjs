@@ -1255,6 +1255,41 @@ describe('TestBench code-behind compile', function () {
       assert.deepEqual(hooks.compileTails(), []);
     });
 
+    it('stays down while the run is still executing steps', async () => {
+      // Generation trails the browser, so a current server's `generating…`
+      // frames arrive WHILE later steps are still running. Treating one as
+      // "the tail has begun" put the strip up mid-run, on top of the steps
+      // that were already reporting their own progress.
+      fake.streamScripts = [
+        (f) => {
+          f.push({ type: 'step:start', line: 8 });
+          f.push({ type: 'step:pass', line: 8 });
+          // Step 1's entry is generated while step 2 runs — progress frame
+          // first, prose second, as the server orders them.
+          f.push({ type: 'compile:progress', done: 0, total: 2, phase: 'generate', step: 1, line: 8, reviewPending: true });
+          f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generating…' });
+          f.push({ type: 'step:start', line: 9 });
+          f.push({ type: 'compile:progress', done: 1, total: 2, phase: 'generate', reviewPending: true });
+          f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' });
+          f.push({ type: 'step:pass', line: 9 });
+        },
+      ];
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      await waitFor('both steps reported', () => posted('compileEvent').length >= 2);
+
+      assert.deepEqual(
+        strips().map((m) => m.state).filter(Boolean),
+        [],
+        'the strip went up while the run was still painting steps',
+      );
+      assert.deepEqual(hooks.compileTails(), []);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
     it('stamps every panel message with the file it belongs to', async () => {
       fake.streamScripts = [tailScript(() => stepsPath, 'export default defineSteps([]);\n')];
       const uri = vscode.Uri.file(mdPath).toString();

@@ -385,6 +385,17 @@ export class RunController {
    * every controller; the strip is one file's news.
    */
   private compileStrip: CompileTail | null = null;
+  /**
+   * Has this run's server sent any `compile:progress` frame?
+   *
+   * The one thing that tells a current server from an older one, and it has to
+   * be a fact rather than a guess: generation starts while the run is still
+   * executing later steps, so a `compile:step` frame is NOT evidence the tail
+   * has begun — on a current server it is routinely mid-run. The server emits
+   * the progress frame ahead of the prose for exactly this reason, so by the
+   * time a `compile:step` arrives this flag is already true there.
+   */
+  private sawCompileProgress = false;
   /** Read by the registry when this file becomes active again, to re-post the
    *  strip the webview may never have been told about. */
   get compileTailState(): CompileTail | null {
@@ -1372,11 +1383,12 @@ export class RunController {
    *
    * - a `compile:progress` frame marked `runEnded`, which is the server
    *   saying the last step has ended;
-   * - the first `compile:step` frame, which is all an OLDER server gives us.
-   *   That one can land while steps are still running, so on that path the
-   *   strip appears at the first generation rather than at run end. It is the
-   *   degraded form on purpose: an old server puts nothing on the wire at run
-   *   end, so there is nothing better to wait for.
+   * - the first `compile:step` frame on a server that has sent no progress at
+   *   all, which is all an OLDER one gives us. That trigger can land while
+   *   steps are still running, so on that path the strip appears at the first
+   *   generation rather than at run end. It is the degraded form on purpose:
+   *   an old server puts nothing on the wire at run end, so there is nothing
+   *   better to wait for.
    */
   private beginCompileTail(tail?: CompileTail): void {
     if (this.compileStrip === null) {
@@ -1801,6 +1813,7 @@ export class RunController {
     // turned away cannot wipe the proposal of the run that turned it away.
     this.compileToken += 1;
     this.compileResult = undefined;
+    this.sawCompileProgress = false;
     // A tail left up by a previous run — a stream that dropped before its
     // result — belongs to nothing now. The new run raises its own.
     this.endCompileTail();
@@ -2706,16 +2719,21 @@ export class RunController {
         // Numbers only — no log line (see `compileLogLine`). `runEnded` is the
         // server saying the steps are done, which is the strip's cue; frames
         // before it belong to a run that is still painting its own progress.
+        this.sawCompileProgress = true;
         const tail = this.tailFrom(event);
         if (event.runEnded === true) this.beginCompileTail(tail);
         else if (this.compileStrip !== null) this.updateCompileTail(tail);
         continue;
       }
       if (event.type === 'compile:step' || event.type === 'compile:result') {
-        // An older server sends no `compile:progress`, so its first compile
-        // frame is the only cue the tail has begun; the strip then runs in its
-        // indeterminate form.
-        if (event.type === 'compile:step') this.beginCompileTail();
+        // An older server sends no `compile:progress` at all, so its first
+        // compile frame is the only cue the tail has begun; the strip then runs
+        // in its indeterminate form. On a current server this must NOT fire —
+        // its start frames arrive mid-run, behind a progress frame that has
+        // already set the flag.
+        if (event.type === 'compile:step' && !this.sawCompileProgress) {
+          this.beginCompileTail();
+        }
         const line = compileLogLine(event);
         if (line !== null) this.logCompileLine(line, log);
         if (event.type === 'compile:result') {

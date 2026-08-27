@@ -775,8 +775,6 @@ export interface HostSkillRerunAvailableMsg {
 export interface HostCompileEventMsg {
   type: 'compileEvent';
   line: string;
-  /** Kind, for the log's colouring. Absent reads as `'info'`. */
-  kind?: 'info' | 'warn' | 'error' | 'pass' | 'fail';
   /** The document this line belongs to — see `HostRunEventMsg.uri`. */
   uri?: string;
 }

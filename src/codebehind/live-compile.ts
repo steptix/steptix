@@ -680,8 +680,16 @@ export class LiveCompiler {
     // BEFORE the model call, which is the whole point: the completion frame
     // below arrives one model call later, and that gap is the silence this
     // story exists to fill.
-    this.stepEvent('generate', step, 'generating…');
+    //
+    // The structured frame LEADS the prose, and the order is load-bearing: a
+    // client tells a current server from an older one by whether any
+    // `compile:progress` has arrived, and generation starts while the run is
+    // still executing later steps. Emit the prose first and the client sees a
+    // `compile:step` with no progress yet, reads it as an older server, and
+    // raises its tail UI mid-run — which is exactly the state the run's own
+    // steps are already reporting.
     this.emitProgress('generate', { step: step.number, line: this.plan[step.index]?.line });
+    this.stepEvent('generate', step, 'generating…');
     const generated = await this.askModel(step, input);
     const applied = await applyGenerated(this.candidate, step, generated, this.stepEvent, 'generate');
     if (applied.kind === 'entry') this.compiled.push(step.number);

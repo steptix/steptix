@@ -424,6 +424,17 @@ it('puts the tail on the wire: a forecast at run end, then counts and a Review s
 
     // Review announces itself BEFORE its model call — the longest single call
     // the compile makes, and the one that used to say nothing until it was done.
+    // Order, not just presence: the structured frame LEADS its prose. A client
+    // tells a current server from an older one by whether any progress frame
+    // has arrived, and generation starts mid-run — prose first would read as
+    // an older server and put the tail UI up while the steps are still going.
+    const firstStart = frames.findIndex(
+      (f) => f.type === 'compile:step' && f.message === 'generating…',
+    );
+    const firstProgress = frames.findIndex((f) => f.type === 'compile:progress');
+    expect(firstProgress).toBeGreaterThan(-1);
+    expect(firstProgress).toBeLessThan(firstStart);
+
     const review = frames.filter((f) => f.type === 'compile:step' && f.phase === 'review');
     expect(String(review[0]!.message)).toMatch(/^reviewing .*\.steps\.ts…$/);
     expect(progress.some((f) => f.phase === 'review')).toBe(true);
