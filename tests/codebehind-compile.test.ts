@@ -432,6 +432,43 @@ export default defineSteps([
     expect(after?.steps[0]?.error).toBeUndefined();
   });
 
+  it('selects a step a keyless run failed on, from the row that run wrote', async () => {
+    // The remedy the keyless failure recommends — "recompile or repair this
+    // step where AI is available" — is only true if the row a keyless run
+    // leaves is selectable here (stories/keyless-replay-and-gateway-env.md
+    // §Part B). The row is an ordinary stale row plus `healSkipped`, which
+    // exists to keep the heal streak from advancing and must not change what
+    // selection sees.
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', EXISTING);
+    await writeLastRun(md, [
+      {
+        index: 1,
+        source: 'Enter the booking code',
+        status: 'failed',
+        fromCodeBehind: true,
+        stale: true,
+        error: '#code went away',
+        healSkipped: true,
+      },
+    ]);
+    const test = await parseTestFile(md);
+    const { client } = scriptedClient([entryEnvelope('Enter the booking code'), REVIEW_NOOP]);
+    const { runner } = scriptedRunner(2, ['pass']);
+    const { events, onEvent } = collect();
+
+    await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+      select: { onlyStale: true },
+    });
+    expect(generatedSteps(events)).toEqual([1]);
+    // And the repair clears both flags, so a second `--only-stale` does not
+    // regenerate a step that is now fixed.
+    const after = await readLastRun(md);
+    expect(after?.steps[0]?.stale).toBe(false);
+    expect(after?.steps[0]?.healSkipped).toBeUndefined();
+  });
+
   it('--steps names the steps, and --all takes every eligible one', async () => {
     const md = await write('booking.md', TEST_MD);
     await write('booking.steps.ts', EXISTING);

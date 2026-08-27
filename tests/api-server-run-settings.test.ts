@@ -84,11 +84,21 @@ vi.mock('../src/context/loader.js', () => ({
   loadContextFiles: vi.fn(async () => ({ files: [], combined: '' })),
 }));
 
+/** Shape of the AI config as this file cares about it — the three values a
+ *  client's `.env` can move (stories/keyless-replay-and-gateway-env.md). */
+type MockAiConfig = { model: string; apiKey?: string | undefined; gatewayUrl: string };
+
 /** Every `syncAuth` the server made, across every session, in order. This is
  *  the only place the model actually takes effect — the executor is handed a
  *  config but the AI call goes through the client — so a model test that did
  *  not look here would be testing the wrong thing. */
-const syncAuthCalls: { model: string; apiKey: string | undefined }[] = [];
+const syncAuthCalls: { model: string; apiKey: string | undefined; gatewayUrl: string | undefined }[] = [];
+
+/** The config each AiClient was CONSTRUCTED with, in order. `syncAuth` alone
+ *  cannot tell the whole gateway story: a brand-new session's client is built
+ *  from `applyEnvToAiConfig` directly, so this is where a dropped env override
+ *  would show up on the very first batch. */
+const aiClientConfigs: MockAiConfig[] = [];
 
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
@@ -97,17 +107,19 @@ vi.mock('../src/ai/client.js', () => ({
      *  into the config object it was handed, so a mock that merely recorded the
      *  call could not catch the aliasing bug where that object is the SERVER's
      *  own `config.ai`. */
-    config: { model: string; apiKey?: string | undefined };
-    constructor(config: { model: string; apiKey?: string | undefined }) {
+    config: MockAiConfig;
+    constructor(config: MockAiConfig) {
       this.config = config;
+      aiClientConfigs.push({ ...config });
     }
     chat = vi.fn(async () => '{}');
-    syncAuth = vi.fn((model: string, apiKey: string | undefined) => {
-      syncAuthCalls.push({ model, apiKey });
+    syncAuth = vi.fn((model: string, apiKey: string | undefined, gatewayUrl?: string) => {
+      syncAuthCalls.push({ model, apiKey, gatewayUrl });
       const changed = model !== this.config.model;
       this.config.model = model;
       if (apiKey === undefined) delete this.config.apiKey;
       else this.config.apiKey = apiKey;
+      if (gatewayUrl !== undefined) this.config.gatewayUrl = gatewayUrl;
       return changed ? `AI model → ${model}` : null;
     });
   },
@@ -169,6 +181,10 @@ const stepMock = vi.mocked(executeStep);
 const API_KEY = 'run-settings-key';
 const SERVER_MODEL = 'server/base-model';
 const SERVER_AI_KEY = 'server-ai-key';
+/** Deliberately NOT the built-in default: a gateway test against a server
+ *  already sitting on the default URL could not tell an applied override from
+ *  a dropped one. Same reason capture is off in the config below. */
+const SERVER_GATEWAY = 'https://server.gateway.test';
 
 /**
  * The server's own config, chosen so every override is OBSERVABLE.
@@ -183,6 +199,7 @@ const testConfig: Config = {
     ...DEFAULT_CONFIG.ai,
     model: SERVER_MODEL,
     apiKey: SERVER_AI_KEY,
+    gatewayUrl: SERVER_GATEWAY,
     sendScreenshots: false,
   },
   browser: {
@@ -208,21 +225,37 @@ async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseU
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };
 }
 
-async function api(method: string, p: string, body?: unknown): Promise<{ status: number; body: any }> {
+/** `base` defaults to the keyed server above; the keyless block below stands up
+ *  a second one, because whether a run has AI is a property of the config the
+ *  process booted with. */
+async function api(
+  method: string,
+  p: string,
+  body?: unknown,
+  base: string = baseUrl,
+): Promise<{ status: number; body: any }> {
   const opts: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(`${baseUrl}${p}`, opts);
+  const res = await fetch(`${base}${p}`, opts);
   return { status: res.status, body: await res.json() };
+}
+
+/** The whole options object the executor was handed on the Nth (0-based) step
+ *  call. Some of what this story ships rides on the options rather than on the
+ *  config — `keyless` is deliberately NOT read off `config.ai` at the far end
+ *  — so an assertion on {@link configAt} alone cannot see it. */
+function optsAt(call: number): Record<string, unknown> {
+  const args = stepMock.mock.calls[call];
+  expect(args, `no executeStep call #${call}`).toBeDefined();
+  return args![3] as unknown as Record<string, unknown>;
 }
 
 /** The `config` the executor was handed on the Nth (0-based) step call. */
 function configAt(call: number): Config {
-  const args = stepMock.mock.calls[call];
-  expect(args, `no executeStep call #${call}`).toBeDefined();
-  return (args![3] as unknown as { config: Config }).config;
+  return optsAt(call)['config'] as Config;
 }
 
 /** The four values this story owns, as they reached the executor. */
@@ -243,12 +276,21 @@ function settingsAt(call: number): {
   };
 }
 
-async function run(sessionId: string, body: Record<string, unknown> = {}): Promise<any> {
-  const { status, body: result } = await api('POST', `/sessions/${sessionId}/steps`, {
-    steps: ['do a thing'],
-    sourceLines: [1],
-    ...body,
-  });
+async function run(
+  sessionId: string,
+  body: Record<string, unknown> = {},
+  base: string = baseUrl,
+): Promise<any> {
+  const { status, body: result } = await api(
+    'POST',
+    `/sessions/${sessionId}/steps`,
+    {
+      steps: ['do a thing'],
+      sourceLines: [1],
+      ...body,
+    },
+    base,
+  );
   expect(status, JSON.stringify(result)).toBe(200);
   return result;
 }
@@ -267,6 +309,7 @@ afterAll(async () => {
 beforeEach(() => {
   stepMock.mockClear();
   syncAuthCalls.length = 0;
+  aiClientConfigs.length = 0;
 });
 
 describe('runSettings reaching the executor', () => {
@@ -400,6 +443,8 @@ describe('the model override', () => {
     expect(syncAuthCalls.at(-1)).toEqual({
       model: 'override/model',
       apiKey: 'from-dot-env-key',
+      // No AI_GATEWAY_URL in this request's `.env`, so the server's own.
+      gatewayUrl: SERVER_GATEWAY,
     });
     // The key still comes from env — only the model is overridden.
     expect(syncAuthCalls.at(-1)?.apiKey).not.toBe(SERVER_AI_KEY);
@@ -442,6 +487,130 @@ describe('the model override', () => {
 
     await run('rs-model-clear');
     expect(syncAuthCalls.at(-1)?.model).toBe(SERVER_MODEL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AI_GATEWAY_URL (stories/keyless-replay-and-gateway-env.md Part A)
+//
+// Here rather than in a loader unit test because the loader is not on this
+// path at all: TestBench ships the project's `.env` as `request.env`, and the
+// server folds it in with `applyEnvToAiConfig`. A var added to the loader and
+// not there passes every loader test and does nothing through the extension —
+// the exact trap the codebehind-env-data work hit with `envName`.
+//
+// There is no `runSettings` gateway knob on purpose, so unlike the model there
+// is nothing above `.env` to lose to.
+// ---------------------------------------------------------------------------
+describe('AI_GATEWAY_URL from the request env', () => {
+  it('reaches the AiClient a new session is built with', async () => {
+    await run('gw-new', { env: { AI_GATEWAY_URL: 'https://llm.corp.example' } });
+
+    // Construction, not just the re-apply: the first batch of a session builds
+    // its client straight from `applyEnvToAiConfig`.
+    expect(aiClientConfigs.at(-1)?.gatewayUrl).toBe('https://llm.corp.example');
+    expect(syncAuthCalls.at(-1)?.gatewayUrl).toBe('https://llm.corp.example');
+  });
+
+  it('is trimmed, and a blank one leaves the server base', async () => {
+    await run('gw-blank', { env: { AI_GATEWAY_URL: '   ' } });
+    expect(syncAuthCalls.at(-1)?.gatewayUrl).toBe(SERVER_GATEWAY);
+
+    await run('gw-pad', { env: { AI_GATEWAY_URL: '  https://llm.corp.example  ' } });
+    expect(syncAuthCalls.at(-1)?.gatewayUrl).toBe('https://llm.corp.example');
+  });
+
+  it('an edit between batches re-points a REUSED session, with no recycle', async () => {
+    // Verification rule (4). The gateway is baked into the client's `baseURL`
+    // at build time, so this is the case that fails silently: the value is
+    // resolved correctly every batch and the session keeps calling the old
+    // endpoint until someone closes it.
+    await run('gw-reuse', { env: { AI_GATEWAY_URL: 'https://old.corp.example' } });
+    await run('gw-reuse', { env: { AI_GATEWAY_URL: 'https://new.corp.example' } });
+
+    // One session → one client, built with the OLD url — so the new one can
+    // only have arrived through syncAuth, which is the point.
+    expect(aiClientConfigs).toEqual([
+      expect.objectContaining({ gatewayUrl: 'https://old.corp.example' }),
+    ]);
+    expect(syncAuthCalls.at(-1)?.gatewayUrl).toBe('https://new.corp.example');
+  });
+
+  it('a removed line reverts to the server base rather than sticking', async () => {
+    await run('gw-revert', { env: { AI_GATEWAY_URL: 'https://llm.corp.example' } });
+    await run('gw-revert', { env: { AI_MODEL: 'from-dot-env' } });
+
+    expect(syncAuthCalls.at(-1)?.gatewayUrl).toBe(SERVER_GATEWAY);
+  });
+
+  it('does not leak into the server base, so a later session starts clean', async () => {
+    await run('gw-leak-a', { env: { AI_GATEWAY_URL: 'https://leaky.corp.example' } });
+    expect(testConfig.ai.gatewayUrl).toBe(SERVER_GATEWAY);
+
+    await run('gw-leak-b');
+    expect(aiClientConfigs.at(-1)?.gatewayUrl).toBe(SERVER_GATEWAY);
+    expect(syncAuthCalls.at(-1)?.gatewayUrl).toBe(SERVER_GATEWAY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless (stories/keyless-replay-and-gateway-env.md Part B)
+//
+// The server path decides keylessness for itself — `runTest`'s answer never
+// reaches it — and it decides it from a value that is NOT on the config the
+// executor is handed, so nothing in the assertions above can see it. Deleting
+// the flag entirely left the whole suite green until this block existed.
+//
+// A second server, because a run is keyless when the config it booted with has
+// no key: the one above deliberately has one, and overrides only ever ADD a
+// key on this path.
+// ---------------------------------------------------------------------------
+describe('keyless reaching the executor', () => {
+  let keylessServer: Server;
+  let keylessBase: string;
+
+  beforeAll(async () => {
+    // Built from DEFAULT_CONFIG.ai rather than by deleting a key from
+    // `testConfig.ai`, and DEFAULT_CONFIG carries no `apiKey` at all — the
+    // minimum-scenario rule: a fixture that inherits the dev machine's key
+    // would condition the very thing under test out of the test.
+    const keylessConfig: Config = {
+      ...testConfig,
+      ai: { ...DEFAULT_CONFIG.ai, model: SERVER_MODEL, gatewayUrl: SERVER_GATEWAY },
+    };
+    const { app } = createApiServer(keylessConfig);
+    ({ server: keylessServer, baseUrl: keylessBase } = await listenOnRandomPort(app));
+  }, 30_000);
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) =>
+      keylessServer.close((e) => (e ? reject(e) : resolve())),
+    );
+  });
+
+  it('passes keyless:true when the server has no key', async () => {
+    await run('kl-none', {}, keylessBase);
+    expect(optsAt(0)['keyless']).toBe(true);
+  });
+
+  it('drops it again when the request\'s .env ships a key', async () => {
+    // THE case. `runConfig.ai` is rebuilt from the server's startup config with
+    // only run settings re-sourced, so on this run it still has no key — read
+    // the flag off it instead of off `applyEnvToAiConfig`'s result and a
+    // project that brought its own key would be refused a heal on a keyless
+    // server, with the test above still passing.
+    await run('kl-env-key', { env: { AI_API_KEY: 'from-dot-env-key' } }, keylessBase);
+
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+    expect(configAt(0).ai.apiKey).toBeUndefined();
+    // ...and the key really did arrive — otherwise the assertion above would
+    // pass for the wrong reason.
+    expect(syncAuthCalls.at(-1)?.apiKey).toBe('from-dot-env-key');
+  });
+
+  it('is absent on a keyed server, so a keyed run\'s options are unchanged', async () => {
+    await run('kl-keyed');
+    expect(optsAt(0)).not.toHaveProperty('keyless');
   });
 });
 

@@ -73,12 +73,18 @@ export function isSkippableStep(instruction: string): boolean {
 
 /**
  * Build an AiConfig with optional env overrides applied over a base. Only
- * `apiKey` and `model` are honoured today — these are the env knobs a `.env`
- * shipped from a client realistically wants to override. Always pass the server
- * base config (`this.config.ai`) as `baseConfig`, never a session's current
- * config: overrides apply only on non-empty values, so basing on the fixed
- * server config lets a removed `.env` line revert cleanly instead of sticking
- * on the prior override. Server process.env is never mutated.
+ * `apiKey`, `model` and `gatewayUrl` are honoured today — these are the env
+ * knobs a `.env` shipped from a client realistically wants to override, and
+ * this is the ONLY place they land on the server path: the loader's
+ * `withEnvDefaults` reads the server's own process env, which is not where a
+ * client's `.env` arrives. A var added there and not here works in every
+ * loader unit test and does nothing at all through TestBench.
+ *
+ * Always pass the server base config (`this.config.ai`) as `baseConfig`, never
+ * a session's current config: overrides apply only on non-empty values, so
+ * basing on the fixed server config lets a removed `.env` line revert cleanly
+ * instead of sticking on the prior override. Server process.env is never
+ * mutated.
  *
  * **Always returns a fresh object, even with nothing to apply.** It used to
  * return `baseConfig` itself on the no-overrides path, which handed
@@ -103,6 +109,15 @@ export function applyEnvToAiConfig(
   const model = envOverrides['AI_MODEL'];
   if (typeof model === 'string' && model.trim().length > 0) {
     next.model = model.trim();
+  }
+  // `aibroker/` models route through whatever endpoint this names
+  // (stories/keyless-replay-and-gateway-env.md). A corporate project points at
+  // its org's internal gateway from its own `.env`, so the value has to travel
+  // with the rest of that `.env` rather than being pinned in the server's
+  // startup config — the server may not even be in the same repo.
+  const gatewayUrl = envOverrides['AI_GATEWAY_URL'];
+  if (typeof gatewayUrl === 'string' && gatewayUrl.trim().length > 0) {
+    next.gatewayUrl = gatewayUrl.trim();
   }
   return next;
 }

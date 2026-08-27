@@ -35,10 +35,28 @@ export interface LastRunStep {
   status: StepStatus;
   /** True when the step ran its code-behind entry rather than calling the AI. */
   fromCodeBehind: boolean;
-  /** True when an entry threw and the step healed under AI. */
+  /**
+   * True when an entry threw — the step needs regenerating, which is the one
+   * question this file answers for `--only-stale` and the repair prompt.
+   *
+   * Usually that means the step healed under AI. On a keyless run it means the
+   * step failed instead, because there was no AI to heal it with
+   * (stories/keyless-replay-and-gateway-env.md §Part B); see `healSkipped`.
+   */
   stale: boolean;
   /** What the entry threw, when `stale`. */
   error?: string;
+  /**
+   * The entry threw and nothing healed it — a keyless run
+   * (stories/keyless-replay-and-gateway-env.md §Part B).
+   *
+   * Only `staleRuns` reads it, and only to leave the streak alone: the count
+   * below means "healed under AI N runs in a row", and a run with no AI healed
+   * nothing. Everything else about the row is an ordinary stale row, on
+   * purpose — the compile that repairs it does not care why nobody repaired it
+   * sooner.
+   */
+  healSkipped?: boolean;
   /**
    * How many runs in a row this step has healed under AI
    * (stories/codebehind-selector-ambiguity.md §"A healed run stops reporting
@@ -114,9 +132,14 @@ function carryStaleRuns(previous: LastRunStep[], steps: LastRunStep[]): LastRunS
     const key = rowKey(step);
     const occurrence = seen.get(key) ?? 0;
     seen.set(key, occurrence + 1);
-    if (!step.stale) {
+    if (!step.stale || step.healSkipped) {
       // Not healing this run — no streak. Deleted rather than written as 0 so
       // a clean sidecar stays as quiet as it was before the field existed.
+      //
+      // `healSkipped` lands here too: the row IS stale (the entry broke and
+      // wants regenerating) but the run had no AI, so counting it would make
+      // the marker say "healed under AI (3 runs in a row)" about a machine
+      // that has never healed anything.
       const { staleRuns: _dropped, ...rest } = step;
       return rest;
     }
@@ -177,6 +200,9 @@ export async function clearStale(
     if (!step.stale || !fixed.has(step.index)) continue;
     step.stale = false;
     delete step.error;
+    // Whatever the row was stale FOR is gone with the regeneration, including
+    // the "nobody could heal this" note a keyless run left.
+    delete step.healSkipped;
     // The streak ends with the regeneration, not with the next run that
     // proves it: leaving the count would make a repaired step still read
     // "healed under AI (3 runs in a row)".

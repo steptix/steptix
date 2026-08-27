@@ -359,6 +359,21 @@ function renderDiagnosis(diagnosis: FailureDiagnosis): string {
     ? renderAiInteraction(diagnosis.aiInteraction)
     : '';
 
+  // No fix, no section. An empty box under a "Suggested fix" heading reads as
+  // a rendering bug, and the diagnosis that has nothing to suggest is usually
+  // the one that never ran (the keyless placeholder,
+  // stories/keyless-replay-and-gateway-env.md §Part B). Evidence keeps its
+  // placeholder line instead: "(no specific observations cited)" is itself a
+  // finding about a diagnosis that did run.
+  const fixHtml = diagnosis.suggestedFix.trim() === ''
+    ? ''
+    : `
+  <div class="diagnosis-section">
+    <div class="diagnosis-section-label">Suggested fix</div>
+    <div class="diagnosis-fix">${escapeHtml(diagnosis.suggestedFix)}</div>
+  </div>
+`;
+
   return `<div class="diagnosis-block">
   <div class="diagnosis-header">
     <span class="diagnosis-title">🔎 Root Cause Analysis</span>
@@ -376,11 +391,7 @@ function renderDiagnosis(diagnosis: FailureDiagnosis): string {
     ${evidenceHtml}
   </div>
 
-  <div class="diagnosis-section">
-    <div class="diagnosis-section-label">Suggested fix</div>
-    <div class="diagnosis-fix">${escapeHtml(diagnosis.suggestedFix)}</div>
-  </div>
-
+${fixHtml}
   ${aiInteractionHtml ? `<div class="diagnosis-section">${aiInteractionHtml}</div>` : ''}
 </div>`;
 }

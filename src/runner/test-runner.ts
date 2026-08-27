@@ -12,6 +12,7 @@ import {
 import type { ParsedTest, TestConfig, TestInstance } from '../parser/types.js';
 import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
+import { aiConfigured } from '../config/loader.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type CdpLaunchOptions } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
@@ -38,6 +39,16 @@ import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues } from '../parser/interpolate-env-data.js';
 import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
+
+/**
+ * What the report says in place of a root-cause analysis when the run had no
+ * AI to produce one (stories/keyless-replay-and-gateway-env.md §Part B).
+ *
+ * One line, and no advice: a diagnosis that was never attempted has nothing
+ * to suggest, and the failed step already carries the "recompile where AI is
+ * available" instruction.
+ */
+export const KEYLESS_DIAGNOSIS_SKIPPED = 'Diagnosis skipped: AI is not configured.';
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
@@ -284,6 +295,20 @@ export async function runTest(
   const tokenTracker = new TokenTracker();
   const aiClient = new AiClient(config.ai, tokenTracker);
   const apiResponseStore = new ApiResponseStore();
+  /**
+   * This run has no AI at all (stories/keyless-replay-and-gateway-env.md
+   * §Part B). On the CLI path `config.ai` IS the fully resolved config — env,
+   * project `.env`, config file and machine floor have all applied by the
+   * time `runTest` is called — so it is the right thing to read here. The
+   * server path resolves its own and passes the answer into `executeStep`
+   * itself.
+   *
+   * Two things change: a broken code-behind entry fails instead of healing,
+   * and the post-failure diagnosis pass is skipped. Both are decided BEFORE
+   * calling AI, so the report states an intention rather than reporting a
+   * caught auth error.
+   */
+  const keyless = !aiConfigured(config.ai);
 
   const baseUrl = test.config.baseUrl;
   const conversationHistory: string[] = [];
@@ -483,7 +508,12 @@ export async function runTest(
       i: number,
     ): Pick<
       StepExecutorOptions,
-      'codeBehind' | 'codeBehindStrict' | 'captureStepContext' | 'signal' | 'envData'
+      | 'codeBehind'
+      | 'codeBehindStrict'
+      | 'keyless'
+      | 'captureStepContext'
+      | 'signal'
+      | 'envData'
     > => {
       const binding = codeBehind.bindingFor(i);
       return {
@@ -492,6 +522,9 @@ export async function runTest(
         // `step.getVar('data.url')` reads the same value.
         ...(test.envData && { envData: test.envData }),
         ...(extras.codeBehindStrict !== undefined && { codeBehindStrict: extras.codeBehindStrict }),
+        // Only when true: absent is "not keyless", so a keyed run's options
+        // are byte-for-byte what they were before this feature existed.
+        ...(keyless && { keyless: true }),
         ...(extras.captureStepContext !== undefined && {
           captureStepContext: extras.captureStepContext,
         }),
@@ -510,6 +543,14 @@ export async function runTest(
       const stale = result.codeBehindStale;
       // The AI turn this step needed only because its entry threw.
       if (stale) healedTokens += Math.max(0, tokenTracker.total - tokensAtStepStart);
+      // A keyless run's broken entry: failed rather than healed, so it is
+      // deliberately not `codeBehindStale` in the result — but the sidecar
+      // exists to tell the next compile which entries need regenerating, and
+      // this one does. Recorded stale here and nowhere else, so the run's own
+      // heal accounting stays at zero
+      // (stories/keyless-replay-and-gateway-env.md §Part B).
+      const healSkipped = stale ? undefined : result.codeBehindHealSkipped;
+      const failure = stale ?? healSkipped;
       lastRunSteps.push({
         index: i + 1,
         source: binding?.source ?? test.expansion?.rawSteps[i] ?? test.steps[i] ?? '',
@@ -521,8 +562,9 @@ export async function runTest(
         ...(binding?.file !== undefined && { file: binding.file }),
         status: result.status,
         fromCodeBehind: result.fromCodeBehind === true,
-        stale: stale !== undefined,
-        ...(stale && { error: stale.error }),
+        stale: failure !== undefined,
+        ...(failure && { error: failure.error }),
+        ...(healSkipped && { healSkipped: true }),
       });
     };
 
@@ -1216,7 +1258,7 @@ export async function runTest(
       ...(strictLoadError !== undefined && { error: strictLoadError }),
     }, secretsNow());
 
-    if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
+    if (overallStatus === 'failed' && config.ai.diagnoseFailures && !keyless) {
       logger.info('Running failure diagnosis…');
       const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
         ...config.browser.domNoiseReduction,
@@ -1232,6 +1274,23 @@ export async function runTest(
         report.outputTokens = tokenTracker.outputTotal;
         logger.info(`Likely cause (${diagnosis.faultCategory}, ${diagnosis.confidence} confidence): ${diagnosis.rootCause}`);
       }
+    } else if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
+      // Keyless. `diagnoseFailures` stays default-true — keyless is a runtime
+      // condition, not a config edit the user should have to know to make — so
+      // the run says why it skipped rather than silently producing a report
+      // with no analysis in it. The note goes in the diagnosis slot itself, so
+      // the HTML report shows it exactly where the analysis would have been
+      // with no rendering change; the other fields are the least-claiming
+      // values the type allows, because this is a placeholder rather than an
+      // analysis (stories/keyless-replay-and-gateway-env.md §Part B).
+      logger.info(KEYLESS_DIAGNOSIS_SKIPPED);
+      report.diagnosis = {
+        rootCause: KEYLESS_DIAGNOSIS_SKIPPED,
+        faultCategory: 'unknown',
+        evidence: [],
+        suggestedFix: '',
+        confidence: 'low',
+      };
     }
 
     return report;

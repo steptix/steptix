@@ -15,7 +15,7 @@ import type { StepResult, SubActionResult } from '../../report/types.js';
 import type { MainToRendererEvents } from '../ipc-types.js';
 import type { BrowserSession } from '../../browser/manager.js';
 
-import { loadConfig } from '../../config/loader.js';
+import { aiConfigured, loadConfig } from '../../config/loader.js';
 import { parseTestFile } from '../../parser/markdown.js';
 import { clearSkillCache } from '../../skills/expander.js';
 import { expandTestInstances, parseTimeoutMs } from '../../runner/test-runner.js';
@@ -216,6 +216,15 @@ export class UIRunnerAdapter {
       csrfTokens: this.csrfTokens,
       resolvedParameters: this.resolvedParameters,
       ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
+      // A broken entry fails with the heal-skip copy instead of reaching AI
+      // (stories/keyless-replay-and-gateway-env.md §Part B). Read off
+      // `this.config.ai` — `loadConfig()` has already applied env, the project
+      // `.env`, the config file and the machine floor, and it is the same
+      // object `this.aiClient` was built from, so the flag cannot disagree
+      // with the client it is speaking for. The third executeStep call-site
+      // family: without this the UI path gets the reactive
+      // `AiNotConfiguredError` where the other two get the plain explanation.
+      ...(!aiConfigured(this.config.ai) && { keyless: true }),
     });
 
     // Emit sub-actions and screenshots
@@ -465,6 +474,10 @@ export class UIRunnerAdapter {
         csrfTokens: this.csrfTokens,
         resolvedParameters: this.resolvedParameters,
         ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
+        // Keyless, same as the steering call above — both call sites or
+        // neither: a run and a steer on the same machine must not disagree
+        // about whether there is AI to heal with.
+        ...(!aiConfigured(this.config.ai) && { keyless: true }),
       });
 
       // Emit sub-actions and screenshots

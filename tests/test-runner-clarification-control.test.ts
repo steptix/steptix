@@ -919,7 +919,11 @@ describe('test-runner — secrets stay out of what the run writes (stories/secre
       suggestedFix: 'Use a longer password than hunter2!x',
     });
     const config = makeConfig();
-    config.ai = { ...config.ai, diagnoseFailures: true };
+    // `apiKey` as well as the flag: a run with no key skips the diagnosis pass
+    // outright (stories/keyless-replay-and-gateway-env.md §Part B), and
+    // `DEFAULT_CONFIG` carries none — so without this there is no diagnosis
+    // left to mask.
+    config.ai = { ...config.ai, diagnoseFailures: true, apiKey: 'test-key' };
 
     try {
       const report = await runTest(

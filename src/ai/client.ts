@@ -1,6 +1,8 @@
 import { AIGateway } from '@pkent/aigateway';
 import type { CallOptions, Effort, V2ContentBlock } from '@pkent/aigateway';
 import type { AiConfig } from '../config/types.js';
+import { aiConfigured } from '../config/loader.js';
+import { DEFAULT_CONFIG } from '../config/defaults.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
@@ -63,6 +65,49 @@ const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> 
   authoring: { effort: 'high', maxTokens: 16384 },
 };
 
+/**
+ * What every AI request says when the machine has no key
+ * (stories/keyless-replay-and-gateway-env.md §Part B, "One reactive
+ * backstop"). Named rather than inlined so the runner's tests can assert the
+ * exact wording without restating it — a second copy is how the message and
+ * the promise drift apart.
+ *
+ * It replaces the gateway's bare `invalid_api_key`, which reads as "my config
+ * is broken" on a machine that was never meant to have a key. The sentences
+ * are the things the reader needs: what was resolved, that replay itself is
+ * unaffected, what to set, and the one non-obvious rule that can hide a key
+ * they know they have.
+ *
+ * It says "resolved to empty" rather than naming the files the key is missing
+ * from, because a blank `AI_API_KEY=` line — the one `.env.example` ships —
+ * BLOCKS the machine `.env` on purpose (`withMachineAiFloor` is a floor for
+ * unset values, not for empty ones), and that is how a project deliberately
+ * forces keyless. A message listing the places with no key would be flatly
+ * wrong for the reader who has one in `%LOCALAPPDATA%\aiui\.env` and cannot
+ * see why it is being ignored, so the parenthetical names the rule instead.
+ */
+export const AI_NOT_CONFIGURED_MESSAGE =
+  'AI is not configured: AI_API_KEY resolved to empty. Compiled tests replay ' +
+  'without AI; this operation needs a model. Set AI_API_KEY in the project ' +
+  '.env or the machine .env — and AI_GATEWAY_URL if your org routes through ' +
+  'its own endpoint. (A blank AI_API_KEY= line in the project .env ' +
+  'deliberately blocks the machine key.)';
+
+/**
+ * Thrown by any AI request made on a keyless run. Typed (rather than a bare
+ * `Error`) so a caller that wants to distinguish "no AI here" from "the model
+ * failed" can, without matching on prose.
+ *
+ * Every operation that genuinely needs AI — compile, errands, AI-executed
+ * steps in an uncompiled test — inherits it with no per-call-site work.
+ */
+export class AiNotConfiguredError extends Error {
+  constructor(message: string = AI_NOT_CONFIGURED_MESSAGE) {
+    super(message);
+    this.name = 'AiNotConfiguredError';
+  }
+}
+
 /** Per-call knobs beyond the messages themselves. */
 export interface CompleteOptions {
   /** Defaults to `routine` — today's behavior. */
@@ -106,32 +151,83 @@ export class AiClient {
    * at the gateway instead of the real upstream.
    */
   private buildGateway(): AIGateway {
-    const opts = this.config.model.startsWith('aibroker/')
+    const viaGateway = this.config.model.startsWith('aibroker/');
+    if (!viaGateway && this.hasCustomGatewayUrl()) {
+      // Someone deliberately pointed this run at an endpoint and it is being
+      // ignored — silently, and in the direction that matters: the request
+      // leaves for the provider instead of staying inside the org's gateway.
+      // Warned rather than refused, because the pairing is legal (a project may
+      // keep a gateway configured and run a direct model on purpose); the cost
+      // of guessing wrong is one log line, and the cost of saying nothing is a
+      // corporate user who thinks their traffic is routed and it is not.
+      logger.warn(
+        `AI_GATEWAY_URL is set to ${this.config.gatewayUrl}, but the model ` +
+          `"${this.config.model}" is not an aibroker/ model — the gateway URL applies ` +
+          'only to aibroker/ models, so this request goes directly to the provider. ' +
+          'Set AI_MODEL=aibroker/<provider>/<model> to route through the gateway.',
+      );
+    }
+    const opts = viaGateway
       ? { baseURL: `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1` }
       : {};
     return new AIGateway(this.config.model, this.config.apiKey ?? '', opts);
   }
 
-  /** Lazily build + memoize the gateway on first use. */
+  /**
+   * Did someone actually choose this gateway URL, or is it just the built-in?
+   *
+   * Compared against `DEFAULT_CONFIG` rather than against `undefined` because
+   * `gatewayUrl` is a required field with a default — every resolved config has
+   * one, so "is it set?" can only ever answer yes. Trailing slashes are
+   * normalised the same way {@link buildGateway} normalises them, so a value
+   * that differs from the default only by a `/` is not treated as a choice.
+   */
+  private hasCustomGatewayUrl(): boolean {
+    const trim = (url: string): string => url.trim().replace(/\/+$/, '');
+    return trim(this.config.gatewayUrl) !== trim(DEFAULT_CONFIG.ai.gatewayUrl);
+  }
+
+  /**
+   * Lazily build + memoize the gateway on first use.
+   *
+   * The single choke point every request passes through, which is why the
+   * keyless check sits here rather than in `complete()`: a future request
+   * method inherits it for free, and the check can never disagree with the
+   * build it guards. The lazy-build contract is unchanged — construction
+   * still succeeds with no key, so a keyless run can build a client, replay a
+   * compiled test and never come near this line
+   * (stories/keyless-replay-and-gateway-env.md §Part B).
+   */
   private getGateway(): AIGateway {
+    if (!aiConfigured(this.config)) throw new AiNotConfiguredError();
     return (this.gateway ??= this.buildGateway());
   }
 
   /**
-   * Re-point the client at a new `model` / `apiKey` — used when a saved `.env`
-   * edit changes `AI_MODEL` / `AI_API_KEY` between runs on a reused session.
-   * Only these two fields are env-mutable; every other field (gatewayUrl,
-   * maxInputTokens, streaming) is server-level and left untouched.
+   * Re-point the client at a new `model` / `apiKey` / `gatewayUrl` — used when
+   * a saved `.env` edit changes `AI_MODEL` / `AI_API_KEY` / `AI_GATEWAY_URL`
+   * between runs on a reused session. Only these three fields are env-mutable;
+   * every other field (maxInputTokens, streaming) is server-level and left
+   * untouched.
    *
    * `@pkent/aigateway` binds the model at construction AND the `baseURL` choice
    * depends on the model prefix, so a model change OR a key change invalidates
-   * the cached gateway — it's rebuilt on the next {@link getGateway} call.
+   * the cached gateway — it's rebuilt on the next {@link getGateway} call. The
+   * gateway URL is baked into that same `baseURL`, which is why it belongs
+   * here rather than in the "server-level, left untouched" list it used to sit
+   * in: a project's `.env` can now move it
+   * (stories/keyless-replay-and-gateway-env.md), and a memoized gateway would
+   * keep talking to the old endpoint for the life of the session.
+   *
+   * `gatewayUrl` is optional so that a caller which does not manage it — the
+   * config's value is a required string, so there is no "cleared" state to
+   * express — leaves today's URL alone rather than reading as a change.
    *
    * Returns a short, key-safe description of what changed (for logging), or
    * `null` when nothing changed. The returned string NEVER contains the key
    * value — only the fact that it changed.
    */
-  syncAuth(model: string, apiKey: string | undefined): string | null {
+  syncAuth(model: string, apiKey: string | undefined, gatewayUrl?: string): string | null {
     const changes: string[] = [];
     if (model !== this.config.model) {
       changes.push(`AI model ${this.config.model} → ${model}`);
@@ -145,8 +241,15 @@ export class AiClient {
       if (apiKey === undefined) delete this.config.apiKey;
       else this.config.apiKey = apiKey;
     }
-    // A model or key change invalidates the cached gateway (the model is bound
-    // at construction and the baseURL choice depends on the model prefix).
+    if (gatewayUrl !== undefined && gatewayUrl !== this.config.gatewayUrl) {
+      // Safe to log in full: an endpoint is routing, not a secret — the same
+      // reason it takes AI_MODEL's precedence rather than AI_API_KEY's.
+      changes.push(`AI gateway ${this.config.gatewayUrl} → ${gatewayUrl}`);
+      this.config.gatewayUrl = gatewayUrl;
+    }
+    // A model, key or gateway change invalidates the cached gateway (the model
+    // is bound at construction, and the baseURL — both whether there is one and
+    // what it points at — is fixed there too).
     if (changes.length > 0) this.gateway = null;
     return changes.length > 0 ? changes.join('; ') : null;
   }
@@ -198,6 +301,12 @@ export class AiClient {
     signal?: AbortSignal,
     options?: CompleteOptions,
   ): Promise<CompleteResult> {
+    // Resolved BEFORE anything is logged: on a keyless run this throws, and a
+    // `POST …` line for a request that was never built is a false trail
+    // through the log the user is reading to work out what happened. Nothing
+    // about the keyed path changes — same lines, same request ids, one
+    // statement earlier.
+    const gateway = this.getGateway();
     const requestId = nextRequestId++;
     const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
@@ -215,7 +324,7 @@ export class AiClient {
     try {
       // Messages pass through unchanged — `@pkent/aigateway` accepts the
       // consumer's `ChatMessage` shape and handles `cache` hints itself.
-      v2 = await this.getGateway().chat(messages, {
+      v2 = await gateway.chat(messages, {
         ...this.resolveProfile(options?.profile),
         responseFormat: { type: 'json_object' },
         signal: this.buildSignal(signal),
@@ -256,6 +365,9 @@ export class AiClient {
     signal?: AbortSignal,
     options?: CompleteOptions,
   ): Promise<CompleteResult> {
+    // Same reason as `completeOnce`: the keyless throw happens before the log
+    // claims a request went out.
+    const gateway = this.getGateway();
     const requestId = nextRequestId++;
     const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
@@ -276,7 +388,7 @@ export class AiClient {
     let haveUsage = false;
 
     try {
-      const stream = this.getGateway().stream(messages, {
+      const stream = gateway.stream(messages, {
         ...this.resolveProfile(options?.profile),
         responseFormat: { type: 'json_object' },
         signal: this.buildSignal(signal),

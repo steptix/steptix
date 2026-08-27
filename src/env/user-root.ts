@@ -92,8 +92,9 @@ export function readMachineKey(deps?: UserRootDeps): string | null {
  * The machine key, generated and persisted if there is none.
  *
  * The write is **create-or-append, never rewrite**: an existing file may
- * carry values the user added by hand (`AI_API_KEY`, `AI_MODEL` — machine
- * defaults are typed into this same file), and an existing key is never
+ * carry values the user added by hand (`AI_API_KEY`, `AI_MODEL`,
+ * `AI_GATEWAY_URL` — machine defaults are typed into this same file, and
+ * `withMachineAiFloor` reads them back), and an existing key is never
  * replaced — replacing it would orphan every client holding the old value.
  * Appending a line the file lacks clobbers neither.
  *

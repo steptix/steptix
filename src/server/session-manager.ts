@@ -22,6 +22,7 @@ import type { StepResult, TestReport } from '../report/types.js';
 // api-server suites replace wholesale with a three-export `vi.mock`.
 import { isHealedStep } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
+import { aiConfigured } from '../config/loader.js';
 import { TokenTracker } from '../utils/tokens.js';
 import type { Page } from 'playwright';
 import {
@@ -107,12 +108,12 @@ export interface StepRequest {
   steps: string[];
   parameters?: Record<string, string>;
   /**
-   * Per-request environment variables (e.g. AI_API_KEY, AI_MODEL). Applied to
-   * the session's config only — never written to the server's process.env, so
-   * concurrent sessions and the server itself remain isolated. AI_API_KEY /
-   * AI_MODEL are re-applied to the session's AiClient at the start of every
-   * batch (see `executeStepsInternal`), so a saved `.env` edit is picked up on
-   * the next run without closing the session.
+   * Per-request environment variables (e.g. AI_API_KEY, AI_MODEL,
+   * AI_GATEWAY_URL). Applied to the session's config only — never written to
+   * the server's process.env, so concurrent sessions and the server itself
+   * remain isolated. All three are re-applied to the session's AiClient at the
+   * start of every batch (see `executeStepsInternal`), so a saved `.env` edit
+   * is picked up on the next run without closing the session.
    */
   env?: Record<string, string>;
   /**
@@ -1473,8 +1474,8 @@ export class SessionManager {
 
     // Create session if it does not exist. The session's AiClient is built with
     // the per-request env applied here; on a reused session, `AI_MODEL` /
-    // `AI_API_KEY` are re-applied per batch in `executeStepsInternal` so a saved
-    // `.env` edit takes effect on the next run.
+    // `AI_API_KEY` / `AI_GATEWAY_URL` are re-applied per batch in
+    // `executeStepsInternal` so a saved `.env` edit takes effect on the next run.
     if (!session) {
       // Per-project recording outputs: the browser context is created — with or
       // without `recordVideo` — and the report/video/log output dir is fixed at
@@ -2192,13 +2193,14 @@ export class SessionManager {
     const captureStepContext = request.captureStepContext === true || request.compile !== undefined;
 
     // Re-apply the per-request env (.env) AI overrides to this session's client
-    // so a saved AI_MODEL / AI_API_KEY edit is picked up on the next run without
-    // closing the session. Recomputed from the server base (`this.config.ai`),
-    // NOT the session's current values, so deleting a line from `.env` cleanly
-    // reverts to the base rather than sticking on the last override. This runs
-    // at the top of the `queueTail`-serialized body (not in `executeSteps`,
-    // which resolves the session before queuing) so it can never mutate the
-    // shared AiClient config out from under a concurrent in-flight batch.
+    // so a saved AI_MODEL / AI_API_KEY / AI_GATEWAY_URL edit is picked up on the
+    // next run without closing the session. Recomputed from the server base
+    // (`this.config.ai`), NOT the session's current values, so deleting a line
+    // from `.env` cleanly reverts to the base rather than sticking on the last
+    // override. This runs at the top of the `queueTail`-serialized body (not in
+    // `executeSteps`, which resolves the session before queuing) so it can never
+    // mutate the shared AiClient config out from under a concurrent in-flight
+    // batch.
     const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
     // Run settings merge FIRST, so the model override below sees this batch's
     // value and every later read in this function sees the same session state.
@@ -2214,7 +2216,15 @@ export class SessionManager {
       typeof overrideModel === 'string' && overrideModel.trim() !== ''
         ? overrideModel.trim()
         : desiredAi.model;
-    const aiChange = session.aiClient.syncAuth(desiredModel, desiredAi.apiKey);
+    // `gatewayUrl` rides along unconditionally: there is no run-setting for it
+    // (stories/run-settings.md owns per-run knobs), so the `.env` value is the
+    // whole story, and passing it every batch is what lets a corporate `.env`
+    // edit re-point a live session instead of waiting for a recycle.
+    const aiChange = session.aiClient.syncAuth(
+      desiredModel,
+      desiredAi.apiKey,
+      desiredAi.gatewayUrl,
+    );
     if (aiChange) {
       logger.info(
         `Session "${sessionId}": ${aiChange} ` +
@@ -4179,6 +4189,14 @@ export class SessionManager {
                 // so the entry's `step.getVar('data.url')` reads the same value.
                 ...(envDataCtx && { envData: envDataCtx }),
                 ...(cb?.strict !== undefined && { codeBehindStrict: cb.strict }),
+                // A broken entry fails instead of healing when this machine
+                // has no AI (stories/keyless-replay-and-gateway-env.md §Part
+                // B). Read off `desiredAi`, NOT `runConfig.ai`: `runConfig` is
+                // rebuilt from the server's startup config with only the run
+                // settings re-sourced, so a key that arrived in the client's
+                // `.env` is not in it — and a server started keyless would
+                // then refuse to heal a project that has its own key.
+                ...(!aiConfigured(desiredAi) && { keyless: true }),
                 ...(captureStepContext && { captureStepContext: true }),
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather
@@ -4722,6 +4740,15 @@ export class SessionManager {
         const i = result.index - 1;
         const binding = codeBehind.bindingFor(i);
         const stale = result.codeBehindStale;
+        // Same as the CLI writer (test-runner.ts): a keyless run's broken
+        // entry never healed, so it carries no `codeBehindStale` and no heal
+        // counter moves — but the sidecar is what `--only-stale` and Compile
+        // This Step read to find the step that needs repairing, so the row is
+        // stale (stories/keyless-replay-and-gateway-env.md §Part B). Both
+        // writers or neither: a fix in one of them only works for whoever ran
+        // the test the other way.
+        const healSkipped = stale ? undefined : result.codeBehindHealSkipped;
+        const failure = stale ?? healSkipped;
         lastRunSteps.push({
           index: result.index,
           source: binding?.source ?? expansionRawSteps[i] ?? effectiveSteps[i] ?? '',
@@ -4731,8 +4758,9 @@ export class SessionManager {
           ...(binding?.file !== undefined && { file: binding.file }),
           status: result.status,
           fromCodeBehind: result.fromCodeBehind === true,
-          stale: stale !== undefined,
-          ...(stale && { error: stale.error }),
+          stale: failure !== undefined,
+          ...(failure && { error: failure.error }),
+          ...(healSkipped && { healSkipped: true }),
         });
       }
       if (lastRunSteps.length > 0) await writeLastRun(request.testFilePath, lastRunSteps);
