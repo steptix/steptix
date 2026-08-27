@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import type { ErrorPayload, RunEvent } from 'ai-ui-automation-runner-core';
+import { describeStepFailure } from 'ai-ui-automation-runner-core';
 import type { TestDiscovery, DiscoveredTest, DiscoveryEvent } from './test-discovery.js';
 import type { RunController } from './run-controller.js';
 import { getOutputChannel } from './output-channel.js';
@@ -470,11 +471,7 @@ export class TestBenchTestController implements vscode.Disposable {
           // share — the streamed line and the TestMessage the failure peek
           // shows. Without it a broken entry's crash never reaches Test
           // Explorer at all when the AI attempt failed too.
-          const detail = event.codeBehindStale
-            ? `${event.error} (its code-behind threw first: ${event.codeBehindStale.error})`
-            : event.fromCodeBehind
-              ? `Code-behind failed: ${event.error}`
-              : event.error;
+          const detail = describeStepFailure(event);
           emit(`✗ step on line ${event.line} failed — ${detail}`);
           failures.push({ line: event.line, error: detail });
           break;

@@ -18,6 +18,9 @@ import {
   viewportCdpConflictError,
 } from '../config/viewport.js';
 import type { StepResult, TestReport } from '../report/types.js';
+// From report/TYPES, deliberately — not report/generator.js, which a dozen
+// api-server suites replace wholesale with a three-export `vi.mock`.
+import { isHealedStep } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import type { Page } from 'playwright';
@@ -4343,7 +4346,7 @@ export class SessionManager {
         // only when the step then passed: "healed" means the AI covered for
         // the broken entry, and a step that failed anyway wasn't covered —
         // it reports through the step:fail path, not the healed summary.
-        if (fullResult.codeBehindStale && fullResult.status === 'passed') {
+        if (isHealedStep(fullResult)) {
           healedTokens += Math.max(0, session.tokenTracker.runTotal - tokensAtStepStart);
         }
 
@@ -4887,14 +4890,9 @@ export class SessionManager {
     // Hook and ad-hoc rows are excluded for the helper's reason — they are not
     // steps of the test.
     const healedSteps = fullStepResults.filter(
-      (s) =>
-        !s.hookScope &&
-        !s.interactiveAdHoc &&
-        !s.interactiveChild &&
-        s.codeBehindStale &&
-        // A failed step can carry the flag too (the entry threw AND the AI
-        // attempt failed) — that one wasn't healed, it failed.
-        s.status === 'passed',
+      // `isHealedStep`, not the bare flag: a failed step can carry it too (the
+      // entry threw AND the AI attempt failed), and that one wasn't healed.
+      (s) => !s.hookScope && !s.interactiveAdHoc && !s.interactiveChild && isHealedStep(s),
     ).length;
 
     emit({

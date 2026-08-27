@@ -921,6 +921,22 @@ describe('TestBench code-behind compile', function () {
       const hover = hooks.staleHoverMessage();
       assert.match(hover, /Repair this step/);
       assert.match(hover, /re-runs this step in the current session/);
+
+      // And the variant an author actually sees: once the run pins the crash
+      // to the line, the hover leads with it and names the entry's file — but
+      // must not lose the action line while doing so. The hook takes the same
+      // detail the decoration passes, so this is the rendered string, not a
+      // second copy of it.
+      const withDetail = hooks.staleHoverMessage({
+        codeBehindStale: {
+          file: '/x/compile-me.steps.ts',
+          error: 'locator resolved to 2 elements',
+        },
+      });
+      assert.match(withDetail, /locator resolved to 2 elements/);
+      assert.match(withDetail, /compile-me\.steps\.ts/);
+      assert.match(withDetail, /Repair this step/);
+      assert.match(withDetail, /re-runs this step in the current session/);
     });
 
     it('is offered on the ⚠ line and on no other', async () => {

@@ -1,10 +1,15 @@
 import * as vscode from 'vscode';
 import {
   type HostToWebviewMsg,
+  type StepFailureDetail,
   type WebviewToHostMsg,
+  stepFailureDetail,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
-import { DecorationManager, computeStepsSummary, STALE_HOVER_MESSAGE } from './decorations.js';
+import { DecorationManager, computeStepsSummary } from './decorations.js';
+// The same builder the ⚠ decoration calls, so the test hook cannot drift from
+// what actually renders.
+import { staleHoverMessage } from './failure-hover-core.js';
 import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
@@ -578,12 +583,15 @@ class RunControllerRegistry implements vscode.Disposable {
                 ? 'pass-cached'
                 : 'pass';
           // A ⚠ pins the code-behind crash to the line, so the hover and the
-          // panel row can say WHAT threw, not just that something did.
+          // panel row can say WHAT threw, not just that something did. No
+          // `error`: the STEP passed, it is the entry that failed.
           this.tracker.setStatus(
             target,
             ev.line,
             status,
-            ev.codeBehindStale ? { codeBehindStale: ev.codeBehindStale } : undefined,
+            ev.codeBehindStale
+              ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
+              : undefined,
           );
           break;
         }
@@ -593,11 +601,7 @@ class RunControllerRegistry implements vscode.Disposable {
           // step row read it back from the tracker. When the failure came out
           // of the step's code-behind (strict replay, `step.expect`, or a
           // heal whose AI attempt failed too) the detail says so.
-          const failureDetail = {
-            error: ev.error,
-            ...(ev.fromCodeBehind && { fromCodeBehind: true }),
-            ...(ev.codeBehindStale && { codeBehindStale: ev.codeBehindStale }),
-          };
+          const failureDetail = stepFailureDetail(ev);
           this.tracker.setStatus(target, ev.line, 'fail', failureDetail);
           // Propagate the failure to the originating test-file `[skill:]` line
           // so the user sees the red icon on the line they actually authored,
@@ -781,18 +785,16 @@ class RunControllerRegistry implements vscode.Disposable {
                 : ev.fromCache
                   ? 'pass-cached'
                   : 'pass',
-            ev.codeBehindStale ? { codeBehindStale: ev.codeBehindStale } : undefined,
+            ev.codeBehindStale
+              ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
+              : undefined,
           );
           break;
         case 'step:fail':
           // A Replay's red step is the compile's whole point (strict mode:
           // broken code fails instead of healing) — pin the error so the ✗
           // says what the code did wrong.
-          this.tracker.setStatus(uri, ev.line, 'fail', {
-            error: ev.error,
-            ...(ev.fromCodeBehind && { fromCodeBehind: true }),
-            ...(ev.codeBehindStale && { codeBehindStale: ev.codeBehindStale }),
-          });
+          this.tracker.setStatus(uri, ev.line, 'fail', stepFailureDetail(ev));
           break;
         default:
           break;
@@ -1413,8 +1415,13 @@ export interface TestBenchTestHooks {
   /** The ⚠ decoration's hover text. Applied decorations are not readable back
    *  from the extension host, so this is how a test asserts the mark names the
    *  action AND its precondition ("re-runs this step in the current session")
-   *  rather than leaving the author with a bare warning glyph. */
-  staleHoverMessage: () => string;
+   *  rather than leaving the author with a bare warning glyph.
+   *
+   *  Takes the same optional detail the decoration passes, so a test asserts
+   *  the string that ACTUALLY renders. Called with no argument it returns the
+   *  detail-less fallback; called with one it returns the crash-first text a
+   *  ⚠ shows in the normal case, which is what the decoration builds. */
+  staleHoverMessage: (failure?: StepFailureDetail) => string;
 }
 
 export interface TestBenchExports {
@@ -1773,7 +1780,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
       lastRunTokens: () => registry.active()?.lastRunTokens ?? null,
       pendingCodeBehind: () => codeBehindDiffs.pending,
-      staleHoverMessage: () => STALE_HOVER_MESSAGE,
+      staleHoverMessage: (failure) => staleHoverMessage(failure),
     },
   };
 }

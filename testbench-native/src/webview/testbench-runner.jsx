@@ -12,6 +12,7 @@ import { createRoot } from "react-dom/client";
 import { hostBridge } from "./lib/host-bridge.js";
 import { collectVariables, parseParametersInline, maskIfSecretInline, classifyCaptureSource } from "./lib/variables-panel.js";
 import { extractStepLineIds } from "./lib/step-lines-inline.js";
+import { describeStepFailure, formatStepFailure } from "./lib/failure-text-inline.js";
 
 // Inline narrowing helper. The webview can't import named exports from
 // runner-core directly because Vite's CJS interop drops names through
@@ -59,26 +60,6 @@ function statusFromTuple(tuples) {
   const map = {};
   for (const [line, status] of tuples) map[line] = status;
   return map;
-}
-
-// One line (or two) of failure text for a step row, from the tracker's
-// pinned StepFailureDetail. A ⚠ row's step passed — only the entry's crash
-// is worth showing; a ✗ row shows what the step died of, and both errors
-// when a broken entry's AI fallback failed too.
-function formatStepFailure(failure, status) {
-  if (status === STATUS.PASS_STALE) {
-    return failure.codeBehindStale
-      ? `code-behind failed: ${failure.codeBehindStale.error}`
-      : null;
-  }
-  if (failure.codeBehindStale) {
-    return (
-      `code-behind threw: ${failure.codeBehindStale.error}\n` +
-      `then failed under AI: ${failure.error ?? ""}`
-    );
-  }
-  if (failure.fromCodeBehind) return `code-behind failed: ${failure.error ?? ""}`;
-  return failure.error ?? null;
 }
 
 /**
@@ -413,14 +394,7 @@ function TestBenchRunner() {
       case "step:fail":
         // A heal whose AI attempt failed too carries both errors — say so,
         // or the code-behind crash that started it would be invisible here.
-        log(
-          event.codeBehindStale
-            ? `✗ Step on line ${event.line} failed: ${event.error} (its code-behind threw first: ${event.codeBehindStale.error})`
-            : event.fromCodeBehind
-              ? `✗ Step on line ${event.line} failed (code-behind): ${event.error}`
-              : `✗ Step on line ${event.line} failed: ${event.error}`,
-          "fail",
-        );
+        log(`✗ Step on line ${event.line} failed: ${describeStepFailure(event)}`, "fail");
         break;
       case "output":
         log(event.msg, event.kind);
@@ -960,7 +934,7 @@ function TestBenchRunner() {
             const stepError = errorMap[lineNumber];
             const stepFailure =
               failureMap[lineNumber] && (status === STATUS.FAIL || status === STATUS.PASS_STALE)
-                ? formatStepFailure(failureMap[lineNumber], status)
+                ? formatStepFailure(failureMap[lineNumber], status === STATUS.PASS_STALE)
                 : null;
             const cls = [
               "tb-step",
@@ -1018,15 +992,33 @@ function TestBenchRunner() {
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>
                 </div>
                 {stepFailure && (
+                  // Same click/right-click behaviour as the row above it, so
+                  // the error reads as part of its step rather than as loose
+                  // text that swallows a click. Not nested INSIDE `tb-step`:
+                  // that is a flex row, and a multi-line block would become a
+                  // fourth column instead of sitting under the step.
                   <div
+                    onClick={(e) => handleStepClick(lineNumber, e)}
+                    onContextMenu={(e) => {
+                      if (!webviewSelection.has(lineNumber)) {
+                        setWebviewSelection(new Set([lineNumber]));
+                        selectionAnchorRef.current = lineNumber;
+                      }
+                      handleStepContextMenu(e, lineNumber, hasBreakpoint, Boolean(status));
+                    }}
+                    title={`Reveal line ${lineNumber}`}
                     style={{
                       padding: "1px 24px 6px 37px",
+                      cursor: "pointer",
                       fontFamily: "var(--vscode-editor-font-family, monospace)",
                       fontSize: "0.85em",
                       whiteSpace: "pre-wrap",
                       overflowWrap: "anywhere",
                       maxHeight: 120,
                       overflowY: "auto",
+                      background: webviewSelection.has(lineNumber)
+                        ? "var(--vscode-list-inactiveSelectionBackground, transparent)"
+                        : "transparent",
                       color:
                         status === STATUS.FAIL
                           ? "var(--vscode-testing-iconFailed, #f87171)"

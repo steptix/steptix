@@ -333,6 +333,40 @@ export default defineSteps([
     });
   });
 
+  it('does NOT flag a step the user stopped as stale', async () => {
+    // Stop is not a verdict on the entry. Flagging an aborted step stale
+    // would put it in the last-run sidecar for `--only-stale` and render the
+    // ⚠ block on a step that was merely cancelled.
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', BROKEN_STEPS);
+
+    const { steps, registry } = await registryFor(md);
+    const controller = new AbortController();
+    const abortingClient = {
+      complete: async () => {
+        controller.abort();
+        throw new Error('aborted');
+      },
+    } as unknown as AiClient;
+
+    const result = await executeStep(1, steps.length, steps[0]!, {
+      page: fakePage(),
+      config: CONFIG,
+      aiClient: abortingClient,
+      contextContent: '',
+      testName: 'booking',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: {},
+      codeBehind: registry.bindingFor(0)!,
+      signal: controller.signal,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('Aborted by client');
+    expect(result.codeBehindStale).toBeUndefined();
+  });
+
   it('never writes a .steps.ts from a run — generation is `aiui compile`', async () => {
     const md = await write('booking.md', TEST_MD);
     const { client, calls } = scriptedClient([ACTION_PLAN]);
@@ -459,6 +493,16 @@ export default defineSteps([
     });
     expect(failedHtml).toContain('locator.fill: Timeout 30000ms exceeded');
     expect(failedHtml).toContain('AI could not find the button either');
+    // …but it must NOT claim the step recovered. `codeBehindStale` says the
+    // ENTRY broke; only `status === 'passed'` says the AI covered for it. The
+    // ✗ Step Failed block renders right below this badge, and "ran under AI"
+    // beside it read as a step that came good.
+    expect(failedHtml).toContain('⚠ code-behind failed');
+    expect(failedHtml).not.toContain('ran under AI');
+    expect(failedHtml).not.toContain('healed under AI');
+    expect(failedHtml).toContain('✗ Step Failed');
+    // The recompile hint still applies — the entry is broken either way.
+    expect(failedHtml).toContain('--only-stale');
 
     const base = { instruction: 'x', status: 'passed' as const, turns: [], durationMs: 1, retried: false };
     expect(
@@ -468,7 +512,17 @@ export default defineSteps([
         { ...base, index: 3, codeBehindStale: { file: 'f', source: 's', error: 'e' } },
         // Hook rows are not steps of the test and must not be counted.
         { ...base, index: 3, hookScope: 'afterEach' },
+        // A step whose entry threw AND whose AI attempt failed carries the
+        // flag but healed nothing. The "Stale" stat is read as "these
+        // recovered", so it belongs in `ai` — it ran under AI, and lost.
+        {
+          ...base,
+          index: 4,
+          status: 'failed' as const,
+          error: 'AI failed too',
+          codeBehindStale: { file: 'f', source: 's', error: 'e' },
+        },
       ]),
-    ).toEqual({ code: 1, ai: 1, stale: 1 });
+    ).toEqual({ code: 1, ai: 2, stale: 1 });
   });
 });

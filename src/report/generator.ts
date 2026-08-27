@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
 import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis, AssertionResult } from './types.js';
-import { getAllAiInteractions } from './types.js';
+import { getAllAiInteractions, isHealedStep } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
@@ -160,7 +160,10 @@ export function countStepOrigins(steps: StepResult[]): {
   let stale = 0;
   for (const step of steps) {
     if (step.hookScope || step.interactiveAdHoc || step.interactiveChild) continue;
-    if (step.codeBehindStale) stale++;
+    // `isHealedStep`, not the bare flag: a step whose entry threw AND whose AI
+    // attempt then failed carries the flag but healed nothing, and the "Stale"
+    // stat is read as "these recovered". It ran under AI, so it counts as AI.
+    if (isHealedStep(step)) stale++;
     else if (step.fromCodeBehind) code++;
     else ai++;
   }
@@ -477,7 +480,9 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
   const toolHtml = step.toolStep ? renderToolStep(step.toolStep) : '';
   const codeBehindHtml = step.codeBehind ? renderCodeBehind(step.codeBehind) : '';
-  const staleHtml = step.codeBehindStale ? renderCodeBehindStale(step.codeBehindStale) : '';
+  const staleHtml = step.codeBehindStale
+    ? renderCodeBehindStale(step.codeBehindStale, isHealedStep(step))
+    : '';
 
   // Skip when this is a tool step: a `[tool: ... out.x="y"]` binding is
   // already shown in the purple Outputs section above via `toolStep.outputs`
@@ -528,8 +533,15 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   // you want to know when the step did something surprising.
   // ⚠ outranks both: the step ran under AI *because* its committed code broke,
   // and that is the one thing about the step's origin worth acting on.
+  //
+  // Two ⚠ wordings, because `codeBehindStale` only says the ENTRY broke. When
+  // the step then passed, the AI covered for it — "ran under AI". When the AI
+  // attempt failed too, the step is red and claiming it ran under AI would
+  // contradict the ✗ Step Failed block rendered right below it.
   const originBadge = step.codeBehindStale
-    ? '<span class="badge badge-codebehind-stale" title="Its code-behind entry failed and the step healed under AI — recompile">⚠ ran under AI — code-behind failed</span>'
+    ? isHealedStep(step)
+      ? '<span class="badge badge-codebehind-stale" title="Its code-behind entry failed and the step healed under AI — recompile">⚠ ran under AI — code-behind failed</span>'
+      : '<span class="badge badge-codebehind-stale" title="Its code-behind entry failed, and the AI attempt that took over failed too — recompile">⚠ code-behind failed</span>'
     : step.fromCodeBehind
       ? `<span class="badge badge-codebehind" title="Ran this step's code-behind — no AI call">${CODE_BEHIND_MARK} code</span>`
       : step.fromCache
@@ -631,10 +643,16 @@ export function renderCodeBehind(cb: NonNullable<StepResult['codeBehind']>): str
  */
 export function renderCodeBehindStale(
   stale: NonNullable<StepResult['codeBehindStale']>,
+  /** Did the AI cover for the broken entry? False when the AI attempt failed
+   *  too — the recompile hint still applies, the "ran under AI" claim does
+   *  not. Defaults true so an older caller reads as it always did. */
+  healed: boolean = true,
 ): string {
   return `<div class="tool-block codebehind-stale-block">
   <div class="tool-header">
-    <span class="tool-title">⚠ Code-behind failed — ran under AI</span>
+    <span class="tool-title">${
+      healed ? '⚠ Code-behind failed — ran under AI' : '⚠ Code-behind failed'
+    }</span>
     <span class="tool-name">${escapeHtml(stale.file)}</span>
   </div>
   <div class="failure-message">${escapeHtml(stale.error)}</div>

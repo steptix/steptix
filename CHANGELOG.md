@@ -28,8 +28,21 @@ the step line everywhere the marks are:
   Test Explorer failure messages, and in the MCP run summary. `step:fail`
   also carries `fromCodeBehind` so a failed `step.expect` / strict replay is
   distinguishable from an AI failure.
-- The run-complete `healed` summary no longer counts a heal whose AI attempt
-  failed — that step wasn't healed, it failed.
+- **"Stale" no longer implies "recovered".** `codeBehindStale` used to reach
+  only passing steps, so several surfaces read it as "healed". Now that a
+  failed step can carry it, anything meaning *healed* asks `isHealedStep`
+  (flag **and** `status === 'passed'`): the run-complete `healed` summary,
+  the report's ⚠ badge — a failed step reads "⚠ code-behind failed" rather
+  than claiming it "ran under AI" next to its own ✗ Step Failed block — and
+  the report's "Stale" stat, which counts a failed step as AI, not stale.
+- One phrasing for the whole failure vocabulary: `describeStepFailure` in
+  runner-core (mirrored for the webview bundle and pinned by a copy-parity
+  test) replaces five hand-written variants that had already drifted apart —
+  the same event rendered "(code-behind) X" on one surface and "Code-behind
+  failed: X" on another.
+- Pinned failure text is clipped at capture, so the per-line detail held in
+  `.testbench/run-state.json` and re-posted on every snapshot stays bounded
+  no matter how long a Playwright call log runs.
 
 ### Added — TestBench: parameter completion inside a skill call
 
