@@ -201,6 +201,32 @@ export interface StepResult {
     error: string;
   };
   /**
+   * This step's entry threw and there was no AI to heal it, so the step failed
+   * (stories/keyless-replay-and-gateway-env.md §Part B).
+   *
+   * The same facts as {@link codeBehindStale} and deliberately NOT that field:
+   * every heal counter in the codebase — `countStepOrigins`, the report's
+   * amber "healed" banner, the run summary's healed-step count and its token
+   * figure — is taken off `codeBehindStale`, and nothing healed here. Marking
+   * the step stale in-result would report a heal that never happened.
+   *
+   * The sidecar writers read it anyway and record the row as stale, because
+   * the sidecar answers a different question — "which steps does a later
+   * compile need to regenerate?" — and the answer for a broken entry is yes
+   * whether or not this machine could repair it. Without that, the failure's
+   * own advice ("recompile or repair this step where AI is available") would
+   * be a no-op: `--only-stale` would not select the step and Compile This Step
+   * would generate blind instead of repairing.
+   */
+  codeBehindHealSkipped?: {
+    /** Absolute path of the `.steps.ts` the failing entry lives in. */
+    file: string;
+    /** The entry's authored `source` — what binds it to this step. */
+    source: string;
+    /** What the entry threw. */
+    error: string;
+  };
+  /**
    * Page state either side of the step, captured only when the caller asked
    * for it (`captureStepContext`). This is compile's Record phase input — the
    * generator writes far better selectors with the DOM in front of it — and it

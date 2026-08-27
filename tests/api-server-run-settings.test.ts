@@ -225,21 +225,37 @@ async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseU
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };
 }
 
-async function api(method: string, p: string, body?: unknown): Promise<{ status: number; body: any }> {
+/** `base` defaults to the keyed server above; the keyless block below stands up
+ *  a second one, because whether a run has AI is a property of the config the
+ *  process booted with. */
+async function api(
+  method: string,
+  p: string,
+  body?: unknown,
+  base: string = baseUrl,
+): Promise<{ status: number; body: any }> {
   const opts: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(`${baseUrl}${p}`, opts);
+  const res = await fetch(`${base}${p}`, opts);
   return { status: res.status, body: await res.json() };
+}
+
+/** The whole options object the executor was handed on the Nth (0-based) step
+ *  call. Some of what this story ships rides on the options rather than on the
+ *  config — `keyless` is deliberately NOT read off `config.ai` at the far end
+ *  — so an assertion on {@link configAt} alone cannot see it. */
+function optsAt(call: number): Record<string, unknown> {
+  const args = stepMock.mock.calls[call];
+  expect(args, `no executeStep call #${call}`).toBeDefined();
+  return args![3] as unknown as Record<string, unknown>;
 }
 
 /** The `config` the executor was handed on the Nth (0-based) step call. */
 function configAt(call: number): Config {
-  const args = stepMock.mock.calls[call];
-  expect(args, `no executeStep call #${call}`).toBeDefined();
-  return (args![3] as unknown as { config: Config }).config;
+  return optsAt(call)['config'] as Config;
 }
 
 /** The four values this story owns, as they reached the executor. */
@@ -260,12 +276,21 @@ function settingsAt(call: number): {
   };
 }
 
-async function run(sessionId: string, body: Record<string, unknown> = {}): Promise<any> {
-  const { status, body: result } = await api('POST', `/sessions/${sessionId}/steps`, {
-    steps: ['do a thing'],
-    sourceLines: [1],
-    ...body,
-  });
+async function run(
+  sessionId: string,
+  body: Record<string, unknown> = {},
+  base: string = baseUrl,
+): Promise<any> {
+  const { status, body: result } = await api(
+    'POST',
+    `/sessions/${sessionId}/steps`,
+    {
+      steps: ['do a thing'],
+      sourceLines: [1],
+      ...body,
+    },
+    base,
+  );
   expect(status, JSON.stringify(result)).toBe(200);
   return result;
 }
@@ -525,6 +550,67 @@ describe('AI_GATEWAY_URL from the request env', () => {
     await run('gw-leak-b');
     expect(aiClientConfigs.at(-1)?.gatewayUrl).toBe(SERVER_GATEWAY);
     expect(syncAuthCalls.at(-1)?.gatewayUrl).toBe(SERVER_GATEWAY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless (stories/keyless-replay-and-gateway-env.md Part B)
+//
+// The server path decides keylessness for itself — `runTest`'s answer never
+// reaches it — and it decides it from a value that is NOT on the config the
+// executor is handed, so nothing in the assertions above can see it. Deleting
+// the flag entirely left the whole suite green until this block existed.
+//
+// A second server, because a run is keyless when the config it booted with has
+// no key: the one above deliberately has one, and overrides only ever ADD a
+// key on this path.
+// ---------------------------------------------------------------------------
+describe('keyless reaching the executor', () => {
+  let keylessServer: Server;
+  let keylessBase: string;
+
+  beforeAll(async () => {
+    // Built from DEFAULT_CONFIG.ai rather than by deleting a key from
+    // `testConfig.ai`, and DEFAULT_CONFIG carries no `apiKey` at all — the
+    // minimum-scenario rule: a fixture that inherits the dev machine's key
+    // would condition the very thing under test out of the test.
+    const keylessConfig: Config = {
+      ...testConfig,
+      ai: { ...DEFAULT_CONFIG.ai, model: SERVER_MODEL, gatewayUrl: SERVER_GATEWAY },
+    };
+    const { app } = createApiServer(keylessConfig);
+    ({ server: keylessServer, baseUrl: keylessBase } = await listenOnRandomPort(app));
+  }, 30_000);
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) =>
+      keylessServer.close((e) => (e ? reject(e) : resolve())),
+    );
+  });
+
+  it('passes keyless:true when the server has no key', async () => {
+    await run('kl-none', {}, keylessBase);
+    expect(optsAt(0)['keyless']).toBe(true);
+  });
+
+  it('drops it again when the request\'s .env ships a key', async () => {
+    // THE case. `runConfig.ai` is rebuilt from the server's startup config with
+    // only run settings re-sourced, so on this run it still has no key — read
+    // the flag off it instead of off `applyEnvToAiConfig`'s result and a
+    // project that brought its own key would be refused a heal on a keyless
+    // server, with the test above still passing.
+    await run('kl-env-key', { env: { AI_API_KEY: 'from-dot-env-key' } }, keylessBase);
+
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+    expect(configAt(0).ai.apiKey).toBeUndefined();
+    // ...and the key really did arrive — otherwise the assertion above would
+    // pass for the wrong reason.
+    expect(syncAuthCalls.at(-1)?.apiKey).toBe('from-dot-env-key');
+  });
+
+  it('is absent on a keyed server, so a keyed run\'s options are unchanged', async () => {
+    await run('kl-keyed');
+    expect(optsAt(0)).not.toHaveProperty('keyless');
   });
 });
 

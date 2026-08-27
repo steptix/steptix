@@ -543,6 +543,14 @@ export async function runTest(
       const stale = result.codeBehindStale;
       // The AI turn this step needed only because its entry threw.
       if (stale) healedTokens += Math.max(0, tokenTracker.total - tokensAtStepStart);
+      // A keyless run's broken entry: failed rather than healed, so it is
+      // deliberately not `codeBehindStale` in the result — but the sidecar
+      // exists to tell the next compile which entries need regenerating, and
+      // this one does. Recorded stale here and nowhere else, so the run's own
+      // heal accounting stays at zero
+      // (stories/keyless-replay-and-gateway-env.md §Part B).
+      const healSkipped = stale ? undefined : result.codeBehindHealSkipped;
+      const failure = stale ?? healSkipped;
       lastRunSteps.push({
         index: i + 1,
         source: binding?.source ?? test.expansion?.rawSteps[i] ?? test.steps[i] ?? '',
@@ -554,8 +562,9 @@ export async function runTest(
         ...(binding?.file !== undefined && { file: binding.file }),
         status: result.status,
         fromCodeBehind: result.fromCodeBehind === true,
-        stale: stale !== undefined,
-        ...(stale && { error: stale.error }),
+        stale: failure !== undefined,
+        ...(failure && { error: failure.error }),
+        ...(healSkipped && { healSkipped: true }),
       });
     };
 

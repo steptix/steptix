@@ -2,6 +2,7 @@ import { AIGateway } from '@pkent/aigateway';
 import type { CallOptions, Effort, V2ContentBlock } from '@pkent/aigateway';
 import type { AiConfig } from '../config/types.js';
 import { aiConfigured } from '../config/loader.js';
+import { DEFAULT_CONFIG } from '../config/defaults.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
@@ -72,15 +73,25 @@ const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> 
  * the promise drift apart.
  *
  * It replaces the gateway's bare `invalid_api_key`, which reads as "my config
- * is broken" on a machine that was never meant to have a key. The three
- * sentences are the three things the reader needs: where the key was looked
- * for, that replay itself is unaffected, and what to set.
+ * is broken" on a machine that was never meant to have a key. The sentences
+ * are the things the reader needs: what was resolved, that replay itself is
+ * unaffected, what to set, and the one non-obvious rule that can hide a key
+ * they know they have.
+ *
+ * It says "resolved to empty" rather than naming the files the key is missing
+ * from, because a blank `AI_API_KEY=` line — the one `.env.example` ships —
+ * BLOCKS the machine `.env` on purpose (`withMachineAiFloor` is a floor for
+ * unset values, not for empty ones), and that is how a project deliberately
+ * forces keyless. A message listing the places with no key would be flatly
+ * wrong for the reader who has one in `%LOCALAPPDATA%\aiui\.env` and cannot
+ * see why it is being ignored, so the parenthetical names the rule instead.
  */
 export const AI_NOT_CONFIGURED_MESSAGE =
-  'AI is not configured: no AI_API_KEY in the project .env, machine .env, or ' +
-  'environment. Compiled tests replay without AI; this operation needs a ' +
-  'model. Set AI_API_KEY — and AI_GATEWAY_URL if your org routes through its ' +
-  'own endpoint.';
+  'AI is not configured: AI_API_KEY resolved to empty. Compiled tests replay ' +
+  'without AI; this operation needs a model. Set AI_API_KEY in the project ' +
+  '.env or the machine .env — and AI_GATEWAY_URL if your org routes through ' +
+  'its own endpoint. (A blank AI_API_KEY= line in the project .env ' +
+  'deliberately blocks the machine key.)';
 
 /**
  * Thrown by any AI request made on a keyless run. Typed (rather than a bare
@@ -140,10 +151,40 @@ export class AiClient {
    * at the gateway instead of the real upstream.
    */
   private buildGateway(): AIGateway {
-    const opts = this.config.model.startsWith('aibroker/')
+    const viaGateway = this.config.model.startsWith('aibroker/');
+    if (!viaGateway && this.hasCustomGatewayUrl()) {
+      // Someone deliberately pointed this run at an endpoint and it is being
+      // ignored — silently, and in the direction that matters: the request
+      // leaves for the provider instead of staying inside the org's gateway.
+      // Warned rather than refused, because the pairing is legal (a project may
+      // keep a gateway configured and run a direct model on purpose); the cost
+      // of guessing wrong is one log line, and the cost of saying nothing is a
+      // corporate user who thinks their traffic is routed and it is not.
+      logger.warn(
+        `AI_GATEWAY_URL is set to ${this.config.gatewayUrl}, but the model ` +
+          `"${this.config.model}" is not an aibroker/ model — the gateway URL applies ` +
+          'only to aibroker/ models, so this request goes directly to the provider. ' +
+          'Set AI_MODEL=aibroker/<provider>/<model> to route through the gateway.',
+      );
+    }
+    const opts = viaGateway
       ? { baseURL: `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1` }
       : {};
     return new AIGateway(this.config.model, this.config.apiKey ?? '', opts);
+  }
+
+  /**
+   * Did someone actually choose this gateway URL, or is it just the built-in?
+   *
+   * Compared against `DEFAULT_CONFIG` rather than against `undefined` because
+   * `gatewayUrl` is a required field with a default — every resolved config has
+   * one, so "is it set?" can only ever answer yes. Trailing slashes are
+   * normalised the same way {@link buildGateway} normalises them, so a value
+   * that differs from the default only by a `/` is not treated as a choice.
+   */
+  private hasCustomGatewayUrl(): boolean {
+    const trim = (url: string): string => url.trim().replace(/\/+$/, '');
+    return trim(this.config.gatewayUrl) !== trim(DEFAULT_CONFIG.ai.gatewayUrl);
   }
 
   /**
@@ -260,6 +301,12 @@ export class AiClient {
     signal?: AbortSignal,
     options?: CompleteOptions,
   ): Promise<CompleteResult> {
+    // Resolved BEFORE anything is logged: on a keyless run this throws, and a
+    // `POST …` line for a request that was never built is a false trail
+    // through the log the user is reading to work out what happened. Nothing
+    // about the keyed path changes — same lines, same request ids, one
+    // statement earlier.
+    const gateway = this.getGateway();
     const requestId = nextRequestId++;
     const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
@@ -277,7 +324,7 @@ export class AiClient {
     try {
       // Messages pass through unchanged — `@pkent/aigateway` accepts the
       // consumer's `ChatMessage` shape and handles `cache` hints itself.
-      v2 = await this.getGateway().chat(messages, {
+      v2 = await gateway.chat(messages, {
         ...this.resolveProfile(options?.profile),
         responseFormat: { type: 'json_object' },
         signal: this.buildSignal(signal),
@@ -318,6 +365,9 @@ export class AiClient {
     signal?: AbortSignal,
     options?: CompleteOptions,
   ): Promise<CompleteResult> {
+    // Same reason as `completeOnce`: the keyless throw happens before the log
+    // claims a request went out.
+    const gateway = this.getGateway();
     const requestId = nextRequestId++;
     const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
@@ -338,7 +388,7 @@ export class AiClient {
     let haveUsage = false;
 
     try {
-      const stream = this.getGateway().stream(messages, {
+      const stream = gateway.stream(messages, {
         ...this.resolveProfile(options?.profile),
         responseFormat: { type: 'json_object' },
         signal: this.buildSignal(signal),

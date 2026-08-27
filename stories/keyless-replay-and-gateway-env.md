@@ -7,7 +7,9 @@ Status: draft, not yet reviewed.
 > compiled test replays green with **zero** AI requests, and the same run with
 > one deliberately broken code-behind entry fails that step with the exact
 > keyless copy below — no `invalid_api_key` anywhere in the report, console,
-> or log, and no diagnosis attempt; (2) `AI_GATEWAY_URL` set in a project's
+> or log, and no diagnosis attempt, and the last-run sidecar marks the broken
+> step stale so a later keyed compile selects and repairs it; (2)
+> `AI_GATEWAY_URL` set in a project's
 > `.env` reaches the AiClient on **both** paths — a CLI run in that project,
 > and a server run where the TestBench extension shipped that `.env` as env
 > overrides — proven at the api-server seam, not just in loader units;
@@ -101,9 +103,14 @@ Out of scope, on purpose: no new config key (the config key already exists),
 no `runSettings` surface for it (per-run model/settings live in
 stories/run-settings.md), no URL validation beyond what `buildGateway`
 already does (trailing-slash strip). Docs: mention the var wherever
-`AI_MODEL`'s env handling is documented, and in the `init` template's `.env`
-comments ([init.ts](../src/cli/commands/init.ts)) — commented out, since the
-default is right for non-corporate users.
+`AI_MODEL`'s env handling is documented — which is [.env.example](../.env.example),
+commented out since the default is right for non-corporate users, and the
+env-var table in [README.md](../README.md). Not the `init` template: `aiui
+init` scaffolds `aiui.config.json`, `tests/`, `context/` and `skills/` and no
+`.env` at all, so there are no template `.env` comments to add it to. The
+scaffolded `aiui.config.json` should NOT pin a `gatewayUrl` either — a value
+there is a deliberate choice that beats the machine floor forever, and one
+copied out of a template is nobody's choice.
 
 ## Part B — keyless mode
 
@@ -126,9 +133,28 @@ the report states intent, not a caught crash):
    > `replay failed and was not healed: AI is not configured on this
    > machine. Recompile or repair this step where AI is available.`
 
-   The step is `failed` (not `error`), `healedSteps` / `healedTokens`
-   accounting is untouched (nothing healed), and steps whose entries succeed
-   keep replaying — one broken step must not poison the rest of the run.
+   The step is `failed` (not `error`) and the run then does exactly what a
+   failed step already makes it do: both runners stop at the first failure
+   (`bail` in [test-runner.ts](../src/runner/test-runner.ts), `break` in
+   [session-manager.ts](../src/server/session-manager.ts)), and keyless
+   changes neither. What the skip must not do is spread: it decides one step,
+   leaves every other entry bound and replaying as code, and leaves what a
+   failure already means alone.
+
+   **Accounting and repair are decoupled, deliberately.** In the run's own
+   result the step is NOT flagged `codeBehindStale`: every heal counter —
+   `healedSteps`, `healedTokens`, `countStepOrigins`, the report's amber
+   "healed" banner, TestBench's healed-step summary — is read off that field,
+   and nothing healed here. But the failure's advice ("recompile or repair
+   this step where AI is available") has to be actionable on the machine that
+   *does* have a model, so the result carries the entry's failure separately
+   (`codeBehindHealSkipped`) and **both** last-run sidecar writers record the
+   row as stale, with the underlying thrown message. That is what
+   `collectStaleKeys` reads for `aiui compile --only-stale`, and what
+   `priorFailure` reads to turn Compile This Step into a repair rather than a
+   blind regeneration. The row also carries `healSkipped`, which keeps the
+   consecutive-heal streak (`staleRuns`, the "healed under AI (3 runs in a
+   row)" marker) from advancing on a machine that has healed nothing.
 
 2. **Diagnosis pass.** The gate at
    [test-runner.ts:1219](../src/runner/test-runner.ts) becomes
@@ -144,10 +170,19 @@ the report states intent, not a caught crash):
 lets `@pkent/aigateway` throw `invalid_api_key` on first use. Add an explicit
 check at first use: when keyless, throw a typed `AiNotConfiguredError`:
 
-> `AI is not configured: no AI_API_KEY in the project .env, machine .env, or
-> environment. Compiled tests replay without AI; this operation needs a
-> model. Set AI_API_KEY — and AI_GATEWAY_URL if your org routes through its
-> own endpoint.`
+> `AI is not configured: AI_API_KEY resolved to empty. Compiled tests replay
+> without AI; this operation needs a model. Set AI_API_KEY in the project
+> .env or the machine .env — and AI_GATEWAY_URL if your org routes through
+> its own endpoint. (A blank AI_API_KEY= line in the project .env
+> deliberately blocks the machine key.)`
+
+It says "resolved to empty" rather than listing the places the key is missing
+from, because a blank `AI_API_KEY=` line — the line `.env.example` ships —
+blocks the machine `.env` on purpose: `withMachineAiFloor` is a floor for
+values nobody set, not for values someone set to empty, and that is how a
+project forces keyless deliberately. Naming the files would be flatly wrong
+for the reader who has a machine key and cannot see why it is ignored, so the
+parenthetical names the rule instead.
 
 Every operation that genuinely needs AI — compile, errands, AI-executed
 steps in an uncompiled test, skill AI steps — inherits this message
@@ -160,9 +195,10 @@ unchanged; only the error the request-time failure produces changes.
 | Operation | Keyless behaviour |
 |---|---|
 | Replay of fully compiled test, all entries green | passes, zero AI calls |
-| Replay, an entry fails | that step fails with the heal-skip copy; run continues |
+| Replay, an entry fails | that step fails with the heal-skip copy, and the run stops there — exactly as any failed step already ends a run |
 | Post-failure diagnosis | skipped with note |
 | Uncompiled / partially compiled test (AI steps) | step errors with `AiNotConfiguredError` copy |
+| Prose `## Before` / `## After` hooks, and conditional-group polls | never compiled — no entry to replay — so they fail reactively with the `AiNotConfiguredError` copy (hook steps go through `executeStep` with no binding; a poll calls `aiClient.complete` in `executeBranchedStep`). Worth stating plainly because the live-check fixture below has neither, so a green manual check says nothing about them |
 | Compile, errand, `run_steps` with AI | fails fast with `AiNotConfiguredError` copy |
 
 Report/wire shape: additive only — the step `error` string and the existing
@@ -188,8 +224,11 @@ restart).
   the bug out of the test path.
 - **Runner**: compiled fixture replays green keyless with an AiClient spy
   that throws if any request is attempted; same fixture with one broken
-  entry → step failed with the exact copy, later steps still executed,
-  diagnosis note present, spy untouched.
+  entry → that step failed with the exact copy while the entries either side
+  still replay as code at the executor seam (the run itself stops at the
+  first failure, as it always has), the result carries no `codeBehindStale`
+  but the sidecar row is stale with the thrown message, diagnosis note
+  present, spy untouched.
 - **Live check** (manual): worktree server started with `AI_API_KEY`
   removed; `templates/init/tests/securebank.md` compiled beforehand on a
   keyed machine; run once green, then break one selector in the app fixture

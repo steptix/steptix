@@ -136,6 +136,7 @@ vi.mock('../src/report/history-appender.js', () => ({
 
 import { runTest } from '../src/runner/test-runner.js';
 import { renderReport } from '../src/report/generator.js';
+import { readLastRun } from '../src/codebehind/last-run.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -185,6 +186,44 @@ function passed(index: number, instruction: string): StepResult {
 
 function failed(index: number, instruction: string, error: string): StepResult {
   return { index, instruction, status: 'failed', turns: [], durationMs: 1, retried: false, error };
+}
+
+/** The story's copy, restated for the same reason `SKIP_NOTE` is: the module
+ *  that exports it is mocked in this file, so importing it would read
+ *  `undefined` and agree with anything. */
+const HEAL_SKIPPED_ERROR =
+  'replay failed and was not healed: AI is not configured on this machine. ' +
+  'Recompile or repair this step where AI is available.';
+
+/** What the entry actually threw — the thing a later repair has to work from,
+ *  and the thing that is NOT in the step's `error`. */
+const ENTRY_ERROR = '#transfers-tab went away in a redesign';
+
+/** What `executeStep` returns for a step whose entry broke on a keyless run:
+ *  failed, ran as code, and carrying the entry's failure structurally but NOT
+ *  as `codeBehindStale` — nothing healed it. */
+function healSkipped(index: number, instruction: string): StepResult {
+  return {
+    ...failed(index, instruction, HEAL_SKIPPED_ERROR),
+    fromCodeBehind: true,
+    codeBehindHealSkipped: {
+      file: path.join(dir, 'transfers.steps.ts'),
+      source: instruction,
+      error: ENTRY_ERROR,
+    },
+  };
+}
+
+/** What it returns for a step that DID heal, on a machine with a key. */
+function healed(index: number, instruction: string): StepResult {
+  return {
+    ...passed(index, instruction),
+    codeBehindStale: {
+      file: path.join(dir, 'transfers.steps.ts'),
+      source: instruction,
+      error: ENTRY_ERROR,
+    },
+  };
 }
 
 let dir: string;
@@ -238,7 +277,12 @@ describe('the post-failure diagnosis pass on a keyless run', () => {
     expect(config.ai.diagnoseFailures).toBe(true);
 
     // And the existing report rendering shows it, unchanged.
-    expect(renderReport(report)).toContain(SKIP_NOTE);
+    const html = renderReport(report);
+    expect(html).toContain(SKIP_NOTE);
+    // ...without an empty "Suggested fix" box under it: a diagnosis that never
+    // ran has nothing to suggest, and a labelled empty box reads as a
+    // rendering bug rather than as a skip.
+    expect(html).not.toContain('Suggested fix');
     // Nothing in the report reads as a broken API key.
     expect(JSON.stringify(report)).not.toMatch(/invalid_api_key/i);
   });
@@ -350,5 +394,109 @@ describe('the keyless flag the runner hands each step', () => {
     );
 
     expect(stepOptions[0]!['keyless']).toBe(true);
+  });
+});
+
+// ─── The last-run sidecar ───────────────────────────────────────────────────
+//
+// The decoupling this story needs and the run does not: the step is NOT stale
+// in the result (nothing healed, so no heal counter may move) but it IS stale
+// in the sidecar (the entry is broken, and a later keyed compile is the only
+// thing that can fix it). Without the second half the failure's own advice —
+// "recompile or repair this step where AI is available" — is a no-op:
+// `--only-stale` would not select the step and Compile This Step would
+// generate blind instead of repairing.
+
+describe('the last-run sidecar after a keyless heal skip', () => {
+  it('marks the broken step stale, with what the entry threw', async () => {
+    executeStepMock.mockImplementationOnce(async () => passed(1, 'Sign in'));
+    executeStepMock.mockImplementationOnce(async () =>
+      healSkipped(2, 'Click the "Transfers" tab'),
+    );
+
+    const md = path.join(dir, 'transfers.md');
+    await runTest(
+      makeInstance(['Sign in', 'Click the "Transfers" tab'], md),
+      keylessConfig(),
+      '',
+    );
+
+    const rows = (await readLastRun(md))!.steps;
+    expect(rows[0]).toMatchObject({ index: 1, stale: false });
+    expect(rows[1]).toMatchObject({
+      index: 2,
+      status: 'failed',
+      fromCodeBehind: true,
+      stale: true,
+      // The thrown message, not the step's error line: a repair prompt fed
+      // "AI is not configured on this machine" would be repairing the wrong
+      // thing.
+      error: ENTRY_ERROR,
+      healSkipped: true,
+    });
+  });
+
+  it('still reports nothing as healed', async () => {
+    // The accounting half. `healedSteps` / `healedTokens` are counted off
+    // `codeBehindStale`, which this path deliberately does not set — so a
+    // sidecar that says "stale" and a report that says "healed" can only
+    // disagree if someone reuses the field.
+    executeStepMock.mockImplementationOnce(async () =>
+      healSkipped(1, 'Click the "Transfers" tab'),
+    );
+
+    const md = path.join(dir, 'transfers.md');
+    const report = await runTest(
+      makeInstance(['Click the "Transfers" tab'], md),
+      keylessConfig(),
+      '',
+    );
+
+    expect(report.status).toBe('failed');
+    expect(report.healedSteps).toBeUndefined();
+    expect(report.healedTokens).toBeUndefined();
+    expect(report.steps[0]!.codeBehindStale).toBeUndefined();
+    // ...and the sidecar still knows, which is the whole point of the split.
+    expect((await readLastRun(md))!.steps[0]!.stale).toBe(true);
+  });
+
+  it('never advances the healed-under-AI streak, however many keyless runs', async () => {
+    // `staleRuns` is what makes the marker read "healed under AI (3 runs in a
+    // row)". A machine with no AI has healed nothing, so the count stays off
+    // the row no matter how often the test is run.
+    const md = path.join(dir, 'transfers.md');
+    for (const _run of [1, 2, 3]) {
+      executeStepMock.mockImplementationOnce(async () =>
+        healSkipped(1, 'Click the "Transfers" tab'),
+      );
+      await runTest(
+        makeInstance(['Click the "Transfers" tab'], md),
+        keylessConfig(),
+        '',
+      );
+      const row = (await readLastRun(md))!.steps[0]!;
+      expect(row.stale).toBe(true);
+      expect(row.staleRuns).toBeUndefined();
+    }
+  });
+
+  it('records a real heal on a keyed machine exactly as it always did', async () => {
+    // The control. A stale row from an actual heal keeps its streak and its
+    // report accounting, and carries no `healSkipped` — the keyless path added
+    // a case, it did not change this one.
+    executeStepMock.mockImplementationOnce(async () => healed(1, 'Click the "Transfers" tab'));
+
+    const md = path.join(dir, 'keyed.md');
+    const report = await runTest(
+      makeInstance(['Click the "Transfers" tab'], md),
+      keyedConfig(),
+      '',
+    );
+
+    expect(report.healedSteps).toBe(1);
+    const row = (await readLastRun(md))!.steps[0]!;
+    expect(row).toMatchObject({ status: 'passed', stale: true, error: ENTRY_ERROR });
+    expect(row.healSkipped).toBeUndefined();
+    expect(row.staleRuns).toBe(1);
   });
 });

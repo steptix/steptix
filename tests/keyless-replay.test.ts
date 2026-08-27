@@ -205,7 +205,7 @@ describe('a keyless run of a compiled test', () => {
     expect(resolvedParameters).toEqual({ user: 'ada', tab: 'transfers', balance: '1200.00' });
   });
 
-  it('fails the broken step with the keyless copy and keeps replaying the rest', async () => {
+  it('fails the broken step with the keyless copy, leaving its siblings replaying as code', async () => {
     const md = await write('transfers.md', TEST_MD);
     await write('transfers.steps.ts', stepsFile('throws'));
 
@@ -226,11 +226,22 @@ describe('a keyless run of a compiled test', () => {
     // Nothing healed, so nothing is flagged stale: `healedSteps` /
     // `healedTokens` are counted off this field and must not move.
     expect(failed!.codeBehindStale).toBeUndefined();
+    // The failure travels structurally instead, for the sidecar writers — the
+    // step still has to be findable by the compile that repairs it
+    // (stories/keyless-replay-and-gateway-env.md §Part B).
+    expect(failed!.codeBehindHealSkipped).toEqual({
+      file: broken.file,
+      source: 'Click the "Transfers" tab',
+      error: '#transfers-tab went away in a redesign',
+    });
     // The entry stays bound — a heal discards it, and this is not a heal.
     expect(broken.entry).toBeDefined();
 
-    // One broken step does not poison the rest: the entries either side still
-    // replay as code.
+    // Each step is executed on its own here, and the keyless skip touches only
+    // the one whose entry broke: the entries either side still replay as code,
+    // with no AI. Whether the RUN goes on past a failed step is the runner's
+    // call and keyless does not change it — today both runners stop at the
+    // first failure, exactly as they did before this feature.
     expect(first!.status).toBe('passed');
     expect(first!.fromCodeBehind).toBe(true);
     expect(third!.status).toBe('passed');

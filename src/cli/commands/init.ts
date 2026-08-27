@@ -86,7 +86,6 @@ async function writeDefaultTemplate(templateName: string, destPath: string): Pro
   const defaults: Record<string, string> = {
     'aiui.config.json': `{
   "ai": {
-    "gatewayUrl": "https://aiapi.example.com",
     "model": "openai/gpt-5.6-luna"
   },
   "browser": {

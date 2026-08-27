@@ -4740,6 +4740,15 @@ export class SessionManager {
         const i = result.index - 1;
         const binding = codeBehind.bindingFor(i);
         const stale = result.codeBehindStale;
+        // Same as the CLI writer (test-runner.ts): a keyless run's broken
+        // entry never healed, so it carries no `codeBehindStale` and no heal
+        // counter moves — but the sidecar is what `--only-stale` and Compile
+        // This Step read to find the step that needs repairing, so the row is
+        // stale (stories/keyless-replay-and-gateway-env.md §Part B). Both
+        // writers or neither: a fix in one of them only works for whoever ran
+        // the test the other way.
+        const healSkipped = stale ? undefined : result.codeBehindHealSkipped;
+        const failure = stale ?? healSkipped;
         lastRunSteps.push({
           index: result.index,
           source: binding?.source ?? expansionRawSteps[i] ?? effectiveSteps[i] ?? '',
@@ -4749,8 +4758,9 @@ export class SessionManager {
           ...(binding?.file !== undefined && { file: binding.file }),
           status: result.status,
           fromCodeBehind: result.fromCodeBehind === true,
-          stale: stale !== undefined,
-          ...(stale && { error: stale.error }),
+          stale: failure !== undefined,
+          ...(failure && { error: failure.error }),
+          ...(healSkipped && { healSkipped: true }),
         });
       }
       if (lastRunSteps.length > 0) await writeLastRun(request.testFilePath, lastRunSteps);

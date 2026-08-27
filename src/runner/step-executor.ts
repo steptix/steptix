@@ -671,16 +671,26 @@ async function runCodeBehindStep(
     //
     // The `error` is the instruction rather than the thrown message on
     // purpose: it is what the console step line, the report row and the
-    // client all render, and the author's next move ("recompile where AI is
-    // available") is the useful thing to put there. The thrown message is one
-    // line down, in the explanation and the log. The entry stays bound and
-    // nothing is flagged stale — nothing healed, so `healedSteps` /
-    // `healedTokens`, both counted off `codeBehindStale`, must not move.
+    // client all render, and the author's next move ("recompile or repair
+    // this step where AI is available") is the useful thing to put there. The
+    // thrown message is one line down, in the explanation and the log.
+    //
+    // It also rides out structurally, in `codeBehindHealSkipped`, because that
+    // advice has to be actionable on the machine that does have a model: the
+    // sidecar writers turn this into a stale row so `--only-stale` selects the
+    // step and the repair prompt gets the real failure to work from. NOT
+    // `codeBehindStale` — every heal counter reads that field, and this step
+    // healed nothing.
     logger.error(`Step ${stepIndex} FAILED (code-behind, no AI configured): ${outcome.error ?? ''}`);
     return {
       result: {
         ...base,
         error: KEYLESS_HEAL_SKIPPED_ERROR,
+        codeBehindHealSkipped: {
+          file: binding.file,
+          source: binding.source,
+          error: outcome.error ?? 'unknown error',
+        },
         aiExplanation:
           'The code-behind entry threw, and this machine has no AI configured, ' +
           `so the step was not re-run under AI. The entry failed with: ${
