@@ -313,7 +313,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
   it('no machine values leaves the built-in default model untouched', async () => {
     const config = await loadConfig(await writeConfig({}));
 
-    expect(config.ai.model).toBe('openai/gpt-5.4-mini');
+    expect(config.ai.model).toBe('openai/gpt-5.6-luna');
     expect(config.ai.apiKey).toBeUndefined();
   });
 
@@ -322,7 +322,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
     const config = await loadConfig(await writeConfig({}));
 
     expect(config.ai.apiKey).toBeUndefined();
-    expect(config.ai.model).toBe('openai/gpt-5.4-mini');
+    expect(config.ai.model).toBe('openai/gpt-5.6-luna');
   });
 });
 
