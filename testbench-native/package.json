@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.103",
+  "version": "0.5.104",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -149,6 +149,11 @@
       {
         "command": "testbench-native.revealSectionLine",
         "title": "TestBench: Go to Section",
+        "enablement": "false"
+      },
+      {
+        "command": "testbench-native.showCompileProgress",
+        "title": "TestBench: Show Compile Progress",
         "enablement": "false"
       },
       {

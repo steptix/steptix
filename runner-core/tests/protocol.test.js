@@ -15,16 +15,22 @@ test('isHostMsg: accepts every host variant', () => {
     'breakpointStop',
     'batchBanner',
     'skillRerunAvailable',
-    'compileState',
     'compileEvent',
+    // The compile tail's strip state (stories/compile-tail-progress.md). It
+    // replaced 'compileState' and 'compileStep', which nothing in the
+    // extension host ever posted.
+    'compileProgress',
     'compileRunEvent',
-    'compileStep',
   ]) {
     assert.equal(isHostMsg({ type }), true, type);
   }
 });
 
 test('isHostMsg: rejects garbage', () => {
+  // The two retired shapes are garbage now, not merely unused: keeping them
+  // accepted would let a stale sender post one and be silently ignored.
+  assert.equal(isHostMsg({ type: 'compileState' }), false);
+  assert.equal(isHostMsg({ type: 'compileStep' }), false);
   assert.equal(isHostMsg(null), false);
   assert.equal(isHostMsg(undefined), false);
   assert.equal(isHostMsg('init'), false);
@@ -69,6 +75,12 @@ test('isRunEvent: accepts every event variant', () => {
     'frame:push',
     'frame:pop',
     'frame:scope',
+    // A compile-mode run's own frames. An ordinary run never sends them, but
+    // the run stream is where they ride (stories/compile-as-you-go.md,
+    // stories/compile-tail-progress.md).
+    'compile:step',
+    'compile:progress',
+    'compile:result',
   ]) {
     assert.equal(isRunEvent({ type }), true, type);
   }
@@ -133,6 +145,13 @@ test('isCompileEvent: accepts every compile frame the server sends', () => {
   assert.equal(isCompileEvent({ type: 'compile:phase', phase: 'replay', round: 2, message: 'ok' }), true);
   assert.equal(isCompileEvent({ type: 'compile:step', phase: 'generate', step: 4, message: 'generated' }), true);
   assert.equal(isCompileEvent({ type: 'compile:done', status: 'green', message: 'done' }), true);
+  // The tail's counts (stories/compile-tail-progress.md). A client that folds
+  // the compile stream has to narrow this one too, or it falls through to a
+  // default case as an unknown frame.
+  assert.equal(
+    isCompileEvent({ type: 'compile:progress', done: 1, total: 3, phase: 'generate' }),
+    true,
+  );
   assert.equal(
     isCompileEvent({ type: 'compile:result', status: 'green', files: {}, summary: { test: '/a.md' } }),
     true,

@@ -1145,6 +1145,206 @@ describe('TestBench code-behind compile', function () {
       await waitFor('idle', () => !hooks.isRunning());
     });
   });
+
+  /**
+   * The compile tail's signals (stories/compile-tail-progress.md).
+   *
+   * Everything asserted here is what the extension host DOES with the server's
+   * frames: which file each panel message is stamped for, when the strip goes
+   * up and comes down, and what the workbench-level aggregator is holding. The
+   * webview's own rendering is pinned separately (tests/panel-scope.test.js);
+   * its state is not readable from the extension host.
+   */
+  describe('the compile tail', () => {
+    /**
+     * Messages the panel was told about SINCE this test started. The view
+     * accumulates across the file, so every assertion is made against a mark
+     * taken before the command under test.
+     */
+    let mark = 0;
+    beforeEach(() => {
+      mark = hooks.hostMessageCount();
+    });
+    const posted = (type) => hooks.hostMessagesSince(mark).filter((m) => m.type === type);
+    const strips = () => posted('compileProgress');
+
+    /** A tail that runs to a result, with the frames a current server sends. */
+    function tailScript(file, content) {
+      return (f) => {
+        f.push({ type: 'step:start', line: 8 });
+        f.push({ type: 'step:pass', line: 8 });
+        f.push({ type: 'step:start', line: 9 });
+        f.push({ type: 'step:pass', line: 9 });
+        // The run's steps are done; everything after this is tail.
+        f.push({ type: 'output', msg: 'Run finished — 2 entries still to generate, then a review pass', kind: 'info' });
+        f.push({
+          type: 'compile:progress',
+          done: 0,
+          total: 2,
+          phase: 'generate',
+          reviewPending: true,
+          runEnded: true,
+        });
+        f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generating…' });
+        f.push({
+          type: 'compile:progress',
+          done: 0,
+          total: 2,
+          phase: 'generate',
+          step: 1,
+          line: 8,
+          reviewPending: true,
+        });
+        f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' });
+        f.push({ type: 'compile:progress', done: 1, total: 2, phase: 'generate', reviewPending: true });
+        f.push({ type: 'compile:step', phase: 'review', step: 0, message: 'reviewing compile-me.steps.ts…' });
+        f.push({ type: 'compile:progress', done: 2, total: 2, phase: 'review' });
+        f.push({
+          type: 'compile:result',
+          status: 'partial',
+          files: { [file()]: content },
+          summary: summaryFor({ compiled: 2, unproven: [1, 2] }),
+        });
+        f.push({ type: 'done', status: 'passed' });
+        f.end();
+      };
+    }
+
+    it('raises the strip at run end, tracks it, and takes it down on the result', async () => {
+      fake.streamScripts = [tailScript(() => stepsPath, 'export default defineSteps([]);\n')];
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
+      await waitFor('idle', () => !hooks.isRunning());
+
+      const states = strips().map((m) => m.state);
+      // First up at run end, with the counts the forecast carried…
+      const first = states.find((s) => s !== null);
+      assert.ok(first, 'the strip never went up');
+      assert.equal(first.file, 'compile-me.md');
+      assert.equal(first.total, 2);
+      // …tracked through generation and Review…
+      assert.ok(
+        states.some((s) => s && s.phase === 'review'),
+        'Review never reached the strip',
+      );
+      // …and down on the result, which is the last thing the strip is told.
+      assert.equal(states[states.length - 1], null, 'the strip outlived the compile');
+      // Nothing left aggregating in the status bar either.
+      assert.deepEqual(hooks.compileTails(), []);
+    });
+
+    it('stamps every panel message with the file it belongs to', async () => {
+      fake.streamScripts = [tailScript(() => stepsPath, 'export default defineSteps([]);\n')];
+      const uri = vscode.Uri.file(mdPath).toString();
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      await waitFor('idle', () => !hooks.isRunning());
+
+      // Without the stamp the panel's Output section is one shared pane and
+      // two concurrent compiles interleave in it.
+      for (const type of ['runEvent', 'compileEvent', 'compileProgress']) {
+        const msgs = posted(type);
+        assert.ok(msgs.length > 0, `no ${type} messages were posted`);
+        for (const m of msgs) assert.equal(m.uri, uri, `${type} carried ${m.uri}`);
+      }
+    });
+
+    it('forwards the compile log lines to the panel, not only to the channel', async () => {
+      fake.streamScripts = [tailScript(() => stepsPath, 'export default defineSteps([]);\n')];
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      await waitFor('idle', () => !hooks.isRunning());
+
+      const lines = posted('compileEvent').map((m) => m.line);
+      // Starts and completions both — the pair is the point: the gap between
+      // them is the model call the author is waiting on.
+      assert.ok(lines.some((l) => /generating…/.test(l)), lines.join('\n'));
+      assert.ok(lines.some((l) => /step 1 generated/.test(l)), lines.join('\n'));
+      assert.ok(lines.some((l) => /reviewing compile-me\.steps\.ts…/.test(l)), lines.join('\n'));
+      // …and the result line the panel already had.
+      assert.ok(lines.some((l) => /Compiled compile-me\.md/.test(l)), lines.join('\n'));
+      // The structured event is never a log line — a client that read the
+      // counts out of prose is the mirror it exists to avoid.
+      assert.equal(lines.some((l) => /compile:progress/.test(l)), false);
+    });
+
+    it('degrades to an indeterminate strip against a server that sends no counts', async () => {
+      // Version skew, new client / old server: `compile:progress` never
+      // arrives, so the first compile frame is the only cue the tail began.
+      fake.streamScripts = [
+        (f) => {
+          f.push({ type: 'step:start', line: 8 });
+          f.push({ type: 'step:pass', line: 8 });
+          f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' });
+          f.push({
+            type: 'compile:result',
+            status: 'partial',
+            files: { [stepsPath]: 'export default defineSteps([]);\n' },
+            summary: summaryFor({ compiled: 1, unproven: [1] }),
+          });
+          f.push({ type: 'done', status: 'passed' });
+          f.end();
+        },
+      ];
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      await waitFor('idle', () => !hooks.isRunning());
+
+      const states = strips().map((m) => m.state);
+      const up = states.find((s) => s !== null);
+      assert.ok(up, 'no strip at all is the silence this story removed');
+      // No counts, and a strip that says so rather than inventing a position.
+      assert.equal(up.done, null);
+      assert.equal(up.total, null);
+      assert.equal(up.file, 'compile-me.md');
+      assert.equal(states[states.length - 1], null);
+    });
+
+    it('takes the strip down when the stream ends without a result', async () => {
+      // A dropped connection, or a server that never sends one. A spinner that
+      // outlives its compile is worse than no spinner.
+      fake.streamScripts = [
+        (f) => {
+          f.push({ type: 'step:start', line: 8 });
+          f.push({ type: 'step:pass', line: 8 });
+          f.push({ type: 'compile:progress', done: 0, total: 1, phase: 'generate', runEnded: true });
+          f.push({ type: 'done', status: 'passed' });
+          f.end();
+        },
+      ];
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      await waitFor('idle', () => !hooks.isRunning());
+
+      const states = strips().map((m) => m.state);
+      assert.ok(states.some((s) => s !== null), 'the strip never went up');
+      assert.equal(states[states.length - 1], null, 'the strip outlived the run');
+      assert.deepEqual(hooks.compileTails(), []);
+    });
+
+    it('an ordinary run raises no strip — its steps are their own progress', async () => {
+      fake.streamScripts = [
+        (f) => {
+          f.push({ type: 'step:start', line: 8 });
+          f.push({ type: 'step:pass', line: 8 });
+          f.push({ type: 'done', status: 'passed' });
+          f.end();
+        },
+      ];
+
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      await waitFor('idle', () => !hooks.isRunning());
+
+      assert.deepEqual(strips().map((m) => m.state).filter(Boolean), []);
+    });
+  });
+
 });
 
 /**

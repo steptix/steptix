@@ -12,6 +12,18 @@ import { createRoot } from "react-dom/client";
 import { hostBridge } from "./lib/host-bridge.js";
 import { collectVariables, parseParametersInline, maskIfSecretInline, classifyCaptureSource } from "./lib/variables-panel.js";
 import { extractStepLineIds } from "./lib/step-lines-inline.js";
+import {
+  stripDetailInline,
+  stripFractionInline,
+  stripHeadlineInline,
+} from "./lib/compile-strip-inline.js";
+import {
+  appendLogLine,
+  clearLogFor,
+  logFor,
+  setStrip,
+  stripFor,
+} from "./lib/panel-scope-inline.js";
 import { describeStepFailure, formatStepFailure } from "./lib/failure-text-inline.js";
 
 // Inline narrowing helper. The webview can't import named exports from
@@ -28,10 +40,9 @@ const HOST_MSG_TYPES = new Set([
   "breakpointStop",
   "batchBanner",
   "skillRerunAvailable",
-  "compileState",
   "compileEvent",
+  "compileProgress",
   "compileRunEvent",
-  "compileStep",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -147,6 +158,85 @@ function BatchBanner({ state }) {
 }
 
 /**
+ * The compile tail's status strip (stories/compile-tail-progress.md).
+ *
+ * Visible only for the TAIL — from the moment the run's steps are done until
+ * the proposal arrives. During the run itself the steps painting ARE the
+ * progress; the strip exists for the stretch that has nothing else to show.
+ *
+ * `state` is the active file's, and only ever the active file's: the strip is
+ * part of that file's run context and leaves the panel with the rest of it when
+ * the author switches away.
+ */
+function CompileStrip({ state }) {
+  if (!state) return null;
+  const headline = stripHeadlineInline(state);
+  const detail = stripDetailInline(state);
+  const fraction = stripFractionInline(state);
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        padding: "6px 12px 0",
+        borderBottom: "1px solid var(--vscode-panel-border, #444)",
+        background: "var(--vscode-editorWidget-background, var(--vscode-sideBar-background))",
+        fontSize: "0.92em",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Spinner />
+        <span style={{ flex: 1, minWidth: 0 }}>{headline}</span>
+      </div>
+      {detail && (
+        <div style={{ opacity: 0.7, paddingLeft: 20, marginTop: 1 }}>{detail}</div>
+      )}
+      <div
+        // A 2px rule under the text: determinate when the server sent counts,
+        // and a full-width dim bar when it did not (an older server sends no
+        // `compile:progress`, and a bar pretending to a position it does not
+        // have would be a lie).
+        style={{
+          height: 2,
+          marginTop: 6,
+          background: "var(--vscode-progressBar-background, #0e70c0)",
+          opacity: fraction === null ? 0.25 : 0.25,
+        }}
+      >
+        {fraction !== null && (
+          <div
+            style={{
+              height: "100%",
+              width: `${Math.round(fraction * 100)}%`,
+              background: "var(--vscode-progressBar-background, #0e70c0)",
+              transition: "width 160ms linear",
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A CSS-only spinner — the webview has no codicon font to lean on. */
+function Spinner() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 11,
+        height: 11,
+        flexShrink: 0,
+        borderRadius: "50%",
+        border: "1.5px solid var(--vscode-progressBar-background, #0e70c0)",
+        borderTopColor: "transparent",
+        display: "inline-block",
+        animation: "tb-spin 900ms linear infinite",
+      }}
+    />
+  );
+}
+
+/**
  * Per-step right-click menu. Opened from a step row's onContextMenu and
  * positioned at the cursor (clamped into the viewport). The transparent
  * backdrop catches outside clicks; Escape also closes. Menu items either
@@ -218,7 +308,22 @@ function TestBenchRunner() {
   const [running, setRunning] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState(null);
   const [composerText, setComposerText] = useState("");
-  const [runLog, setRunLog] = useState([]);
+  /**
+   * The Output section's lines, PER FILE (stories/compile-tail-progress.md
+   * §The panel log). The panel follows the active editor but every run
+   * controller posts to this one webview, so a single shared array showed
+   * whichever test spoke last — and two concurrent compiles interleaved their
+   * generation lines. Keyed by the document URI each message is stamped with.
+   */
+  const [logsByUri, setLogsByUri] = useState({});
+  /**
+   * The compile tail's status strip, per file. Same keying and the same
+   * reason: the strip describes ONE file's compile, and a panel showing
+   * github.md with securebank.md's counts on it reads as the wrong file's
+   * state. The workbench's status bar item is what covers the author who has
+   * navigated away.
+   */
+  const [stripByUri, setStripByUri] = useState({});
   const [runtimeVariables, setRuntimeVariables] = useState({});
   // Parallel to runtimeVariables: records the `source` discriminator from
   // each `capture` event (runner-core CaptureEvent → 'capture' | 'toolOutput')
@@ -243,8 +348,6 @@ function TestBenchRunner() {
    * banner doesn't need to linger.
    */
   const [batchBanner, setBatchBanner] = useState(null);
-  /** True while a code-behind compile is running for this file. */
-  const [compiling, setCompiling] = useState(false);
   /**
    * Per-step right-click menu. Non-null carries cursor coords + the row's
    * state (line, hasBreakpoint, hasStatus) so the menu can label items
@@ -266,6 +369,13 @@ function TestBenchRunner() {
 
   const outputLogRef = useRef(null);
   const outputAtBottomRef = useRef(true);
+  /**
+   * The active file's URI, as a ref so the message handler (subscribed once,
+   * on mount) can read it without going stale. Only used as the fallback
+   * bucket for a message that carries no `uri` — a host that predates the
+   * stamp, or a hand-built one in a test.
+   */
+  const activeUriRef = useRef(null);
   // Tracks the previous `running` value so the message handler can detect
   // the false→true transition without depending on React state batching
   // order (parametersResolved may arrive in the same tick as running:true,
@@ -287,6 +397,7 @@ function TestBenchRunner() {
       if (!isHostMsg(msg)) return;
       switch (msg.type) {
         case "activeFile":
+          activeUriRef.current = msg.snapshot.uri ?? null;
           setSnapshot(msg.snapshot);
           if (!msg.snapshot.isTestFile) {
             setHostError(null);
@@ -309,15 +420,12 @@ function TestBenchRunner() {
             // captured scope is wiped on the host side too).
             setSkillRerun(null);
             setRerunEdits({});
-            // Same reasoning for "Compile from this run": the run it named is
-            // no longer the last one.
-            setCompileFromRun(null);
           }
           runningRef.current = msg.running;
           setRunning(msg.running);
           break;
         case "runEvent":
-          handleRunEvent(msg.event);
+          handleRunEvent(msg.event, msg.uri);
           break;
         case "runError":
           setHostError(msg.payload);
@@ -340,14 +448,13 @@ function TestBenchRunner() {
           setSkillRerun(msg.failure);
           setRerunEdits({});
           break;
-        case "compileState":
-          setCompiling(msg.running);
-          // A compile that just started is a fresh narrative; a compile that
-          // just finished has already said everything it has to say.
-          if (msg.running) log(`Compiling ${msg.file ?? "code-behind"}…`, "info");
-          break;
         case "compileEvent":
-          log(msg.line, "info");
+          log(msg.line, msg.kind ?? "info", msg.uri);
+          break;
+        case "compileProgress":
+          // `state: null` takes the strip down. Kept per file so switching
+          // away and back mid-tail finds it where it was.
+          setStripByUri((prev) => setStrip(prev, msg.uri ?? activeUriRef.current, msg.state));
           break;
         case "compileRunEvent":
           // The log line for this event arrived as `compileEvent`; what is
@@ -361,8 +468,6 @@ function TestBenchRunner() {
             }));
           }
           break;
-        case "compileStep":
-          break;
         default:
           break;
       }
@@ -371,10 +476,10 @@ function TestBenchRunner() {
     return unsubscribe;
   }, []);
 
-  const handleRunEvent = (event) => {
+  const handleRunEvent = (event, uri) => {
     switch (event.type) {
       case "step:start":
-        log(`Running step on line ${event.line}…`);
+        log(`Running step on line ${event.line}…`, "info", uri);
         setRunning(true);
         break;
       case "step:pass":
@@ -382,22 +487,24 @@ function TestBenchRunner() {
           log(
             `⚠ Step on line ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`,
             "warn",
+            uri,
           );
         } else {
           log(
             `✓ Step on line ${event.line} passed${event.fromCodeBehind ? " (code-behind)" : ""}`,
             "pass",
+            uri,
           );
         }
-        if (event.output) log(event.output, "info");
+        if (event.output) log(event.output, "info", uri);
         break;
       case "step:fail":
         // A heal whose AI attempt failed too carries both errors — say so,
         // or the code-behind crash that started it would be invisible here.
-        log(`✗ Step on line ${event.line} failed: ${describeStepFailure(event)}`, "fail");
+        log(`✗ Step on line ${event.line} failed: ${describeStepFailure(event)}`, "fail", uri);
         break;
       case "output":
-        log(event.msg, event.kind);
+        log(event.msg, event.kind, uri);
         break;
       case "capture":
         setRuntimeVariables((prev) => ({ ...prev, [event.name]: event.value }));
@@ -405,7 +512,7 @@ function TestBenchRunner() {
         // classifyCaptureSource collapses absent/unknown to 'capture' (the
         // conservative default), so this never crashes on legacy events.
         setRuntimeSources((prev) => ({ ...prev, [event.name]: classifyCaptureSource(event.source) }));
-        log(`✎ ${event.name} ← ${maskIfSecretInline(event.name, event.value)}`, "info");
+        log(`✎ ${event.name} ← ${maskIfSecretInline(event.name, event.value)}`, "info", uri);
         break;
       case "frame:scope":
         // Phase 4 / Phase 5 follow-up — surface the server's per-frame
@@ -424,7 +531,11 @@ function TestBenchRunner() {
         setRuntimeVariables((prev) => ({ ...prev, ...event.scope }));
         break;
       case "done":
-        log(`Run ${event.status}`, event.status === "passed" ? "pass" : event.status === "failed" || event.status === "error" ? "fail" : "info");
+        log(
+          `Run ${event.status}`,
+          event.status === "passed" ? "pass" : event.status === "failed" || event.status === "error" ? "fail" : "info",
+          uri,
+        );
         setRunning(false);
         break;
       default:
@@ -432,8 +543,22 @@ function TestBenchRunner() {
     }
   };
 
-  const log = (msg, kind = "info") =>
-    setRunLog((entries) => [...entries, { msg, kind, ts: new Date().toLocaleTimeString() }]);
+  /**
+   * Append one line to a FILE's log.
+   *
+   * `uri` is the document the host stamped the message with. A message that
+   * carries none — an older host, or a hand-built one — falls back to whatever
+   * file is active, which is what the single shared log always did.
+   */
+  const log = (msg, kind = "info", uri) => {
+    const entry = { msg, kind, ts: new Date().toLocaleTimeString() };
+    setLogsByUri((prev) => appendLogLine(prev, uri ?? activeUriRef.current, entry));
+  };
+
+  /** The active file's log, and the active file's strip. Everything else's
+   *  stays in its own bucket until the author switches to it. */
+  const runLog = logFor(logsByUri, snapshot?.uri);
+  const compileStrip = stripFor(stripByUri, snapshot?.uri);
 
   // Auto-scroll output log to bottom unless the user has scrolled up.
   useEffect(() => {
@@ -525,7 +650,9 @@ function TestBenchRunner() {
   };
   const handleStop = () => hostBridge.postStop();
   const handleCloseSession = () => hostBridge.postRestartSession();
-  const handleClearLog = () => setRunLog([]);
+  /** Clear the ACTIVE file's log only. Another file's compile is still
+   *  running and its lines are still its own. */
+  const handleClearLog = () => setLogsByUri((prev) => clearLogFor(prev, snapshot?.uri));
 
   /**
    * Click on a step row. Plain click → replace selection with this line and
@@ -647,6 +774,7 @@ function TestBenchRunner() {
       <BatchBanner state={batchBanner} />
       <style>{`
         body { padding: 0 !important; margin: 0; }
+        @keyframes tb-spin { to { transform: rotate(360deg); } }
         .tb-btn {
           padding: 4px 10px;
           border: none;
@@ -782,11 +910,11 @@ function TestBenchRunner() {
           <button
             className="tb-btn"
             onClick={handleCompile}
-            disabled={running || compiling}
+            disabled={running}
             title="Run this test once and generate code-behind for every step that ran under AI, then offer the result as a diff. The entries are unproven — the next run proves them."
           >
             <CodeBehindIcon style={{ marginRight: 5 }} />
-            {compiling ? "Compiling…" : "Run & Compile"}
+            Run &amp; Compile
           </button>
         </div>
         {(passCount > 0 || failCount > 0) && (
@@ -798,6 +926,8 @@ function TestBenchRunner() {
           </div>
         )}
       </div>
+
+      <CompileStrip state={compileStrip} />
 
       {hostError && (
         <div style={{ padding: 10 }}>
