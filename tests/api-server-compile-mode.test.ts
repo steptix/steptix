@@ -363,8 +363,12 @@ describe('POST /sessions/:id/steps with compile', () => {
     expect(frames[frames.length - 1]!.type).toBe('done');
 
     const steps = frames.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+    // Start frame then completion frame, per step
+    // (stories/compile-tail-progress.md §The server speaks at starts).
     expect(steps.map((f) => [f.step, f.line, f.message])).toEqual([
+      [1, 4, 'generating…'],
       [1, 4, 'generated'],
+      [2, 5, 'generating…'],
       [2, 5, 'generated'],
     ]);
 
@@ -626,7 +630,9 @@ describe('recompiling a step whose entry broke', () => {
         compileContinues: true,
       });
 
-      const generated = second.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+      const generated = second.filter(
+        (f) => f.type === 'compile:step' && f.message === 'generated',
+      );
       // Step TWO of the run, on line 5 — not step one all over again.
       expect(generated.map((f) => [f.step, f.line])).toEqual([[2, 5]]);
 
@@ -654,7 +660,9 @@ describe('recompiling a step whose entry broke', () => {
       // be discarded, not continued, or its entries would ride along and its
       // step numbers would keep climbing.
       const fresh = await block({ steps: [STEPS[0]!], sourceLines: [4], testFilePath, compile: 'run' });
-      const generated = fresh.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+      const generated = fresh.filter(
+        (f) => f.type === 'compile:step' && f.message === 'generated',
+      );
       expect(generated.map((f) => f.step)).toEqual([1]);
       const result = fresh.find((f) => f.type === 'compile:result')!;
       expect(result.summary.totalSteps).toBe(1);
@@ -801,7 +809,10 @@ describe('recompiling a step whose entry broke', () => {
 
       // Generation: the step's own expanded number and skill-file line.
       const generated = frames.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
-      expect(generated.map((f) => [f.step, f.line, f.message])).toEqual([[2, 5, 'generated']]);
+      expect(generated.map((f) => [f.step, f.line, f.message])).toEqual([
+        [2, 5, 'generating…'],
+        [2, 5, 'generated'],
+      ]);
 
       // The entry lands where a whole-test compile binds it: the skill's own
       // file, from the run's real skill frame — no compileScope involved.

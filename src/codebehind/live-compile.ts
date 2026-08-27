@@ -75,6 +75,33 @@ export interface LiveCompileStepEvent {
   message: string;
 }
 
+/**
+ * How far the tail has got (stories/compile-tail-progress.md), as numbers.
+ *
+ * The client's counts must not come from matching the prose on
+ * `compile:step` — that would mirror the server's wording and rot the first
+ * time it changes — so they ride their own frame.
+ */
+export interface LiveCompileProgressEvent {
+  type: 'compile:progress';
+  /** Enqueued entries that reached a terminal state — generated, kept as AI,
+   *  errored, or skipped by a stop. */
+  done: number;
+  /** Entries enqueued so far; final once the run's last step has ended. */
+  total: number;
+  phase: 'generate' | 'review';
+  /** 1-based step being generated right now, when `phase` is `'generate'`. */
+  step?: number;
+  line?: number;
+  /** A Review pass is still owed ('run' mode only). */
+  reviewPending?: boolean;
+  /** The run's last step has just ended; everything from here is tail. */
+  runEnded?: boolean;
+}
+
+/** Everything the compiler puts on the run's stream. */
+export type LiveCompileEvent = LiveCompileStepEvent | LiveCompileProgressEvent;
+
 export interface LiveCompileOptions {
   mode: LiveCompileMode;
   /** Absolute path of the test file. */
@@ -105,7 +132,7 @@ export interface LiveCompileOptions {
    *  Replaced per block by `beginBlock` — a retained compiler outlives the
    *  request that created it, and block 1's signal is spent by then. */
   signal?: AbortSignal | undefined;
-  emit: (event: LiveCompileStepEvent) => void;
+  emit: (event: LiveCompileEvent) => void;
   /** Something the author should know that belongs to no step. */
   note?: ((message: string, level: 'info' | 'warn') => void) | undefined;
 }
@@ -207,6 +234,15 @@ export class LiveCompiler {
   private kept = 0;
   private keptAiExisting = 0;
   private errors = 0;
+  /**
+   * Entries put on the queue — the tail's `total`.
+   *
+   * Counted at `offer` time rather than derived from the outcome lists,
+   * because the whole point of the number is to be known BEFORE the work is
+   * done. It is final once the run's last step has been offered, which is
+   * exactly when `runStepsEnded` forecasts with it.
+   */
+  private enqueued = 0;
   /** Every parameter value the run resolved, merged across steps, for the
    *  review's leak guard. */
   private readonly parameters: Record<string, string> = {};
@@ -233,7 +269,7 @@ export class LiveCompiler {
    * that closed when block 1 answered. Caught by the split-run seam test,
    * which saw a correct summary and not one `compile:step` frame.
    */
-  private emit: (event: LiveCompileStepEvent) => void;
+  private emit: (event: LiveCompileEvent) => void;
   private note: ((message: string, level: 'info' | 'warn') => void) | undefined;
   /** Set by `dispose`: skip generations not yet started and propose nothing. */
   private disposed = false;
@@ -266,7 +302,7 @@ export class LiveCompiler {
     plan: PlanEntry[],
     signal?: AbortSignal | undefined,
     stream?: {
-      emit: (event: LiveCompileStepEvent) => void;
+      emit: (event: LiveCompileEvent) => void;
       note?: ((message: string, level: 'info' | 'warn') => void) | undefined;
     },
   ): void {
@@ -334,6 +370,70 @@ export class LiveCompiler {
   }
 
   /**
+   * Enqueued entries that will produce nothing more — the tail's `done`.
+   *
+   * `attempted` plus what a stop skipped. Those two are the same number on
+   * every path but a stop, which is the one case where an entry ends without
+   * an outcome; counting it keeps the progress bar from freezing part-way
+   * while the run winds down.
+   */
+  private get settled(): number {
+    return this.attempted + this.skippedByStop.length;
+  }
+
+  /**
+   * Put the tail's counts on the stream.
+   *
+   * `reviewPending` is a forecast, not a fact: it says a Review pass is owed
+   * if the compile gets that far. A `'steps'` compile never owes one.
+   */
+  private emitProgress(
+    phase: 'generate' | 'review',
+    current?: { step: number; line?: number | undefined },
+    runEnded?: boolean,
+  ): void {
+    this.emit({
+      type: 'compile:progress',
+      done: this.settled,
+      total: this.enqueued,
+      phase,
+      ...(current && { step: current.step }),
+      ...(current && typeof current.line === 'number' && current.line > 0 && { line: current.line }),
+      ...(phase === 'generate' && this.options.mode === 'run' && { reviewPending: true }),
+      ...(runEnded === true && { runEnded: true }),
+    });
+  }
+
+  /**
+   * The run's last step has ended; everything left is tail
+   * (stories/compile-tail-progress.md).
+   *
+   * This is the moment `total` becomes final — every step has been offered —
+   * and the moment the author most needs to be told what is still owed, because
+   * the steps have stopped painting and nothing else is about to speak for up
+   * to a minute. Called by the server once per BLOCK: a run split by a
+   * breakpoint drains its queue at the end of each block, so each block has its
+   * own tail and its own forecast.
+   *
+   * Silent when there is no tail to forecast — an all-cached run that enqueued
+   * nothing and owes no Review has nothing to wait for, and saying "0 entries
+   * still to generate" would be noise.
+   */
+  runStepsEnded(): void {
+    const outstanding = this.enqueued - this.settled;
+    const reviewOwed = this.options.mode === 'run' && this.enqueued > 0;
+    if (outstanding === 0 && !reviewOwed) return;
+    this.emitProgress('generate', undefined, true);
+    const entries = `${outstanding} ${outstanding === 1 ? 'entry' : 'entries'} still to generate`;
+    this.note?.(
+      reviewOwed
+        ? `Run finished — ${entries}, then a review pass`
+        : `Run finished — ${entries}`,
+      'info',
+    );
+  }
+
+  /**
    * Offer a finished step. Returns immediately — the browser never waits on
    * generation. Called for EVERY step, eligible or not, so the summary can
    * say how many were kept as code and how many were already AI.
@@ -370,6 +470,7 @@ export class LiveCompiler {
       hasEntry: input.binding!.entry !== undefined,
       isAiEntry: false,
     };
+    this.enqueued++;
     // Each link is isolated. A rejected link would otherwise poison the rest
     // of the chain — `.then` on a rejected promise is skipped — so one
     // unexpected throw at step 2 would silently lose steps 3..n, which is
@@ -386,6 +487,9 @@ export class LiveCompiler {
             'The step stays AI; nothing was written for it.',
           'warn',
         );
+        // `generate` threw before its own progress emit, so this entry would
+        // otherwise never be counted settled.
+        this.emitProgress('generate');
       });
   }
 
@@ -552,8 +656,16 @@ export class LiveCompiler {
     // asked for.
     if (this.disposed || this.signal?.aborted) {
       this.skippedByStop.push(step.number);
+      // Still progress: the entry is settled, in the only way a stopped one
+      // can be. Without this the bar stalls one short for every skip.
+      this.emitProgress('generate');
       return;
     }
+    // BEFORE the model call, which is the whole point: the completion frame
+    // below arrives one model call later, and that gap is the silence this
+    // story exists to fill.
+    this.stepEvent('generate', step, 'generating…');
+    this.emitProgress('generate', { step: step.number, line: this.plan[step.index]?.line });
     const generated = await this.askModel(step, input);
     const applied = await applyGenerated(this.candidate, step, generated, this.stepEvent, 'generate');
     if (applied.kind === 'entry') this.compiled.push(step.number);
@@ -572,6 +684,7 @@ export class LiveCompiler {
         'warn',
       );
     }
+    this.emitProgress('generate');
   }
 
   /**
@@ -591,6 +704,7 @@ export class LiveCompiler {
       .touchedFiles()
       .filter((f) => this.reviewed.get(f) !== this.candidate.contentOf(f));
     if (this.options.mode === 'run' && !final.aborted && unreviewed.length > 0) {
+      this.emitProgress('review');
       await reviewCandidate(
         this.candidate,
         {

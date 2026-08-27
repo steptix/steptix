@@ -8,6 +8,7 @@ import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import {
   generationRefusal,
   LiveCompiler,
+  type LiveCompileEvent,
   type LiveCompileStepEvent,
 } from '../src/codebehind/live-compile.js';
 
@@ -205,7 +206,7 @@ function compilerFor(
     mode?: 'run' | 'steps';
     client?: AiClient;
     signal?: AbortSignal;
-    events?: LiveCompileStepEvent[];
+    events?: LiveCompileEvent[];
     notes?: string[];
   } = {},
 ): LiveCompiler {
@@ -226,7 +227,7 @@ function compilerFor(
 
 describe('the trailing generation queue', () => {
   it('generates an entry per eligible step and proposes one file', async () => {
-    const events: LiveCompileStepEvent[] = [];
+    const events: LiveCompileEvent[] = [];
     const compiler = compilerFor(['Sign in', 'Add to cart'], { events });
 
     compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
@@ -234,8 +235,16 @@ describe('the trailing generation queue', () => {
 
     const outcome = await compiler.finish({ tokensUsed: 120 });
 
-    expect(events.filter((e) => e.phase === 'generate').map((e) => [e.step, e.line, e.message])).toEqual([
+    // A start frame BEFORE each model call and the completion frame after
+    // (stories/compile-tail-progress.md): the gap between the two is the
+    // silence the tail used to be.
+    const stepFrames = events.filter(
+      (e): e is LiveCompileStepEvent => e.type === 'compile:step' && e.phase === 'generate',
+    );
+    expect(stepFrames.map((e) => [e.step, e.line, e.message])).toEqual([
+      [1, 10, 'generating…'],
       [1, 10, 'generated'],
+      [2, 11, 'generating…'],
       [2, 11, 'generated'],
     ]);
     expect(Object.keys(outcome.files)).toEqual([stepsFile]);
@@ -271,7 +280,7 @@ describe('the trailing generation queue', () => {
 
   it('a generation error does not stop anything — the step stays AI and the rest are proposed', async () => {
     const notes: string[] = [];
-    const events: LiveCompileStepEvent[] = [];
+    const events: LiveCompileEvent[] = [];
     const { client } = fakeClient({
       generate: (prompt) => {
         if (/source:\s*"Add to cart"/.test(prompt)) throw new Error('model exploded');
@@ -407,7 +416,7 @@ describe('the trailing generation queue', () => {
     // breakpoint splits it. The compiler is retained on the session, so block
     // 2's entries join block 1's rather than starting a fresh file, and its
     // steps keep the RUN's numbers rather than restarting at 1.
-    const events: LiveCompileStepEvent[] = [];
+    const events: LiveCompileEvent[] = [];
     const compiler = compilerFor(['Sign in', 'Add to cart'], { events });
     compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
     const first = await compiler.finish({ tokensUsed: 10 });
@@ -419,7 +428,9 @@ describe('the trailing generation queue', () => {
     const second = await compiler.finish({ tokensUsed: 20 });
 
     // Block 2's step is step 3 of the run, on ITS line — not step 1 on line 10.
-    const generated = events.filter((e) => e.phase === 'generate').map((e) => [e.step, e.line]);
+    const generated = events
+      .filter((e) => e.type === 'compile:step' && e.message === 'generated')
+      .map((e) => [e.step, e.line]);
     expect(generated).toEqual([[1, 10], [3, 20]]);
     // One file, both entries: block 2 did not start from the unapplied file.
     expect(second.summary.compiled).toBe(2);

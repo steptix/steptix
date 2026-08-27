@@ -580,6 +580,21 @@ export type RunEvent =
       message: string;
     }
   /**
+   * How far the compile tail has got, as numbers
+   * (stories/compile-tail-progress.md). Its own frame so a client never has to
+   * parse the prose on `compile:step` to draw a progress bar.
+   */
+  | {
+      type: 'compile:progress';
+      done: number;
+      total: number;
+      phase: 'generate' | 'review';
+      step?: number;
+      line?: number;
+      reviewPending?: boolean;
+      runEnded?: boolean;
+    }
+  /**
    * Terminal for the compile, after the queue drains and Review runs, and
    * before `done`. Proposals only: the server writes no `.steps.ts` on this
    * path.
@@ -4808,6 +4823,10 @@ export class SessionManager {
     // by the time the run is over. The server writes no `.steps.ts` here;
     // TestBench applies through its diff, as it does for a boxed compile.
     if (liveCompile) {
+      // The run's steps are done; everything after this is tail. Said before
+      // the drain begins (stories/compile-tail-progress.md) — after it, the
+      // forecast would be a report.
+      liveCompile.runStepsEnded();
       // Numbers are the RUN's, not this block's: a client folding the summary
       // is looking at one test, however many requests it took to run it.
       const offset = liveCompile.blockOffset;
