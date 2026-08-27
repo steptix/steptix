@@ -4580,6 +4580,12 @@ export class SessionManager {
         }
       }
     } finally {
+      // The run's steps are done; everything from here is tail
+      // (stories/compile-tail-progress.md). Said HERE — the first statement
+      // after the step loop, ahead of the report, the recording write and the
+      // drain — because every one of those awaits is time the queue keeps
+      // spending, and a forecast issued after them is a report.
+      liveCompile?.runStepsEnded();
       // Restore status unless session was closed
       if (session.status !== 'closed') {
         session.status = 'active';
@@ -4823,10 +4829,6 @@ export class SessionManager {
     // by the time the run is over. The server writes no `.steps.ts` here;
     // TestBench applies through its diff, as it does for a boxed compile.
     if (liveCompile) {
-      // The run's steps are done; everything after this is tail. Said before
-      // the drain begins (stories/compile-tail-progress.md) — after it, the
-      // forecast would be a report.
-      liveCompile.runStepsEnded();
       // Numbers are the RUN's, not this block's: a client folding the summary
       // is looking at one test, however many requests it took to run it.
       const offset = liveCompile.blockOffset;

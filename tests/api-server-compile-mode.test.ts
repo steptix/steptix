@@ -390,6 +390,45 @@ describe('POST /sessions/:id/steps with compile', () => {
     expect(result.files[stepsFilePath]).toContain("source: 'Search for the order'");
   });
 
+it('puts the tail on the wire: a forecast at run end, then counts and a Review start', async () => {
+    const { frames } = await runSteps(requestBody({ compile: 'run' }));
+
+    // The forecast lands the moment the last step ends, which is exactly the
+    // point the panel would otherwise go quiet (stories/compile-tail-progress.md).
+    const forecast = frames.filter(
+      (f) => f.type === 'output' && /Run finished — /.test(String(f.msg)),
+    );
+    expect(forecast.map((f) => f.msg)).toEqual([
+      'Run finished — 2 entries still to generate, then a review pass',
+    ]);
+
+    // …before any entry is written, which is what makes it a forecast rather
+    // than a report.
+    const forecastAt = frames.findIndex(
+      (f) => f.type === 'output' && /Run finished — /.test(String(f.msg)),
+    );
+    const firstWritten = frames.findIndex(
+      (f) => f.type === 'compile:step' && f.message === 'generated',
+    );
+    expect(forecastAt).toBeLessThan(firstWritten);
+
+    // The structured half. Exactly one frame is marked `runEnded`, and its
+    // total is final.
+    const progress = frames.filter((f) => f.type === 'compile:progress');
+    const ended = progress.filter((f) => f.runEnded === true);
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toMatchObject({ done: 0, total: 2, phase: 'generate', reviewPending: true });
+    // …and the last one agrees with the summary the run ends with.
+    const result = frames.find((f) => f.type === 'compile:result')!;
+    expect(progress[progress.length - 1]!.done).toBe(result.summary.compiled);
+
+    // Review announces itself BEFORE its model call — the longest single call
+    // the compile makes, and the one that used to say nothing until it was done.
+    const review = frames.filter((f) => f.type === 'compile:step' && f.phase === 'review');
+    expect(String(review[0]!.message)).toMatch(/^reviewing .*\.steps\.ts…$/);
+    expect(progress.some((f) => f.phase === 'review')).toBe(true);
+  });
+
   it('proposes only — the server never writes the .steps.ts itself', async () => {
     await runSteps(requestBody({ compile: 'run' }));
     await expect(fs.access(stepsFilePath)).rejects.toThrow();

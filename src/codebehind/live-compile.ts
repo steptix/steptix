@@ -418,13 +418,29 @@ export class LiveCompiler {
    * Silent when there is no tail to forecast — an all-cached run that enqueued
    * nothing and owes no Review has nothing to wait for, and saying "0 entries
    * still to generate" would be noise.
+   *
+   * A run stopped before its last step is the other wording: what is queued
+   * will be skipped, not generated, and `finish` runs no Review on an aborted
+   * compile — so promising one here would be a forecast of something that
+   * cannot happen.
    */
   runStepsEnded(): void {
+    const stopped = this.disposed || this.signal?.aborted === true;
     const outstanding = this.enqueued - this.settled;
-    const reviewOwed = this.options.mode === 'run' && this.enqueued > 0;
+    const reviewOwed = this.options.mode === 'run' && this.enqueued > 0 && !stopped;
     if (outstanding === 0 && !reviewOwed) return;
     this.emitProgress('generate', undefined, true);
-    const entries = `${outstanding} ${outstanding === 1 ? 'entry' : 'entries'} still to generate`;
+    const plural = outstanding === 1 ? 'entry' : 'entries';
+    if (stopped) {
+      if (outstanding > 0) {
+        this.note?.(
+          `Run stopped — ${outstanding} queued ${plural} will not be generated`,
+          'info',
+        );
+      }
+      return;
+    }
+    const entries = `${outstanding} ${plural} still to generate`;
     this.note?.(
       reviewOwed
         ? `Run finished — ${entries}, then a review pass`
