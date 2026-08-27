@@ -692,6 +692,12 @@ describe('the tail reports its progress', () => {
     // A stopped run promises no review pass — an aborted compile runs none —
     // and names what will not be generated rather than what is still coming.
     expect(notes).toEqual([`Run stopped — 2 queued entries will not be generated`]);
+    // …and the log names WHICH steps got nothing, since the summary carries
+    // only a list a client renders as a count.
+    const skipped = events.filter(
+      (e) => e.type === 'compile:step' && e.message === 'skipped — the run was stopped',
+    );
+    expect(skipped.map((e) => e.step)).toEqual([1, 2]);
     // Nothing was generated: both were skipped, and the summary says so.
     expect(outcome.summary.compiled).toBe(0);
     expect(outcome.summary.notAttempted).toEqual([1, 2]);

@@ -62,22 +62,28 @@ export class CompileTailSignals implements vscode.Disposable {
     // navigated away, so it names the file. Not cancellable on purpose: a
     // Cancel link on a toast is a destructive control in a place people click
     // reflexively, and Stop in the panel already aborts the tail.
-    void this.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `Compiling code-behind for ${tail.file}`,
-        cancellable: false,
-      },
-      (progress) =>
-        new Promise<void>((resolve) => {
-          entry.report = progress;
-          entry.done = resolve;
-          // A tail that ended between `begin` and the callback running (VS Code
-          // invokes it on a later turn) must not leave the toast up forever.
-          if (!this.running.has(key)) resolve();
-          else this.reportTo(entry);
-        }),
-    );
+    void Promise.resolve(
+      this.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Compiling code-behind for ${tail.file}`,
+          cancellable: false,
+        },
+        (progress) =>
+          new Promise<void>((resolve) => {
+            entry.report = progress;
+            entry.done = resolve;
+            // A tail that ended between `begin` and the callback running (VS
+            // Code invokes it on a later turn) must not leave the toast up
+            // forever.
+            if (!this.running.has(key)) resolve();
+            else this.reportTo(entry);
+          }),
+      ),
+      // A reporter that rejects would otherwise be an unhandled rejection in
+      // the extension host — and the compile it was announcing is unaffected
+      // either way, so there is nothing to report and nothing to undo.
+    ).catch(() => undefined);
   }
 
   /** New counts for a running tail. A no-op for a file with no tail. */

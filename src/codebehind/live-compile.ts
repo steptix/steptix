@@ -672,6 +672,10 @@ export class LiveCompiler {
     // asked for.
     if (this.disposed || this.signal?.aborted) {
       this.skippedByStop.push(step.number);
+      // Named, not merely counted: the summary's `notAttempted` is a list of
+      // numbers a client renders as a total, and "3 step(s) not attempted"
+      // does not tell the author WHICH of their steps still has no entry.
+      this.stepEvent('generate', step, 'skipped — the run was stopped');
       // Still progress: the entry is settled, in the only way a stopped one
       // can be. Without this the bar stalls one short for every skip.
       this.emitProgress('generate');
