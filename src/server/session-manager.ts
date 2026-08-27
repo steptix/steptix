@@ -580,6 +580,21 @@ export type RunEvent =
       message: string;
     }
   /**
+   * How far the compile tail has got, as numbers
+   * (stories/compile-tail-progress.md). Its own frame so a client never has to
+   * parse the prose on `compile:step` to draw a progress bar.
+   */
+  | {
+      type: 'compile:progress';
+      done: number;
+      total: number;
+      phase: 'generate' | 'review';
+      step?: number;
+      line?: number;
+      reviewPending?: boolean;
+      runEnded?: boolean;
+    }
+  /**
    * Terminal for the compile, after the queue drains and Review runs, and
    * before `done`. Proposals only: the server writes no `.steps.ts` on this
    * path.
@@ -4565,6 +4580,12 @@ export class SessionManager {
         }
       }
     } finally {
+      // The run's steps are done; everything from here is tail
+      // (stories/compile-tail-progress.md). Said HERE — the first statement
+      // after the step loop, ahead of the report, the recording write and the
+      // drain — because every one of those awaits is time the queue keeps
+      // spending, and a forecast issued after them is a report.
+      liveCompile?.runStepsEnded();
       // Restore status unless session was closed
       if (session.status !== 'closed') {
         session.status = 'active';

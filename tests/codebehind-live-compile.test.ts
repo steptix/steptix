@@ -8,6 +8,8 @@ import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import {
   generationRefusal,
   LiveCompiler,
+  type LiveCompileEvent,
+  type LiveCompileProgressEvent,
   type LiveCompileStepEvent,
 } from '../src/codebehind/live-compile.js';
 
@@ -205,7 +207,7 @@ function compilerFor(
     mode?: 'run' | 'steps';
     client?: AiClient;
     signal?: AbortSignal;
-    events?: LiveCompileStepEvent[];
+    events?: LiveCompileEvent[];
     notes?: string[];
   } = {},
 ): LiveCompiler {
@@ -226,7 +228,7 @@ function compilerFor(
 
 describe('the trailing generation queue', () => {
   it('generates an entry per eligible step and proposes one file', async () => {
-    const events: LiveCompileStepEvent[] = [];
+    const events: LiveCompileEvent[] = [];
     const compiler = compilerFor(['Sign in', 'Add to cart'], { events });
 
     compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
@@ -234,8 +236,16 @@ describe('the trailing generation queue', () => {
 
     const outcome = await compiler.finish({ tokensUsed: 120 });
 
-    expect(events.filter((e) => e.phase === 'generate').map((e) => [e.step, e.line, e.message])).toEqual([
+    // A start frame BEFORE each model call and the completion frame after
+    // (stories/compile-tail-progress.md): the gap between the two is the
+    // silence the tail used to be.
+    const stepFrames = events.filter(
+      (e): e is LiveCompileStepEvent => e.type === 'compile:step' && e.phase === 'generate',
+    );
+    expect(stepFrames.map((e) => [e.step, e.line, e.message])).toEqual([
+      [1, 10, 'generating…'],
       [1, 10, 'generated'],
+      [2, 11, 'generating…'],
       [2, 11, 'generated'],
     ]);
     expect(Object.keys(outcome.files)).toEqual([stepsFile]);
@@ -271,7 +281,7 @@ describe('the trailing generation queue', () => {
 
   it('a generation error does not stop anything — the step stays AI and the rest are proposed', async () => {
     const notes: string[] = [];
-    const events: LiveCompileStepEvent[] = [];
+    const events: LiveCompileEvent[] = [];
     const { client } = fakeClient({
       generate: (prompt) => {
         if (/source:\s*"Add to cart"/.test(prompt)) throw new Error('model exploded');
@@ -407,7 +417,7 @@ describe('the trailing generation queue', () => {
     // breakpoint splits it. The compiler is retained on the session, so block
     // 2's entries join block 1's rather than starting a fresh file, and its
     // steps keep the RUN's numbers rather than restarting at 1.
-    const events: LiveCompileStepEvent[] = [];
+    const events: LiveCompileEvent[] = [];
     const compiler = compilerFor(['Sign in', 'Add to cart'], { events });
     compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
     const first = await compiler.finish({ tokensUsed: 10 });
@@ -419,7 +429,9 @@ describe('the trailing generation queue', () => {
     const second = await compiler.finish({ tokensUsed: 20 });
 
     // Block 2's step is step 3 of the run, on ITS line — not step 1 on line 10.
-    const generated = events.filter((e) => e.phase === 'generate').map((e) => [e.step, e.line]);
+    const generated = events
+      .filter((e) => e.type === 'compile:step' && e.message === 'generated')
+      .map((e) => [e.step, e.line]);
     expect(generated).toEqual([[1, 10], [3, 20]]);
     // One file, both entries: block 2 did not start from the unapplied file.
     expect(second.summary.compiled).toBe(2);
@@ -555,5 +567,151 @@ describe('a step healing a broken entry', () => {
 
     const asked = prompts.filter((p) => !/Review a generated/.test(p));
     expect(asked[0]).not.toContain('A generated code-behind entry was replayed');
+  });
+});
+
+/**
+ * The tail's own progress (stories/compile-tail-progress.md).
+ *
+ * The numbers are the contract: a client draws a determinate bar off them and
+ * must never derive one by matching the prose the compiler also emits. So what
+ * is pinned here is the arithmetic — that `done` and `total` agree with the
+ * summary the same compile ends with, on the ordinary path and on the paths
+ * where an entry ends without an outcome.
+ */
+describe('the tail reports its progress', () => {
+  const progress = (events: LiveCompileEvent[]): LiveCompileProgressEvent[] =>
+    events.filter((e): e is LiveCompileProgressEvent => e.type === 'compile:progress');
+
+  it('forecasts at run end: the final total, and that a review pass follows', () => {
+    const events: LiveCompileEvent[] = [];
+    const notes: string[] = [];
+    const compiler = compilerFor(['Sign in', 'Add to cart'], { events, notes });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    compiler.offer({ index: 1, binding: binding('Add to cart'), result: result(2, 'Add to cart'), resolvedParameters: {} });
+
+    // The run's last step has just ended; nothing has been generated yet.
+    compiler.runStepsEnded();
+
+    const forecast = progress(events).filter((e) => e.runEnded === true);
+    expect(forecast).toHaveLength(1);
+    expect(forecast[0]).toMatchObject({ done: 0, total: 2, phase: 'generate', reviewPending: true });
+    expect(notes).toEqual(['Run finished — 2 entries still to generate, then a review pass']);
+  });
+
+  it('says nothing at run end when there is no tail to wait for', () => {
+    const events: LiveCompileEvent[] = [];
+    const notes: string[] = [];
+    const compiler = compilerFor(['Sign in'], { events, notes });
+    // Offered, but ineligible: the step already ran as code, so nothing was
+    // enqueued and no Review is owed. "0 entries still to generate" would be
+    // noise, and a strip raised on it would spin over an empty queue.
+    compiler.offer({
+      index: 0,
+      binding: binding('Sign in'),
+      result: result(1, 'Sign in', { fromCodeBehind: true }),
+      resolvedParameters: {},
+    });
+    compiler.runStepsEnded();
+    expect(progress(events)).toEqual([]);
+    expect(notes).toEqual([]);
+  });
+
+  it('a single-step compile forecasts no review pass — that path runs none', () => {
+    const events: LiveCompileEvent[] = [];
+    const notes: string[] = [];
+    const compiler = compilerFor(['Sign in'], { mode: 'steps', events, notes });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    compiler.runStepsEnded();
+
+    expect(progress(events)[0]).toMatchObject({ done: 0, total: 1 });
+    expect(progress(events)[0]!.reviewPending).toBeUndefined();
+    expect(notes).toEqual(['Run finished — 1 entry still to generate']);
+  });
+
+  it('counts up to the summary: attempted = generated + kept AI + errored', async () => {
+    // One of each terminal outcome, so the arithmetic the acceptance names is
+    // exercised end to end rather than on the happy path alone.
+    const { client } = fakeClient({
+      generate: (prompt) => {
+        if (/source:\s*"Add to cart"/.test(prompt)) {
+          return JSON.stringify({ entry: null, reason: 'the transcript is not reproducible' });
+        }
+        if (/source:\s*"Check out"/.test(prompt)) return 'not json and not a fence';
+        return JSON.stringify({ entry: `{ source: 'Sign in', async run() {} }` });
+      },
+    });
+    const events: LiveCompileEvent[] = [];
+    const compiler = compilerFor(['Sign in', 'Add to cart', 'Check out'], { client, events });
+    for (const [i, text] of ['Sign in', 'Add to cart', 'Check out'].entries()) {
+      compiler.offer({ index: i, binding: binding(text), result: result(i + 1, text), resolvedParameters: {} });
+    }
+    compiler.runStepsEnded();
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    const generation = progress(events).filter((e) => e.phase === 'generate');
+    const last = generation[generation.length - 1]!;
+    expect(last.total).toBe(3);
+    // One generated, one kept as AI, one errored — every enqueued entry
+    // settled, and the bar reached the end.
+    expect(last.done).toBe(3);
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.keptAi).toBe(1);
+    expect(outcome.summary.error).toMatch(/could not be generated/);
+  });
+
+  it('names the step it is generating right now, and only while generating', async () => {
+    const events: LiveCompileEvent[] = [];
+    const compiler = compilerFor(['Sign in'], { events });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const withStep = progress(events).filter((e) => e.step !== undefined);
+    expect(withStep).toHaveLength(1);
+    expect(withStep[0]).toMatchObject({ step: 1, line: 10, phase: 'generate' });
+    // Review announces itself as a phase, never as a step: it belongs to the
+    // file, not to any one entry.
+    const review = progress(events).filter((e) => e.phase === 'review');
+    expect(review).toHaveLength(1);
+    expect(review[0]!.step).toBeUndefined();
+  });
+
+  it('a stop still settles what it skipped, so the bar never stalls', async () => {
+    const controller = new AbortController();
+    const events: LiveCompileEvent[] = [];
+    const notes: string[] = [];
+    const compiler = compilerFor(['Sign in', 'Add to cart'], { events, notes, signal: controller.signal });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    compiler.offer({ index: 1, binding: binding('Add to cart'), result: result(2, 'Add to cart'), resolvedParameters: {} });
+    controller.abort();
+    compiler.runStepsEnded();
+    const outcome = await compiler.finish({ tokensUsed: 0, aborted: true });
+
+    const last = progress(events)[progress(events).length - 1]!;
+    expect(last).toMatchObject({ done: 2, total: 2 });
+    // A stopped run promises no review pass — an aborted compile runs none —
+    // and names what will not be generated rather than what is still coming.
+    expect(notes).toEqual([`Run stopped — 2 queued entries will not be generated`]);
+    // …and the log names WHICH steps got nothing, since the summary carries
+    // only a list a client renders as a count.
+    const skipped = events.filter(
+      (e) => e.type === 'compile:step' && e.message === 'skipped — the run was stopped',
+    );
+    expect(skipped.map((e) => e.step)).toEqual([1, 2]);
+    // Nothing was generated: both were skipped, and the summary says so.
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.summary.notAttempted).toEqual([1, 2]);
+  });
+
+  it('marks only the run-end frame — the ones during the run are not it', async () => {
+    const events: LiveCompileEvent[] = [];
+    const compiler = compilerFor(['Sign in'], { events });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    // Generation frames land before the run ends on a real run; here the drain
+    // is forced first, which is the same ordering from the frames' point of view.
+    await compiler.finish({ tokensUsed: 0 });
+    expect(progress(events).filter((e) => e.runEnded === true)).toEqual([]);
+    compiler.runStepsEnded();
+    expect(progress(events).filter((e) => e.runEnded === true)).toHaveLength(1);
   });
 });

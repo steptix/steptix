@@ -302,6 +302,7 @@ export type RunEvent =
   // entry is generated or declined, `compile:result` once, terminal, just
   // before `done`. Absent from an ordinary run, which sends no `compile`.
   | CompileStepEvent
+  | CompileProgressEvent
   | CompileResultEvent;
 
 // ---------------------------------------------------------------------------
@@ -349,6 +350,49 @@ export interface CompileStepEvent {
    *  paint ▶ there while the model works on the step. */
   line?: number;
   message: string;
+}
+
+/**
+ * How far the compile tail has got (stories/compile-tail-progress.md).
+ *
+ * The numbers a client needs, as numbers. The prose on `compile:step` is for
+ * reading; deriving "5 of 8" by matching those message strings would be a
+ * mirror of the server's wording that rots the first time the wording changes,
+ * so the counts ride their own frame and the prose is never parsed.
+ *
+ * Emitted when a generation starts, when one finishes, when Review starts, and
+ * once — with the final `total` — the moment the run's last step ends.
+ */
+export interface CompileProgressEvent {
+  type: 'compile:progress';
+  /**
+   * Entries that have reached a terminal state: generated, kept as AI, or
+   * errored — the summary's own decomposition. A stop counts its skipped
+   * entries here too: they will never finish, and the alternative is a bar
+   * frozen at "5 of 8" until the result frame takes it away.
+   */
+  done: number;
+  /** Entries enqueued so far. Final once the run's last step has ended. */
+  total: number;
+  phase: 'generate' | 'review';
+  /** 1-based step being generated right now, when `phase` is `'generate'`. */
+  step?: number;
+  /** That step's source line, for a client that wants to reveal it. */
+  line?: number;
+  /** A Review pass is still owed. Never set in `'steps'` mode, which runs
+   *  none by design. */
+  reviewPending?: boolean;
+  /**
+   * This is the frame emitted the moment the run's last step ended — the
+   * client's cue that everything from here on is tail.
+   *
+   * A client cannot tell that from the counts: a mid-run frame and the run-end
+   * frame can carry the same `done`/`total`, and the alternative is matching
+   * the forecast's prose, which is the mirror this event exists to avoid. The
+   * strip is gated on it, so it stays absent while the steps are still
+   * painting — during the run the steps ARE the progress.
+   */
+  runEnded?: boolean;
 }
 
 /**
@@ -426,6 +470,7 @@ export interface CompileResultEvent {
 export type CompileEvent =
   | CompilePhaseEvent
   | CompileStepEvent
+  | CompileProgressEvent
   | CompileDoneEvent
   | CompileResultEvent
   | CompileRunEvent
@@ -437,6 +482,7 @@ export function isCompileEvent(value: unknown): value is CompileEvent {
   return (
     t === 'compile:phase' ||
     t === 'compile:step' ||
+    t === 'compile:progress' ||
     t === 'compile:done' ||
     t === 'compile:result' ||
     (t === 'compile:run' && isRunEvent((value as { event?: unknown }).event)) ||
@@ -598,6 +644,18 @@ export interface HostActiveFileMsg {
 export interface HostRunEventMsg {
   type: 'runEvent';
   event: RunEvent;
+  /**
+   * The document this event belongs to (`vscode.Uri.toString()`), stamped by
+   * the host's per-controller post callback.
+   *
+   * The panel follows the active editor but every controller posts to the same
+   * webview, so without this the panel's Output section is one shared pane
+   * that shows whichever test spoke last (stories/compile-tail-progress.md
+   * §The panel log). Optional only so a host that predates the field — or a
+   * test double that posts by hand — still type-checks; the webview falls back
+   * to the active file.
+   */
+  uri?: string;
 }
 
 export interface HostRunErrorMsg {
@@ -713,23 +771,49 @@ export interface HostSkillRerunAvailableMsg {
   } | null;
 }
 
-/**
- * A compile is running, or has stopped (stories/codebehind-compile.md §What
- * the author sees). The panel shows the phase lines while `running`, and
- * disables Compile so a second one cannot be started against the same file —
- * the server would refuse it anyway.
- */
-export interface HostCompileStateMsg {
-  type: 'compileState';
-  running: boolean;
-  /** Absolute path of the test being compiled. Present on start. */
-  file?: string;
-}
-
 /** One already-formatted compile log line, for the panel to append. */
 export interface HostCompileEventMsg {
   type: 'compileEvent';
   line: string;
+  /** The document this line belongs to — see `HostRunEventMsg.uri`. */
+  uri?: string;
+}
+
+/**
+ * The compile tail's status strip for one file
+ * (stories/compile-tail-progress.md §The panel strip).
+ *
+ * `state: null` takes the strip down. The strip is deliberately file-scoped:
+ * a panel showing github.md with securebank.md's counts on it reads as the
+ * wrong file's state, and it has no coherent answer for two compiles at once.
+ * The workbench-global signals — the notification and the status bar item —
+ * are what cover the author who has navigated away.
+ */
+export interface HostCompileProgressMsg {
+  type: 'compileProgress';
+  /** The document whose compile this describes — see `HostRunEventMsg.uri`. */
+  uri?: string;
+  state: CompileStripState | null;
+}
+
+/** What the strip draws. */
+export interface CompileStripState {
+  /** Basename of the test being compiled. */
+  file: string;
+  /**
+   * Entries finished, and entries enqueued. Both null until a
+   * `compile:progress` frame arrives — which an older server never sends, and
+   * which is why the strip has an indeterminate form at all.
+   */
+  done: number | null;
+  total: number | null;
+  phase: 'generate' | 'review';
+  /** 1-based step being generated right now. */
+  step?: number;
+  /** That step's line in the test file. */
+  line?: number;
+  /** A review pass still follows the generation queue. */
+  reviewPending?: boolean;
 }
 
 /**
@@ -746,16 +830,6 @@ export interface HostCompileRunEventMsg {
   event: RunEvent;
 }
 
-/**
- * The model is working on the step at `line` (Generate or Repair). The host
- * paints ▶ there, so the gutter walks the test during the phases that do not
- * execute it.
- */
-export interface HostCompileStepMsg {
-  type: 'compileStep';
-  line: number;
-}
-
 export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
@@ -767,10 +841,9 @@ export type HostToWebviewMsg =
   | HostBreakpointStopMsg
   | HostBatchBannerMsg
   | HostSkillRerunAvailableMsg
-  | HostCompileStateMsg
   | HostCompileEventMsg
-  | HostCompileRunEventMsg
-  | HostCompileStepMsg;
+  | HostCompileProgressMsg
+  | HostCompileRunEventMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -928,10 +1001,9 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'breakpointStop' ||
     t === 'batchBanner' ||
     t === 'skillRerunAvailable' ||
-    t === 'compileState' ||
     t === 'compileEvent' ||
-    t === 'compileRunEvent' ||
-    t === 'compileStep'
+    t === 'compileProgress' ||
+    t === 'compileRunEvent'
   );
 }
 
@@ -976,6 +1048,7 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'codebehind:awaiting-debugger' ||
     // Only a compile-mode run emits these; an ordinary one never does.
     t === 'compile:step' ||
+    t === 'compile:progress' ||
     t === 'compile:result'
   );
 }

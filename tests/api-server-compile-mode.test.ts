@@ -363,8 +363,12 @@ describe('POST /sessions/:id/steps with compile', () => {
     expect(frames[frames.length - 1]!.type).toBe('done');
 
     const steps = frames.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+    // Start frame then completion frame, per step
+    // (stories/compile-tail-progress.md §The server speaks at starts).
     expect(steps.map((f) => [f.step, f.line, f.message])).toEqual([
+      [1, 4, 'generating…'],
       [1, 4, 'generated'],
+      [2, 5, 'generating…'],
       [2, 5, 'generated'],
     ]);
 
@@ -384,6 +388,56 @@ describe('POST /sessions/:id/steps with compile', () => {
     expect(Object.keys(result.files)).toEqual([stepsFilePath]);
     expect(result.files[stepsFilePath]).toContain("source: 'Open the dashboard'");
     expect(result.files[stepsFilePath]).toContain("source: 'Search for the order'");
+  });
+
+it('puts the tail on the wire: a forecast at run end, then counts and a Review start', async () => {
+    const { frames } = await runSteps(requestBody({ compile: 'run' }));
+
+    // The forecast lands the moment the last step ends, which is exactly the
+    // point the panel would otherwise go quiet (stories/compile-tail-progress.md).
+    const forecast = frames.filter(
+      (f) => f.type === 'output' && /Run finished — /.test(String(f.msg)),
+    );
+    expect(forecast.map((f) => f.msg)).toEqual([
+      'Run finished — 2 entries still to generate, then a review pass',
+    ]);
+
+    // …before any entry is written, which is what makes it a forecast rather
+    // than a report.
+    const forecastAt = frames.findIndex(
+      (f) => f.type === 'output' && /Run finished — /.test(String(f.msg)),
+    );
+    const firstWritten = frames.findIndex(
+      (f) => f.type === 'compile:step' && f.message === 'generated',
+    );
+    expect(forecastAt).toBeLessThan(firstWritten);
+
+    // The structured half. Exactly one frame is marked `runEnded`, and its
+    // total is final.
+    const progress = frames.filter((f) => f.type === 'compile:progress');
+    const ended = progress.filter((f) => f.runEnded === true);
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toMatchObject({ done: 0, total: 2, phase: 'generate', reviewPending: true });
+    // …and the last one agrees with the summary the run ends with.
+    const result = frames.find((f) => f.type === 'compile:result')!;
+    expect(progress[progress.length - 1]!.done).toBe(result.summary.compiled);
+
+    // Review announces itself BEFORE its model call — the longest single call
+    // the compile makes, and the one that used to say nothing until it was done.
+    // Order, not just presence: the structured frame LEADS its prose. A client
+    // tells a current server from an older one by whether any progress frame
+    // has arrived, and generation starts mid-run — prose first would read as
+    // an older server and put the tail UI up while the steps are still going.
+    const firstStart = frames.findIndex(
+      (f) => f.type === 'compile:step' && f.message === 'generating…',
+    );
+    const firstProgress = frames.findIndex((f) => f.type === 'compile:progress');
+    expect(firstProgress).toBeGreaterThan(-1);
+    expect(firstProgress).toBeLessThan(firstStart);
+
+    const review = frames.filter((f) => f.type === 'compile:step' && f.phase === 'review');
+    expect(String(review[0]!.message)).toMatch(/^reviewing .*\.steps\.ts…$/);
+    expect(progress.some((f) => f.phase === 'review')).toBe(true);
   });
 
   it('proposes only — the server never writes the .steps.ts itself', async () => {
@@ -626,7 +680,9 @@ describe('recompiling a step whose entry broke', () => {
         compileContinues: true,
       });
 
-      const generated = second.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+      const generated = second.filter(
+        (f) => f.type === 'compile:step' && f.message === 'generated',
+      );
       // Step TWO of the run, on line 5 — not step one all over again.
       expect(generated.map((f) => [f.step, f.line])).toEqual([[2, 5]]);
 
@@ -654,7 +710,9 @@ describe('recompiling a step whose entry broke', () => {
       // be discarded, not continued, or its entries would ride along and its
       // step numbers would keep climbing.
       const fresh = await block({ steps: [STEPS[0]!], sourceLines: [4], testFilePath, compile: 'run' });
-      const generated = fresh.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
+      const generated = fresh.filter(
+        (f) => f.type === 'compile:step' && f.message === 'generated',
+      );
       expect(generated.map((f) => f.step)).toEqual([1]);
       const result = fresh.find((f) => f.type === 'compile:result')!;
       expect(result.summary.totalSteps).toBe(1);
@@ -801,7 +859,10 @@ describe('recompiling a step whose entry broke', () => {
 
       // Generation: the step's own expanded number and skill-file line.
       const generated = frames.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
-      expect(generated.map((f) => [f.step, f.line, f.message])).toEqual([[2, 5, 'generated']]);
+      expect(generated.map((f) => [f.step, f.line, f.message])).toEqual([
+        [2, 5, 'generating…'],
+        [2, 5, 'generated'],
+      ]);
 
       // The entry lands where a whole-test compile binds it: the skill's own
       // file, from the run's real skill frame — no compileScope involved.

@@ -26,6 +26,7 @@ import {
   userRootEnvPath,
   type ClassifiedStep,
   type CompileEvent,
+  type CompileProgressEvent,
   type CompileResultEvent,
   type CompileSummary,
   type ErrorPayload,
@@ -35,6 +36,8 @@ import {
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
+import type { CompileTail } from './compile-progress-core.js';
+import type { CompileTailSignals } from './compile-tail-signals.js';
 import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
 import { buildSectionsPayload, preflightSections, sectionedSkillRefusal } from './sections.js';
@@ -216,6 +219,11 @@ export function compileLogLine(event: CompileEvent): string | null {
       if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${inner.msg}`;
       return null;
     }
+    case 'compile:progress':
+      // Numbers for the strip, the toast and the status bar item — never a log
+      // line. The prose that belongs beside them already arrived as the
+      // `compile:step` start frame this event accompanies.
+      return null;
     case 'compile:done':
       return event.status === 'green'
         ? `✓ ${event.message}`
@@ -367,6 +375,42 @@ export class RunController {
   /** The compile mode of the logical run in progress, so a Continue after a
    *  breakpoint keeps compiling rather than silently becoming a plain Run. */
   private compileModeOfRun: 'run' | 'steps' | undefined;
+  /**
+   * The compile tail's strip state for THIS document, or null when no tail is
+   * running (stories/compile-tail-progress.md §The panel strip).
+   *
+   * Held on the controller — which is per document — rather than in the
+   * webview, so switching away and back mid-tail restores the strip at the
+   * current count instead of losing it. The panel is one surface shared by
+   * every controller; the strip is one file's news.
+   */
+  private compileStrip: CompileTail | null = null;
+  /**
+   * Has this run's server sent any `compile:progress` frame?
+   *
+   * The one thing that tells a current server from an older one, and it has to
+   * be a fact rather than a guess: generation starts while the run is still
+   * executing later steps, so a `compile:step` frame is NOT evidence the tail
+   * has begun — on a current server it is routinely mid-run. The server emits
+   * the progress frame ahead of the prose for exactly this reason, so by the
+   * time a `compile:step` arrives this flag is already true there.
+   */
+  private sawCompileProgress = false;
+  /** Read by the registry when this file becomes active again, to re-post the
+   *  strip the webview may never have been told about. */
+  get compileTailState(): CompileTail | null {
+    return this.compileStrip;
+  }
+  /**
+   * The workbench-level aggregator (status bar item + one toast per compile).
+   * Attached by the registry after construction rather than taken in the
+   * constructor, which already has eight positional parameters — and a batch
+   * controller deliberately gets none, for the same reason it posts nowhere.
+   */
+  private tailSignals: CompileTailSignals | undefined;
+  attachCompileTailSignals(signals: CompileTailSignals): void {
+    this.tailSignals = signals;
+  }
   /** Test-only readback of the remembered mode. A Stop clearing it has no
    *  other observable effect — every path that would inherit is already gated
    *  on `isResume`, and a Stop wipes the resume marker — so without this the
@@ -1318,6 +1362,82 @@ export class RunController {
   }
 
   /**
+   * A compile log line, to the panel's Output section as well as the channel
+   * (stories/compile-tail-progress.md §The panel log).
+   *
+   * The channel keeps its copy — it remains the full-history surface — but the
+   * panel is where the author is looking, and until now the only compile line
+   * it ever saw was the final result.
+   */
+  private logCompileLine(line: string, log: (line: string) => void): void {
+    log(line);
+    this.post({ type: 'compileEvent', line });
+  }
+
+  /**
+   * The run's steps are done and the compile is still working: raise the
+   * strip, the toast and the status bar item.
+   *
+   * Idempotent, and deliberately so — a split run calls it once per block, and
+   * the two triggers below can both fire for one tail:
+   *
+   * - a `compile:progress` frame marked `runEnded`, which is the server
+   *   saying the last step has ended;
+   * - the first `compile:step` frame on a server that has sent no progress at
+   *   all, which is all an OLDER one gives us. That trigger can land while
+   *   steps are still running, so on that path the strip appears at the first
+   *   generation rather than at run end. It is the degraded form on purpose:
+   *   an old server puts nothing on the wire at run end, so there is nothing
+   *   better to wait for.
+   */
+  private beginCompileTail(tail?: CompileTail): void {
+    if (this.compileStrip === null) {
+      this.compileStrip = tail ?? {
+        file: path.basename(this.document.uri.fsPath),
+        done: null,
+        total: null,
+        phase: 'generate',
+      };
+      this.post({ type: 'compileProgress', state: this.compileStrip });
+      this.tailSignals?.begin(this.document.uri, this.compileStrip);
+      return;
+    }
+    if (tail) this.updateCompileTail(tail);
+  }
+
+  /** New counts for a tail already up. */
+  private updateCompileTail(tail: CompileTail): void {
+    this.compileStrip = tail;
+    this.post({ type: 'compileProgress', state: tail });
+    this.tailSignals?.update(this.document.uri, tail);
+  }
+
+  /**
+   * The tail is over. Called on `compile:result` and again when the run ends,
+   * because a stream that dies without a result — a dropped connection, a
+   * server that never sends one — must not leave a spinner up forever.
+   */
+  private endCompileTail(): void {
+    if (this.compileStrip === null) return;
+    this.compileStrip = null;
+    this.post({ type: 'compileProgress', state: null });
+    this.tailSignals?.end(this.document.uri);
+  }
+
+  /** The strip state a `compile:progress` frame describes. */
+  private tailFrom(event: CompileProgressEvent): CompileTail {
+    return {
+      file: this.compileStrip?.file ?? path.basename(this.document.uri.fsPath),
+      done: event.done,
+      total: event.total,
+      phase: event.phase,
+      ...(event.step !== undefined && { step: event.step }),
+      ...(event.line !== undefined && { line: event.line }),
+      ...(event.reviewPending !== undefined && { reviewPending: event.reviewPending }),
+    };
+  }
+
+  /**
    * Halt the run mid-flight without abandoning it. Aborts the current
    * stream (same mechanism as stop) but flips a flag so the abort handler
    * publishes a `breakpointStop` at the line that was executing, leaving
@@ -1693,6 +1813,10 @@ export class RunController {
     // turned away cannot wipe the proposal of the run that turned it away.
     this.compileToken += 1;
     this.compileResult = undefined;
+    this.sawCompileProgress = false;
+    // A tail left up by a previous run — a stream that dropped before its
+    // result — belongs to nothing now. The new run raises its own.
+    this.endCompileTail();
 
     // Clear any stale pause indicator IMMEDIATELY — synchronously, before
     // we do any async env-file work. If we waited until after env resolution
@@ -2395,6 +2519,11 @@ export class RunController {
       this.emitRunEvent({ type: 'done', status: 'error' });
       return this.fail(payload, log);
     } finally {
+      // A stream that ended without a `compile:result` (a dropped connection,
+      // a server error) must not leave a spinner running for the rest of the
+      // session. On the ordinary path the result already took it down and this
+      // is a no-op.
+      this.endCompileTail();
       this.active = null;
       this.pauseRequested = false;
       this.cancelPrompt();
@@ -2586,10 +2715,29 @@ export class RunController {
       // The compile riding this run (stories/compile-as-you-go.md). Logged,
       // never folded into the gutter: by the time an entry is generated its
       // step has already painted ✓, and repainting ▶ on it would undo that.
+      if (event.type === 'compile:progress') {
+        // Numbers only — no log line (see `compileLogLine`). `runEnded` is the
+        // server saying the steps are done, which is the strip's cue; frames
+        // before it belong to a run that is still painting its own progress.
+        this.sawCompileProgress = true;
+        const tail = this.tailFrom(event);
+        if (event.runEnded === true) this.beginCompileTail(tail);
+        else if (this.compileStrip !== null) this.updateCompileTail(tail);
+        continue;
+      }
       if (event.type === 'compile:step' || event.type === 'compile:result') {
+        // An older server sends no `compile:progress` at all, so its first
+        // compile frame is the only cue the tail has begun; the strip then runs
+        // in its indeterminate form. On a current server this must NOT fire —
+        // its start frames arrive mid-run, behind a progress frame that has
+        // already set the flag.
+        if (event.type === 'compile:step' && !this.sawCompileProgress) {
+          this.beginCompileTail();
+        }
         const line = compileLogLine(event);
-        if (line !== null) log(line);
+        if (line !== null) this.logCompileLine(line, log);
         if (event.type === 'compile:result') {
+          this.endCompileTail();
           this.compileResult = {
             ok: event.status !== 'failed',
             status: event.status,
@@ -2599,8 +2747,7 @@ export class RunController {
               error: event.summary.error ?? 'the compile produced nothing',
             }),
           };
-          this.post({ type: 'compileEvent', line: compileResultLine(event) });
-          log(compileResultLine(event));
+          this.logCompileLine(compileResultLine(event), log);
         }
         continue;
       }
@@ -2627,6 +2774,12 @@ export class RunController {
         // whose AI attempt failed too). Same vocabulary as every other
         // single-line surface.
         log(`✗ step ${event.line} failed: ${describeStepFailure(event)}`);
+      } else if (event.type === 'output') {
+        // The compile's own prose — the run-end forecast, and the warning a
+        // failed generation leaves — plus anything else the server says out of
+        // band. Logged as what it says rather than as `event output`, which is
+        // all the fall-through below ever made of it.
+        log(`[${event.kind}] ${event.msg}`);
       } else {
         log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
       }

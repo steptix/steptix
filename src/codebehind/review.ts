@@ -159,6 +159,11 @@ export async function reviewCandidate(
   for (const file of files) {
     const before = candidate.contentOf(file);
     if (before === undefined) continue;
+    // Before the call, not after (stories/compile-tail-progress.md). Review is
+    // the longest single model call the compile makes and its first word used
+    // to arrive only once it had finished — the quietest stretch of the tail
+    // saying nothing at all about what it was doing.
+    emit(`reviewing ${basename(file)}…`);
     let revised: string;
     try {
       const completion = await input.aiClient.complete(

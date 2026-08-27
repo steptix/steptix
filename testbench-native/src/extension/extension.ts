@@ -37,6 +37,7 @@ import {
   stepsFileBreakpoints,
 } from './inspector-target.js';
 import { ServerStatusBar } from './server-status-bar.js';
+import { CompileTailSignals } from './compile-tail-signals.js';
 import { registerServerCommands } from './server-commands.js';
 import {
   AutoStartGuard,
@@ -104,6 +105,15 @@ class RunControllerRegistry implements vscode.Disposable {
   /** ONE guard for every controller: a failed auto-start must not be retried
    *  once per test in a Test Explorer batch. */
   private readonly autoStartGuard = new AutoStartGuard();
+  /**
+   * The workbench-level compile-tail signals — the status bar item and the
+   * per-compile toast (stories/compile-tail-progress.md).
+   *
+   * Owned here rather than by a controller because it aggregates ACROSS them:
+   * the compile lock is per test file, so two files can compile at once and
+   * only something above the controllers can say "compiling 2".
+   */
+  readonly compileTailSignals = new CompileTailSignals();
 
   constructor(
     private readonly view: TestBenchRunnerView,
@@ -128,8 +138,29 @@ class RunControllerRegistry implements vscode.Disposable {
       const now = this.activeSignature();
       if (now === this.lastActiveSignature) return;
       this.lastActiveSignature = now;
+      // The strip is the ACTIVE file's, and the webview is one surface shared
+      // by every controller — so when the active file changes, tell the panel
+      // what THAT file's compile is doing (or that it has none). This is what
+      // restores a strip mid-tail when the author switches back.
+      //
+      // Behind the dedupe on purpose: `onChange` fires on selection moves and
+      // edits as well as editor switches, and a message per keystroke would
+      // re-render the panel on every cursor move for the length of a compile.
+      this.postCompileStripFor(now === '<none>' ? null : now);
       this.refreshRunningContext();
     });
+  }
+
+  /**
+   * Re-post the strip for whichever file just became active. A file with no
+   * controller, or one with no tail running, gets an explicit `null` — the
+   * webview holds per-file strips, and the file that just became active is
+   * entitled to be told it has none.
+   */
+  private postCompileStripFor(uri: string | null): void {
+    if (uri === null) return;
+    const state = this.controllers.get(uri)?.compileTailState ?? null;
+    this.view.post({ type: 'compileProgress', uri, state });
   }
 
   /** Disposed with the registry; see the constructor. */
@@ -297,6 +328,7 @@ class RunControllerRegistry implements vscode.Disposable {
         onServerReady: (info) => this.autoAttachForStepsBreakpoints({ ...info, folder }),
       },
     );
+    controller.attachCompileTailSignals(this.compileTailSignals);
     this.controllers.set(key, controller);
     // Re-fire the controller's frame-stack changes through the registry
     // so a single view subscriber catches every controller's transitions.
@@ -530,7 +562,16 @@ class RunControllerRegistry implements vscode.Disposable {
   private makePostCallback(uri: vscode.Uri): (msg: HostToWebviewMsg) => void {
     return (msg: HostToWebviewMsg) => {
       this.applyToTracker(uri, msg);
-      this.view.post(msg);
+      // Which file this message is about. The panel follows the active editor
+      // but every controller posts to the same webview, so without the stamp
+      // the Output section is one shared pane showing whichever test spoke
+      // last, and two concurrent compiles interleave their lines
+      // (stories/compile-tail-progress.md §The panel log).
+      this.view.post(
+        msg.type === 'runEvent' || msg.type === 'compileEvent' || msg.type === 'compileProgress'
+          ? { ...msg, uri: uri.toString() }
+          : msg,
+      );
     };
   }
 
@@ -800,11 +841,6 @@ class RunControllerRegistry implements vscode.Disposable {
           break;
       }
       return;
-    }
-    // The model is working on this step (Generate / Repair): ▶ walks the test
-    // during the phases that do not execute it.
-    if (msg.type === 'compileStep') {
-      this.tracker.setStatus(uri, msg.line, 'running');
     }
   }
 
@@ -1236,6 +1272,7 @@ class RunControllerRegistry implements vscode.Disposable {
   lastDoneStatus: 'passed' | 'failed' | 'error' | 'aborted' | null = null;
 
   dispose(): void {
+    this.compileTailSignals.dispose();
     this.trackerSub.dispose();
     this.discardControllers();
     for (const sub of this.frameSubs.values()) sub.dispose();
@@ -1416,6 +1453,19 @@ export interface TestBenchTestHooks {
    *  code-behind tests: the diff editors themselves are not readable from the
    *  extension host, but what they were opened WITH is. */
   pendingCodeBehind: () => { testFilePath: string; files: Record<string, string> } | null;
+  /** Every host→webview message posted since `mark` and still retained, most
+   *  recent last. The webview's own state is not readable from the extension
+   *  host, so this is how the per-file scoping of the panel's Output section
+   *  and compile strip is asserted: through the URI each message carries. */
+  hostMessagesSince: (mark: number) => import('ai-ui-automation-runner-core').HostToWebviewMsg[];
+  /** The mark to pass back to `hostMessagesSince`. */
+  hostMessageCount: () => number;
+  /** Replace how the compile toast is raised, so the harness can observe it. */
+  setCompileProgressReporter: (
+    reporter: import('./compile-tail-signals.js').ProgressReporter,
+  ) => void;
+  /** The compile tails the workbench status bar item is aggregating. */
+  compileTails: () => import('./compile-progress-core.js').CompileTail[];
   /** The ⚠ decoration's hover text. Applied decorations are not readable back
    *  from the extension host, so this is how a test asserts the mark names the
    *  action AND its precondition ("re-runs this step in the current session")
@@ -1652,6 +1702,14 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
       },
     ),
+    // The status bar item's click (stories/compile-tail-progress.md): with one
+    // compile running it opens that file's panel, with several it asks which.
+    // Registered here rather than in the command module because the aggregator
+    // it drives is the registry's, and it is deliberately not in the palette —
+    // there is nothing to invoke when no compile is running.
+    vscode.commands.registerCommand(CompileTailSignals.clickCommand, () =>
+      registry.compileTailSignals.reveal(),
+    ),
     ...registerCommands(registry, tracker, codeBehindDiffs),
     codeBehindDiffs,
     serverStatusBar,
@@ -1784,6 +1842,21 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       },
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
       lastRunTokens: () => registry.active()?.lastRunTokens ?? null,
+      /** What the panel was TOLD since `mark`, most recent last. The webview's
+       *  own state is not readable from here, so the per-file scoping is
+       *  asserted through the URI stamp on the messages that carry it. */
+      hostMessagesSince: (mark: number) => view.messagesSince(mark),
+      /** The mark to pass back to `hostMessagesSince`. Not an array index: the
+       *  buffer drops from the front once full, and an index would then point
+       *  at a different message than it did when it was taken. */
+      hostMessageCount: () => view.sentMessageCount,
+      /** Swap how the compile toast is raised. The harness cannot read a real
+       *  notification back, and a real one would sit on screen for the length
+       *  of the suite. */
+      setCompileProgressReporter: (reporter) =>
+        registry.compileTailSignals.setProgressReporter(reporter),
+      /** Every compile tail the status bar item is currently aggregating. */
+      compileTails: () => registry.compileTailSignals.tails,
       pendingCodeBehind: () => codeBehindDiffs.pending,
       staleHoverMessage: (failure) => staleHoverMessage(failure),
     },

@@ -40,6 +40,7 @@ export class TestBenchRunnerView implements vscode.WebviewViewProvider {
     private readonly context: vscode.ExtensionContext,
     private readonly tracker: ActiveFileTracker,
   ) {
+    this.recording = context.extensionMode === vscode.ExtensionMode.Test;
     tracker.onChange((snap) => this.postActiveFile(snap));
   }
 
@@ -47,9 +48,50 @@ export class TestBenchRunnerView implements vscode.WebviewViewProvider {
     this.messageHandler = handler;
   }
 
+  /**
+   * Everything `post` has sent, most recent last, capped.
+   *
+   * The webview's own state is not readable from the extension host, so this
+   * is how the integration suite asserts what the panel was TOLD — which is
+   * the half of the per-file scoping that lives on this side: the URI stamp
+   * that decides which file's Output section a line lands in
+   * (stories/compile-tail-progress.md).
+   */
+  private readonly sent: HostToWebviewMsg[] = [];
+  private static readonly SENT_CAP = 2000;
+  /**
+   * Only a test window records. In a real one the buffer would hold thousands
+   * of live messages — `activeFile` carries the WHOLE document text and is
+   * posted on every selection change, and a `step:fail` runEvent carries a
+   * base64 screenshot — for the benefit of a hook nothing there ever calls.
+   */
+  private readonly recording: boolean;
+  /** How many messages have EVER been posted — the index space a caller marks
+   *  in. The buffer drops from the front once it is full, so a plain array
+   *  index stops meaning anything the moment that happens. */
+  private sentTotal = 0;
+
+  /** Test-only: the mark to pass back to `messagesSince`. */
+  get sentMessageCount(): number {
+    return this.sentTotal;
+  }
+
+  /** Test-only: everything posted since `mark` that is still retained. */
+  messagesSince(mark: number): HostToWebviewMsg[] {
+    const dropped = this.sentTotal - this.sent.length;
+    return this.sent.slice(Math.max(0, mark - dropped));
+  }
+
   /** Forward a host→webview message to every attached surface. Posts to a
    *  not-yet-ready webview are still safe — VS Code queues them. */
   post(msg: HostToWebviewMsg): void {
+    if (this.recording) {
+      this.sent.push(msg);
+      this.sentTotal += 1;
+      if (this.sent.length > TestBenchRunnerView.SENT_CAP) {
+        this.sent.splice(0, this.sent.length - TestBenchRunnerView.SENT_CAP);
+      }
+    }
     for (const a of this.attachments) {
       void a.webview.postMessage(msg);
     }
