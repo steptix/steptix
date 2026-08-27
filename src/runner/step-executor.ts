@@ -466,7 +466,7 @@ export async function executeStep(
     // loop detects `signal.aborted` after this returns and records the run as
     // aborted, bypassing the step:fail path. See issues/020.
     if (opts.signal?.aborted) {
-      return {
+      return withStale({
         index: stepIndex,
         instruction,
         status: 'failed',
@@ -476,7 +476,7 @@ export async function executeStep(
         pageUrl: opts.page.url(),
         error: 'Aborted by client',
         aiExplanation: 'Step aborted by client (run stopped).',
-      };
+      });
     }
 
     logger.error(`Step ${stepIndex} FAILED after retry: ${errorMessage}`);
@@ -493,7 +493,11 @@ export async function executeStep(
       priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
     }
 
-    return {
+    // `withStale` here too: when the AI attempt was only happening because the
+    // step's entry threw, dropping the flag on failure would erase the
+    // code-behind error entirely — the client would see the AI failure and
+    // nothing about the crash that caused the fall-through.
+    return withStale({
       index: stepIndex,
       instruction,
       status: 'failed',
@@ -504,7 +508,7 @@ export async function executeStep(
       pageUrl: opts.page.url(),
       error: errorMessage,
       aiExplanation: `Failed to execute step after ${opts.config.execution.retries + 1} attempts. Last error: ${errorMessage}`,
-    };
+    });
   }
 }
 

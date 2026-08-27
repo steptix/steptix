@@ -207,7 +207,15 @@ export function compileLogLine(event: CompileEvent): string | null {
         return `  ${' '.repeat(11)} ✓ step on line ${inner.line}${how}`;
       }
       if (inner.type === 'step:fail') {
-        return `  ${' '.repeat(11)} ✗ step on line ${inner.line} — ${inner.error}`;
+        // Replay runs strict, so a red step here IS the code-behind failing —
+        // but say so only when the event does, and carry the crash behind a
+        // healed-then-failed step the same way the run log does.
+        const how = inner.codeBehindStale
+          ? `${inner.error} (its code-behind threw first: ${inner.codeBehindStale.error})`
+          : inner.fromCodeBehind
+            ? `(code-behind) ${inner.error}`
+            : inner.error;
+        return `  ${' '.repeat(11)} ✗ step on line ${inner.line} — ${how}`;
       }
       if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${inner.msg}`;
       return null;
@@ -2617,6 +2625,17 @@ export class RunController {
         } else {
           log(`✓ step ${event.line} passed`);
         }
+      } else if (event.type === 'step:fail') {
+        // The error, in the run log — with the code-behind crash when the
+        // failure has one behind it (the entry itself failing, or a heal
+        // whose AI attempt failed too). Same vocabulary as the panel's log.
+        log(
+          event.codeBehindStale
+            ? `✗ step ${event.line} failed: ${event.error} (its code-behind threw first: ${event.codeBehindStale.error})`
+            : event.fromCodeBehind
+              ? `✗ step ${event.line} failed (code-behind): ${event.error}`
+              : `✗ step ${event.line} failed: ${event.error}`,
+        );
       } else {
         log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
       }

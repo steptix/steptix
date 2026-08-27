@@ -61,6 +61,26 @@ function statusFromTuple(tuples) {
   return map;
 }
 
+// One line (or two) of failure text for a step row, from the tracker's
+// pinned StepFailureDetail. A ⚠ row's step passed — only the entry's crash
+// is worth showing; a ✗ row shows what the step died of, and both errors
+// when a broken entry's AI fallback failed too.
+function formatStepFailure(failure, status) {
+  if (status === STATUS.PASS_STALE) {
+    return failure.codeBehindStale
+      ? `code-behind failed: ${failure.codeBehindStale.error}`
+      : null;
+  }
+  if (failure.codeBehindStale) {
+    return (
+      `code-behind threw: ${failure.codeBehindStale.error}\n` +
+      `then failed under AI: ${failure.error ?? ""}`
+    );
+  }
+  if (failure.fromCodeBehind) return `code-behind failed: ${failure.error ?? ""}`;
+  return failure.error ?? null;
+}
+
 /**
  * The code-behind mark: `</>` — the same drawing as the gutter's
  * status-code-behind.svg and the editor-title button's `$(code)`, so "ran as
@@ -380,7 +400,7 @@ function TestBenchRunner() {
         if (event.codeBehindStale) {
           log(
             `⚠ Step on line ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`,
-            "info",
+            "warn",
           );
         } else {
           log(
@@ -391,7 +411,16 @@ function TestBenchRunner() {
         if (event.output) log(event.output, "info");
         break;
       case "step:fail":
-        log(`✗ Step on line ${event.line} failed: ${event.error}`, "fail");
+        // A heal whose AI attempt failed too carries both errors — say so,
+        // or the code-behind crash that started it would be invisible here.
+        log(
+          event.codeBehindStale
+            ? `✗ Step on line ${event.line} failed: ${event.error} (its code-behind threw first: ${event.codeBehindStale.error})`
+            : event.fromCodeBehind
+              ? `✗ Step on line ${event.line} failed (code-behind): ${event.error}`
+              : `✗ Step on line ${event.line} failed: ${event.error}`,
+          "fail",
+        );
         break;
       case "output":
         log(event.msg, event.kind);
@@ -471,6 +500,14 @@ function TestBenchRunner() {
   const errorMap = useMemo(() => {
     const m = {};
     for (const [line, payload] of snapshot?.errors ?? []) m[line] = payload;
+    return m;
+  }, [snapshot]);
+  // Failure text pinned to ✗/⚠ lines by the host's tracker — rendered inline
+  // under the step row so a failed code-behind's error is visible without
+  // digging through the Output log.
+  const failureMap = useMemo(() => {
+    const m = {};
+    for (const [line, failure] of snapshot?.failures ?? []) m[line] = failure;
     return m;
   }, [snapshot]);
 
@@ -921,6 +958,10 @@ function TestBenchRunner() {
             const isPaused = snapshot?.breakpointStop === lineNumber;
             const hasBreakpoint = (snapshot?.breakpoints ?? []).includes(lineNumber);
             const stepError = errorMap[lineNumber];
+            const stepFailure =
+              failureMap[lineNumber] && (status === STATUS.FAIL || status === STATUS.PASS_STALE)
+                ? formatStepFailure(failureMap[lineNumber], status)
+                : null;
             const cls = [
               "tb-step",
               status === STATUS.PASS ? "tb-step--pass" : "",
@@ -976,6 +1017,25 @@ function TestBenchRunner() {
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>
                 </div>
+                {stepFailure && (
+                  <div
+                    style={{
+                      padding: "1px 24px 6px 37px",
+                      fontFamily: "var(--vscode-editor-font-family, monospace)",
+                      fontSize: "0.85em",
+                      whiteSpace: "pre-wrap",
+                      overflowWrap: "anywhere",
+                      maxHeight: 120,
+                      overflowY: "auto",
+                      color:
+                        status === STATUS.FAIL
+                          ? "var(--vscode-testing-iconFailed, #f87171)"
+                          : "var(--vscode-editorWarning-foreground, #fbbf24)",
+                    }}
+                  >
+                    {stepFailure}
+                  </div>
+                )}
                 {stepError && (
                   <div style={{ padding: "0 8px 6px 36px" }}>
                     <ErrorPanel error={stepError} />

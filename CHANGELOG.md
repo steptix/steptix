@@ -6,6 +6,31 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Fixed — TestBench: a failed code-behind step now says what failed, where you're looking
+
+When a code-behind step failed in TestBench, the error was one line in the
+scrolling Output log — and in the worst case (the entry threw, the step fell
+through to AI, and the AI attempt failed too) the code-behind crash was
+dropped before it ever reached the client. Now the failure text is pinned to
+the step line everywhere the marks are:
+
+- **Editor hovers** — hovering a ✗ shows the step's error (labelled
+  "code-behind failed" when it came from the entry); hovering a ⚠ now leads
+  with the actual crash and the `.steps.ts` file instead of only the static
+  Repair hint. Hovers survive window reloads with the rest of the run state.
+- **TestBench panel** — the error renders inline under the failed step's row
+  in the Steps list (red for ✗, yellow for ⚠), so no log-scrolling. The ⚠
+  log line is now warning-coloured, and a failed heal logs both errors.
+- **Failed heals keep their story** — a step whose entry threw and whose AI
+  retry also failed now carries `codeBehindStale` on the `step:fail` wire
+  event, in the report (the ⚠ block renders alongside the failure), in the
+  last-run sidecar (so `--only-stale` / Repair see the broken entry), in
+  Test Explorer failure messages, and in the MCP run summary. `step:fail`
+  also carries `fromCodeBehind` so a failed `step.expect` / strict replay is
+  distinguishable from an AI failure.
+- The run-complete `healed` summary no longer counts a heal whose AI attempt
+  failed — that step wasn't healed, it failed.
+
 ### Added — TestBench: parameter completion inside a skill call
 
 With the cursor in the argument position of a skill call — `1. [skill

@@ -577,12 +577,28 @@ class RunControllerRegistry implements vscode.Disposable {
               : ev.fromCache
                 ? 'pass-cached'
                 : 'pass';
-          this.tracker.setStatus(target, ev.line, status);
+          // A ⚠ pins the code-behind crash to the line, so the hover and the
+          // panel row can say WHAT threw, not just that something did.
+          this.tracker.setStatus(
+            target,
+            ev.line,
+            status,
+            ev.codeBehindStale ? { codeBehindStale: ev.codeBehindStale } : undefined,
+          );
           break;
         }
         case 'step:fail': {
           const target = this.targetUriFor(uri, ev.frame);
-          this.tracker.setStatus(target, ev.line, 'fail');
+          // Pin the failure text to the line: the ✗ hover and the panel's
+          // step row read it back from the tracker. When the failure came out
+          // of the step's code-behind (strict replay, `step.expect`, or a
+          // heal whose AI attempt failed too) the detail says so.
+          const failureDetail = {
+            error: ev.error,
+            ...(ev.fromCodeBehind && { fromCodeBehind: true }),
+            ...(ev.codeBehindStale && { codeBehindStale: ev.codeBehindStale }),
+          };
+          this.tracker.setStatus(target, ev.line, 'fail', failureDetail);
           // Propagate the failure to the originating test-file `[skill:]` line
           // so the user sees the red icon on the line they actually authored,
           // not just on the skill's body line they may not even have open.
@@ -590,7 +606,9 @@ class RunControllerRegistry implements vscode.Disposable {
           if (ev.frame) {
             const controller = this.controllers.get(uri.toString());
             root = controller?.markFrameFailed(ev.frame.id) ?? null;
-            if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail');
+            // The invocation line carries the same failure text as the body
+            // line it descends to — the user may only have the test file open.
+            if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail', failureDetail);
             // Park the failure context so the Variables panel can offer
             // "re-run this skill step with its variables". No-ops on the
             // controller for nested frames (v1 is top-level skills only), in
@@ -763,10 +781,18 @@ class RunControllerRegistry implements vscode.Disposable {
                 : ev.fromCache
                   ? 'pass-cached'
                   : 'pass',
+            ev.codeBehindStale ? { codeBehindStale: ev.codeBehindStale } : undefined,
           );
           break;
         case 'step:fail':
-          this.tracker.setStatus(uri, ev.line, 'fail');
+          // A Replay's red step is the compile's whole point (strict mode:
+          // broken code fails instead of healing) — pin the error so the ✗
+          // says what the code did wrong.
+          this.tracker.setStatus(uri, ev.line, 'fail', {
+            error: ev.error,
+            ...(ev.fromCodeBehind && { fromCodeBehind: true }),
+            ...(ev.codeBehindStale && { codeBehindStale: ev.codeBehindStale }),
+          });
           break;
         default:
           break;

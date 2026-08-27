@@ -91,6 +91,20 @@ export interface StepFailEvent {
   error: string;
   screenshot?: string;
   frame?: FrameInfo;
+  /**
+   * True when the failure came from the step's own code-behind entry — a
+   * failed `step.expect`, or the entry throwing under strict replay. Tells
+   * the client to present `error` as "the code-behind failed", not as an
+   * AI-run failure.
+   */
+  fromCodeBehind?: boolean;
+  /**
+   * Present when the step's entry threw, the step fell through to AI, and
+   * the AI attempt then failed too. `error` above is the AI failure; this is
+   * the code crash that put the step on that path — without it the client
+   * could only report the second failure of the two.
+   */
+  codeBehindStale?: { file: string; error: string };
 }
 
 /**
@@ -448,6 +462,24 @@ export interface CompileRequest {
 // ---------------------------------------------------------------------------
 
 /**
+ * Why a step line wears a ✗ (or a ⚠) — the failure text, pinned to the line
+ * so every surface that paints the mark can also say what went wrong. Shapes
+ * mirror the `step:fail` / `step:pass` wire fields they are captured from.
+ */
+export interface StepFailureDetail {
+  /** The step's own failure message. Absent on a ⚠ line — the step passed;
+   *  it is the entry that failed. */
+  error?: string;
+  /** The failure in `error` came from the step's code-behind (a failed
+   *  `step.expect`, or the entry throwing under strict replay). */
+  fromCodeBehind?: boolean;
+  /** The code-behind crash, when the entry threw and the step fell through
+   *  to AI: the whole story of a ⚠, the first half of a ✗ whose AI attempt
+   *  then failed too. */
+  codeBehindStale?: { file: string; error: string };
+}
+
+/**
  * Mirror of the active TextEditor's TestBench state: file text, breakpoints,
  * statuses, paused-at marker. The webview renders against this; the host is
  * the source of truth.
@@ -474,6 +506,8 @@ export interface FileStateSnapshot {
     ]
   >;
   errors: Array<[number, ErrorPayload]>;
+  /** Per-line failure text for ✗ and ⚠ statuses — same keying as `statuses`. */
+  failures: Array<[number, StepFailureDetail]>;
   breakpointStop: number | null;
   selectedLines: number[];
   cursorLine: number;

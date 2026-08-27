@@ -465,10 +465,20 @@ export class TestBenchTestController implements vscode.Disposable {
           }
           if (event.output) emit(`  ${event.output}`);
           break;
-        case 'step:fail':
-          emit(`✗ step on line ${event.line} failed — ${event.error}`);
-          failures.push({ line: event.line, error: event.error });
+        case 'step:fail': {
+          // Fold the code-behind context into the one string both surfaces
+          // share — the streamed line and the TestMessage the failure peek
+          // shows. Without it a broken entry's crash never reaches Test
+          // Explorer at all when the AI attempt failed too.
+          const detail = event.codeBehindStale
+            ? `${event.error} (its code-behind threw first: ${event.codeBehindStale.error})`
+            : event.fromCodeBehind
+              ? `Code-behind failed: ${event.error}`
+              : event.error;
+          emit(`✗ step on line ${event.line} failed — ${detail}`);
+          failures.push({ line: event.line, error: detail });
           break;
+        }
         case 'output':
           emit(`[${event.kind}] ${event.msg}`);
           if (event.kind === 'error') serverErrors.push(event.msg);

@@ -298,6 +298,41 @@ export default defineSteps([
     expect(binding.entry).toBeDefined();
   });
 
+  it('keeps the code-behind crash on the result when the AI attempt fails too', async () => {
+    // The entry throws, the step falls through to AI, and the AI fails as
+    // well. The failed result must still carry `codeBehindStale` — dropping
+    // it here (which is what used to happen) erased the code-behind error
+    // everywhere downstream: the step:fail event, the report, the sidecar.
+    const md = await write('booking.md', TEST_MD);
+    await write('booking.steps.ts', BROKEN_STEPS);
+
+    const { steps, registry } = await registryFor(md);
+    const binding = registry.bindingFor(0)!;
+    const failingClient = {
+      complete: async () => { throw new Error('gateway on fire'); },
+    } as unknown as AiClient;
+
+    const result = await executeStep(1, steps.length, steps[0]!, {
+      page: fakePage(),
+      config: CONFIG,
+      aiClient: failingClient,
+      contextContent: '',
+      testName: 'booking',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: {},
+      codeBehind: binding,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('gateway on fire');
+    expect(result.codeBehindStale).toEqual({
+      file: binding.file,
+      source: 'Enter the booking code',
+      error: '#booking-code went away in a redesign',
+    });
+  });
+
   it('never writes a .steps.ts from a run — generation is `aiui compile`', async () => {
     const md = await write('booking.md', TEST_MD);
     const { client, calls } = scriptedClient([ACTION_PLAN]);
@@ -404,6 +439,26 @@ export default defineSteps([
     expect(html).toContain('aiui compile /p/tests/booking.md --only-stale');
     // ⚠ outranks the code mark: the step did NOT run as code.
     expect(html).not.toContain('cb-mark');
+
+    // A step whose heal FAILED keeps the flag too (the executor no longer
+    // drops it on the failed path), so the report shows both halves: the
+    // code-behind crash and the AI failure that followed it.
+    const failedHtml = renderStep({
+      index: 1,
+      instruction: 'Enter the booking code',
+      status: 'failed',
+      turns: [],
+      durationMs: 42,
+      retried: true,
+      error: 'AI could not find the button either',
+      codeBehindStale: {
+        file: '/p/tests/booking.steps.ts',
+        source: 'Enter the booking code',
+        error: 'locator.fill: Timeout 30000ms exceeded',
+      },
+    });
+    expect(failedHtml).toContain('locator.fill: Timeout 30000ms exceeded');
+    expect(failedHtml).toContain('AI could not find the button either');
 
     const base = { instruction: 'x', status: 'passed' as const, turns: [], durationMs: 1, retried: false };
     expect(

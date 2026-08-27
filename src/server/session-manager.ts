@@ -493,7 +493,21 @@ export type RunEvent =
        *  "recompile" prompt; the file is what "Open Code-behind" opens. */
       codeBehindStale?: { file: string; error: string };
     }
-  | { type: 'step:fail'; line: number; error: string; screenshot?: string; frame?: FrameInfo; tab?: TabInfo }
+  | {
+      type: 'step:fail';
+      line: number;
+      error: string;
+      screenshot?: string;
+      frame?: FrameInfo;
+      tab?: TabInfo;
+      /** `error` is the step's own code-behind failing (a `step.expect`, or
+       *  the entry throwing under strict replay) — not an AI-run failure. */
+      fromCodeBehind?: boolean;
+      /** The entry threw, the step fell through to AI, and the AI attempt
+       *  failed too. `error` is the AI failure; this is the crash that put
+       *  the step on that path. */
+      codeBehindStale?: { file: string; error: string };
+    }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' }
   | {
@@ -4325,8 +4339,11 @@ export class SessionManager {
           ...tabAfterStep,
         };
         fullStepResults.push(fullResult);
-        // The AI turn this step needed only because its entry threw.
-        if (fullResult.codeBehindStale) {
+        // The AI turn this step needed only because its entry threw. Counted
+        // only when the step then passed: "healed" means the AI covered for
+        // the broken entry, and a step that failed anyway wasn't covered —
+        // it reports through the step:fail path, not the healed summary.
+        if (fullResult.codeBehindStale && fullResult.status === 'passed') {
           healedTokens += Math.max(0, session.tokenTracker.runTotal - tokensAtStepStart);
         }
 
@@ -4499,6 +4516,19 @@ export class SessionManager {
             error: stepResult.error ?? 'Step failed',
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
+            // Where the failure came from, so the client can say "the
+            // code-behind failed" instead of a bare error: the entry itself
+            // (strict replay / step.expect), or — codeBehindStale — the entry
+            // threw, the step fell through to AI, and the AI failed too. The
+            // stale error rides along because `error` above only carries the
+            // second failure of that pair.
+            ...(stepResult.fromCodeBehind && { fromCodeBehind: true }),
+            ...(stepResult.codeBehindStale && {
+              codeBehindStale: {
+                file: stepResult.codeBehindStale.file,
+                error: stepResult.codeBehindStale.error,
+              },
+            }),
             ...tabAfterStep,
           });
           // Phase 4 — surface the scope at failure time too. The user
@@ -4857,7 +4887,14 @@ export class SessionManager {
     // Hook and ad-hoc rows are excluded for the helper's reason — they are not
     // steps of the test.
     const healedSteps = fullStepResults.filter(
-      (s) => !s.hookScope && !s.interactiveAdHoc && !s.interactiveChild && s.codeBehindStale,
+      (s) =>
+        !s.hookScope &&
+        !s.interactiveAdHoc &&
+        !s.interactiveChild &&
+        s.codeBehindStale &&
+        // A failed step can carry the flag too (the entry threw AND the AI
+        // attempt failed) — that one wasn't healed, it failed.
+        s.status === 'passed',
     ).length;
 
     emit({

@@ -7,7 +7,7 @@ import {
   extractSteps,
   sectionBodyLinesAt,
 } from 'ai-ui-automation-runner-core';
-import type { ErrorPayload } from 'ai-ui-automation-runner-core';
+import type { ErrorPayload, StepFailureDetail } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, shiftAnchorForChanges } from './step-lines.js';
 
 /**
@@ -48,6 +48,9 @@ export type LineStatus =
 interface PersistedFileState {
   statuses: Array<[number, LineStatus]>;
   errors: Array<[number, ErrorPayload]>;
+  /** Failure text behind ✗/⚠ statuses. Optional: files written before the
+   *  field existed load as "no details", never as an error. */
+  failures?: Array<[number, StepFailureDetail]>;
   signature: string;
 }
 
@@ -71,6 +74,9 @@ const PERSIST_DEBOUNCE_MS = 400;
 export interface FileState {
   statuses: Map<number, LineStatus>;
   errors: Map<number, ErrorPayload>;
+  /** Why a line wears ✗ or ⚠ — keyed like `statuses`, cleared with them,
+   *  and replaced whenever the line's status is rewritten. */
+  failures: Map<number, StepFailureDetail>;
   /** Line where a breakpoint paused the run (for the yellow ▶ arrow). */
   breakpointStop: number | null;
 }
@@ -84,6 +90,7 @@ export interface FileStateSnapshot {
   breakpoints: number[];
   statuses: Array<[number, LineStatus]>;
   errors: Array<[number, ErrorPayload]>;
+  failures: Array<[number, StepFailureDetail]>;
   breakpointStop: number | null;
   selectedLines: number[];
   cursorLine: number;
@@ -275,6 +282,7 @@ export class ActiveFileTracker {
       s = {
         statuses: new Map(),
         errors: new Map(),
+        failures: new Map(),
         breakpointStop: null,
       };
       this.states.set(key, s);
@@ -361,6 +369,7 @@ export class ActiveFileTracker {
     const state = this.state(uri);
     state.statuses.clear();
     state.errors.clear();
+    state.failures.clear();
     state.breakpointStop = null;
     this.clearAnchorFor(uri);
     this.emit();
@@ -381,12 +390,26 @@ export class ActiveFileTracker {
     const state = this.state(uri);
     const had = state.statuses.delete(line);
     const hadErr = state.errors.delete(line);
-    if (had || hadErr) this.emit();
+    const hadFailure = state.failures.delete(line);
+    if (had || hadErr || hadFailure) this.emit();
   }
 
-  setStatus(uri: vscode.Uri, line: number, status: LineStatus): void {
+  /**
+   * `failure` is the error text behind a ✗ (or the code-behind crash behind a
+   * ⚠) — what the gutter hover and the panel's step row show. Every status
+   * write clears the line's previous detail first, so a re-run that passes
+   * doesn't keep last run's failure text pinned under a green mark.
+   */
+  setStatus(
+    uri: vscode.Uri,
+    line: number,
+    status: LineStatus,
+    failure?: StepFailureDetail,
+  ): void {
     const state = this.state(uri);
     state.statuses.set(line, status);
+    state.failures.delete(line);
+    if (failure) state.failures.set(line, failure);
     this.emit();
   }
 
@@ -613,6 +636,7 @@ export class ActiveFileTracker {
       breakpoints: [...this.breakpoints(uri)].sort((a, b) => a - b),
       statuses: [...state.statuses.entries()],
       errors: [...state.errors.entries()],
+      failures: [...state.failures.entries()],
       breakpointStop: this.derivedBreakpointStop(key, state),
       selectedLines: [],
       cursorLine: 1,
@@ -653,6 +677,7 @@ export class ActiveFileTracker {
         breakpoints: [],
         statuses: [],
         errors: [],
+        failures: [],
         breakpointStop: null,
         selectedLines: [],
         cursorLine: 1,
@@ -667,6 +692,7 @@ export class ActiveFileTracker {
       breakpoints: [...this.breakpoints(document.uri)].sort((a, b) => a - b),
       statuses: [...state.statuses.entries()],
       errors: [...state.errors.entries()],
+      failures: [...state.failures.entries()],
       breakpointStop: this.derivedBreakpointStop(document.uri.toString(), state),
       selectedLines: editor ? selectionLines(editor) : [],
       cursorLine: editor?.selection.active.line ? editor.selection.active.line + 1 : 1,
@@ -724,8 +750,9 @@ export class ActiveFileTracker {
           persisted.statuses.filter(([, s]) => s !== 'running'),
         );
         const errors = new Map<number, ErrorPayload>(persisted.errors);
+        const failures = new Map<number, StepFailureDetail>(persisted.failures ?? []);
         if (statuses.size === 0 && errors.size === 0) continue;
-        this.states.set(key, { statuses, errors, breakpointStop: null });
+        this.states.set(key, { statuses, errors, failures, breakpointStop: null });
         this.signatures.set(key, persisted.signature);
       }
     }
@@ -817,6 +844,7 @@ export class ActiveFileTracker {
       bucket[this.relativeKey(folder, uri)] = {
         statuses,
         errors: [...state.errors.entries()],
+        failures: [...state.failures.entries()],
         signature: this.signatures.get(key) ?? '',
       };
       buckets.set(folder.uri.toString(), bucket);
