@@ -87,7 +87,7 @@ async function writeDefaultTemplate(templateName: string, destPath: string): Pro
     'aiui.config.json': `{
   "ai": {
     "gatewayUrl": "https://aiapi.example.com",
-    "model": "openai/gpt-5.4-mini"
+    "model": "openai/gpt-5.6-luna"
   },
   "browser": {
     "headed": true,
