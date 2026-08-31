@@ -4,7 +4,7 @@ AI-powered UI test automation using natural language Markdown test files. Write 
 
 ## Prerequisites
 
-- Node.js >= 18
+- Node.js >= 22.21 (see [Corporate networks](#corporate-networks) — proxy support relies on it)
 - npm
 
 ## Install
@@ -825,6 +825,38 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 > The per-environment data directory is configured via `tests.dataDir` in
 > `aiui.config.json` (default `data`) — **not** an env var. The former
 > `AIUI_DATA_DIR` env var has been removed.
+
+### Corporate networks
+
+On a network with a mandatory proxy or TLS interception, three environment
+variables have to be set **where the server process starts** — not in a
+project's `.env`. All three are read by the Node runtime at startup, before a
+line of framework code runs, so they are not framework configuration:
+
+```bash
+NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://corp-proxy:8080 NODE_EXTRA_CA_CERTS=/path/to/corp-root.pem node dist/index.js serve -p 3100
+```
+
+| Variable | Why |
+| --- | --- |
+| `NODE_USE_ENV_PROXY` | The one people miss. Setting `HTTPS_PROXY` alone does **nothing** — Node's `fetch` ignores the proxy environment variables unless this is set, so the server silently goes direct and times out against the firewall instead of reporting a proxy problem. Needs Node >= 22.21 (or >= 24); that is why the floor in [Prerequisites](#prerequisites) is 22.21. Node prints an `EnvHttpProxyAgent is experimental` warning on startup when it is on. |
+| `HTTPS_PROXY` | The proxy itself (`HTTP_PROXY` and `NO_PROXY` work too). |
+| `NODE_EXTRA_CA_CERTS` | Needed when the proxy re-signs TLS with a private root. Node ships its own root bundle and ignores the OS trust store, so a browser on the same machine succeeds while the server fails certificate validation. |
+
+Set these in the operator's own environment — the shell, service definition, or
+MCP client config that launches the server. A project's `.env` deliberately
+**cannot** supply `NODE_EXTRA_CA_CERTS`; it is filtered by
+`UNSAFE_CHILD_ENV_KEYS` in
+[src/mcp/server-start.ts](./src/mcp/server-start.ts). One Sessions API server
+serves *every* project pointing at that `SERVER_URL` and holds each one's
+credentials, so a CA installed by one project would be trusted for every other
+project's calls.
+
+To keep model traffic inside your own network, point
+[`AI_GATEWAY_URL`](#environment-variables) at an in-tenant or self-hosted
+OpenAI-compatible endpoint. A fully compiled test replays with **no AI calls at
+all** and needs no key — see
+[stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md).
 
 ### Per-environment configuration
 
