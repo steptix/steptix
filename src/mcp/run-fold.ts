@@ -103,8 +103,43 @@ export interface FoldedEffectiveSettings {
   capture: EffectiveSettings['capture'] | null;
   fullPage: boolean | null;
   sendScreenshots: boolean | null;
-  sources: EffectiveSettings['sources'] | null;
+  /** stories/run-settings.md §9. Null from a server that predates the switch —
+   *  which is a different statement from `'on'`, and worth keeping apart. */
+  ai: EffectiveSettings['ai'] | null;
+  aiOffReason: EffectiveSettings['aiOffReason'];
+  sources: FoldedSettingSources | null;
   screenshotsReturn: ScreenshotsReturn;
+}
+
+/**
+ * The four sources every server reports, plus the AI one, which only a server
+ * carrying §9 does. Its own type rather than `EffectiveSettings['sources']`
+ * because the wire spans server versions and that one does not.
+ */
+export interface FoldedSettingSources {
+  model: EffectiveSettings['sources']['model'];
+  capture: EffectiveSettings['sources']['capture'];
+  fullPage: EffectiveSettings['sources']['fullPage'];
+  sendScreenshots: EffectiveSettings['sources']['sendScreenshots'];
+  ai: EffectiveSettings['sources']['ai'] | null;
+}
+
+/**
+ * The server's half of the echo as it ARRIVES — the §§1–8 fields, which every
+ * server that reports at all sends, plus the §9 ones, which an older one omits.
+ *
+ * Kept apart from `EffectiveSettings` on purpose: reusing the server's own type
+ * here would force `readEffectiveSettings` to either invent an `ai` value for an
+ * older server or reject the whole frame and lose the four fields it did send.
+ */
+interface WireEffectiveSettings {
+  model: string;
+  capture: EffectiveSettings['capture'];
+  fullPage: boolean;
+  sendScreenshots: boolean;
+  ai: EffectiveSettings['ai'] | null;
+  aiOffReason: EffectiveSettings['aiOffReason'];
+  sources: FoldedSettingSources;
 }
 
 export interface FoldInput {
@@ -191,7 +226,7 @@ export function foldRun(input: FoldInput): FoldedRun {
    *  what makes `final` depend on the capture setting. */
   let lastScreenshot: string | null = null;
   let sawFailure = false;
-  let serverSettings: EffectiveSettings | null = null;
+  let serverSettings: WireEffectiveSettings | null = null;
   let sawSkipped = false;
 
   /** Sent-array position for a line the server reported, or null. */
@@ -486,6 +521,8 @@ export function foldRun(input: FoldInput): FoldedRun {
       capture: serverSettings?.capture ?? null,
       fullPage: serverSettings?.fullPage ?? null,
       sendScreenshots: serverSettings?.sendScreenshots ?? null,
+      ai: serverSettings?.ai ?? null,
+      aiOffReason: serverSettings?.aiOffReason ?? null,
       sources: serverSettings?.sources ?? null,
       screenshotsReturn,
     },
@@ -493,18 +530,21 @@ export function foldRun(input: FoldInput): FoldedRun {
 }
 
 /** Sources, validated as a set so a partial one degrades to "not reported"
- *  rather than to an object the output schema rejects. */
-function readSources(value: unknown): EffectiveSettings['sources'] | null {
+ *  rather than to an object the output schema rejects. `ai` is read separately
+ *  and nullable: an older server sends the other four and not this one, and
+ *  rejecting the set over it would throw away what it did send. */
+function readSources(value: unknown): FoldedSettingSources | null {
   if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
   const valid = new Set(['server', 'project', 'session']);
-  const out: Record<string, string> = {};
+  const out: Record<string, string | null> = {};
   for (const key of ['model', 'capture', 'fullPage', 'sendScreenshots']) {
     const from = record[key];
     if (typeof from !== 'string' || !valid.has(from)) return null;
     out[key] = from;
   }
-  return out as unknown as EffectiveSettings['sources'];
+  out.ai = typeof record.ai === 'string' && valid.has(record.ai) ? record.ai : null;
+  return out as unknown as FoldedSettingSources;
 }
 
 /**
@@ -515,7 +555,7 @@ function readSources(value: unknown): EffectiveSettings['sources'] | null {
  * it" — the alternative is a `structuredContent` validation failure that strips
  * the whole run result at the very end of a run that worked.
  */
-function readEffectiveSettings(value: unknown): EffectiveSettings | null {
+function readEffectiveSettings(value: unknown): WireEffectiveSettings | null {
   if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
   const captureModes = new Set(['every-step', 'on-failure', 'none', 'custom']);
@@ -525,11 +565,21 @@ function readEffectiveSettings(value: unknown): EffectiveSettings | null {
   if (typeof record.sendScreenshots !== 'boolean') return null;
   const sources = readSources(record.sources);
   if (!sources) return null;
+  // The §9 pair is read permissively, not required: a server that predates the
+  // AI switch omits both, and rejecting the frame over them would report a
+  // perfectly good run as having no settings at all.
+  const ai = record.ai === 'on' || record.ai === 'off' ? record.ai : null;
+  const reason =
+    ai === 'off' && (record.aiOffReason === 'policy' || record.aiOffReason === 'no-key')
+      ? record.aiOffReason
+      : null;
   return {
     model: record.model,
     capture: record.capture as EffectiveSettings['capture'],
     fullPage: record.fullPage,
     sendScreenshots: record.sendScreenshots,
+    ai,
+    aiOffReason: reason,
     sources,
   };
 }
@@ -602,7 +652,7 @@ function readErrandTabs(value: unknown): ErrandTab[] | null {
 function missingScreenshotReason(
   mode: Exclude<ScreenshotsReturn, 'none'>,
   sawFailure: boolean,
-  settings: EffectiveSettings | null,
+  settings: WireEffectiveSettings | null,
 ): string | null {
   const capture = settings?.capture;
   const captureSays =

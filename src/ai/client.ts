@@ -143,6 +143,36 @@ export class GatewayUrlRequiredError extends Error {
   }
 }
 
+/**
+ * What an AI request says on a run whose policy forbids AI
+ * (stories/run-settings.md §9).
+ *
+ * Its own message rather than {@link AI_NOT_CONFIGURED_MESSAGE}, because that
+ * one's advice — "Set AI_API_KEY in the project .env" — is wrong here twice
+ * over: a key IS configured, and setting one would change nothing. The run was
+ * asked to spend no AI, and the actionable move is to stop asking for that or
+ * to compile the step so it replays without a model.
+ */
+export const AI_FORBIDDEN_BY_POLICY_MESSAGE =
+  'This step needs AI and this run forbids AI (runSettings.ai: off). A key is ' +
+  'configured; the run was asked to make no AI calls. Compiled steps replay ' +
+  'either way — compile this step, or run again with ai: "on" (or "default") ' +
+  'to allow it.';
+
+/**
+ * Thrown by every AI request made while the run's policy veil is up.
+ *
+ * Typed and distinct from {@link AiNotConfiguredError} so the two never
+ * collapse: the echo has to keep "off (policy)" and "off (no key)" apart, and a
+ * shared error class is how that distinction quietly stops being true.
+ */
+export class AiForbiddenByPolicyError extends Error {
+  constructor(message: string = AI_FORBIDDEN_BY_POLICY_MESSAGE) {
+    super(message);
+    this.name = 'AiForbiddenByPolicyError';
+  }
+}
+
 /** Per-call knobs beyond the messages themselves. */
 export interface CompleteOptions {
   /** Defaults to `routine` — today's behavior. */
@@ -172,6 +202,17 @@ export class AiClient {
    * fail at request time" behavior and lets {@link syncAuth} just null this out.
    */
   private gateway: AIGateway | null = null;
+  /**
+   * The run's policy veil (stories/run-settings.md §9): while it is up, every
+   * request is refused whatever the key says.
+   *
+   * On the client rather than in the executor because the executor's `keyless`
+   * option does not reach `executeBranchedStep`, which receives neither it nor
+   * `codeBehind` — so an executor-level gate would miss branched AI steps
+   * entirely while the report claimed the run made no AI calls. The client is
+   * the one choke point both paths share.
+   */
+  private aiForbidden = false;
 
   constructor(config: AiConfig, tokenTracker: TokenTracker) {
     this.config = config;
@@ -257,8 +298,25 @@ export class AiClient {
    * (stories/keyless-replay-and-gateway-env.md §Part B).
    */
   private getGateway(): AIGateway {
+    // Policy before the key check: on a policy-off run a key is present, so
+    // "AI is not configured" would be a false statement about a correct config.
+    if (this.aiForbidden) throw new AiForbiddenByPolicyError();
     if (!aiConfigured(this.config)) throw new AiNotConfiguredError();
     return (this.gateway ??= this.buildGateway());
+  }
+
+  /**
+   * Raise or lower the policy veil for the batch about to run
+   * (stories/run-settings.md §9).
+   *
+   * Set per batch, never sticky: run settings are retained on the SESSION and
+   * re-resolved every request, and a client that stayed veiled after the caller
+   * turned AI back on would need a session recycle to recover — the very cost
+   * this feature exists to avoid. Leaves the memoized gateway alone: the veil
+   * refuses before it is ever handed out, so there is nothing to invalidate.
+   */
+  setAiPolicy(allowed: boolean): void {
+    this.aiForbidden = !allowed;
   }
 
   /**

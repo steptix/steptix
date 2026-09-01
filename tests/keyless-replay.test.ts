@@ -30,7 +30,11 @@ import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { clearSkillCache } from '../src/skills/expander.js';
-import { executeStep, KEYLESS_HEAL_SKIPPED_ERROR } from '../src/runner/step-executor.js';
+import {
+  executeStep,
+  KEYLESS_HEAL_SKIPPED_ERROR,
+  POLICY_HEAL_SKIPPED_ERROR,
+} from '../src/runner/step-executor.js';
 import { buildCodeBehindRegistry, type CodeBehindRegistry } from '../src/codebehind/loader.js';
 
 /** The story's copy, restated rather than imported, so a silent edit to the
@@ -162,7 +166,11 @@ async function runAll(
   steps: string[],
   registry: CodeBehindRegistry,
   aiClient: AiClient,
-  extra: { keyless?: boolean; codeBehindStrict?: boolean } = {},
+  extra: {
+    keyless?: boolean;
+    keylessReason?: 'no-key' | 'policy';
+    codeBehindStrict?: boolean;
+  } = {},
 ) {
   const page = fakePage();
   const resolvedParameters: Record<string, string> = {};
@@ -249,6 +257,55 @@ describe('a keyless run of a compiled test', () => {
     expect(resolvedParameters).toEqual({ user: 'ada', balance: '1200.00' });
 
     expect(attempts).toEqual([]);
+  });
+
+  it('says the run forbids AI, not that the machine has none, when policy is the reason', async () => {
+    // stories/run-settings.md §9. `ai: off` takes the SAME skip and the same
+    // sidecar — the mechanism is deliberately reused — but the keyless copy's
+    // claim ("AI is not configured on this machine") is flatly untrue here, and
+    // "go repair this where AI is available" would send the reader to fix
+    // something that is not broken.
+    const md = await write('transfers.md', TEST_MD);
+    await write('transfers.steps.ts', stepsFile('throws'));
+
+    const { steps, registry } = await registryFor(md);
+    const broken = registry.bindingFor(1)!;
+    const { client, attempts } = forbiddenClient();
+    const { results } = await runAll(steps, registry, client, {
+      keyless: true,
+      keylessReason: 'policy',
+    });
+
+    const failed = results[1]!;
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toBe(POLICY_HEAL_SKIPPED_ERROR);
+    expect(failed.error).toContain('runSettings.ai: off');
+    expect(failed.error).not.toContain('this machine');
+    expect(failed.aiExplanation).toContain('this run forbids AI');
+    expect(failed.aiExplanation).toContain('#transfers-tab went away in a redesign');
+    // The sidecar is unchanged, which is what keeps compile-repair able to find
+    // the step whichever reason skipped the heal.
+    expect(failed.codeBehindHealSkipped).toEqual({
+      file: broken.file,
+      source: 'Click the "Transfers" tab',
+      error: '#transfers-tab went away in a redesign',
+    });
+    expect(failed.codeBehindStale).toBeUndefined();
+    expect(attempts).toEqual([]);
+  });
+
+  it('keeps the machine-has-no-AI copy when no reason is given', async () => {
+    // The default, asserted beside the variant above: an absent `keylessReason`
+    // is exactly today's behaviour, which is what makes the new flag additive.
+    const md = await write('transfers.md', TEST_MD);
+    await write('transfers.steps.ts', stepsFile('throws'));
+
+    const { steps, registry } = await registryFor(md);
+    const { client } = forbiddenClient();
+    const { results } = await runAll(steps, registry, client, { keyless: true });
+
+    expect(results[1]!.error).toBe(KEYLESS_HEAL_SKIPPED_ERROR);
+    expect(POLICY_HEAL_SKIPPED_ERROR).not.toBe(KEYLESS_HEAL_SKIPPED_ERROR);
   });
 
   it('names the underlying entry failure in the explanation, not in the error', async () => {

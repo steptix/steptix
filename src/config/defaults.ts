@@ -14,6 +14,7 @@ export const DEFAULT_CONFIG: Config = {
     streamResponses: false,
     sendScreenshots: false,
     diagnoseFailures: true,
+    allowInRuns: true,
   },
   browser: {
     headed: true,

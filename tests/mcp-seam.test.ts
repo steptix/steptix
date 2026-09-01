@@ -630,11 +630,14 @@ describe('run settings on the wire', () => {
     capture: 'every-step' as const,
     fullPage: false,
     sendScreenshots: false,
+    ai: 'on' as const,
+    aiOffReason: null,
     sources: {
       model: 'session' as const,
       capture: 'session' as const,
       fullPage: 'server' as const,
       sendScreenshots: 'server' as const,
+      ai: 'server' as const,
     },
   };
 
@@ -660,6 +663,38 @@ describe('run settings on the wire', () => {
       capture: 'every-step',
       model: 'override/model',
     });
+  });
+
+  it('puts ai on the wire, so the switch is reachable from a tool call', async () => {
+    // stories/run-settings.md §9. `assemble` forwards `runSettings` wholesale,
+    // so the failure mode here is upstream: an argument `readRunSettings` does
+    // not read is dropped silently, with the tool schema still advertising it.
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT, ai: 'off' },
+    });
+
+    expect(harness.calls[0]?.body.runSettings).toEqual({ ai: 'off' });
+  });
+
+  it('forwards "default" rather than swallowing it, so an override can be cleared', async () => {
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT, ai: 'default' },
+    });
+
+    // Absent and 'default' are different requests — one leaves the session's
+    // setting alone, the other stops overriding — and only the server can tell
+    // them apart.
+    expect(harness.calls[0]?.body.runSettings).toEqual({ ai: 'default' });
   });
 
   it('omits runSettings entirely when the caller set none', async () => {
@@ -728,6 +763,38 @@ describe('run settings on the wire', () => {
     const summary = (res.content as { text?: string }[])[0]?.text ?? '';
     expect(summary).toContain('override/model');
     expect(summary).toContain('every-step');
+    // AI was on, which is the ordinary case: the line stays quiet about it
+    // rather than growing a clause every run has to carry.
+    expect(summary).not.toContain('AI:');
+  });
+
+  it('distinguishes AI off by policy from AI off for want of a key', async () => {
+    // The distinction on the line a host that ignores structured output will
+    // show. Support needs to tell them apart, and they need opposite responses.
+    const lineFor = async (
+      ai: 'off',
+      aiOffReason: 'policy' | 'no-key',
+    ): Promise<string> => {
+      const { client } = await connect({
+        script: {
+          events: [
+            {
+              type: 'done',
+              status: 'passed',
+              effectiveSettings: { ...effective, ai, aiOffReason },
+            },
+          ],
+        },
+      });
+      const res = await client.callTool({
+        name: 'run_steps',
+        arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+      });
+      return (res.content as { text?: string }[])[0]?.text ?? '';
+    };
+
+    expect(await lineFor('off', 'policy')).toContain('AI: off (policy)');
+    expect(await lineFor('off', 'no-key')).toContain('AI: off (no key)');
   });
 
   it('validates against the output schema when an older server omits the echo', async () => {
@@ -903,9 +970,32 @@ describe('get_run_settings', () => {
       capture: 'every-step',
       fullPage: null,
       sendScreenshots: null,
+      ai: null,
     });
     expect(structured.serverDefaults.capture).toBe('on-failure');
     expect(harness.configCalls).toEqual(['mcp:x']);
+  });
+
+  it('answers null for the AI switch when the server predates it', async () => {
+    // `report` above is deliberately an OLDER server's payload — no `ai`
+    // anywhere. The output schema requires every key to be PRESENT, so a
+    // missing one would fail validation and strip the whole result; and
+    // inventing "on" would be a claim that server never made.
+    const harness = await connect({ serverConfig: report });
+
+    const res = await harness.client.callTool({
+      name: 'get_run_settings',
+      arguments: { session_id: 'mcp:x', project_root: PROJECT_ROOT },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as Record<string, any>;
+    expect(structured.ai).toBeNull();
+    expect(structured.aiOffReason).toBeNull();
+    expect(structured.sources.ai).toBeNull();
+    expect(structured.serverDefaults.ai).toBeNull();
+    // …and the settings that server DID report still came through.
+    expect(structured.model).toBe('session/model');
   });
 
   it('reports the server defaults when no session is named', async () => {

@@ -347,6 +347,7 @@ vi.mock('../src/ai/client.js', () => ({
       aiConfigs.push(config ?? {});
     }
     chat = vi.fn(async () => '{}');
+    setAiPolicy = vi.fn();
     syncAuth = vi.fn(() => null);
   },
 }));

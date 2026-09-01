@@ -2,8 +2,8 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { url as inspectorUrl } from 'node:inspector';
 import path from 'node:path';
-import type { CaptureMode, Config, RunSettings } from '../config/types.js';
-import { CAPTURE_MODES, RUN_SETTING_KEYS } from '../config/run-settings.js';
+import type { AiMode, CaptureMode, Config, RunSettings } from '../config/types.js';
+import { AI_MODES, CAPTURE_MODES, RUN_SETTING_KEYS } from '../config/run-settings.js';
 import {
   knownProfilesAcross,
   startCdpBrowser,
@@ -2436,6 +2436,17 @@ function parseRunSettings(raw: unknown): RunSettings | string {
       );
     }
     out.capture = capture as CaptureMode;
+  }
+
+  if ('ai' in input) {
+    const ai = input.ai;
+    if (typeof ai !== 'string' || !AI_MODES.includes(ai as AiMode)) {
+      return (
+        `Invalid runSettings.ai ${JSON.stringify(ai)}. ` +
+        `Valid values are ${AI_MODES.map((m) => `"${m}"`).join(', ')}.`
+      );
+    }
+    out.ai = ai as AiMode;
   }
 
   if ('model' in input) {

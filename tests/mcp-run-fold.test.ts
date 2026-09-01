@@ -573,11 +573,14 @@ describe('effectiveSettings on the done event', () => {
     capture: 'every-step' as const,
     fullPage: true,
     sendScreenshots: false,
+    ai: 'on' as const,
+    aiOffReason: null,
     sources: {
       model: 'session' as const,
       capture: 'session' as const,
       fullPage: 'project' as const,
       sendScreenshots: 'server' as const,
+      ai: 'server' as const,
     },
   };
 
@@ -604,11 +607,62 @@ describe('effectiveSettings on the done event', () => {
       capture: null,
       fullPage: null,
       sendScreenshots: null,
+      ai: null,
+      aiOffReason: null,
       sources: null,
       // Never null: this side always knows what it was told, whatever the
       // server did or did not report.
       screenshotsReturn: 'on-failure',
     });
+  });
+
+  it('keeps the four §§1–8 fields when a server predating the AI switch omits ai', () => {
+    // The older-server rule applied to §9's own addition. Rejecting the frame
+    // over a missing `ai` would throw away the four settings that server DID
+    // report — a strictly worse answer than the one it sent.
+    const { ai: _ai, aiOffReason: _reason, sources, ...older } = settings;
+    const { ai: _aiSource, ...olderSources } = sources;
+    const result = fold({
+      events: [
+        {
+          type: 'done',
+          status: 'passed',
+          effectiveSettings: { ...older, sources: olderSources },
+        } as unknown as RunEvent,
+      ],
+      screenshotsReturn: 'none',
+    });
+
+    expect(result.effectiveSettings?.model).toBe(settings.model);
+    expect(result.effectiveSettings?.capture).toBe('every-step');
+    expect(result.effectiveSettings?.sources?.model).toBe('session');
+    // Null, not 'on': "the server did not say" and "the server said yes" are
+    // different claims, and only one of them is true here.
+    expect(result.effectiveSettings?.ai).toBeNull();
+    expect(result.effectiveSettings?.aiOffReason).toBeNull();
+    expect(result.effectiveSettings?.sources?.ai).toBeNull();
+  });
+
+  it('carries the off reason through, so policy and no-key stay apart', () => {
+    const result = fold({
+      events: [
+        {
+          type: 'done',
+          status: 'passed',
+          effectiveSettings: {
+            ...settings,
+            ai: 'off',
+            aiOffReason: 'policy',
+            sources: { ...settings.sources, ai: 'session' },
+          },
+        } as unknown as RunEvent,
+      ],
+      screenshotsReturn: 'none',
+    });
+
+    expect(result.effectiveSettings?.ai).toBe('off');
+    expect(result.effectiveSettings?.aiOffReason).toBe('policy');
+    expect(result.effectiveSettings?.sources?.ai).toBe('session');
   });
 
   it('treats a malformed report as not reported', () => {

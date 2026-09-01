@@ -11,7 +11,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  AI_MODES,
   CAPTURE_MODES,
+  RUN_SETTING_KEYS,
   captureModeOf,
   mergeRunSettings,
   resolveRunSettings,
@@ -23,7 +25,9 @@ import type { Config, RunSettings } from '../src/config/types.js';
  *  that reached for a default instead of the base is visible. */
 const server: Config = {
   ...DEFAULT_CONFIG,
-  ai: { ...DEFAULT_CONFIG.ai, model: 'server/model', sendScreenshots: false },
+  // Keyed on purpose: with no key every resolution would report `ai: 'off'` for
+  // want of one, and the policy cases below could not be told from that.
+  ai: { ...DEFAULT_CONFIG.ai, model: 'server/model', sendScreenshots: false, apiKey: 'k' },
   browser: {
     ...DEFAULT_CONFIG.browser,
     captureScreenshotsPerAction: false,
@@ -68,6 +72,18 @@ describe('mergeRunSettings', () => {
     const current: RunSettings = { capture: 'every-step' };
     mergeRunSettings(current, { capture: 'none' });
     expect(current).toEqual({ capture: 'every-step' });
+  });
+
+  it('retains ai per key, and "default" deletes it', () => {
+    const off = mergeRunSettings({}, { ai: 'off' });
+    expect(off).toEqual({ ai: 'off' });
+
+    // A later request about something else must not lift the switch.
+    expect(mergeRunSettings(off, { capture: 'none' })).toEqual({ ai: 'off', capture: 'none' });
+
+    const cleared = mergeRunSettings(off, { ai: 'default' });
+    expect(cleared).toEqual({});
+    expect('ai' in cleared).toBe(false);
   });
 });
 
@@ -126,11 +142,14 @@ describe('resolveRunSettings', () => {
       capture: 'on-failure',
       fullPage: false,
       sendScreenshots: false,
+      ai: 'on',
+      aiOffReason: null,
       sources: {
         model: 'server',
         capture: 'server',
         fullPage: 'server',
         sendScreenshots: 'server',
+        ai: 'server',
       },
     });
   });
@@ -245,5 +264,149 @@ describe('resolveRunSettings — browser.ambiguousTarget', () => {
     expect(config.browser.captureScreenshotsPerAction).toBe(false);
     expect(config.browser.fullPageScreenshots).toBe(false);
     expect(config.browser.browser).toBe(server.browser.browser);
+  });
+});
+
+describe('resolveRunSettings — the AI switch', () => {
+  // stories/run-settings.md §9. `server` above is keyed, so every `off` here is
+  // a POLICY answer; the no-key cases build their own config.
+  const keyless: Config = { ...server, ai: { ...server.ai, apiKey: '' } };
+
+  it('is on by default, sourced from the server', () => {
+    const { effective, config } = resolve({});
+
+    expect(effective.ai).toBe('on');
+    expect(effective.aiOffReason).toBeNull();
+    expect(effective.sources.ai).toBe('server');
+    expect(config.ai.allowInRuns).toBe(true);
+  });
+
+  it('a session override turns it off, and says policy', () => {
+    const { effective, config } = resolve({ ai: 'off' });
+
+    expect(effective.ai).toBe('off');
+    expect(effective.aiOffReason).toBe('policy');
+    expect(effective.sources.ai).toBe('session');
+    expect(config.ai.allowInRuns).toBe(false);
+  });
+
+  it("carries the PROJECT's allowInRuns into the config handed to the executor", () => {
+    // The trap this list's own comment names: `config.ai` below is spread from
+    // the SERVER's startup config, so a per-project key not re-sourced BY NAME
+    // silently keeps the server's answer. Routing it onto the project bundle is
+    // necessary and not sufficient — this is the second drop point.
+    const project: Config = { ...server, ai: { ...server.ai, allowInRuns: false } };
+    const { effective, config } = resolve({}, project);
+
+    expect(effective.ai).toBe('off');
+    expect(effective.aiOffReason).toBe('policy');
+    expect(effective.sources.ai).toBe('project');
+    expect(config.ai.allowInRuns).toBe(false);
+  });
+
+  it('does not let a server that forbids AI impose it on a silent project', () => {
+    // The other direction, for `ambiguousTarget`'s reason: a resolver that just
+    // echoed the server config would pass the check above and fail here.
+    const noAiServer: Config = { ...server, ai: { ...server.ai, allowInRuns: false } };
+    const { effective } = resolveRunSettings(noAiServer, server, noAiServer.ai.model, {});
+
+    expect(effective.ai).toBe('on');
+    expect(effective.sources.ai).toBe('project');
+  });
+
+  it('a session "on" beats a project that forbids it', () => {
+    const project: Config = { ...server, ai: { ...server.ai, allowInRuns: false } };
+    const { effective, config } = resolve({ ai: 'on' }, project);
+
+    expect(effective.ai).toBe('on');
+    expect(effective.sources.ai).toBe('session');
+    expect(config.ai.allowInRuns).toBe(true);
+  });
+
+  it('"default" resolves to the base rather than the last override', () => {
+    const project: Config = { ...server, ai: { ...server.ai, allowInRuns: false } };
+    const { effective } = resolve({ ai: 'default' }, project);
+
+    expect(effective.ai).toBe('off');
+    expect(effective.sources.ai).toBe('project');
+  });
+
+  it('reports no-key when a run has no key, without calling it policy', () => {
+    // The distinction the echo exists to keep. Nothing was chosen here, so the
+    // source stays where the policy came from.
+    const { effective } = resolveRunSettings(keyless, keyless, keyless.ai.model, {});
+
+    expect(effective.ai).toBe('off');
+    expect(effective.aiOffReason).toBe('no-key');
+    expect(effective.sources.ai).toBe('server');
+  });
+
+  it('reads the key off the ai config it is GIVEN, not the server base', () => {
+    // The server may be keyless while the request's `.env` shipped a key, and
+    // vice versa — which is exactly the shape the executor's `keyless` flag had
+    // to be fixed for once already.
+    const withKey = resolveRunSettings(keyless, keyless, keyless.ai.model, {}, {
+      ai: { ...keyless.ai, apiKey: 'from-dot-env' },
+    });
+    expect(withKey.effective.ai).toBe('on');
+
+    const withoutKey = resolveRunSettings(server, server, server.ai.model, {}, {
+      ai: { ...server.ai, apiKey: '' },
+    });
+    expect(withoutKey.effective.ai).toBe('off');
+    expect(withoutKey.effective.aiOffReason).toBe('no-key');
+  });
+
+  it('calls it policy when the run is BOTH keyless and forbidden', () => {
+    // A key is not the fix on a run that was asked to spend nothing, so
+    // reporting 'no-key' would send support to correct a line that is fine.
+    const { effective } = resolveRunSettings(keyless, keyless, keyless.ai.model, { ai: 'off' });
+
+    expect(effective.aiOffReason).toBe('policy');
+  });
+
+  it('bypasses the policy for a request FOR AI, without touching the overrides', () => {
+    // Compile, Repair This Step and errands. The session's retained `off` has
+    // to survive: the alternative — compile sending `runSettings: {ai: "on"}` —
+    // would be merged and silently clobber it for every later run.
+    const overrides: RunSettings = { ai: 'off' };
+    const { effective, config } = resolveRunSettings(server, server, server.ai.model, overrides, {
+      bypassAiPolicy: true,
+    });
+
+    expect(effective.ai).toBe('on');
+    expect(effective.sources.ai).toBe('server');
+    expect(config.ai.allowInRuns).toBe(true);
+    expect(overrides).toEqual({ ai: 'off' });
+  });
+
+  it('does not conjure AI out of a bypass when there is no key', () => {
+    // The bypass lifts a POLICY. A compile on a machine with no model is still
+    // a compile with no model, and must say so.
+    const { effective } = resolveRunSettings(keyless, keyless, keyless.ai.model, { ai: 'off' }, {
+      bypassAiPolicy: true,
+    });
+
+    expect(effective.ai).toBe('off');
+    expect(effective.aiOffReason).toBe('no-key');
+  });
+
+  it('leaves every other config value alone while flipping the switch', () => {
+    const { config } = resolve({ ai: 'off' });
+
+    expect(config.ai.model).toBe('server/model');
+    expect(config.ai.maxInputTokens).toBe(server.ai.maxInputTokens);
+    expect(config.ai.diagnoseFailures).toBe(server.ai.diagnoseFailures);
+    expect(config.browser.captureScreenshotsPerAction).toBe(false);
+  });
+});
+
+describe('the accepted vocabulary', () => {
+  it('lists ai among the wire keys, so the route stops refusing it as unknown', () => {
+    expect(RUN_SETTING_KEYS).toContain('ai');
+  });
+
+  it('offers "default", without which going back would be inexpressible', () => {
+    expect(AI_MODES).toEqual(['on', 'off', 'default']);
   });
 });

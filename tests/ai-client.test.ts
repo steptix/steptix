@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AiClient,
+  AiForbiddenByPolicyError,
   AiNotConfiguredError,
+  AI_FORBIDDEN_BY_POLICY_MESSAGE,
   AI_NOT_CONFIGURED_MESSAGE,
   GatewayUrlRequiredError,
   GATEWAY_URL_REQUIRED_MESSAGE,
@@ -415,6 +417,116 @@ describe('AiClient — @pkent/aigateway integration', () => {
         baseURL: 'https://llm.corp.example/v1',
       });
       expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('setAiPolicy — the run-forbids-AI veil', () => {
+    // stories/run-settings.md §9. Every test here runs on a KEYED client: the
+    // whole point of the veil is that a key is present and the run was asked to
+    // spend nothing anyway, so a keyless fixture would prove nothing.
+
+    it('refuses a keyed request while the veil is up, and sends nothing', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(false);
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+      expect(constructorMock).not.toHaveBeenCalled();
+      expect(chatMock).not.toHaveBeenCalled();
+      expect(streamMock).not.toHaveBeenCalled();
+    });
+
+    it('still runs the ordinary call when policy allows it', async () => {
+      // The case the veil must not break, asserted alongside the refusal rather
+      // than on its own: a gate tested only on the input it declines can be
+      // refusing everything and look correct.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(true);
+
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(result.text).toBe('{}');
+      expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('lifts on the next batch without a session recycle', async () => {
+      // Settings are re-resolved per request, so a client that stayed veiled
+      // after the caller passed ai: "on" would need the browser thrown away to
+      // recover — the very cost this whole feature exists to avoid.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+
+      client.setAiPolicy(false);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+
+      client.setAiPolicy(true);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).resolves.toMatchObject({
+        text: '{}',
+      });
+      expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('is NOT AiNotConfiguredError, and never advises setting a key', async () => {
+      // The distinction the echo has to keep: "off (policy)" and "off (no key)"
+      // need opposite responses, and "Set AI_API_KEY in the project .env" is
+      // wrong advice for a run whose key is already there.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(false);
+
+      const err = await client
+        .complete([{ role: 'user', content: 'Hi' }])
+        .then(() => null)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AiForbiddenByPolicyError);
+      expect(err).not.toBeInstanceOf(AiNotConfiguredError);
+      expect((err as Error).message).toBe(AI_FORBIDDEN_BY_POLICY_MESSAGE);
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).toContain('runSettings.ai: off');
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).not.toContain('AI_API_KEY');
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).not.toBe(AI_NOT_CONFIGURED_MESSAGE);
+    });
+
+    it('beats the keyless refusal when a run is both keyless and policy-off', async () => {
+      // Both true is reachable — a keyless machine whose caller also asked for
+      // ai: "off". Policy is the more specific statement about THIS run, and
+      // it is the one whose advice is not misleading.
+      const client = new AiClient({ ...baseConfig, apiKey: '' }, tokenTracker as any);
+      client.setAiPolicy(false);
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+    });
+
+    it('refuses the streaming path on the same terms', async () => {
+      const client = new AiClient(
+        { ...baseConfig, streamResponses: true },
+        tokenTracker as any,
+      );
+      client.setAiPolicy(false);
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+      expect(streamMock).not.toHaveBeenCalled();
+    });
+
+    it('logs no request for the request it never made', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(false);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+
+      const logged = [
+        ...vi.mocked(logger.debug).mock.calls,
+        ...vi.mocked(logger.trace).mock.calls,
+      ]
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(logged).not.toContain('POST');
+      expect(logged).not.toContain('ai.request');
     });
   });
 

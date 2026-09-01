@@ -73,7 +73,7 @@ vi.mock('../src/ai/diagnose.js', () => ({
 }));
 
 vi.mock('../src/ai/client.js', () => ({
-  AiClient: class { syncAuth = vi.fn(() => null); },
+  AiClient: class { setAiPolicy = vi.fn(); syncAuth = vi.fn(() => null); },
 }));
 
 vi.mock('../src/utils/run-log.js', () => ({
