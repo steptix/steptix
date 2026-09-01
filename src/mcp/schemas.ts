@@ -713,8 +713,10 @@ export const getRunSettingsOutput = toolSchema({
     .enum(['policy', 'no-key'])
     .nullable()
     .describe(
-      'Why ai is "off": "policy" (asked for, key present) or "no-key" ' +
-        '(nothing configured on this machine). Null when ai is on.',
+      'Why ai is "off": "policy" (a run that was asked to make no AI calls) ' +
+        'or "no-key" (nothing configured on this machine). Null when ai is ' +
+        'on. Policy is reported first when both hold, so "policy" says ' +
+        'nothing either way about whether a key exists.',
     ),
   sources: z
     .object({
@@ -1196,8 +1198,10 @@ const effectiveSettings = z
       .nullable()
       .describe(
         'Why ai is "off". "policy" — somebody asked for a run that spends ' +
-          'nothing, and a key is configured. "no-key" — nothing is configured ' +
-          'on this machine, so no run here can use AI. Null when ai is on.',
+          'nothing. "no-key" — nothing is configured on this machine, so no ' +
+          'run here can use AI. Policy is reported first when both hold, so ' +
+          '"policy" says nothing either way about whether a key exists. Null ' +
+          'when ai is on.',
       ),
     sources: z
       .object({

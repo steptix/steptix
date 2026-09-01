@@ -800,9 +800,35 @@ function aiSaid(
   reason: FoldedEffectiveSettings['aiOffReason'],
 ): string {
   if (ai !== 'off') return '';
-  const why =
-    reason === 'policy' ? 'policy' : reason === 'no-key' ? 'no key' : 'reason not reported';
-  return `, AI: off (${why})`;
+  return `, AI: off (${offBecause(reason)})`;
+}
+
+/** Why `ai` is off, in the echo's words. */
+function offBecause(reason: FoldedEffectiveSettings['aiOffReason']): string {
+  return reason === 'policy' ? 'policy' : reason === 'no-key' ? 'no key' : 'reason not reported';
+}
+
+/**
+ * The AI half of the `get_run_settings` echo, which has one thing the run echo
+ * does not: a retained override that can DISAGREE with the last run's result.
+ *
+ * Two ways to get there — a compile bypasses the switch outright, so a session
+ * holding `ai: off` still reports `ai: 'on'` from that run; and setting the
+ * override after a run leaves the previous run's answer standing. Either way
+ * {@link aiSaid} alone would fall silent on the `on` side, and a host that
+ * renders only content blocks would see nothing saying the switch is still
+ * down for the next run.
+ *
+ * One clause when they agree, so the ordinary line is unchanged.
+ */
+function aiSaidWithOverride(
+  ai: FoldedEffectiveSettings['ai'],
+  reason: FoldedEffectiveSettings['aiOffReason'],
+  override: 'on' | 'off' | null,
+): string {
+  if (override === null || ai === null || override === ai) return aiSaid(ai, reason);
+  const last = ai === 'on' ? 'on for the last run' : `off for the last run (${offBecause(reason)})`;
+  return `, AI: ${last}; session override ai: ${override} stands for the next run`;
 }
 
 function outcomeToResult(outcome: RunOutcome): ToolResult {
@@ -2363,7 +2389,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             `model ${effective.model} (${effective.sources.model}), capture ` +
             `${effective.capture} (${effective.sources.capture}), model sees ` +
             `screenshots: ${effective.sendScreenshots ? 'yes' : 'no'}` +
-            aiSaid(effective.ai ?? null, effective.aiOffReason ?? null),
+            // `value.overrides`, not `overrides`: already folded to
+            // `'on' | 'off' | null`, so "default" cannot read as a divergence.
+            aiSaidWithOverride(
+              effective.ai ?? null,
+              effective.aiOffReason ?? null,
+              value.overrides?.ai ?? null,
+            ),
         );
       } catch (err) {
         return asToolError(err, project?.envFilesConsulted ?? [], project?.serverUrl ?? '');

@@ -34,10 +34,15 @@ export interface AiConfig {
    * behaviour (stories/run-settings.md §9).
    *
    * The project-level floor under the per-session `ai` run setting: `false`
-   * makes every run in this project behave like a keyless one no matter which
-   * keys are configured — compiled steps replay, and anything needing a model
-   * is skipped or refused. Compile, repair and errands are deliberately NOT
-   * gated by it; they are requests *for* AI.
+   * makes a run behave like a keyless one no matter which keys are configured —
+   * compiled steps replay, and anything needing a model is skipped or refused.
+   * Compile, repair and errands are deliberately NOT gated by it; they are
+   * requests *for* AI.
+   *
+   * Scope: runs that go through the Sessions API server — TestBench, MCP, the
+   * HTTP API. The `aiui run` CLI resolves no run settings and ignores this key
+   * outright; there, key presence is the only switch, and a blank `AI_API_KEY=`
+   * in the project `.env` is how you force keyless.
    */
   allowInRuns?: boolean;
 }

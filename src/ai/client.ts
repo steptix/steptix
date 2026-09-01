@@ -148,16 +148,21 @@ export class GatewayUrlRequiredError extends Error {
  * (stories/run-settings.md §9).
  *
  * Its own message rather than {@link AI_NOT_CONFIGURED_MESSAGE}, because that
- * one's advice — "Set AI_API_KEY in the project .env" — is wrong here twice
- * over: a key IS configured, and setting one would change nothing. The run was
- * asked to spend no AI, and the actionable move is to stop asking for that or
- * to compile the step so it replays without a model.
+ * one's advice — "Set AI_API_KEY in the project .env" — is not the move here:
+ * the run was asked to spend no AI, and a key changes nothing about that. The
+ * actionable move is to stop asking for it, or to compile the step so it
+ * replays without a model.
+ *
+ * It says nothing about whether a key exists, in either direction. Policy wins
+ * when both hold (`resolveRunSettings`, src/config/run-settings.ts) — so a
+ * keyless machine running with `ai: off` lands here too, and a message
+ * asserting a key is configured would be flatly wrong for that reader.
  */
 export const AI_FORBIDDEN_BY_POLICY_MESSAGE =
-  'This step needs AI and this run forbids AI (runSettings.ai: off). A key is ' +
-  'configured; the run was asked to make no AI calls. Compiled steps replay ' +
-  'either way — compile this step, or run again with ai: "on" (or "default") ' +
-  'to allow it.';
+  'This step needs AI and this run forbids AI: it was asked to make no AI ' +
+  'calls (runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
+  'Compiled steps replay either way — compile this step, or run again with ' +
+  'ai: "on" (or "default") to allow it.';
 
 /**
  * Thrown by every AI request made while the run's policy veil is up.

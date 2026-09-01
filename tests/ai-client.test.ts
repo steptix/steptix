@@ -469,8 +469,8 @@ describe('AiClient — @pkent/aigateway integration', () => {
 
     it('is NOT AiNotConfiguredError, and never advises setting a key', async () => {
       // The distinction the echo has to keep: "off (policy)" and "off (no key)"
-      // need opposite responses, and "Set AI_API_KEY in the project .env" is
-      // wrong advice for a run whose key is already there.
+      // need opposite responses, and "Set AI_API_KEY in the project .env" sends
+      // the reader to edit a line that has no bearing on the refusal.
       const client = new AiClient(baseConfig, tokenTracker as any);
       client.setAiPolicy(false);
 
@@ -497,6 +497,10 @@ describe('AiClient — @pkent/aigateway integration', () => {
       await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
         AiForbiddenByPolicyError,
       );
+      // ...and because this run reaches the policy message with NO key, that
+      // message may not assert one is configured. The claim would be false for
+      // exactly the reader standing here.
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).not.toMatch(/key is\s+configured/i);
     });
 
     it('refuses the streaming path on the same terms', async () => {

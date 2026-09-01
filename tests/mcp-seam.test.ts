@@ -998,6 +998,61 @@ describe('get_run_settings', () => {
     expect(structured.model).toBe('session/model');
   });
 
+  /** `report`'s session, with the §9 pair and an override folded in. */
+  const withAi = (
+    ai: 'on' | 'off',
+    aiOffReason: 'policy' | 'no-key' | null,
+    override: 'on' | 'off',
+  ) => ({
+    ...report,
+    session: {
+      ...report.session,
+      overrides: { ...report.session.overrides, ai: override },
+      effective: {
+        ...report.session.effective,
+        ai,
+        aiOffReason,
+        sources: { ...report.session.effective.sources, ai: 'session' },
+      },
+    },
+  });
+
+  it('names the standing ai override on the text line when the last run disagreed', async () => {
+    // A compile bypasses the switch, so a session holding `ai: off` reports
+    // `ai: 'on'` from that run — as does a session whose override was set after
+    // its last run. Echoing the effective value alone goes SILENT on the `on`
+    // side, and a host that renders only content blocks (OpenCode) then sees
+    // nothing saying the switch is still down for the next run.
+    const harness = await connect({ serverConfig: withAi('on', null, 'off') });
+
+    const res = await harness.client.callTool({
+      name: 'get_run_settings',
+      arguments: { session_id: 'mcp:x', project_root: PROJECT_ROOT },
+    });
+
+    const text = (res.content as { text?: string }[]).map((c) => c.text ?? '').join('\n');
+    expect(text).toContain('AI: on for the last run');
+    expect(text).toContain('session override ai: off stands for the next run');
+    // The extra clause is a text-line fix only; structured output is untouched.
+    const structured = res.structuredContent as Record<string, any>;
+    expect(structured.ai).toBe('on');
+    expect(structured.aiOffReason).toBeNull();
+    expect(structured.overrides.ai).toBe('off');
+  });
+
+  it('keeps the AI echo to one clause when the override and the last run agree', async () => {
+    const harness = await connect({ serverConfig: withAi('off', 'policy', 'off') });
+
+    const res = await harness.client.callTool({
+      name: 'get_run_settings',
+      arguments: { session_id: 'mcp:x', project_root: PROJECT_ROOT },
+    });
+
+    const text = (res.content as { text?: string }[]).map((c) => c.text ?? '').join('\n');
+    expect(text).toContain('AI: off (policy)');
+    expect(text).not.toContain('stands for the next run');
+  });
+
   it('reports the server defaults when no session is named', async () => {
     const harness = await connect({ serverConfig: { ...report, session: null } });
 
