@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AiClient, AiNotConfiguredError, AI_NOT_CONFIGURED_MESSAGE } from '../src/ai/client.js';
+import {
+  AiClient,
+  AiNotConfiguredError,
+  AI_NOT_CONFIGURED_MESSAGE,
+  GatewayUrlRequiredError,
+  GATEWAY_URL_REQUIRED_MESSAGE,
+} from '../src/ai/client.js';
 import type { AiConfig } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { logger } from '../src/utils/logger.js';
@@ -144,8 +150,11 @@ describe('AiClient — @pkent/aigateway integration', () => {
       const warned = vi.mocked(logger.warn).mock.calls.map((c) => String(c[0])).join('\n');
       expect(warned).toContain('https://llm.corp.example');
       expect(warned).toContain('openai/chatgpt-5.5');
+      // Both routing spellings are named: the reader has to be able to tell
+      // which one their `.env` should say.
+      expect(warned).toContain('gateway/');
       expect(warned).toContain('aibroker/');
-      expect(warned).toContain('AI_MODEL=aibroker/<provider>/<model>');
+      expect(warned).toContain('AI_MODEL=gateway/<model>');
       // Warned, not refused: the pairing is legal, and the request still goes.
       expect(constructorMock).toHaveBeenCalledWith('openai/chatgpt-5.5', 'test-key', {});
     });
@@ -194,6 +203,135 @@ describe('AiClient — @pkent/aigateway integration', () => {
         AiNotConfiguredError,
       );
       expect(constructorMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('gateway/ — the explicit-destination prefix', () => {
+    // stories/copilot-lm-bridge.md §Part B. `gateway/` says what the mechanism
+    // does — route to AI_GATEWAY_URL — where `aibroker/` names the hosted broker
+    // application. The alias routes identically; the one behavioural difference
+    // is that `gateway/` demands a URL somebody chose.
+    const corp = 'https://llm.corp.example';
+
+    it('builds the gateway with { baseURL } for a gateway/ model, model string verbatim', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1', gatewayUrl: corp },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      // The full string goes across: stripping the first segment is the
+      // library's job (`gateway` is a provider alias there), which is why this
+      // asserts the prefix is still ON the model we hand it.
+      expect(constructorMock).toHaveBeenCalledTimes(1);
+      expect(constructorMock).toHaveBeenCalledWith('gateway/copilot/gpt-4.1', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+      expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn about an inert pair — the URL is doing its job', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1', gatewayUrl: corp },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('normalises a trailing slash into the /v1 suffix, as aibroker/ does', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1', gatewayUrl: `${corp}/` },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(constructorMock).toHaveBeenCalledWith('gateway/copilot/gpt-4.1', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+    });
+
+    it('refuses a gateway/ model when AI_GATEWAY_URL was never set, and sends nothing', async () => {
+      // The guard: the loader keeps no provenance, so "unset" is a value
+      // comparison against the built-in default. Refusing beats silently
+      // shipping the key and the DOM payload to the default host.
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        tokenTracker as any,
+      );
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        GatewayUrlRequiredError,
+      );
+      expect(constructorMock).not.toHaveBeenCalled();
+      expect(chatMock).not.toHaveBeenCalled();
+      expect(streamMock).not.toHaveBeenCalled();
+    });
+
+    it('names AI_GATEWAY_URL and .env, and never AI_API_KEY, in the refusal', async () => {
+      // A key is not the problem here, and naming one would send the reader to
+      // edit a line that is already correct.
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        tokenTracker as any,
+      );
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(
+        GATEWAY_URL_REQUIRED_MESSAGE,
+      );
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).toBe(new GatewayUrlRequiredError().message);
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).toContain('AI_GATEWAY_URL');
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).toContain('.env');
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).not.toContain('AI_API_KEY');
+    });
+
+    it('refuses a default URL that only differs by a trailing slash', async () => {
+      const client = new AiClient(
+        {
+          ...baseConfig,
+          model: 'gateway/copilot/gpt-4.1',
+          gatewayUrl: `${DEFAULT_CONFIG.ai.gatewayUrl}/`,
+        },
+        tokenTracker as any,
+      );
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        GatewayUrlRequiredError,
+      );
+      expect(constructorMock).not.toHaveBeenCalled();
+    });
+
+    it('lets aibroker/ fall through to the default endpoint, guard or no guard', async () => {
+      // The case the guard must not break: `aibroker/` is the zero-config
+      // hosted-broker spelling, so the same config that refuses above proceeds
+      // here. Testing the refusal alone would not have caught a guard that
+      // matched both prefixes.
+      const client = new AiClient(
+        { ...baseConfig, model: 'aibroker/openai/chatgpt-5.5' },
+        tokenTracker as any,
+      );
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      expect(result.text).toBe('{}');
+      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+    });
+
+    it('lets a gateway/ model through the moment a URL is chosen', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        tokenTracker as any,
+      );
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        GatewayUrlRequiredError,
+      );
+
+      // Same client, one `.env` edit later — the refusal is about the config,
+      // not a state the client got stuck in.
+      client.syncAuth('gateway/copilot/gpt-4.1', 'test-key', corp);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(result.text).toBe('{}');
+      expect(constructorMock).toHaveBeenCalledWith('gateway/copilot/gpt-4.1', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
     });
   });
 

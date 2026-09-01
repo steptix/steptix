@@ -108,6 +108,41 @@ export class AiNotConfiguredError extends Error {
   }
 }
 
+/**
+ * What a `gateway/` model says when nobody chose the endpoint
+ * (stories/copilot-lm-bridge.md §Part B).
+ *
+ * `gateway/` means "route to `AI_GATEWAY_URL`, whatever it names" — a local
+ * bridge, a corporate gateway, Ollama. When that variable was never set, the
+ * resolved value is the built-in default, and sending the request anyway would
+ * ship the key and the DOM payload to the hosted broker: exactly the egress the
+ * corporate reader picked this spelling to avoid. So it is refused rather than
+ * routed, and the message names the variable it needs.
+ *
+ * Deliberately silent about `AI_API_KEY`: a key is not the problem here, and
+ * pointing at it would send the reader to edit a line that is already correct.
+ */
+export const GATEWAY_URL_REQUIRED_MESSAGE =
+  'AI_GATEWAY_URL is not set, so a gateway/ model has no endpoint to route to: ' +
+  'it resolved to the built-in default, which is not what "gateway/" asks for. ' +
+  'Refusing to send this request rather than routing it somewhere you did not ' +
+  'choose. Set AI_GATEWAY_URL in the project .env to the endpoint you mean — a ' +
+  'local bridge, your org\'s gateway, Ollama — or use ' +
+  'AI_MODEL=aibroker/<provider>/<model>, which is the spelling for the hosted ' +
+  'broker on the default endpoint.';
+
+/**
+ * Thrown when a `gateway/` model is paired with an unset `AI_GATEWAY_URL`.
+ * Typed for {@link AiNotConfiguredError}'s reason — a caller distinguishing
+ * "misconfigured routing" from "the model failed" should not match on prose.
+ */
+export class GatewayUrlRequiredError extends Error {
+  constructor(message: string = GATEWAY_URL_REQUIRED_MESSAGE) {
+    super(message);
+    this.name = 'GatewayUrlRequiredError';
+  }
+}
+
 /** Per-call knobs beyond the messages themselves. */
 export interface CompleteOptions {
   /** Defaults to `routine` — today's behavior. */
@@ -146,12 +181,30 @@ export class AiClient {
   /**
    * Build the `@pkent/aigateway` client bound to the current `model` + `apiKey`.
    * The model-string prefix drives routing: `baseURL` (the gateway `/v1`
-   * surface) is supplied ONLY for `aibroker/` models — for direct models
+   * surface) is supplied ONLY for gateway-routed models — for direct models
    * (`openai/…`, `anthropic/…`, …) passing it would point the provider's own SDK
    * at the gateway instead of the real upstream.
+   *
+   * Two prefixes route, and they differ only in what they say about the
+   * destination (stories/copilot-lm-bridge.md §Part B). `gateway/` means "route
+   * to `AI_GATEWAY_URL`", so it REQUIRES one to have been set; `aibroker/` names
+   * the hosted broker application and keeps its fall-through to the built-in
+   * default, which is what makes it the zero-config spelling. The library strips
+   * whichever first segment it was given and forwards the rest, so the model
+   * string goes across verbatim either way.
    */
   private buildGateway(): AIGateway {
-    const viaGateway = this.config.model.startsWith('aibroker/');
+    const viaGateway =
+      this.config.model.startsWith('gateway/') || this.config.model.startsWith('aibroker/');
+    // Refused before anything is built or sent. The loader keeps no provenance —
+    // an explicitly-set URL and the built-in default are indistinguishable on
+    // the result — so this is the same value comparison `hasCustomGatewayUrl`
+    // makes for the warning below. It also refuses the one edge that comparison
+    // cannot see, a URL explicitly set TO the default host; acceptable, because
+    // `aibroker/` is precisely the spelling for that.
+    if (this.config.model.startsWith('gateway/') && !this.hasCustomGatewayUrl()) {
+      throw new GatewayUrlRequiredError();
+    }
     if (!viaGateway && this.hasCustomGatewayUrl()) {
       // Someone deliberately pointed this run at an endpoint and it is being
       // ignored — silently, and in the direction that matters: the request
@@ -162,9 +215,10 @@ export class AiClient {
       // corporate user who thinks their traffic is routed and it is not.
       logger.warn(
         `AI_GATEWAY_URL is set to ${this.config.gatewayUrl}, but the model ` +
-          `"${this.config.model}" is not an aibroker/ model — the gateway URL applies ` +
-          'only to aibroker/ models, so this request goes directly to the provider. ' +
-          'Set AI_MODEL=aibroker/<provider>/<model> to route through the gateway.',
+          `"${this.config.model}" is not a gateway-routed model — the gateway URL ` +
+          'applies only to gateway-routed models (gateway/… and aibroker/…), so this ' +
+          'request goes directly to the provider. ' +
+          'Set AI_MODEL=gateway/<model> to route through the gateway.',
       );
     }
     const opts = viaGateway
@@ -181,6 +235,10 @@ export class AiClient {
    * one, so "is it set?" can only ever answer yes. Trailing slashes are
    * normalised the same way {@link buildGateway} normalises them, so a value
    * that differs from the default only by a `/` is not treated as a choice.
+   *
+   * Two callers, opposite directions: the inert-pair warning fires when a
+   * chosen URL is being ignored, and the `gateway/` guard fires when no URL was
+   * chosen at all.
    */
   private hasCustomGatewayUrl(): boolean {
     const trim = (url: string): string => url.trim().replace(/\/+$/, '');

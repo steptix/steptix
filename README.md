@@ -797,8 +797,8 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | Variable | Purpose |
 | --- | --- |
 | `AI_API_KEY` | API key for the aiapi gateway. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). The runner now uses aiapi v2 endpoints. |
-| `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. |
-| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint `aibroker/` models route through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Same precedence as `AI_MODEL` (environment → `aiui.config.json` → machine `.env` → built-in default), and it reaches the server path too: the TestBench extension ships the project's `.env` with each run. |
+| `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. The first segment decides routing: `gateway/<model>` routes to whatever `AI_GATEWAY_URL` names (your own gateway, a local bridge, Ollama) and **refuses to run when that variable is unset**, rather than quietly sending the traffic elsewhere; `aibroker/<provider>/<model>` is the hosted broker on the built-in endpoint and needs no URL; anything else (`openai/…`, `anthropic/…`) goes direct to the provider. |
+| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Pair it with `AI_MODEL=gateway/<model>`: that spelling says "route here", and a `gateway/` model with this variable unset is refused rather than sent to the default host. Same precedence as `AI_MODEL` (environment → `aiui.config.json` → machine `.env` → built-in default), and it reaches the server path too: the TestBench extension ships the project's `.env` with each run. |
 | `AI_EFFORT` | How hard the model thinks on **routine** steps: `low`, `medium`, `high`, `xhigh`, `max` — plus `none` and `minimal`, but see the warning below before using `none`. Optional — **unset is the default and changes nothing on the wire**. Setting it also raises the routine output cap to 8192, since reasoning tokens count against the same cap. Authoring calls (code-behind generation/review, assertions, failure diagnosis) already run at `high` and are deliberately *not* lowered by this. A level the bound model doesn't support fails on the first AI call with `invalid_effort`. Process-level like `maxInputTokens`, not per-session overridable. |
 | `AIUI_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `aiui serve` generates a machine key at `%LOCALAPPDATA%\aiui\.env` (`~/.aiui/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
@@ -854,8 +854,11 @@ project's calls.
 
 To keep model traffic inside your own network, point
 [`AI_GATEWAY_URL`](#environment-variables) at an in-tenant or self-hosted
-OpenAI-compatible endpoint. A fully compiled test replays with **no AI calls at
-all** and needs no key — see
+OpenAI-compatible endpoint and set `AI_MODEL=gateway/<model>`. The `gateway/`
+prefix means "route to `AI_GATEWAY_URL`", and it refuses to run when that
+variable is unset — so a forgotten URL line fails loudly instead of sending the
+key and the page payload to the default host. A fully compiled test replays with
+**no AI calls at all** and needs no key — see
 [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md).
 
 ### Per-environment configuration
