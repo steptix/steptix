@@ -123,7 +123,7 @@ The mappings, exhaustively:
 | `reasoning_effort`, `stream_options`, `temperature`, unknowns | — | drop silently, never error — the `retry`/`authoring` profiles send effort, streams carry `stream_options: {include_usage: true}`, and both must keep working |
 | `response_format: json_object` | — | best-effort emulation, below |
 | response fragments | `for await (…of res.text)` | concatenate (non-stream) or re-emit as SSE deltas (stream) |
-| usage | — (`vscode.lm` reports none) | zeros on the wire; note `completeStream` treats absent usage as missing and **estimates** (`ceil(len/4)`), so streamed bridge calls report estimated tokens, not 0 |
+| usage | — (`vscode.lm` reports none) | zeros on the wire; note `completeStream` treats absent-*or zero* usage as missing and **estimates output tokens** (`ceil(len/4)`), so streamed bridge calls report estimates, not 0 |
 
 **`json_object` emulation.** `AiClient` sends
 `response_format: {type: "json_object"}` on **every** request — both
@@ -252,10 +252,12 @@ Costs to document rather than change:
 - **CLI / CI / MCP-from-another-host.** No extension host, no bridge. Green
   compiled runs still replay with zero AI calls — but with the bridge trio in
   `.env`, such a run is keyed-with-unreachable-endpoint, not keyless: a stale
-  step's heal attempt and a failed run's diagnosis die with
-  connection-refused instead of taking the graceful keyless skip. For true
-  keyless there, blank the key (`AI_API_KEY=`) or run with `ai: off`. Compile
-  needs a VS Code window — which is where compiles come from anyway.
+  step's heal attempt (and, on CLI/CI, a failed run's diagnosis — the
+  MCP-driven server path runs none) dies with connection-refused instead of
+  taking the graceful keyless skip. For true keyless there, blank the key
+  (`AI_API_KEY=`) on CLI/CI; `ai: off` is a runSettings wire value, so it is
+  the answer only for MCP-driven runs. Compile needs a VS Code window — which
+  is where compiles come from anyway.
 - **Proxy/CA support.** Separate thread: operator-level environment on
   whoever starts the server, nothing to do with the bridge.
 - **Other `vscode.lm` providers.** They work for free (the API is
@@ -306,12 +308,14 @@ plainly.
    rejected because it reads wrong the moment it points at a non-local corp
    gateway; `aibroker/` because it names the hosted broker application. The
    legacy spelling keeps working; the work item lives in Part B. Refinement:
-   `gateway/` demands an explicitly set URL (loud error otherwise) while
-   `aibroker/` keeps the aiapi default — each spelling matches its behavior.
+   `gateway/` demands a non-default URL (loud error otherwise — an explicit
+   URL equal to the default host is also refused) while `aibroker/` keeps the
+   aiapi default — each spelling matches its behavior.
 3. **Usage reporting.** Zeros, or estimate via `model.countTokens()` at the
    cost of extra calls? Zeros proposed — noting they are true zeros only on
-   the non-streaming path: `completeStream` already estimates absent usage at
-   `ceil(len/4)`, so streamed bridge calls report estimates either way.
+   the non-streaming path: `completeStream` already estimates absent-or-zero
+   usage at `ceil(len/4)` (output side only), so streamed bridge calls report
+   estimates either way.
    Revisit if the mixed zero/estimate reports confuse people.
 4. **RESOLVED — diagnosis and quota.** Superseded by the AI run switch
    ([run-settings.md](run-settings.md) §9): setup never touches

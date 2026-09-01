@@ -74,8 +74,8 @@ conversation.
 > effect; (6) `get_run_settings` reports those same values plus their source,
 > and starts no server to answer; (7) a run with `ai: "off"` on a *keyed*
 > session makes zero AI requests — a stale compiled step takes the keyless
-> skip and sidecar, an uncompiled step fails with the policy refusal, the
-> diagnosis pass is skipped — and Compile This Step on that same session
+> skip and sidecar, an uncompiled step fails with the policy refusal, no
+> diagnosis pass runs — and Compile This Step on that same session
 > still compiles.
 
 ## Context
@@ -306,6 +306,8 @@ is on — a full-page PNG of a long page exceeds it — and the existing behavio
 
 The `done` event gains an `effectiveSettings` object: the model, the three
 screenshot values, and where each came from (`server`, `project`, `session`).
+(§9 later adds the AI mode to this same object, plus — when off — whether
+policy or a missing key made it so.)
 The server is the only party that can report this — the MCP does not know the
 server's defaults, and reading the project file itself would answer a different
 question.
@@ -368,15 +370,25 @@ the top of `executeStepsInternal`, compute
 `runKeyless = !aiConfigured(desiredAi) || effective.ai === 'off'` and pass it
 as `opts.keyless`. That reuses, unchanged, the heal fall-through skip in
 `runCodeBehindStep` (`codeBehindHealSkipped`, plus the `stale: true` +
-`healSkipped` sidecar row so compile-repair still finds the step) and the
-diagnosis skip. The refusal on an AI-*executed* step is NOT covered by that
+`healSkipped` sidecar row so compile-repair still finds the step). The
+diagnosis pass needs no gate on this path: it exists only on the CLI runner
+(`test-runner.ts`, behind its own local keyless check), and the server path
+this wire reaches runs no diagnosis at all — item (7)'s "no diagnosis pass"
+is satisfied there by absence, and the CLI's skip is out of this wire's
+reach. The refusal on an AI-*executed* step is NOT covered by that
 flag: it lives in `AiClient.getGateway()`'s key-presence check, which under
 `ai: off` still holds a real key and would happily run the step while the
-report claims zero-by-policy. The policy therefore needs its own refusal at
-the executor or client, with its own message — "this run forbids AI
-(runSettings.ai: off)" — because the existing `AiNotConfiguredError` and
-heal-skip texts say "Set AI_API_KEY in the project .env": wrong advice for
-policy-off, and it would erase the very distinction the echo must keep. The
+report claims zero-by-policy. The policy therefore needs its own refusal,
+with its own message — "this run forbids AI (runSettings.ai: off)" — because
+both existing keyless texts are wrong for policy-off: `AiNotConfiguredError`
+says "Set AI_API_KEY in the project .env", and the heal-skip text claims "AI
+is not configured on this machine" — untrue when a key is present and policy
+is off, and either would erase the very distinction the echo must keep.
+Where the refusal lives is decided by a fact, not taste: the branched-step
+call site (`executeBranchedStep`) receives neither `keyless` nor
+`codeBehind` in its options, so an executor-level gate misses branched AI
+steps entirely — the client-side gate covers them for free, which points the
+refusal at the client. The
 report and `effectiveSettings` distinguish `AI: off (policy)` from
 `AI: off (no key)` — support needs to tell them apart — and the two message
 variants are explicit work items of this story.
