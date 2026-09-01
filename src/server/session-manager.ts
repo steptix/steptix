@@ -2576,7 +2576,18 @@ export class SessionManager {
     // policy-off has to reuse the heal fall-through skip and its stale/
     // healSkipped sidecar, or a compiled step that broke under `ai: off` would
     // be invisible to compile-repair.
-    const runKeyless = !aiConfigured(desiredAi) || resolvedSettings.effective.ai === 'off';
+    //
+    // `desiredModel`, not `desiredAi.model` — the one line here that wants the
+    // POST-override model rather than the pre-override one the resolver above
+    // is deliberately given. `aiConfigured` is model-aware now (a
+    // self-authenticating provider needs no key), and this is asking what the
+    // run can actually do, not where a setting came from: it is the same model
+    // `syncAuth` just pointed the client at, so a keyless `bedrock/` project
+    // overridden to `anthropic/…` reports having no AI instead of reporting
+    // `on` and dying on an empty key.
+    const runKeyless =
+      !aiConfigured({ ...desiredAi, model: desiredModel }) ||
+      resolvedSettings.effective.ai === 'off';
     // The session's own viewport, re-applied on top (stories/per-test-viewport.md
     // §2: "every browser the test opens inherits it").
     //

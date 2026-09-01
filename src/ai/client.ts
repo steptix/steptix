@@ -253,18 +253,30 @@ export class AiClient {
     }
     if (!viaGateway && this.hasCustomGatewayUrl()) {
       // Someone deliberately pointed this run at an endpoint and it is being
-      // ignored — silently, and in the direction that matters: the request
-      // leaves for the provider instead of staying inside the org's gateway.
-      // Warned rather than refused, because the pairing is legal (a project may
-      // keep a gateway configured and run a direct model on purpose); the cost
-      // of guessing wrong is one log line, and the cost of saying nothing is a
-      // corporate user who thinks their traffic is routed and it is not.
+      // ignored — silently, and often in the direction that matters: the
+      // request leaves for the provider instead of staying inside the org's
+      // gateway. Warned rather than refused, because the pairing is legal (a
+      // project may keep a gateway configured and run a direct model on
+      // purpose); the cost of guessing wrong is one log line, and the cost of
+      // saying nothing is a corporate user who thinks their traffic is routed
+      // and it is not.
+      //
+      // It says what is true and offers both readings rather than prescribing
+      // one, because "set AI_MODEL=gateway/<model>" is wrong advice for a whole
+      // audience: a `bedrock/` model already reaches the user's own AWS
+      // account, and this pairing is unusually likely there — corporate setups
+      // keep a gateway URL configured while the approved AI is Bedrock
+      // (stories/bedrock-provider.md §"Notes for the builder").
       logger.warn(
         `AI_GATEWAY_URL is set to ${this.config.gatewayUrl}, but the model ` +
           `"${this.config.model}" is not a gateway-routed model — the gateway URL ` +
           'applies only to gateway-routed models (gateway/… and aibroker/…), so this ' +
-          'request goes directly to the provider. ' +
-          'Set AI_MODEL=gateway/<model> to route through the gateway.',
+          'request goes wherever the model prefix points instead: for openai/…, ' +
+          'anthropic/… and the like, straight out to that provider. ' +
+          'If you meant to route through the gateway, set AI_MODEL=gateway/<model>. ' +
+          'If the model already reaches infrastructure you control — a bedrock/ model ' +
+          'goes to your own AWS account — nothing is leaving it, and the URL is ' +
+          'simply unused here.',
       );
     }
     const opts = viaGateway

@@ -296,19 +296,37 @@ export async function runTest(
   const aiClient = new AiClient(config.ai, tokenTracker);
   const apiResponseStore = new ApiResponseStore();
   /**
+   * May this run use AI at all? The CLI resolves no run settings, so
+   * `runSettings.ai` never reaches here — but `ai.allowInRuns` is a project
+   * setting in `aiui.config.json`, and until now the CLI ignored it outright.
+   *
+   * That was survivable only while a blank `AI_API_KEY=` was a working
+   * substitute. For a project whose provider self-authenticates there is no key
+   * to blank (stories/bedrock-provider.md §"The CLI keyless gap"), which would
+   * leave a CI user with no way to force a no-AI run in exactly the setup this
+   * is for. Honouring it here also retires the CLI/server split, so the same
+   * `aiui.config.json` means the same thing on both paths.
+   */
+  const aiAllowed = config.ai.allowInRuns !== false;
+  // Lowered for the same reason the server lowers it: with a key present,
+  // `AiNotConfiguredError`'s advice ("set AI_API_KEY") would be a false
+  // statement about a correct config. Set once — the CLI has no per-batch
+  // settings to re-resolve.
+  aiClient.setAiPolicy(aiAllowed);
+  /**
    * This run has no AI at all (stories/keyless-replay-and-gateway-env.md
-   * §Part B). On the CLI path `config.ai` IS the fully resolved config — env,
-   * project `.env`, config file and machine floor have all applied by the
-   * time `runTest` is called — so it is the right thing to read here. The
-   * server path resolves its own and passes the answer into `executeStep`
-   * itself.
+   * §Part B), either for want of a key or because the project forbids it. On
+   * the CLI path `config.ai` IS the fully resolved config — env, project
+   * `.env`, config file and machine floor have all applied by the time
+   * `runTest` is called — so it is the right thing to read here. The server
+   * path resolves its own and passes the answer into `executeStep` itself.
    *
    * Two things change: a broken code-behind entry fails instead of healing,
    * and the post-failure diagnosis pass is skipped. Both are decided BEFORE
    * calling AI, so the report states an intention rather than reporting a
    * caught auth error.
    */
-  const keyless = !aiConfigured(config.ai);
+  const keyless = !aiConfigured(config.ai) || !aiAllowed;
 
   const baseUrl = test.config.baseUrl;
   const conversationHistory: string[] = [];
@@ -511,6 +529,7 @@ export async function runTest(
       | 'codeBehind'
       | 'codeBehindStrict'
       | 'keyless'
+      | 'keylessReason'
       | 'captureStepContext'
       | 'signal'
       | 'envData'
@@ -525,6 +544,13 @@ export async function runTest(
         // Only when true: absent is "not keyless", so a keyed run's options
         // are byte-for-byte what they were before this feature existed.
         ...(keyless && { keyless: true }),
+        // Which explanation the skipped step carries. Policy first when both
+        // hold, matching the server: a key IS present on the policy path, so
+        // "no key" would send the reader to fix a line that is correct. Absent
+        // means 'no-key', so nothing changes for a run that simply has none.
+        // Not also gated on `keyless` — a forbidden run is keyless by
+        // construction, so the extra clause could only ever be true.
+        ...(!aiAllowed && { keylessReason: 'policy' as const }),
         ...(extras.captureStepContext !== undefined && {
           captureStepContext: extras.captureStepContext,
         }),

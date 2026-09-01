@@ -287,7 +287,16 @@ export function resolveRunSettings(
   }
   // Policy first when both are true: a key IS present on the policy path, so
   // reporting 'no-key' there would send support to fix a line that is correct.
-  const keyed = aiConfigured(options?.ai ?? serverConfig.ai);
+  //
+  // `model` — the resolved POST-override one, from the block above — not the
+  // config's own. `aiConfigured` is model-aware now (a self-authenticating
+  // provider needs no key), and the override is exactly where the two answers
+  // can differ: a keyless `bedrock/` project whose session overrode the model
+  // to `anthropic/…` would otherwise report `ai: 'on'` and then fail on an
+  // empty key. Only the model is re-sourced; the key still comes from the
+  // request's `.env` layered over the server base, for the reason
+  // `ResolveRunSettingsOptions.ai` exists.
+  const keyed = aiConfigured({ ...(options?.ai ?? serverConfig.ai), model });
   const ai: EffectiveSettings['ai'] = allowed && keyed ? 'on' : 'off';
   const aiOffReason: EffectiveSettings['aiOffReason'] =
     ai === 'on' ? null : !allowed ? 'policy' : 'no-key';

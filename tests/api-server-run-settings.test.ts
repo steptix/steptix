@@ -169,6 +169,32 @@ vi.mock('../src/browser/screenshot.js', () => ({
   captureScreenshot: vi.fn(async () => ({ base64: 'fakeBase64' })),
 }));
 
+/**
+ * The provider registry `aiConfigured` asks whether a model needs a key
+ * (stories/bedrock-provider.md §Part B). Stubbed because the pin is
+ * `@pkent/aigateway@1.4.0-beta.2`, which has no `bedrock` provider — the
+ * version carrying it is built but unpublished — so the real registry would
+ * report `bedrock/` as needing a key and the block at the bottom of this file
+ * could not exist.
+ *
+ * Safe to mock file-wide: the AI client above is mocked too, so nothing here
+ * ever constructs a gateway, and no other model id in this file starts with a
+ * self-authenticating prefix.
+ */
+vi.mock('@pkent/aigateway', () => {
+  class FakeAIGateway {
+    static providers() {
+      return [
+        { id: 'anthropic', prefix: 'anthropic/' },
+        { id: 'openai', prefix: 'openai/' },
+        { id: 'gateway', prefix: 'gateway/' },
+        { id: 'bedrock', prefix: 'bedrock/', selfAuthenticating: true },
+      ];
+    }
+  }
+  return { AIGateway: FakeAIGateway, default: FakeAIGateway };
+});
+
 vi.mock('../src/utils/logger.js', () => ({
   logger: {
     info: vi.fn(), error: vi.fn(), warn: vi.fn(), success: vi.fn(),
@@ -715,6 +741,113 @@ describe('keyless reaching the executor', () => {
 
     expect(optsAt(0)['keyless']).toBe(true);
     expect(optsAt(0)).not.toHaveProperty('keylessReason');
+  });
+
+  it('stops being keyless when the session overrides to a self-authenticating model', async () => {
+    // The mirror of the Bedrock override case below, and the one that keeps the
+    // two halves of `runKeyless` asking about the SAME model
+    // (stories/bedrock-provider.md §Part B). Read off the pre-override model,
+    // the key half answers for `server/base-model` — no key, so keyless — while
+    // the echo answers for the override and says AI is on. The executor would
+    // then refuse to heal a broken entry on a run that has a model, and the
+    // done frame would insist it does.
+    const done = await doneFrameOf('kl-to-selfauth', {
+      runSettings: { model: 'bedrock/global.anthropic.claude-opus-4-6-v1' },
+    }, keylessBase);
+
+    expect(done.effectiveSettings.ai).toBe('on');
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless but configured — a self-authenticating provider
+// (stories/bedrock-provider.md §Part B)
+//
+// A third server, with no key AND a `bedrock/` model. Everything above says a
+// keyless server means a keyless run; this block is where that stops being
+// true, and the two interesting cases are compositions rather than states:
+// what a MODEL OVERRIDE does to the answer, and which reason an `ai: "off"`
+// run reports when a key was never the problem.
+//
+// Driven over HTTP because the pre/post-override distinction lives in the
+// session manager, not in `resolveRunSettings` — the resolver is deliberately
+// handed the pre-override model, and only the executor's options can show
+// which one the keyless answer was actually taken from.
+// ---------------------------------------------------------------------------
+describe('a keyless run on a self-authenticating provider', () => {
+  const BEDROCK_MODEL = 'bedrock/global.anthropic.claude-opus-4-6-v1';
+  let bedrockServer: Server;
+  let bedrockBase: string;
+
+  beforeAll(async () => {
+    // Same minimum-scenario rule as the keyless server above: built from
+    // DEFAULT_CONFIG.ai, which carries no `apiKey`, so nothing on the dev
+    // machine can quietly key this run.
+    const bedrockConfig: Config = {
+      ...testConfig,
+      ai: { ...DEFAULT_CONFIG.ai, model: BEDROCK_MODEL, gatewayUrl: SERVER_GATEWAY },
+    };
+    const { app } = createApiServer(bedrockConfig);
+    ({ server: bedrockServer, baseUrl: bedrockBase } = await listenOnRandomPort(app));
+  }, 30_000);
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) =>
+      bedrockServer.close((e) => (e ? reject(e) : resolve())),
+    );
+  });
+
+  it('is not keyless at all, and the echo says AI is on', async () => {
+    const done = await doneFrameOf('bd-on', {}, bedrockBase);
+
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+    expect(done.effectiveSettings.ai).toBe('on');
+    expect(done.effectiveSettings.aiOffReason).toBeNull();
+    // The key really is absent — otherwise this passes for the wrong reason.
+    expect(configAt(0).ai.apiKey).toBeUndefined();
+  });
+
+  it('becomes keyless when the session overrides the model to a keyed provider', async () => {
+    // THE composition. The run now talks to Anthropic with an empty key, so
+    // asking the pre-override model would report `on` and then fail at the
+    // first call — with every assertion above still green.
+    const done = await doneFrameOf('bd-override', {
+      runSettings: { model: 'anthropic/claude-opus-4-8' },
+    }, bedrockBase);
+
+    expect(configAt(0).ai.model).toBe('anthropic/claude-opus-4-8');
+    expect(optsAt(0)['keyless']).toBe(true);
+    expect(done.effectiveSettings.ai).toBe('off');
+    expect(done.effectiveSettings.aiOffReason).toBe('no-key');
+    // …and the client really was re-pointed, so the flag is describing the
+    // model the run used rather than one nobody reached.
+    expect(syncAuthCalls.at(-1)?.model).toBe('anthropic/claude-opus-4-8');
+  });
+
+  it('stays non-keyless when the override names another self-authenticating model', async () => {
+    // The control for the case above: an override is not disqualifying, it
+    // just moves which model the question is about.
+    await run('bd-override-ok', {
+      runSettings: { model: 'bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0' },
+    }, bedrockBase);
+
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+  });
+
+  it('says policy, never no key, when a working Bedrock run is switched off', async () => {
+    // The other trap. This run HAS AI and was told not to spend it, so
+    // `off (no key)` would send the reader to add a key Bedrock has no use for
+    // — the exact wrong advice Part B exists to stop.
+    const done = await doneFrameOf('bd-off', { runSettings: { ai: 'off' } }, bedrockBase);
+
+    expect(done.effectiveSettings.ai).toBe('off');
+    expect(done.effectiveSettings.aiOffReason).toBe('policy');
+    expect(optsAt(0)['keyless']).toBe(true);
+    expect(optsAt(0)['keylessReason']).toBe('policy');
+    // The client-side veil is down too, so a branched AI step refuses with the
+    // policy error rather than with "AI is not configured".
+    expect(aiPolicyCalls.at(-1)).toBe(false);
   });
 });
 

@@ -39,10 +39,15 @@ export interface AiConfig {
    * Compile, repair and errands are deliberately NOT gated by it; they are
    * requests *for* AI.
    *
-   * Scope: runs that go through the Sessions API server — TestBench, MCP, the
-   * HTTP API. The `aiui run` CLI resolves no run settings and ignores this key
-   * outright; there, key presence is the only switch, and a blank `AI_API_KEY=`
-   * in the project `.env` is how you force keyless.
+   * Scope: every path that runs a test — the Sessions API server (TestBench,
+   * MCP, the HTTP API), the `aiui run` CLI and the Runner UI. The two
+   * non-server paths resolve no run settings, so the per-session `ai` override
+   * cannot reach them and this key is the whole switch there.
+   *
+   * Neither of those two honoured it until stories/bedrock-provider.md:
+   * blanking `AI_API_KEY=` was a working substitute right up until a provider
+   * that authenticates itself, where there is no key to blank and a CI user
+   * would have had no way to force a no-AI run at all.
    */
   allowInRuns?: boolean;
 }

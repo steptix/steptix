@@ -83,7 +83,7 @@
         },
         "allowInRuns": {
           "type": "boolean",
-          "description": "May a run use AI at all? Default `true`, so absence is exactly today's behaviour (stories/run-settings.md §9).\n\nThe project-level floor under the per-session `ai` run setting: `false` makes a run behave like a keyless one no matter which keys are configured — compiled steps replay, and anything needing a model is skipped or refused. Compile, repair and errands are deliberately NOT gated by it; they are requests *for* AI.\n\nScope: runs that go through the Sessions API server — TestBench, MCP, the HTTP API. The `aiui run` CLI resolves no run settings and ignores this key outright; there, key presence is the only switch, and a blank `AI_API_KEY=` in the project `.env` is how you force keyless."
+          "description": "May a run use AI at all? Default `true`, so absence is exactly today's behaviour (stories/run-settings.md §9).\n\nThe project-level floor under the per-session `ai` run setting: `false` makes a run behave like a keyless one no matter which keys are configured — compiled steps replay, and anything needing a model is skipped or refused. Compile, repair and errands are deliberately NOT gated by it; they are requests *for* AI.\n\nScope: every path that runs a test — the Sessions API server (TestBench, MCP, the HTTP API), the `aiui run` CLI and the Runner UI. The two non-server paths resolve no run settings, so the per-session `ai` override cannot reach them and this key is the whole switch there.\n\nNeither of those two honoured it until stories/bedrock-provider.md: blanking `AI_API_KEY=` was a working substitute right up until a provider that authenticates itself, where there is no key to blank and a CI user would have had no way to force a no-AI run at all."
         }
       },
       "additionalProperties": false,
@@ -97,10 +97,10 @@
           "description": "Show browser window (false = headless)"
         },
         "viewport": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5643-5677-src_config_types.ts-5585-5678-src_config_types.ts-5484-12475-src_config_types.ts-0-24104449752545%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5932-5966-src_config_types.ts-5874-5967-src_config_types.ts-5773-12764-src_config_types.ts-0-24393449752545%3E"
         },
         "windowSize": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5734-5768-src_config_types.ts-5678-5769-src_config_types.ts-5484-12475-src_config_types.ts-0-241041327565221%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6023-6057-src_config_types.ts-5967-6058-src_config_types.ts-5773-12764-src_config_types.ts-0-243931327565221%3E"
         },
         "fixedViewport": {
           "type": "object",
@@ -196,7 +196,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-5643-5677-src_config_types.ts-5585-5678-src_config_types.ts-5484-12475-src_config_types.ts-0-24104449752545>": {
+    "DeepPartial<structure-src_config_types.ts-5932-5966-src_config_types.ts-5874-5967-src_config_types.ts-5773-12764-src_config_types.ts-0-24393449752545>": {
       "type": "object",
       "properties": {
         "width": {
@@ -209,7 +209,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-5734-5768-src_config_types.ts-5678-5769-src_config_types.ts-5484-12475-src_config_types.ts-0-241041327565221>": {
+    "DeepPartial<structure-src_config_types.ts-6023-6057-src_config_types.ts-5967-6058-src_config_types.ts-5773-12764-src_config_types.ts-0-243931327565221>": {
       "type": "object",
       "properties": {
         "width": {
