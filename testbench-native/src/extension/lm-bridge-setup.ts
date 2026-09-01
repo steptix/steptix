@@ -95,9 +95,19 @@ async function runSetup(bridge: LmBridge): Promise<void> {
 
   if (!(await confirmWrite(target, plan.preview, plan.flipsKeylessToKeyed, existing === ''))) return;
 
+  // Tmp-and-rename rather than an in-place write: this file holds the user's
+  // OTHER secrets, and a crash partway through `writeFile` leaves it truncated
+  // with no copy of what was in it. The temp sits in the same directory so the
+  // rename stays within one volume, where it is atomic — every reader sees the
+  // whole old file or the whole new one. `.env.tmp-<pid>` rather than a name in
+  // the OS temp dir, so the usual `.env*` ignore rule still covers it if a crash
+  // lands in the one instant it exists, and so two windows cannot collide.
+  const tmpPath = `${target.envPath}.tmp-${process.pid}`;
   try {
-    await fs.writeFile(target.envPath, plan.text, 'utf8');
+    await fs.writeFile(tmpPath, plan.text, 'utf8');
+    await fs.rename(tmpPath, target.envPath);
   } catch (err) {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
     void vscode.window.showErrorMessage(
       `TestBench: could not write ${target.envPath} — ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -279,12 +289,17 @@ function summary(model: LmModelHandle, bridge: LmBridge, flipped: boolean): stri
     `Copilot bridge on ${bridge.gatewayUrl()}. Compiling and repairing spend Copilot ` +
     'premium requests; running a compiled test spends none, and runSettings ai: "off" ' +
     'makes any run keyless by policy. ' +
-    // The one failure this command cannot detect: the `gateway/` prefix lives in
-    // the SERVER's routing library, which this extension neither imports nor can
-    // interrogate. An older one refuses the model it was just handed, and the
-    // error names neither Copilot nor the bridge — so the fix is said here, once.
-    'If the server answers "unsupported model", its copy of the framework predates ' +
-    'the gateway/ prefix — update it.';
+    // The one failure this command cannot detect: `gateway/` is resolved by
+    // @pkent/aigateway inside the server process, which this extension neither
+    // imports nor can interrogate. A copy predating the gateway provider refuses
+    // the model it was just handed, and the error names neither Copilot nor the
+    // bridge — so the actual remedy is said here, once. It is NOT "update the
+    // framework": the framework's own dependency has to move to a version that
+    // ships the provider, which is a release, not a pull.
+    'If the server answers Unsupported model "gateway/…" and lists the providers ' +
+    'it knows, gateway/ is not among them yet: @pkent/aigateway has to ship the ' +
+    'gateway provider and the framework has to depend on that version. Updating ' +
+    'the framework alone will not fix it.';
   return flipped
     ? `${base} This project was pinned keyless by a blank AI_API_KEY and is now keyed.`
     : base;

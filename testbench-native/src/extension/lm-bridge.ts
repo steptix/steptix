@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { getOutputChannel } from './output-channel.js';
 import {
   IMAGE_STRIP_WARNING,
-  bridgeError,
+  bodyLimitError,
   chatCompletionBody,
   isAuthorized,
   isTerminalError,
@@ -17,13 +17,12 @@ import {
   routeFor,
   streamFrames,
   stripJsonFence,
-  translateRequest,
+  translateBody,
   unauthorizedError,
   unknownRouteError,
   type BridgeError,
   type BridgeMessage,
   type LmSelector,
-  type TranslateResult,
 } from './lm-bridge-core.js';
 
 /**
@@ -50,9 +49,6 @@ export const DEFAULT_PORT = 18790;
 
 /** How long to wait before re-attempting a port another window is holding. */
 const DEFAULT_RETRY_MS = 15_000;
-
-/** Refused beyond this; a prompt this large is a bug, not a big page. */
-const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 /** Shown in Copilot's consent dialog, so it says what the seat is being spent on. */
 const JUSTIFICATION =
@@ -223,6 +219,23 @@ export class LmBridge implements vscode.Disposable {
       await this.stop('disabled by settings');
       return;
     }
+    // Checked here rather than left to `listen`, which answers a bad port two
+    // ways and neither is usable: `0` binds an ephemeral port the OS picks, and
+    // setup would then write that into a project `.env` — a number nothing will
+    // be serving on the next reload. Anything non-integer or out of range makes
+    // `listen` throw SYNCHRONOUSLY, inside a promise executor, so it escapes as
+    // a rejection on a `sync()` nobody awaits instead of as a state a user can
+    // see. `error` is the state the status bar already renders.
+    const problem = portProblem(port);
+    if (problem) {
+      if (this.server) await this.stop('the port setting is not usable');
+      if (this.disposed) return;
+      this.state = 'error';
+      this.detail = problem;
+      this.log(problem);
+      this.render();
+      return;
+    }
     // A port change orphans every `.env` written with the old one, so it has to
     // take effect immediately rather than at the next window reload — otherwise
     // the rerun of setup that heals those files writes a port nothing serves.
@@ -258,7 +271,7 @@ export class LmBridge implements vscode.Disposable {
   status(): BridgeStatus {
     return {
       state: this.state,
-      port: this.boundPort || vscode.workspace.getConfiguration('testbench-native').get<number>(LM_BRIDGE_PORT, DEFAULT_PORT),
+      port: this.boundPort || configuredPort(),
       servedRequests: this.servedRequests,
       detail: this.detail,
     };
@@ -591,6 +604,46 @@ export class LmBridge implements vscode.Disposable {
   }
 }
 
+/**
+ * Why `lmBridge.port` cannot be bound, in words the status bar can show, or
+ * `null` when it can.
+ *
+ * `0` is refused rather than read as "any free port": the OS would happily
+ * grant one, but the whole contract of this port is that setup writes it into a
+ * project `.env` and the next window binds the same number.
+ *
+ * `unknown` in, because `package.json` constrains what the settings UI offers
+ * and not what a hand-edited `settings.json` can hold — a string arrives here
+ * as readily as a number.
+ */
+function portProblem(port: unknown): string | null {
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return (
+      `testbench-native.${LM_BRIDGE_PORT} is ${JSON.stringify(port) ?? String(port)}, ` +
+      'which is not a port: it must be a whole number from 1 to 65535. The bridge ' +
+      'is not listening.'
+    );
+  }
+  return null;
+}
+
+/**
+ * The configured port, falling back to the default when the setting is not
+ * usable.
+ *
+ * The fallback is what keeps an unusable setting out of the files: `status()`
+ * feeds {@link LmBridge.gatewayUrl}, which setup writes into a project `.env`,
+ * and `http://127.0.0.1:0` there would be a permanent connection-refused with
+ * nothing on screen explaining it. The bridge is in `error` either way, and the
+ * setup command warns before it writes.
+ */
+function configuredPort(): number {
+  const port = vscode.workspace
+    .getConfiguration('testbench-native')
+    .get<number>(LM_BRIDGE_PORT, DEFAULT_PORT);
+  return portProblem(port) === null ? port : DEFAULT_PORT;
+}
+
 /** `unknown` from a catch, narrowed to what {@link mapLmError} reads. */
 function asLmError(err: unknown): { code?: string; name?: string; message?: string } {
   if (err instanceof Error) {
@@ -604,25 +657,6 @@ function asLmError(err: unknown): { code?: string; name?: string; message?: stri
   return { message: String(err) };
 }
 
-/** JSON.parse in front of {@link translateRequest}, both failures shaped alike. */
-function translateBody(text: string): TranslateResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    return {
-      ok: false,
-      error: bridgeError(
-        400,
-        `The request body is not JSON: ${err instanceof Error ? err.message : String(err)}`,
-        'invalid_request_error',
-        'bad_request',
-      ),
-    };
-  }
-  return translateRequest(parsed);
-}
-
 async function readBody(
   req: http.IncomingMessage,
 ): Promise<{ ok: true; text: string } | { ok: false; error: BridgeError }> {
@@ -631,17 +665,10 @@ async function readBody(
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY_BYTES) {
-      return {
-        ok: false,
-        error: bridgeError(
-          413,
-          `Request body exceeds ${MAX_BODY_BYTES} bytes.`,
-          'invalid_request_error',
-          'payload_too_large',
-        ),
-      };
-    }
+    // Checked per chunk rather than at the end: the point is to stop reading,
+    // not to refuse afterwards.
+    const tooLarge = bodyLimitError(size);
+    if (tooLarge) return { ok: false, error: tooLarge };
     chunks.push(buf);
   }
   return { ok: true, text: Buffer.concat(chunks).toString('utf8') };

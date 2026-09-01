@@ -309,6 +309,42 @@ describe('TestBench Copilot LM bridge', function () {
     assert.match(json(result).error.message, /\/v1\/chat\/completions/);
   });
 
+  it('refuses port 0 instead of binding an ephemeral port nothing can find again', async () => {
+    // `listen(0)` SUCCEEDS — the OS grants a random free port. Setup would then
+    // write that number into a project `.env`, where it is wrong the moment the
+    // window reloads. Refusing is the only answer that keeps the file truthful.
+    await setBridge({ enabled: true, at: 0 });
+
+    const status = hooks.lmBridgeStatus();
+    assert.equal(status.state, 'error');
+    assert.match(status.detail, /lmBridge\.port/, 'the message names the setting');
+    assert.notEqual(status.port, 0, 'gatewayUrl() must never be able to say :0');
+
+    // And the listener it had is released rather than left serving a port the
+    // settings no longer name.
+    await assert.rejects(() => call('/v1/models'), /fetch failed|ECONNREFUSED/);
+  });
+
+  it('refuses an out-of-range or fractional port without throwing out of sync()', async () => {
+    // `server.listen(70000)` throws SYNCHRONOUSLY, from inside the promise
+    // executor — on the `void bridge.sync()` call sites that is an unhandled
+    // rejection, with nothing on screen. `setBridge` awaits sync, so a throw
+    // here fails this test rather than vanishing.
+    await setBridge({ enabled: true, at: 70000 });
+    assert.equal(hooks.lmBridgeStatus().state, 'error');
+    assert.match(hooks.lmBridgeStatus().detail, /1 to 65535/);
+
+    await setBridge({ enabled: true, at: 18790.5 });
+    assert.equal(hooks.lmBridgeStatus().state, 'error');
+
+    // Recoverable: fixing the setting brings the listener back, so a typo is not
+    // a window-lifetime outage.
+    const good = await freePort();
+    await setBridge({ enabled: true, at: good });
+    await waitFor('recovered', () => hooks.lmBridgeStatus().state === 'listening');
+    assert.equal((await call('/v1/models', { at: good })).status, 200);
+  });
+
   it('stands by on a port another window holds, and adopts it when that window closes', async () => {
     const contested = await freePort();
     const other = await squat(contested);

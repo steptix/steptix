@@ -40,11 +40,11 @@ export const ENV_COMMENT_LINES = [
   '# Written by "TestBench: Use Copilot for AI" — AI runs on your GitHub Copilot',
   '# seat, through a bridge inside VS Code. It only answers while that window is',
   '# open, and only compile/repair/AI steps call it (a compiled run spends nothing).',
-  '#   Connection refused / ECONNREFUSED → the bridge is not running: open this',
-  '#     project in VS Code, or rerun "TestBench: Use Copilot for AI".',
-  '#   401 from the bridge → this AI_API_KEY was minted on another machine.',
-  '#     Settings Sync copies the bridge settings but not the token, which lives',
-  '#     in this machine\'s VS Code SecretStorage. Rerun setup here either way.',
+  '#   Connection refused / ECONNREFUSED → no bridge is running on this machine.',
+  '#     Open this project in VS Code and run "TestBench: Use Copilot for AI" here.',
+  '#   401 from the bridge → this machine\'s bridge mints its own token, and this',
+  '#     AI_API_KEY is not it (the file came from another machine, or the token was',
+  '#     reset). It lives in VS Code SecretStorage. Rerun setup in this window.',
 ];
 
 export interface EnvUpdateInput {

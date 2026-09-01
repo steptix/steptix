@@ -18,6 +18,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   IMAGE_OMITTED_NOTE,
+  MAX_BODY_BYTES,
+  bodyLimitError,
   chatCompletionBody,
   isAuthorized,
   isTerminalError,
@@ -30,6 +32,7 @@ import {
   routeFor,
   streamFrames,
   stripJsonFence,
+  translateBody,
   translateRequest,
   unauthorizedError,
   unknownRouteError,
@@ -476,4 +479,59 @@ test('every model-touching failure is terminal — the SDK retries 429/5xx twice
 test('a bad request is not marked terminal — nothing was spent and nothing is claimed', () => {
   assert.equal(isTerminalError(unauthorizedError()), false);
   assert.equal(isTerminalError(unknownRouteError('GET', '/nope')), false);
+});
+
+// --- the two refusals that happen before translateRequest ever sees a value --
+
+test('a body that is not JSON is a 400 carrying the parser\'s own complaint', () => {
+  // The OpenAI SDK surfaces `error.message` verbatim, and PR #110 puts it in
+  // step hovers — so "not JSON" alone would leave the author with a bridge that
+  // rejects and no way to see what it read.
+  const result = translateBody('{"model": "copilot/gpt-4.1", messages:');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.status, 400);
+  assert.equal(result.error.body.error.code, 'bad_request');
+  assert.match(result.error.body.error.message, /not JSON/);
+  assert.ok(
+    result.error.body.error.message.length >
+      'The request body is not JSON: '.length,
+    'the parser\'s message is appended, not swallowed',
+  );
+});
+
+test('an empty body is a 400 rather than a crash on JSON.parse', () => {
+  const result = translateBody('');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.status, 400);
+});
+
+test('valid JSON goes straight through to translateRequest', () => {
+  // The guard must not become the whole function: a well-formed body still has
+  // to arrive translated, which is the case a "bad JSON is refused" test alone
+  // would let a `return null` swallow.
+  const result = translateBody(JSON.stringify(request()));
+  assert.equal(result.ok, true);
+  assert.equal(result.value.model, 'copilot/gpt-4.1');
+});
+
+test('valid JSON that is not an object is refused by translateRequest, not by the parser', () => {
+  const result = translateBody('[1,2,3]');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.status, 400);
+  assert.match(result.error.body.error.message, /must be a JSON object/);
+});
+
+test('the body cap allows exactly the cap and refuses one byte past it', () => {
+  assert.equal(bodyLimitError(0), null);
+  assert.equal(bodyLimitError(MAX_BODY_BYTES - 1), null);
+  assert.equal(bodyLimitError(MAX_BODY_BYTES), null, 'the cap itself is allowed');
+
+  const err = bodyLimitError(MAX_BODY_BYTES + 1);
+  assert.equal(err.status, 413);
+  assert.equal(err.body.error.code, 'payload_too_large');
+  assert.match(err.body.error.message, new RegExp(String(MAX_BODY_BYTES)));
+});
+
+test('the 413 is not terminal — the caller may legitimately retry a smaller prompt', () => {
+  assert.equal(isTerminalError(bodyLimitError(MAX_BODY_BYTES + 1)), false);
 });

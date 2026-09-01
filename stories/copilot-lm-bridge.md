@@ -166,11 +166,12 @@ response telling the user to rerun **TestBench: Use Copilot for AI**.
    with request count as tooltip — the visible answer to "is my seat being
    spent".
 
-Edge notes, one sentence each. Settings Sync replicates `lmBridge.enabled`
-and `.port` but SecretStorage is machine-local, so a second machine mints a
-different token and a copied `.env` gets 401 — the `.env` comment setup
-writes names both symptoms (connection refused = bridge not running; 401 =
-token from another machine; rerun setup either way). Changing `lmBridge.port`
+Edge notes, one sentence each. Both bridge settings are machine-scoped (so
+Settings Sync carries neither) and the token is machine-local in
+SecretStorage, so a second machine mints a different token and a copied
+`.env` gets 401 — the `.env` comment setup writes names both symptoms
+(connection refused = no bridge on this machine; 401 = this machine's bridge
+has a different token; rerun setup here either way). Changing `lmBridge.port`
 orphans every `.env` written with the old port; only rerunning setup heals
 them. The model QuickPick can be empty (not signed into Copilot, no seat) —
 say so with a sign-in hint rather than showing an empty list. And setup

@@ -260,6 +260,45 @@ export function translateRequest(raw: unknown): TranslateResult {
   };
 }
 
+/** JSON.parse in front of {@link translateRequest}, both failures shaped alike. */
+export function translateBody(text: string): TranslateResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return {
+      ok: false,
+      error: bridgeError(
+        400,
+        `The request body is not JSON: ${err instanceof Error ? err.message : String(err)}`,
+        'invalid_request_error',
+        'bad_request',
+      ),
+    };
+  }
+  return translateRequest(parsed);
+}
+
+/** Refused beyond this; a prompt this large is a bug, not a big page. */
+export const MAX_BODY_BYTES = 32 * 1024 * 1024;
+
+/**
+ * The 413 for a body of `size` bytes, or `null` while it is still acceptable.
+ *
+ * A predicate over a byte count rather than a check inside the read loop, so
+ * the boundary is testable without pushing 32MB through a socket. The cap
+ * itself is allowed — only what exceeds it is refused.
+ */
+export function bodyLimitError(size: number): BridgeError | null {
+  if (size <= MAX_BODY_BYTES) return null;
+  return bridgeError(
+    413,
+    `Request body exceeds ${MAX_BODY_BYTES} bytes.`,
+    'invalid_request_error',
+    'payload_too_large',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Model resolution
 // ---------------------------------------------------------------------------
@@ -458,10 +497,10 @@ function badRequest(message: string): BridgeError {
 /**
  * 401 — no token, the wrong token, or a token from another machine.
  *
- * Settings Sync replicates `lmBridge.enabled`/`.port` but not SecretStorage,
- * so a `.env` copied to a second machine authenticates against a token that
- * was never minted there. That is the single likeliest cause, so it is the one
- * the message names.
+ * The token is minted per machine and kept in SecretStorage, which is never
+ * synced, so a `.env` copied to a second machine authenticates against a token
+ * that was never minted there. That is the single likeliest cause, so it is the
+ * one the message names.
  */
 export function unauthorizedError(): BridgeError {
   return bridgeError(

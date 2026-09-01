@@ -48,6 +48,17 @@ test('the comment names both failure symptoms, since neither explains itself', (
   assert.match(text, /SecretStorage/);
 });
 
+test('the comment blames the machine, not Settings Sync', () => {
+  // Both bridge settings are scope "machine", which Settings Sync EXCLUDES —
+  // so "Sync copies the settings but not the token" described a mechanism that
+  // does not run, and sent a reader looking at their sync config instead of at
+  // whether a bridge is up in this window.
+  const text = plan('').text;
+  assert.doesNotMatch(text, /Settings Sync/);
+  assert.match(text, /no bridge is running on this machine/);
+  assert.match(text, /Rerun setup in this window/);
+});
+
 test('unrelated lines are preserved exactly, in place', () => {
   const before = [
     '# my project',

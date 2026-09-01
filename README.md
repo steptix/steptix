@@ -906,10 +906,14 @@ bridge speaks text only, so an image block is replaced with a short note (the
 diagnosis pass still works, text-only). The bridge is loopback — a **remote**
 Sessions API server would resolve `127.0.0.1` to itself, so this only works with
 a server on the same machine; the setup command warns when `SERVER_URL` is not
-local. And the `gateway/` prefix is resolved by the *server's* routing library,
-so a server older than that prefix refuses the model with "unsupported model" —
-update the framework on whichever machine runs `aiui serve`. See
-[stories/copilot-lm-bridge.md](./stories/copilot-lm-bridge.md).
+local. And the `gateway/` prefix is resolved by `@pkent/aigateway` inside the
+server process — which does not know it yet, so today the server answers
+`Unsupported model "gateway/…"` and lists the providers it does know. That
+clears once the package ships the `gateway` provider and this repo's dependency
+moves to that version: rollout steps 1–2 of
+[stories/copilot-lm-bridge.md](./stories/copilot-lm-bridge.md). Updating the
+framework on the machine running `aiui serve` does not fix it on its own — the
+missing piece is the routing library the framework depends on.
 
 ### Per-environment configuration
 
