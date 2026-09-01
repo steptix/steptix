@@ -8,7 +8,7 @@ started with. Both are frozen for the life of the server process, so the only
 way to change either is to stop the server and start it again — which kills
 every open browser and every signed-in session with it.
 
-This story gives the agent four settings it can change on a live session:
+This story gives the agent five settings it can change on a live session:
 
 - **Which model runs the steps.** Takes effect on the very next run. No browser
   restart, no closing the session.
@@ -20,6 +20,12 @@ This story gives the agent four settings it can change on a live session:
   is not.
 - **Whether the model sees screenshots** while it works, which is the main
   cost lever on a run.
+- **Whether AI may be used at all during the run.** `ai: off` makes the run
+  behave exactly like a keyless one no matter which keys are configured:
+  compiled steps replay, and anything that needs a model — an uncompiled
+  step, mid-run healing, the post-failure diagnosis — is skipped or refused
+  with the typed no-AI error. The off state is the corporate artifact: "this
+  run made zero AI calls, by policy", printed in the report.
 
 Every setting is scoped to one session. That matters because the same server
 also serves TestBench: a setting that applied server-wide would let an agent
@@ -211,7 +217,8 @@ One new optional field on `StepRequest`, beside `logging`:
     "model": "openrouter/google/gemini-3-flash-preview:nitro",
     "capture": "every-step",        // every-step | on-failure | none | default
     "fullPage": true,
-    "sendScreenshots": false
+    "sendScreenshots": false,
+    "ai": "on"                      // on | off | default
   }
 }
 ```
@@ -343,8 +350,37 @@ must treat empty as an error rather than reporting a blank page.
 - A model switch on a session with caching on → warning on the run result,
   naming the cache as the reason results may not reflect the new model.
 
+### 9. The AI switch
+
+`ai: "on" | "off" | "default"` follows `capture`'s pattern: `"default"` clears
+the override and falls back to the project value, a new `ai.allowInRuns`
+(default `true`, so absence is exactly today's behavior).
+
+`off` does not invent a mode — it reuses keyless
+([keyless-replay-and-gateway-env.md](keyless-replay-and-gateway-env.md),
+PR #111). The server's keyless predicate generalizes from "no key" to "no key
+OR policy off"; every downstream behavior already exists and is tested: the
+heal fall-through skip in `runCodeBehindStep` (`healSkipped` plus the
+`stale:true` sidecar, so compile-repair still finds the step), the diagnosis
+skip, the typed refusal on an AI-executed step. The report and the
+`effectiveSettings` echo distinguish `AI: off (policy)` from
+`AI: off (no key)` — support needs to tell them apart.
+
+Explicitly NOT gated: compile, Repair This Step, and errands. Those are
+requests *for* AI; a policy about runs must not break them. An `ai: off` run
+that meets an uncompiled step fails that step the way keyless does — "this
+step needs AI and this run forbids it" — actionable, and marked for repair.
+
+Why now: the Copilot bridge ([copilot-lm-bridge.md](copilot-lm-bridge.md))
+makes a credential permanently present (the bridge token), so "leave the key
+blank" stops being available as the way to say "spend nothing". The switch
+restores that as stated intent rather than credential accident, for every
+provider at once.
+
 ## Out of scope
 
+- A TestBench run-button toggle for `ai` — the extensions get the wire for
+  free; surfacing a mode chooser in their UI is an extension story.
 - Writing `aiui.config.json`, or any persistence beyond the session.
 - Server-wide settings changes.
 - `reports.includeScreenshots` / `reports.embedScreenshots` — dead knobs;
