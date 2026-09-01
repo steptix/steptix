@@ -861,6 +861,56 @@ key and the page payload to the default host. A fully compiled test replays with
 **no AI calls at all** and needs no key — see
 [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md).
 
+#### Using GitHub Copilot
+
+If the only AI your organisation has approved is a GitHub Copilot subscription,
+the TestBench extension can be that AI. Run **TestBench: Use Copilot for AI**
+once: it raises Copilot's consent dialog, asks which of your seat's models to
+use, and writes three lines into the project's `.env`.
+
+```
+AI_MODEL=gateway/copilot/gpt-4.1
+AI_GATEWAY_URL=http://127.0.0.1:18790
+AI_API_KEY=<bridge token>
+```
+
+Nothing new leaves the machine. VS Code's `vscode.lm` API has no HTTP surface
+and the Sessions API server is a separate process, so the extension publishes
+that API as an OpenAI-compatible endpoint on 127.0.0.1 and the server reaches it
+through the `gateway/` routing above. Prompts still go out over Copilot's own
+channel — the one the org already approved. The listener is off by default, is
+User-scoped so no workspace can turn it on, and every request needs the bearer
+token that setup wrote (kept in this machine's VS Code SecretStorage, so a
+`.env` copied to another machine gets a 401).
+
+**Scope: compiling, repairing and authoring — not running.** Copilot bills in
+premium requests with per-model multipliers, sized for interactive chat, and
+agent-style traffic exhausts a seat in minutes. Code-behind replay means runs
+don't need AI at all: a fully compiled test makes **zero** AI calls and spends
+**zero** quota, however many times it runs. What does spend quota is a human
+asking for AI work — Compile This Step, Repair this step, compiling a test — plus
+two reactive paths on a keyed run: the failure-diagnosis pass (one call per
+failed run) and a heal attempt on a stale compiled step. Nothing stops you
+running uncompiled steps through Copilot; it will work, and it will hit the
+seat's limits.
+
+To spend nothing on a particular run without editing `.env`, use the AI run
+switch: `runSettings: {ai: "off"}` makes the run keyless *by policy* — compiled
+steps replay, a broken entry takes the skip instead of healing, and anything
+needing a model is refused with a typed error. The report then says the run made
+zero AI calls because it was told to, rather than because a key happened to be
+missing.
+
+Three limits worth knowing before you set it up. Screenshots are dropped: the
+bridge speaks text only, so an image block is replaced with a short note (the
+diagnosis pass still works, text-only). The bridge is loopback — a **remote**
+Sessions API server would resolve `127.0.0.1` to itself, so this only works with
+a server on the same machine; the setup command warns when `SERVER_URL` is not
+local. And the `gateway/` prefix is resolved by the *server's* routing library,
+so a server older than that prefix refuses the model with "unsupported model" —
+update the framework on whichever machine runs `aiui serve`. See
+[stories/copilot-lm-bridge.md](./stories/copilot-lm-bridge.md).
+
 ### Per-environment configuration
 
 Your tests project can live anywhere — it doesn't have to be inside this repo. The framework resolves all paths relative to **the directory you run the CLI from** (`process.cwd()`).
