@@ -207,12 +207,26 @@ function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Co
  * second list of key-free prefixes in this repo drifting against the real one
  * (stories/bedrock-provider.md §"Declaring that the provider self-authenticates").
  *
- * Guarded because the answer has to survive two things that legitimately have
- * no `providers()` to call: a pin older than the method, and the fake gateway
- * classes several suites mock the module with. Both fall back to "nothing
- * self-authenticates", which is exactly the key-only behaviour that predates
- * this — safe in the direction that matters, since it can only ever refuse an
- * AI call, never send one somewhere unintended.
+ * Guarded for the tests, not for the pin. The pinned `1.4.0-beta.2` DOES have
+ * `providers()`; so does every other version, which has carried it since the
+ * library's first commit. No real version reaches the fallback. What reaches it is
+ * `tests/ai-client.test.ts` and `tests/ai-effort.test.ts`, which replace the
+ * whole module with a fake gateway class carrying no statics at all: remove the
+ * guard and seven cases in the first die on `AIGateway.providers is not a
+ * function`. Stating that precisely matters, because a guard whose stated
+ * reason has expired is a guard someone deletes.
+ *
+ * The fallback is "nothing self-authenticates", i.e. the key-only behaviour
+ * that predates this — safe in the direction that matters, since it can only
+ * refuse an AI call, never send one somewhere unintended. But note what it
+ * means inside those two suites, and `ai-effort.test.ts` is the live example
+ * even though it passes today only because nothing in it reaches this branch:
+ * `aiConfigured` answers `false` for a keyless `bedrock/` model there, silently
+ * and with nothing to read as a failure. A Bedrock case added to either would
+ * test the fallback and call it the feature.
+ * `tests/bedrock-keyless.test.ts` and `tests/api-server-run-settings.test.ts`
+ * are the suites that stub `providers()` for real, and are where such a case
+ * belongs.
  */
 function selfAuthenticatingModel(model: string): boolean {
   const list = typeof AIGateway.providers === 'function' ? AIGateway.providers() : [];

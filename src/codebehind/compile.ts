@@ -1075,6 +1075,13 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
         codeBehindStrict: request.strict,
         captureStepContext: request.captureContext,
         ...(request.throughStep !== undefined && { stopAfterStep: request.throughStep }),
+        // Always, the way src/server/compile-runner.ts always sets it on its
+        // own runner. A compile is a request FOR AI (stories/run-settings.md
+        // §9), so `ai.allowInRuns: false` must not gate it — otherwise `aiui
+        // compile` refuses every step and writes nothing on precisely the
+        // projects that turned the switch off so they would have compiled
+        // steps to replay.
+        bypassAiPolicy: true,
         ...(request.signal && { signal: request.signal }),
       },
     );

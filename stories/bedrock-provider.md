@@ -104,6 +104,55 @@ What *is* worth documenting: unlike the Python SDK, the TypeScript client does
 **not** read `~/.aws/config`, so an SSO profile that sets a region is not
 enough — `AWS_REGION` must be set explicitly.
 
+#### Explicitly *where*, though — the half this section originally left out
+
+"The client reads `AWS_REGION`" is true of the SDK and says nothing about which
+process's environment that is, which is exactly how the first draft of the docs
+came to tell users to put it in a project `.env`. On two of the four paths that
+is silently wrong:
+
+| Path | Project `.env` reaches `process.env`? |
+| --- | --- |
+| `aiui run` | Yes — `cli/index.ts` calls `loadDefaultEnvFileSync()` at module scope |
+| Electron Runner UI | Yes — `ui/main/index.ts` does the same |
+| Sessions API server (TestBench) | **No** |
+| MCP | **No** |
+
+The server path is not an oversight to repair. `project-bundle.ts` resolves
+each request's bundle with `mutateProcessEnv: false` *by design* — one server
+serves many projects, and exporting any one project's `.env` into the shared
+process is what stories/project-scoped-data-dir-and-env.md exists to prevent.
+What travels instead is `applyEnvToAiConfig`, which forwards exactly
+`AI_API_KEY`, `AI_MODEL` and `AI_GATEWAY_URL` into the run's `AiConfig`. No AWS
+variable is in that list, and the Mantle client would not read `AiConfig`
+anyway — it reads `process.env`.
+
+**So the documentation is what changes, not the plumbing.** AWS credentials
+already come from the machine — env vars, an SSO profile, an instance role —
+and cannot live in a project `.env` in the first place; the region belongs with
+the credentials it is part of. Machine-level region is the coherent design, not
+a workaround for a limitation. The README and `.env.example` now say to put
+`AWS_REGION` / `AWS_PROFILE` in the environment that **starts the Sessions API
+server** (or that runs the CI job), and say plainly that the project-`.env`
+form works on the CLI and the Electron UI only.
+
+Considered and rejected: **forwarding the AWS variables through the bundle**,
+either by adding them to `applyEnvToAiConfig` or by threading `awsRegion` into
+the gateway options. It would mean widening `AIGateway`'s fixed option
+allowlist — the same widening this section argues against two paragraphs up,
+and the same invariant ("reads no environment variables") it would break — to
+buy a second, repo-shaped way of configuring something AWS already configures
+machine-wide. It also would not generalise: the credential chain is more than
+one variable, and forwarding a region while credentials still came from the
+machine would be the confusing half-measure.
+
+One consequence worth naming: TestBench's `serverAutoStart` launches the server
+as a child process, so the server inherits the environment of whatever launched
+VS Code. A region exported in a terminal *after* VS Code started is not in that
+environment. Set it where it persists — the user's environment variables, the
+shell profile, or the CI job definition — rather than in the shell you happen
+to be typing in.
+
 ### Model ids
 
 Every Bedrock id form is slash-free, so the generic `stripProviderPrefix`
@@ -162,10 +211,28 @@ actually uses a session override:
 - `run-settings.ts` (the `keyed` determination) — the resolved post-override
   model sits unused in a local.
 
-Left alone, a `bedrock/` project whose session overrides the model to
-`anthropic/…` reports `AI: on`, then dies with an empty key. Both sites must
-ask about **the model the run will actually use** — still no signature change,
-just the right argument.
+Both must ask about **the model the run will actually use** — still no signature
+change, just the right argument. But they earn it on *different* compositions,
+and an earlier draft of this section gave both the same one, which is wrong in a
+way worth correcting rather than quietly deleting: a reason that does not hold
+is what gets a fix reverted later by someone who checks it.
+
+- **`run-settings.ts` owns the `bedrock/` → `anthropic/…` case.** A keyless
+  Bedrock project whose session overrides to a provider that needs a key would
+  otherwise report `AI: on` and then die on an empty key. Asking with the
+  post-override model turns the echo to `off (no-key)` — and because
+  `session-manager.ts` also ORs in `effective.ai === 'off'`, that single fix
+  already makes the executor's `keyless` flag correct too. The session
+  manager's own argument makes no difference to this case at all.
+
+- **`session-manager.ts` earns its fix on the mirror image**: a keyless run on a
+  provider that *does* need a key, overridden **to** `bedrock/…`. Now the
+  resolver says `ai: on` — correctly, the model the run will use supplies its
+  own credentials — so the `|| effective.ai === 'off'` clause is false and the
+  `aiConfigured` call is the only thing deciding. Handed the pre-override model
+  it answers "no key", and the run tells the executor it is keyless while the
+  echo tells the reader it is on. Compiled steps would take the heal skip on a
+  run that had a working model.
 
 The other four sites are unaffected.
 
@@ -193,8 +260,30 @@ no key to blank, so **a CI user loses their only way to force a no-AI run** —
 in the very scenario this story markets.
 
 Fix it rather than document it: have the CLI runner honour
-`ai.allowInRuns === false` alongside its key check. One line, and it also
-retires the CLI/server inconsistency that forced a doc-scoping fix earlier.
+`ai.allowInRuns === false` alongside its key check. It also retires the
+CLI/server inconsistency that forced a doc-scoping fix earlier.
+
+**Not one line, though — two, and the second is the one that bites.** `runTest`
+is shared with the compiler: `compileTest` drives it through
+`createTestFileRunner`, so a gate added there gates `aiui compile` as well, and
+the switch's own documented carve-out ("Compile, repair and errands are
+deliberately NOT gated by it; they are requests *for* AI" — `src/config/types.ts`
+and the JSON schema) stops being true on the CLI. The failure is total and
+silent in the worst direction: `aiui compile` on an `allowInRuns: false` project
+refuses every step and writes nothing, on exactly the projects that set the
+switch in order to *have* compiled steps to replay.
+
+The server already solved this with a per-request `bypassAiPolicy`
+(`session-manager.ts`, `errand-runner.ts`, `compile-runner.ts`). The in-process
+path needs the same escape hatch, threaded through `RunTestExtras` the way
+compile already threads `codeBehindStrict` and `codeBehindDisabled`, and set by
+`createTestFileRunner` — the one caller that IS the request for AI. Deliberately
+not a config key or a CLI flag: nothing a test file or a user can set should be
+able to lift the project's own switch.
+
+(`src/ui/main/runner-adapter.ts` has no compile path — it drives `executeStep`
+directly and never calls `runTest` or `compileTest` — so the same hole does not
+exist there.)
 
 ## Non-goals
 
@@ -219,6 +308,13 @@ retires the CLI/server inconsistency that forced a doc-scoping fix earlier.
   stripping of all three id forms above. Add the new test file to
   `prepublishOnly` — it is an explicit list, and an omission silently ungates
   the publish.
+  **And assert the mode, not just the construction.** "Constructs with an empty
+  key" passes whether the client then signs with SigV4 or sends an empty
+  `Authorization: Bearer`, and the second is what a whitespace-only key actually
+  produced. The two are distinguishable offline: a loopback server sees the
+  header, and pinning the AWS example credentials in the environment for the
+  duration of one call makes SigV4 sign deterministically without the machine's
+  own credential chain entering the suite at all.
 - **Framework — the compositions, not the shapes.** `aiConfigured` true for a
   keyless `bedrock/` model, still false for a keyless non-self-authenticating
   one, still true with a key. Then the two traps: a keyless `bedrock/` config
@@ -226,7 +322,12 @@ retires the CLI/server inconsistency that forced a doc-scoping fix earlier.
   report configured; and `ai: "off"` on a working Bedrock run must still refuse
   and echo `off (policy)`, never `off (no key)`.
 - **CLI:** the gate above is server-path-shaped; add one covering the CLI
-  runner honouring `allowInRuns`.
+  runner honouring `allowInRuns` — **on a keyed config**, or it passes for want
+  of a key and never reads the switch. Pair it with the carve-out: a compile of
+  an `allowInRuns: false` project must still run under AI, driven through
+  `createTestFileRunner` rather than by handing `runTest` the bypass flag
+  directly. The flag existing and the compile path setting it are two claims,
+  and only the join is the bug.
 - **Smoke:** `AI_EFFORT` set with a `bedrock/` model — `output_config.effort`
   is always sent and is not documented either way for Bedrock.
 - **Live (manual, real AWS account):** one compile and one repair; confirm the

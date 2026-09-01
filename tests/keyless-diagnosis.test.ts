@@ -145,6 +145,7 @@ vi.mock('../src/report/history-appender.js', () => ({
 }));
 
 import { runTest } from '../src/runner/test-runner.js';
+import { createTestFileRunner } from '../src/codebehind/compile.js';
 import { renderReport } from '../src/report/generator.js';
 import { readLastRun } from '../src/codebehind/last-run.js';
 
@@ -492,6 +493,63 @@ describe('the CLI honouring ai.allowInRuns', () => {
     expect(report.status).toBe('failed');
     expect(diagnoseFailureMock).not.toHaveBeenCalled();
     expect(report.diagnosis?.rootCause).toBe(SKIP_NOTE);
+  });
+
+  it('does not gate the runs `aiui compile` makes — a compile is a request FOR AI', async () => {
+    // The switch and the compiler share one `runTest`, so honouring the switch
+    // there took `aiui compile` down with it: every step refused, nothing
+    // recorded, nothing written — on precisely the projects that set
+    // `allowInRuns: false` in order to HAVE compiled steps to replay. Both the
+    // config type and the JSON schema promise the opposite in as many words,
+    // and the server has always honoured it via `bypassAiPolicy`.
+    //
+    // Driven through the compiler's own runner rather than by passing the flag
+    // to `runTest` directly: the flag existing and the compile path setting it
+    // are two claims, and only the join is the bug.
+    const config = forbiddenConfig();
+    expect(aiConfigured(config.ai)).toBe(true);
+
+    executeStepMock.mockImplementation(async (index: number) => passed(index, 'step'));
+
+    const instance = makeInstance(['Sign in', 'Read the balance'], path.join(dir, 'compile-me.md'));
+    const runner = createTestFileRunner({
+      test: instance.test,
+      config,
+      contextContent: '',
+      aiClient: {} as never,
+    });
+
+    const outcome = await runner({
+      purpose: 'record',
+      parameters: {},
+      strict: false,
+      captureContext: true,
+      disableCodeBehind: true,
+    });
+
+    expect(outcome.status).toBe('passed');
+    expect(stepOptions).toHaveLength(2);
+    // Not keyless, no policy reason, and the veil never lowered — the three
+    // ways the refusal reaches a step.
+    expect(stepOptions.every((o) => !('keyless' in o))).toBe(true);
+    expect(stepOptions.every((o) => !('keylessReason' in o))).toBe(true);
+    expect(aiPolicyCalls).not.toContain(false);
+  });
+
+  it('still refuses an ordinary run of the same project', async () => {
+    // The control for the bypass. Without it, a flag that leaked into every run
+    // would pass the case above by turning the switch off altogether.
+    executeStepMock.mockImplementation(async (index: number) => passed(index, 'step'));
+
+    await runTest(
+      makeInstance(['Sign in'], path.join(dir, 'not-a-compile.md')),
+      forbiddenConfig(),
+      '',
+    );
+
+    expect(stepOptions[0]!['keyless']).toBe(true);
+    expect(stepOptions[0]!['keylessReason']).toBe('policy');
+    expect(aiPolicyCalls).toContain(false);
   });
 });
 

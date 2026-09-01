@@ -90,9 +90,18 @@ export const KEYLESS_HEAL_SKIPPED_ERROR =
  * the run was asked to spend nothing. Telling this reader to go find a machine
  * with a model would send them to fix something that is not broken, and it
  * would erase the very distinction the run's echo has to keep.
+ *
+ * Both settings are named, the way `AI_FORBIDDEN_BY_POLICY_MESSAGE`
+ * (src/ai/client.ts) already names both.
+ * `runSettings.ai` was once the only way to arrive here, because the
+ * switch was server-path-only; the CLI and the Runner UI honour
+ * `ai.allowInRuns` now (stories/bedrock-provider.md §"The CLI keyless gap") and
+ * neither of them resolves run settings at all. A reader sent to look for
+ * `runSettings.ai: off` on those paths would find nothing to turn back on.
  */
 export const POLICY_HEAL_SKIPPED_ERROR =
-  'replay failed and was not healed: this run forbids AI (runSettings.ai: off). ' +
+  'replay failed and was not healed: this run forbids AI ' +
+  '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
   'Repair this step, or run again with AI allowed.';
 
 export interface StepExecutorOptions {
@@ -720,7 +729,8 @@ async function runCodeBehindStep(
         aiExplanation:
           (byPolicy
             ? 'The code-behind entry threw, and this run forbids AI ' +
-              '(runSettings.ai: off), so the step was not re-run under AI. '
+              '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json), ' +
+              'so the step was not re-run under AI. '
             : 'The code-behind entry threw, and this machine has no AI configured, ' +
               'so the step was not re-run under AI. ') +
           `The entry failed with: ${outcome.error ?? 'unknown error'}`,

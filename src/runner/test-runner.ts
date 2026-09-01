@@ -268,6 +268,21 @@ export interface RunTestExtras {
    * test's, so the compiler indexes it as it would any run.
    */
   stopAfterStep?: number;
+  /**
+   * Ignore `ai.allowInRuns: false` for this run.
+   *
+   * A compile is a request *for* AI, not a run the switch should gate
+   * (stories/run-settings.md §9) — the whole point of it is to spend tokens
+   * once so later runs spend none. The server has always said so via
+   * `bypassAiPolicy` (src/server/session-manager.ts, src/server/errand-runner.ts);
+   * this is the same escape hatch on the in-process path, which `aiui compile`
+   * takes.
+   *
+   * Set by {@link createTestFileRunner} and nothing else. It is not a config
+   * key or a CLI flag, and deliberately not reachable from a test file: it
+   * exists so the one caller that IS the request for AI can say so.
+   */
+  bypassAiPolicy?: boolean;
   /** Abort signal, threaded into every step. */
   signal?: AbortSignal;
 }
@@ -306,8 +321,15 @@ export async function runTest(
    * leave a CI user with no way to force a no-AI run in exactly the setup this
    * is for. Honouring it here also retires the CLI/server split, so the same
    * `aiui.config.json` means the same thing on both paths.
+   *
+   * `bypassAiPolicy` is the one exception, and it is not a hole in the switch:
+   * a compile is a request FOR AI (stories/run-settings.md §9), so gating it
+   * would mean `aiui compile` produced nothing on the very projects that set
+   * `allowInRuns: false` in order to have something to replay. The server
+   * already carved out exactly this; the flag is how the in-process path says
+   * the same thing.
    */
-  const aiAllowed = config.ai.allowInRuns !== false;
+  const aiAllowed = config.ai.allowInRuns !== false || extras.bypassAiPolicy === true;
   // Lowered for the same reason the server lowers it: with a key present,
   // `AiNotConfiguredError`'s advice ("set AI_API_KEY") would be a false
   // statement about a correct config. Set once — the CLI has no per-batch

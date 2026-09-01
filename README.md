@@ -798,7 +798,7 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | --- | --- |
 | `AI_API_KEY` | API key for the aiapi gateway. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). One exception: a `bedrock/` model supplies its own credentials, so a run with no key here is still treated as having AI — see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). The runner now uses aiapi v2 endpoints. |
 | `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. The first segment decides routing: `gateway/<model>` routes to whatever `AI_GATEWAY_URL` names (your own gateway, a local bridge, Ollama) and **refuses to run when that variable is unset**, rather than quietly sending the traffic elsewhere; `aibroker/<provider>/<model>` is the hosted broker on the built-in endpoint and needs no URL; `bedrock/<model>` is Claude in your own AWS account, needs `AWS_REGION` and no key; anything else (`openai/…`, `anthropic/…`) goes direct to the provider. |
-| `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK, not by this framework: `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain work exactly as they do for any AWS tool. |
+| `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK straight from `process.env`, not by this framework, so unlike every other row in this table it belongs in the **machine environment** — the shell that starts `aiui serve`, or the CI job — rather than in a project `.env`. Same for `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain, which work exactly as they do for any AWS tool. A project `.env` reaches it on `aiui run` and the Electron UI only; see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). |
 | `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Pair it with `AI_MODEL=gateway/<model>`: that spelling says "route here", and a `gateway/` model with this variable unset is refused rather than sent to the default host. Same precedence as `AI_MODEL` (environment → `aiui.config.json` → machine `.env` → built-in default), and it reaches the server path too: the TestBench extension ships the project's `.env` with each run. |
 | `AI_EFFORT` | How hard the model thinks on **routine** steps: `low`, `medium`, `high`, `xhigh`, `max` — plus `none` and `minimal`, but see the warning below before using `none`. Optional — **unset is the default and changes nothing on the wire**. Setting it also raises the routine output cap to 8192, since reasoning tokens count against the same cap. Authoring calls (code-behind generation/review, assertions, failure diagnosis) already run at `high` and are deliberately *not* lowered by this. A level the bound model doesn't support fails on the first AI call with `invalid_effort`. Process-level like `maxInputTokens`, not per-session overridable. |
 | `AIUI_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `aiui serve` generates a machine key at `%LOCALAPPDATA%\aiui\.env` (`~/.aiui/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
@@ -870,14 +870,38 @@ your own network path — commonly a VPC endpoint, so nothing traverses the publ
 internet. No new vendor to clear, no per-seat quota, and unlike the Copilot
 bridge below it works headless and in CI.
 
+**The AWS half of this lives in the machine environment, not in the project
+`.env`.** `AWS_REGION`, `AWS_PROFILE` and any AWS credentials are read from
+`process.env` by the AWS SDK itself, which knows nothing about this framework's
+env files. That already matches how AWS credentials work everywhere else — they
+come from the machine, an SSO login or an instance role, and never from a file
+in the repo — and the region belongs with them.
+
+Concretely: put them in the environment that **starts the Sessions API server**
+(or that runs your CI job). The `AI_*` lines below still go in the project
+`.env`, which is what the TestBench extension ships with each run.
+
+The project `.env` does work for the AWS variables on two paths only — `aiui
+run` and the Electron Runner UI — because those load the project's base `.env`
+into their own process at startup. The Sessions API server deliberately does
+not: it serves many projects at once and exports none of their `.env` files
+into its own process (see
+[stories/project-scoped-data-dir-and-env.md](./stories/project-scoped-data-dir-and-env.md)),
+so a project `.env` carrying `AWS_REGION` reaches the run's AI config on the
+CLI and silently does not on TestBench or MCP. Set it once on the machine and
+all four paths agree.
+
 Two ways to authenticate, and the framework does neither itself — the AWS SDK
 resolves both.
 
 **A bearer token**, which is an ordinary key:
 
 ```
+# project .env
 AI_MODEL=bedrock/global.anthropic.claude-opus-4-6-v1
 AI_API_KEY=<bedrock bearer token>
+
+# machine environment (or the shell that starts `aiui serve`)
 AWS_REGION=eu-west-1
 ```
 
@@ -885,12 +909,24 @@ AWS_REGION=eu-west-1
 credentials, an SSO profile, or an instance role:
 
 ```
+# project .env — the blank key line is deliberate, see below
 AI_MODEL=bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0
+AI_API_KEY=
+
+# machine environment (or the shell that starts `aiui serve`)
 AWS_REGION=eu-west-1
 AWS_PROFILE=acme-dev
 ```
 
-Two things about that second form are worth knowing before you hit them.
+Three things about that second form are worth knowing before you hit them.
+
+**Keep the empty `AI_API_KEY=` line.** Not as a way to force a keyless run — see
+below — but because omitting it entirely is not the same as blanking it. With
+no line at all the machine-wide key at `%LOCALAPPDATA%\aiui\.env` fills the gap,
+and that key is then handed to AWS as a Bedrock bearer token: it takes
+precedence over every AWS credential source, so SigV4 never runs and the request
+fails as a 403 that names nothing. A blank line sets the key to empty, which
+blocks the machine default and leaves the credential chain in charge.
 
 **`AWS_REGION` must be set explicitly.** Unlike the Python SDK, the TypeScript
 client does not read `~/.aws/config`, so an SSO profile that already carries a
