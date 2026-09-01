@@ -58,8 +58,9 @@ TestBench extension publishes `vscode.lm` as an OpenAI-compatible endpoint on
 127.0.0.1, and the server consumes it through routing that already shipped
 (the `gateway/` prefix + `AI_GATEWAY_URL`, which the extension already
 delivers per-run by shipping the project `.env`). Framework changes: **one
-naming alias** (Part B) — nothing behavioral on the run path; the tests below
-hold it.
+alias plus one guard** (Part B) — the `gateway/` spelling and its
+refuse-on-default-URL check; nothing else behavioral on the run path, and the
+tests below hold both.
 
 Scope is compile/repair/authoring, **not** per-step run execution. Copilot is
 billed in premium requests with per-model multipliers, sized for interactive
@@ -74,6 +75,10 @@ and hit its limits; that is the user's quota to spend and the docs say so.
 
 ### Lifecycle
 
+- `engines.vscode` rises to **`^1.90.0`** — the release that finalized the
+  `vscode.lm` chat API. Today's `^1.85.0` would compile clean (`@types/vscode`
+  floats under the caret) and die at runtime on 1.85–1.89 hosts, where
+  `vscode.lm` is undefined.
 - New module `src/extension/lm-bridge.ts`, started on activation when
   `testbench-native.lmBridge.enabled` is true. **User scope, default false** —
   the same reasoning as `serverAutoStart.cwd`: a workspace-settable switch
@@ -113,20 +118,27 @@ The mappings, exhaustively:
 | `role: "system"` | — (only User/Assistant exist) | fold: prepend to the first user message |
 | `role: "user"/"assistant"` | `LanguageModelChatMessage.User/Assistant` | 1:1 |
 | `content` text blocks | joined text | 1:1 |
-| `content` `image_url` blocks | — | **strip**, substituting an inline `[screenshot omitted — images unsupported over the bridge]` note; a once-per-session warning names `ai.sendScreenshots` when that is the source (see non-goals) |
-| `max_tokens` | `modelOptions` where supported | pass through |
-| `reasoning_effort`, `temperature`, unknowns | — | drop silently, never error — the `retry`/`authoring` profiles send effort and must keep working |
+| `content` `image_url` blocks | — | **strip**, substituting an inline `[screenshot omitted — images unsupported over the bridge]` note; a once-per-session warning names both possible sources (`ai.sendScreenshots`, the diagnosis pass's own capture) — the wire carries nothing to tell them apart (see non-goals) |
+| `max_completion_tokens` | `modelOptions` where supported | the cap arrives under this name — the routing lib maps `maxTokens` to it; `max_tokens` never appears on this wire |
+| `reasoning_effort`, `stream_options`, `temperature`, unknowns | — | drop silently, never error — the `retry`/`authoring` profiles send effort, streams carry `stream_options: {include_usage: true}`, and both must keep working |
 | `response_format: json_object` | — | best-effort emulation, below |
 | response fragments | `for await (…of res.text)` | concatenate (non-stream) or re-emit as SSE deltas (stream) |
-| usage | — (`vscode.lm` reports none) | zeros; TokenTracker shows 0 for bridge calls |
+| usage | — (`vscode.lm` reports none) | zeros on the wire; note `completeStream` treats absent usage as missing and **estimates** (`ceil(len/4)`), so streamed bridge calls report estimated tokens, not 0 |
 
-**`json_object` emulation.** Code-behind compile forces
-`response_format: json_object` and parses a strict `{"entry":…}` envelope.
-`vscode.lm` has no JSON mode, and models without it like to wrap JSON in
-markdown fences. When a request asked for `json_object`, the bridge strips one
-leading/trailing ``` fence pair from the completed response before returning
-it. Protocol-level, framework untouched; the acceptance below proves it on a
-real compile.
+**`json_object` emulation.** `AiClient` sends
+`response_format: {type: "json_object"}` on **every** request — both
+`completeOnce` and `completeStream` pass it, not just compile — and
+code-behind compile parses a strict `{"entry":…}` envelope out of it.
+`vscode.lm` has no JSON mode, and models without one like to wrap JSON in
+markdown fences. When a request asks for `json_object` the bridge **buffers
+the full response**, strips one leading/trailing ``` fence pair, and emits
+once — for `stream: true` as a single SSE delta then `[DONE]`, since
+stripping deltas that were already emitted is impossible. Because this client
+always asks for `json_object`, the bridge in practice always buffers; that
+also turns a mid-stream `vscode.lm` error into a whole-request error carrying
+the real message — the quota-exhausted text survives instead of arriving as a
+truncated completion. Protocol-level, framework untouched; the acceptance
+below proves it on a real compile.
 
 ### Consent
 
@@ -154,6 +166,18 @@ response telling the user to rerun **TestBench: Use Copilot for AI**.
    with request count as tooltip — the visible answer to "is my seat being
    spent".
 
+Edge notes, one sentence each. Settings Sync replicates `lmBridge.enabled`
+and `.port` but SecretStorage is machine-local, so a second machine mints a
+different token and a copied `.env` gets 401 — the `.env` comment setup
+writes names both symptoms (connection refused = bridge not running; 401 =
+token from another machine; rerun setup either way). Changing `lmBridge.port`
+orphans every `.env` written with the old port; only rerunning setup heals
+them. The model QuickPick can be empty (not signed into Copilot, no seat) —
+say so with a sign-in hint rather than showing an empty list. And setup
+overwriting a deliberately blank `AI_API_KEY=` line flips a forced-keyless
+project to keyed — the confirm diff shows it, and the summary says it in
+words.
+
 ### Errors
 
 `LanguageModelError` and friends map to OpenAI-style
@@ -168,8 +192,8 @@ symptom.
 
 ## Part B — framework
 
-One deliberate change, and it is naming, not behavior: the **`gateway/`
-prefix**. `aibroker/` cannot be the documented Copilot spelling — it names the
+Two deliberate changes: a naming alias — the **`gateway/` prefix** — and one
+guard on it. `aibroker/` cannot be the documented Copilot spelling — it names the
 hosted broker application, and a reviewer reading it beside a loopback URL
 misreads the destination. `gateway/` says what the mechanism actually does:
 route to `AI_GATEWAY_URL`, whatever it names — this bridge, a corp gateway,
@@ -181,16 +205,20 @@ Ollama.
 - This repo: `buildGateway`'s prefix check covers both spellings; the
   inert-pair warning says "gateway-routed models"; `.env.example` and the
   README switch their explicit-destination examples to `gateway/`.
-- **`gateway/` requires an explicitly set `AI_GATEWAY_URL`** (env, project
-  config, or machine `.env`). When the value would come only from the
-  built-in default, the request is refused with a clear error naming the
-  variable — never sent. Rationale: a corporate user who forgets the URL
-  line must get a loud failure, not silent egress of their token and DOM
-  payload to the default host. `aibroker/` keeps today's fall-through to
-  aiapi — so it is not merely a legacy alias but the zero-config
-  hosted-broker spelling, and each name now matches its behavior exactly.
-  The loader already knows which layer a value resolved from, so this is a
-  provenance check, not new plumbing. Existing `.env` files don't break.
+- **`gateway/` requires an explicitly set `AI_GATEWAY_URL`.** When the
+  resolved URL equals the built-in default, the request is refused with a
+  clear error naming the variable — never sent. Rationale: a corporate user
+  who forgets the URL line must get a loud failure, not silent egress of
+  their token and DOM payload to the default host. Mechanically this is a
+  value comparison against `DEFAULT_CONFIG` — the same check PR #111's
+  `hasCustomGatewayUrl` already uses — because the loader deliberately
+  retains no provenance: an explicit value and the built-in default are
+  "indistinguishable on the result" (its own comment). The one edge this
+  misses — a user explicitly setting the URL to the default host — is also
+  refused; acceptable, because `aibroker/` is precisely the spelling for
+  that. `aibroker/` keeps today's fall-through to aiapi — not merely a
+  legacy alias but the zero-config hosted-broker spelling — and existing
+  `.env` files don't break.
 
 Everything else is already shipped: the extension ships the project `.env`
 with each run, so the trio reaches the server's per-run config, and the
@@ -213,17 +241,21 @@ Costs to document rather than change:
 
 - **Per-step run execution over Copilot.** Works, unadvised, undocumented as a
   workflow; the quota math is the reason this story is compile/repair-shaped.
-- **Screenshots/vision.** `LanguageModelDataPart` postdates the extension's
-  `^1.85` engine floor; `ai.sendScreenshots` defaults false so the default
-  path never sends images. The bridge strips image blocks rather than
-  erroring, because the diagnosis pass captures and attaches its own
-  screenshot regardless of `sendScreenshots`
-  ([diagnose.ts:46](../src/ai/diagnose.ts)) — a hard refusal would break
-  diagnosis on every failed keyed run. Raising the floor for real vision is
-  its own small story when someone needs it.
-- **CLI / CI / MCP-from-another-host.** No extension host, no bridge; replay
-  still works keyless there. Compile needs a VS Code window — which is where
-  compiles come from anyway.
+- **Screenshots/vision.** `LanguageModelDataPart` postdates even the `^1.90`
+  floor Part A sets — the 1.90 bump buys the chat API, not image parts;
+  `ai.sendScreenshots` defaults false so the default path never sends images.
+  The bridge strips image blocks rather than erroring, because the diagnosis
+  pass captures and attaches its own screenshot regardless of
+  `sendScreenshots` ([diagnose.ts:46](../src/ai/diagnose.ts)) — a hard
+  refusal would break diagnosis on every failed keyed run. Raising the floor
+  further for real vision is its own small story when someone needs it.
+- **CLI / CI / MCP-from-another-host.** No extension host, no bridge. Green
+  compiled runs still replay with zero AI calls — but with the bridge trio in
+  `.env`, such a run is keyed-with-unreachable-endpoint, not keyless: a stale
+  step's heal attempt and a failed run's diagnosis die with
+  connection-refused instead of taking the graceful keyless skip. For true
+  keyless there, blank the key (`AI_API_KEY=`) or run with `ai: off`. Compile
+  needs a VS Code window — which is where compiles come from anyway.
 - **Proxy/CA support.** Separate thread: operator-level environment on
   whoever starts the server, nothing to do with the bridge.
 - **Other `vscode.lm` providers.** They work for free (the API is
@@ -237,7 +269,10 @@ Costs to document rather than change:
   model-id fallback — tested without a VS Code host.
 - **Unit (repo root):** `gateway/` parity — the existing `aibroker/` routing
   tests in `ai-client.test.ts` mirrored for the alias: baseURL applied,
-  prefix stripped, no inert-pair warning.
+  prefix stripped, no inert-pair warning. Plus the guard, the one new
+  framework behavior: `gateway/` with a default-valued URL is a typed error
+  naming `AI_GATEWAY_URL` and no request is sent; `aibroker/` with the same
+  config proceeds to the aiapi default.
 - **Integration (electron harness):** a fake `vscode.lm` namespace (the
   FakeApiClient pattern): consent-missing path, 401 without token, EADDRINUSE
   standby/adopt, `/v1/models` shape, streaming and non-streaming bodies.
@@ -274,8 +309,10 @@ plainly.
    `gateway/` demands an explicitly set URL (loud error otherwise) while
    `aibroker/` keeps the aiapi default — each spelling matches its behavior.
 3. **Usage reporting.** Zeros, or estimate via `model.countTokens()` at the
-   cost of extra calls? Zeros proposed; revisit if 0-token compile reports
-   confuse people.
+   cost of extra calls? Zeros proposed — noting they are true zeros only on
+   the non-streaming path: `completeStream` already estimates absent usage at
+   `ceil(len/4)`, so streamed bridge calls report estimates either way.
+   Revisit if the mixed zero/estimate reports confuse people.
 4. **RESOLVED — diagnosis and quota.** Superseded by the AI run switch
    ([run-settings.md](run-settings.md) §9): setup never touches
    `ai.diagnoseFailures`, spend control is the run mode, and diagnosis works

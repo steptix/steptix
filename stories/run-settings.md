@@ -70,9 +70,13 @@ conversation.
 > stick; (3) a `model` override changes which model answers on the next batch of
 > an already-open session, with no browser restart; (4) a concurrent run on a
 > *different* session on the same server is unaffected by both; (5) every run
-> result names the model, capture mode and return mode actually in effect; (6)
-> `get_run_settings` reports those same values plus their source, and starts no
-> server to answer.
+> result names the model, capture mode, return mode and AI mode actually in
+> effect; (6) `get_run_settings` reports those same values plus their source,
+> and starts no server to answer; (7) a run with `ai: "off"` on a *keyed*
+> session makes zero AI requests — a stale compiled step takes the keyless
+> skip and sidecar, an uncompiled step fails with the policy refusal, the
+> diagnosis pass is skipped — and Compile This Step on that same session
+> still compiles.
 
 ## Context
 
@@ -358,24 +362,61 @@ the override and falls back to the project value, a new `ai.allowInRuns`
 
 `off` does not invent a mode — it reuses keyless
 ([keyless-replay-and-gateway-env.md](keyless-replay-and-gateway-env.md),
-PR #111). The server's keyless predicate generalizes from "no key" to "no key
-OR policy off"; every downstream behavior already exists and is tested: the
-heal fall-through skip in `runCodeBehindStep` (`healSkipped` plus the
-`stale:true` sidecar, so compile-repair still finds the step), the diagnosis
-skip, the typed refusal on an AI-executed step. The report and the
-`effectiveSettings` echo distinguish `AI: off (policy)` from
-`AI: off (no key)` — support needs to tell them apart.
+PR #111) — but there is no single predicate to flip: keyless is enforced at
+points that read different inputs, and each needs the policy threaded in. At
+the top of `executeStepsInternal`, compute
+`runKeyless = !aiConfigured(desiredAi) || effective.ai === 'off'` and pass it
+as `opts.keyless`. That reuses, unchanged, the heal fall-through skip in
+`runCodeBehindStep` (`codeBehindHealSkipped`, plus the `stale: true` +
+`healSkipped` sidecar row so compile-repair still finds the step) and the
+diagnosis skip. The refusal on an AI-*executed* step is NOT covered by that
+flag: it lives in `AiClient.getGateway()`'s key-presence check, which under
+`ai: off` still holds a real key and would happily run the step while the
+report claims zero-by-policy. The policy therefore needs its own refusal at
+the executor or client, with its own message — "this run forbids AI
+(runSettings.ai: off)" — because the existing `AiNotConfiguredError` and
+heal-skip texts say "Set AI_API_KEY in the project .env": wrong advice for
+policy-off, and it would erase the very distinction the echo must keep. The
+report and `effectiveSettings` distinguish `AI: off (policy)` from
+`AI: off (no key)` — support needs to tell them apart — and the two message
+variants are explicit work items of this story.
 
-Explicitly NOT gated: compile, Repair This Step, and errands. Those are
-requests *for* AI; a policy about runs must not break them. An `ai: off` run
-that meets an uncompiled step fails that step the way keyless does — "this
-step needs AI and this run forbids it" — actionable, and marked for repair.
+Explicitly NOT gated: compile, Repair This Step, and errands — those are
+requests *for* AI. This needs a mechanism, not a sentence: compile rides the
+gated pipeline (the compile-runner calls `executeSteps`, and settings are
+retained per session), so a session whose retained `ai` is `off` would gate
+its own repairs — and the obvious patch, compile sending
+`runSettings: {ai: "on"}`, is wrong, because `mergeRunSettings` would retain
+it and silently clobber the user's standing `off` for every later run. The
+carve-out is an internal, non-retained per-request flag set by the
+compile-runner and errand-runner call sites and never accepted from the wire
+(the api-server allowlist does not know it), which `resolveRunSettings`
+honours by skipping the `ai` slice for that request only. An `ai: off` run
+that meets an uncompiled step still fails that step the way keyless does —
+"this step needs AI and this run forbids it" — actionable, and marked for
+repair.
 
 Why now: the Copilot bridge ([copilot-lm-bridge.md](copilot-lm-bridge.md))
 makes a credential permanently present (the bridge token), so "leave the key
 blank" stops being available as the way to say "spend nothing". The switch
 restores that as stated intent rather than credential accident, for every
 provider at once.
+
+What §9 adds to the *built* feature — the §§1–8 wire is implemented, so these
+are increments on shipped code: `"ai"` joins `RUN_SETTING_KEYS` (today the
+key is refused as unknown); `parseRunSettings` gains the mode enum beside
+`CAPTURE_MODES`; `mergeRunSettings` gains the `'default'`-deletes branch;
+`resolveRunSettings` and `EffectiveSettings` gain `ai` plus its source and,
+when off, the reason (policy vs no key); `ai.allowInRuns` lands in
+types/defaults/schema and **must join the hand-grown per-project re-source
+list** in `resolveRunSettings` — the exact trap that list's own comment warns
+about — or a project's value is silently the server's; and the api-server
+enum validation, `get_run_settings` output, `runResultOutput` (nullable,
+older-server rule) and both run tools' schemas follow. Tests, on the same
+seams as below: `ai` accepted on the wire and an unknown value is a 400;
+`off` reaches the executor as keyless-by-policy; retention and
+`default`-restores; the echo distinguishes policy from no-key; compile on an
+`ai: off` session still compiles.
 
 ## Out of scope
 
