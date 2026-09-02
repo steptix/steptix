@@ -16,8 +16,11 @@ import {
   ENV_COMMENT_LINES,
   PREVIOUS_KEY_PLACEHOLDER,
   TOKEN_PLACEHOLDER,
+  envCommentLines,
   isLocalServerUrl,
+  overlayBridgeKeys,
   planEnvUpdate,
+  serverUrlIn,
 } from '../src/extension/lm-bridge-env.ts';
 
 const TOKEN = 'f'.repeat(64);
@@ -204,4 +207,111 @@ test('a file without a trailing newline gains a separating blank line, not a joi
   const out = lines(plan('SERVER_URL=http://localhost:3100'));
   assert.equal(out[0], 'SERVER_URL=http://localhost:3100');
   assert.equal(out[1], '', 'the appended block starts on its own line');
+});
+
+// ---------------------------------------------------------------------------
+// The active environment's overlay (stories/env-overlay-awareness.md Part A)
+// ---------------------------------------------------------------------------
+
+test('an absent overlay file sets none of the trio — that is the no-conflict case', () => {
+  // A missing `.env.<name>` reaches the detector as '' (readIfPresent), and so
+  // does no active env at all. Both mean "nothing shadows the write".
+  assert.deepEqual(overlayBridgeKeys(''), []);
+});
+
+test('an overlay with none of the trio does not interrupt setup', () => {
+  const text = ['SERVER_URL=http://localhost:3100', 'BANK_PASSWORD=hunter2', ''].join('\n');
+  assert.deepEqual(overlayBridgeKeys(text), []);
+});
+
+test('each of the three counts on its own, because each composes a broken run alone', () => {
+  // AI_API_KEY is the incident. AI_MODEL alone is worse: the bridge token is
+  // posted to whatever provider that model names. AI_GATEWAY_URL alone dials a
+  // stranger — and surfaces as the SDK's bare 'Connection error.'
+  assert.deepEqual(overlayBridgeKeys('AI_API_KEY=sk-live-other\n'), ['AI_API_KEY']);
+  assert.deepEqual(overlayBridgeKeys('AI_MODEL=openai/chatgpt-5.5\n'), ['AI_MODEL']);
+  assert.deepEqual(overlayBridgeKeys('AI_GATEWAY_URL=https://uat.example\n'), ['AI_GATEWAY_URL']);
+  assert.deepEqual(
+    overlayBridgeKeys('AI_API_KEY=x\nSERVER_URL=y\nAI_MODEL=z\n'),
+    ['AI_MODEL', 'AI_API_KEY'],
+    'reported in trio order, whatever order the file has',
+  );
+});
+
+test('a blank AI_API_KEY in the overlay still shadows — an empty value is a value', () => {
+  // `AI_API_KEY=` pins a run keyless. Written into the overlay it beats a
+  // perfect `.env`, and the symptom is "AI is not configured", not a 401.
+  assert.deepEqual(overlayBridgeKeys('AI_API_KEY=\n'), ['AI_API_KEY']);
+});
+
+test('the overlay is read with the server grammar, not a second one', () => {
+  // scanServerEnv skips a malformed line instead of throwing, and keys
+  // `export FOO=1` as `export FOO` — exactly as the server does. A stricter
+  // reader here would either blow up on someone's file or claim a conflict a
+  // run would never see.
+  assert.deepEqual(overlayBridgeKeys('this is not an assignment\nAI_MODEL=m\n'), ['AI_MODEL']);
+  assert.deepEqual(overlayBridgeKeys('export AI_API_KEY=k\n'), []);
+});
+
+test('writing the overlay produces the SAME full trio, not just the shadowed key', () => {
+  // Half a trio in the file that wins is the failure this whole check exists
+  // to prevent: an overlay AI_MODEL=openai/... over a bridge token posts that
+  // token to OpenAI.
+  const overlay = planEnvUpdate({ text: 'AI_API_KEY=sk-live-other\n', ...INPUT, envName: 'uat' });
+  assert.ok(overlay.text.includes('AI_MODEL=gateway/copilot/gpt-4.1'));
+  assert.ok(overlay.text.includes('AI_GATEWAY_URL=http://127.0.0.1:18790'));
+  assert.ok(overlay.text.includes(`AI_API_KEY=${TOKEN}`));
+  assert.equal(overlay.changes.length, 3);
+});
+
+test('targeting the overlay changes only the comment block — the same plan, either file', () => {
+  const base = plan('SERVER_URL=http://localhost:3100\n');
+  const overlay = planEnvUpdate({
+    text: 'SERVER_URL=http://localhost:3100\n',
+    ...INPUT,
+    envName: 'uat',
+  });
+  const assignments = (text) => text.split('\n').filter((l) => !l.startsWith('#'));
+  assert.deepEqual(assignments(overlay.text), assignments(base.text));
+});
+
+test('the overlay file says it only applies while that env is active', () => {
+  // The head's advice is "rerun setup in this window", which in a `.env.uat`
+  // is true only while uat is selected — the staleness that mints the next 401.
+  const text = planEnvUpdate({ text: '', ...INPUT, envName: 'uat' }).text;
+  assert.match(text, /\.env\.uat/);
+  assert.match(text, /active environment \(testbench-native\.activeEnv\)/);
+  assert.match(text, /--env uat/);
+});
+
+test('the base .env names the overlay as the third 401 cause', () => {
+  // The one the file cannot see for itself, and the one "rerun setup" does not
+  // fix: setup finds `.env` already correct and writes nothing.
+  const text = plan('').text;
+  assert.match(text, /testbench-native\.activeEnv/);
+  assert.match(text, /\.env\.<name> sets its own/);
+});
+
+test('the overlay file does NOT carry the base file\'s overlay cause — it IS the winner', () => {
+  const text = planEnvUpdate({ text: '', ...INPUT, envName: 'uat' }).text;
+  assert.doesNotMatch(text, /beats this file on every run/);
+});
+
+test('both blocks share their first line, so switching target cannot stack two', () => {
+  assert.equal(envCommentLines('uat')[0], ENV_COMMENT_LINES[0]);
+  const first = planEnvUpdate({ text: '', ...INPUT, envName: 'uat' }).text;
+  // Same file, different port: the trio is rewritten in place, nothing appended.
+  const second = planEnvUpdate({
+    text: first,
+    ...INPUT,
+    envName: 'uat',
+    gatewayUrl: 'http://127.0.0.1:18791',
+  }).text;
+  assert.equal(second.split(ENV_COMMENT_LINES[0]).length - 1, 1);
+});
+
+test('SERVER_URL reads back the same way for either file', () => {
+  assert.equal(serverUrlIn('SERVER_URL=https://ci.corp.example\n'), 'https://ci.corp.example');
+  assert.equal(serverUrlIn('SERVER_URL=a\nSERVER_URL=b\n'), 'b', 'the line a run wins with');
+  assert.equal(serverUrlIn(''), null);
 });

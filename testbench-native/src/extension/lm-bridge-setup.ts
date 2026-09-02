@@ -9,7 +9,13 @@ import {
   type LmBridge,
   type LmModelHandle,
 } from './lm-bridge.js';
-import { isLocalServerUrl, planEnvUpdate } from './lm-bridge-env.js';
+import {
+  isLocalServerUrl,
+  overlayBridgeKeys,
+  planEnvUpdate,
+  serverUrlIn,
+} from './lm-bridge-env.js';
+import { EnvSelector } from './env-selector.js';
 
 /**
  * **TestBench: Use Copilot for AI** — the one command that turns a Copilot
@@ -57,8 +63,8 @@ async function runSetup(bridge: LmBridge): Promise<void> {
   if (!(await warmUp(model))) return;
 
   // 3. The `.env`.
-  const target = resolveEnvTarget();
-  if (!target) {
+  const baseTarget = resolveEnvTarget();
+  if (!baseTarget) {
     void vscode.window.showErrorMessage(
       'TestBench: open the test project as a workspace folder first — the Copilot ' +
         "bridge settings are written into that folder's .env.",
@@ -73,10 +79,16 @@ async function runSetup(bridge: LmBridge): Promise<void> {
     // told, rather than discovering it through an error four minutes later.
     void vscode.window.showWarningMessage(
       `TestBench: the Copilot bridge is not listening (${status.detail ?? status.state}). ` +
-        'The .env below is still correct; the bridge claims the port as soon as it ' +
+        'The env file below is still correct; the bridge claims the port as soon as it ' +
         'is free.',
     );
   }
+
+  // 4. Which file. Before the plan, not after: an overlay shadowing a `.env`
+  //    that is ALREADY correct is exactly the case the plan short-circuits as
+  //    "nothing to write" — the shape of the incident this check exists for.
+  const target = await chooseTarget(baseTarget);
+  if (!target) return;
 
   const existing = await readIfPresent(target.envPath);
   const plan = planEnvUpdate({
@@ -84,6 +96,7 @@ async function runSetup(bridge: LmBridge): Promise<void> {
     model: `gateway/${qualifiedModelId(model)}`,
     gatewayUrl: bridge.gatewayUrl(),
     token: await bridge.ensureToken(),
+    envName: target.envName,
   });
 
   if (plan.unchanged) {
@@ -115,16 +128,25 @@ async function runSetup(bridge: LmBridge): Promise<void> {
   }
   log(`wrote ${plan.changes.map((c) => c.key).join(', ')} to ${target.envPath}`);
 
-  if (plan.serverUrl && !isLocalServerUrl(plan.serverUrl)) {
+  // Which SERVER_URL a run would actually use, which is not necessarily the
+  // one in the file just written: an overlay that names none inherits the base
+  // `.env`'s, and warning about a remote server only when the winning file
+  // happens to spell it out would make the warning a coin toss.
+  const effectiveServerUrl =
+    plan.serverUrl ??
+    (target.envName === null
+      ? null
+      : serverUrlIn(await readIfPresent(path.join(target.folder.uri.fsPath, '.env'))));
+  if (effectiveServerUrl && !isLocalServerUrl(effectiveServerUrl)) {
     void vscode.window.showWarningMessage(
-      `TestBench: SERVER_URL in this .env is ${plan.serverUrl}, which is not this ` +
-        'machine. The bridge binds 127.0.0.1, so a remote Sessions API server will ' +
-        'resolve AI_GATEWAY_URL to itself and get a connection refused. Copilot ' +
+      `TestBench: SERVER_URL for this project is ${effectiveServerUrl}, which is not ` +
+        'this machine. The bridge binds 127.0.0.1, so a remote Sessions API server ' +
+        'will resolve AI_GATEWAY_URL to itself and get a connection refused. Copilot ' +
         'through the bridge only works with a local server.',
     );
   }
 
-  void vscode.window.showInformationMessage(summary(model, bridge, plan.flipsKeylessToKeyed));
+  void vscode.window.showInformationMessage(summary(model, bridge, target, plan.flipsKeylessToKeyed));
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +251,8 @@ async function warmUp(model: LmModelHandle): Promise<boolean> {
 interface EnvTarget {
   folder: vscode.WorkspaceFolder;
   envPath: string;
+  /** null for the base `.env`; the env name when this is its `.env.<name>`. */
+  envName: string | null;
 }
 
 /** The workspace folder of the active editor, else the first one open. */
@@ -237,10 +261,87 @@ function resolveEnvTarget(): EnvTarget | null {
   const folder =
     (active ? workspaceFolderFor(active) : null) ?? vscode.workspace.workspaceFolders?.[0] ?? null;
   if (!folder) return null;
-  return { folder, envPath: path.join(folder.uri.fsPath, '.env') };
+  return { folder, envPath: path.join(folder.uri.fsPath, '.env'), envName: null };
 }
 
-const shortPath = (target: EnvTarget): string => `${target.folder.name}${path.sep}.env`;
+const shortPath = (target: EnvTarget): string =>
+  `${target.folder.name}${path.sep}${path.basename(target.envPath)}`;
+
+/**
+ * The active environment's overlay, when it sets any of the trio.
+ *
+ * This is the whole reason the story exists: `.env.<name>` beats `.env` on
+ * every run, so a `.env` this command writes perfectly can be shadowed by a
+ * line the user has not thought about in weeks — and the 401 that follows
+ * blames the token, the machine, and the command, none of which are at fault.
+ *
+ * All three keys count, not just `AI_API_KEY`. The server applies them
+ * independently, so an overlay `AI_MODEL=openai/…` over a bridge token posts
+ * that token to OpenAI: a second misleading 401, from a different direction.
+ */
+async function activeOverlayConflict(
+  target: EnvTarget,
+): Promise<{ envName: string; envPath: string; keys: string[] } | null> {
+  const envName = EnvSelector.activeEnv();
+  // The name is a plain workspace setting, and it is about to name a file this
+  // command WRITES. Accept only what the env picker itself offers, so a
+  // hand-edited (or repo-supplied) `../..` cannot steer the write out of the
+  // folder. Anything else is left to the run path, which reports it as TB006.
+  if (!envName || !/^[A-Za-z0-9_-]+$/.test(envName)) return null;
+
+  // The TARGET's folder, not "the workspace": `resolveEnvTarget` already picked
+  // the active editor's folder in a multi-root window, and the overlay that
+  // shadows that folder's `.env` is the one beside it.
+  const envPath = path.join(target.folder.uri.fsPath, `.env.${envName}`);
+  const keys = overlayBridgeKeys(await readIfPresent(envPath));
+  return keys.length > 0 ? { envName, envPath, keys } : null;
+}
+
+/**
+ * Which file the trio goes in — asked, never guessed.
+ *
+ * There is deliberately no default: the modal is already interrupting the
+ * user, so making them choose costs nothing, while choosing for them can
+ * silently break an environment's model pairing (writing `AI_MODEL` into a
+ * `.env.uat` that pairs a different model with a different endpoint) or leave
+ * the setup they just ran shadowed. Dismissing the modal cancels the command
+ * rather than picking one.
+ */
+async function chooseTarget(target: EnvTarget): Promise<EnvTarget | null> {
+  const conflict = await activeOverlayConflict(target);
+  if (!conflict) return target;
+
+  const overlayFile = `.env.${conflict.envName}`;
+  log(`active env ${conflict.envName}: ${overlayFile} sets ${conflict.keys.join(', ')}`);
+  const writeOverlay = `Write ${overlayFile}`;
+  const choice = await vscode.window.showWarningMessage(
+    `The active environment "${conflict.envName}" sets ${conflict.keys.join(', ')} in ` +
+      `${overlayFile}, which overrides .env on every run. Write the bridge settings to ` +
+      `${overlayFile} instead?`,
+    {
+      modal: true,
+      detail:
+        `Write ${overlayFile} — all three lines (AI_MODEL, AI_GATEWAY_URL, AI_API_KEY) go ` +
+        `into the file that wins, and .env is left exactly as it is. They apply while ` +
+        `"${conflict.envName}" is the active environment; the CLI needs ` +
+        `"aiui run --env ${conflict.envName}" to see them.\n\n` +
+        'Continue anyway — write .env, as before. It stays shadowed by ' +
+        `${overlayFile} until you clear the environment or edit that file.`,
+    },
+    writeOverlay,
+    'Continue anyway',
+  );
+
+  if (choice === undefined) {
+    log('overlay choice dismissed — nothing written');
+    return null;
+  }
+  if (choice !== writeOverlay) {
+    log(`continuing with .env despite ${overlayFile}`);
+    return target;
+  }
+  return { folder: target.folder, envPath: conflict.envPath, envName: conflict.envName };
+}
 
 async function readIfPresent(file: string): Promise<string> {
   try {
@@ -268,6 +369,7 @@ async function confirmWrite(
       'stale compiled step will try to heal. Use runSettings ai: "off" for a run ' +
       'that must spend nothing.'
     : '';
+  const file = path.basename(target.envPath);
   const choice = await vscode.window.showInformationMessage(
     `${creating ? 'Create' : 'Update'} ${shortPath(target)}?`,
     {
@@ -278,17 +380,31 @@ async function confirmWrite(
         `this file a credential — keep it out of version control.` +
         keylessNote,
     },
-    creating ? 'Create .env' : 'Update .env',
+    `${creating ? 'Create' : 'Update'} ${file}`,
   );
   return choice !== undefined;
 }
 
-function summary(model: LmModelHandle, bridge: LmBridge, flipped: boolean): string {
+function summary(
+  model: LmModelHandle,
+  bridge: LmBridge,
+  target: EnvTarget,
+  flipped: boolean,
+): string {
+  // Which FILE, because that is now a real choice: the same three lines mean
+  // "always" in `.env` and "while this env is active" in `.env.<name>`, and a
+  // message that names only the model and the URL leaves the user unable to
+  // tell which of those they just got.
+  const where =
+    target.envName === null
+      ? `, from ${shortPath(target)}`
+      : `, from ${shortPath(target)} — which applies while "${target.envName}" is the ` +
+        `active environment, and to "aiui run --env ${target.envName}"`;
   const base =
     `TestBench now compiles and repairs with ${qualifiedModelId(model)} over the ` +
-    `Copilot bridge on ${bridge.gatewayUrl()}. Compiling and repairing spend Copilot ` +
-    'premium requests; running a compiled test spends none, and runSettings ai: "off" ' +
-    'makes any run keyless by policy. ' +
+    `Copilot bridge on ${bridge.gatewayUrl()}${where}. Compiling and repairing spend ` +
+    'Copilot premium requests; running a compiled test spends none, and runSettings ' +
+    'ai: "off" makes any run keyless by policy. ' +
     // The one failure this command cannot detect: `gateway/` is resolved by
     // @pkent/aigateway inside the server process, which this extension neither
     // imports nor can interrogate. A server predating the gateway provider

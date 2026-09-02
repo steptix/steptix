@@ -1,6 +1,8 @@
 /**
- * What "TestBench: Use Copilot for AI" writes into the project `.env`
- * (stories/copilot-lm-bridge.md §The setup command, effect 3).
+ * What "TestBench: Use Copilot for AI" writes into the project `.env` — or
+ * into the active environment's `.env.<name>`, when that overlay would
+ * otherwise shadow the trio (stories/copilot-lm-bridge.md §The setup command,
+ * effect 3; stories/env-overlay-awareness.md Part A).
  *
  * Pure text in / text out — no `vscode`, no filesystem — because this file
  * holds the user's other secrets and the confirm they approve has to be the
@@ -29,14 +31,15 @@ export const TOKEN_PLACEHOLDER = '<bridge token — kept in this machine\'s Secr
 export const PREVIOUS_KEY_PLACEHOLDER = '<the key this file already had>';
 
 /**
- * The comment block written above the trio the first time.
+ * The head of the comment block: what this file is, and the two failure
+ * symptoms that are the same wherever the trio lives.
  *
- * Both failure symptoms are named because neither is self-explanatory from the
- * server's error text: a refused connection reads as "the AI is down", and a
- * 401 from a loopback URL reads as "my key is wrong" when the key is simply
- * from a different machine.
+ * Both are named because neither is self-explanatory from the server's error
+ * text: a refused connection reads as "the AI is down", and a 401 from a
+ * loopback URL reads as "my key is wrong" when the key is simply from a
+ * different machine.
  */
-export const ENV_COMMENT_LINES = [
+const ENV_COMMENT_HEAD = [
   '# Written by "TestBench: Use Copilot for AI" — AI runs on your GitHub Copilot',
   '# seat, through a bridge inside VS Code. It only answers while that window is',
   '# open, and only compile/repair/AI steps call it (a compiled run spends nothing).',
@@ -47,6 +50,63 @@ export const ENV_COMMENT_LINES = [
   '#     reset). It lives in VS Code SecretStorage. Rerun setup in this window.',
 ];
 
+/**
+ * The third 401 cause, and the one the base `.env` cannot see: an active
+ * environment's `.env.<name>` carries its own `AI_API_KEY`, which beats every
+ * line in this file on every run. "Rerun setup" alone does not fix that —
+ * setup finds this file already correct and writes nothing — so the remedy has
+ * to be spelled out where the lines it is about actually live.
+ */
+const OVERLAY_CAUSE_LINES = [
+  '#   401 with these lines looking correct → an active environment (the',
+  '#     testbench-native.activeEnv setting) whose .env.<name> sets its own',
+  '#     AI_API_KEY beats this file on every run. Clear the env, or rerun setup',
+  '#     with it active to write these lines into that file instead.',
+];
+
+/** The comment block written above the trio the first time, in a base `.env`. */
+export const ENV_COMMENT_LINES = [...ENV_COMMENT_HEAD, ...OVERLAY_CAUSE_LINES];
+
+/**
+ * The comment block for the file this write targets.
+ *
+ * In `.env.<name>` the overlay cause is inverted — this file IS the winner —
+ * so naming it there would describe a mechanism that cannot bite. What that
+ * file needs instead is the caveat the head's "rerun setup in this window"
+ * leaves out: setup lands here only while this env is the active one, and the
+ * CLI reaches these lines only when told `--env <name>`.
+ */
+export function envCommentLines(envName: string | null): string[] {
+  if (envName === null) return ENV_COMMENT_LINES;
+  return [
+    ...ENV_COMMENT_HEAD,
+    `#   These lines are in .env.${envName}, which beats .env — but only while`,
+    `#     "${envName}" is the active environment (testbench-native.activeEnv), or`,
+    `#     the CLI is given --env ${envName}. Rerunning setup under a different env`,
+    '#     writes to that env\'s file instead and leaves these lines behind, stale.',
+  ];
+}
+
+/**
+ * Which of the trio a `.env.<name>` overlay sets, in trio order.
+ *
+ * All three, not just the token: they are applied independently on the server,
+ * so an overlay carrying only `AI_MODEL=openai/…` still composes a run that
+ * posts the bridge token to OpenAI. Read with the scanner the server itself
+ * uses, so "does this line count" has one answer.
+ */
+export function overlayBridgeKeys(text: string): string[] {
+  const present = new Set(scanServerEnv(text).map((a) => a.key));
+  return [AI_MODEL, AI_GATEWAY_URL, AI_API_KEY].filter((key) => present.has(key));
+}
+
+/** Last `SERVER_URL` assignment in a `.env`, or null — later wins, as a run does. */
+export function serverUrlIn(text: string): string | null {
+  let value: string | null = null;
+  for (const a of scanServerEnv(text)) if (a.key === 'SERVER_URL') value = a.value;
+  return value;
+}
+
 export interface EnvUpdateInput {
   /** Current file contents; `''` for a file that does not exist yet. */
   text: string;
@@ -56,6 +116,13 @@ export interface EnvUpdateInput {
   gatewayUrl: string;
   /** The bridge token. Never rendered into {@link EnvUpdatePlan.preview}. */
   token: string;
+  /**
+   * Which file this plan is for: `null` for the base `.env`, the env name when
+   * it targets that env's `.env.<name>` overlay. It changes only the comment
+   * block — the trio written is the same either way, because a file that
+   * carries part of it composes a run nobody can diagnose.
+   */
+  envName?: string | null;
 }
 
 export interface EnvChange {
@@ -86,7 +153,11 @@ export interface EnvUpdatePlan {
 }
 
 /**
- * Plan the `.env` write.
+ * Plan the write into the file {@link EnvUpdateInput.envName} names.
+ *
+ * Whichever file that is, it receives the WHOLE trio: the three are applied
+ * independently on the server, so half of them in the winning file composes a
+ * run that fails in a way no message explains.
  *
  * Existing assignments are rewritten IN PLACE (the last one wins, matching the
  * server's own later-wins loop), so a file whose `AI_MODEL` sits under a
@@ -142,8 +213,11 @@ export function planEnvUpdate(input: EnvUpdateInput): EnvUpdatePlan {
     // is actually being appended — a file that only needed its port bumped
     // keeps the comment it already has instead of collecting a second copy.
     if (lines.length > 0 && (lines[lines.length - 1] ?? '').trim() !== '') lines.push(fileCr);
-    if (!input.text.includes(ENV_COMMENT_LINES[0]!)) {
-      lines.push(...ENV_COMMENT_LINES.map((l) => `${l}${fileCr}`));
+    // The first line is the marker for "this file already has the block", and
+    // it is the same sentence in both variants — so switching target never
+    // stacks a second copy on a file that already carries one.
+    if (!input.text.includes(ENV_COMMENT_HEAD[0]!)) {
+      lines.push(...envCommentLines(input.envName ?? null).map((l) => `${l}${fileCr}`));
     }
     lines.push(...toAppend);
   }
@@ -151,15 +225,13 @@ export function planEnvUpdate(input: EnvUpdateInput): EnvUpdatePlan {
   let text = lines.join('\n');
   if (text !== '' && !text.endsWith('\n')) text += '\n';
 
-  const serverUrlEntry = lastOf('SERVER_URL');
-
   return {
     text,
     unchanged: changes.length === 0,
     changes,
     preview: renderPreview(changes),
     flipsKeylessToKeyed,
-    serverUrl: serverUrlEntry ? serverUrlEntry.value : null,
+    serverUrl: serverUrlIn(input.text),
   };
 }
 
