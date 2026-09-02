@@ -26,7 +26,20 @@ const FIXTURES_DIR =
 const BASE_ENV = path.join(FIXTURES_DIR, '.env');
 const ENV_NAME = 'setupenv';
 const OVERLAY_ENV = path.join(FIXTURES_DIR, `.env.${ENV_NAME}`);
+// A dotted name: legal in a filename, read and applied by the run path, and
+// rejected by the first version of setup's name guard — which is how setup
+// came to write `.env` while every run went on using the overlay.
+const DOTTED_ENV_NAME = 'setupenv.local';
+const DOTTED_OVERLAY_ENV = path.join(FIXTURES_DIR, `.env.${DOTTED_ENV_NAME}`);
 const SETUP_COMMAND = 'testbench-native.useCopilotForAi';
+
+/** The extension's output channel, which the harness tees to a file — VS Code
+ *  exposes no way to read an OutputChannel back. */
+function readOutputLog() {
+  const file = process.env.TESTBENCH_LIVE_LOG;
+  if (!file || !fs.existsSync(file)) return null;
+  return fs.readFileSync(file, 'utf-8');
+}
 
 /** A port nothing is listening on right now. */
 function freePort() {
@@ -134,6 +147,7 @@ describe('TestBench Copilot setup vs. the active env overlay', function () {
     await hooks.syncLmBridge();
     if (baseEnvSnapshot !== null) fs.writeFileSync(BASE_ENV, baseEnvSnapshot);
     fs.rmSync(OVERLAY_ENV, { force: true });
+    fs.rmSync(DOTTED_OVERLAY_ENV, { force: true });
   });
 
   beforeEach(() => {
@@ -141,6 +155,7 @@ describe('TestBench Copilot setup vs. the active env overlay', function () {
     overlayAnswer = 0;
     fs.writeFileSync(BASE_ENV, baseEnvSnapshot);
     fs.rmSync(OVERLAY_ENV, { force: true });
+    fs.rmSync(DOTTED_OVERLAY_ENV, { force: true });
   });
 
   afterEach(async () => {
@@ -148,6 +163,7 @@ describe('TestBench Copilot setup vs. the active env overlay', function () {
     await setActiveEnv(undefined);
     fs.writeFileSync(BASE_ENV, baseEnvSnapshot);
     fs.rmSync(OVERLAY_ENV, { force: true });
+    fs.rmSync(DOTTED_OVERLAY_ENV, { force: true });
   });
 
   it('writes .env and asks nothing when no environment is active', async () => {
@@ -236,6 +252,42 @@ describe('TestBench Copilot setup vs. the active env overlay', function () {
     assert.equal(overlayPrompts().length, 1);
     assert.equal(read(OVERLAY_ENV), overlayBefore);
     assert.equal(read(BASE_ENV), baseEnvSnapshot);
+  });
+
+  it('a dotted env name is a file like any other — it must still be checked', async () => {
+    // `.env.setupenv.local` is read and applied by the run path. A name guard
+    // that only accepted picker-shaped names threw this one away and returned
+    // "no overlay", so setup wrote `.env` and reported success while every run
+    // kept taking AI_API_KEY from here: the incident, wearing a different name.
+    fs.writeFileSync(DOTTED_OVERLAY_ENV, 'AI_API_KEY=sk-live-from-dotted\n');
+    await setActiveEnv(DOTTED_ENV_NAME);
+    overlayAnswer = 0; // "Write .env.setupenv.local"
+
+    await vscode.commands.executeCommand(SETUP_COMMAND);
+
+    const asked = overlayPrompts();
+    assert.equal(asked.length, 1, 'the dotted overlay must raise the same question');
+    assert.deepEqual(asked[0].items, [`Write .env.${DOTTED_ENV_NAME}`, 'Continue anyway']);
+    assert.equal(read(BASE_ENV), baseEnvSnapshot, '.env comes out byte-identical');
+    const overlay = read(DOTTED_OVERLAY_ENV);
+    assert.ok(overlay.includes(`AI_API_KEY=${token}`), 'the shadowing key is replaced');
+    assert.ok(!overlay.includes('sk-live-from-dotted'));
+  });
+
+  it('a name that would escape the folder is refused, and says so in the log', async () => {
+    // The guard still has to hold: this name is joined onto a folder path and
+    // written to. What it must not do is refuse in silence — a bare `return
+    // null` reads exactly like "no environment is active" and walks the user
+    // into the same 401 with nothing to go on.
+    await setActiveEnv('../..');
+
+    await vscode.commands.executeCommand(SETUP_COMMAND);
+
+    assert.equal(overlayPrompts().length, 0, 'no file is formed from it, so nothing to ask');
+    assert.ok(read(BASE_ENV).includes(`AI_API_KEY=${token}`), '.env is written, as with no env');
+    const log = readOutputLog();
+    assert.ok(log, 'the harness must tee the output channel — see runTest.cjs');
+    assert.match(log, /active env "\.\.\/\.\." cannot name a file beside \.env/);
   });
 
   it('an overlay that touches none of the trio is not a conflict', async () => {

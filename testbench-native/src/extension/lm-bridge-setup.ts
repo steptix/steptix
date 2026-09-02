@@ -10,10 +10,11 @@ import {
   type LmModelHandle,
 } from './lm-bridge.js';
 import {
+  effectiveServerUrl,
+  envNameStaysInFolder,
   isLocalServerUrl,
   overlayBridgeKeys,
   planEnvUpdate,
-  serverUrlIn,
 } from './lm-bridge-env.js';
 import { EnvSelector } from './env-selector.js';
 
@@ -87,7 +88,11 @@ async function runSetup(bridge: LmBridge): Promise<void> {
   // 4. Which file. Before the plan, not after: an overlay shadowing a `.env`
   //    that is ALREADY correct is exactly the case the plan short-circuits as
   //    "nothing to write" — the shape of the incident this check exists for.
-  const target = await chooseTarget(baseTarget);
+  //    Read once here because the overlay decides two separate things, and only
+  //    one of them is the write target: it also carries the SERVER_URL a run
+  //    would use, whichever file gets written.
+  const overlay = await activeOverlay(baseTarget);
+  const target = await chooseTarget(baseTarget, overlay);
   if (!target) return;
 
   const existing = await readIfPresent(target.envPath);
@@ -128,18 +133,22 @@ async function runSetup(bridge: LmBridge): Promise<void> {
   }
   log(`wrote ${plan.changes.map((c) => c.key).join(', ')} to ${target.envPath}`);
 
-  // Which SERVER_URL a run would actually use, which is not necessarily the
-  // one in the file just written: an overlay that names none inherits the base
-  // `.env`'s, and warning about a remote server only when the winning file
-  // happens to spell it out would make the warning a coin toss.
-  const effectiveServerUrl =
-    plan.serverUrl ??
-    (target.envName === null
-      ? null
-      : serverUrlIn(await readIfPresent(path.join(target.folder.uri.fsPath, '.env'))));
-  if (effectiveServerUrl && !isLocalServerUrl(effectiveServerUrl)) {
+  // Which SERVER_URL a run would actually use — which is neither "the one in
+  // the file just written" nor "the one in `.env`". It is `composeEnv`'s
+  // answer: the active overlay's when that file sets one, the base's
+  // otherwise, and that holds whether or not the overlay was the write target.
+  // Consulting the overlay only when it IS the target made the warning a coin
+  // toss: *Continue anyway* over a `.env.uat` that redirects SERVER_URL to
+  // localhost warned "not this machine" about a run that dials localhost, and
+  // the reverse said nothing before a connection refused.
+  const baseText =
+    target.envName === null
+      ? existing
+      : await readIfPresent(path.join(target.folder.uri.fsPath, '.env'));
+  const serverUrl = effectiveServerUrl(baseText, overlay?.text ?? null);
+  if (serverUrl && !isLocalServerUrl(serverUrl)) {
     void vscode.window.showWarningMessage(
-      `TestBench: SERVER_URL for this project is ${effectiveServerUrl}, which is not ` +
+      `TestBench: SERVER_URL for this project is ${serverUrl}, which is not ` +
         'this machine. The bridge binds 127.0.0.1, so a remote Sessions API server ' +
         'will resolve AI_GATEWAY_URL to itself and get a connection refused. Copilot ' +
         'through the bridge only works with a local server.',
@@ -267,34 +276,59 @@ function resolveEnvTarget(): EnvTarget | null {
 const shortPath = (target: EnvTarget): string =>
   `${target.folder.name}${path.sep}${path.basename(target.envPath)}`;
 
+interface ActiveOverlay {
+  envName: string;
+  envPath: string;
+  /** Its contents; `''` for a selected env with no file beside the `.env`. */
+  text: string;
+}
+
 /**
- * The active environment's overlay, when it sets any of the trio.
+ * The active environment's overlay file, read once.
  *
  * This is the whole reason the story exists: `.env.<name>` beats `.env` on
  * every run, so a `.env` this command writes perfectly can be shadowed by a
  * line the user has not thought about in weeks — and the 401 that follows
  * blames the token, the machine, and the command, none of which are at fault.
- *
- * All three keys count, not just `AI_API_KEY`. The server applies them
- * independently, so an overlay `AI_MODEL=openai/…` over a bridge token posts
- * that token to OpenAI: a second misleading 401, from a different direction.
  */
-async function activeOverlayConflict(
-  target: EnvTarget,
-): Promise<{ envName: string; envPath: string; keys: string[] } | null> {
+async function activeOverlay(target: EnvTarget): Promise<ActiveOverlay | null> {
   const envName = EnvSelector.activeEnv();
+  if (!envName) return null;
   // The name is a plain workspace setting, and it is about to name a file this
-  // command WRITES. Accept only what the env picker itself offers, so a
-  // hand-edited (or repo-supplied) `../..` cannot steer the write out of the
-  // folder. Anything else is left to the run path, which reports it as TB006.
-  if (!envName || !/^[A-Za-z0-9_-]+$/.test(envName)) return null;
+  // command WRITES — so reject what would escape the folder, and only that. An
+  // earlier "picker-shaped names only" rule turned out to cut the wrong way in
+  // both directions: it threw away `uat.local`, a name whose `.env.uat.local`
+  // the run path reads and applies quite happily, leaving setup to write `.env`
+  // while the run kept using the overlay — the incident, for that name. And the
+  // rejected names it was protecting against are not reported by the run path
+  // either: `../..` composes a path that resolves to the folder itself, so
+  // `readEnvOverlayFile` finds it, tries to read a directory, and throws EISDIR
+  // — which the run controller rethrows unmapped, not as TB006.
+  if (!envNameStaysInFolder(envName)) {
+    // Said out loud, because a silent `return null` here looks identical to
+    // "no environment is active" and leads the user to the same 401.
+    log(`active env "${envName}" cannot name a file beside .env — overlay not checked`);
+    return null;
+  }
 
   // The TARGET's folder, not "the workspace": `resolveEnvTarget` already picked
   // the active editor's folder in a multi-root window, and the overlay that
   // shadows that folder's `.env` is the one beside it.
   const envPath = path.join(target.folder.uri.fsPath, `.env.${envName}`);
-  const keys = overlayBridgeKeys(await readIfPresent(envPath));
-  return keys.length > 0 ? { envName, envPath, keys } : null;
+  return { envName, envPath, text: await readIfPresent(envPath) };
+}
+
+/**
+ * Which of the trio the active overlay shadows, if any.
+ *
+ * All three keys count, not just `AI_API_KEY`. The server applies them
+ * independently, so an overlay `AI_MODEL=openai/…` over a bridge token posts
+ * that token to OpenAI: a second misleading 401, from a different direction.
+ */
+function overlayConflict(overlay: ActiveOverlay | null): (ActiveOverlay & { keys: string[] }) | null {
+  if (!overlay) return null;
+  const keys = overlayBridgeKeys(overlay.text);
+  return keys.length > 0 ? { ...overlay, keys } : null;
 }
 
 /**
@@ -307,8 +341,11 @@ async function activeOverlayConflict(
  * the setup they just ran shadowed. Dismissing the modal cancels the command
  * rather than picking one.
  */
-async function chooseTarget(target: EnvTarget): Promise<EnvTarget | null> {
-  const conflict = await activeOverlayConflict(target);
+async function chooseTarget(
+  target: EnvTarget,
+  overlay: ActiveOverlay | null,
+): Promise<EnvTarget | null> {
+  const conflict = overlayConflict(overlay);
   if (!conflict) return target;
 
   const overlayFile = `.env.${conflict.envName}`;

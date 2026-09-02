@@ -3,7 +3,6 @@
 // The default test-electron runner spawns Code.exe directly, which silently
 // rejects every flag on Windows.
 const path = require('node:path');
-const os = require('node:os');
 const cp = require('node:child_process');
 const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
 
@@ -50,7 +49,16 @@ async function main() {
     // runner does. VS Code exposes no way to read an OutputChannel back, so
     // without this the run log — the only place several messages exist at
     // all — is unassertable, and tests that reach for it silently no-op.
-    const outputLogPath = path.join(os.tmpdir(), 'testbench-fast-suite.log');
+    //
+    // Beside this script, not in the OS temp dir: the extension truncates the
+    // file at its first getOutputChannel() and appends from there, so one
+    // machine-global path means two fast suites — the two-worktree workflow
+    // CLAUDE.md documents — wipe and interleave each other's log, and the
+    // assertions that read it fail or, worse, pass on the other run's lines.
+    // Removed before launch so a killed run's log can never be read as this
+    // one's.
+    const outputLogPath = path.resolve(__dirname, 'fast-suite-output.log');
+    try { require('node:fs').rmSync(outputLogPath, { force: true }); } catch { /* ignore */ }
 
     const result = cp.spawnSync(codeExe, args, {
       stdio: 'inherit',

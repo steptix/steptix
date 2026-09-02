@@ -16,7 +16,9 @@ import {
   ENV_COMMENT_LINES,
   PREVIOUS_KEY_PLACEHOLDER,
   TOKEN_PLACEHOLDER,
+  effectiveServerUrl,
   envCommentLines,
+  envNameStaysInFolder,
   isLocalServerUrl,
   overlayBridgeKeys,
   planEnvUpdate,
@@ -244,13 +246,23 @@ test('a blank AI_API_KEY in the overlay still shadows — an empty value is a va
   assert.deepEqual(overlayBridgeKeys('AI_API_KEY=\n'), ['AI_API_KEY']);
 });
 
-test('the overlay is read with the server grammar, not a second one', () => {
-  // scanServerEnv skips a malformed line instead of throwing, and keys
-  // `export FOO=1` as `export FOO` — exactly as the server does. A stricter
-  // reader here would either blow up on someone's file or claim a conflict a
-  // run would never see.
+test('the overlay is read with BOTH grammars a run uses, not just the server one', () => {
+  // The two disagree, and the disagreement is not academic. The TestBench run
+  // path — the one the incident was on — reads the overlay with `parseEnv`,
+  // which strips `export `; the server's scan keys the same line as
+  // `export AI_API_KEY` and reports the file clean. Detecting on the scan alone
+  // let an `export`-style overlay shadow the token on exactly the path that
+  // matters while setup said there was no conflict.
+  assert.deepEqual(overlayBridgeKeys('export AI_API_KEY=k\n'), ['AI_API_KEY']);
+  assert.deepEqual(
+    overlayBridgeKeys('export AI_MODEL=openai/x\nAI_API_KEY=k\n'),
+    ['AI_MODEL', 'AI_API_KEY'],
+    'a file may mix the two forms; either can win',
+  );
+  // And the scan stays the floor: `parseEnv` throws on the first malformed line
+  // where the scan skips it, so a file the run path would reject outright must
+  // not silence a conflict the scan could see on its own.
   assert.deepEqual(overlayBridgeKeys('this is not an assignment\nAI_MODEL=m\n'), ['AI_MODEL']);
-  assert.deepEqual(overlayBridgeKeys('export AI_API_KEY=k\n'), []);
 });
 
 test('writing the overlay produces the SAME full trio, not just the shadowed key', () => {
@@ -314,4 +326,46 @@ test('SERVER_URL reads back the same way for either file', () => {
   assert.equal(serverUrlIn('SERVER_URL=https://ci.corp.example\n'), 'https://ci.corp.example');
   assert.equal(serverUrlIn('SERVER_URL=a\nSERVER_URL=b\n'), 'b', 'the line a run wins with');
   assert.equal(serverUrlIn(''), null);
+});
+
+// ---------------------------------------------------------------------------
+// Which env names may name a file, and which SERVER_URL a run would use
+// ---------------------------------------------------------------------------
+
+test('a dotted env name is a real file, so setup must consider it', () => {
+  // `.env.uat.local` is a file the run path reads and applies. Rejecting the
+  // name here is not caution, it is the incident: setup writes `.env` while
+  // every run keeps taking its AI_API_KEY from the overlay.
+  assert.equal(envNameStaysInFolder('uat.local'), true);
+  assert.equal(envNameStaysInFolder('uat'), true);
+  assert.equal(envNameStaysInFolder('ci-2_b'), true);
+});
+
+test('only names that would ESCAPE the folder are rejected', () => {
+  // The guard exists for one thing: this name is about to be joined onto a
+  // folder path and written to.
+  assert.equal(envNameStaysInFolder('../..'), false);
+  assert.equal(envNameStaysInFolder('..'), false);
+  assert.equal(envNameStaysInFolder('a/b'), false, 'a POSIX separator');
+  assert.equal(envNameStaysInFolder('a\\b'), false, 'and a Windows one');
+  assert.equal(envNameStaysInFolder('../secrets/.env'), false);
+});
+
+test('the warning follows composeEnv: the overlay when it sets SERVER_URL, else the base', () => {
+  // Both directions, because reading only the write target got both wrong. An
+  // overlay pointing back at this machine must silence the warning...
+  const url = effectiveServerUrl('SERVER_URL=http://ci.corp:3100\n', 'SERVER_URL=http://localhost:3100\n');
+  assert.equal(url, 'http://localhost:3100');
+  assert.equal(isLocalServerUrl(url), true, 'nothing to warn about — the run dials localhost');
+
+  // ...and an overlay pointing away from it must raise one, however local the
+  // base `.env` looks.
+  const away = effectiveServerUrl('SERVER_URL=http://localhost:3100\n', 'SERVER_URL=http://ci.corp:3100\n');
+  assert.equal(away, 'http://ci.corp:3100');
+  assert.equal(isLocalServerUrl(away), false, 'connection refused, warned about first');
+
+  // An overlay that names none inherits the base's; no overlay at all is base.
+  assert.equal(effectiveServerUrl('SERVER_URL=http://ci.corp:3100\n', 'UAT_ONLY=x\n'), 'http://ci.corp:3100');
+  assert.equal(effectiveServerUrl('SERVER_URL=http://ci.corp:3100\n', null), 'http://ci.corp:3100');
+  assert.equal(effectiveServerUrl('', null), null);
 });

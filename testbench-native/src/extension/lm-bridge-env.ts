@@ -6,11 +6,12 @@
  *
  * Pure text in / text out — no `vscode`, no filesystem — because this file
  * holds the user's other secrets and the confirm they approve has to be the
- * literal thing that gets written. The only import is the runner-core scanner
- * that reads `.env` exactly the way the SERVER does, so "which line wins" here
- * is the same answer a run would get rather than a second grammar that drifts.
+ * literal thing that gets written. The only imports are the two runner-core
+ * `.env` readers a run itself uses, so "which line wins" here is answered by
+ * the same grammars rather than a third one that drifts.
  */
-import { scanServerEnv } from 'ai-ui-automation-runner-core';
+import { parseEnv, scanServerEnv } from 'ai-ui-automation-runner-core';
+import * as path from 'node:path';
 
 /** The three lines this command owns. Nothing else in the file is touched. */
 export const AI_MODEL = 'AI_MODEL';
@@ -92,12 +93,63 @@ export function envCommentLines(envName: string | null): string[] {
  *
  * All three, not just the token: they are applied independently on the server,
  * so an overlay carrying only `AI_MODEL=openai/…` still composes a run that
- * posts the bridge token to OpenAI. Read with the scanner the server itself
- * uses, so "does this line count" has one answer.
+ * posts the bridge token to OpenAI.
+ *
+ * The UNION of both readers, because the two paths this detector speaks for do
+ * not share a grammar. `scanServerEnv` is the server's; `parseEnv` is the one
+ * the TestBench run path uses (`readEnvOverlayFile` → `composeEnv`), and that
+ * is the path the incident was on. They disagree on exactly the line a shell
+ * user is most likely to write: `export AI_API_KEY=k` keys as `export
+ * AI_API_KEY` under the scan and as `AI_API_KEY` under the parse — so scanning
+ * alone reports "no conflict" about an overlay that shadows the token on the
+ * one path that matters. A key either reader can see is a key that can win.
  */
 export function overlayBridgeKeys(text: string): string[] {
   const present = new Set(scanServerEnv(text).map((a) => a.key));
+  try {
+    for (const key of Object.keys(parseEnv(text))) present.add(key);
+  } catch {
+    // `parseEnv` throws on the first malformed line, where the scan skips it.
+    // The scan's keys still stand: a file the run path will reject outright is
+    // not a reason to stop warning about the lines both readers agreed on.
+  }
   return [AI_MODEL, AI_GATEWAY_URL, AI_API_KEY].filter((key) => present.has(key));
+}
+
+/**
+ * Is this active-env name one this command may form a filename from?
+ *
+ * The name is a plain workspace setting and it is about to name a file setup
+ * WRITES, so a hand-edited (or repo-supplied) `../..` must not steer that write
+ * out of the folder. But the guard rejects only what would ESCAPE: any name the
+ * run path would happily read — `uat.local`, forming the perfectly legal
+ * `.env.uat.local` — has to be a name setup considers too, or setup writes
+ * `.env` while the run applies the overlay, which is the incident again.
+ */
+export function envNameStaysInFolder(envName: string): boolean {
+  const file = `.env.${envName}`;
+  // Both separator rules, not the host's: a `\` is a separator on Windows and
+  // an ordinary character elsewhere, and a guard on a written path should not
+  // be one thing in the extension host and another in a POSIX unit run.
+  return (
+    path.win32.basename(file) === file &&
+    path.posix.basename(file) === file &&
+    !envName.includes('..')
+  );
+}
+
+/**
+ * The `SERVER_URL` a run would actually use, given the base `.env` and the
+ * active environment's overlay (`null` when there is no active overlay).
+ *
+ * This is `composeEnv`'s rule and nothing else: the overlay's value when it
+ * sets one, the base's otherwise. Which file setup happens to be writing does
+ * not enter into it — reading only the write target would make the "not this
+ * machine" warning a coin toss, firing on a base `SERVER_URL` the overlay has
+ * already redirected to localhost and staying silent on the reverse.
+ */
+export function effectiveServerUrl(baseText: string, overlayText: string | null): string | null {
+  return (overlayText === null ? null : serverUrlIn(overlayText)) ?? serverUrlIn(baseText);
 }
 
 /** Last `SERVER_URL` assignment in a `.env`, or null — later wins, as a run does. */
