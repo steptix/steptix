@@ -1,6 +1,7 @@
 # Claude on Bedrock — the customer's own AWS account as the AI endpoint
 
-Status: draft — reviewed once, revised
+Status: BUILT and merged-pending — implemented, reviewed twice, live-verified
+(the live check against a real AWS account is still outstanding)
 Builds on: the model-prefix routing
 ([SPEC-aibroker-routing.md](../SPEC-aibroker-routing.md) plus the `gateway/`
 alias from [copilot-lm-bridge.md](copilot-lm-bridge.md) Part B), keyless replay
@@ -335,14 +336,19 @@ exist there.)
 
 ## Rollout
 
-1. `@pkent/aigateway`: publish. **The `gateway/` provider is still unpublished**
-   — it exists only in the local `1.4.0-beta.4` while the latest published is
-   `1.4.0-beta.3`, and this repo pins `1.4.0-beta.2` exactly. Bedrock lands in
-   that same unpublished version, so this step ships both providers.
-2. This repo: bump the pin, `npm install` to regenerate the lock, then Part B
-   and docs. Rebuild `dist/`, restart the server; no extension bump.
+**Done.** Recorded because the ordering is the reusable part: the framework
+pins the library exactly, so a published version is not a consumed one until
+the pin moves and the lock is regenerated.
 
-Until step 1, `bedrock/` is an unknown provider and fails loudly at
+1. `@pkent/aigateway`: published — `1.4.0-beta.5` shipped the `gateway` and
+   `bedrock` providers together (pkent/aigateway#6), `beta.6` made the SDKs load
+   lazily and the AWS peer optional (#7), `beta.7` fixed the retry and the
+   untested deferred imports (#8).
+2. This repo: pin bumped and `npm install` re-run for each, then Part B and the
+   docs. Rebuild `dist/` and restart the server; the extension bump is needed
+   only because the bridge ships extension code.
+
+Before step 1, `bedrock/` was an unknown provider and failed loudly at
 construction — no egress, no silent fallback.
 
 ## Notes for the builder
@@ -357,9 +363,10 @@ construction — no egress, no silent fallback.
 - **Unsupported on Bedrock and unused here:** server-side tools, Files API,
   Batches, server-side fallback. Tool use, thinking and structured outputs are
   supported.
-- **The inert-pair warning misfires.** A `bedrock/` model with `AI_GATEWAY_URL`
-  set advises "Set AI_MODEL=gateway/<model>" — wrong for Bedrock, and this
-  audience is unusually likely to have both set. Widen the warning text.
+- **The inert-pair warning misfired** — done. A `bedrock/` model with
+  `AI_GATEWAY_URL` set used to advise "Set AI_MODEL=gateway/<model>", wrong for
+  Bedrock, and this audience is unusually likely to have both set. The text is
+  widened and pinned by a test.
 
 ## Open questions
 

@@ -50,6 +50,19 @@ import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.j
  */
 export const KEYLESS_DIAGNOSIS_SKIPPED = 'Diagnosis skipped: AI is not configured.';
 
+/**
+ * The same slot, for a run that HAS AI and was told not to use it.
+ *
+ * Both reasons reach this branch — `keyless` is `no key OR policy off` — but
+ * only one of them is about configuration. Telling an operator whose key is
+ * present and valid that "AI is not configured" sends them to add a key they
+ * already have, or (on Bedrock SigV4) one that would actively break the run by
+ * outranking the AWS credential chain. This is the same distinction
+ * `aiOffReason` and {@link AI_FORBIDDEN_BY_POLICY_MESSAGE} exist to keep.
+ */
+export const POLICY_DIAGNOSIS_SKIPPED =
+  'Diagnosis skipped: this run was asked to make no AI calls (ai.allowInRuns: false).';
+
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
 
@@ -1331,9 +1344,12 @@ export async function runTest(
       // with no rendering change; the other fields are the least-claiming
       // values the type allows, because this is a placeholder rather than an
       // analysis (stories/keyless-replay-and-gateway-env.md §Part B).
-      logger.info(KEYLESS_DIAGNOSIS_SKIPPED);
+      // Which of the two reasons put us here decides what to say: a run with a
+      // working key that was told not to spend it is not an unconfigured one.
+      const skipNote = aiAllowed ? KEYLESS_DIAGNOSIS_SKIPPED : POLICY_DIAGNOSIS_SKIPPED;
+      logger.info(skipNote);
       report.diagnosis = {
-        rootCause: KEYLESS_DIAGNOSIS_SKIPPED,
+        rootCause: skipNote,
         faultCategory: 'unknown',
         evidence: [],
         suggestedFix: '',

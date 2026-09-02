@@ -291,15 +291,14 @@ function summary(model: LmModelHandle, bridge: LmBridge, flipped: boolean): stri
     'makes any run keyless by policy. ' +
     // The one failure this command cannot detect: `gateway/` is resolved by
     // @pkent/aigateway inside the server process, which this extension neither
-    // imports nor can interrogate. A copy predating the gateway provider refuses
-    // the model it was just handed, and the error names neither Copilot nor the
-    // bridge — so the actual remedy is said here, once. It is NOT "update the
-    // framework": the framework's own dependency has to move to a version that
-    // ships the provider, which is a release, not a pull.
+    // imports nor can interrogate. A server predating the gateway provider
+    // refuses the model it was just handed, and the error names neither Copilot
+    // nor the bridge — so the remedy is said here, once. Now that the framework
+    // depends on a version shipping the provider, updating the SERVER is the
+    // fix; before that dependency moved, it was not.
     'If the server answers Unsupported model "gateway/…" and lists the providers ' +
-    'it knows, gateway/ is not among them yet: @pkent/aigateway has to ship the ' +
-    'gateway provider and the framework has to depend on that version. Updating ' +
-    'the framework alone will not fix it.';
+    'it knows, that server predates the gateway/ prefix: rebuild and restart it ' +
+    'from a checkout that has it.';
   return flipped
     ? `${base} This project was pinned keyless by a blank AI_API_KEY and is now keyed.`
     : base;

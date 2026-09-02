@@ -16,12 +16,12 @@
  *    refuse and must say `policy`, never `no key`.
  *
  * ── Why the library is mocked ───────────────────────────────────────────────
- * The pin is `@pkent/aigateway@1.4.0-beta.2`, which has no `bedrock` provider —
- * the one carrying it is built but unpublished (§Rollout). So the registry is
- * stubbed here with the shape that version will report, the same way
- * tests/ai-client.test.ts stubs the gateway class. Until the publish this is
- * the only way to exercise the branch at all; after it, these cases keep
- * working and one live compile proves the wire.
+ * Stubbed rather than real: the suite must not need `@anthropic-ai/bedrock-sdk`,
+ * the optional peer this repo deliberately does not install so that users who
+ * never touch Bedrock do not download the AWS SDK. The registry is stubbed with
+ * the shape the published package reports, the same way tests/ai-client.test.ts
+ * stubs the gateway class. The real wire is proved separately, against the
+ * published package, by the live probes and one live compile.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Config, RunSettings } from '../src/config/types.js';

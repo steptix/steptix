@@ -102,8 +102,22 @@ export function applyEnvToAiConfig(
 ): AiConfig {
   const next = { ...baseConfig };
   if (!envOverrides) return next;
+  // Present-but-empty is a VALUE, not an absence. A blank `AI_API_KEY=` line is
+  // how a project pins itself keyless — it blocks the machine-wide key from
+  // `%LOCALAPPDATA%\aiui\.env` (keyless-replay-and-gateway-env.md), and it is
+  // what the Bedrock SigV4 setup depends on, since an explicit key outranks
+  // every AWS credential source in the client's precedence. Skipping the empty
+  // string here made this path disagree with the CLI, where `withEnvDefaults`
+  // sets `''` and the machine floor only fills `undefined`: the server kept its
+  // own key and handed it to whatever the project's model resolved to. For a
+  // Bedrock project that meant the machine's gateway key travelling to AWS as a
+  // bearer token, with SigV4 never running.
+  //
+  // Only the key has this semantic. A blank `AI_MODEL` or `AI_GATEWAY_URL`
+  // means "not set here, fall back", because neither has a meaningful empty
+  // value to select.
   const apiKey = envOverrides['AI_API_KEY'];
-  if (typeof apiKey === 'string' && apiKey.length > 0) {
+  if (typeof apiKey === 'string') {
     next.apiKey = apiKey;
   }
   const model = envOverrides['AI_MODEL'];

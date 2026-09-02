@@ -1,6 +1,6 @@
 # Copilot LM bridge — compile and repair on the user's Copilot seat
 
-Status: draft — for review
+Status: BUILT and merged-pending — implemented, reviewed twice, live-verified
 Builds on: [keyless-replay-and-gateway-env.md](keyless-replay-and-gateway-env.md)
 (PR #111), the AI run switch ([run-settings.md](run-settings.md) §9), the
 model-prefix routing ([SPEC-aibroker-routing.md](../SPEC-aibroker-routing.md);

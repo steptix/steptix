@@ -207,7 +207,7 @@ function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Co
  * second list of key-free prefixes in this repo drifting against the real one
  * (stories/bedrock-provider.md §"Declaring that the provider self-authenticates").
  *
- * Guarded for the tests, not for the pin. The pinned `1.4.0-beta.2` DOES have
+ * Guarded for the tests, not for the pin. Every published version DOES have
  * `providers()`; so does every other version, which has carried it since the
  * library's first commit. No real version reaches the fallback. What reaches it is
  * `tests/ai-client.test.ts` and `tests/ai-effort.test.ts`, which replace the

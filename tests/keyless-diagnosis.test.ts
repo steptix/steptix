@@ -36,6 +36,13 @@ import { aiConfigured } from '../src/config/loader.js';
  *  constant must fail here, not agree with itself. */
 const SKIP_NOTE = 'Diagnosis skipped: AI is not configured.';
 
+/** The policy twin. A keyed run told not to spend the key is NOT unconfigured,
+ *  and telling its operator otherwise sends them to add a key they already have
+ *  — or, on Bedrock SigV4, one that would break the run by outranking the AWS
+ *  credential chain. */
+const POLICY_SKIP_NOTE =
+  'Diagnosis skipped: this run was asked to make no AI calls (ai.allowInRuns: false).';
+
 // ─── Runner harness ─────────────────────────────────────────────────────────
 
 const launchBrowserMock = vi.fn();
@@ -492,7 +499,10 @@ describe('the CLI honouring ai.allowInRuns', () => {
 
     expect(report.status).toBe('failed');
     expect(diagnoseFailureMock).not.toHaveBeenCalled();
-    expect(report.diagnosis?.rootCause).toBe(SKIP_NOTE);
+    // The POLICY note, not the no-key one: forbiddenConfig() is KEYED and merely
+    // forbidden. Asserting the no-key text here locked in the false claim.
+    expect(report.diagnosis?.rootCause).toBe(POLICY_SKIP_NOTE);
+    expect(report.diagnosis?.rootCause).not.toContain('not configured');
   });
 
   it('does not gate the runs `aiui compile` makes — a compile is a request FOR AI', async () => {

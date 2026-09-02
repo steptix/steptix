@@ -171,11 +171,10 @@ vi.mock('../src/browser/screenshot.js', () => ({
 
 /**
  * The provider registry `aiConfigured` asks whether a model needs a key
- * (stories/bedrock-provider.md §Part B). Stubbed because the pin is
- * `@pkent/aigateway@1.4.0-beta.2`, which has no `bedrock` provider — the
- * version carrying it is built but unpublished — so the real registry would
- * report `bedrock/` as needing a key and the block at the bottom of this file
- * could not exist.
+ * (stories/bedrock-provider.md §Part B). Stubbed so the suite needs neither a
+ * network call nor the optional `@anthropic-ai/bedrock-sdk` peer, which this
+ * repo deliberately does not install — the real registry is exercised against
+ * the published package by the live probes instead.
  *
  * Safe to mock file-wide: the AI client above is mocked too, so nothing here
  * ever constructs a gateway, and no other model id in this file starts with a
@@ -575,6 +574,36 @@ describe('the model override', () => {
     // ...so a session created AFTER the override runs on the base model.
     await run('rs-leak-b');
     expect(syncAuthCalls.at(-1)?.model).toBe(SERVER_MODEL);
+  });
+
+  it('a blank AI_API_KEY= clears the key rather than being ignored', async () => {
+    // Present-but-empty is a VALUE. A blank line is how a project pins itself
+    // keyless, and `applyEnvToAiConfig` used to require `length > 0`, so the
+    // server kept its OWN key — which `withMachineAiFloor` fills from the
+    // machine `.env`. Four documents in this repo promise the opposite.
+    //
+    // The sharp edge is Bedrock SigV4, whose whole setup is "no key, let the
+    // AWS credential chain sign": an explicit key outranks every AWS source, so
+    // the machine's gateway key would travel to AWS as a bearer token and SigV4
+    // would never run. That is a credential going somewhere it was never meant
+    // to, which is why this is asserted through the real route rather than a
+    // unit test of the helper.
+    await run('rs-blank-key', {
+      env: { AI_API_KEY: '', AI_MODEL: 'bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0' },
+    });
+
+    const last = syncAuthCalls.at(-1);
+    expect(last?.model).toBe('bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0');
+    expect(last?.apiKey).toBe('');
+    expect(last?.apiKey).not.toBe(SERVER_AI_KEY);
+  });
+
+  it('an absent AI_API_KEY still inherits the server key — only a blank one clears', async () => {
+    // The other half of the guard: "not mentioned" must keep meaning "fall
+    // back", or every project without the line would lose the machine key.
+    await run('rs-absent-key', { env: { AI_MODEL: 'openai/gpt-4o' } });
+
+    expect(syncAuthCalls.at(-1)?.apiKey).toBe(SERVER_AI_KEY);
   });
 
   it('null falls back to env, then to the server base', async () => {
