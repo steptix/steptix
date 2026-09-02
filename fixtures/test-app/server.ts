@@ -32,6 +32,17 @@
  *     GET /new-window          → page with buttons to open a new window and a new tab
  *     GET /new-window/popup    → content served in the new window (popup)
  *     GET /new-window/tab      → content served in the new tab
+ *
+ *   Documents (file upload) test page — stories/file-upload-steps.md:
+ *     GET    /documents        → page with a plain file field, a styled uploader
+ *                                whose <input type="file"> is hidden, and a
+ *                                multi-file field. No login required.
+ *     GET    /api/documents    → every document uploaded since the last clear
+ *     POST   /api/documents    → multipart/form-data, field name `file` (repeatable).
+ *                                Rejects disallowed extensions (400) and files
+ *                                over 1 MB (413); a batch is all-or-nothing.
+ *     DELETE /api/documents    → clears the list, so concurrent runs can isolate
+ *                                themselves without restarting the server.
  */
 
 import http from 'node:http';
@@ -81,6 +92,27 @@ const csrfTokens = new Map<string, string>();
 // Valid session IDs (populated on login)
 const validSessions = new Set<string>();
 
+// ─── Documents (file upload) ──────────────────────────────────────────────────
+
+interface DocumentRecord {
+  id: string;
+  name: string;
+  size: number;
+  /** The MIME type the client sent for the part — what the browser inferred. */
+  type: string;
+  sha256: string;
+  uploadedAt: string;
+}
+
+/** Uploaded documents, oldest first. Bytes are hashed and dropped, never kept. */
+const documents: DocumentRecord[] = [];
+let documentSeq = 0;
+
+const DOCUMENT_ALLOWED_EXTENSIONS = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.txt', '.csv']);
+const DOCUMENT_MAX_BYTES = 1024 * 1024;
+/** Cap on the whole multipart request, so a runaway upload cannot pin the fixture. */
+const DOCUMENT_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function parseBody(req: http.IncomingMessage): Promise<unknown> {
@@ -126,6 +158,82 @@ function notFound(res: http.ServerResponse): void {
 
 function unauthorized(res: http.ServerResponse, message = 'Unauthorized'): void {
   json(res, 401, { error: message });
+}
+
+class BodyTooLarge extends Error {}
+
+/**
+ * Read the raw request body into a Buffer. `parseBody` above is JSON-only and
+ * must not be used for multipart. Past `limit` the rest is drained and
+ * discarded, so the 413 can still be written on a live socket.
+ */
+function readRawBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let tooLarge = false;
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (tooLarge) return;
+      if (total > limit) { tooLarge = true; chunks.length = 0; return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (tooLarge) reject(new BodyTooLarge(`Request body exceeds ${limit} bytes`));
+      else resolve(Buffer.concat(chunks));
+    });
+    req.on('error', reject);
+  });
+}
+
+interface MultipartPart {
+  name: string;
+  /** Present for file parts only. */
+  filename?: string;
+  contentType: string;
+  data: Buffer;
+}
+
+/**
+ * Minimal multipart/form-data parser: enough for what browsers and Node's
+ * FormData send, with no dependency. Each part is
+ * `--boundary CRLF headers CRLF CRLF data CRLF`, and the body ends with
+ * `--boundary--`. Data is sliced by byte offsets so binary parts survive.
+ */
+function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
+  const delimiter = Buffer.from(`--${boundary}`);
+  const parts: MultipartPart[] = [];
+  let pos = body.indexOf(delimiter);
+  if (pos < 0) return parts;
+  for (;;) {
+    pos += delimiter.length;
+    // The closing delimiter is `--boundary--`.
+    if (body[pos] === 0x2d && body[pos + 1] === 0x2d) break;
+    if (body[pos] === 0x0d && body[pos + 1] === 0x0a) pos += 2;
+    const headersEnd = body.indexOf('\r\n\r\n', pos);
+    if (headersEnd < 0) throw new Error('Malformed multipart body: part headers never end');
+    const headers = body.subarray(pos, headersEnd).toString('utf8');
+    const dataStart = headersEnd + 4;
+    const next = body.indexOf(delimiter, dataStart);
+    if (next < 0) throw new Error('Malformed multipart body: unterminated part');
+    // The part's data is followed by CRLF, then the next delimiter.
+    const data = body.subarray(dataStart, Math.max(dataStart, next - 2));
+    const disposition = /content-disposition:\s*([^\r\n]*)/i.exec(headers)?.[1] ?? '';
+    const name = /(?:^|;)\s*name="([^"]*)"/i.exec(disposition)?.[1] ?? '';
+    const filenameMatch = /(?:^|;)\s*filename="([^"]*)"/i.exec(disposition);
+    const contentType = /content-type:\s*([^\r\n]*)/i.exec(headers)?.[1]?.trim() || 'application/octet-stream';
+    const part: MultipartPart = { name, contentType, data };
+    if (filenameMatch) part.filename = filenameMatch[1];
+    parts.push(part);
+    pos = next;
+  }
+  return parts;
+}
+
+/** The stored name is the bare file name — a client-supplied path is dropped. */
+function documentName(filename: string | undefined): string {
+  const base = (filename ?? '').split(/[\\/]/).pop() ?? '';
+  return base || 'unnamed';
 }
 
 function serveStatic(res: http.ServerResponse, filePath: string): void {
@@ -1334,6 +1442,7 @@ async function handleRequest(
       '/assertions': 'assertions.html',
       '/confirm-action': 'confirm-action.html',
       '/dom-noise': 'dom-noise.html',
+      '/documents': 'documents.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {
@@ -1343,6 +1452,81 @@ async function handleRequest(
     } else {
       notFound(res);
     }
+    return;
+  }
+
+  // ── Documents API (file upload) ────────────────────────────────────────────
+  if (pathname === '/api/documents' && method === 'GET') {
+    json(res, 200, { documents });
+    return;
+  }
+
+  if (pathname === '/api/documents' && method === 'DELETE') {
+    documents.length = 0;
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (pathname === '/api/documents' && method === 'POST') {
+    const contentType = req.headers['content-type'] ?? '';
+    const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+    const boundary = (boundaryMatch?.[1] ?? boundaryMatch?.[2])?.trim();
+    if (!/^multipart\/form-data/i.test(contentType) || !boundary) {
+      json(res, 400, { error: 'Expected a multipart/form-data body' });
+      return;
+    }
+
+    let body: Buffer;
+    try {
+      body = await readRawBody(req, DOCUMENT_MAX_REQUEST_BYTES);
+    } catch (err) {
+      if (err instanceof BodyTooLarge) {
+        json(res, 413, { error: `Request body is larger than the ${DOCUMENT_MAX_REQUEST_BYTES / (1024 * 1024)} MB limit` });
+        return;
+      }
+      throw err;
+    }
+
+    let parts: MultipartPart[];
+    try {
+      parts = parseMultipart(body, boundary);
+    } catch (err) {
+      json(res, 400, { error: (err as Error).message });
+      return;
+    }
+
+    const files = parts.filter((p) => p.filename !== undefined);
+    if (files.length === 0) {
+      json(res, 400, { error: 'Choose a file first' });
+      return;
+    }
+
+    // Validate every part before adding any: a batch is all-or-nothing, so a
+    // test that sends one bad file among good ones sees nothing half-added.
+    for (const file of files) {
+      const name = documentName(file.filename);
+      const ext = path.extname(name).toLowerCase();
+      if (!DOCUMENT_ALLOWED_EXTENSIONS.has(ext)) {
+        json(res, 400, { error: `${name} is not an allowed file type` });
+        return;
+      }
+      if (file.data.length > DOCUMENT_MAX_BYTES) {
+        json(res, 413, { error: `${name} is larger than the 1 MB limit` });
+        return;
+      }
+    }
+
+    const added: DocumentRecord[] = files.map((file) => ({
+      id: `doc-${String(++documentSeq).padStart(3, '0')}`,
+      name: documentName(file.filename),
+      size: file.data.length,
+      type: file.contentType,
+      sha256: crypto.createHash('sha256').update(file.data).digest('hex'),
+      uploadedAt: new Date().toISOString(),
+    }));
+    documents.push(...added);
+    json(res, 201, { documents: added });
     return;
   }
 
