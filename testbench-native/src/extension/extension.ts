@@ -39,6 +39,8 @@ import {
 import { ServerStatusBar } from './server-status-bar.js';
 import { CompileTailSignals } from './compile-tail-signals.js';
 import { registerServerCommands } from './server-commands.js';
+import { LmBridge, type BridgeStatus, type LmFacade } from './lm-bridge.js';
+import { registerLmBridgeCommands } from './lm-bridge-setup.js';
 import {
   AutoStartGuard,
   defaultHealthProbe,
@@ -1476,10 +1478,40 @@ export interface TestBenchTestHooks {
    *  detail-less fallback; called with one it returns the crash-first text a
    *  ⚠ shows in the normal case, which is what the decoration builds. */
   staleHoverMessage: (failure?: StepFailureDetail) => string;
+  /** The Copilot bridge's listener state, bound port and served-request count. */
+  lmBridgeStatus: () => BridgeStatus;
+  /** Swap the `vscode.lm` namespace the bridge (and the setup command) calls,
+   *  and shorten the EADDRINUSE standby retry so the adopt is observable inside
+   *  a test's timeout. A real `vscode.lm` in the harness would need a signed-in
+   *  Copilot seat and would spend it. */
+  configureLmBridge: (opts: { facade?: LmFacade; retryMs?: number }) => void;
+  /** The bridge token, so a test can present the header a real client would.
+   *  Minting it here is not a side effect the suite has to undo: it is the same
+   *  SecretStorage entry the extension would mint on first use, inside the
+   *  harness's own user-data-dir. */
+  lmBridgeToken: () => Promise<string>;
+  /** Re-read the bridge settings now, instead of waiting on the configuration
+   *  event. Returns once the listen attempt has settled. */
+  syncLmBridge: () => Promise<void>;
 }
 
 export interface TestBenchExports {
   __testHooks?: TestBenchTestHooks;
+}
+
+/**
+ * Was this extension host launched by the integration harness?
+ *
+ * `TESTBENCH_TEST_REPORT` is the path Mocha's JSON reporter writes to. Both
+ * runners set it (tests/integration/runTest.cjs, runLiveTest.cjs), the suite
+ * entry reads it, and nothing in a user's VS Code does — which makes it the
+ * one signal available to `activate()` that distinguishes a test host from a
+ * real window. Checked at activation rather than per hook: the whole surface
+ * is either present or absent, so there is no half-exposed shape for a caller
+ * to probe.
+ */
+function underIntegrationHarness(): boolean {
+  return (process.env['TESTBENCH_TEST_REPORT'] ?? '') !== '';
 }
 
 export function activate(context: vscode.ExtensionContext): TestBenchExports {
@@ -1493,6 +1525,28 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   // scatter the diagnosis of a single process across folders.
   const serverLogPath = (): string =>
     vscode.Uri.joinPath(context.globalStorageUri, 'server.log').fsPath;
+
+  // Copilot bridge (stories/copilot-lm-bridge.md). Constructed always, started
+  // only when the User-scoped `lmBridge.enabled` says so — a window that never
+  // opted in opens no listener and shows no status bar item.
+  const lmBridge = new LmBridge(context);
+
+  /**
+   * Fire-and-forget `sync()`, with the rejection handled.
+   *
+   * `sync()` settles for every state it models — disabled, standby, a port it
+   * refuses — so this catch is for the one it does not: an unmodelled failure on
+   * a call nobody awaits is otherwise an unhandled rejection, which stops
+   * nothing and tells no one. The bridge's own channel, so the line lands next
+   * to the `lm-bridge:` lines a user is already reading.
+   */
+  const syncLmBridge = (): void => {
+    void lmBridge.sync().catch((err: unknown) => {
+      out.appendLine(
+        `[${ts()}] lm-bridge: sync failed — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  };
 
   const tracker = new ActiveFileTracker();
   const decorations = new DecorationManager(context, tracker);
@@ -1648,6 +1702,15 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       }
     }),
     openInEditor,
+    lmBridge,
+    ...registerLmBridgeCommands(lmBridge),
+    // Both bridge settings take effect immediately. The port especially: it is
+    // baked into every `.env` the setup command has written, so a change that
+    // waited for a window reload would leave those files pointing at a port
+    // nothing is serving.
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('testbench-native.lmBridge')) syncLmBridge();
+    }),
     // F12 / Ctrl+Click / Peek on `[skill: ...]` / `[tool: ...]` invocations
     // and on bare-name section calls / `### Name` headings.
     vscode.languages.registerDefinitionProvider(
@@ -1726,6 +1789,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
     }),
   );
 
+  // Not awaited: activation must not block on a socket, and a bridge that ends
+  // up in standby behind another window is a normal outcome, not a failure.
+  syncLmBridge();
+
   out.appendLine(`[${ts()}] activation complete — ${context.subscriptions.length} disposables`);
 
   if (!context.globalState.get<boolean>(FIRST_ACTIVATION_KEY)) {
@@ -1739,6 +1806,14 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         if (choice === 'Show Run Log') void vscode.commands.executeCommand('testbench-native.showRunLog');
       });
   }
+
+  // Withheld outside the harness. `exports` is readable by any co-installed
+  // extension through `vscode.extensions.getExtension(...)`, and these hooks are
+  // not merely diagnostic: `lmBridgeToken` hands out the bearer token that
+  // guards the Copilot bridge, and `configureLmBridge` swaps the `vscode.lm`
+  // namespace the bridge calls — between them, everything needed to spend
+  // somebody's Copilot seat or read what is being sent to it.
+  if (!underIntegrationHarness()) return {};
 
   return {
     __testHooks: {
@@ -1859,6 +1934,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       compileTails: () => registry.compileTailSignals.tails,
       pendingCodeBehind: () => codeBehindDiffs.pending,
       staleHoverMessage: (failure) => staleHoverMessage(failure),
+      lmBridgeStatus: () => lmBridge.status(),
+      configureLmBridge: (opts) => lmBridge.configureForTests(opts),
+      lmBridgeToken: () => lmBridge.ensureToken(),
+      syncLmBridge: () => lmBridge.sync(),
     },
   };
 }

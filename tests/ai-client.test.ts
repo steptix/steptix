@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AiClient, AiNotConfiguredError, AI_NOT_CONFIGURED_MESSAGE } from '../src/ai/client.js';
+import {
+  AiClient,
+  AiForbiddenByPolicyError,
+  AiNotConfiguredError,
+  AI_FORBIDDEN_BY_POLICY_MESSAGE,
+  AI_NOT_CONFIGURED_MESSAGE,
+  GatewayUrlRequiredError,
+  GATEWAY_URL_REQUIRED_MESSAGE,
+} from '../src/ai/client.js';
 import type { AiConfig } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { logger } from '../src/utils/logger.js';
@@ -144,8 +152,11 @@ describe('AiClient — @pkent/aigateway integration', () => {
       const warned = vi.mocked(logger.warn).mock.calls.map((c) => String(c[0])).join('\n');
       expect(warned).toContain('https://llm.corp.example');
       expect(warned).toContain('openai/chatgpt-5.5');
+      // Both routing spellings are named: the reader has to be able to tell
+      // which one their `.env` should say.
+      expect(warned).toContain('gateway/');
       expect(warned).toContain('aibroker/');
-      expect(warned).toContain('AI_MODEL=aibroker/<provider>/<model>');
+      expect(warned).toContain('AI_MODEL=gateway/<model>');
       // Warned, not refused: the pairing is legal, and the request still goes.
       expect(constructorMock).toHaveBeenCalledWith('openai/chatgpt-5.5', 'test-key', {});
     });
@@ -194,6 +205,135 @@ describe('AiClient — @pkent/aigateway integration', () => {
         AiNotConfiguredError,
       );
       expect(constructorMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('gateway/ — the explicit-destination prefix', () => {
+    // stories/copilot-lm-bridge.md §Part B. `gateway/` says what the mechanism
+    // does — route to AI_GATEWAY_URL — where `aibroker/` names the hosted broker
+    // application. The alias routes identically; the one behavioural difference
+    // is that `gateway/` demands a URL somebody chose.
+    const corp = 'https://llm.corp.example';
+
+    it('builds the gateway with { baseURL } for a gateway/ model, model string verbatim', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1', gatewayUrl: corp },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      // The full string goes across: stripping the first segment is the
+      // library's job (`gateway` is a provider alias there), which is why this
+      // asserts the prefix is still ON the model we hand it.
+      expect(constructorMock).toHaveBeenCalledTimes(1);
+      expect(constructorMock).toHaveBeenCalledWith('gateway/copilot/gpt-4.1', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+      expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn about an inert pair — the URL is doing its job', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1', gatewayUrl: corp },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('normalises a trailing slash into the /v1 suffix, as aibroker/ does', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1', gatewayUrl: `${corp}/` },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(constructorMock).toHaveBeenCalledWith('gateway/copilot/gpt-4.1', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+    });
+
+    it('refuses a gateway/ model when AI_GATEWAY_URL was never set, and sends nothing', async () => {
+      // The guard: the loader keeps no provenance, so "unset" is a value
+      // comparison against the built-in default. Refusing beats silently
+      // shipping the key and the DOM payload to the default host.
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        tokenTracker as any,
+      );
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        GatewayUrlRequiredError,
+      );
+      expect(constructorMock).not.toHaveBeenCalled();
+      expect(chatMock).not.toHaveBeenCalled();
+      expect(streamMock).not.toHaveBeenCalled();
+    });
+
+    it('names AI_GATEWAY_URL and .env, and never AI_API_KEY, in the refusal', async () => {
+      // A key is not the problem here, and naming one would send the reader to
+      // edit a line that is already correct.
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        tokenTracker as any,
+      );
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(
+        GATEWAY_URL_REQUIRED_MESSAGE,
+      );
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).toBe(new GatewayUrlRequiredError().message);
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).toContain('AI_GATEWAY_URL');
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).toContain('.env');
+      expect(GATEWAY_URL_REQUIRED_MESSAGE).not.toContain('AI_API_KEY');
+    });
+
+    it('refuses a default URL that only differs by a trailing slash', async () => {
+      const client = new AiClient(
+        {
+          ...baseConfig,
+          model: 'gateway/copilot/gpt-4.1',
+          gatewayUrl: `${DEFAULT_CONFIG.ai.gatewayUrl}/`,
+        },
+        tokenTracker as any,
+      );
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        GatewayUrlRequiredError,
+      );
+      expect(constructorMock).not.toHaveBeenCalled();
+    });
+
+    it('lets aibroker/ fall through to the default endpoint, guard or no guard', async () => {
+      // The case the guard must not break: `aibroker/` is the zero-config
+      // hosted-broker spelling, so the same config that refuses above proceeds
+      // here. Testing the refusal alone would not have caught a guard that
+      // matched both prefixes.
+      const client = new AiClient(
+        { ...baseConfig, model: 'aibroker/openai/chatgpt-5.5' },
+        tokenTracker as any,
+      );
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      expect(result.text).toBe('{}');
+      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
+    });
+
+    it('lets a gateway/ model through the moment a URL is chosen', async () => {
+      const client = new AiClient(
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        tokenTracker as any,
+      );
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        GatewayUrlRequiredError,
+      );
+
+      // Same client, one `.env` edit later — the refusal is about the config,
+      // not a state the client got stuck in.
+      client.syncAuth('gateway/copilot/gpt-4.1', 'test-key', corp);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(result.text).toBe('{}');
+      expect(constructorMock).toHaveBeenCalledWith('gateway/copilot/gpt-4.1', 'test-key', {
+        baseURL: 'https://llm.corp.example/v1',
+      });
     });
   });
 
@@ -277,6 +417,120 @@ describe('AiClient — @pkent/aigateway integration', () => {
         baseURL: 'https://llm.corp.example/v1',
       });
       expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('setAiPolicy — the run-forbids-AI veil', () => {
+    // stories/run-settings.md §9. Every test here runs on a KEYED client: the
+    // whole point of the veil is that a key is present and the run was asked to
+    // spend nothing anyway, so a keyless fixture would prove nothing.
+
+    it('refuses a keyed request while the veil is up, and sends nothing', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(false);
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+      expect(constructorMock).not.toHaveBeenCalled();
+      expect(chatMock).not.toHaveBeenCalled();
+      expect(streamMock).not.toHaveBeenCalled();
+    });
+
+    it('still runs the ordinary call when policy allows it', async () => {
+      // The case the veil must not break, asserted alongside the refusal rather
+      // than on its own: a gate tested only on the input it declines can be
+      // refusing everything and look correct.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(true);
+
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
+      expect(result.text).toBe('{}');
+      expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('lifts on the next batch without a session recycle', async () => {
+      // Settings are re-resolved per request, so a client that stayed veiled
+      // after the caller passed ai: "on" would need the browser thrown away to
+      // recover — the very cost this whole feature exists to avoid.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+
+      client.setAiPolicy(false);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+
+      client.setAiPolicy(true);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).resolves.toMatchObject({
+        text: '{}',
+      });
+      expect(chatMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('is NOT AiNotConfiguredError, and never advises setting a key', async () => {
+      // The distinction the echo has to keep: "off (policy)" and "off (no key)"
+      // need opposite responses, and "Set AI_API_KEY in the project .env" sends
+      // the reader to edit a line that has no bearing on the refusal.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(false);
+
+      const err = await client
+        .complete([{ role: 'user', content: 'Hi' }])
+        .then(() => null)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AiForbiddenByPolicyError);
+      expect(err).not.toBeInstanceOf(AiNotConfiguredError);
+      expect((err as Error).message).toBe(AI_FORBIDDEN_BY_POLICY_MESSAGE);
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).toContain('runSettings.ai: off');
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).not.toContain('AI_API_KEY');
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).not.toBe(AI_NOT_CONFIGURED_MESSAGE);
+    });
+
+    it('beats the keyless refusal when a run is both keyless and policy-off', async () => {
+      // Both true is reachable — a keyless machine whose caller also asked for
+      // ai: "off". Policy is the more specific statement about THIS run, and
+      // it is the one whose advice is not misleading.
+      const client = new AiClient({ ...baseConfig, apiKey: '' }, tokenTracker as any);
+      client.setAiPolicy(false);
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+      // ...and because this run reaches the policy message with NO key, that
+      // message may not assert one is configured. The claim would be false for
+      // exactly the reader standing here.
+      expect(AI_FORBIDDEN_BY_POLICY_MESSAGE).not.toMatch(/key is\s+configured/i);
+    });
+
+    it('refuses the streaming path on the same terms', async () => {
+      const client = new AiClient(
+        { ...baseConfig, streamResponses: true },
+        tokenTracker as any,
+      );
+      client.setAiPolicy(false);
+
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+      expect(streamMock).not.toHaveBeenCalled();
+    });
+
+    it('logs no request for the request it never made', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      client.setAiPolicy(false);
+      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+        AiForbiddenByPolicyError,
+      );
+
+      const logged = [
+        ...vi.mocked(logger.debug).mock.calls,
+        ...vi.mocked(logger.trace).mock.calls,
+      ]
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(logged).not.toContain('POST');
+      expect(logged).not.toContain('ai.request');
     });
   });
 

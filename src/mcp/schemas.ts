@@ -268,6 +268,19 @@ const sendScreenshots = z
       `needs the image. ${settingsNote}`,
   );
 
+const aiMode = z
+  .enum(['on', 'off', 'default'])
+  .optional()
+  .describe(
+    'Whether this run may use AI at all. `off` makes the run behave exactly ' +
+      'like a keyless one no matter which keys are configured: compiled steps ' +
+      'replay, and anything needing a model — an uncompiled step, mid-run ' +
+      'healing of a broken entry — is skipped or refused with a typed error ' +
+      'naming the policy. Use it to guarantee a run spends nothing, and to get ' +
+      '"this run made zero AI calls, by policy" on the result. Compiling and ' +
+      `repairing a step are NOT gated by it — those are requests for AI. ${settingsNote}`,
+  );
+
 const screenshotsReturn = z
   .enum(['none', 'on-failure', 'final', 'default'])
   .optional()
@@ -304,6 +317,7 @@ export const runStepsInput = toolSchema({
   capture,
   full_page: fullPage,
   send_screenshots: sendScreenshots,
+  ai: aiMode,
   screenshots_return: screenshotsReturn,
 });
 
@@ -319,6 +333,7 @@ export const runTestFileInput = toolSchema({
   capture,
   full_page: fullPage,
   send_screenshots: sendScreenshots,
+  ai: aiMode,
   screenshots_return: screenshotsReturn,
 });
 
@@ -690,12 +705,26 @@ export const getRunSettingsOutput = toolSchema({
   capture: z.enum(['every-step', 'on-failure', 'none', 'custom']).nullable(),
   fullPage: z.boolean().nullable(),
   sendScreenshots: z.boolean().nullable(),
+  ai: z
+    .enum(['on', 'off'])
+    .nullable()
+    .describe('Whether the next run on this session could use AI at all.'),
+  aiOffReason: z
+    .enum(['policy', 'no-key'])
+    .nullable()
+    .describe(
+      'Why ai is "off": "policy" (a run that was asked to make no AI calls) ' +
+        'or "no-key" (nothing configured on this machine). Null when ai is ' +
+        'on. Policy is reported first when both hold, so "policy" says ' +
+        'nothing either way about whether a key exists.',
+    ),
   sources: z
     .object({
       model: settingSource,
       capture: settingSource,
       fullPage: settingSource,
       sendScreenshots: settingSource,
+      ai: settingSource.nullable(),
     })
     .nullable(),
   overrides: z
@@ -704,6 +733,7 @@ export const getRunSettingsOutput = toolSchema({
       capture: z.enum(['every-step', 'on-failure', 'none']).nullable(),
       fullPage: z.boolean().nullable(),
       sendScreenshots: z.boolean().nullable(),
+      ai: z.enum(['on', 'off']).nullable(),
     })
     .nullable()
     .describe(
@@ -716,6 +746,9 @@ export const getRunSettingsOutput = toolSchema({
       capture: z.enum(['every-step', 'on-failure', 'none', 'custom']),
       fullPage: z.boolean(),
       sendScreenshots: z.boolean(),
+      // Nullable where its neighbours are not, for the reason `sources.ai` is:
+      // a server predating the AI switch reports the rest and omits this.
+      ai: z.enum(['on', 'off']).nullable(),
     })
     .nullable()
     .describe('What a run with no project config and no overrides would use.'),
@@ -1153,12 +1186,32 @@ const effectiveSettings = z
     capture: z.enum(['every-step', 'on-failure', 'none', 'custom']).nullable(),
     fullPage: z.boolean().nullable(),
     sendScreenshots: z.boolean().nullable(),
+    ai: z
+      .enum(['on', 'off'])
+      .nullable()
+      .describe(
+        'Whether this run could use AI. "off" means it made zero AI calls — ' +
+          'read aiOffReason to see whether that was asked for or forced.',
+      ),
+    aiOffReason: z
+      .enum(['policy', 'no-key'])
+      .nullable()
+      .describe(
+        'Why ai is "off". "policy" — somebody asked for a run that spends ' +
+          'nothing. "no-key" — nothing is configured on this machine, so no ' +
+          'run here can use AI. Policy is reported first when both hold, so ' +
+          '"policy" says nothing either way about whether a key exists. Null ' +
+          'when ai is on.',
+      ),
     sources: z
       .object({
         model: settingSource,
         capture: settingSource,
         fullPage: settingSource,
         sendScreenshots: settingSource,
+        // Nullable where the other four are not: a Sessions API server that
+        // predates the AI switch reports the four and omits this one.
+        ai: settingSource.nullable(),
       })
       .nullable(),
     screenshotsReturn: z.enum(['none', 'on-failure', 'final']),

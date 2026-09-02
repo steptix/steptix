@@ -658,6 +658,16 @@ export interface InternalRunOptions {
   };
   /** Receives the full step records the `StepResponse` folds away. */
   onRunDetails?: (details: RunDetails) => void;
+  /**
+   * Ignore the AI run switch for this request (stories/run-settings.md §9).
+   *
+   * Compile, Repair This Step and errands are requests *for* AI, so a session
+   * whose retained `ai` is `off` must not gate its own repairs. Deliberately
+   * here and not on `StepRequest`: sending `runSettings: {ai: "on"}` instead
+   * would be RETAINED by `mergeRunSettings` and silently clobber the caller's
+   * standing `off` for every later run.
+   */
+  bypassAiPolicy?: boolean;
 }
 
 export interface StepResultResponse {
@@ -2534,12 +2544,50 @@ export class SessionManager {
     // value would leave it unable to tell "the project's .env chose this" from
     // "the agent asked for this", which is the provenance the whole
     // first-class-field decision exists to keep.
+    //
+    // Compile is a request FOR AI, so the switch does not gate it. Two ways in,
+    // both per-request and neither retained: the in-process flag the
+    // compile-runner sets, and a `compile` on the wire — which is how "Compile
+    // This Step" and "Repair this step" actually arrive (they ride
+    // `compile: 'steps'` on the step route, not `POST /codebehind/compile`), so
+    // the in-process flag alone would leave the commands §9 names as carve-outs
+    // gated on an `ai: off` session.
+    const bypassAiPolicy = internal?.bypassAiPolicy === true || request.compile !== undefined;
     const resolvedSettings = resolveRunSettings(
       this.config,
       projectConfig,
       desiredAi.model,
       session.runSettings,
+      // `desiredAi`, not `this.config.ai`: whether this run has a key at all is
+      // decided by the client's `.env` layered over the server base, and a
+      // server started keyless would otherwise report a keyed project as
+      // having no AI.
+      { ai: desiredAi, ...(bypassAiPolicy && { bypassAiPolicy: true }) },
     );
+    // Policy-off is the only state that veils the client. A run that is keyless
+    // for want of a key must keep `AiNotConfiguredError`, whose advice ("set
+    // AI_API_KEY") is right there and wrong here.
+    const aiPolicyOff = resolvedSettings.effective.aiOffReason === 'policy';
+    // Safe to mutate the shared client here for `syncAuth`'s reason: this is the
+    // top of the `queueTail`-serialized body, so no concurrent batch on this
+    // session is in flight.
+    session.aiClient.setAiPolicy(!aiPolicyOff);
+    // `opts.keyless` for the executor. The predicate, not the key check alone:
+    // policy-off has to reuse the heal fall-through skip and its stale/
+    // healSkipped sidecar, or a compiled step that broke under `ai: off` would
+    // be invisible to compile-repair.
+    //
+    // `desiredModel`, not `desiredAi.model` — the one line here that wants the
+    // POST-override model rather than the pre-override one the resolver above
+    // is deliberately given. `aiConfigured` is model-aware now (a
+    // self-authenticating provider needs no key), and this is asking what the
+    // run can actually do, not where a setting came from: it is the same model
+    // `syncAuth` just pointed the client at, so a keyless `bedrock/` project
+    // overridden to `anthropic/…` reports having no AI instead of reporting
+    // `on` and dying on an empty key.
+    const runKeyless =
+      !aiConfigured({ ...desiredAi, model: desiredModel }) ||
+      resolvedSettings.effective.ai === 'off';
     // The session's own viewport, re-applied on top (stories/per-test-viewport.md
     // §2: "every browser the test opens inherits it").
     //
@@ -4189,14 +4237,16 @@ export class SessionManager {
                 // so the entry's `step.getVar('data.url')` reads the same value.
                 ...(envDataCtx && { envData: envDataCtx }),
                 ...(cb?.strict !== undefined && { codeBehindStrict: cb.strict }),
-                // A broken entry fails instead of healing when this machine
-                // has no AI (stories/keyless-replay-and-gateway-env.md §Part
-                // B). Read off `desiredAi`, NOT `runConfig.ai`: `runConfig` is
-                // rebuilt from the server's startup config with only the run
-                // settings re-sourced, so a key that arrived in the client's
-                // `.env` is not in it — and a server started keyless would
-                // then refuse to heal a project that has its own key.
-                ...(!aiConfigured(desiredAi) && { keyless: true }),
+                // A broken entry fails instead of healing when this run has no
+                // AI (stories/keyless-replay-and-gateway-env.md §Part B) —
+                // either because the machine has no key or because the run
+                // forbids AI (stories/run-settings.md §9). See `runKeyless`:
+                // the key half is read off `desiredAi`, NOT `runConfig.ai`,
+                // which carries only the server's startup key.
+                ...(runKeyless && { keyless: true }),
+                // Which explanation the skipped step carries. Absent means
+                // 'no-key', so nothing changes for a run that simply has no key.
+                ...(runKeyless && aiPolicyOff && { keylessReason: 'policy' as const }),
                 ...(captureStepContext && { captureStepContext: true }),
                 // No interactive console attached to a server-driven run —
                 // an AI clarification prompt must fail the step fast rather

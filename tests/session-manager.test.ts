@@ -32,7 +32,11 @@ const browserTrackerInstances: Array<{ getActive: ReturnType<typeof vi.fn>; clos
 
 // Track AiClient instances so tests can assert the per-batch env re-sync
 // (issue 019) — how many clients were built and what syncAuth was called with.
-const aiClientInstances: Array<{ config: any; syncAuth: ReturnType<typeof vi.fn> }> = [];
+const aiClientInstances: Array<{
+  config: any;
+  syncAuth: ReturnType<typeof vi.fn>;
+  setAiPolicy: ReturnType<typeof vi.fn>;
+}> = [];
 
 vi.mock('../src/browser/manager.js', () => {
   class BrowserTracker {
@@ -95,6 +99,7 @@ vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     config: any;
     chat = vi.fn(async () => '{}');
+    setAiPolicy = vi.fn();
     syncAuth = vi.fn((model: string, apiKey: string | undefined, gatewayUrl?: string) => {
       const changed =
         model !== this.config.model ||
@@ -299,6 +304,58 @@ describe('SessionManager', () => {
       expect(ai.config.model).toBe('test-model');
       expect(ai.config.apiKey).toBeUndefined();
       expect(ai.config.gatewayUrl).toBe('https://ai.test');
+    });
+  });
+
+  describe('the compile/errand carve-out from the AI switch', () => {
+    // stories/run-settings.md §9. `POST /codebehind/compile` drives this same
+    // machinery in process, and its request carries no `compile` field — so the
+    // wire-derived carve-out on the step route does not cover it and this flag
+    // has to. A keyed manager, because the switch is only meaningful with one.
+    const keyed = { ...testConfig, ai: { ...testConfig.ai, apiKey: 'k' } };
+
+    /** The options object the executor got on the Nth (0-based) step call. */
+    const optsAt = (call: number): Record<string, unknown> =>
+      vi.mocked(executeStep).mock.calls[call]![3] as unknown as Record<string, unknown>;
+
+    it('ignores a retained `ai: off` for an in-process request FOR AI', async () => {
+      const manager2 = new SessionManager(keyed);
+      await manager2.executeSteps('carve', { steps: ['s1'], runSettings: { ai: 'off' } });
+      expect(optsAt(0)['keyless']).toBe(true);
+
+      await manager2.executeSteps('carve', { steps: ['s2'] }, undefined, undefined, {
+        bypassAiPolicy: true,
+      });
+
+      expect(optsAt(1)).not.toHaveProperty('keyless');
+      expect(aiClientInstances[0]!.setAiPolicy.mock.calls).toEqual([[false], [true]]);
+    });
+
+    it('does not retain the bypass — the next ordinary run is off again', async () => {
+      // The trap §9 names: compile sending `runSettings: {ai: "on"}` instead
+      // would be merged onto the session and silently clobber the caller's
+      // standing `off` for every later run.
+      const manager2 = new SessionManager(keyed);
+      await manager2.executeSteps('carve-keep', { steps: ['s1'], runSettings: { ai: 'off' } });
+      await manager2.executeSteps('carve-keep', { steps: ['s2'] }, undefined, undefined, {
+        bypassAiPolicy: true,
+      });
+      await manager2.executeSteps('carve-keep', { steps: ['s3'] });
+
+      expect(optsAt(2)['keyless']).toBe(true);
+      expect(manager2.getRunSettings('carve-keep')?.session?.overrides).toEqual({ ai: 'off' });
+    });
+
+    it('does not conjure AI out of the bypass on a keyless server', async () => {
+      // It lifts a POLICY. A compile on a machine with no model is still a
+      // compile with no model, and the executor has to keep hearing so.
+      const manager2 = new SessionManager(testConfig);
+      await manager2.executeSteps('carve-keyless', { steps: ['s1'] }, undefined, undefined, {
+        bypassAiPolicy: true,
+      });
+
+      expect(optsAt(0)['keyless']).toBe(true);
+      expect(optsAt(0)).not.toHaveProperty('keylessReason');
     });
   });
 

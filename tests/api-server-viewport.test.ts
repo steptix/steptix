@@ -89,6 +89,7 @@ vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     config = { model: 'mock-model' };
     chat = vi.fn(async () => '{}');
+    setAiPolicy = vi.fn();
     syncAuth = vi.fn(() => null);
   },
 }));

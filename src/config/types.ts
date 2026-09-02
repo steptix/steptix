@@ -29,6 +29,27 @@ export interface AiConfig {
   sendScreenshots: boolean;
   /** Run a post-failure AI diagnosis pass and attach the result to the report */
   diagnoseFailures: boolean;
+  /**
+   * May a run use AI at all? Default `true`, so absence is exactly today's
+   * behaviour (stories/run-settings.md §9).
+   *
+   * The project-level floor under the per-session `ai` run setting: `false`
+   * makes a run behave like a keyless one no matter which keys are configured —
+   * compiled steps replay, and anything needing a model is skipped or refused.
+   * Compile, repair and errands are deliberately NOT gated by it; they are
+   * requests *for* AI.
+   *
+   * Scope: every path that runs a test — the Sessions API server (TestBench,
+   * MCP, the HTTP API), the `aiui run` CLI and the Runner UI. The two
+   * non-server paths resolve no run settings, so the per-session `ai` override
+   * cannot reach them and this key is the whole switch there.
+   *
+   * Neither of those two honoured it until stories/bedrock-provider.md:
+   * blanking `AI_API_KEY=` was a working substitute right up until a provider
+   * that authenticates itself, where there is no key to blank and a CI user
+   * would have had no way to force a no-AI run at all.
+   */
+  allowInRuns?: boolean;
 }
 
 /**
@@ -393,6 +414,22 @@ export interface McpConfig {
 export type CaptureMode = 'every-step' | 'on-failure' | 'none' | 'default';
 
 /**
+ * Whether AI may be used during a run (stories/run-settings.md §9).
+ *
+ * `off` does not invent a mode — it reuses keyless: compiled steps replay, a
+ * broken entry takes the skip instead of healing, and a step that needs a model
+ * is refused. `default` clears the override and falls back to `ai.allowInRuns`.
+ */
+export type AiMode = 'on' | 'off' | 'default';
+
+/**
+ * Why AI was off for a run. Support has to tell these apart: `'policy'` is
+ * somebody's stated intent and the key is fine; `'no-key'` is a machine with
+ * nothing configured, and the advice is the opposite in each case.
+ */
+export type AiOffReason = 'policy' | 'no-key';
+
+/**
  * Per-session overrides for how a run behaves, applied per request and
  * RETAINED on the session (stories/run-settings.md §1–§2).
  *
@@ -413,6 +450,9 @@ export interface RunSettings {
   /** `ai.sendScreenshots` — whether the MODEL sees the image while it works,
    *  which is the main cost lever on a run. */
   sendScreenshots?: boolean | null;
+  /** Whether AI may be used at all during the run. `'default'` falls back to
+   *  the project's `ai.allowInRuns`. */
+  ai?: AiMode;
 }
 
 /** Which layer decided a setting's value. */
@@ -436,11 +476,21 @@ export interface EffectiveSettings {
   capture: 'every-step' | 'on-failure' | 'none' | 'custom';
   fullPage: boolean;
   sendScreenshots: boolean;
+  /** Whether this run could use AI. `'off'` covers both a policy that forbids
+   *  it and a machine with no key — {@link aiOffReason} says which. */
+  ai: 'on' | 'off';
+  /** Why {@link ai} is `'off'`; `null` when it is on. Reported rather than
+   *  inferred because the two states need opposite advice, and a key IS present
+   *  on the policy path. */
+  aiOffReason: AiOffReason | null;
   sources: {
     model: SettingSource;
     capture: SettingSource;
     fullPage: SettingSource;
     sendScreenshots: SettingSource;
+    /** Which layer decided the AI POLICY. A missing key does not move this:
+     *  it is not a setting anybody chose. */
+    ai: SettingSource;
   };
 }
 

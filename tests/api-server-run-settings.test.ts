@@ -100,6 +100,17 @@ const syncAuthCalls: { model: string; apiKey: string | undefined; gatewayUrl: st
  *  would show up on the very first batch. */
 const aiClientConfigs: MockAiConfig[] = [];
 
+/**
+ * Every `setAiPolicy` the server made, in order — the client-side half of the
+ * AI switch (stories/run-settings.md §9).
+ *
+ * Recorded because `opts.keyless` cannot stand for it: that flag never reaches
+ * `executeBranchedStep`, so the veil on the client is the only thing covering a
+ * branched AI step, and an assertion on the executor alone would pass with it
+ * missing.
+ */
+const aiPolicyCalls: boolean[] = [];
+
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     /** Retained and MUTATED by `syncAuth`, exactly as the real client does.
@@ -113,6 +124,9 @@ vi.mock('../src/ai/client.js', () => ({
       aiClientConfigs.push({ ...config });
     }
     chat = vi.fn(async () => '{}');
+    setAiPolicy = vi.fn((allowed: boolean) => {
+      aiPolicyCalls.push(allowed);
+    });
     syncAuth = vi.fn((model: string, apiKey: string | undefined, gatewayUrl?: string) => {
       syncAuthCalls.push({ model, apiKey, gatewayUrl });
       const changed = model !== this.config.model;
@@ -154,6 +168,31 @@ vi.mock('../src/report/generator.js', () => ({
 vi.mock('../src/browser/screenshot.js', () => ({
   captureScreenshot: vi.fn(async () => ({ base64: 'fakeBase64' })),
 }));
+
+/**
+ * The provider registry `aiConfigured` asks whether a model needs a key
+ * (stories/bedrock-provider.md §Part B). Stubbed so the suite needs neither a
+ * network call nor the optional `@anthropic-ai/bedrock-sdk` peer, which this
+ * repo deliberately does not install — the real registry is exercised against
+ * the published package by the live probes instead.
+ *
+ * Safe to mock file-wide: the AI client above is mocked too, so nothing here
+ * ever constructs a gateway, and no other model id in this file starts with a
+ * self-authenticating prefix.
+ */
+vi.mock('@pkent/aigateway', () => {
+  class FakeAIGateway {
+    static providers() {
+      return [
+        { id: 'anthropic', prefix: 'anthropic/' },
+        { id: 'openai', prefix: 'openai/' },
+        { id: 'gateway', prefix: 'gateway/' },
+        { id: 'bedrock', prefix: 'bedrock/', selfAuthenticating: true },
+      ];
+    }
+  }
+  return { AIGateway: FakeAIGateway, default: FakeAIGateway };
+});
 
 vi.mock('../src/utils/logger.js', () => ({
   logger: {
@@ -310,7 +349,67 @@ beforeEach(() => {
   stepMock.mockClear();
   syncAuthCalls.length = 0;
   aiClientConfigs.length = 0;
+  aiPolicyCalls.length = 0;
 });
+
+/** Read SSE frames into {event, data} pairs. */
+async function readSse(res: Response): Promise<{ event: string; data: any }[]> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const events: { event: string; data: any }[] = [];
+  let currentEvent = 'message';
+  let currentData: string[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, '');
+      buf = buf.slice(nl + 1);
+      if (line === '') {
+        if (currentData.length > 0) {
+          try {
+            events.push({ event: currentEvent, data: JSON.parse(currentData.join('\n')) });
+          } catch {
+            events.push({ event: currentEvent, data: currentData.join('\n') });
+          }
+        }
+        currentEvent = 'message';
+        currentData = [];
+        continue;
+      }
+      if (line.startsWith(':')) continue;
+      const colon = line.indexOf(':');
+      const field = colon < 0 ? line : line.slice(0, colon);
+      const value = (colon < 0 ? '' : line.slice(colon + 1)).replace(/^ /, '');
+      if (field === 'event') currentEvent = value;
+      else if (field === 'data') currentData.push(value);
+    }
+  }
+  return events;
+}
+
+/** Run a batch over the streaming route and return its `done` frame — the only
+ *  channel the echo travels on. */
+async function doneFrameOf(
+  sessionId: string,
+  body: Record<string, unknown> = {},
+  base: string = baseUrl,
+): Promise<any> {
+  const res = await fetch(`${base}/sessions/${sessionId}/steps?stream=1`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': API_KEY,
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify({ steps: ['do a thing'], sourceLines: [1], ...body }),
+  });
+  expect(res.status).toBe(200);
+  return (await readSse(res)).find((e) => e.event === 'done')?.data;
+}
 
 describe('runSettings reaching the executor', () => {
   it('applies capture, fullPage and sendScreenshots to the config the executor gets', async () => {
@@ -477,6 +576,36 @@ describe('the model override', () => {
     expect(syncAuthCalls.at(-1)?.model).toBe(SERVER_MODEL);
   });
 
+  it('a blank AI_API_KEY= clears the key rather than being ignored', async () => {
+    // Present-but-empty is a VALUE. A blank line is how a project pins itself
+    // keyless, and `applyEnvToAiConfig` used to require `length > 0`, so the
+    // server kept its OWN key — which `withMachineAiFloor` fills from the
+    // machine `.env`. Four documents in this repo promise the opposite.
+    //
+    // The sharp edge is Bedrock SigV4, whose whole setup is "no key, let the
+    // AWS credential chain sign": an explicit key outranks every AWS source, so
+    // the machine's gateway key would travel to AWS as a bearer token and SigV4
+    // would never run. That is a credential going somewhere it was never meant
+    // to, which is why this is asserted through the real route rather than a
+    // unit test of the helper.
+    await run('rs-blank-key', {
+      env: { AI_API_KEY: '', AI_MODEL: 'bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0' },
+    });
+
+    const last = syncAuthCalls.at(-1);
+    expect(last?.model).toBe('bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0');
+    expect(last?.apiKey).toBe('');
+    expect(last?.apiKey).not.toBe(SERVER_AI_KEY);
+  });
+
+  it('an absent AI_API_KEY still inherits the server key — only a blank one clears', async () => {
+    // The other half of the guard: "not mentioned" must keep meaning "fall
+    // back", or every project without the line would lose the machine key.
+    await run('rs-absent-key', { env: { AI_MODEL: 'openai/gpt-4o' } });
+
+    expect(syncAuthCalls.at(-1)?.apiKey).toBe(SERVER_AI_KEY);
+  });
+
   it('null falls back to env, then to the server base', async () => {
     await run('rs-model-clear', { runSettings: { model: 'override/model' } });
     await run('rs-model-clear', {
@@ -612,6 +741,246 @@ describe('keyless reaching the executor', () => {
     await run('kl-keyed');
     expect(optsAt(0)).not.toHaveProperty('keyless');
   });
+
+  it('reports the echo as off for want of a key, and NOT as policy', async () => {
+    // The half of the distinction the keyed server cannot produce. Support has
+    // to be able to tell "somebody asked for this" from "this machine has no
+    // model", because the fix is the opposite in each case.
+    const done = await doneFrameOf('kl-echo', {}, keylessBase);
+
+    expect(done.effectiveSettings.ai).toBe('off');
+    expect(done.effectiveSettings.aiOffReason).toBe('no-key');
+    // Nothing was chosen, so the source stays where the policy came from.
+    expect(done.effectiveSettings.sources.ai).toBe('server');
+  });
+
+  it('says policy, not no-key, when a keyless run was ALSO asked to forbid AI', async () => {
+    // Both are true and only one is useful: a key is not the fix on a run that
+    // was asked to spend nothing.
+    const done = await doneFrameOf('kl-both', { runSettings: { ai: 'off' } }, keylessBase);
+
+    expect(done.effectiveSettings.aiOffReason).toBe('policy');
+    expect(optsAt(0)['keylessReason']).toBe('policy');
+  });
+
+  it('does NOT claim policy for a keyless run the caller left alone', async () => {
+    // …and the executor's explanation follows the same rule: absent means
+    // 'no-key', which is what keeps today's keyless wording on today's path.
+    await run('kl-reason', {}, keylessBase);
+
+    expect(optsAt(0)['keyless']).toBe(true);
+    expect(optsAt(0)).not.toHaveProperty('keylessReason');
+  });
+
+  it('stops being keyless when the session overrides to a self-authenticating model', async () => {
+    // The mirror of the Bedrock override case below, and the one that keeps the
+    // two halves of `runKeyless` asking about the SAME model
+    // (stories/bedrock-provider.md §Part B). Read off the pre-override model,
+    // the key half answers for `server/base-model` — no key, so keyless — while
+    // the echo answers for the override and says AI is on. The executor would
+    // then refuse to heal a broken entry on a run that has a model, and the
+    // done frame would insist it does.
+    const done = await doneFrameOf('kl-to-selfauth', {
+      runSettings: { model: 'bedrock/global.anthropic.claude-opus-4-6-v1' },
+    }, keylessBase);
+
+    expect(done.effectiveSettings.ai).toBe('on');
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless but configured — a self-authenticating provider
+// (stories/bedrock-provider.md §Part B)
+//
+// A third server, with no key AND a `bedrock/` model. Everything above says a
+// keyless server means a keyless run; this block is where that stops being
+// true, and the two interesting cases are compositions rather than states:
+// what a MODEL OVERRIDE does to the answer, and which reason an `ai: "off"`
+// run reports when a key was never the problem.
+//
+// Driven over HTTP because the pre/post-override distinction lives in the
+// session manager, not in `resolveRunSettings` — the resolver is deliberately
+// handed the pre-override model, and only the executor's options can show
+// which one the keyless answer was actually taken from.
+// ---------------------------------------------------------------------------
+describe('a keyless run on a self-authenticating provider', () => {
+  const BEDROCK_MODEL = 'bedrock/global.anthropic.claude-opus-4-6-v1';
+  let bedrockServer: Server;
+  let bedrockBase: string;
+
+  beforeAll(async () => {
+    // Same minimum-scenario rule as the keyless server above: built from
+    // DEFAULT_CONFIG.ai, which carries no `apiKey`, so nothing on the dev
+    // machine can quietly key this run.
+    const bedrockConfig: Config = {
+      ...testConfig,
+      ai: { ...DEFAULT_CONFIG.ai, model: BEDROCK_MODEL, gatewayUrl: SERVER_GATEWAY },
+    };
+    const { app } = createApiServer(bedrockConfig);
+    ({ server: bedrockServer, baseUrl: bedrockBase } = await listenOnRandomPort(app));
+  }, 30_000);
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) =>
+      bedrockServer.close((e) => (e ? reject(e) : resolve())),
+    );
+  });
+
+  it('is not keyless at all, and the echo says AI is on', async () => {
+    const done = await doneFrameOf('bd-on', {}, bedrockBase);
+
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+    expect(done.effectiveSettings.ai).toBe('on');
+    expect(done.effectiveSettings.aiOffReason).toBeNull();
+    // The key really is absent — otherwise this passes for the wrong reason.
+    expect(configAt(0).ai.apiKey).toBeUndefined();
+  });
+
+  it('becomes keyless when the session overrides the model to a keyed provider', async () => {
+    // THE composition. The run now talks to Anthropic with an empty key, so
+    // asking the pre-override model would report `on` and then fail at the
+    // first call — with every assertion above still green.
+    const done = await doneFrameOf('bd-override', {
+      runSettings: { model: 'anthropic/claude-opus-4-8' },
+    }, bedrockBase);
+
+    expect(configAt(0).ai.model).toBe('anthropic/claude-opus-4-8');
+    expect(optsAt(0)['keyless']).toBe(true);
+    expect(done.effectiveSettings.ai).toBe('off');
+    expect(done.effectiveSettings.aiOffReason).toBe('no-key');
+    // …and the client really was re-pointed, so the flag is describing the
+    // model the run used rather than one nobody reached.
+    expect(syncAuthCalls.at(-1)?.model).toBe('anthropic/claude-opus-4-8');
+  });
+
+  it('stays non-keyless when the override names another self-authenticating model', async () => {
+    // The control for the case above: an override is not disqualifying, it
+    // just moves which model the question is about.
+    await run('bd-override-ok', {
+      runSettings: { model: 'bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0' },
+    }, bedrockBase);
+
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+  });
+
+  it('says policy, never no key, when a working Bedrock run is switched off', async () => {
+    // The other trap. This run HAS AI and was told not to spend it, so
+    // `off (no key)` would send the reader to add a key Bedrock has no use for
+    // — the exact wrong advice Part B exists to stop.
+    const done = await doneFrameOf('bd-off', { runSettings: { ai: 'off' } }, bedrockBase);
+
+    expect(done.effectiveSettings.ai).toBe('off');
+    expect(done.effectiveSettings.aiOffReason).toBe('policy');
+    expect(optsAt(0)['keyless']).toBe(true);
+    expect(optsAt(0)['keylessReason']).toBe('policy');
+    // The client-side veil is down too, so a branched AI step refuses with the
+    // policy error rather than with "AI is not configured".
+    expect(aiPolicyCalls.at(-1)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The AI switch (stories/run-settings.md §9)
+//
+// The server this block runs against is KEYED, which is the whole point: `ai:
+// "off"` has to make a run behave like a keyless one *while a key is present*,
+// and against a keyless server every assertion here would pass for the wrong
+// reason. The no-key half is asserted on the second server below.
+// ---------------------------------------------------------------------------
+describe('the AI switch', () => {
+  it('reaches the executor as keyless-by-policy, and veils the client', async () => {
+    await run('ai-off', { runSettings: { ai: 'off' } });
+
+    // Reuses keyless, so a compiled step still replays and a broken entry takes
+    // the skip + sidecar rather than healing under a model.
+    expect(optsAt(0)['keyless']).toBe(true);
+    // …but says which kind, because the two need different explanations on the
+    // skipped step: "no AI on this machine" is false when a key is right there.
+    expect(optsAt(0)['keylessReason']).toBe('policy');
+    // The client-side half. `keyless` never reaches `executeBranchedStep`, so
+    // without this a branched AI step would run on a real key while the run
+    // reported zero-by-policy.
+    expect(aiPolicyCalls).toEqual([false]);
+  });
+
+  it('leaves a keyed run untouched when nothing asked for the switch', async () => {
+    // The control the case above is only meaningful against.
+    await run('ai-control');
+
+    expect(optsAt(0)).not.toHaveProperty('keyless');
+    expect(optsAt(0)).not.toHaveProperty('keylessReason');
+    expect(aiPolicyCalls).toEqual([true]);
+  });
+
+  it('is retained, so a second request that says nothing still runs with AI off', async () => {
+    // The silent-regression case, for `capture`'s reason: a forgotten re-send
+    // must be benign, not a revert that quietly starts spending money again.
+    await run('ai-retain', { runSettings: { ai: 'off' } });
+    await run('ai-retain');
+
+    expect(optsAt(1)['keyless']).toBe(true);
+    expect(optsAt(1)['keylessReason']).toBe('policy');
+    expect(aiPolicyCalls).toEqual([false, false]);
+  });
+
+  it('"default" restores the project value rather than the last override', async () => {
+    await run('ai-default', { runSettings: { ai: 'off' } });
+    expect(optsAt(0)['keyless']).toBe(true);
+
+    await run('ai-default', { runSettings: { ai: 'default' } });
+    expect(optsAt(1)).not.toHaveProperty('keyless');
+    expect(aiPolicyCalls).toEqual([false, true]);
+  });
+
+  it('"on" turns it back on without waiting for a new session', async () => {
+    await run('ai-back-on', { runSettings: { ai: 'off' } });
+    await run('ai-back-on', { runSettings: { ai: 'on' } });
+
+    expect(optsAt(1)).not.toHaveProperty('keyless');
+    expect(aiPolicyCalls.at(-1)).toBe(true);
+  });
+
+  it('does not leak into another session', async () => {
+    await run('ai-iso-a', { runSettings: { ai: 'off' } });
+    await run('ai-iso-b');
+
+    expect(optsAt(1)).not.toHaveProperty('keyless');
+  });
+
+  it('names the mode and the reason on the done event', async () => {
+    const done = await doneFrameOf('ai-echo', { runSettings: { ai: 'off' } });
+
+    expect(done.effectiveSettings.ai).toBe('off');
+    expect(done.effectiveSettings.aiOffReason).toBe('policy');
+    expect(done.effectiveSettings.sources.ai).toBe('session');
+  });
+
+  it('does not gate a compile, and does not consume the session\'s setting doing it', async () => {
+    // Compile This Step and Repair this step ride `compile: "steps"` on THIS
+    // route, so a carve-out that only covered the in-process compile endpoint
+    // would leave both of them gated on an `ai: off` session.
+    //
+    // A `testFilePath` that does not exist is fine here: the compile fails
+    // later, in generation, and what is under test is what the executor and the
+    // client were handed before that.
+    await run('ai-compile', { runSettings: { ai: 'off' } });
+    expect(optsAt(0)['keyless']).toBe(true);
+
+    await doneFrameOf('ai-compile', {
+      compile: 'steps',
+      testFilePath: path.join(tmpRoot, 'compile-carveout.md'),
+    });
+    expect(optsAt(1)).not.toHaveProperty('keyless');
+    expect(aiPolicyCalls).toEqual([false, true]);
+
+    // And the retained `off` survived it — the reason the carve-out is a
+    // per-request flag rather than compile sending `runSettings: {ai: "on"}`,
+    // which `mergeRunSettings` would keep for every later run.
+    await run('ai-compile');
+    expect(optsAt(2)['keyless']).toBe(true);
+    expect(aiPolicyCalls).toEqual([false, true, false]);
+  });
 });
 
 describe('refusals', () => {
@@ -663,6 +1032,34 @@ describe('refusals', () => {
     expect(String(flag.body.error)).toContain('boolean');
   });
 
+  it('400s an unknown ai value, naming the valid ones, and runs nothing', async () => {
+    const { status, body } = await api('POST', '/sessions/rs-bad-ai/steps', {
+      steps: ['do a thing'],
+      runSettings: { ai: 'no' },
+    });
+
+    expect(status).toBe(400);
+    expect(String(body.error)).toContain('runSettings.ai');
+    expect(String(body.error)).toContain('"on"');
+    expect(String(body.error)).toContain('"off"');
+    expect(String(body.error)).toContain('"default"');
+    expect(stepMock).not.toHaveBeenCalled();
+  });
+
+  it('names ai among the valid keys, so a misspelling points at the right one', async () => {
+    // The key has to be on the allow-list at all: before §9 the route refused
+    // `ai` outright as unknown, so "accepted on the wire" is a claim worth
+    // pinning from the refusal side too.
+    const { status, body } = await api('POST', '/sessions/rs-ai-key/steps', {
+      steps: ['do a thing'],
+      runSettings: { Ai: 'off' },
+    });
+
+    expect(status).toBe(400);
+    expect(String(body.error)).toContain('"Ai"');
+    expect(String(body.error)).toMatch(/Valid keys are .*\bai\b/);
+  });
+
   it('400s a non-object runSettings', async () => {
     const { status } = await api('POST', '/sessions/rs-bad-shape/steps', {
       steps: ['x'],
@@ -673,45 +1070,6 @@ describe('refusals', () => {
 });
 
 describe('the echo on the done event', () => {
-  /** Read SSE frames into {event, data} pairs. */
-  async function readSse(res: Response): Promise<{ event: string; data: any }[]> {
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    const events: { event: string; data: any }[] = [];
-    let currentEvent = 'message';
-    let currentData: string[] = [];
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).replace(/\r$/, '');
-        buf = buf.slice(nl + 1);
-        if (line === '') {
-          if (currentData.length > 0) {
-            try {
-              events.push({ event: currentEvent, data: JSON.parse(currentData.join('\n')) });
-            } catch {
-              events.push({ event: currentEvent, data: currentData.join('\n') });
-            }
-          }
-          currentEvent = 'message';
-          currentData = [];
-          continue;
-        }
-        if (line.startsWith(':')) continue;
-        const colon = line.indexOf(':');
-        const field = colon < 0 ? line : line.slice(0, colon);
-        const value = (colon < 0 ? '' : line.slice(colon + 1)).replace(/^ /, '');
-        if (field === 'event') currentEvent = value;
-        else if (field === 'data') currentData.push(value);
-      }
-    }
-    return events;
-  }
-
   it('names the settings the run actually used, and where each came from', async () => {
     const res = await fetch(`${baseUrl}/sessions/rs-echo/steps?stream=1`, {
       method: 'POST',
@@ -734,6 +1092,8 @@ describe('the echo on the done event', () => {
       capture: 'every-step',
       fullPage: false,
       sendScreenshots: false,
+      ai: 'on',
+      aiOffReason: null,
       sources: {
         model: 'session',
         capture: 'session',
@@ -741,6 +1101,7 @@ describe('the echo on the done event', () => {
         // server with no project config in play is the server.
         fullPage: 'server',
         sendScreenshots: 'server',
+        ai: 'server',
       },
     });
   });
@@ -770,11 +1131,14 @@ describe('GET /config', () => {
       capture: 'on-failure',
       fullPage: false,
       sendScreenshots: false,
+      ai: 'on',
+      aiOffReason: null,
       sources: {
         model: 'server',
         capture: 'server',
         fullPage: 'server',
         sendScreenshots: 'server',
+        ai: 'server',
       },
     });
     expect(body.session).toBeNull();

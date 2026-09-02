@@ -126,6 +126,7 @@ vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     model = 'base';
     chat = vi.fn(async () => '{}');
+    setAiPolicy = vi.fn();
     syncAuth = vi.fn(function (this: { model: string }, model: string) {
       this.model = model;
       return null;
@@ -329,6 +330,60 @@ function requestBody(extra: Record<string, unknown> = {}): Record<string, unknow
     ...extra,
   };
 }
+
+describe('compile on a session that forbids AI', () => {
+  /** POST to a NAMED session, so two requests share one — `runSteps` above
+   *  deliberately takes a fresh session each time. */
+  async function postTo(
+    sessionId: string,
+    body: Record<string, unknown>,
+  ): Promise<{ type: string; [k: string]: any }[]> {
+    const res = await fetch(`${baseUrl}/sessions/${sessionId}/steps?stream=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, Accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+    return readSse(res);
+  }
+
+  it('still compiles — the switch does not gate a request FOR AI', async () => {
+    // Verification item (7) of stories/run-settings.md: a run with `ai: "off"`
+    // makes zero AI calls, and Compile This Step on that same session still
+    // compiles. The key rides in on the request `.env`, the way the extension
+    // ships a project's — this file's server config deliberately has none, and
+    // without one the run would be keyless for that reason instead.
+    const session = 'compile-ai-off';
+    const env = { AI_API_KEY: 'from-dot-env' };
+
+    const plain = await postTo(session, { steps: STEPS, sourceLines: [4, 5], env, runSettings: { ai: 'off' } });
+    expect(plain.filter((f) => f.type === 'step:pass')).toHaveLength(2);
+    expect(plain.at(-1)!.effectiveSettings.ai).toBe('off');
+    expect(plain.at(-1)!.effectiveSettings.aiOffReason).toBe('policy');
+
+    // Same session, retained `ai: off`, and the compile runs anyway.
+    const frames = await postTo(session, {
+      ...requestBody({ compile: 'run' }),
+      env,
+    });
+    const result = frames.find((f) => f.type === 'compile:result');
+    // Same shape every other compile in this file produces — an entry per step,
+    // unproven because nothing replays here. What matters is that the switch
+    // did not turn it into zero.
+    expect(result?.summary.compiled).toBe(2);
+    expect(Object.keys(result?.files ?? {})).toEqual([stepsFilePath]);
+    expect(result!.files[stepsFilePath]).toContain("source: 'Open the dashboard'");
+    expect(result!.files[stepsFilePath]).toContain("source: 'Search for the order'");
+    // The generation calls really happened — the assertions above would pass on
+    // a proposal that came from somewhere else.
+    expect(aiPrompts.length).toBeGreaterThan(0);
+
+    // …and the compile did not consume the session's setting: an ordinary run
+    // after it is off again.
+    const after = await postTo(session, { steps: STEPS, sourceLines: [4, 5], env });
+    expect(after.at(-1)!.effectiveSettings.ai).toBe('off');
+  });
+});
 
 describe('POST /sessions/:id/steps with compile', () => {
   it('rejects a value that is neither "run" nor "steps"', async () => {

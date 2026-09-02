@@ -77,6 +77,7 @@ import {
   ApiRouteNotFoundError,
   DEFAULT_SCREENSHOTS_RETURN,
   PreflightFailure,
+  type AiMode,
   type ApiClient,
   type AssembledRun,
   type CaptureMode,
@@ -331,6 +332,7 @@ function readRunSettings(args: {
   capture?: CaptureMode | undefined;
   full_page?: boolean | null | undefined;
   send_screenshots?: boolean | null | undefined;
+  ai?: AiMode | undefined;
   screenshots_return?: ScreenshotsReturn | 'default' | undefined;
 }): { runSettings: RunSettings; screenshotsReturn: ScreenshotsReturn } {
   const runSettings: RunSettings = {};
@@ -338,6 +340,7 @@ function readRunSettings(args: {
   if (args.capture !== undefined) runSettings.capture = args.capture;
   if (args.full_page !== undefined) runSettings.fullPage = args.full_page;
   if (args.send_screenshots !== undefined) runSettings.sendScreenshots = args.send_screenshots;
+  if (args.ai !== undefined) runSettings.ai = args.ai;
   // `default` is `none`: no image comes back unless it was asked for. A
   // screenshot is a picture of a live signed-in session, and it is charged to
   // the caller's context — neither is a cost to incur by default.
@@ -781,8 +784,51 @@ function settingsLine(settings: FoldedEffectiveSettings | null): string | null {
   return (
     `Settings: model ${settings.model ?? '(not reported)'}, capture ` +
     `${settings.capture ?? '(not reported)'}, return ${settings.screenshotsReturn}` +
-    (settings.sendScreenshots ? ', model sees screenshots' : '')
+    (settings.sendScreenshots ? ', model sees screenshots' : '') +
+    aiSaid(settings.ai, settings.aiOffReason)
   );
+}
+
+/**
+ * The AI half of the echo. Silent when AI was on — that is the ordinary case and
+ * the line is already long — and explicit about WHY when it was off, because
+ * "off (policy)" and "off (no key)" call for opposite responses: one was asked
+ * for, the other means this machine cannot run AI at all.
+ */
+function aiSaid(
+  ai: FoldedEffectiveSettings['ai'],
+  reason: FoldedEffectiveSettings['aiOffReason'],
+): string {
+  if (ai !== 'off') return '';
+  return `, AI: off (${offBecause(reason)})`;
+}
+
+/** Why `ai` is off, in the echo's words. */
+function offBecause(reason: FoldedEffectiveSettings['aiOffReason']): string {
+  return reason === 'policy' ? 'policy' : reason === 'no-key' ? 'no key' : 'reason not reported';
+}
+
+/**
+ * The AI half of the `get_run_settings` echo, which has one thing the run echo
+ * does not: a retained override that can DISAGREE with the last run's result.
+ *
+ * Two ways to get there — a compile bypasses the switch outright, so a session
+ * holding `ai: off` still reports `ai: 'on'` from that run; and setting the
+ * override after a run leaves the previous run's answer standing. Either way
+ * {@link aiSaid} alone would fall silent on the `on` side, and a host that
+ * renders only content blocks would see nothing saying the switch is still
+ * down for the next run.
+ *
+ * One clause when they agree, so the ordinary line is unchanged.
+ */
+function aiSaidWithOverride(
+  ai: FoldedEffectiveSettings['ai'],
+  reason: FoldedEffectiveSettings['aiOffReason'],
+  override: 'on' | 'off' | null,
+): string {
+  if (override === null || ai === null || override === ai) return aiSaid(ai, reason);
+  const last = ai === 'on' ? 'on for the last run' : `off for the last run (${offBecause(reason)})`;
+  return `, AI: ${last}; session override ai: ${override} stands for the next run`;
 }
 
 function outcomeToResult(outcome: RunOutcome): ToolResult {
@@ -1710,10 +1756,12 @@ project, which is what carries the skills and tools directories.`.trim();
  * being surprised that `capture: "none"` still took pictures.
  */
 const SETTINGS_NOTE = `
-Settings: model, capture, full_page and send_screenshots stick to the session
-until changed — set one once and later calls inherit it. Each run tells you what
-it actually used in effectiveSettings; read that rather than assuming, since a
-preference set earlier in a conversation is easy to lose track of.
+Settings: model, capture, full_page, send_screenshots and ai stick to the
+session until changed — set one once and later calls inherit it. Each run tells
+you what it actually used in effectiveSettings; read that rather than assuming,
+since a preference set earlier in a conversation is easy to lose track of. That
+includes effectiveSettings.ai: "off" with aiOffReason "policy" means somebody
+asked for a run that spends nothing, "no-key" means this machine has none.
 
 Screenshots come back to you on a FAILURE by default — a picture of the page as
 it broke, which is usually the fastest way to see why. Nothing comes back on a
@@ -2191,9 +2239,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'Get run settings',
       description:
-        'What the next run will use: the model, what gets photographed, and ' +
-        'whether the model sees screenshots — plus where each value came from ' +
-        '(the server, this project, or something set on this session).\n\n' +
+        'What the next run will use: the model, what gets photographed, ' +
+        'whether the model sees screenshots, and whether AI may be used at ' +
+        'all — plus where each value came from (the server, this project, or ' +
+        'something set on this session).\n\n' +
         'Pass session_id to ask about one session. Settings are per session, so ' +
         'the answer for the session you have been running in is the one that ' +
         'matters; without an id you get the server-wide defaults.\n\n' +
@@ -2201,7 +2250,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'in play should not cause a server to exist. If nothing is running you ' +
         'get running: false rather than an error.\n\n' +
         'Change any of these by passing model / capture / full_page / ' +
-        'send_screenshots to run_steps or run_test_file; they stick to the ' +
+        'send_screenshots / ai to run_steps or run_test_file; they stick to the ' +
         'session from then on.',
       inputSchema: schemas.getRunSettingsInput,
       outputSchema: schemas.getRunSettingsOutput,
@@ -2281,6 +2330,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               capture: null,
               fullPage: null,
               sendScreenshots: null,
+              ai: null,
+              aiOffReason: null,
               sources: null,
               overrides: null,
               serverDefaults: null,
@@ -2305,7 +2356,12 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           capture: effective.capture,
           fullPage: effective.fullPage,
           sendScreenshots: effective.sendScreenshots,
-          sources: effective.sources,
+          // `?? null` on the §9 pair, and only there: a Sessions API server that
+          // predates the AI switch answers `GET /config` without them, and a
+          // missing key fails output validation outright.
+          ai: effective.ai ?? null,
+          aiOffReason: effective.aiOffReason ?? null,
+          sources: effective.sources ? { ...effective.sources, ai: effective.sources.ai ?? null } : null,
           overrides:
             overrides === undefined
               ? null
@@ -2316,12 +2372,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                   capture: overrides.capture === 'default' ? null : (overrides.capture ?? null),
                   fullPage: overrides.fullPage ?? null,
                   sendScreenshots: overrides.sendScreenshots ?? null,
+                  ai: overrides.ai === 'default' ? null : (overrides.ai ?? null),
                 },
           serverDefaults: {
             model: report.server.model,
             capture: report.server.capture,
             fullPage: report.server.fullPage,
             sendScreenshots: report.server.sendScreenshots,
+            ai: report.server.ai ?? null,
           },
         };
         return validated(
@@ -2330,7 +2388,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           `${report.session ? `Session ${report.session.sessionId}` : 'Server defaults'}: ` +
             `model ${effective.model} (${effective.sources.model}), capture ` +
             `${effective.capture} (${effective.sources.capture}), model sees ` +
-            `screenshots: ${effective.sendScreenshots ? 'yes' : 'no'}`,
+            `screenshots: ${effective.sendScreenshots ? 'yes' : 'no'}` +
+            // `value.overrides`, not `overrides`: already folded to
+            // `'on' | 'off' | null`, so "default" cannot read as a divergence.
+            aiSaidWithOverride(
+              effective.ai ?? null,
+              effective.aiOffReason ?? null,
+              value.overrides?.ai ?? null,
+            ),
         );
       } catch (err) {
         return asToolError(err, project?.envFilesConsulted ?? [], project?.serverUrl ?? '');

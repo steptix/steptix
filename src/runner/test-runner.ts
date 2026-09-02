@@ -50,6 +50,19 @@ import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.j
  */
 export const KEYLESS_DIAGNOSIS_SKIPPED = 'Diagnosis skipped: AI is not configured.';
 
+/**
+ * The same slot, for a run that HAS AI and was told not to use it.
+ *
+ * Both reasons reach this branch — `keyless` is `no key OR policy off` — but
+ * only one of them is about configuration. Telling an operator whose key is
+ * present and valid that "AI is not configured" sends them to add a key they
+ * already have, or (on Bedrock SigV4) one that would actively break the run by
+ * outranking the AWS credential chain. This is the same distinction
+ * `aiOffReason` and {@link AI_FORBIDDEN_BY_POLICY_MESSAGE} exist to keep.
+ */
+export const POLICY_DIAGNOSIS_SKIPPED =
+  'Diagnosis skipped: this run was asked to make no AI calls (ai.allowInRuns: false).';
+
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
 
@@ -268,6 +281,21 @@ export interface RunTestExtras {
    * test's, so the compiler indexes it as it would any run.
    */
   stopAfterStep?: number;
+  /**
+   * Ignore `ai.allowInRuns: false` for this run.
+   *
+   * A compile is a request *for* AI, not a run the switch should gate
+   * (stories/run-settings.md §9) — the whole point of it is to spend tokens
+   * once so later runs spend none. The server has always said so via
+   * `bypassAiPolicy` (src/server/session-manager.ts, src/server/errand-runner.ts);
+   * this is the same escape hatch on the in-process path, which `aiui compile`
+   * takes.
+   *
+   * Set by {@link createTestFileRunner} and nothing else. It is not a config
+   * key or a CLI flag, and deliberately not reachable from a test file: it
+   * exists so the one caller that IS the request for AI can say so.
+   */
+  bypassAiPolicy?: boolean;
   /** Abort signal, threaded into every step. */
   signal?: AbortSignal;
 }
@@ -296,19 +324,44 @@ export async function runTest(
   const aiClient = new AiClient(config.ai, tokenTracker);
   const apiResponseStore = new ApiResponseStore();
   /**
+   * May this run use AI at all? The CLI resolves no run settings, so
+   * `runSettings.ai` never reaches here — but `ai.allowInRuns` is a project
+   * setting in `aiui.config.json`, and until now the CLI ignored it outright.
+   *
+   * That was survivable only while a blank `AI_API_KEY=` was a working
+   * substitute. For a project whose provider self-authenticates there is no key
+   * to blank (stories/bedrock-provider.md §"The CLI keyless gap"), which would
+   * leave a CI user with no way to force a no-AI run in exactly the setup this
+   * is for. Honouring it here also retires the CLI/server split, so the same
+   * `aiui.config.json` means the same thing on both paths.
+   *
+   * `bypassAiPolicy` is the one exception, and it is not a hole in the switch:
+   * a compile is a request FOR AI (stories/run-settings.md §9), so gating it
+   * would mean `aiui compile` produced nothing on the very projects that set
+   * `allowInRuns: false` in order to have something to replay. The server
+   * already carved out exactly this; the flag is how the in-process path says
+   * the same thing.
+   */
+  const aiAllowed = config.ai.allowInRuns !== false || extras.bypassAiPolicy === true;
+  // Lowered for the same reason the server lowers it: with a key present,
+  // `AiNotConfiguredError`'s advice ("set AI_API_KEY") would be a false
+  // statement about a correct config. Set once — the CLI has no per-batch
+  // settings to re-resolve.
+  aiClient.setAiPolicy(aiAllowed);
+  /**
    * This run has no AI at all (stories/keyless-replay-and-gateway-env.md
-   * §Part B). On the CLI path `config.ai` IS the fully resolved config — env,
-   * project `.env`, config file and machine floor have all applied by the
-   * time `runTest` is called — so it is the right thing to read here. The
-   * server path resolves its own and passes the answer into `executeStep`
-   * itself.
+   * §Part B), either for want of a key or because the project forbids it. On
+   * the CLI path `config.ai` IS the fully resolved config — env, project
+   * `.env`, config file and machine floor have all applied by the time
+   * `runTest` is called — so it is the right thing to read here. The server
+   * path resolves its own and passes the answer into `executeStep` itself.
    *
    * Two things change: a broken code-behind entry fails instead of healing,
    * and the post-failure diagnosis pass is skipped. Both are decided BEFORE
    * calling AI, so the report states an intention rather than reporting a
    * caught auth error.
    */
-  const keyless = !aiConfigured(config.ai);
+  const keyless = !aiConfigured(config.ai) || !aiAllowed;
 
   const baseUrl = test.config.baseUrl;
   const conversationHistory: string[] = [];
@@ -511,6 +564,7 @@ export async function runTest(
       | 'codeBehind'
       | 'codeBehindStrict'
       | 'keyless'
+      | 'keylessReason'
       | 'captureStepContext'
       | 'signal'
       | 'envData'
@@ -525,6 +579,13 @@ export async function runTest(
         // Only when true: absent is "not keyless", so a keyed run's options
         // are byte-for-byte what they were before this feature existed.
         ...(keyless && { keyless: true }),
+        // Which explanation the skipped step carries. Policy first when both
+        // hold, matching the server: a key IS present on the policy path, so
+        // "no key" would send the reader to fix a line that is correct. Absent
+        // means 'no-key', so nothing changes for a run that simply has none.
+        // Not also gated on `keyless` — a forbidden run is keyless by
+        // construction, so the extra clause could only ever be true.
+        ...(!aiAllowed && { keylessReason: 'policy' as const }),
         ...(extras.captureStepContext !== undefined && {
           captureStepContext: extras.captureStepContext,
         }),
@@ -1283,9 +1344,12 @@ export async function runTest(
       // with no rendering change; the other fields are the least-claiming
       // values the type allows, because this is a placeholder rather than an
       // analysis (stories/keyless-replay-and-gateway-env.md §Part B).
-      logger.info(KEYLESS_DIAGNOSIS_SKIPPED);
+      // Which of the two reasons put us here decides what to say: a run with a
+      // working key that was told not to spend it is not an unconfigured one.
+      const skipNote = aiAllowed ? KEYLESS_DIAGNOSIS_SKIPPED : POLICY_DIAGNOSIS_SKIPPED;
+      logger.info(skipNote);
       report.diagnosis = {
-        rootCause: KEYLESS_DIAGNOSIS_SKIPPED,
+        rootCause: skipNote,
         faultCategory: 'unknown',
         evidence: [],
         suggestedFix: '',

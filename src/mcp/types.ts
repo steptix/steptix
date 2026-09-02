@@ -11,6 +11,8 @@ import type { ErrandSummary, ErrandTab, RunEvent } from '../server/session-manag
 import type { TabHolder } from '../server/errand-locks.js';
 import type { LoginResult } from '../credentials/types.js';
 import type {
+  AiMode,
+  AiOffReason,
   CaptureMode,
   EffectiveSettings,
   RunSettings,
@@ -35,7 +37,7 @@ export type { ErrandSummary, ErrandTab, RunEvent, TabHolder };
 // — `runSettings` out on the request, `effectiveSettings` back on `done` and on
 // `GET /config` — and two hand-kept copies of a wire shape drift, silently, in
 // the direction of the half that gets edited.
-export type { CaptureMode, EffectiveSettings, RunSettings, SettingSource };
+export type { AiMode, AiOffReason, CaptureMode, EffectiveSettings, RunSettings, SettingSource };
 
 /**
  * What comes back to the CALLER, as distinct from what gets captured into the

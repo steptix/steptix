@@ -395,6 +395,11 @@ export class CodeBehindCompiler {
           },
           run.signal,
           {
+            // A compile is a request FOR AI, so the run switch does not gate it
+            // (stories/run-settings.md §9). In-process only: the caller's
+            // session may hold a retained `ai: off`, and this must neither obey
+            // it nor overwrite it.
+            bypassAiPolicy: true,
             codeBehind: {
               expansion: {
                 steps: test.steps,

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { AIGateway } from '@pkent/aigateway';
 import { DEFAULT_CONFIG } from './defaults.js';
 import type { AiConfig, Config, UserConfig } from './types.js';
 import { parseBoolEnv } from '../env/loader.js';
@@ -200,14 +201,57 @@ function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Co
 }
 
 /**
- * Is there a key to make an AI request with?
+ * Does this model route to a provider that supplies its own credentials?
  *
- * Detected from the resolved config, never declared: there is no `ai.enabled`
- * flag to drift out of sync with reality
- * (stories/keyless-replay-and-gateway-env.md §Part B). Whitespace counts as
- * absent — an `AI_API_KEY=` line with a stray space is the same "no key" the
- * author meant, and letting it through would only move the failure to the
- * gateway.
+ * Asked of the library rather than answered here, because the alternative is a
+ * second list of key-free prefixes in this repo drifting against the real one
+ * (stories/bedrock-provider.md §"Declaring that the provider self-authenticates").
+ *
+ * Guarded for the tests, not for the pin. Every published version DOES have
+ * `providers()`; so does every other version, which has carried it since the
+ * library's first commit. No real version reaches the fallback. What reaches it is
+ * `tests/ai-client.test.ts` and `tests/ai-effort.test.ts`, which replace the
+ * whole module with a fake gateway class carrying no statics at all: remove the
+ * guard and seven cases in the first die on `AIGateway.providers is not a
+ * function`. Stating that precisely matters, because a guard whose stated
+ * reason has expired is a guard someone deletes.
+ *
+ * The fallback is "nothing self-authenticates", i.e. the key-only behaviour
+ * that predates this — safe in the direction that matters, since it can only
+ * refuse an AI call, never send one somewhere unintended. But note what it
+ * means inside those two suites, and `ai-effort.test.ts` is the live example
+ * even though it passes today only because nothing in it reaches this branch:
+ * `aiConfigured` answers `false` for a keyless `bedrock/` model there, silently
+ * and with nothing to read as a failure. A Bedrock case added to either would
+ * test the fallback and call it the feature.
+ * `tests/bedrock-keyless.test.ts` and `tests/api-server-run-settings.test.ts`
+ * are the suites that stub `providers()` for real, and are where such a case
+ * belongs.
+ */
+function selfAuthenticatingModel(model: string): boolean {
+  const list = typeof AIGateway.providers === 'function' ? AIGateway.providers() : [];
+  return list.some((provider) => provider.selfAuthenticating === true && model.startsWith(provider.prefix));
+}
+
+/**
+ * Can this config make an AI request?
+ *
+ * Almost always "is there a key", and for every provider that holds a key that
+ * is the whole answer: whitespace counts as absent — an `AI_API_KEY=` line with
+ * a stray space is the same "no key" the author meant, and letting it through
+ * would only move the failure to the gateway.
+ *
+ * The exception is a provider that authenticates itself. A Bedrock project
+ * signing with the AWS credential chain has no `AI_API_KEY` and never will
+ * (stories/bedrock-provider.md §Part B), so a key-only predicate would refuse
+ * every AI call on a correctly configured machine and advise setting a key
+ * Bedrock has no use for.
+ *
+ * So the answer is no longer purely detected: the key half still is, but the
+ * second half is DECLARED — by the library, in its provider registry, not by
+ * anything in this repo. That is the property worth keeping. There is still no
+ * `ai.enabled` flag for a user to set and drift out of sync with reality; the
+ * declaration lives with the code that knows whether a credential is needed.
  *
  * It lives here, beside the three sources it is asking about — the env
  * overlay, the config file and the machine floor above — rather than on the
@@ -216,12 +260,16 @@ function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Co
  * predicate that lived on the client could be mocked into lying about whether
  * the run has AI.
  *
- * Callers pass the config the run will ACTUALLY use. On the server path that
- * is `applyEnvToAiConfig`'s result, not the server's startup `config.ai` — the
- * two differ whenever a client ships its own `.env`.
+ * Callers pass the config the run will ACTUALLY use — both halves of it. On the
+ * server path the key is `applyEnvToAiConfig`'s result rather than the server's
+ * startup `config.ai` (the two differ whenever a client ships its own `.env`),
+ * and the model must be the one after any session override, not the one the
+ * project's `.env` named. A keyless `bedrock/` project whose session overrides
+ * the model to `anthropic/…` has no AI, and asking with the pre-override model
+ * would report `AI: on` and then die with an empty key.
  */
 export function aiConfigured(ai: AiConfig): boolean {
-  return (ai.apiKey ?? '').trim() !== '';
+  return (ai.apiKey ?? '').trim() !== '' || selfAuthenticatingModel(ai.model);
 }
 
 /**

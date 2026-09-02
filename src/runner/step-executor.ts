@@ -81,6 +81,29 @@ export const KEYLESS_HEAL_SKIPPED_ERROR =
   'replay failed and was not healed: AI is not configured on this machine. ' +
   'Recompile or repair this step where AI is available.';
 
+/**
+ * The same step on a run that forbids AI by policy
+ * (stories/run-settings.md §9).
+ *
+ * A separate string because {@link KEYLESS_HEAL_SKIPPED_ERROR}'s claim — "AI is
+ * not configured on this machine" — is simply untrue here: a key is present and
+ * the run was asked to spend nothing. Telling this reader to go find a machine
+ * with a model would send them to fix something that is not broken, and it
+ * would erase the very distinction the run's echo has to keep.
+ *
+ * Both settings are named, the way `AI_FORBIDDEN_BY_POLICY_MESSAGE`
+ * (src/ai/client.ts) already names both.
+ * `runSettings.ai` was once the only way to arrive here, because the
+ * switch was server-path-only; the CLI and the Runner UI honour
+ * `ai.allowInRuns` now (stories/bedrock-provider.md §"The CLI keyless gap") and
+ * neither of them resolves run settings at all. A reader sent to look for
+ * `runSettings.ai: off` on those paths would find nothing to turn back on.
+ */
+export const POLICY_HEAL_SKIPPED_ERROR =
+  'replay failed and was not healed: this run forbids AI ' +
+  '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
+  'Repair this step, or run again with AI allowed.';
+
 export interface StepExecutorOptions {
   page: Page;
   config: Config;
@@ -169,6 +192,13 @@ export interface StepExecutorOptions {
    * keyless" — every caller that doesn't know stays on today's behaviour.
    */
   keyless?: boolean;
+  /**
+   * Which kind of keyless this is, and therefore which explanation the skipped
+   * step carries (stories/run-settings.md §9). Only read when {@link keyless}
+   * is set; `'no-key'` is the default and the behaviour every existing caller
+   * keeps.
+   */
+  keylessReason?: 'no-key' | 'policy';
   /**
    * Code-behind step-into (stories/codebehind-debugging.md): hit a
    * `debugger;` immediately before this step's entry `run()`. The session
@@ -681,21 +711,29 @@ async function runCodeBehindStep(
     // step and the repair prompt gets the real failure to work from. NOT
     // `codeBehindStale` — every heal counter reads that field, and this step
     // healed nothing.
-    logger.error(`Step ${stepIndex} FAILED (code-behind, no AI configured): ${outcome.error ?? ''}`);
+    // Policy-off and no-key take the SAME skip and the same sidecar — only the
+    // wording differs, because the reader's next move does.
+    const byPolicy = opts.keylessReason === 'policy';
+    logger.error(
+      `Step ${stepIndex} FAILED (code-behind, ${byPolicy ? 'AI forbidden by policy' : 'no AI configured'}): ${outcome.error ?? ''}`,
+    );
     return {
       result: {
         ...base,
-        error: KEYLESS_HEAL_SKIPPED_ERROR,
+        error: byPolicy ? POLICY_HEAL_SKIPPED_ERROR : KEYLESS_HEAL_SKIPPED_ERROR,
         codeBehindHealSkipped: {
           file: binding.file,
           source: binding.source,
           error: outcome.error ?? 'unknown error',
         },
         aiExplanation:
-          'The code-behind entry threw, and this machine has no AI configured, ' +
-          `so the step was not re-run under AI. The entry failed with: ${
-            outcome.error ?? 'unknown error'
-          }`,
+          (byPolicy
+            ? 'The code-behind entry threw, and this run forbids AI ' +
+              '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json), ' +
+              'so the step was not re-run under AI. '
+            : 'The code-behind entry threw, and this machine has no AI configured, ' +
+              'so the step was not re-run under AI. ') +
+          `The entry failed with: ${outcome.error ?? 'unknown error'}`,
       },
     };
   }

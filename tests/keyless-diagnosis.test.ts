@@ -36,6 +36,13 @@ import { aiConfigured } from '../src/config/loader.js';
  *  constant must fail here, not agree with itself. */
 const SKIP_NOTE = 'Diagnosis skipped: AI is not configured.';
 
+/** The policy twin. A keyed run told not to spend the key is NOT unconfigured,
+ *  and telling its operator otherwise sends them to add a key they already have
+ *  — or, on Bedrock SigV4, one that would break the run by outranking the AWS
+ *  credential chain. */
+const POLICY_SKIP_NOTE =
+  'Diagnosis skipped: this run was asked to make no AI calls (ai.allowInRuns: false).';
+
 // ─── Runner harness ─────────────────────────────────────────────────────────
 
 const launchBrowserMock = vi.fn();
@@ -97,7 +104,17 @@ const diagnoseFailureMock = vi.fn();
 vi.mock('../src/ai/diagnose.js', () => ({
   diagnoseFailure: (...args: unknown[]) => diagnoseFailureMock(...args),
 }));
-vi.mock('../src/ai/client.js', () => ({ AiClient: class { syncAuth = vi.fn(() => null); } }));
+/** Every `setAiPolicy` the runner made, in order. Recorded because
+ *  `opts.keyless` cannot stand for it: the flag tells the executor how to treat
+ *  a broken code-behind entry, while the veil is what makes a direct AI call
+ *  refuse with the policy error instead of "AI is not configured". */
+const aiPolicyCalls: boolean[] = [];
+vi.mock('../src/ai/client.js', () => ({
+  AiClient: class {
+    setAiPolicy = vi.fn((allowed: boolean) => { aiPolicyCalls.push(allowed); });
+    syncAuth = vi.fn(() => null);
+  },
+}));
 vi.mock('../src/utils/run-log.js', () => ({
   openRunLogFile: () => null,
   attachRunLogBridges: () => () => {},
@@ -135,6 +152,7 @@ vi.mock('../src/report/history-appender.js', () => ({
 }));
 
 import { runTest } from '../src/runner/test-runner.js';
+import { createTestFileRunner } from '../src/codebehind/compile.js';
 import { renderReport } from '../src/report/generator.js';
 import { readLastRun } from '../src/codebehind/last-run.js';
 
@@ -235,6 +253,7 @@ beforeEach(async () => {
   launchBrowserMock.mockReset();
   closeBrowserMock.mockReset();
   stepOptions.length = 0;
+  aiPolicyCalls.length = 0;
   launchBrowserMock.mockResolvedValue({
     page: { url: () => 'https://bank.test/', goto: vi.fn(async () => undefined) },
   });
@@ -394,6 +413,153 @@ describe('the keyless flag the runner hands each step', () => {
     );
 
     expect(stepOptions[0]!['keyless']).toBe(true);
+  });
+});
+
+// ─── The CLI's own AI switch ────────────────────────────────────────────────
+//
+// `ai.allowInRuns: false` used to be server-path-only, and the CLI's answer to
+// "should this run spend AI?" was key presence alone. Blanking `AI_API_KEY=`
+// was a workable substitute right up until a provider that authenticates
+// itself: there is no key to blank, and a CI user in exactly the setup
+// stories/bedrock-provider.md markets would lose their only way to force a
+// no-AI run.
+//
+// Asserted on a KEYED config throughout — against a keyless one every case
+// below would pass for the wrong reason.
+
+describe('the CLI honouring ai.allowInRuns', () => {
+  function forbiddenConfig(): Config {
+    const config = keyedConfig();
+    return { ...config, ai: { ...config.ai, allowInRuns: false } };
+  }
+
+  it('makes a keyed run keyless, and says the reason is policy', async () => {
+    const config = forbiddenConfig();
+    // The trap: a config that had drifted keyless would produce the same flag
+    // without the switch ever being read.
+    expect(aiConfigured(config.ai)).toBe(true);
+
+    executeStepMock.mockImplementation(async (index: number) => passed(index, 'step'));
+
+    await runTest(
+      makeInstance(['Sign in', 'Read the balance'], path.join(dir, 'no-ai.md')),
+      config,
+      '',
+    );
+
+    expect(stepOptions).toHaveLength(2);
+    expect(stepOptions.every((o) => o['keyless'] === true)).toBe(true);
+    // 'no-key' would send the reader to fix a line that is correct.
+    expect(stepOptions.every((o) => o['keylessReason'] === 'policy')).toBe(true);
+    // …and the client refuses with the policy error rather than the reactive
+    // "AI is not configured", which the flag alone does not cover.
+    expect(aiPolicyCalls).toContain(false);
+  });
+
+  it('leaves a keyed run that never mentioned the switch exactly as it was', async () => {
+    // The control. Without it, a gate that fired unconditionally would pass the
+    // case above while quietly ending AI for everyone on the CLI.
+    executeStepMock.mockImplementation(async (index: number) => passed(index, 'step'));
+
+    await runTest(
+      makeInstance(['Sign in'], path.join(dir, 'still-on.md')),
+      keyedConfig(),
+      '',
+    );
+
+    expect('keyless' in stepOptions[0]!).toBe(false);
+    expect('keylessReason' in stepOptions[0]!).toBe(false);
+    expect(aiPolicyCalls).not.toContain(false);
+  });
+
+  it('reports policy rather than no-key when the run has neither a key nor permission', async () => {
+    // Both true, one useful — the same precedence the server keeps.
+    const config = keylessConfig();
+    const forbidden: Config = { ...config, ai: { ...config.ai, allowInRuns: false } };
+    executeStepMock.mockImplementation(async (index: number) => passed(index, 'step'));
+
+    await runTest(makeInstance(['Sign in'], path.join(dir, 'neither.md')), forbidden, '');
+
+    expect(stepOptions[0]!['keyless']).toBe(true);
+    expect(stepOptions[0]!['keylessReason']).toBe('policy');
+  });
+
+  it('skips the post-failure diagnosis pass, the same as any keyless run', async () => {
+    // The switch reuses keyless rather than inventing a mode, so everything
+    // hanging off that flag has to follow — including the pass that would
+    // otherwise spend a model call on a run told to spend none.
+    executeStepMock.mockImplementationOnce(async () => failed(1, 'Sign in', 'boom'));
+
+    const report = await runTest(
+      makeInstance(['Sign in'], path.join(dir, 'no-ai-diagnosis.md')),
+      forbiddenConfig(),
+      '',
+    );
+
+    expect(report.status).toBe('failed');
+    expect(diagnoseFailureMock).not.toHaveBeenCalled();
+    // The POLICY note, not the no-key one: forbiddenConfig() is KEYED and merely
+    // forbidden. Asserting the no-key text here locked in the false claim.
+    expect(report.diagnosis?.rootCause).toBe(POLICY_SKIP_NOTE);
+    expect(report.diagnosis?.rootCause).not.toContain('not configured');
+  });
+
+  it('does not gate the runs `aiui compile` makes — a compile is a request FOR AI', async () => {
+    // The switch and the compiler share one `runTest`, so honouring the switch
+    // there took `aiui compile` down with it: every step refused, nothing
+    // recorded, nothing written — on precisely the projects that set
+    // `allowInRuns: false` in order to HAVE compiled steps to replay. Both the
+    // config type and the JSON schema promise the opposite in as many words,
+    // and the server has always honoured it via `bypassAiPolicy`.
+    //
+    // Driven through the compiler's own runner rather than by passing the flag
+    // to `runTest` directly: the flag existing and the compile path setting it
+    // are two claims, and only the join is the bug.
+    const config = forbiddenConfig();
+    expect(aiConfigured(config.ai)).toBe(true);
+
+    executeStepMock.mockImplementation(async (index: number) => passed(index, 'step'));
+
+    const instance = makeInstance(['Sign in', 'Read the balance'], path.join(dir, 'compile-me.md'));
+    const runner = createTestFileRunner({
+      test: instance.test,
+      config,
+      contextContent: '',
+      aiClient: {} as never,
+    });
+
+    const outcome = await runner({
+      purpose: 'record',
+      parameters: {},
+      strict: false,
+      captureContext: true,
+      disableCodeBehind: true,
+    });
+
+    expect(outcome.status).toBe('passed');
+    expect(stepOptions).toHaveLength(2);
+    // Not keyless, no policy reason, and the veil never lowered — the three
+    // ways the refusal reaches a step.
+    expect(stepOptions.every((o) => !('keyless' in o))).toBe(true);
+    expect(stepOptions.every((o) => !('keylessReason' in o))).toBe(true);
+    expect(aiPolicyCalls).not.toContain(false);
+  });
+
+  it('still refuses an ordinary run of the same project', async () => {
+    // The control for the bypass. Without it, a flag that leaked into every run
+    // would pass the case above by turning the switch off altogether.
+    executeStepMock.mockImplementation(async (index: number) => passed(index, 'step'));
+
+    await runTest(
+      makeInstance(['Sign in'], path.join(dir, 'not-a-compile.md')),
+      forbiddenConfig(),
+      '',
+    );
+
+    expect(stepOptions[0]!['keyless']).toBe(true);
+    expect(stepOptions[0]!['keylessReason']).toBe('policy');
+    expect(aiPolicyCalls).toContain(false);
   });
 });
 

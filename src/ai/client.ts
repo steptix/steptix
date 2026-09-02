@@ -108,6 +108,76 @@ export class AiNotConfiguredError extends Error {
   }
 }
 
+/**
+ * What a `gateway/` model says when nobody chose the endpoint
+ * (stories/copilot-lm-bridge.md §Part B).
+ *
+ * `gateway/` means "route to `AI_GATEWAY_URL`, whatever it names" — a local
+ * bridge, a corporate gateway, Ollama. When that variable was never set, the
+ * resolved value is the built-in default, and sending the request anyway would
+ * ship the key and the DOM payload to the hosted broker: exactly the egress the
+ * corporate reader picked this spelling to avoid. So it is refused rather than
+ * routed, and the message names the variable it needs.
+ *
+ * Deliberately silent about `AI_API_KEY`: a key is not the problem here, and
+ * pointing at it would send the reader to edit a line that is already correct.
+ */
+export const GATEWAY_URL_REQUIRED_MESSAGE =
+  'AI_GATEWAY_URL is not set, so a gateway/ model has no endpoint to route to: ' +
+  'it resolved to the built-in default, which is not what "gateway/" asks for. ' +
+  'Refusing to send this request rather than routing it somewhere you did not ' +
+  'choose. Set AI_GATEWAY_URL in the project .env to the endpoint you mean — a ' +
+  'local bridge, your org\'s gateway, Ollama — or use ' +
+  'AI_MODEL=aibroker/<provider>/<model>, which is the spelling for the hosted ' +
+  'broker on the default endpoint.';
+
+/**
+ * Thrown when a `gateway/` model is paired with an unset `AI_GATEWAY_URL`.
+ * Typed for {@link AiNotConfiguredError}'s reason — a caller distinguishing
+ * "misconfigured routing" from "the model failed" should not match on prose.
+ */
+export class GatewayUrlRequiredError extends Error {
+  constructor(message: string = GATEWAY_URL_REQUIRED_MESSAGE) {
+    super(message);
+    this.name = 'GatewayUrlRequiredError';
+  }
+}
+
+/**
+ * What an AI request says on a run whose policy forbids AI
+ * (stories/run-settings.md §9).
+ *
+ * Its own message rather than {@link AI_NOT_CONFIGURED_MESSAGE}, because that
+ * one's advice — "Set AI_API_KEY in the project .env" — is not the move here:
+ * the run was asked to spend no AI, and a key changes nothing about that. The
+ * actionable move is to stop asking for it, or to compile the step so it
+ * replays without a model.
+ *
+ * It says nothing about whether a key exists, in either direction. Policy wins
+ * when both hold (`resolveRunSettings`, src/config/run-settings.ts) — so a
+ * keyless machine running with `ai: off` lands here too, and a message
+ * asserting a key is configured would be flatly wrong for that reader.
+ */
+export const AI_FORBIDDEN_BY_POLICY_MESSAGE =
+  'This step needs AI and this run forbids AI: it was asked to make no AI ' +
+  'calls (runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
+  'Compiled steps replay either way — compile this step, or run again with ' +
+  'ai: "on" (or "default") to allow it.';
+
+/**
+ * Thrown by every AI request made while the run's policy veil is up.
+ *
+ * Typed and distinct from {@link AiNotConfiguredError} so the two never
+ * collapse: the echo has to keep "off (policy)" and "off (no key)" apart, and a
+ * shared error class is how that distinction quietly stops being true.
+ */
+export class AiForbiddenByPolicyError extends Error {
+  constructor(message: string = AI_FORBIDDEN_BY_POLICY_MESSAGE) {
+    super(message);
+    this.name = 'AiForbiddenByPolicyError';
+  }
+}
+
 /** Per-call knobs beyond the messages themselves. */
 export interface CompleteOptions {
   /** Defaults to `routine` — today's behavior. */
@@ -137,6 +207,17 @@ export class AiClient {
    * fail at request time" behavior and lets {@link syncAuth} just null this out.
    */
   private gateway: AIGateway | null = null;
+  /**
+   * The run's policy veil (stories/run-settings.md §9): while it is up, every
+   * request is refused whatever the key says.
+   *
+   * On the client rather than in the executor because the executor's `keyless`
+   * option does not reach `executeBranchedStep`, which receives neither it nor
+   * `codeBehind` — so an executor-level gate would miss branched AI steps
+   * entirely while the report claimed the run made no AI calls. The client is
+   * the one choke point both paths share.
+   */
+  private aiForbidden = false;
 
   constructor(config: AiConfig, tokenTracker: TokenTracker) {
     this.config = config;
@@ -146,25 +227,56 @@ export class AiClient {
   /**
    * Build the `@pkent/aigateway` client bound to the current `model` + `apiKey`.
    * The model-string prefix drives routing: `baseURL` (the gateway `/v1`
-   * surface) is supplied ONLY for `aibroker/` models — for direct models
+   * surface) is supplied ONLY for gateway-routed models — for direct models
    * (`openai/…`, `anthropic/…`, …) passing it would point the provider's own SDK
    * at the gateway instead of the real upstream.
+   *
+   * Two prefixes route, and they differ only in what they say about the
+   * destination (stories/copilot-lm-bridge.md §Part B). `gateway/` means "route
+   * to `AI_GATEWAY_URL`", so it REQUIRES one to have been set; `aibroker/` names
+   * the hosted broker application and keeps its fall-through to the built-in
+   * default, which is what makes it the zero-config spelling. The library strips
+   * whichever first segment it was given and forwards the rest, so the model
+   * string goes across verbatim either way.
    */
   private buildGateway(): AIGateway {
-    const viaGateway = this.config.model.startsWith('aibroker/');
+    const viaGateway =
+      this.config.model.startsWith('gateway/') || this.config.model.startsWith('aibroker/');
+    // Refused before anything is built or sent. The loader keeps no provenance —
+    // an explicitly-set URL and the built-in default are indistinguishable on
+    // the result — so this is the same value comparison `hasCustomGatewayUrl`
+    // makes for the warning below. It also refuses the one edge that comparison
+    // cannot see, a URL explicitly set TO the default host; acceptable, because
+    // `aibroker/` is precisely the spelling for that.
+    if (this.config.model.startsWith('gateway/') && !this.hasCustomGatewayUrl()) {
+      throw new GatewayUrlRequiredError();
+    }
     if (!viaGateway && this.hasCustomGatewayUrl()) {
       // Someone deliberately pointed this run at an endpoint and it is being
-      // ignored — silently, and in the direction that matters: the request
-      // leaves for the provider instead of staying inside the org's gateway.
-      // Warned rather than refused, because the pairing is legal (a project may
-      // keep a gateway configured and run a direct model on purpose); the cost
-      // of guessing wrong is one log line, and the cost of saying nothing is a
-      // corporate user who thinks their traffic is routed and it is not.
+      // ignored — silently, and often in the direction that matters: the
+      // request leaves for the provider instead of staying inside the org's
+      // gateway. Warned rather than refused, because the pairing is legal (a
+      // project may keep a gateway configured and run a direct model on
+      // purpose); the cost of guessing wrong is one log line, and the cost of
+      // saying nothing is a corporate user who thinks their traffic is routed
+      // and it is not.
+      //
+      // It says what is true and offers both readings rather than prescribing
+      // one, because "set AI_MODEL=gateway/<model>" is wrong advice for a whole
+      // audience: a `bedrock/` model already reaches the user's own AWS
+      // account, and this pairing is unusually likely there — corporate setups
+      // keep a gateway URL configured while the approved AI is Bedrock
+      // (stories/bedrock-provider.md §"Notes for the builder").
       logger.warn(
         `AI_GATEWAY_URL is set to ${this.config.gatewayUrl}, but the model ` +
-          `"${this.config.model}" is not an aibroker/ model — the gateway URL applies ` +
-          'only to aibroker/ models, so this request goes directly to the provider. ' +
-          'Set AI_MODEL=aibroker/<provider>/<model> to route through the gateway.',
+          `"${this.config.model}" is not a gateway-routed model — the gateway URL ` +
+          'applies only to gateway-routed models (gateway/… and aibroker/…), so this ' +
+          'request goes wherever the model prefix points instead: for openai/…, ' +
+          'anthropic/… and the like, straight out to that provider. ' +
+          'If you meant to route through the gateway, set AI_MODEL=gateway/<model>. ' +
+          'If the model already reaches infrastructure you control — a bedrock/ model ' +
+          'goes to your own AWS account — nothing is leaving it, and the URL is ' +
+          'simply unused here.',
       );
     }
     const opts = viaGateway
@@ -181,6 +293,10 @@ export class AiClient {
    * one, so "is it set?" can only ever answer yes. Trailing slashes are
    * normalised the same way {@link buildGateway} normalises them, so a value
    * that differs from the default only by a `/` is not treated as a choice.
+   *
+   * Two callers, opposite directions: the inert-pair warning fires when a
+   * chosen URL is being ignored, and the `gateway/` guard fires when no URL was
+   * chosen at all.
    */
   private hasCustomGatewayUrl(): boolean {
     const trim = (url: string): string => url.trim().replace(/\/+$/, '');
@@ -199,8 +315,25 @@ export class AiClient {
    * (stories/keyless-replay-and-gateway-env.md §Part B).
    */
   private getGateway(): AIGateway {
+    // Policy before the key check: on a policy-off run a key is present, so
+    // "AI is not configured" would be a false statement about a correct config.
+    if (this.aiForbidden) throw new AiForbiddenByPolicyError();
     if (!aiConfigured(this.config)) throw new AiNotConfiguredError();
     return (this.gateway ??= this.buildGateway());
+  }
+
+  /**
+   * Raise or lower the policy veil for the batch about to run
+   * (stories/run-settings.md §9).
+   *
+   * Set per batch, never sticky: run settings are retained on the SESSION and
+   * re-resolved every request, and a client that stayed veiled after the caller
+   * turned AI back on would need a session recycle to recover — the very cost
+   * this feature exists to avoid. Leaves the memoized gateway alone: the veil
+   * refuses before it is ever handed out, so there is nothing to invalidate.
+   */
+  setAiPolicy(allowed: boolean): void {
+    this.aiForbidden = !allowed;
   }
 
   /**

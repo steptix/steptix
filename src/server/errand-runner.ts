@@ -303,7 +303,15 @@ export class ErrandRunner {
       // Server base → project bundle, and no third layer: an errand has no
       // session to hold overrides (stories/errands.md §Return), so `{}` here is
       // the whole story rather than an omission.
-      const settings = resolveRunSettings(this.config, bundle.config, desiredAi.model, {});
+      //
+      // The AI switch does not gate errands (stories/run-settings.md §9) —
+      // an errand is a request FOR AI, and with no session to carry an
+      // override the only thing that could gate it is a project's
+      // `ai.allowInRuns: false`, which is a statement about RUNS.
+      const settings = resolveRunSettings(this.config, bundle.config, desiredAi.model, {}, {
+        ai: desiredAi,
+        bypassAiPolicy: true,
+      });
       const envDataCtx: EnvDataContext | null = bundle.envBundle
         ? {
             env: bundle.envBundle.env,

@@ -120,6 +120,7 @@ let forcedEntryBody: string | null = null;
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     chat = vi.fn(async () => '{}');
+    setAiPolicy = vi.fn();
     syncAuth = vi.fn(() => null);
     complete = vi.fn(async (messages: { role: string; content: string }[]) => {
       const last = messages[messages.length - 1]?.content ?? '';

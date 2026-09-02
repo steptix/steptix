@@ -7,12 +7,15 @@
  * regresses silently, so it wants tests that do not have to stand up a session.
  */
 import type {
+  AiConfig,
+  AiMode,
   CaptureMode,
   Config,
   EffectiveSettings,
   RunSettings,
   SettingSource,
 } from './types.js';
+import { aiConfigured } from './loader.js';
 
 /** Accepted `capture` values, in the order an error message should list them. */
 export const CAPTURE_MODES: readonly CaptureMode[] = [
@@ -22,6 +25,11 @@ export const CAPTURE_MODES: readonly CaptureMode[] = [
   'default',
 ];
 
+/** Accepted `ai` values (stories/run-settings.md §9), same shape as
+ *  {@link CAPTURE_MODES} — including `'default'`, without which "stop
+ *  overriding" is inexpressible. */
+export const AI_MODES: readonly AiMode[] = ['on', 'off', 'default'];
+
 /** Keys `runSettings` accepts on the wire. An unknown one is refused rather
  *  than dropped — a caller who misspelled `sendScreenshots` and silently got
  *  nothing has no way to notice. */
@@ -30,6 +38,7 @@ export const RUN_SETTING_KEYS: readonly string[] = [
   'capture',
   'fullPage',
   'sendScreenshots',
+  'ai',
 ];
 
 /** §3's table, in one place so the route, the resolver and the echo agree. */
@@ -96,6 +105,10 @@ export function mergeRunSettings(
       delete next.sendScreenshots;
     }
   }
+  if ('ai' in incoming) {
+    if (incoming.ai !== undefined && incoming.ai !== 'default') next.ai = incoming.ai;
+    else delete next.ai;
+  }
 
   return next;
 }
@@ -143,6 +156,31 @@ export interface ResolvedRunSettings {
   effective: EffectiveSettings;
 }
 
+/** The layers beyond the two configs and the session's overrides. */
+export interface ResolveRunSettingsOptions {
+  /**
+   * The AI config whose KEY decides whether this run has AI at all — i.e.
+   * `applyEnvToAiConfig`'s result, the request's `.env` layered over the server
+   * base. Defaults to `serverConfig.ai`.
+   *
+   * Passed separately because `serverConfig` cannot answer it: a key that
+   * arrived in a client's `.env` is not on the server's startup config, and a
+   * server started keyless would otherwise report a keyed project's run as
+   * having no AI.
+   */
+  ai?: AiConfig;
+  /**
+   * Skip the `ai` slice for THIS request only — compile, Repair This Step and
+   * errands are requests *for* AI, not runs the switch should gate
+   * (stories/run-settings.md §9).
+   *
+   * Deliberately not expressible as a `RunSettings` value: `mergeRunSettings`
+   * would retain it and silently clobber the user's standing `off` for every
+   * later run on that session. It is per-request and nothing writes it back.
+   */
+  bypassAiPolicy?: boolean;
+}
+
 /**
  * Resolve one batch's settings: server base → project bundle → session
  * overrides.
@@ -160,6 +198,7 @@ export function resolveRunSettings(
   projectConfig: Config,
   envModel: string,
   overrides: RunSettings,
+  options?: ResolveRunSettingsOptions,
 ): ResolvedRunSettings {
   // `!== false` matches how step-executor.ts reads this flag, so an absent
   // value keeps meaning "on" rather than flipping when we write it back out.
@@ -224,10 +263,48 @@ export function resolveRunSettings(
     modelFrom = 'session';
   }
 
+  // The AI switch (stories/run-settings.md §9). `allowInRuns` re-sourced here
+  // for the reason `ambiguousTarget` is — `config.ai` below is spread from the
+  // SERVER's startup config, so a key not named here silently keeps the
+  // server's answer whatever the project's aiui.config.json says. `!== false`
+  // so absence stays "allowed", which is exactly today's behaviour.
+  const allowBase = base(
+    serverConfig.ai.allowInRuns !== false,
+    projectConfig.ai.allowInRuns !== false,
+  );
+  let allowed = allowBase.value;
+  let aiFrom = allowBase.from;
+  if (overrides.ai !== undefined && overrides.ai !== 'default') {
+    allowed = overrides.ai === 'on';
+    aiFrom = 'session';
+  }
+  if (options?.bypassAiPolicy === true) {
+    // A request FOR AI. The policy layer is skipped outright rather than
+    // overridden, so the session's retained `off` is untouched, and the source
+    // reverts to the base one — nothing about this request is a setting.
+    allowed = true;
+    aiFrom = allowBase.from;
+  }
+  // Policy first when both are true: a key IS present on the policy path, so
+  // reporting 'no-key' there would send support to fix a line that is correct.
+  //
+  // `model` — the resolved POST-override one, from the block above — not the
+  // config's own. `aiConfigured` is model-aware now (a self-authenticating
+  // provider needs no key), and the override is exactly where the two answers
+  // can differ: a keyless `bedrock/` project whose session overrode the model
+  // to `anthropic/…` would otherwise report `ai: 'on'` and then fail on an
+  // empty key. Only the model is re-sourced; the key still comes from the
+  // request's `.env` layered over the server base, for the reason
+  // `ResolveRunSettingsOptions.ai` exists.
+  const keyed = aiConfigured({ ...(options?.ai ?? serverConfig.ai), model });
+  const ai: EffectiveSettings['ai'] = allowed && keyed ? 'on' : 'off';
+  const aiOffReason: EffectiveSettings['aiOffReason'] =
+    ai === 'on' ? null : !allowed ? 'policy' : 'no-key';
+
   return {
     config: {
       ...serverConfig,
-      ai: { ...serverConfig.ai, model, sendScreenshots },
+      ai: { ...serverConfig.ai, model, sendScreenshots, allowInRuns: allowed },
       browser: {
         ...serverConfig.browser,
         captureScreenshotsPerAction: perAction,
@@ -241,11 +318,14 @@ export function resolveRunSettings(
       capture: captureModeOf(perAction, onFailure),
       fullPage,
       sendScreenshots,
+      ai,
+      aiOffReason,
       sources: {
         model: modelFrom,
         capture: captureFrom,
         fullPage: fullPageFrom,
         sendScreenshots: sendFrom,
+        ai: aiFrom,
       },
     },
   };

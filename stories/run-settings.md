@@ -8,7 +8,7 @@ started with. Both are frozen for the life of the server process, so the only
 way to change either is to stop the server and start it again — which kills
 every open browser and every signed-in session with it.
 
-This story gives the agent four settings it can change on a live session:
+This story gives the agent five settings it can change on a live session:
 
 - **Which model runs the steps.** Takes effect on the very next run. No browser
   restart, no closing the session.
@@ -20,6 +20,12 @@ This story gives the agent four settings it can change on a live session:
   is not.
 - **Whether the model sees screenshots** while it works, which is the main
   cost lever on a run.
+- **Whether AI may be used at all during the run.** `ai: off` makes the run
+  behave exactly like a keyless one no matter which keys are configured:
+  compiled steps replay, and anything that needs a model — an uncompiled
+  step, mid-run healing, the post-failure diagnosis — is skipped or refused
+  with the typed no-AI error. The off state is the corporate artifact: "this
+  run made zero AI calls, by policy", printed in the report.
 
 Every setting is scoped to one session. That matters because the same server
 also serves TestBench: a setting that applied server-wide would let an agent
@@ -64,9 +70,13 @@ conversation.
 > stick; (3) a `model` override changes which model answers on the next batch of
 > an already-open session, with no browser restart; (4) a concurrent run on a
 > *different* session on the same server is unaffected by both; (5) every run
-> result names the model, capture mode and return mode actually in effect; (6)
-> `get_run_settings` reports those same values plus their source, and starts no
-> server to answer.
+> result names the model, capture mode, return mode and AI mode actually in
+> effect; (6) `get_run_settings` reports those same values plus their source,
+> and starts no server to answer; (7) a run with `ai: "off"` on a *keyed*
+> session makes zero AI requests — a stale compiled step takes the keyless
+> skip and sidecar, an uncompiled step fails with the policy refusal, no
+> diagnosis pass runs — and Compile This Step on that same session
+> still compiles.
 
 ## Context
 
@@ -211,7 +221,8 @@ One new optional field on `StepRequest`, beside `logging`:
     "model": "openrouter/google/gemini-3-flash-preview:nitro",
     "capture": "every-step",        // every-step | on-failure | none | default
     "fullPage": true,
-    "sendScreenshots": false
+    "sendScreenshots": false,
+    "ai": "on"                      // on | off | default
   }
 }
 ```
@@ -295,6 +306,8 @@ is on — a full-page PNG of a long page exceeds it — and the existing behavio
 
 The `done` event gains an `effectiveSettings` object: the model, the three
 screenshot values, and where each came from (`server`, `project`, `session`).
+(§9 later adds the AI mode to this same object, plus — when off — whether
+policy or a missing key made it so.)
 The server is the only party that can report this — the MCP does not know the
 server's defaults, and reading the project file itself would answer a different
 question.
@@ -343,8 +356,84 @@ must treat empty as an error rather than reporting a blank page.
 - A model switch on a session with caching on → warning on the run result,
   naming the cache as the reason results may not reflect the new model.
 
+### 9. The AI switch
+
+`ai: "on" | "off" | "default"` follows `capture`'s pattern: `"default"` clears
+the override and falls back to the project value, a new `ai.allowInRuns`
+(default `true`, so absence is exactly today's behavior).
+
+`off` does not invent a mode — it reuses keyless
+([keyless-replay-and-gateway-env.md](keyless-replay-and-gateway-env.md),
+PR #111) — but there is no single predicate to flip: keyless is enforced at
+points that read different inputs, and each needs the policy threaded in. At
+the top of `executeStepsInternal`, compute
+`runKeyless = !aiConfigured(desiredAi) || effective.ai === 'off'` and pass it
+as `opts.keyless`. That reuses, unchanged, the heal fall-through skip in
+`runCodeBehindStep` (`codeBehindHealSkipped`, plus the `stale: true` +
+`healSkipped` sidecar row so compile-repair still finds the step). The
+diagnosis pass needs no gate on this path: it exists only on the CLI runner
+(`test-runner.ts`, behind its own local keyless check), and the server path
+this wire reaches runs no diagnosis at all — item (7)'s "no diagnosis pass"
+is satisfied there by absence, and the CLI's skip is out of this wire's
+reach. The refusal on an AI-*executed* step is NOT covered by that
+flag: it lives in `AiClient.getGateway()`'s key-presence check, which under
+`ai: off` still holds a real key and would happily run the step while the
+report claims zero-by-policy. The policy therefore needs its own refusal,
+with its own message — "this run forbids AI (runSettings.ai: off)" — because
+both existing keyless texts are wrong for policy-off: `AiNotConfiguredError`
+says "Set AI_API_KEY in the project .env", and the heal-skip text claims "AI
+is not configured on this machine" — untrue when a key is present and policy
+is off, and either would erase the very distinction the echo must keep.
+Where the refusal lives is decided by a fact, not taste: the branched-step
+call site (`executeBranchedStep`) receives neither `keyless` nor
+`codeBehind` in its options, so an executor-level gate misses branched AI
+steps entirely — the client-side gate covers them for free, which points the
+refusal at the client. The
+report and `effectiveSettings` distinguish `AI: off (policy)` from
+`AI: off (no key)` — support needs to tell them apart — and the two message
+variants are explicit work items of this story.
+
+Explicitly NOT gated: compile, Repair This Step, and errands — those are
+requests *for* AI. This needs a mechanism, not a sentence: compile rides the
+gated pipeline (the compile-runner calls `executeSteps`, and settings are
+retained per session), so a session whose retained `ai` is `off` would gate
+its own repairs — and the obvious patch, compile sending
+`runSettings: {ai: "on"}`, is wrong, because `mergeRunSettings` would retain
+it and silently clobber the user's standing `off` for every later run. The
+carve-out is an internal, non-retained per-request flag set by the
+compile-runner and errand-runner call sites and never accepted from the wire
+(the api-server allowlist does not know it), which `resolveRunSettings`
+honours by skipping the `ai` slice for that request only. An `ai: off` run
+that meets an uncompiled step still fails that step the way keyless does —
+"this step needs AI and this run forbids it" — actionable, and marked for
+repair.
+
+Why now: the Copilot bridge ([copilot-lm-bridge.md](copilot-lm-bridge.md))
+makes a credential permanently present (the bridge token), so "leave the key
+blank" stops being available as the way to say "spend nothing". The switch
+restores that as stated intent rather than credential accident, for every
+provider at once.
+
+What §9 adds to the *built* feature — the §§1–8 wire is implemented, so these
+are increments on shipped code: `"ai"` joins `RUN_SETTING_KEYS` (today the
+key is refused as unknown); `parseRunSettings` gains the mode enum beside
+`CAPTURE_MODES`; `mergeRunSettings` gains the `'default'`-deletes branch;
+`resolveRunSettings` and `EffectiveSettings` gain `ai` plus its source and,
+when off, the reason (policy vs no key); `ai.allowInRuns` lands in
+types/defaults/schema and **must join the hand-grown per-project re-source
+list** in `resolveRunSettings` — the exact trap that list's own comment warns
+about — or a project's value is silently the server's; and the api-server
+enum validation, `get_run_settings` output, `runResultOutput` (nullable,
+older-server rule) and both run tools' schemas follow. Tests, on the same
+seams as below: `ai` accepted on the wire and an unknown value is a 400;
+`off` reaches the executor as keyless-by-policy; retention and
+`default`-restores; the echo distinguishes policy from no-key; compile on an
+`ai: off` session still compiles.
+
 ## Out of scope
 
+- A TestBench run-button toggle for `ai` — the extensions get the wire for
+  free; surfacing a mode chooser in their UI is an extension story.
 - Writing `aiui.config.json`, or any persistence beyond the session.
 - Server-wide settings changes.
 - `reports.includeScreenshots` / `reports.embedScreenshots` — dead knobs;

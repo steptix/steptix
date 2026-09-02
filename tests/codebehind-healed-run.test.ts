@@ -97,7 +97,7 @@ vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
 }));
 
 vi.mock('../src/ai/diagnose.js', () => ({ diagnoseFailure: vi.fn(async () => null) }));
-vi.mock('../src/ai/client.js', () => ({ AiClient: class { syncAuth = vi.fn(() => null); } }));
+vi.mock('../src/ai/client.js', () => ({ AiClient: class { setAiPolicy = vi.fn(); syncAuth = vi.fn(() => null); } }));
 vi.mock('../src/utils/run-log.js', () => ({
   openRunLogFile: () => null,
   attachRunLogBridges: () => () => {},

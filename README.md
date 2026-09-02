@@ -796,9 +796,10 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 
 | Variable | Purpose |
 | --- | --- |
-| `AI_API_KEY` | API key for the aiapi gateway. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). The runner now uses aiapi v2 endpoints. |
-| `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. |
-| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint `aibroker/` models route through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Same precedence as `AI_MODEL` (environment → `aiui.config.json` → machine `.env` → built-in default), and it reaches the server path too: the TestBench extension ships the project's `.env` with each run. |
+| `AI_API_KEY` | API key for the aiapi gateway. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). One exception: a `bedrock/` model supplies its own credentials, so a run with no key here is still treated as having AI — see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). The runner now uses aiapi v2 endpoints. |
+| `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. The first segment decides routing: `gateway/<model>` routes to whatever `AI_GATEWAY_URL` names (your own gateway, a local bridge, Ollama) and **refuses to run when that variable is unset**, rather than quietly sending the traffic elsewhere; `aibroker/<provider>/<model>` is the hosted broker on the built-in endpoint and needs no URL; `bedrock/<model>` is Claude in your own AWS account, needs `AWS_REGION` and no key; anything else (`openai/…`, `anthropic/…`) goes direct to the provider. |
+| `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK straight from `process.env`, not by this framework, so unlike every other row in this table it belongs in the **machine environment** — the shell that starts `aiui serve`, or the CI job — rather than in a project `.env`. Same for `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain, which work exactly as they do for any AWS tool. A project `.env` reaches it on `aiui run` and the Electron UI only; see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). |
+| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Pair it with `AI_MODEL=gateway/<model>`: that spelling says "route here", and a `gateway/` model with this variable unset is refused rather than sent to the default host. Same precedence as `AI_MODEL` (environment → `aiui.config.json` → machine `.env` → built-in default), and it reaches the server path too: the TestBench extension ships the project's `.env` with each run. |
 | `AI_EFFORT` | How hard the model thinks on **routine** steps: `low`, `medium`, `high`, `xhigh`, `max` — plus `none` and `minimal`, but see the warning below before using `none`. Optional — **unset is the default and changes nothing on the wire**. Setting it also raises the routine output cap to 8192, since reasoning tokens count against the same cap. Authoring calls (code-behind generation/review, assertions, failure diagnosis) already run at `high` and are deliberately *not* lowered by this. A level the bound model doesn't support fails on the first AI call with `invalid_effort`. Process-level like `maxInputTokens`, not per-session overridable. |
 | `AIUI_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `aiui serve` generates a machine key at `%LOCALAPPDATA%\aiui\.env` (`~/.aiui/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
@@ -854,9 +855,172 @@ project's calls.
 
 To keep model traffic inside your own network, point
 [`AI_GATEWAY_URL`](#environment-variables) at an in-tenant or self-hosted
-OpenAI-compatible endpoint. A fully compiled test replays with **no AI calls at
-all** and needs no key — see
+OpenAI-compatible endpoint and set `AI_MODEL=gateway/<model>`. The `gateway/`
+prefix means "route to `AI_GATEWAY_URL`", and it refuses to run when that
+variable is unset — so a forgotten URL line fails loudly instead of sending the
+key and the page payload to the default host. A fully compiled test replays with
+**no AI calls at all** and needs no key — see
 [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md).
+
+#### Using Amazon Bedrock (Claude in your own AWS account)
+
+If your approved AI is "Claude in our AWS account", set `AI_MODEL=bedrock/<model>`.
+Prompts go to Bedrock in your region, under your existing AWS agreement, over
+your own network path — commonly a VPC endpoint, so nothing traverses the public
+internet. No new vendor to clear, no per-seat quota, and unlike the Copilot
+bridge below it works headless and in CI.
+
+**Install the Bedrock SDK first — it is not bundled:**
+
+```bash
+npm install @anthropic-ai/bedrock-sdk
+```
+
+It is an optional peer dependency of `@pkent/aigateway` rather than something
+this framework depends on, deliberately: it pulls the AWS SDK, roughly 50
+packages and 38 MB of credential providers and IMDS clients, and depending on it
+here would charge every user of this framework for a provider most of them never
+use. Only Bedrock users install it. If you forget, the first AI call fails with
+`missing_optional_dependency` naming that exact command, so the failure is
+loud and self-explaining rather than mysterious.
+
+**The AWS half of this lives in the machine environment, not in the project
+`.env`.** `AWS_REGION`, `AWS_PROFILE` and any AWS credentials are read from
+`process.env` by the AWS SDK itself, which knows nothing about this framework's
+env files. That already matches how AWS credentials work everywhere else — they
+come from the machine, an SSO login or an instance role, and never from a file
+in the repo — and the region belongs with them.
+
+Concretely: put them in the environment that **starts the Sessions API server**
+(or that runs your CI job). The `AI_*` lines below still go in the project
+`.env`, which is what the TestBench extension ships with each run.
+
+The project `.env` does work for the AWS variables on two paths only — `aiui
+run` and the Electron Runner UI — because those load the project's base `.env`
+into their own process at startup. The Sessions API server deliberately does
+not: it serves many projects at once and exports none of their `.env` files
+into its own process (see
+[stories/project-scoped-data-dir-and-env.md](./stories/project-scoped-data-dir-and-env.md)),
+so a project `.env` carrying `AWS_REGION` reaches the run's AI config on the
+CLI and silently does not on TestBench or MCP. Set it once on the machine and
+all four paths agree.
+
+Two ways to authenticate, and the framework does neither itself — the AWS SDK
+resolves both.
+
+**A bearer token**, which is an ordinary key:
+
+```
+# project .env
+AI_MODEL=bedrock/global.anthropic.claude-opus-4-6-v1
+AI_API_KEY=<bedrock bearer token>
+
+# machine environment (or the shell that starts `aiui serve`)
+AWS_REGION=eu-west-1
+```
+
+**Or no key at all**, signing each request with the AWS credential chain — env
+credentials, an SSO profile, or an instance role:
+
+```
+# project .env — the blank key line is deliberate, see below
+AI_MODEL=bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0
+AI_API_KEY=
+
+# machine environment (or the shell that starts `aiui serve`)
+AWS_REGION=eu-west-1
+AWS_PROFILE=acme-dev
+```
+
+Three things about that second form are worth knowing before you hit them.
+
+**Keep the empty `AI_API_KEY=` line.** Not as a way to force a keyless run — see
+below — but because omitting it entirely is not the same as blanking it. With
+no line at all the machine-wide key at `%LOCALAPPDATA%\aiui\.env` fills the gap,
+and that key is then handed to AWS as a Bedrock bearer token: it takes
+precedence over every AWS credential source, so SigV4 never runs and the request
+fails as a 403 that names nothing. A blank line sets the key to empty, which
+blocks the machine default and leaves the credential chain in charge.
+
+**`AWS_REGION` must be set explicitly.** Unlike the Python SDK, the TypeScript
+client does not read `~/.aws/config`, so an SSO profile that already carries a
+region is not enough. With none set, the run fails at construction with a
+message naming `AWS_REGION` / `AWS_DEFAULT_REGION`.
+
+**A blank `AI_API_KEY=` no longer forces a keyless run.** This framework reports
+AI as configured when the model routes to a provider that supplies its own
+credentials, which is the whole point — otherwise a correct Bedrock setup would
+be told to set a key Bedrock has no use for. To spend nothing on a run, use
+`ai.allowInRuns: false` in `aiui.config.json`, or `runSettings: {ai: "off"}` on
+the server path; with no key to blank, that is the switch. Both are honoured by
+the `aiui run` CLI as well as by the server.
+
+**Model ids normally carry an inference-profile prefix** (`global.`, `eu.`,
+`us.`). That is the norm rather than an edge case: AWS serves most current
+Claude models through cross-region inference only, and passing the bare base id
+returns HTTP 400 asking for the id or ARN of an inference profile. The suffix
+varies per model (`-v1`, `-20250929-v1:0`, or none). Profile **ARNs** are not
+supported — they contain slashes, which the provider-prefix strip would mangle.
+
+`AI_GATEWAY_URL` does not apply to a `bedrock/` model and is simply unused when
+both are set. The run logs a line saying so; it is not an error, and nothing is
+leaving your account.
+
+See [stories/bedrock-provider.md](./stories/bedrock-provider.md).
+
+#### Using GitHub Copilot
+
+If the only AI your organisation has approved is a GitHub Copilot subscription,
+the TestBench extension can be that AI. Run **TestBench: Use Copilot for AI**
+once: it raises Copilot's consent dialog, asks which of your seat's models to
+use, and writes three lines into the project's `.env`.
+
+```
+AI_MODEL=gateway/copilot/gpt-4.1
+AI_GATEWAY_URL=http://127.0.0.1:18790
+AI_API_KEY=<bridge token>
+```
+
+Nothing new leaves the machine. VS Code's `vscode.lm` API has no HTTP surface
+and the Sessions API server is a separate process, so the extension publishes
+that API as an OpenAI-compatible endpoint on 127.0.0.1 and the server reaches it
+through the `gateway/` routing above. Prompts still go out over Copilot's own
+channel — the one the org already approved. The listener is off by default, is
+User-scoped so no workspace can turn it on, and every request needs the bearer
+token that setup wrote (kept in this machine's VS Code SecretStorage, so a
+`.env` copied to another machine gets a 401).
+
+**Scope: compiling, repairing and authoring — not running.** Copilot bills in
+premium requests with per-model multipliers, sized for interactive chat, and
+agent-style traffic exhausts a seat in minutes. Code-behind replay means runs
+don't need AI at all: a fully compiled test makes **zero** AI calls and spends
+**zero** quota, however many times it runs. What does spend quota is a human
+asking for AI work — Compile This Step, Repair this step, compiling a test — plus
+two reactive paths on a keyed run: the failure-diagnosis pass (one call per
+failed run) and a heal attempt on a stale compiled step. Nothing stops you
+running uncompiled steps through Copilot; it will work, and it will hit the
+seat's limits.
+
+To spend nothing on a particular run without editing `.env`, use the AI run
+switch: `runSettings: {ai: "off"}` makes the run keyless *by policy* — compiled
+steps replay, a broken entry takes the skip instead of healing, and anything
+needing a model is refused with a typed error. The report then says the run made
+zero AI calls because it was told to, rather than because a key happened to be
+missing. On the `aiui run` CLI there is no per-run channel, so the project-level
+`ai.allowInRuns: false` in `aiui.config.json` is the equivalent switch — and it
+is the only one for a provider that supplies its own credentials, where there is
+no `AI_API_KEY` to blank.
+
+Three limits worth knowing before you set it up. Screenshots are dropped: the
+bridge speaks text only, so an image block is replaced with a short note (the
+diagnosis pass still works, text-only). The bridge is loopback — a **remote**
+Sessions API server would resolve `127.0.0.1` to itself, so this only works with
+a server on the same machine; the setup command warns when `SERVER_URL` is not
+local. And the `gateway/` prefix is resolved by `@pkent/aigateway` inside the server
+process, so the server has to be running a build whose dependency ships it —
+`1.4.0-beta.5` or later. If it answers `Unsupported model "gateway/…"` and lists
+the providers it does know, that server predates the prefix: rebuild and restart
+it from a checkout on this version.
 
 ### Per-environment configuration
 

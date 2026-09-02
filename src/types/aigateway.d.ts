@@ -75,9 +75,25 @@ declare module '@pkent/aigateway' {
   }
 
   /**
+   * One registered provider, as reported by {@link AIGateway.providers}.
+   *
+   * Exactly three fields, deliberately: this file is a hand-maintained mirror
+   * that goes stale silently, so every field declared here is one more thing to
+   * keep true. `selfAuthenticating` is present only on providers that resolve
+   * their own credentials (Bedrock signs with the AWS credential chain), which
+   * is why it is optional rather than a boolean on every entry.
+   */
+  export interface ProviderEntry {
+    id: string;
+    prefix: string;
+    selfAuthenticating?: boolean;
+  }
+
+  /**
    * A provider-neutral LLM client bound to one model + one API key. The model
    * string selects the provider via prefix matching; `new AIGateway(...)` throws
-   * on an empty key and binds the model at construction.
+   * on an empty key — unless the provider self-authenticates — and binds the
+   * model at construction.
    */
   export class AIGateway {
     constructor(model: string, key: string, options?: GatewayOptions);
@@ -85,6 +101,12 @@ declare module '@pkent/aigateway' {
     get provider(): string;
     chat(messages: unknown, callOptions?: CallOptions): Promise<V2Response>;
     stream(messages: unknown, callOptions?: CallOptions): ChatStream;
+    /**
+     * The registered providers and their `<id>/` model prefixes. Asked rather
+     * than mirrored: the alternative is a second list of key-free prefixes in
+     * this repo, drifting against the library's.
+     */
+    static providers(): ProviderEntry[];
   }
 
   export default AIGateway;

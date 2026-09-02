@@ -37,6 +37,23 @@ import { setLogCallback } from '../../utils/logger.js';
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]\s*(.*)/i;
 
+/**
+ * Does this run have no AI — for want of a key, or because the project forbids
+ * it? Mirrored from the CLI runner, which is the closer sibling than the server:
+ * neither resolves run settings, so `runSettings.ai` never reaches either and
+ * `ai.allowInRuns` in `aiui.config.json` is the whole switch.
+ *
+ * Honoured here as well as in the CLI on purpose. Before
+ * stories/bedrock-provider.md the rule was clean — "the non-server paths ignore
+ * it" — and fixing only the CLI would replace it with "everything except the
+ * Electron UI", an exception nobody could derive from the config file. It also
+ * costs the same one line: a project whose provider self-authenticates has no
+ * key to blank here either.
+ */
+function runIsKeyless(config: Config): boolean {
+  return !aiConfigured(config.ai) || config.ai.allowInRuns === false;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -224,7 +241,11 @@ export class UIRunnerAdapter {
       // with the client it is speaking for. The third executeStep call-site
       // family: without this the UI path gets the reactive
       // `AiNotConfiguredError` where the other two get the plain explanation.
-      ...(!aiConfigured(this.config.ai) && { keyless: true }),
+      ...(runIsKeyless(this.config) && { keyless: true }),
+      // Which explanation the skipped step carries. Policy first when both
+      // hold, matching the server and the CLI: a key IS present on the policy
+      // path, so "no key" would send the reader to fix a correct line.
+      ...(this.config.ai.allowInRuns === false && { keylessReason: 'policy' as const }),
     });
 
     // Emit sub-actions and screenshots
@@ -311,6 +332,11 @@ export class UIRunnerAdapter {
     // 6. Set up AI client and token tracker
     this.tokenTracker = new TokenTracker();
     this.aiClient = new AiClient(this.config.ai, this.tokenTracker);
+    // Lowered for the same reason the server lowers it: with a key present,
+    // `AiNotConfiguredError`'s advice ("set AI_API_KEY") would be a false
+    // statement about a correct config. Set once — the UI path has no per-batch
+    // run settings to re-resolve.
+    this.aiClient.setAiPolicy(this.config.ai.allowInRuns !== false);
     this.apiResponseStore = new ApiResponseStore();
 
     // 7. Navigate to base URL if provided
@@ -477,7 +503,8 @@ export class UIRunnerAdapter {
         // Keyless, same as the steering call above — both call sites or
         // neither: a run and a steer on the same machine must not disagree
         // about whether there is AI to heal with.
-        ...(!aiConfigured(this.config.ai) && { keyless: true }),
+        ...(runIsKeyless(this.config) && { keyless: true }),
+        ...(this.config.ai.allowInRuns === false && { keylessReason: 'policy' as const }),
       });
 
       // Emit sub-actions and screenshots
