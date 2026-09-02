@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Documents</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover {
+      background: #374151;
+      color: #f9fafb;
+    }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name {
+      font-size: 13px;
+      font-weight: 500;
+      color: #f9fafb;
+    }
+
+    .user-email {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover {
+      background: #374151;
+      color: #f9fafb;
+    }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .upload-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    .upload-grid .section-card { margin-bottom: 0; }
+
+    label.field-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+
+    input[type="file"] {
+      display: block;
+      width: 100%;
+      font-size: 13px;
+      color: #374151;
+      margin-bottom: 14px;
+    }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    .btn-link {
+      background: none;
+      border: none;
+      color: #1a56db;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 0;
+      text-decoration: underline;
+    }
+
+    /* Styled uploader: the input is hidden, the drop zone is what you see */
+    .dropzone {
+      border: 2px dashed #cbd5e1;
+      border-radius: 10px;
+      padding: 28px 16px;
+      text-align: center;
+      font-size: 13px;
+      color: #6b7280;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      margin-bottom: 14px;
+    }
+
+    .dropzone.dragover {
+      border-color: #1a56db;
+      background: #eff4ff;
+    }
+
+    .dropzone .dropzone-icon { font-size: 26px; display: block; margin-bottom: 8px; }
+
+    /* Specificity must beat the `input[type="file"]` rule above, or the
+       "hidden" input renders — which is exactly the case this card exists
+       to exercise. */
+    input[type="file"].visually-hidden { display: none; }
+
+    .selected-file {
+      font-size: 13px;
+      color: #111827;
+      min-height: 18px;
+      margin-bottom: 14px;
+    }
+
+    .selected-file:empty::before {
+      content: 'No file chosen';
+      color: #9ca3af;
+    }
+
+    /* Status */
+    .status {
+      margin: 0 0 24px;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      display: none;
+    }
+
+    .status.success {
+      display: block;
+      background: #ecfdf5;
+      color: #047857;
+      border: 1px solid #a7f3d0;
+    }
+
+    .status.error {
+      display: block;
+      background: #fef2f2;
+      color: #b91c1c;
+      border: 1px solid #fecaca;
+    }
+
+    /* Documents table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    thead th {
+      text-align: left;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 8px 12px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    tbody td {
+      padding: 12px;
+      border-bottom: 1px solid #f3f4f6;
+      color: #111827;
+      vertical-align: middle;
+    }
+
+    tbody tr:last-child td { border-bottom: none; }
+
+    td.doc-sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #6b7280; }
+    td.doc-type { color: #6b7280; }
+    td.doc-empty { color: #9ca3af; text-align: center; padding: 24px; }
+
+    .doc-count {
+      font-size: 13px;
+      color: #6b7280;
+      margin-right: 16px;
+    }
+
+    .section-actions { display: flex; align-items: center; }
+
+    /* Cookie banner (same as the other pages) */
+    .cookie-banner {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: #1f2937;
+      color: #f9fafb;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 14px;
+      z-index: 1000;
+      box-shadow: 0 -2px 12px rgba(0,0,0,0.15);
+    }
+
+    .cookie-banner.hidden { display: none; }
+    .cookie-banner p { flex: 1; }
+
+    .cookie-btn {
+      padding: 8px 20px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .cookie-btn:hover { background: #1648c0; }
+
+    .cookie-reject {
+      padding: 8px 20px;
+      background: transparent;
+      color: #d1d5db;
+      border: 1px solid #4b5563;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .cookie-reject:hover { border-color: #9ca3af; color: #f3f4f6; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html" class="active" aria-current="page">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Documents</h1>
+      <p>Upload statements, proof of identity and receipts. PDF, PNG, JPG, TXT or CSV, up to 1 MB each.</p>
+    </div>
+
+    <!-- Outcome of the last upload attempt -->
+    <div id="upload-status" class="status" role="status" aria-live="polite" data-state="idle"></div>
+
+    <div class="upload-grid">
+      <!-- Card 1: plain visible file field -->
+      <section class="section-card" id="statement-card" aria-labelledby="statement-title">
+        <div class="section-header">
+          <h2 class="section-title" id="statement-title">Upload a statement</h2>
+        </div>
+        <p class="section-hint">A single file, chosen with a standard file field.</p>
+        <form id="statement-form" novalidate>
+          <label class="field-label" for="statement-file">Statement file</label>
+          <input type="file" id="statement-file" name="file" accept=".pdf,.png,.jpg,.jpeg,.txt,.csv">
+          <button type="submit" class="btn" id="statement-upload">Upload</button>
+        </form>
+      </section>
+
+      <!-- Card 2: styled uploader, the real input is hidden -->
+      <section class="section-card" id="identity-card" aria-labelledby="identity-title">
+        <div class="section-header">
+          <h2 class="section-title" id="identity-title">Proof of identity</h2>
+        </div>
+        <p class="section-hint">Drag a file onto the box or use the button. The file field itself is hidden.</p>
+        <form id="identity-form" novalidate>
+          <div id="identity-dropzone" class="dropzone" role="button" tabindex="0" aria-label="Choose a proof of identity file">
+            <span class="dropzone-icon">🪪</span>
+            <span>Drag a file here or</span>
+            <button type="button" class="btn-link" id="identity-choose">Choose file</button>
+            <input type="file" id="identity-file" name="file" class="visually-hidden" accept=".pdf,.png,.jpg,.jpeg,.txt,.csv" tabindex="-1">
+          </div>
+          <div id="identity-selected" class="selected-file" aria-live="polite"></div>
+          <button type="submit" class="btn" id="identity-upload" disabled>Upload</button>
+        </form>
+      </section>
+
+      <!-- Card 3: several files in one go -->
+      <section class="section-card" id="receipts-card" aria-labelledby="receipts-title">
+        <div class="section-header">
+          <h2 class="section-title" id="receipts-title">Receipts</h2>
+        </div>
+        <p class="section-hint">Choose several files at once; they are sent in one request.</p>
+        <form id="receipts-form" novalidate>
+          <label class="field-label" for="receipts-files">Receipt files</label>
+          <input type="file" id="receipts-files" name="file" multiple accept=".pdf,.png,.jpg,.jpeg,.txt,.csv">
+          <button type="submit" class="btn" id="receipts-upload">Upload all</button>
+        </form>
+      </section>
+    </div>
+
+    <!-- Everything uploaded so far, as the server sees it -->
+    <section class="section-card" id="documents-card" aria-labelledby="documents-title" style="margin-top: 24px;">
+      <div class="section-header">
+        <h2 class="section-title" id="documents-title">Uploaded documents</h2>
+        <div class="section-actions">
+          <span class="doc-count" id="documents-count">0 documents</span>
+          <button type="button" class="btn btn-secondary" id="documents-clear">Clear all</button>
+        </div>
+      </div>
+      <table id="documents-table" aria-describedby="documents-count">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Size</th>
+            <th scope="col">Type</th>
+            <th scope="col">SHA-256</th>
+            <th scope="col">Uploaded</th>
+          </tr>
+        </thead>
+        <tbody id="documents-body">
+          <tr id="documents-empty"><td class="doc-empty" colspan="5">No documents uploaded yet.</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- Cookie consent banner -->
+  <div id="cookie-banner" class="cookie-banner hidden" role="dialog" aria-label="Cookie consent">
+    <p>We use cookies to improve your experience. By continuing, you agree to our cookie policy.</p>
+    <button class="cookie-reject" id="cookie-reject">Reject</button>
+    <button class="cookie-btn" id="cookie-accept">Accept Cookies</button>
+  </div>
+
+  <script>
+    // ── Shell: cookie banner, user info, sign out (same as the other pages) ──
+    if (!localStorage.getItem('cookie-consent')) {
+      document.getElementById('cookie-banner').classList.remove('hidden');
+    }
+    document.getElementById('cookie-accept').addEventListener('click', function () {
+      localStorage.setItem('cookie-consent', 'accepted');
+      document.getElementById('cookie-banner').classList.add('hidden');
+    });
+    document.getElementById('cookie-reject').addEventListener('click', function () {
+      localStorage.setItem('cookie-consent', 'rejected');
+      document.getElementById('cookie-banner').classList.add('hidden');
+    });
+
+    const email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Upload plumbing ──────────────────────────────────────────────────────
+    const statusEl = document.getElementById('upload-status');
+    const bodyEl = document.getElementById('documents-body');
+    const countEl = document.getElementById('documents-count');
+
+    function setStatus(state, message) {
+      statusEl.className = 'status ' + state;
+      statusEl.dataset.state = state;
+      statusEl.textContent = message;
+    }
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function formatTime(iso) {
+      const d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function renderDocuments(documents) {
+      bodyEl.innerHTML = '';
+      countEl.textContent = documents.length + (documents.length === 1 ? ' document' : ' documents');
+      if (documents.length === 0) {
+        const tr = document.createElement('tr');
+        tr.id = 'documents-empty';
+        tr.innerHTML = '<td class="doc-empty" colspan="5">No documents uploaded yet.</td>';
+        bodyEl.appendChild(tr);
+        return;
+      }
+      for (const doc of documents) {
+        const tr = document.createElement('tr');
+        tr.className = 'doc-row';
+        tr.dataset.id = doc.id;
+        tr.dataset.name = doc.name;
+        tr.dataset.sha256 = doc.sha256;
+        const cells = [
+          ['doc-name', doc.name],
+          ['doc-size', formatSize(doc.size)],
+          ['doc-type', doc.type || '—'],
+          ['doc-sha', doc.sha256.slice(0, 12)],
+          ['doc-time', formatTime(doc.uploadedAt)],
+        ];
+        for (const [cls, text] of cells) {
+          const td = document.createElement('td');
+          td.className = cls;
+          td.textContent = text;
+          if (cls === 'doc-sha') td.title = doc.sha256;
+          tr.appendChild(td);
+        }
+        bodyEl.appendChild(tr);
+      }
+    }
+
+    async function refreshDocuments() {
+      const res = await fetch('/api/documents');
+      const data = await res.json();
+      renderDocuments(data.documents || []);
+    }
+
+    async function upload(files) {
+      const list = Array.from(files || []).filter(Boolean);
+      if (list.length === 0) {
+        setStatus('error', 'Choose a file first');
+        return false;
+      }
+      const form = new FormData();
+      for (const f of list) form.append('file', f, f.name);
+      let res;
+      try {
+        res = await fetch('/api/documents', { method: 'POST', body: form });
+      } catch (err) {
+        setStatus('error', 'Upload failed: ' + err.message);
+        return false;
+      }
+      let data = {};
+      try { data = await res.json(); } catch { /* no body */ }
+      if (!res.ok) {
+        setStatus('error', data.error || ('Upload failed (' + res.status + ')'));
+        return false;
+      }
+      const added = data.documents || [];
+      if (added.length === 1) {
+        setStatus('success', 'Uploaded ' + added[0].name + ' (' + formatSize(added[0].size) + ')');
+      } else {
+        setStatus('success', 'Uploaded ' + added.length + ' files');
+      }
+      await refreshDocuments();
+      return true;
+    }
+
+    // ── Card 1: plain field ──────────────────────────────────────────────────
+    const statementInput = document.getElementById('statement-file');
+    document.getElementById('statement-form').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      if (await upload(statementInput.files)) statementInput.value = '';
+    });
+
+    // ── Card 2: styled uploader with a hidden input ──────────────────────────
+    const identityInput = document.getElementById('identity-file');
+    const identityDropzone = document.getElementById('identity-dropzone');
+    const identitySelected = document.getElementById('identity-selected');
+    const identityUpload = document.getElementById('identity-upload');
+    let identityFile = null;
+
+    function chooseIdentityFile(file) {
+      identityFile = file || null;
+      identitySelected.textContent = identityFile ? identityFile.name + ' (' + formatSize(identityFile.size) + ')' : '';
+      identityUpload.disabled = !identityFile;
+    }
+
+    document.getElementById('identity-choose').addEventListener('click', function (e) {
+      e.stopPropagation();
+      identityInput.click();
+    });
+    identityDropzone.addEventListener('click', function () { identityInput.click(); });
+    identityDropzone.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); identityInput.click(); }
+    });
+    identityInput.addEventListener('change', function () {
+      chooseIdentityFile(identityInput.files[0]);
+    });
+    identityDropzone.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      identityDropzone.classList.add('dragover');
+    });
+    identityDropzone.addEventListener('dragleave', function () {
+      identityDropzone.classList.remove('dragover');
+    });
+    identityDropzone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      identityDropzone.classList.remove('dragover');
+      chooseIdentityFile(e.dataTransfer.files[0]);
+    });
+    document.getElementById('identity-form').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      if (await upload(identityFile ? [identityFile] : [])) {
+        identityInput.value = '';
+        chooseIdentityFile(null);
+      }
+    });
+
+    // ── Card 3: multiple files ───────────────────────────────────────────────
+    const receiptsInput = document.getElementById('receipts-files');
+    document.getElementById('receipts-form').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      if (await upload(receiptsInput.files)) receiptsInput.value = '';
+    });
+
+    // ── Clear all ────────────────────────────────────────────────────────────
+    document.getElementById('documents-clear').addEventListener('click', async function () {
+      await fetch('/api/documents', { method: 'DELETE' });
+      setStatus('success', 'All documents cleared');
+      await refreshDocuments();
+    });
+
+    refreshDocuments();
+  </script>
+</body>
+</html>

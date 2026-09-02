@@ -6,6 +6,22 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — SecureBank fixture: a Documents page for file-upload steps
+
+`fixtures/test-app` gains `/documents`, the page the upcoming file-upload
+step support ([stories/file-upload-steps.md](stories/file-upload-steps.md))
+will be tested against: three upload controls (a plain `<input type="file">`,
+a styled "Choose file" button whose input is hidden, and a multi-file field),
+an "Uploaded documents" table fed by a real multipart `POST /api/documents`,
+and server-side rejection of disallowed extensions (400) and files over 1 MB
+(413). `GET`/`DELETE /api/documents` list and clear the in-memory store so
+concurrent runs can isolate themselves. Sample files live beside the tests
+that use them (`fixtures/tests/attachments/`,
+`templates/init/tests/attachments/`), and
+`templates/init/tests/securebank-upload.md` is the markdown test part 2 of the
+story has to make pass — today the model is never told the `upload` action
+exists, so it is expected to fail.
+
 ### Fixed — TestBench: a failed code-behind step now says what failed, where you're looking
 
 When a code-behind step failed in TestBench, the error was one line in the
