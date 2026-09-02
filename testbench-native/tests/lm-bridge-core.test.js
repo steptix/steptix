@@ -106,6 +106,28 @@ test('the 401 names the copied-.env case, because that is the one nobody guesses
   assert.match(err.body.error.message, /TestBench: Use Copilot for AI/);
 });
 
+test('the 401 also names the overlay — the cause a correct .env cannot explain', () => {
+  // The incident: `.env` is right, setup did run here, the token is this
+  // machine's, and an active env's `.env.<name>` quietly beat all of it.
+  // Unconditional, because this listener serves every window and a request
+  // carries no workspace identity — there is nothing here to condition on.
+  const message = unauthorizedError().body.error.message;
+  assert.match(message, /testbench-native\.activeEnv/);
+  assert.match(message, /\.env\.<name>/);
+  assert.match(message, /AI_API_KEY over \.env/);
+});
+
+test('the 401 names the mechanism and never a token — it has none to leak', () => {
+  // The expected token is in scope at the call site (isAuthorized compares it),
+  // so "put the right one in the message" is a one-line change away at all
+  // times. It would hand any unauthenticated caller the credential.
+  const token = 'a'.repeat(64);
+  const message = unauthorizedError().body.error.message;
+  assert.equal(unauthorizedError.length, 0, 'the builder cannot even be given a token');
+  assert.ok(!message.includes(token));
+  assert.doesNotMatch(message, /[0-9a-f]{32}/, 'nothing token-shaped survives in the text');
+});
+
 // ---------------------------------------------------------------------------
 // Message translation
 // ---------------------------------------------------------------------------

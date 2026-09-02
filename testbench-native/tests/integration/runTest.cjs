@@ -45,6 +45,21 @@ async function main() {
     const reportPath = path.resolve(__dirname, 'test-report.json');
     try { require('node:fs').rmSync(reportPath, { force: true }); } catch { /* ignore */ }
 
+    // Tee the extension's output channel to a file, the same way the live
+    // runner does. VS Code exposes no way to read an OutputChannel back, so
+    // without this the run log — the only place several messages exist at
+    // all — is unassertable, and tests that reach for it silently no-op.
+    //
+    // Beside this script, not in the OS temp dir: the extension truncates the
+    // file at its first getOutputChannel() and appends from there, so one
+    // machine-global path means two fast suites — the two-worktree workflow
+    // CLAUDE.md documents — wipe and interleave each other's log, and the
+    // assertions that read it fail or, worse, pass on the other run's lines.
+    // Removed before launch so a killed run's log can never be read as this
+    // one's.
+    const outputLogPath = path.resolve(__dirname, 'fast-suite-output.log');
+    try { require('node:fs').rmSync(outputLogPath, { force: true }); } catch { /* ignore */ }
+
     const result = cp.spawnSync(codeExe, args, {
       stdio: 'inherit',
       env: {
@@ -52,6 +67,7 @@ async function main() {
         ELECTRON_RUN_AS_NODE: '1',
         TESTBENCH_FIXTURES_DIR: workspacePath,
         TESTBENCH_TEST_REPORT: reportPath,
+        TESTBENCH_LIVE_LOG: outputLogPath,
         ELECTRON_ENABLE_LOGGING: '1',
       },
     });
