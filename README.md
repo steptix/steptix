@@ -870,6 +870,20 @@ your own network path — commonly a VPC endpoint, so nothing traverses the publ
 internet. No new vendor to clear, no per-seat quota, and unlike the Copilot
 bridge below it works headless and in CI.
 
+**Install the Bedrock SDK first — it is not bundled:**
+
+```bash
+npm install @anthropic-ai/bedrock-sdk
+```
+
+It is an optional peer dependency of `@pkent/aigateway` rather than something
+this framework depends on, deliberately: it pulls the AWS SDK, roughly 50
+packages and 38 MB of credential providers and IMDS clients, and depending on it
+here would charge every user of this framework for a provider most of them never
+use. Only Bedrock users install it. If you forget, the first AI call fails with
+`missing_optional_dependency` naming that exact command, so the failure is
+loud and self-explaining rather than mysterious.
+
 **The AWS half of this lives in the machine environment, not in the project
 `.env`.** `AWS_REGION`, `AWS_PROFILE` and any AWS credentials are read from
 `process.env` by the AWS SDK itself, which knows nothing about this framework's
