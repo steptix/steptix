@@ -41,8 +41,8 @@ where `.env.uat` sets `AI_API_KEY`.
 **You get** a choice, before anything is planned or written:
 
 > The active environment **uat** sets `AI_API_KEY` in `.env.uat`, which
-> overrides `.env` on every run. Where should the bridge settings live?
-> **Write `.env.uat`** · **Write both** · **Continue anyway**
+> overrides `.env` on every run. Write the bridge settings to `.env.uat`
+> instead? **Write `.env.uat`** · **Continue anyway**
 
 **You run** a test where a stale overlay still shadows the token.
 **You get** a 401 that lists the actual suspect:
@@ -111,22 +111,27 @@ case:
 | Choice | Effect |
 |---|---|
 | **Write `.env.<name>`** | full trio to the overlay; `.env` untouched |
-| **Write both** | full trio to `.env` and to `.env.<name>` |
 | **Continue anyway** | today's behaviour, for someone who knows why |
 
 **There is no default.** The modal already interrupts, so making the user
 choose costs nothing, and a wrong default here can break an environment's
-model pairing. Each option is honest about a different trade:
+model pairing.
 
-- *Write the overlay* edits exactly the file that runs and leaves `.env` as it
-  was. Clearing the env later yields whatever `.env` produced before setup — a
-  different provider, or the plain "AI is not configured" — both
-  self-explaining, never a bridge 401. But `aiui run` without `--env` never sees
-  it (see CLI, above).
-- *Write both* is the option that makes `aiui run` and `aiui run --env uat`
-  reach the bridge alike. Its cost is two copies of the token: a later rerun of
-  setup updates the overlay only if that env is still active, so the summary
-  must say every file it wrote.
+*Write the overlay* edits exactly the file that runs and leaves `.env` as it
+was, so there is one copy of the token and one source of truth. Clearing the
+env later yields whatever `.env` produced before setup — a different provider,
+or the plain "AI is not configured" — both self-explaining, never a bridge 401.
+
+**The CLI trade, stated rather than papered over.** `aiui run` knows nothing of
+`testbench-native.activeEnv`, so after *Write the overlay* a plain `aiui run`
+does not reach the bridge — it composes `.env` plus the machine floor and runs
+on whatever that names. That is not a misleading failure (a different model, or
+"AI is not configured"), and the fix is the one the CLI already has:
+`aiui run --env uat`. A "write both files" option was considered and dropped:
+it would make the two commands agree at the cost of two copies of the token,
+with a later setup rerun updating the overlay only while that env is still
+active — the staleness that produces exactly the 401 this story exists to
+remove. One file, one truth; the summary says which file.
 
 **Why the whole trio, not just the key.** The three are applied independently
 on the server. Writing only the token into an overlay that sets its own
@@ -136,14 +141,16 @@ setup promised not to touch. A wrong `AI_GATEWAY_URL` is no better diagnosed:
 through the SDK it surfaces as the literal `'Connection error.'`, naming nothing.
 Coherence per file is the invariant.
 
-**Mechanics the builder will hit.** `planEnvUpdate` hardcodes the three keys and
-one target — it needs a target parameter. The tmp-and-rename write is single-file;
-*Write both* is two sequential writes, and a failure on the second must report
-which file was written and which was not. `ENV_COMMENT_LINES` (the block setup
-appends to `.env`) names the 401's causes and must gain the overlay cause; note
-it is appended only when a key is appended and only if its first line is absent,
-so a revised block never reaches an existing `.env`. And `summary()` names the
-model and URL today, not the file — it must list every file written.
+**Mechanics the builder will hit.** `planEnvUpdate` hardcodes one target — it
+needs a target parameter, since the same plan now aims at either `.env` or
+`.env.<name>`. The tmp-and-rename write stays single-file. `ENV_COMMENT_LINES`
+(the block setup appends alongside the trio) names the 401's causes and must gain
+the overlay cause; note it is appended only when a key is appended and only if
+its first line is absent, so a revised block never reaches an existing file —
+and when the target is `.env.<name>`, its "rerun setup in this window" advice
+needs the caveat that setup will target the overlay only while that env is
+active. `summary()` names the model and URL today, not the file — it must name
+the file written, because which file it was is now the whole point.
 
 ## Part B — the 401 names the overlay, with no hint machinery
 
@@ -193,10 +200,11 @@ anything other than a workspace setting.
 - **Unit (core):** `unauthorizedError()` contains the overlay sentence and does
   not contain the expected token.
 - **Integration (electron harness):** setup with a conflicting overlay prompts
-  once and, on *Write both*, leaves both files coherent; setup with `.env`
-  already correct and a conflicting overlay **still prompts** (the `unchanged`
-  case that swallowed the incident); setup with no active env writes exactly
-  what it does today. The run-controller log names the overridden keys.
+  once and, on *Write the overlay*, leaves `.env.<name>` holding a coherent trio
+  and `.env` byte-identical to before; setup with `.env` already correct and a
+  conflicting overlay **still prompts** (the `unchanged` case that swallowed the
+  incident); setup with no active env writes exactly what it does today. The
+  run-controller log names the overridden keys.
 - **Manual, real seat:** the incident — active env with a conflicting key, run,
   confirm the 401 and the run log both name the overlay.
 
@@ -207,9 +215,8 @@ server rebuild, no framework change, no library change.
 
 ## Open questions
 
-1. **Should *Write both* be offered at all**, given the two-copies staleness, or
-   should the CLI-parity case be documented as "set `--env` on the CLI too" and
-   the option dropped to keep one source of truth?
+1. **RESOLVED — *Write both* is dropped.** One file, one truth; the CLI uses
+   `--env`. Reasoning in Part A.
 2. **Should the overlay check also flag `SERVER_URL` / `AIUI_SERVER_API_KEY`?**
    Not bridge-related, but an overlay that redirects the server is the other
    silent-override that reads as "the bridge is broken". Probably a separate
