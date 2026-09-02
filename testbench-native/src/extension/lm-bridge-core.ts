@@ -500,7 +500,15 @@ function badRequest(message: string): BridgeError {
  * The token is minted per machine and kept in SecretStorage, which is never
  * synced, so a `.env` copied to a second machine authenticates against a token
  * that was never minted there. That is the single likeliest cause, so it is the
- * one the message names.
+ * one the message names first.
+ *
+ * The overlay is named second, unconditionally, because it is the cause a
+ * reader cannot get to on their own: the `.env` in front of them is correct,
+ * and nothing in a 401 suggests another file beat it. It cannot be detected
+ * here — one listener serves every window, `activeEnv` is per workspace, and a
+ * request carries only a Bearer token — so the message names the MECHANISM and
+ * never a value. The value is logged by the window that owns the workspace, on
+ * every run (run-controller's `.env.<name> overlaid` line).
  */
 export function unauthorizedError(): BridgeError {
   return bridgeError(
@@ -509,7 +517,10 @@ export function unauthorizedError(): BridgeError {
       'token from AI_API_KEY, written by "TestBench: Use Copilot for AI". If that ' +
       'line came from another machine it will not work here — the token lives in ' +
       "this machine's VS Code SecretStorage, which Settings Sync does not " +
-      'replicate. Rerun the setup command in this window.',
+      'replicate. Rerun the setup command in this window. Or this workspace has an ' +
+      'active environment (testbench-native.activeEnv) whose .env.<name> sets its ' +
+      'own AI_API_KEY over .env — then that file is the one to fix, and rerunning ' +
+      'setup with the environment active offers to write it there.',
     'invalid_request_error',
     'invalid_api_key',
   );

@@ -3,6 +3,7 @@
 // The default test-electron runner spawns Code.exe directly, which silently
 // rejects every flag on Windows.
 const path = require('node:path');
+const os = require('node:os');
 const cp = require('node:child_process');
 const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
 
@@ -45,6 +46,12 @@ async function main() {
     const reportPath = path.resolve(__dirname, 'test-report.json');
     try { require('node:fs').rmSync(reportPath, { force: true }); } catch { /* ignore */ }
 
+    // Tee the extension's output channel to a file, the same way the live
+    // runner does. VS Code exposes no way to read an OutputChannel back, so
+    // without this the run log — the only place several messages exist at
+    // all — is unassertable, and tests that reach for it silently no-op.
+    const outputLogPath = path.join(os.tmpdir(), 'testbench-fast-suite.log');
+
     const result = cp.spawnSync(codeExe, args, {
       stdio: 'inherit',
       env: {
@@ -52,6 +59,7 @@ async function main() {
         ELECTRON_RUN_AS_NODE: '1',
         TESTBENCH_FIXTURES_DIR: workspacePath,
         TESTBENCH_TEST_REPORT: reportPath,
+        TESTBENCH_LIVE_LOG: outputLogPath,
         ELECTRON_ENABLE_LOGGING: '1',
       },
     });

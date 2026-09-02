@@ -45,6 +45,14 @@ const SUB_ROOT_OVERLAY = path.join(FIXTURES_DIR, '.env.subenv');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** The extension's output channel, which the harness tees to a file — VS Code
+ *  exposes no way to read an OutputChannel back. */
+function readOutputLog() {
+  const file = process.env.TESTBENCH_LIVE_LOG;
+  if (!file || !fs.existsSync(file)) return null;
+  return fs.readFileSync(file, 'utf-8');
+}
+
 async function waitFor(label, predicate, timeoutMs = 5_000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -181,6 +189,22 @@ describe('TestBench env-file overlay (## Parameters honour the selected env)', f
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('the run log names WHICH keys the overlay overrode, not just how many', async () => {
+    // A count tells a user with a failing run nothing. The keys tell them
+    // whether the thing they are staring at — the AI key, the server URL — is
+    // even the value that ran (stories/env-overlay-awareness.md Part B).
+    await setActiveEnv('t2');
+
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+
+    const log = readOutputLog();
+    assert.ok(log, 'the harness must tee the output channel — see runTest.cjs');
+    assert.match(log, /\.env\.t2 overlaid \(2 keys: T2_ONLY, SHARED\)/);
   });
 
   it('fails the run with TB006 (and opens no stream) when the selected .env.<name> is missing', async () => {

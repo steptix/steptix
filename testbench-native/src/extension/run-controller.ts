@@ -1997,7 +1997,18 @@ export class RunController {
         return this.fail(payload, log);
       }
       env = composeEnv(env, overlay);
-      log(`.env.${effectiveEnvName} overlaid (${Object.keys(overlay).length} key(s))`);
+      // The KEYS, not just how many: this line is the only place a run says
+      // which values the overlay took over, and the ones that mislead hardest
+      // when they are silently replaced (AI_API_KEY, SERVER_URL) look exactly
+      // like a broken bridge or a dead server from every other error message.
+      // Safe to name — a key is not its value, and the values are secrets.
+      const keys = Object.keys(overlay);
+      log(
+        keys.length === 0
+          ? `.env.${effectiveEnvName} overlaid (no keys)`
+          : `.env.${effectiveEnvName} overlaid (${keys.length} ` +
+              `${keys.length === 1 ? 'key' : 'keys'}: ${keys.join(', ')})`,
+      );
     }
 
     if (!env['SERVER_URL'] || env['SERVER_URL'].trim() === '') {
