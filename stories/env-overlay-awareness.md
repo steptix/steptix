@@ -101,10 +101,16 @@ case:
 2. If set, look for `<target.folder>/.env.<name>` — the target's folder, not
    "the workspace", since `resolveEnvTarget()` already picks the active
    editor's folder in a multi-root workspace. Absent → today's behaviour.
-3. Present → read it with `scanServerEnv` (the reader `planEnvUpdate` already
-   uses; it shares the server's grammar and does not throw on a malformed
-   line — `parseEnv` does both, and is the wrong tool here). Check for **any of
-   `AI_MODEL`, `AI_GATEWAY_URL`, `AI_API_KEY`**.
+3. Present → read it with **both** readers and take the union of their keys.
+   `scanServerEnv` is what `planEnvUpdate` writes with and shares the server's
+   grammar; but the path the incident was on — the TestBench run — reads the
+   overlay with `readEnvOverlayFile` → `parseEnv`, which strips a leading
+   `export `. Measured: `export AI_API_KEY=k` is key `export AI_API_KEY` to the
+   scanner and `AI_API_KEY` to the parser, so a scanner-only check reports no
+   conflict on exactly the overlay that shadows the token at run time.
+   `parseEnv` throws on a malformed line; catch that and keep the scan result as
+   the floor. Check the union for **any of `AI_MODEL`, `AI_GATEWAY_URL`,
+   `AI_API_KEY`**.
 4. None set → today's behaviour. Any set → the choice below decides which
    file(s) the plan targets, and **every file written receives the full trio**.
 
