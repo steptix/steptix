@@ -51,6 +51,23 @@
     .alert-body .title { font-weight: 500; font-size: 0.9rem; }
     .alert-body .desc { font-size: 0.82rem; color: #64748b; margin-top: 2px; }
     .alert-body .date { font-size: 0.78rem; color: #94a3b8; margin-top: 4px; }
+    /* ── Form panel — enabled/disabled + field-value assertions ───────────── */
+    .form-panel { background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 20px; }
+    .form-row { display: flex; gap: 16px; margin-bottom: 14px; }
+    .form-field { flex: 1; }
+    .form-field label { display: block; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin-bottom: 6px; }
+    .form-field input, .form-field select { width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.9rem; font-family: inherit; background: white; }
+    .form-field input:disabled, .form-field select:disabled { background: #f1f5f9; color: #94a3b8; cursor: not-allowed; }
+    button.primary { padding: 9px 18px; border: none; border-radius: 6px; background: #1a1a2e; color: white; font-size: 0.9rem; font-weight: 500; cursor: pointer; }
+    button.primary:disabled { background: #cbd5e1; color: #94a3b8; cursor: not-allowed; }
+    button.secondary { padding: 9px 18px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; color: #1a1a2e; font-size: 0.9rem; cursor: pointer; }
+    .form-hint { font-size: 0.82rem; color: #64748b; margin-top: 4px; }
+    .settle-row { display: flex; align-items: center; gap: 12px; margin-top: 18px; padding-top: 18px; border-top: 1px solid #f1f5f9; }
+    .settle-row .settle-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; }
+    .settle-row .settle-value { font-size: 1.1rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .settle-row .settle-value.pending { color: #94a3b8; font-weight: 500; }
+    /* ── Empty state ──────────────────────────────────────────────────────── */
+    .empty-state { padding: 28px 16px; text-align: center; color: #64748b; font-size: 0.9rem; background: white; }
   </style>
 </head>
 <body>
@@ -264,6 +281,148 @@
       </div>
     </div>
   </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       Section 4: Transfer panel.
+
+       Targets for the verify shapes the sections above cannot express:
+         - field value      → #transfer-amount holds "50.20"
+         - disabled control → #transfer-submit is disabled (no payee chosen)
+         - enabled control  → #transfer-cancel is enabled, so a "disabled"
+                              assertion has to actually read the property
+                              rather than match any button on the page
+         - absent element   → there is deliberately NO #transfer-error node.
+                              "Verify no error is shown" must pass here.
+
+       #pending-settlement is the async target: it renders "Calculating..." and
+       settles to $1,204.75 800ms after load, and "Refresh" resets it for a
+       further 2s. Written as two steps (click, then verify) it has settled by
+       the time the next step runs; written as ONE step it forces the
+       assertion to poll. Both are legitimate — the live suite uses the
+       two-step form so it does not depend on the model choosing to poll.
+       ══════════════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Transfer Funds</h2>
+    <div class="form-panel" id="transfer-panel">
+      <div class="form-row">
+        <div class="form-field">
+          <label for="transfer-from">From account</label>
+          <select id="transfer-from">
+            <option selected>Everyday Checking</option>
+            <option>Savings Plus</option>
+            <option>Investment Account</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label for="transfer-to">To payee</label>
+          <input id="transfer-to" type="text" value="" placeholder="Select a payee">
+        </div>
+        <div class="form-field">
+          <label for="transfer-amount">Amount (AUD)</label>
+          <input id="transfer-amount" type="text" value="50.20">
+        </div>
+      </div>
+      <div class="form-row" style="align-items:center">
+        <div>
+          <button id="transfer-submit" class="primary" type="button" disabled>Transfer</button>
+          <button id="transfer-cancel" class="secondary" type="button">Cancel</button>
+          <div id="transfer-hint" class="form-hint">Select a payee to enable this transfer.</div>
+        </div>
+      </div>
+      <div class="settle-row">
+        <span class="settle-label">Pending settlement</span>
+        <span id="pending-settlement" class="settle-value pending">Calculating...</span>
+        <button id="refresh-settlement" class="secondary" type="button">Refresh</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       Section 5: Scheduled payments.
+
+       Gives .badge.pending and .badge.closed real instances — the stylesheet
+       defined both from the start but only .badge.active was ever rendered,
+       so "verify the status is Pending" had nothing to read. Also the target
+       for status-per-row assertions: find the row by payee, read its badge.
+       ══════════════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Scheduled Payments</h2>
+    <table id="scheduled-table">
+      <thead>
+        <tr>
+          <th>Payee</th>
+          <th>Frequency</th>
+          <th>Next payment</th>
+          <th class="amount-cell">Amount</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="scheduled-body">
+        <tr><td>Landlord — Rent</td><td>Monthly</td><td>2026-05-15</td><td class="amount-cell">$1,850.00</td><td><span class="badge active">Active</span></td></tr>
+        <tr><td>AGL Electricity</td><td>Quarterly</td><td>2026-06-01</td><td class="amount-cell">$183.60</td><td><span class="badge active">Active</span></td></tr>
+        <tr><td>External Transfer — J. Smith</td><td>One-off</td><td>2026-04-26</td><td class="amount-cell">$8,500.00</td><td><span class="badge pending">Pending review</span></td></tr>
+        <tr><td>Old Gym Membership</td><td>Monthly</td><td>—</td><td class="amount-cell">$59.99</td><td><span class="badge closed">Cancelled</span></td></tr>
+        <tr><td>Telstra NBN</td><td>Monthly</td><td>2026-05-06</td><td class="amount-cell">$89.00</td><td><span class="badge active">Active</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       Section 6: Closed accounts — the empty-state target.
+
+       The table renders its header and an explicit "no rows" message, which
+       is the shape worth testing: an empty result set is not the same as a
+       missing table, and an assertion that confuses the two passes for the
+       wrong reason.
+       ══════════════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Closed Accounts</h2>
+    <table id="closed-accounts-table">
+      <thead>
+        <tr>
+          <th>Account</th>
+          <th>Closed on</th>
+          <th class="amount-cell">Final balance</th>
+        </tr>
+      </thead>
+      <tbody id="closed-accounts-body"></tbody>
+    </table>
+    <div id="closed-accounts-empty" class="empty-state">No closed accounts.</div>
+  </section>
+
+  <script>
+    // Async settlement value — see the Section 4 comment for why the delay
+    // exists and how the two step shapes differ.
+    (function () {
+      var el = document.getElementById('pending-settlement');
+      var btn = document.getElementById('refresh-settlement');
+      function settle(delayMs) {
+        el.textContent = 'Calculating...';
+        el.classList.add('pending');
+        setTimeout(function () {
+          el.textContent = '$1,204.75';
+          el.classList.remove('pending');
+        }, delayMs);
+      }
+      settle(800);
+      btn.addEventListener('click', function () { settle(2000); });
+
+      // The payee field gates the Transfer button. Typing a payee enables it,
+      // so "verify Transfer is disabled" and "verify Transfer is enabled" are
+      // both reachable states rather than one hardcoded attribute.
+      var payee = document.getElementById('transfer-to');
+      var submit = document.getElementById('transfer-submit');
+      var hint = document.getElementById('transfer-hint');
+      payee.addEventListener('input', function () {
+        var ready = payee.value.trim().length > 0;
+        submit.disabled = !ready;
+        hint.textContent = ready
+          ? 'Ready to transfer.'
+          : 'Select a payee to enable this transfer.';
+      });
+    })();
+  </script>
 
 </main>
 </body>
