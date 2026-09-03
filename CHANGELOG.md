@@ -6,6 +6,20 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Fixed — a compiled post-condition that cannot go red
+
+A post-condition that always passes is the same as having none, only harder to
+notice. On a capture step the instruction names no expectation — "Count the
+rows [as: n]" says nothing about what n should be — so the model reached for
+the only value to hand and compared it to itself:
+`step.expect((await rows.count()) === rowCount)`, which re-reads what it has
+already stored and passes just as happily on an empty page.
+
+The generation rule now says a post-condition has to be able to fail, and what
+to assert when the step states no expectation: that the thing you read from was
+really there and really populated, rather than that a number equals itself. The
+same step now waits for the first row and asserts the count is non-zero.
+
 ### Added — Upload steps now work end to end
 
 The `upload` action has been in the parser, the executor and the step cache for
