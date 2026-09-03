@@ -1062,3 +1062,80 @@ and the spec drift corrected above.
 Each of the five has a test: the blocker in the step-cache suite, the cached
 and healed paths in `tests/upload-cached-failure.test.ts`, the rest in
 `tests/upload-action.test.ts` and `tests/upload-paths.test.ts`.
+
+## The compiled post-condition has to wait (2026-09-04)
+
+Compiling `securebank-upload.md` left three steps as AI. The upload itself was
+fine every time; what failed on replay was the post-condition the model wrote
+for it:
+
+```js
+await page.locator('#statement-file').setInputFiles(step.filePath('attachments/malware.exe'));
+await page.locator('#statement-upload').click();
+const status = page.locator('#upload-status');
+await status.waitFor();
+const message = (await status.textContent())?.trim();
+step.expect(message === 'malware.exe is not an allowed file type', '...');
+```
+
+`#upload-status` on the Documents page is **one** element that keeps the
+previous step's message: `.status` is `display:none` until `setStatus` gives it
+a class, and after that it stays visible with whatever text it last held. So
+`waitFor()` — whose default state is `visible` — returns instantly having
+proved nothing, and `textContent()` reads the *old* message while the upload's
+`fetch` is still in flight. The assertion compares last step's text against
+this step's expectation and fails.
+
+Measured, not theorised: a hand-written entry holding exactly that shape fails
+with `status was "All documents cleared"` — the message from the *Clear all*
+step three steps earlier.
+
+It is invisible under AI, which is why it survived this long. The runner
+settles the page after each action and the next model turn costs seconds of
+think time, so the text has always arrived by the time the AI looks. Only
+compiled code is fast enough to lose the race. Nothing about it is
+upload-specific: any step shaped "click something, then assert on text the
+server updates" has it, and the same generated file had it a second time on the
+documents table, which `refreshDocuments()` fills from a *second* fetch issued
+after the status text is already set.
+
+The cause was the post-condition rule in `buildStepCodePrompt`, which offered
+two forms — a `locator.waitFor()`, or "a `step.expect(...)` over a value read
+back from the page" — and said nothing about the second being a non-waiting
+read. Two changes:
+
+- **The rule now says wait for the NEW state first, then assert**
+  ([prompts.ts](../src/ai/prompts.ts)). It names the hole in a bare
+  `waitFor()`, and it names the waiting forms an entry actually has: a
+  text-filtered locator (`page.locator(sel, { hasText })` or
+  `.filter({ hasText })`) whose `waitFor()` does not resolve until the text is
+  there, and `page.waitForFunction` for what a text filter cannot express.
+  Rule 6 (no imports) rules out Playwright's web-first
+  `expect(locator).toHaveText(...)`, so the rule says that too rather than
+  leaving the model to discover it. The heading keeps its number — the rules
+  are still `9. **End with a post-condition, …**`.
+- **A static backstop**, `unwaitedReadComplaint`
+  ([generate.ts](../src/codebehind/generate.ts)), joins
+  `ambiguousSelectorComplaint`, `literalUploadPathComplaint`,
+  `undeclaredContextComplaint` and `staleHandleComplaint` on the one shared
+  re-ask. It fires when an entry feeds a one-shot read (`textContent`,
+  `innerText`, `inputValue`, `allTextContents`, `getAttribute`) into
+  `step.expect` with no wait for a named state anywhere in it. A bare
+  `waitFor()` deliberately does not count as that wait, and neither does
+  `waitFor({ state: 'visible' })` — `visible` is the default and the element is
+  already visible. The transition states, a text filter, a predicate, a
+  response and a `goto` all do. Warns and accepts if the re-ask comes back no
+  better, like its siblings: a textual check over generated code does not get
+  to fail a compile.
+
+Result: `securebank-upload.md` compiles **14 of 14 steps as code**, and a run
+with the step cache cleared replays all 14 from code-behind with **zero** AI
+calls and zero tokens. The tightened rule alone was enough — the backstop
+never fired during the compile, which is the outcome to want from a backstop.
+
+One shape this deliberately leaves alone: the generated entry for *"Count the
+rows … [as: document_count]"* ends with `step.expect((await rows.count()) ===
+rowCount)`, comparing a count to itself. It cannot go red, so it is not a
+post-condition — but it is the general "verify that cannot go red" problem
+(PR #118), not this one, and it reads through `count()` rather than a text
+read. Worth its own chip.

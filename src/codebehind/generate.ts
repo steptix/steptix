@@ -198,7 +198,8 @@ export async function generateStepEntry(
   const complaint =
     staticEntryComplaint(first.code, options.actions) ??
     undeclaredContextComplaint(first.code) ??
-    staleHandleComplaint(first.code);
+    staleHandleComplaint(first.code) ??
+    unwaitedReadComplaint(first.code);
   if (complaint === undefined) return first;
 
   logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
@@ -242,6 +243,13 @@ export async function generateStepEntry(
     logger.warn(
       `Code-behind for "${binding.source}" still uses \`page\` after switching tab or browser; ` +
         `it may drive the tab the step left. ${complaint}`,
+    );
+  }
+  const stillUnwaited = unwaitedReadComplaint(second.code);
+  if (stillUnwaited !== undefined) {
+    logger.warn(
+      `Code-behind for "${binding.source}" still asserts on a page value it never waited for; ` +
+        `it may read the state from before the step. ${stillUnwaited}`,
     );
   }
   return second;
@@ -387,6 +395,80 @@ export function staleHandleComplaint(code: string): string | undefined {
     );
   }
   return undefined;
+}
+
+/** Reads that take whatever the DOM holds at that instant. None of them
+ *  retries, so each is only as correct as the wait in front of it. */
+const INSTANT_READ =
+  /\.\s*(?:textContent|innerText|inputValue|allTextContents|allInnerTexts|getAttribute)\s*\(/;
+
+/**
+ * Constructs that block until the page reaches a NAMED state.
+ *
+ * A bare `waitFor()` is deliberately not one of them, and neither is
+ * `waitFor({ state: 'visible' })`: `visible` is the default, and on an element
+ * that is already on the page it returns at once having proved nothing. The
+ * transition states (`hidden`, `attached`, `detached`) are real waits, as are
+ * a text filter, a predicate, and a response.
+ */
+const WAITS_FOR_STATE = new RegExp(
+  [
+    'hasText',
+    'hasNotText',
+    'waitForFunction',
+    'waitForSelector',
+    'waitForResponse',
+    'waitForRequest',
+    'waitForURL',
+    'waitForLoadState',
+    String.raw`waitFor\s*\(\s*\{[^}]*state\s*:\s*['"](?:hidden|attached|detached)['"]`,
+    String.raw`\.\s*goto\s*\(`,
+    'toHaveText',
+    'toContainText',
+    'toHaveValue',
+    'toHaveCount',
+  ].join('|'),
+);
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * the read-that-does-not-wait case (stories/upload-action.md, "The compiled
+ * post-condition has to wait").
+ *
+ * The shape: the entry pulls a value out of the page with a one-shot read and
+ * feeds it to `step.expect`, having never waited for the state it is about to
+ * assert. `step.expect` does not retry and the read does not either, so the
+ * comparison happens milliseconds after the click that triggered the change —
+ * with the request that produces it still in flight. It reads the value the
+ * page had BEFORE the step and fails.
+ *
+ * It is invisible under AI, which is what makes it worth a static check: the
+ * runner settles the page after each action and the next model turn costs
+ * seconds of think time, so the value has always arrived by the time the AI
+ * looks. Only the compiled entry is fast enough to lose. Measured on
+ * `securebank-upload.md`, whose `#upload-status` is one element that keeps the
+ * PREVIOUS step's message: the assertion read "All documents cleared" while
+ * the upload it was asserting on was still uploading.
+ *
+ * Conservative in both directions. It needs a `step.expect` AND an instant
+ * read AND no state wait anywhere in the entry, so an entry that waits on some
+ * unrelated line is left alone — and, like its siblings, absence of the
+ * pattern means the check did not run, never that the entry is proven safe.
+ */
+export function unwaitedReadComplaint(code: string): string | undefined {
+  if (!/\bstep\s*\.\s*expect\s*\(/.test(code)) return undefined;
+  if (!INSTANT_READ.test(code)) return undefined;
+  if (WAITS_FOR_STATE.test(code)) return undefined;
+  return (
+    'The entry reads a value out of the page and asserts on it without ever waiting for the '
+    + 'state it asserts. `step.expect` does not retry and the read does not either, so on replay '
+    + 'this compares whatever the page held a millisecond after the action — which, when a '
+    + 'request is still in flight, is the value from BEFORE the step. Wait for the NEW state '
+    + "first: `await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()` "
+    + '(or `.filter({ hasText: ... })` on a locator you already have) does not resolve until that '
+    + 'text is present, and `page.waitForFunction` covers what a text filter cannot. Read the '
+    + 'value into `step.expect` after that, not instead of it.'
+  );
 }
 
 /** Everything `run`'s context object carries. Used bare, each of these is a

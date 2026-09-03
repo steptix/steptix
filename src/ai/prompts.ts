@@ -1272,7 +1272,11 @@ await (await chooser).setFiles(step.filePath('attachments/statement.pdf'));
 \`\`\`
 (the \`.catch\` matters: without it a failing click leaves the waiter rejecting with nobody listening, which can end the run.) A parameterised path is \`step.filePath(step.getVar('name'))\`. NEVER write an absolute path, and never hand a bare string literal to \`setInputFiles\` or \`setFiles\`.
 ${selectorRules}
-${postConditionNumber}. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".${trackerPostCondition(input.actions)}
+${postConditionNumber}. **End with a post-condition, and make it wait.** The last thing \`run\` does must check that the page shows the step succeeded: on replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
+
+   **Wait for the NEW state, then assert — never the other way round.** \`step.expect\` does not retry, and neither does a read. Code arrives a millisecond after the click that triggered the change, while the request producing it is still in flight, so \`step.expect((await el.textContent())?.includes('Uploaded logo.png'))\` compares the text the page had BEFORE the step and fails. A bare \`locator.waitFor()\` has the same hole: its default state is \`visible\`, so on an element that is already on the page it returns at once having proved nothing — and a status region reused between steps is already visible, still showing the previous message.
+
+   Wait on the state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)${trackerPostCondition(input.actions)}
 
 Respond with ONLY the JSON object — no prose around it.`;
 

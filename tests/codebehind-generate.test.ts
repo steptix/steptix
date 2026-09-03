@@ -16,6 +16,7 @@ import {
   generateStepEntry,
   refuseReason,
   staleHandleComplaint,
+  unwaitedReadComplaint,
   undeclaredContextComplaint,
 } from '../src/codebehind/generate.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
@@ -335,7 +336,7 @@ describe('buildStepCodePrompt — the measurement', () => {
     expect(text).not.toContain('resolvedBy');
     expect(text).not.toContain('NOT usable as written');
     // Numbering stays put, so the rules read the same as they always did.
-    expect(text).toContain('9. **End with a post-condition.**');
+    expect(text).toContain('9. **End with a post-condition, and make it wait.**');
   });
 
   it('reads a plural action’s count as context for the loop, never as ambiguity', () => {
@@ -368,7 +369,7 @@ describe('buildStepCodePrompt — the measurement', () => {
       }).content,
     );
     expect(text).toContain('not evidence that it matches one element');
-    expect(text).toContain('9. **End with a post-condition.**');
+    expect(text).toContain('9. **End with a post-condition, and make it wait.**');
   });
 
   it('asks for a data-driven locator on a positional handle, and not on a scoped one', () => {
@@ -692,6 +693,147 @@ describe('staleHandleComplaint', () => {
   });
 });
 
+describe('unwaitedReadComplaint', () => {
+  const entryWith = (body: string) =>
+    `{\n  source: 'x',\n  async run({ page, step }) {\n${body}\n  },\n}`;
+
+  // The measured failure, verbatim from a generated entry: `#upload-status` is
+  // one element that keeps the previous step's message, so the read lands
+  // while the upload it asserts on is still in flight.
+  it('complains about a read fed straight into step.expect', () => {
+    const complaint = unwaitedReadComplaint(
+      entryWith(
+        `    await page.locator('#statement-upload').click();\n` +
+        `    const message = (await page.locator('#upload-status').textContent())?.trim();\n` +
+        `    step.expect(message === 'Uploaded logo.png', 'status');`,
+      ),
+    );
+    expect(complaint).toMatch(/without ever waiting/);
+    expect(complaint).toMatch(/hasText/);
+  });
+
+  // The trap that makes this worth a check rather than trusting the replay: a
+  // bare `waitFor()` LOOKS like the wait and is not one. Its default state is
+  // `visible`, which the status region already is.
+  it('is not satisfied by a bare waitFor', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#statement-upload').click();\n` +
+          `    const status = page.locator('#upload-status');\n` +
+          `    await status.waitFor();\n` +
+          `    step.expect((await status.textContent()) === 'Uploaded logo.png', 'status');`,
+        ),
+      ),
+    ).toBeDefined();
+  });
+
+  // Nor by naming the state that is already the default.
+  it('is not satisfied by waitFor({ state: "visible" })', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#upload-status').waitFor({ state: 'visible' });\n` +
+          `    step.expect((await page.locator('#upload-status').textContent()) === 'ok', 'status');`,
+        ),
+      ),
+    ).toBeDefined();
+  });
+
+  it('accepts a text-filtered wait before the read', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#statement-upload').click();\n` +
+          `    const status = page.locator('#upload-status', { hasText: 'Uploaded logo.png' });\n` +
+          `    await status.waitFor();\n` +
+          `    step.expect((await status.textContent())!.includes('logo.png'), 'status');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('accepts a filter({ hasText }) wait', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#upload-status').filter({ hasText: 'Uploaded 2 files' }).waitFor();\n` +
+          `    step.expect((await page.locator('#upload-status').textContent()) !== '', 'status');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('accepts a waitForFunction, which covers what a text filter cannot', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.waitForFunction(() => document.querySelectorAll('#documents-body > tr').length === 4);\n` +
+          `    step.expect((await page.locator('#documents-count').textContent()) === '4 documents', 'count');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  // A transition state is a real wait — unlike `visible`, the element has to
+  // actually change for it to resolve.
+  it('accepts a wait for a transition state', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#spinner').waitFor({ state: 'hidden' });\n` +
+          `    step.expect((await page.locator('#total').textContent()) === '$4.00', 'total');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  // `goto` awaits the load event, so a navigate-then-read entry has settled.
+  it('accepts a read after a navigation', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.goto(new URL('documents.html', baseUrl).toString());\n` +
+          `    step.expect((await page.locator('h1').textContent())?.includes('Documents'), 'heading');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('says nothing about an entry that asserts on no page read', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    const count = step.getVar('document_count');\n` +
+          `    step.expect(count === '4', 'document_count equals 4');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('says nothing about a read with no assertion on it', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    const name = (await page.locator('#account-name').textContent())?.trim();\n` +
+          `    step.setVar('account_name', name ?? '');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  // Ordering: the faults that throw or corrupt come first, and the caller
+  // shares one re-ask between all of them.
+  it('is reported after the faults that throw on replay', () => {
+    const bothFaults =
+      `{\n  source: 'x',\n  async run({ step }) {\n` +
+      `    const message = (await page.locator('#upload-status').textContent());\n` +
+      `    step.expect(message === 'ok', 'status');\n  },\n}`;
+    expect(undeclaredContextComplaint(bothFaults)).toMatch(/`page`/);
+    expect(unwaitedReadComplaint(bothFaults)).toBeDefined();
+  });
+});
+
 describe('generateStepEntry', () => {
   it('returns the entry the model produced', async () => {
     const { client, calls } = stubClient(JSON.stringify({
@@ -906,6 +1048,36 @@ describe('generateStepEntry — the static backstop', () => {
     expect(calls).toHaveLength(2);
     expect(result).toEqual({ kind: 'entry', code: bare });
     expect(result.kind === 'entry' && result.code).not.toContain('octocat-the-cat');
+  });
+
+  // The unwaited-read check shares that one re-ask. Driven through generation
+  // rather than called directly, because the fault it catches only matters if
+  // it is actually in the chain — the shape here is the measured failure from
+  // `securebank-upload.md`, and it needs no `targeting` to fire.
+  it('re-asks about a read that never waited, and takes the waiting answer', async () => {
+    const racy =
+      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `const m = await page.locator('#upload-status').textContent(); ` +
+      `step.expect(m === 'Uploaded logo.png', 'status'); } }`;
+    const waiting =
+      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `const s = page.locator('#upload-status', { hasText: 'Uploaded logo.png' }); ` +
+      `await s.waitFor(); step.expect((await s.textContent()) !== null, 'status'); } }`;
+    const { client, calls } = stubSequence(
+      JSON.stringify({ entry: racy }),
+      JSON.stringify({ entry: waiting }),
+    );
+    const result = await generateStepEntry({
+      binding: bindingFor('Assert the status'),
+      actions: [{ action: 'read', selector: '#upload-status' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    expect(calls).toHaveLength(2);
+    expect(contentBlocksToText(calls[1]![1]!.content)).toContain('without ever waiting');
+    expect(result).toEqual({ kind: 'entry', code: waiting });
   });
 });
 

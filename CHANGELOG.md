@@ -34,6 +34,33 @@ Compiled entries resolve their paths through `step.filePath(...)` rather than
 freezing an absolute one. All of it is tested against the Documents page added
 to the SecureBank fixture app earlier.
 
+### Fixed — a compiled post-condition now waits for the state it asserts
+
+Compiling the upload acceptance test left three steps needing AI, and the
+reason was not uploads at all. The post-condition the model wrote read the
+status message once and compared it — and the page that message lands in is a
+single element that keeps the PREVIOUS step's text until the new one arrives.
+Compiled code gets there a millisecond after the click, with the request still
+in flight, so it read the old message and the assertion failed. A bare
+`waitFor()` did not save it: its default state is `visible`, which that element
+already was. Under AI it never showed, because the runner settles the page after
+each action and the next model turn costs seconds of think time, so the text has
+always arrived by the time the AI looks. Only compiled code is fast enough to
+lose the race.
+
+The post-condition rule now says to wait for the new state and then assert, and
+names the waiting forms a code-behind entry actually has — a text-filtered
+locator, or `page.waitForFunction` — since with no imports, Playwright's
+`expect(locator).toHaveText(...)` is not among them. A static check backs it up
+on the one re-ask the other backstops share, catching a one-shot read fed into
+`step.expect` with nothing waiting in front of it. Nothing here is
+upload-specific: any step shaped "click something, then assert on text the
+server updates" had the same race, and the same generated file had it a second
+time on a table filled by a later fetch.
+
+The upload acceptance test now compiles all 14 of its steps as code and replays
+them with no model calls at all.
+
 ### Fixed — a failed step no longer claims retries it never spent
 
 The failure a step reports was built from `execution.retries` rather than from
