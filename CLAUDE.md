@@ -219,8 +219,13 @@ contend on is per-worktree:
 
 - **The fixture app** — `fixtures/test-app` on the pinned port 8787, booted
   by `runLiveTest.cjs`. First run in wins the port; later runs probe it,
-  adopt it, and leave it alone on exit. Safe to share because it serves
-  static markup and holds no per-run state.
+  adopt it, and leave it alone on exit. Safe to share for the pages, which
+  are static markup. Since PR #117 it does hold one piece of per-run state:
+  the `/api/documents` list behind the Documents page. Tests that assert
+  on it clear it first (`DELETE /api/documents`), but two runs uploading
+  at the same moment can still see each other's rows — a
+  `securebank-upload.md` row-count failure during a concurrent run is that,
+  not a regression.
 
 There used to be an exception here: `templates/init/tests/github.md` drove a
 real github.com login, so two worktrees ran it with the same credentials from
