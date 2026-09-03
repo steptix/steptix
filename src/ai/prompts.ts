@@ -1049,6 +1049,73 @@ function measuredSelectorRules(actions: TranscriptAction[]): string | undefined 
   return `${counts}\n${handles}`;
 }
 
+/** The six actions `ctx.tabs` and `ctx.browsers` cover. */
+const TAB_ACTIONS: ReadonlySet<string> = new Set([
+  'openPage', 'switchPage', 'closePage', 'openBrowser', 'switchBrowser', 'closeBrowser',
+]);
+/** The two that can leave the entry with no page to assert on. */
+const CLOSING_ACTIONS: ReadonlySet<string> = new Set(['closePage', 'closeBrowser']);
+
+/**
+ * Rule 7a: the stale-handle rule, emitted only for a transcript that actually
+ * moved a tab or a browser (stories/codebehind-framework-actions.md).
+ *
+ * Numbered `7a` rather than `8` because the selector rules below are numbered
+ * from 8 and the post-condition rule's number is COMPUTED from the last one
+ * they emit — inserting a rule 8 here would collide with them and shift a
+ * number the computation depends on.
+ *
+ * A rule the transcript cannot trigger is pure cost on every compile, so a
+ * step that touched no tab never sees it. Same principle as
+ * `measuredSelectorRules`.
+ */
+function tabHandleRule(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => TAB_ACTIONS.has(a.action))) return '';
+  return (
+    `\n7a. **After a tab or browser switch, use the handle the switcher returned — never \`page\`.** ` +
+    `\`run({ page })\` destructures, and destructuring reads once: \`page\` is bound to whichever tab was ` +
+    `active when \`run\` was called, and stays bound to it. So this is wrong, and it does not throw — it ` +
+    `drives the tab the step left and passes:\n` +
+    `\`\`\`ts\nawait tabs.switchTo('page:2');\nawait page.getByRole('heading').waitFor();  // the OLD tab\n\`\`\`\n` +
+    `Write it this way instead:\n` +
+    `\`\`\`ts\nconst opened = await tabs.switchTo('page:2');\nawait opened.getByRole('heading').waitFor();\n\`\`\`\n` +
+    `\`tabs.open\`, \`tabs.openedBy\`, \`tabs.switchTo\`, \`tabs.close\`, \`browsers.open\` and ` +
+    `\`browsers.switchTo\` all return the page that is active afterwards. Using \`page\` BEFORE the first ` +
+    `switch is correct — that is where \`tabs.openedBy(() => page.click(...))\`'s trigger lives.`
+  );
+}
+
+/**
+ * The post-condition rule's carve-outs for steps whose result is not on a
+ * page (stories/codebehind-framework-actions.md).
+ *
+ * Two cases where the plain rule asks for something that cannot exist. A step
+ * that CLOSED something has no page left to assert on — checking the one it
+ * closed is the obvious wrong move. And a freshly-opened browser sits on
+ * `about:blank`: its step succeeded when the browser exists and is active, and
+ * an entry that waits for content there flakes or hangs.
+ *
+ * `switchBrowser` deliberately gets no carve-out — the browser you switched TO
+ * has real content, so the ordinary rule applies to the page it returned.
+ */
+function trackerPostCondition(actions: TranscriptAction[]): string {
+  const clauses: string[] = [];
+  if (actions.some((a) => CLOSING_ACTIONS.has(a.action))) {
+    clauses.push(
+      `For a step that CLOSES a tab or a browser, the post-condition is that it is gone — assert over ` +
+        `\`tabs.list()\` or \`browsers.list()\`, or check the page you were returned to, not the one you closed.`,
+    );
+  }
+  if (actions.some((a) => a.action === 'openBrowser')) {
+    clauses.push(
+      `For a step that OPENS a browser, the post-condition is that the browser exists and is active — ` +
+        `\`browsers.list()\` or \`browsers.activeLabel()\`. A new browser is on \`about:blank\` until ` +
+        `something navigates it, so do not wait for page content there.`,
+    );
+  }
+  return clauses.length > 0 ? ` ${clauses.join(' ')}` : '';
+}
+
 /**
  * Ask the model to turn one successful step into its code-behind entry
  * (stories/step-codebehind.md, "Generation").
@@ -1147,7 +1214,7 @@ Respond with ONLY this JSON — the code-behind entry as a single string field (
   "entry": "{ source: ..., async run({ page, step, log }) { ... } }"
 }
 
-If this step cannot be expressed as code — it needs a framework action (opening or switching a browser or tab), interactive input, or a judgement code cannot make — decline instead, and say why in one sentence:
+If this step cannot be expressed as code — it needs interactive input from a person, or a judgement code cannot make — decline instead, and say why in one sentence. Opening, switching and closing tabs and browsers is NOT a reason to decline: \`tabs\` and \`browsers\` below do all six.
 
 {
   "entry": null,
@@ -1169,6 +1236,17 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
 - \`baseUrl\` — the test's configured base URL, when it has one.
+- \`tabs\` — tab control, the code equivalent of the \`openPage\` / \`switchPage\` / \`closePage\` actions:
+  - \`await tabs.open(url, { as })\` — open a new tab at \`url\` and make it active. \`as\` is optional and names it.
+  - \`await tabs.openedBy(() => ...)\` — run the callback and adopt the tab the PAGE opened (a \`window.open\`, or a click on \`target="_blank"\`). Use this whenever the transcript is a \`click\` followed by a \`switchPage\`: the wait is armed before the click, so there is no race.
+  - \`await tabs.switchTo(id)\` — make an already-open tab active. \`id\` is a label (\`'main'\`, \`'page:2'\`, or an \`as\` name), a URL substring, or a title substring — the same identifier the \`switchPage\` action in the transcript used.
+  - \`await tabs.close(id)\` — close a tab. The main tab cannot be closed.
+  - \`tabs.list()\` — \`{ label, url, isActive }[]\`. \`tabs.active()\` — the active page.
+- \`browsers\` — browser control, the code equivalent of \`openBrowser\` / \`switchBrowser\` / \`closeBrowser\`:
+  - \`await browsers.open(label, { engine, channel, headed })\` — launch an isolated browser under \`label\` and make it active. Options are all optional; without them it matches the run's own browser.
+  - \`await browsers.switchTo(label)\` — make a tracked browser active. The one the test started in is \`'default'\`.
+  - \`await browsers.close(label)\` — close one. Returns nothing.
+  - \`browsers.list()\` — \`{ label, engine, channel, activePageUrl, isActive }[]\`. \`browsers.activeLabel()\` — the active label.
 
 Rules — all of them are enforced:
 
@@ -1177,10 +1255,10 @@ Rules — all of them are enforced:
 3. **Write the step's outputs** with \`step.setVar\`, using the capture name from the step text.
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
-6. **No imports.** Everything you need arrives via the context object.
-7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.
+6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
+7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${tabHandleRule(input.actions)}
 ${selectorRules}
-${postConditionNumber}. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
+${postConditionNumber}. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".${trackerPostCondition(input.actions)}
 
 Respond with ONLY the JSON object — no prose around it.`;
 

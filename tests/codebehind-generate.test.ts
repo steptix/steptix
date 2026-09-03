@@ -15,6 +15,8 @@ import {
   ambiguousSelectorComplaint,
   generateStepEntry,
   refuseReason,
+  staleHandleComplaint,
+  undeclaredContextComplaint,
 } from '../src/codebehind/generate.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
 import { buildFileReviewPrompt, parseFileRevision } from '../src/codebehind/review.js';
@@ -511,11 +513,27 @@ describe('ambiguousSelectorComplaint', () => {
 });
 
 describe('refuseReason', () => {
-  it('refuses a transcript that changed runner state rather than the page', () => {
-    expect(refuseReason('Open a second browser', [
-      { action: 'openBrowser', value: 'worker' },
+  it('refuses a transcript that waits on a person', () => {
+    expect(refuseReason('Ask the tester to confirm', [
+      { action: 'prompt', question: 'Did it arrive?' },
       { action: 'click', selector: '#x' },
-    ])).toMatch(/openBrowser/);
+    ])).toMatch(/prompt/);
+  });
+
+  // The six actions that used to be refused wholesale. `ctx.tabs` and
+  // `ctx.browsers` express all of them now
+  // (stories/codebehind-framework-actions.md), so a refusal here would be the
+  // regression that silently reinstates the AI floor on every test that
+  // touches a second tab.
+  it.each([
+    ['openPage', { action: 'openPage' as const, url: 'https://example.com/docs' }],
+    ['switchPage', { action: 'switchPage' as const, page: 'page:2' }],
+    ['closePage', { action: 'closePage' as const, page: 'page:2' }],
+    ['openBrowser', { action: 'openBrowser' as const, browserLabel: 'worker' }],
+    ['switchBrowser', { action: 'switchBrowser' as const, browserLabel: 'worker' }],
+    ['closeBrowser', { action: 'closeBrowser' as const, browserLabel: 'worker' }],
+  ])('allows a transcript containing %s', (_name, action) => {
+    expect(refuseReason('Open a new tab and switch to it', [action])).toBeUndefined();
   });
 
   it('refuses a bracket-token step — code-behind for those is a stated non-goal', () => {
@@ -531,6 +549,146 @@ describe('refuseReason', () => {
 
   it('allows an ordinary step', () => {
     expect(refuseReason('Click Sign in', PASSING_ACTIONS)).toBeUndefined();
+  });
+});
+
+describe('undeclaredContextComplaint', () => {
+  // The fault this exists for, verbatim from the first live run of
+  // compile-browsers.md: three entries generated correctly, all three threw
+  // `ReferenceError: browsers is not defined` on replay because the parameter
+  // list was still the `{ page, step, log }` the prompt's example shows.
+  it('catches a context property used but not destructured', () => {
+    const complaint = undeclaredContextComplaint(
+      `{\n  source: 'x',\n  async run({ page, step, log }) {\n` +
+      `    await browsers.open('worker');\n  },\n}`,
+    );
+    expect(complaint).toMatch(/browsers/);
+    expect(complaint).toMatch(/ReferenceError/);
+  });
+
+  it('stays quiet when it is destructured', () => {
+    expect(
+      undeclaredContextComplaint(
+        `{\n  source: 'x',\n  async run({ page, step, log, browsers }) {\n` +
+        `    await browsers.open('worker');\n  },\n}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('exempts a local binding of the same name', () => {
+    expect(
+      undeclaredContextComplaint(
+        `{\n  source: 'x',\n  async run({ page }) {\n` +
+        `    const tabs = await page.locator('.tab').all();\n` +
+        `    await tabs.length;\n  },\n}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  // `run(ctx)` puts everything behind `ctx.`, so there is no bare name to be
+  // undeclared and nothing this check can say.
+  it('says nothing about an entry that takes the whole context', () => {
+    expect(
+      undeclaredContextComplaint(
+        `{\n  source: 'x',\n  async run(ctx) {\n    await ctx.tabs.switchTo('main');\n  },\n}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('is not fooled by a property access on something else', () => {
+    expect(
+      undeclaredContextComplaint(
+        `{\n  source: 'x',\n  async run({ page }) {\n` +
+        `    await page.locator('#x').click();\n` +
+        `    const info = { browsers: 1 };\n` +
+        `    step.expect(info.browsers === 1);\n  },\n}`,
+      ),
+      // `info.browsers` is a property access, not a bare `browsers.` use —
+      // but `step` IS used bare and undeclared, so that is what it reports.
+    ).toMatch(/`step`/);
+  });
+});
+
+describe('staleHandleComplaint', () => {
+  const entryWith = (body: string) =>
+    `{\n  source: 'x',\n  async run({ page, tabs, browsers }) {\n${body}\n  },\n}`;
+
+  it('complains when `page` is used after a tab switch', () => {
+    const complaint = staleHandleComplaint(
+      entryWith(
+        `    await tabs.switchTo('page:2');\n` +
+        `    await page.getByRole('heading', { name: 'Docs' }).waitFor();`,
+      ),
+    );
+    expect(complaint).toMatch(/destructures once/);
+    expect(complaint).toMatch(/`page`/);
+  });
+
+  it('complains when `context` is used after a browser switch', () => {
+    expect(
+      staleHandleComplaint(
+        entryWith(
+          `    await browsers.switchTo('worker');\n` +
+          `    await context.cookies();`,
+        ),
+      ),
+    ).toMatch(/`context`/);
+  });
+
+  it('stays quiet when the returned handle is used instead', () => {
+    expect(
+      staleHandleComplaint(
+        entryWith(
+          `    const opened = await tabs.open('https://example.com/docs');\n` +
+          `    await opened.getByRole('heading', { name: 'Docs' }).waitFor();`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  // The one shape the naive "mentions page after a switcher" check gets
+  // wrong: `openedBy`'s trigger runs BEFORE the tab exists, so its `page` use
+  // is correct and is on the switching line itself.
+  it('leaves openedBy\'s own trigger alone', () => {
+    expect(
+      staleHandleComplaint(
+        entryWith(
+          `    const popup = await tabs.openedBy(() => page.getByRole('button', { name: 'Open' }).click());\n` +
+          `    await popup.getByRole('heading').waitFor();`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('leaves a `page` use before the switch alone', () => {
+    expect(
+      staleHandleComplaint(
+        entryWith(
+          `    await page.getByRole('button', { name: 'Open' }).click();\n` +
+          `    const opened = await tabs.switchTo('page:2');\n` +
+          `    await opened.getByRole('heading').waitFor();`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('says nothing about an entry that never switches', () => {
+    expect(
+      staleHandleComplaint(entryWith(`    await page.locator('#login').fill('x');`)),
+    ).toBeUndefined();
+  });
+
+  // `tabs.list()` and `tabs.active()` read; they do not move the active page,
+  // so a `page` use after one of them is not stale.
+  it('does not treat a read-only tabs call as a switch', () => {
+    expect(
+      staleHandleComplaint(
+        entryWith(
+          `    step.expect(tabs.list().length === 2, 'two tabs');\n` +
+          `    await page.getByRole('heading').waitFor();`,
+        ),
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -598,8 +756,8 @@ describe('generateStepEntry', () => {
   it('declines before the model call when the step can never be code', async () => {
     const { client, calls } = stubClient('should never be asked');
     const result = await generateStepEntry({
-      binding: bindingFor('Open a second browser and sign in there'),
-      actions: [{ action: 'openBrowser', value: 'worker' }],
+      binding: bindingFor('Ask the tester whether the letter arrived'),
+      actions: [{ action: 'prompt', question: 'Did the letter arrive?' }],
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
