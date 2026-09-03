@@ -3,7 +3,14 @@ import { interpolate } from '../parser/parameters.js';
 import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
-import type { CodeBehindContext, CodeBehindStepApi, StepCodeEntry } from './types.js';
+import { unavailableBrowserApi, unavailableTabApi } from './tabs.js';
+import type {
+  CodeBehindBrowserApi,
+  CodeBehindContext,
+  CodeBehindStepApi,
+  CodeBehindTabApi,
+  StepCodeEntry,
+} from './types.js';
 
 /**
  * Running one code-behind entry (stories/step-codebehind.md, "Execution").
@@ -29,6 +36,18 @@ export interface RunCodeBehindOptions {
   browser: Browser;
   /** Live parameter map — the same object `{{var}}` and `[as: x]` use. */
   resolvedParameters: Record<string, string>;
+  /**
+   * Tab and browser control (stories/codebehind-framework-actions.md), built
+   * over the run's own trackers so a switch here is the switch the following
+   * natural-language steps see.
+   *
+   * Omitted by a caller with no tracker, and replaced with an API whose every
+   * method throws — never left undefined, because an entry destructuring
+   * `{ tabs }` would then get `undefined` and fail with a TypeError that says
+   * nothing about why.
+   */
+  tabs?: CodeBehindTabApi | undefined;
+  browsers?: CodeBehindBrowserApi | undefined;
   /**
    * The run's env/data context, when it has one — what `${data.url}` was
    * resolved against in the step text, and what `step.getVar('data.url')`
@@ -87,6 +106,8 @@ export async function runCodeBehindEntry(
     browser: options.browser,
     step: makeStepApi(options.binding.scope, options.resolvedParameters, outputs, options.envData),
     log: createCapturingLog(options.label, logs),
+    tabs: options.tabs ?? unavailableTabApi(),
+    browsers: options.browsers ?? unavailableBrowserApi(),
     ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
   };
 

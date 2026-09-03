@@ -35,6 +35,7 @@ import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cach
 import { fingerprintAssertion } from '../cache/step-cache.js';
 import type { CodeBehindBinding } from '../codebehind/loader.js';
 import { entrySourceText, runCodeBehindEntry } from '../codebehind/execute.js';
+import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
@@ -616,7 +617,7 @@ async function runCodeBehindStep(
 ): Promise<{ result?: StepResult; stale?: StepResult['codeBehindStale'] }> {
   const entry = binding.entry;
   if (!entry) return {};
-  const page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
+  let page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
   const code = entrySourceText(entry);
   // Ask the tracker for the browser when there is one: `context.browser()` is
   // null for a persistent context, which is what the CDP path can hand us.
@@ -624,17 +625,50 @@ async function runCodeBehindStep(
   // the tracker-less paths.
   const active = tryGetActiveSession(opts);
 
+  // Tab and browser control, over the run's own trackers
+  // (stories/codebehind-framework-actions.md). `showTab` is handed through as
+  // the focus hook so a compiled switch raises the tab on screen exactly like
+  // the `switchPage` action does — without it a headed run drives an
+  // invisible tab while the wrong one is displayed.
+  const tabs = opts.pageTracker
+    ? makeTabApi(opts.pageTracker, { focus: (p) => showTab(p, opts) })
+    : undefined;
+  const browsers = opts.browserTracker
+    ? makeBrowserApi(
+        opts.browserTracker,
+        // The run's own browser config, closed over: an entry chooses the
+        // engine/channel/headedness the `openBrowser` action can, and nothing
+        // else. No `videoDir`, matching that handler.
+        (overrides) => launchBrowser(opts.config.browser, undefined, overrides),
+        { focus: (p) => showTab(p, opts) },
+      )
+    : undefined;
+
   const outcome = await runCodeBehindEntry({
     binding,
     page,
     context: active?.context ?? page.context(),
     browser: active?.browser ?? page.context().browser()!,
+    ...(tabs && { tabs }),
+    ...(browsers && { browsers }),
     resolvedParameters: opts.resolvedParameters ?? {},
     ...(opts.envData && { envData: opts.envData }),
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
     ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
     label: `codebehind:${stepIndex}`,
   });
+
+  // The entry may have moved the active tab or browser (`ctx.tabs`,
+  // `ctx.browsers`). Everything below has to describe where the step ENDED —
+  // a screenshot and a `pageUrl` from the tab the step navigated away from
+  // are worse than none, because they look right. Same order as the AI loop's
+  // own refresh: the browser tracker is the outer one.
+  if (opts.browserTracker) {
+    try { page = opts.browserTracker.getActivePage(); }
+    catch { /* closeBrowser left none — keep the last handle for the report */ }
+  } else if (opts.pageTracker) {
+    page = opts.pageTracker.getActive();
+  }
 
   const brokenCode = outcome.status === 'failed' && !outcome.expectationFailed;
   // Strict first: a compile replay that also happens to run keyless is still a

@@ -31,6 +31,98 @@ export interface CodeBehindStepApi {
   expect(condition: boolean, message?: string): void;
 }
 
+/** One tab, as `tabs.list()` reports it. */
+export interface CodeBehindTabInfo {
+  /** `main`, an author label from `as`, or an auto `page:N`. */
+  label: string;
+  url: string;
+  isActive: boolean;
+}
+
+/** One browser, as `browsers.list()` reports it. */
+export interface CodeBehindBrowserInfo {
+  label: string;
+  engine: string;
+  channel: string;
+  activePageUrl: string;
+  isActive: boolean;
+}
+
+/**
+ * Tab control — the code-behind half of `openPage`, `switchPage` and
+ * `closePage` (stories/codebehind-framework-actions.md).
+ *
+ * Every method that changes which tab is active RETURNS the page that is
+ * active afterwards, and generated code must use that handle. `run({ page })`
+ * destructures, and destructuring reads once: after a switch the `page`
+ * binding still points at the tab the step just left.
+ *
+ * These drive the run's own `PageTracker`, so a switch here is the same
+ * switch a `switchPage` action makes — the natural-language steps that follow
+ * target the tab this code moved to.
+ */
+export interface CodeBehindTabApi {
+  /**
+   * Open a new tab at `url` and make it active. `as` names it, so a later
+   * `switchTo` can address it exactly rather than by URL substring.
+   */
+  open(url: string, options?: { as?: string }): Promise<Page>;
+  /**
+   * Run `trigger` and adopt the tab the PAGE opened as a result — a
+   * `window.open`, or a click on `target="_blank"`. The wait is armed before
+   * the trigger runs, so there is no window in which the tab exists but
+   * nothing is listening; a `switchTo` polling for it afterwards is the racy
+   * version of this.
+   */
+  openedBy(
+    trigger: () => unknown | Promise<unknown>,
+    options?: { as?: string; timeoutMs?: number },
+  ): Promise<Page>;
+  /**
+   * Make an already-open tab active, by label (`main`, `docs`, `page:2`),
+   * URL substring, or title substring — the tracker's own matching, so the
+   * identifier a `switchPage` transcript carries works here unchanged.
+   */
+  switchTo(identifier: string): Promise<Page>;
+  /** Close a tab, and return the page that is active afterwards. The main
+   *  tab cannot be closed — that throws, as the AI action fails. */
+  close(identifier: string): Promise<Page>;
+  /** Every tab the run is tracking. */
+  list(): CodeBehindTabInfo[];
+  /** The active page right now — the fresh handle after any switch. */
+  active(): Page;
+}
+
+/**
+ * Browser control — the code-behind half of `openBrowser`, `switchBrowser`
+ * and `closeBrowser` (stories/codebehind-framework-actions.md).
+ *
+ * A second browser is a second isolated session: its own context, cookies and
+ * `PageTracker`. `open` and `switchTo` return the new browser's active page
+ * for the same reason the tab API does.
+ */
+export interface CodeBehindBrowserApi {
+  /** Launch a browser under `label` and make it active. Overrides default to
+   *  the run's own browser config. */
+  open(
+    label: string,
+    options?: { engine?: 'chromium' | 'firefox' | 'webkit'; channel?: string; headed?: boolean },
+  ): Promise<Page>;
+  /** Make a tracked browser active, by the label it was opened under.
+   *  `default` is the one the test started in. */
+  switchTo(label: string): Promise<Page>;
+  /**
+   * Close a tracked browser. Returns nothing on purpose: closing the last one
+   * leaves no active session, and there would be no honest page to hand back.
+   * A step that closes a browser asserts on `list()`, not on a page.
+   */
+  close(label: string): Promise<void>;
+  /** Every browser the run is tracking. */
+  list(): CodeBehindBrowserInfo[];
+  /** The active browser's label. */
+  activeLabel(): string;
+}
+
 /**
  * Runtime context handed to an entry's `run`. The same live Playwright
  * instances the AI loop drives (so anything the code does carries into the
@@ -42,6 +134,14 @@ export interface CodeBehindContext {
   browser: Browser;
   step: CodeBehindStepApi;
   log: ToolLog;
+  /** Tabs, driving the run's `PageTracker`. Always present: a run without
+   *  page tracking gets an API whose every method throws, because a
+   *  `switchTo` that quietly did nothing would leave the following steps on
+   *  the wrong tab with everything green. */
+  tabs: CodeBehindTabApi;
+  /** Browsers, driving the run's `BrowserTracker`. Same always-present,
+   *  never-silent contract as `tabs`. */
+  browsers: CodeBehindBrowserApi;
   /** The test's `## Config` baseUrl, when it declared one. */
   baseUrl?: string;
 }

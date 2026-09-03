@@ -33,20 +33,17 @@ import { scan, type StringToken } from './tokenizer.js';
  */
 
 /**
- * Actions that mutate **runner** state rather than the page. A transcript
- * containing one of these is not expressible as a `run(ctx)` body — the entry
- * would have no way to swap the active browser or answer a prompt — so the
- * step stays AI.
+ * Actions that mutate **runner** state rather than the page and have no
+ * `ctx` equivalent, so a transcript containing one is not expressible as a
+ * `run(ctx)` body.
+ *
+ * This list used to hold all six tab and browser actions, on the true grounds
+ * that an entry had no way to say "the active page is that one now". It does
+ * now — `ctx.tabs` and `ctx.browsers` drive the run's own trackers
+ * (stories/codebehind-framework-actions.md) — so what is left is the one
+ * action that waits on a human at a terminal. There is no code for that.
  */
-const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set([
-  'openBrowser',
-  'switchBrowser',
-  'closeBrowser',
-  'openPage',
-  'closePage',
-  'switchPage',
-  'prompt',
-]);
+const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt']);
 
 /**
  * Steps whose text opens with a bracket token.
@@ -78,7 +75,7 @@ export function refuseReason(
   }
   const framework = actions.find((a) => FRAMEWORK_ACTIONS.has(a.action));
   if (framework) {
-    return `the step used "${framework.action}", which changes runner state rather than the page`;
+    return `the step used "${framework.action}", which waits on a person rather than the page`;
   }
   if (actions.length === 0) {
     return 'the recorded run performed no page actions for this step';
@@ -187,10 +184,20 @@ export async function generateStepEntry(
   );
   if (first.kind !== 'entry') return first;
 
-  // ── The static backstop (stories/codebehind-selector-ambiguity.md) ────────
-  // The measurement is in front of the model; this is for when it reads the
-  // number and writes the bare selector anyway.
-  const complaint = ambiguousSelectorComplaint(first.code, options.actions);
+  // ── The static backstops ──────────────────────────────────────────────────
+  // Both are for the case the prompt cannot cover: the model was told the
+  // thing and wrote it the other way anyway.
+  //
+  // Selector ambiguity first (stories/codebehind-selector-ambiguity.md) — it
+  // throws on replay, so it is self-announcing, where a stale handle
+  // (stories/codebehind-framework-actions.md) drives the wrong tab and PASSES.
+  // One re-ask is shared between them: two would double a compile's model
+  // calls for a pair of heuristics, and the complaint text carries whichever
+  // fault fired.
+  const complaint =
+    ambiguousSelectorComplaint(first.code, options.actions) ??
+    undeclaredContextComplaint(first.code) ??
+    staleHandleComplaint(first.code);
   if (complaint === undefined) return first;
 
   logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
@@ -220,6 +227,19 @@ export async function generateStepEntry(
     logger.warn(
       `Code-behind for "${binding.source}" still targets a selector this run measured as ` +
         `matching more than one element; it may throw on replay. ${complaint}`,
+    );
+  }
+  const stillUndeclared = undeclaredContextComplaint(second.code);
+  if (stillUndeclared !== undefined) {
+    logger.warn(
+      `Code-behind for "${binding.source}" still uses a context property it does not ` +
+        `destructure; it will throw on replay. ${stillUndeclared}`,
+    );
+  }
+  if (staleHandleComplaint(second.code) !== undefined) {
+    logger.warn(
+      `Code-behind for "${binding.source}" still uses \`page\` after switching tab or browser; ` +
+        `it may drive the tab the step left. ${complaint}`,
     );
   }
   return second;
@@ -268,6 +288,109 @@ export function ambiguousSelectorComplaint(
         ? `Use the verified resolvedSelector ${JSON.stringify(resolved)}`
         : `Scope it to an ancestor that makes it unique`) +
       `, or reproduce the runtime's tolerance with .locator('visible=true').first().`
+    );
+  }
+  return undefined;
+}
+
+/**
+ * A call that changes which tab or browser is active, and therefore makes the
+ * `page` the entry destructured a handle on somewhere the step has left.
+ * `tabs.list`, `tabs.active` and the two `list()`s are absent on purpose —
+ * they read, they do not move.
+ */
+const SWITCHER_CALL =
+  /(?:^|[^\w$.])(?:tabs\s*\.\s*(?:open|openedBy|switchTo|close)|browsers\s*\.\s*(?:open|switchTo))\s*\(/;
+
+/** A use of the stale handle: any property access on the bare `page` or
+ *  `context` binding. `page.url()` is included — after a switch it reports the
+ *  tab the step left, which is exactly the wrong answer to log or assert on. */
+const STALE_HANDLE_USE = /(?:^|[^\w$.])(page|context)\s*\.\s*\w/;
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * the stale-handle half (stories/codebehind-framework-actions.md, "Two static
+ * backstops").
+ *
+ * `run({ page })` destructures, and destructuring reads once. After
+ * `await tabs.switchTo(...)` the `page` binding still points at the tab the
+ * step left, so `page.locator(...)` on the next line silently drives the wrong
+ * tab — and passes, because the old tab is still a real page with real
+ * content. Nothing throws. That is what makes this worth a static check
+ * rather than trusting the replay to catch it.
+ *
+ * Line-based, and deliberately one-directional in what it misses: a `page` use
+ * BEFORE the first switcher is correct and left alone (it is how `openedBy`'s
+ * own trigger is written), a handle passed into a helper is not tracked, and
+ * two statements on one line read as one. Catching the common case for free
+ * beats catching every case with a parser — and the caller keeps the first
+ * answer if the re-ask comes back no better.
+ */
+export function staleHandleComplaint(code: string): string | undefined {
+  const lines = code.split('\n');
+  const switchedAt = lines.findIndex((line) => SWITCHER_CALL.test(line));
+  if (switchedAt === -1) return undefined;
+  // The switching line itself may legitimately mention `page` — it is where
+  // `openedBy(() => page.click(...))` lives, and the trigger runs before the
+  // tab exists.
+  for (let i = switchedAt + 1; i < lines.length; i++) {
+    const match = STALE_HANDLE_USE.exec(lines[i]!);
+    if (!match) continue;
+    const handle = match[1];
+    return (
+      `The entry calls a tab or browser switcher and then uses \`${handle}\` on a later line. ` +
+      `\`run({ page })\` destructures once, so that binding still points at the tab the step ` +
+      `left — it will drive the wrong tab and pass. Name the page the switcher returned ` +
+      `(\`const opened = await tabs.switchTo(...)\`) and use that handle instead.`
+    );
+  }
+  return undefined;
+}
+
+/** Everything `run`'s context object carries. Used bare, each of these is a
+ *  `ReferenceError` unless the entry destructured it. */
+const CONTEXT_PROPERTIES = ['page', 'context', 'browser', 'step', 'log', 'tabs', 'browsers'] as const;
+
+/** The destructured parameter list of `async run({ ... })`. Undefined when the
+ *  entry took the context as a whole (`run(ctx)`), where there is nothing to
+ *  check — `ctx.tabs` cannot be undeclared. */
+const RUN_DESTRUCTURE = /\brun\s*\(\s*\{([^}]*)\}/;
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * the "used it without asking for it" case.
+ *
+ * The prompt shows the entry shape as `async run({ page, step, log })`, and a
+ * model adding a `browsers.open(...)` call sometimes leaves that list alone.
+ * The result is `ReferenceError: browsers is not defined` at replay — which
+ * heals to AI, so the step passes and the author sees a ⚠ they have to chase.
+ * Observed on the first live run of `compile-browsers.md`: all three browser
+ * entries generated correctly and all three threw on exactly this.
+ *
+ * Cheap, deterministic, and it cannot fire on a correct entry: the names are
+ * fixed, and a locally-declared binding of the same name is exempted.
+ */
+export function undeclaredContextComplaint(code: string): string | undefined {
+  const params = RUN_DESTRUCTURE.exec(code);
+  if (!params) return undefined;
+  const declared = new Set(
+    params[1]!
+      // `{ page, step: s, log }` — the property name is what is in scope only
+      // when there is no rename, and a rename means the author asked for it
+      // either way, so the property half is the right half to read.
+      .split(',')
+      .map((part) => part.split(':')[0]!.trim())
+      .filter(Boolean),
+  );
+  for (const name of CONTEXT_PROPERTIES) {
+    if (declared.has(name)) continue;
+    if (!new RegExp(`(?:^|[^\\w$.])${name}\\s*\\.`).test(code)) continue;
+    // A local of the same name is defined, whatever the parameter list says.
+    if (new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(code)) continue;
+    return (
+      `The entry uses \`${name}\` but \`run\` does not destructure it — the parameter list is ` +
+      `\`{ ${[...declared].join(', ')} }\`, so this throws \`ReferenceError: ${name} is not defined\` ` +
+      `on the first replay. Add \`${name}\` to the destructured context object.`
     );
   }
   return undefined;
