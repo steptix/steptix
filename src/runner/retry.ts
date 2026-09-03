@@ -41,6 +41,20 @@ export async function withRetry<T>(
       if (signal?.aborted) {
         throw err;
       }
+      // Some failures are facts about the world, not bad plans: an upload whose
+      // file is missing, is a folder, or sits outside the project fails the same
+      // way however many times it is re-planned, and each retry costs a full AI
+      // turn. The action layer tags those; honour the tag before the warning
+      // below, so the log says the retries were skipped on purpose rather than
+      // implying another attempt is coming.
+      if (isNonRetryable(err)) {
+        logger.warn(`${label} failed and will not be retried: ${errorText(err)}`);
+        // Still hand the attempt to `onFailure`: it is what carries the turns
+        // into the failed result, and without it the report shows the error
+        // with no sub-actions, no screenshot and no reasoning behind it.
+        onFailure?.(err);
+        throw err;
+      }
       if (attempt <= maxRetries) {
         logger.warn(`${label} failed on attempt ${attempt}: ${String(err)}`);
         onFailure?.(err);
@@ -49,6 +63,20 @@ export async function withRetry<T>(
   }
 
   throw lastError;
+}
+
+/** Did the thrower ask us not to retry? Structural, so any layer can tag an
+ *  error without importing a class. */
+function isNonRetryable(err: unknown): boolean {
+  return (
+    typeof err === 'object'
+    && err !== null
+    && (err as { retryable?: unknown }).retryable === false
+  );
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function sleep(ms: number): Promise<void> {

@@ -377,7 +377,7 @@ The AI returns structured JSON actions. Supported types:
 | `type`      | `selector`, `value`, `description` | Type text into a field       |
 | `select`    | `selector`, `value`, `description` | Select dropdown option       |
 | `navigate`  | `url`, `description`            | Navigate to URL                 |
-| `upload`    | `selector`, `filePath`, `description` | Upload a file              |
+| `upload`    | `selector`, `filePath` or `filePaths`, `description` | Upload one or more files; the path is relative to the test file's folder |
 | `hover`     | `selector`, `description`       | Hover over element              |
 | `wait`      | `condition`, `timeout`, `description` | Wait for condition or duration |
 | `scroll`    | `direction`, `amount`, `description` | Scroll the page             |

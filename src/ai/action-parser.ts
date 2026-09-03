@@ -1,5 +1,6 @@
 import type { AIAction, AIResponse, BranchedAIResponse, ActionType } from './types.js';
 import { logger } from '../utils/logger.js';
+import { normaliseUploadPath } from '../browser/upload-paths.js';
 
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
@@ -52,7 +53,87 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   'press': 'keyboard',
   'key': 'keyboard',
   'key_press': 'keypress',
+  'attach': 'upload',
+  'attach_file': 'upload',
+  'attachFile': 'upload',
+  'file_upload': 'upload',
+  'upload_file': 'upload',
+  'uploadFile': 'upload',
+  'set_files': 'upload',
+  'setFiles': 'upload',
+  'setInputFiles': 'upload',
 };
+
+/**
+ * A file path a model copied out of a step is the one place its JSON reliably
+ * breaks. `"\\attachments\\logo.png"` is INVALID JSON — `\\a` is not an
+ * escape — so `JSON.parse` rejects the whole response and the turn is lost,
+ * before any field-level normalisation could have helped
+ * (stories/upload-action.md §2).
+ *
+ * The repair runs only after a parse has already failed, and only inside the
+ * value of a `filePath` / `filePaths` key. That scoping is the point: a blanket
+ * backslash fix would corrupt a `read` action's `pattern` (a regex `\\d` would
+ * silently become `/d`) or a `value` the step meant literally. A correctly
+ * escaped `"attachments\\\\logo.png"` is left alone — it already parses, and
+ * `normaliseUploadPath` folds its separator afterwards.
+ */
+const UPLOAD_PATH_VALUE =
+  /("file(?:Path|Paths)"\s*:\s*)("(?:[^"\\]|\\.)*"|\[(?:\s*"(?:[^"\\]|\\.)*"\s*,?)*\s*\])/g;
+/**
+ * A valid escape, or a stray backslash. Matching the valid form FIRST and
+ * keeping it is what makes this safe over consecutive backslashes: a correctly
+ * escaped `\\\\` is consumed whole, so its second character is never mistaken
+ * for the start of a bad escape.
+ */
+const JSON_ESCAPE_OR_STRAY = /\\(["\\/bfnrtu]|u[0-9a-fA-F]{4})|\\/g;
+
+function fixEscapes(text: string): string {
+  return text.replace(JSON_ESCAPE_OR_STRAY, (whole, valid: string | undefined) =>
+    (valid === undefined ? '/' : whole));
+}
+
+/** The scoped repair: path values only, so a `read` action's regex `pattern`
+ *  cannot be collateral damage. */
+function repairUploadPathEscapes(json: string): string {
+  return json.replace(UPLOAD_PATH_VALUE, (_whole, key: string, value: string) =>
+    key + fixEscapes(value));
+}
+
+/**
+ * `JSON.parse`, with one retry through {@link repairUploadPathEscapes}. Throws
+ * the ORIGINAL parse error when the repair changed nothing or still fails, so
+ * the message names the model's own output rather than our repaired copy.
+ */
+function parseWithUploadPathRepair(jsonString: string): unknown {
+  try {
+    return JSON.parse(jsonString);
+  } catch (err) {
+    // Scoped first — it is the safe one, and it covers the common case.
+    const scoped = repairUploadPathEscapes(jsonString);
+    if (scoped !== jsonString) {
+      try {
+        const parsed: unknown = JSON.parse(scoped);
+        logger.debug('Repaired unescaped backslashes in an upload path before parsing the AI response');
+        return parsed;
+      } catch { /* still broken — widen below */ }
+    }
+    // Still unparseable, so the turn is lost either way. Widen the repair to
+    // every string: a model that echoed the step's path into `description` as
+    // well as into `filePath` is the ordinary shape of this failure. A
+    // mangled regex somewhere else in the response is a worse outcome than a
+    // clean parse, but a better one than throwing the whole turn away.
+    const broad = fixEscapes(jsonString);
+    if (broad !== jsonString) {
+      try {
+        const parsed: unknown = JSON.parse(broad);
+        logger.debug('Repaired unescaped backslashes across the AI response before parsing it');
+        return parsed;
+      } catch { /* genuinely malformed */ }
+    }
+    throw err;
+  }
+}
 
 /**
  * Parse the raw string response from the AI into a structured AIResponse.
@@ -63,7 +144,7 @@ export function parseAIResponse(rawResponse: string): AIResponse {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonString);
+    parsed = parseWithUploadPathRepair(jsonString);
   } catch (err) {
     throw new Error(
       `AI response is not valid JSON: ${String(err)}\nRaw response:\n${rawResponse.substring(0, 500)}`,
@@ -108,7 +189,7 @@ export function parseBranchedResponse(rawResponse: string): BranchedAIResponse {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonString);
+    parsed = parseWithUploadPathRepair(jsonString);
   } catch (err) {
     throw new Error(
       `Branched AI response is not valid JSON: ${String(err)}\nRaw response:\n${rawResponse.substring(0, 500)}`,
@@ -289,7 +370,35 @@ function parseAction(raw: unknown, index: number): AIAction {
   if (typeof obj['selector'] === 'string') action.selector = obj['selector'];
   if (typeof obj['value'] === 'string') action.value = obj['value'];
   if (typeof obj['url'] === 'string') action.url = obj['url'];
-  if (typeof obj['filePath'] === 'string') action.filePath = obj['filePath'];
+  // Upload paths (stories/upload-action.md §2). Normalised here so the cached
+  // action and the compiled code-behind carry a relative, forward-slashed path
+  // whatever spelling the model used. Normalisation ALSO runs at the point of
+  // use, because a `{{param}}` path is interpolated after this parser has run.
+  const rawFilePaths = obj['filePaths'];
+  let filePaths: string[] | undefined;
+  if (Array.isArray(rawFilePaths)) {
+    const cleaned = rawFilePaths
+      .filter((p): p is string => typeof p === 'string')
+      .map(normaliseUploadPath)
+      .filter((p) => p !== '');
+    if (cleaned.length > 0) filePaths = cleaned;
+  }
+  // A lone path under the plural key is a shape the model will produce; read it
+  // as the singular rather than dropping it and costing a turn.
+  const singularPath =
+    typeof obj['filePath'] === 'string'
+      ? normaliseUploadPath(obj['filePath'])
+      : typeof rawFilePaths === 'string'
+        ? normaliseUploadPath(rawFilePaths)
+        : '';
+  if (filePaths !== undefined) {
+    action.filePaths = filePaths;
+    if (singularPath !== '' && typeof obj['filePath'] === 'string') {
+      logger.warn('Upload action carried both "filePath" and "filePaths" — using "filePaths"');
+    }
+  } else if (singularPath !== '') {
+    action.filePath = singularPath;
+  }
   if (typeof obj['condition'] === 'string') action.condition = obj['condition'];
   if (typeof obj['expected'] === 'string') action.expected = obj['expected'];
   if (typeof obj['key'] === 'string') action.key = obj['key'];

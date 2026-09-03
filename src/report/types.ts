@@ -42,6 +42,11 @@ export interface SubActionResult {
    * was impossible, which is never an error.
    */
   targeting?: ActionTargeting;
+  /** How an `upload` delivered its files. A sibling of `targeting`, never a
+   *  field inside it: generation reads `targeting === undefined` as "this
+   *  action was not measured", so a route stored in there would misclassify
+   *  every upload (stories/upload-action.md, decision 14). */
+  upload?: { via: 'input' | 'chooser' };
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;
   /** ISO 8601 timestamp when this sub-action completed */

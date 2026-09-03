@@ -227,6 +227,34 @@
     return out;
   }
 
+  // The one hidden element that IS a legitimate target.
+  //
+  // A styled uploader — the shape almost every real site uses — is a visible
+  // button next to an <input type="file"> at display:none. Collapsing that
+  // input to a bare <input> placeholder like every other hidden element left
+  // the model unable to name it at all: it could see a button and nothing to
+  // upload to. Keep just enough to target it and to tell one field from
+  // another, and no more (stories/upload-action.md §7, decision 9).
+  //
+  // Deliberately narrow: only when the INPUT ITSELF is the hidden element. An
+  // input inside a hidden ancestor is still collapsed with that ancestor —
+  // the opener route covers that layout.
+  var UPLOAD_PLACEHOLDER_ATTRS = ['id', 'name', 'type', 'accept', 'multiple'];
+
+  function hiddenFileInputAttrs(el, tag) {
+    if (tag !== 'input') return '';
+    var type = (el.getAttribute('type') || '').toLowerCase();
+    if (type !== 'file') return '';
+    var out = '';
+    for (var i = 0; i < UPLOAD_PLACEHOLDER_ATTRS.length; i++) {
+      var name = UPLOAD_PLACEHOLDER_ATTRS[i];
+      if (!el.hasAttribute(name)) continue;
+      if (DROP_UNSTABLE_IDS && name === 'id' && isUnstableId(el.getAttribute(name))) continue;
+      out += ' ' + name + '="' + escapeAttr(el.getAttribute(name)) + '"';
+    }
+    return out;
+  }
+
   var iframeIdx = 0;
 
   function processElement(el, depth) {
@@ -245,7 +273,10 @@
       // — the element isn't a target, so id/class/aria etc. are pure noise.
       var phIndent = '  '.repeat(depth);
       if (SELF_CLOSING_TAGS.has(tag)) {
-        return phIndent + '<' + tag + '> <!-- hidden: ' + hideWhy + ' -->\n';
+        // An <input> is self-closing, so this is the only branch a hidden file
+        // input can take.
+        return phIndent + '<' + tag + hiddenFileInputAttrs(el, tag)
+          + '> <!-- hidden: ' + hideWhy + ' -->\n';
       }
       return phIndent + '<' + tag + '><!-- hidden: ' + hideWhy + ' --></' + tag + '>\n';
     }

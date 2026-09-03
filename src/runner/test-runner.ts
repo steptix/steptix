@@ -381,6 +381,11 @@ export async function runTest(
   const baseDir = resolveTestCacheBase(config.cache.dir, effectiveEnv);
   const stepCache = await StepCache.initialize(baseDir, cacheDirName(test.filePath, projectRoot), test.steps);
 
+  // Where a file named in an "Upload file ..." step lives: beside the test that
+  // names it, fenced by the project root (stories/upload-action.md §3). The CLI
+  // always has both, so an upload step works from a plain `aiui run`.
+  const uploadPaths = { baseDir: path.dirname(test.filePath), projectRoot };
+
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
     ?? config.execution.timeout;
@@ -711,6 +716,7 @@ export async function runTest(
             conversationHistory: [...conversationHistory],
             apiResponseStore,
             csrfTokens,
+            uploadPaths,
             resolvedParameters,
             pageTracker: session.pageTracker,
             browserTracker,
@@ -822,6 +828,7 @@ export async function runTest(
           conversationHistory: [...conversationHistory],
           apiResponseStore,
           csrfTokens,
+          uploadPaths,
           resolvedParameters,
           pageTracker: session.pageTracker,
           browserTracker,
@@ -936,6 +943,7 @@ export async function runTest(
             conversationHistory: [...conversationHistory],
             apiResponseStore,
             csrfTokens,
+            uploadPaths,
             resolvedParameters,
             pageTracker: session.pageTracker,
             browserTracker,
@@ -1031,6 +1039,7 @@ export async function runTest(
           conversationHistory: [...conversationHistory],
           apiResponseStore,
           csrfTokens,
+          uploadPaths,
           resolvedParameters,
           pageTracker: session.pageTracker,
           browserTracker,
@@ -1058,6 +1067,7 @@ export async function runTest(
           conversationHistory: [...conversationHistory],
           apiResponseStore,
           csrfTokens,
+          uploadPaths,
           resolvedParameters,
           pageTracker: session.pageTracker,
           browserTracker,
@@ -1154,6 +1164,7 @@ export async function runTest(
             conversationHistory: [...conversationHistory],
             apiResponseStore,
             csrfTokens,
+            uploadPaths,
             resolvedParameters,
             pageTracker: session.pageTracker,
             browserTracker,

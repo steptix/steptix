@@ -1,6 +1,7 @@
 import type { Page, FrameLocator, Locator } from 'playwright';
 import type { AIAction } from '../ai/types.js';
 import { logger } from '../utils/logger.js';
+import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 
 /**
  * Resolves the locator root for an action.
@@ -146,6 +147,13 @@ export interface ExecuteActionOptions {
    * ONE count whatever the mode; `resolvedSelector` stays compile-only.
    */
   ambiguousTarget?: 'first' | 'fail' | undefined;
+  /**
+   * Where a file named in an `upload` step lives: the test file's folder, and
+   * the project root that fences it (stories/upload-action.md §3). Absent on
+   * a run with no test file — Flick never sends one — in which case only an
+   * absolute path can resolve.
+   */
+  uploadPaths?: UploadPathContext | undefined;
 }
 
 /** Result of executing a single Playwright action */
@@ -166,7 +174,21 @@ export interface ActionExecutionResult {
   /** What the runtime found at the instant it acted. Absent unless the caller
    *  asked to measure, and absent whenever measurement was impossible. */
   targeting?: ActionTargeting;
+  /**
+   * Do not retry this failure, and do not treat it as a broken plan: the
+   * action was never attempted because the file it names is missing, is a
+   * folder, or sits outside the project. Re-planning cannot conjure a file,
+   * so a retry only burns an AI turn (stories/upload-action.md §5).
+   */
+  retryable?: false;
+  /** How an `upload` delivered its files: straight onto an `<input
+   *  type="file">`, or by answering the picker a control opened. Recorded so a
+   *  compiled code-behind entry writes the shape that actually worked. */
+  upload?: { via: UploadRoute };
 }
+
+/** Which of the two upload routes ran. */
+export type UploadRoute = 'input' | 'chooser';
 
 /**
  * Execute a single AI action via Playwright.
@@ -180,6 +202,30 @@ export async function executeAction(
   options?: ExecuteActionOptions,
 ): Promise<ActionExecutionResult> {
   logger.subAction(action.description);
+
+  // ── Upload paths, before anything touches the page ────────────────────────
+  // Deliberately the FIRST thing an upload does. Everything below — selector
+  // sanitising, iframe promotion (a `count()`), the frame checks, the hoisted
+  // measurement wait — runs against the browser, so resolving later would let a
+  // compile run spend the whole 10s budget on a slightly-wrong selector before
+  // noticing the file was never there. Returning (rather than throwing) also
+  // keeps the catch below out of it, so no `matchCount` is recorded and the
+  // retry prompt cannot claim "No elements matched this selector" about a file
+  // that simply does not exist.
+  let uploadFiles: string[] | undefined;
+  if (action.action === 'upload') {
+    const resolved = await resolveUploadPaths(uploadPathsOf(action), options?.uploadPaths ?? {});
+    if (!resolved.ok) {
+      logger.error(`Action failed [upload]: ${resolved.error}`);
+      return {
+        success: false,
+        error: resolved.error,
+        retryable: false,
+        ...(action.selector !== undefined && { failedSelector: action.selector }),
+      };
+    }
+    uploadFiles = resolved.absolute;
+  }
 
   // Auto-promote iframe selectors that the AI accidentally placed in the selector
   // field instead of the frame field. If the first segment of the selector matches
@@ -229,6 +275,8 @@ export async function executeAction(
   let targeting: ActionTargeting | undefined;
   /** What is left of the action's own budget after the wait hoisted out of it. */
   let remainingMs: number | undefined;
+  /** Which route an `upload` took, for the transcript a compile reads. */
+  let uploadRoute: UploadRoute | undefined;
 
   try {
     // ── Measurement (stories/codebehind-selector-ambiguity.md) ──────────────
@@ -258,12 +306,34 @@ export async function executeAction(
       // on the visible count would let it silently capture from a hidden first
       // match, which is worse than the click case: it poisons a variable
       // instead of failing loudly.
-      const candidates =
+      //
+      // `upload` is its own case. It waits on `attached`, because a hidden
+      // <input type="file"> is a legitimate target — but it still PREFERS a
+      // visible match and only falls back to a hidden file input, so neither
+      // stored count describes the set it chose from. Worse, on a gate-only run
+      // `measureTargeting` never takes the visible count for an `attached`
+      // action, and it strips a zero one, so reading either off `targeting`
+      // would silently disable the gate. Measure both here, on the gate's own
+      // terms, mirroring the executor's target rule exactly.
+      let candidates =
         singular.state === 'visible' ? targeting?.visibleMatchCount : targeting?.matchCount;
+      let gatedOnVisible = singular.state === 'visible';
+      let uploadFallback = false;
+      if (eff.action === 'upload') {
+        const counts = await uploadCandidateCounts(root, eff.selector);
+        gatedOnVisible = counts.visible > 0;
+        uploadFallback = !gatedOnVisible;
+        candidates = gatedOnVisible ? counts.visible : counts.hiddenFileInputs;
+      }
       if (candidates !== undefined && candidates > 1) {
-        const what = singular.state === 'visible' ? 'visible elements' : 'elements';
-        const took =
-          singular.state === 'visible'
+        const what = uploadFallback
+          ? 'hidden file inputs'
+          : gatedOnVisible
+            ? 'visible elements'
+            : 'elements';
+        const took = uploadFallback
+          ? `${eff.action} took the first hidden file input`
+          : gatedOnVisible
             ? `${eff.action} took the first visible one`
             : `${eff.action} took the first of them, hidden included`;
         if (wantGate) {
@@ -305,7 +375,7 @@ export async function executeAction(
         break;
 
       case 'upload':
-        await executeUpload(root, eff, remainingMs);
+        uploadRoute = await executeUpload(page, root, eff, uploadFiles ?? [], remainingMs);
         break;
 
       case 'hover':
@@ -400,7 +470,11 @@ export async function executeAction(
         logger.warn(`Unknown action type: ${(eff as AIAction).action}`);
     }
 
-    return { success: true, ...(targeting !== undefined && { targeting }) };
+    return {
+      success: true,
+      ...(targeting !== undefined && { targeting }),
+      ...(uploadRoute !== undefined && { upload: { via: uploadRoute } }),
+    };
   } catch (err) {
     // A run abort (issue 022) must propagate as a throw, not be swallowed into a
     // failed-action result — the step loop / withRetry recognise it and end the
@@ -529,19 +603,193 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 }
 
-async function executeUpload(
+/**
+ * How many candidates would each of the two upload routes pick from? Mirrors
+ * the target rule in {@link executeUpload}: a visible match wins; failing that,
+ * a hidden `<input type="file">`. Never throws — it feeds a gate, not an action.
+ */
+async function uploadCandidateCounts(
   root: Page | FrameLocator,
-  action: AIAction,
-  timeoutMs?: number,
-): Promise<void> {
-  const selector = requireSelector(action);
-  const filePath = action.filePath ?? action.value ?? '';
-  if (!filePath) throw new Error('upload action requires a filePath');
-  await root
+  selector: string,
+): Promise<{ visible: number; hiddenFileInputs: number }> {
+  const visible = await root
     .locator(selector)
     .locator('visible=true')
-    .first()
-    .setInputFiles(filePath, { timeout: timeoutMs ?? UPLOAD_TIMEOUT_MS });
+    .count()
+    .catch(() => 0);
+  if (visible > 0) return { visible, hiddenFileInputs: 0 };
+  const hiddenFileInputs = await root
+    .locator(selector)
+    .and(root.locator('input[type="file"]'))
+    .count()
+    .catch(() => 0);
+  return { visible, hiddenFileInputs };
+}
+
+/** Refuse a multi-file upload into a field that takes one, rather than
+ *  silently uploading only the first. Retryable: the model can split the step
+ *  or pick the multi-file field. */
+function assertMultipleAllowed(selector: string, files: string[], multiple: boolean): void {
+  if (files.length > 1 && !multiple) {
+    throw new Error(
+      `"${selector}" accepts one file but the step gave ${files.length}. `
+      + 'Split the step, or target a multi-file field',
+    );
+  }
+}
+
+/** Is this element something we can set files on directly? A `<label>` counts:
+ *  Playwright retargets a label to its control, so it needs no picker. */
+async function classifyUploadTarget(
+  target: Locator,
+): Promise<{ isFileInput: boolean; multiple: boolean }> {
+  try {
+    // Explicit `undefined` arg + options — a lone options object would be read
+    // as the page function's ARGUMENT and silently take Playwright's 30s
+    // default. Same trap as `measureTargeting`.
+    return await target.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        // Duck-typed: this file compiles without the DOM lib, like every other
+        // in-page function here.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const fileInput = (candidate: any) =>
+          candidate && candidate.tagName === 'INPUT'
+          && String(candidate.type).toLowerCase() === 'file'
+            ? candidate
+            : null;
+        const input = fileInput(el) ?? (el.tagName === 'LABEL' ? fileInput(el.control) : null);
+        return { isFileInput: input !== null, multiple: input ? Boolean(input.multiple) : false };
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    // An element that detached in the gap, or a frame that will not evaluate.
+    // Treat it as an opener: the chooser route reports a clearer failure than
+    // a setInputFiles on something that is not an input.
+    //
+    // `multiple: true` because the probe FAILED, not because it said "many":
+    // reporting single here would refuse a two-file step with a confident
+    // claim about a field we could not read. Let Playwright's own
+    // "non-multiple file input" error speak instead.
+    return { isFileInput: false, multiple: true };
+  }
+}
+
+/**
+ * Click a control and answer the file picker it opens.
+ *
+ * The waiter is armed before the click and its rejection is handled straight
+ * away. `Promise.all([waitForEvent, click])` looks equivalent and is not: when
+ * the CLICK fails, the waiter keeps running and later rejects with nobody
+ * listening, which under Node's default `--unhandled-rejections=throw` ends a
+ * CLI run outright (the Sessions API only survives it because of its crash
+ * guard). Awaiting the click first also means a click failure — the more
+ * specific error — is the one that surfaces.
+ */
+async function uploadViaChooser(
+  page: Page,
+  target: Locator,
+  selector: string,
+  files: string[],
+  budgetMs: number,
+): Promise<UploadRoute> {
+  const chooserPromise = page.waitForEvent('filechooser', { timeout: budgetMs });
+  chooserPromise.catch(() => { /* handled below, or by the click's error */ });
+  await target.click({ timeout: budgetMs });
+  let chooser;
+  try {
+    chooser = await chooserPromise;
+  } catch {
+    throw new Error(
+      `Clicking "${selector}" did not open a file chooser Playwright can answer. `
+      + 'If the snapshot shows an <input type="file"> for this field, target it '
+      + 'directly; a picker opened with the File System Access API cannot be driven',
+    );
+  }
+  assertMultipleAllowed(selector, files, chooser.isMultiple());
+  await chooser.setFiles(files);
+  return 'chooser';
+}
+
+/**
+ * Put files into the page.
+ *
+ * `files` arrive already resolved to absolute paths and already proven to exist
+ * — {@link executeAction} does that before touching the browser at all.
+ *
+ * Target rule (stories/upload-action.md, decision 7): a VISIBLE match wins, and
+ * is either set directly (a file input, or a label for one) or clicked to open
+ * a picker. Only when nothing matches visibly do we fall back to a hidden
+ * `<input type="file">` — the one hidden element that is a legitimate target,
+ * and the shape every styled uploader on the web uses. A hidden
+ * anything-else is not a target: taking it would resurrect the decoy bug that
+ * stories/codebehind-selector-ambiguity.md fixed, where the first match in DOM
+ * order is a collapsed mobile copy of the real control.
+ */
+async function executeUpload(
+  page: Page,
+  root: Page | FrameLocator,
+  action: AIAction,
+  files: string[],
+  timeoutMs?: number,
+): Promise<UploadRoute> {
+  const selector = requireSelector(action);
+  // ONE budget for the whole action, spent down as it goes. Each wait below
+  // would otherwise get a fresh 10s, so the failure path could take thirty
+  // seconds to say a selector matched nothing.
+  const deadline = Date.now() + (timeoutMs ?? UPLOAD_TIMEOUT_MS);
+  const remaining = (): number => Math.max(deadline - Date.now(), MIN_ACTION_TIMEOUT_MS);
+
+  const matches = root.locator(selector);
+  const visible = matches.locator('visible=true');
+
+  // Something must match — but not necessarily visibly.
+  await matches.first().waitFor({ state: 'attached', timeout: remaining() });
+
+  /** Act on the first VISIBLE match: set the files on it when it is a file
+   *  input (or a label for one), otherwise click it and answer the picker. */
+  const useVisibleTarget = async (): Promise<UploadRoute> => {
+    const target = visible.first();
+    const kind = await classifyUploadTarget(target);
+    if (kind.isFileInput) {
+      assertMultipleAllowed(selector, files, kind.multiple);
+      logUpload(files, selector, 'input');
+      await target.setInputFiles(files, { timeout: remaining() });
+      return 'input';
+    }
+    logUpload(files, selector, 'chooser');
+    return await uploadViaChooser(page, target, selector, files, remaining());
+  };
+
+  if ((await visible.count().catch(() => 0)) > 0) return await useVisibleTarget();
+
+  const hiddenInput = matches.and(root.locator('input[type="file"]')).first();
+  if ((await hiddenInput.count().catch(() => 0)) === 0) {
+    // Nothing visible, and no hidden file input either. Let Playwright raise
+    // the same "not visible" failure every other action would, rather than
+    // inventing one.
+    await visible.first().waitFor({ state: 'visible', timeout: remaining() });
+    // It became visible inside the budget after all — a slow render, not a
+    // missing control. Act on it, rather than falling through to a hidden-input
+    // locator that matches nothing and times out blaming the wrong element.
+    return await useVisibleTarget();
+  }
+
+  const kind = await classifyUploadTarget(hiddenInput);
+  assertMultipleAllowed(selector, files, kind.multiple);
+  logUpload(files, selector, 'input');
+  await hiddenInput.setInputFiles(files, { timeout: remaining() });
+  return 'input';
+}
+
+/** The one line that names the absolute paths actually sent. The `subAction`
+ *  line above carries only the model's description, so without this a failed
+ *  upload is the only place a path is ever visible. */
+function logUpload(files: string[], selector: string, via: UploadRoute): void {
+  const how = via === 'input' ? 'input' : 'via file chooser';
+  logger.info(`upload: ${files.join(', ')} → ${selector} (${how})`);
 }
 
 async function executeHover(
@@ -598,7 +846,11 @@ function singularTargetOf(root: Page | FrameLocator, action: AIAction): Singular
     case 'hover':
       return { target: visibleFirst(), state: 'visible', budgetMs: HOVER_TIMEOUT_MS };
     case 'upload':
-      return { target: visibleFirst(), state: 'visible', budgetMs: UPLOAD_TIMEOUT_MS };
+      // `attached`, not `visible`: the styled uploader's <input type="file"> is
+      // `display:none` and is still the right target. The gate compensates —
+      // see the upload clause in `executeAction`, which counts what each route
+      // would actually pick from rather than trusting either stored count.
+      return { target: root.locator(selector).first(), state: 'attached', budgetMs: UPLOAD_TIMEOUT_MS };
     case 'read':
       if (action.multiple) return null;
       return { target: root.locator(selector).first(), state: 'attached', budgetMs: READ_TIMEOUT_MS };

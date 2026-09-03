@@ -1,4 +1,5 @@
 import type { AiClient } from '../ai/client.js';
+import { normaliseUploadPath } from '../browser/upload-paths.js';
 import { findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
 import {
   buildStepCodePrompt,
@@ -185,19 +186,20 @@ export async function generateStepEntry(
   if (first.kind !== 'entry') return first;
 
   // ── The static backstops ──────────────────────────────────────────────────
-  // Both are for the case the prompt cannot cover: the model was told the
-  // thing and wrote it the other way anyway.
+  // All of them are for the case the prompt cannot cover: the model was told
+  // the thing and wrote it the other way anyway.
   //
   // Selector ambiguity first (stories/codebehind-selector-ambiguity.md) — it
   // throws on replay, so it is self-announcing, where a stale handle
   // (stories/codebehind-framework-actions.md) drives the wrong tab and PASSES.
-  // One re-ask is shared between them: two would double a compile's model
-  // calls for a pair of heuristics, and the complaint text carries whichever
-  // fault fired.
+  // One re-ask is shared between them all: more would multiply a compile's
+  // model calls for a handful of heuristics, and the complaint text carries
+  // whichever fault fired.
   const complaint =
-    ambiguousSelectorComplaint(first.code, options.actions) ??
+    staticEntryComplaint(first.code, options.actions) ??
     undeclaredContextComplaint(first.code) ??
-    staleHandleComplaint(first.code);
+    staleHandleComplaint(first.code) ??
+    unwaitedReadComplaint(first.code);
   if (complaint === undefined) return first;
 
   logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
@@ -223,10 +225,11 @@ export async function generateStepEntry(
     );
     return first;
   }
-  if (ambiguousSelectorComplaint(second.code, options.actions) !== undefined) {
+  const stillWrong = staticEntryComplaint(second.code, options.actions);
+  if (stillWrong !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still targets a selector this run measured as ` +
-        `matching more than one element; it may throw on replay. ${complaint}`,
+      `Code-behind for "${binding.source}" still has a fault the static check can see; ` +
+        `it may throw or hard-code a path on replay. ${stillWrong}`,
     );
   }
   const stillUndeclared = undeclaredContextComplaint(second.code);
@@ -242,7 +245,54 @@ export async function generateStepEntry(
         `it may drive the tab the step left. ${complaint}`,
     );
   }
+  const stillUnwaited = unwaitedReadComplaint(second.code);
+  if (stillUnwaited !== undefined) {
+    logger.warn(
+      `Code-behind for "${binding.source}" still asserts on a page value it never waited for; ` +
+        `it may read the state from before the step. ${stillUnwaited}`,
+    );
+  }
   return second;
+}
+
+/**
+ * Every static fault worth one re-ask, in the order they are checked.
+ *
+ * Selector ambiguity comes first deliberately: it is the fault the model gets
+ * wrong more often, and a bare selector throws on replay where a literal path
+ * merely breaks on the next machine.
+ */
+export function staticEntryComplaint(
+  code: string,
+  actions: RecordedAction[],
+): string | undefined {
+  return ambiguousSelectorComplaint(code, actions) ?? literalUploadPathComplaint(code, actions);
+}
+
+/**
+ * `setInputFiles('attachments/logo.png')` — a path frozen into the file.
+ *
+ * Generated code must route every upload path through `step.filePath(...)`,
+ * which resolves it against the TEST FILE's folder at replay time. A literal
+ * is resolved by Playwright against the server process's working directory
+ * instead, so the entry works on the machine that compiled it and fails
+ * everywhere else — the exact portability failure code-behind exists to avoid.
+ * An absolute literal is the same fault, caught by the same check.
+ */
+const LITERAL_FILE_ARG = /\.\s*(?:setInputFiles|setFiles)\s*\(\s*(['"`]|\[\s*['"`])/;
+
+export function literalUploadPathComplaint(
+  code: string,
+  actions: RecordedAction[],
+): string | undefined {
+  if (!actions.some((a) => a.action === 'upload')) return undefined;
+  if (!LITERAL_FILE_ARG.test(code)) return undefined;
+  return (
+    'The entry passes a string literal to setInputFiles/setFiles. An upload path in a step is '
+    + "relative to the test file's folder, so it must go through step.filePath('…') — which "
+    + 'resolves it at replay time and fails loudly if the file is missing. A literal path (relative '
+    + 'or absolute) only works on the machine that compiled it.'
+  );
 }
 
 /**
@@ -345,6 +395,80 @@ export function staleHandleComplaint(code: string): string | undefined {
     );
   }
   return undefined;
+}
+
+/** Reads that take whatever the DOM holds at that instant. None of them
+ *  retries, so each is only as correct as the wait in front of it. */
+const INSTANT_READ =
+  /\.\s*(?:textContent|innerText|inputValue|allTextContents|allInnerTexts|getAttribute)\s*\(/;
+
+/**
+ * Constructs that block until the page reaches a NAMED state.
+ *
+ * A bare `waitFor()` is deliberately not one of them, and neither is
+ * `waitFor({ state: 'visible' })`: `visible` is the default, and on an element
+ * that is already on the page it returns at once having proved nothing. The
+ * transition states (`hidden`, `attached`, `detached`) are real waits, as are
+ * a text filter, a predicate, and a response.
+ */
+const WAITS_FOR_STATE = new RegExp(
+  [
+    'hasText',
+    'hasNotText',
+    'waitForFunction',
+    'waitForSelector',
+    'waitForResponse',
+    'waitForRequest',
+    'waitForURL',
+    'waitForLoadState',
+    String.raw`waitFor\s*\(\s*\{[^}]*state\s*:\s*['"](?:hidden|attached|detached)['"]`,
+    String.raw`\.\s*goto\s*\(`,
+    'toHaveText',
+    'toContainText',
+    'toHaveValue',
+    'toHaveCount',
+  ].join('|'),
+);
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * the read-that-does-not-wait case (stories/upload-action.md, "The compiled
+ * post-condition has to wait").
+ *
+ * The shape: the entry pulls a value out of the page with a one-shot read and
+ * feeds it to `step.expect`, having never waited for the state it is about to
+ * assert. `step.expect` does not retry and the read does not either, so the
+ * comparison happens milliseconds after the click that triggered the change —
+ * with the request that produces it still in flight. It reads the value the
+ * page had BEFORE the step and fails.
+ *
+ * It is invisible under AI, which is what makes it worth a static check: the
+ * runner settles the page after each action and the next model turn costs
+ * seconds of think time, so the value has always arrived by the time the AI
+ * looks. Only the compiled entry is fast enough to lose. Measured on
+ * `securebank-upload.md`, whose `#upload-status` is one element that keeps the
+ * PREVIOUS step's message: the assertion read "All documents cleared" while
+ * the upload it was asserting on was still uploading.
+ *
+ * Conservative in both directions. It needs a `step.expect` AND an instant
+ * read AND no state wait anywhere in the entry, so an entry that waits on some
+ * unrelated line is left alone — and, like its siblings, absence of the
+ * pattern means the check did not run, never that the entry is proven safe.
+ */
+export function unwaitedReadComplaint(code: string): string | undefined {
+  if (!/\bstep\s*\.\s*expect\s*\(/.test(code)) return undefined;
+  if (!INSTANT_READ.test(code)) return undefined;
+  if (WAITS_FOR_STATE.test(code)) return undefined;
+  return (
+    'The entry reads a value out of the page and asserts on it without ever waiting for the '
+    + 'state it asserts. `step.expect` does not retry and the read does not either, so on replay '
+    + 'this compares whatever the page held a millisecond after the action — which, when a '
+    + 'request is still in flight, is the value from BEFORE the step. Wait for the NEW state '
+    + "first: `await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()` "
+    + '(or `.filter({ hasText: ... })` on a locator you already have) does not resolve until that '
+    + 'text is present, and `page.waitForFunction` covers what a text filter cannot. Read the '
+    + 'value into `step.expect` after that, not instead of it.'
+  );
 }
 
 /** Everything `run`'s context object carries. Used bare, each of these is a
@@ -520,10 +644,21 @@ export function guardedValues(
   parameters: Array<{ name: string; value: string }>,
   envRefs: Array<{ ref: string; value: string }>,
 ): Array<{ name: string; value: string }> {
-  return [
+  const base = [
     ...parameters,
     ...envRefs.map((r) => ({ name: `\${${r.ref}}`, value: r.value })),
   ];
+  // A path parameter reaches the model already interpolated into the step, and
+  // the model writes it back NORMALISED — `\attachments\march.pdf` comes back
+  // as `attachments/march.pdf`. Guarding only the raw spelling would let that
+  // frozen path through the leak check (stories/upload-action.md §6).
+  // Path-shaped only. `findInlinedParameterValue` is a bare substring test, so
+  // widening an ordinary parameter like `route: "/logs"` into the token `logs`
+  // would start reporting any entry containing that word as a leak.
+  const normalised = base
+    .map((g) => ({ name: g.name, value: normaliseUploadPath(g.value) }))
+    .filter((g, i) => g.value !== base[i]!.value && g.value.includes('/'));
+  return [...base, ...normalised];
 }
 
 /** `{{username}}` for a parameter, `${data.url}` for an environment reference. */

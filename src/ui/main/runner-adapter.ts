@@ -7,7 +7,8 @@
  * portable to a future WebSocket backend.
  */
 
-import { resolve as pathResolve } from 'node:path';
+import { resolve as pathResolve, dirname as pathDirname } from 'node:path';
+import { resolveProjectRoot } from '../../server/project-root.js';
 import type { Page } from 'playwright';
 import type { Config } from '../../config/types.js';
 import type { ParsedTest, TestInstance } from '../../parser/types.js';
@@ -127,6 +128,11 @@ export class UIRunnerAdapter {
   private csrfTokens: Record<string, string> = {};
   private resolvedParameters: Record<string, string> = {};
   private test: ParsedTest | null = null;
+  /** The project root an upload path is fenced by. Resolved once per run,
+   *  because the options literals below are built synchronously — and without
+   *  it the fence would collapse to the test's own folder, refusing a
+   *  `../shared/logo.png` the CLI accepts. */
+  private uploadProjectRoot: string | null = null;
 
   constructor(emit: EmitFn) {
     this.emit = emit;
@@ -231,6 +237,13 @@ export class UIRunnerAdapter {
       conversationHistory: [...this.conversationHistory],
       ...(this.apiResponseStore != null && { apiResponseStore: this.apiResponseStore }),
       csrfTokens: this.csrfTokens,
+      // An upload step resolves its path beside the test file being run.
+      ...(this.test && {
+        uploadPaths: {
+          baseDir: pathDirname(this.test.filePath),
+          projectRoot: this.uploadProjectRoot,
+        },
+      }),
       resolvedParameters: this.resolvedParameters,
       ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
       // A broken entry fails with the heal-skip copy instead of reaching AI
@@ -315,6 +328,7 @@ export class UIRunnerAdapter {
     const skillsDir = pathResolve(process.cwd(), this.config.tests.skillsDir);
     const parsedTest = await parseTestFile(filePath, { skillsDir });
     this.test = parsedTest;
+    this.uploadProjectRoot = await resolveProjectRoot(parsedTest.filePath);
 
     // 3. Expand test instances (take first for the UI — no data-driven in UI v1)
     const instances = await expandTestInstances(parsedTest, this.config);
@@ -498,6 +512,13 @@ export class UIRunnerAdapter {
         conversationHistory: [...this.conversationHistory],
         apiResponseStore: this.apiResponseStore,
         csrfTokens: this.csrfTokens,
+      // An upload step resolves its path beside the test file being run.
+      ...(this.test && {
+        uploadPaths: {
+          baseDir: pathDirname(this.test.filePath),
+          projectRoot: this.uploadProjectRoot,
+        },
+      }),
         resolvedParameters: this.resolvedParameters,
         ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
         // Keyless, same as the steering call above — both call sites or

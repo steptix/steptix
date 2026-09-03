@@ -1690,7 +1690,9 @@ Step syntax: plain English, one action per step. Also supported:
   [input: label]            needs a human — SKIPPED in an unattended run
   Section Name              call an inline "### Section Name" from the same file
   \${env.VAR} / \${data.key} substituted from the selected environment
-  {{param}}                 substituted from ## Parameters`.trim();
+  {{param}}                 substituted from ## Parameters
+  Upload file attachments/x.png   a file path is relative to the test file
+                            (run_steps / run_errand: the project root)`.trim();
 
 /**
  * The CDP pointer, on the run tools themselves.
@@ -1744,6 +1746,7 @@ Step syntax: plain English, one action per step. Also supported:
                             env_name, or they reach the AI as literal text
   {{name}}                  substituted from a capture made EARLIER IN THIS
                             errand; never from a previous one
+  Upload file attachments/x.png   a file path is relative to the project root
 [skill: ...] and [tool: ...] are refused here — those need run_steps in a
 project, which is what carries the skills and tools directories.`.trim();
 

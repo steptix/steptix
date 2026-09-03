@@ -864,7 +864,20 @@ function renderSubAction(sub: SubActionResult): string {
   const description = sub.action.description;
   const timeStr = formatTime(sub.timestamp);
   const timeLabel = timeStr ? `<span class="event-time">${timeStr}</span>` : '';
-  const hasBody = sub.screenshotBase64 || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData;
+  // Which files an upload sent, in the RELATIVE form the step wrote: the
+  // report is shared, and the absolute path is in the run log (and in the
+  // error text when it failed). Without it an upload row says only "upload".
+  const uploadPaths =
+    sub.action.action === 'upload'
+      ? (sub.action.filePaths ?? (sub.action.filePath !== undefined ? [sub.action.filePath] : []))
+      : [];
+  const uploadHtml =
+    uploadPaths.length > 0
+      ? `<div class="sub-action-detail">${uploadPaths.length === 1 ? 'file' : 'files'}: `
+        + `${escapeHtml(uploadPaths.join(', '))}</div>`
+      : '';
+  const hasBody = sub.screenshotBase64 || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
+    || uploadHtml !== '';
 
   const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
   const screenshotHtml = sub.screenshotBase64
@@ -908,7 +921,7 @@ function renderSubAction(sub: SubActionResult): string {
     <span class="sub-action-desc">${escapeHtml(description)}</span>
     ${timeLabel}
   </div>
-  ${hasBody ? `<div class="sub-action-body">${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
+  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
 }
 

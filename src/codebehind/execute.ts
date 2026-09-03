@@ -4,6 +4,12 @@ import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataConte
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
 import { unavailableBrowserApi, unavailableTabApi } from './tabs.js';
+import {
+  resolveUploadPathSync,
+  nonRetryable,
+  isNonRetryable,
+  type UploadPathContext,
+} from '../browser/upload-paths.js';
 import type {
   CodeBehindBrowserApi,
   CodeBehindContext,
@@ -65,6 +71,10 @@ export interface RunCodeBehindOptions {
   pauseBeforeRun?: boolean | undefined;
   /** Step label used in log lines, e.g. `codebehind:12`. */
   label: string;
+  /** Where a path passed to `step.filePath` resolves from: the test file's
+   *  folder, fenced by the project root. Absent on a run with no test file,
+   *  where `step.filePath` accepts only absolute paths. */
+  uploadPaths?: UploadPathContext | undefined;
 }
 
 export interface CodeBehindOutcome {
@@ -77,6 +87,14 @@ export interface CodeBehindOutcome {
   /** Values the entry wrote, under their effective (post-rename) names. */
   outputs: Record<string, string>;
   error?: string;
+  /**
+   * True when the failure is a fact about the world rather than broken code —
+   * today, a `step.filePath` whose file is missing, is a folder, or sits
+   * outside the project. The runner must NOT heal these: the entry is fine, so
+   * re-running the step under AI would spend a turn and discard a working
+   * entry for a failure no re-planning can fix.
+   */
+  nonRetryable?: boolean;
 }
 
 /** Execute an entry's `run`. Never throws — the caller decides what a failure
@@ -104,7 +122,13 @@ export async function runCodeBehindEntry(
     page: options.page,
     context: options.context,
     browser: options.browser,
-    step: makeStepApi(options.binding.scope, options.resolvedParameters, outputs, options.envData),
+    step: makeStepApi(
+      options.binding.scope,
+      options.resolvedParameters,
+      outputs,
+      options.envData,
+      options.uploadPaths,
+    ),
     log: createCapturingLog(options.label, logs),
     tabs: options.tabs ?? unavailableTabApi(),
     browsers: options.browsers ?? unavailableBrowserApi(),
@@ -137,6 +161,7 @@ export async function runCodeBehindEntry(
       logs,
       outputs,
       error: err instanceof Error ? err.message : String(err),
+      ...(isNonRetryable(err) && { nonRetryable: true }),
     };
   }
 }
@@ -169,6 +194,7 @@ function makeStepApi(
   resolvedParameters: Record<string, string>,
   outputs: Record<string, string>,
   envData?: EnvDataContext | undefined,
+  uploadPaths?: UploadPathContext | undefined,
 ): CodeBehindStepApi {
   return {
     getVar(name) {
@@ -211,6 +237,21 @@ function makeStepApi(
       if (!condition) {
         throw new CodeBehindExpectationError(message ?? 'Code-behind expectation failed');
       }
+    },
+    filePath(relative) {
+      // `step.filePath(step.getVar('x'))` is the parameterised form, and
+      // `getVar` answers `undefined` for a name this run has no value for —
+      // say so, rather than letting "undefined" become a path segment.
+      if (typeof relative !== 'string' || relative.trim() === '') {
+        throw nonRetryable(
+          'step.filePath needs a path; it was given '
+          + (relative === undefined
+            ? 'nothing (step.getVar returned undefined?)'
+            : JSON.stringify(relative))
+          + '. Pass the path as written in the step',
+        );
+      }
+      return resolveUploadPathSync(relative, uploadPaths ?? {});
     },
   };
 }

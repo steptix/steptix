@@ -1,3 +1,4 @@
+import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { Config, EffectiveSettings } from '../config/types.js';
@@ -483,6 +484,10 @@ export class ErrandRunner {
           ownTabs,
           steps: request.steps,
           runConfig: settings.config,
+          uploadPaths: {
+            baseDir: dirname(request.testFilePath),
+            projectRoot: bundle.projectRoot,
+          },
           envDataCtx,
           aiClient,
           contextContent: context.combined,
@@ -563,6 +568,9 @@ export class ErrandRunner {
     ownTabs: Map<Page, ErrandTab>;
     steps: string[];
     runConfig: Config;
+    /** Base + fence for an "Upload file ..." step. An errand's synthetic test
+     *  file sits in the project root, so both resolve there. */
+    uploadPaths: { baseDir: string; projectRoot: string | null };
     envDataCtx: EnvDataContext | null;
     aiClient: AiClient;
     contextContent: string;
@@ -712,6 +720,7 @@ export class ErrandRunner {
           apiResponseStore,
           csrfTokens,
           resolvedParameters: scope,
+          uploadPaths: args.uploadPaths,
           pageTracker: active.pageTracker,
           browserTracker,
           // No console is attached to an errand either, so an AI clarification

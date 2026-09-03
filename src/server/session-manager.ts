@@ -4220,6 +4220,18 @@ export class SessionManager {
                 conversationHistory: [...session.conversationHistory],
                 apiResponseStore: session.apiResponseStore,
                 csrfTokens: session.csrfTokens,
+                // Where an "Upload file ..." step's path resolves from: the
+                // folder of the test file the client sent, fenced by the
+                // project root the bundle already walked to. A request without
+                // a testFilePath (Flick, and any client that omits it) gets no
+                // base, so a relative upload path fails with a message saying
+                // exactly that rather than resolving against the server's cwd.
+                uploadPaths: {
+                  ...(request.testFilePath !== undefined && {
+                    baseDir: dirname(request.testFilePath),
+                  }),
+                  projectRoot: projectBundle.projectRoot,
+                },
                 resolvedParameters,
                 pageTracker: session.browserSession.pageTracker,
                 browserTracker: session.browserTracker,

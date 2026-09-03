@@ -743,9 +743,11 @@ When you run a test, here's what happens end to end:
 | `scroll` | `page.evaluate()` scroll |
 | `hover` | `locator.hover()` |
 | `keyboard` | `page.keyboard.press()` |
-| `upload` | `locator.setInputFiles(filePath)` |
+| `upload` | `locator.setInputFiles(...)`, or click the control and answer `page.waitForEvent('filechooser')` |
 | `api_call` | HTTP fetch (with session cookies or standalone) |
 | `assert` | Second AI call evaluates pass/fail against DOM + screenshot |
+
+A file path named in a step is relative to the folder the test file lives in.
 
 ### Key source files
 
