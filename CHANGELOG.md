@@ -6,6 +6,58 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — Live coverage for verify steps, including two that must go red
+
+Verification had almost no live coverage. Two steps existed —
+`cache-replay.md`'s "Verify the page URL is exactly about:blank" and
+`sections-live.md`'s DOM-free "Confirm the browser is showing a page" — and
+neither suite asserted anything about the verification itself: one asserts the
+⚡ cache glyph, the other asserts section expansion. Nothing read a real value
+off a real page, and nothing proved a verify could fail.
+
+`testbench-native/tests/integration/live/verify-assertions.test.cjs` now drives
+three fixtures against the portfolio page in `fixtures/test-app`:
+
+- **`verify-assertions.md`** — one step per common verification shape, all
+  expected green: text equality, exact currency, negation, threshold, sign,
+  substring/row lookup, count, cross-element sum, ordering, field value,
+  disabled and enabled control, absence, per-row status badge, empty state,
+  and an async value read after the action that changes it.
+- **`verify-near-miss.md`** — expects `$148,320.51` against a rendered
+  `$148,320.50` and **must fail**.
+- **`verify-false-negation.md`** — asserts the Cash & Savings card is NOT
+  `$24,582.90` when it is exactly that, and **must fail**.
+
+The two red fixtures are the load-bearing half. The model both writes the
+assertion code and grades the result, so a file of passing verifies cannot
+distinguish "verification works" from "verification is a no-op that returns
+true". Both are near misses rather than absurd values on purpose: one cent is
+only caught by an assertion that actually compares the numbers, and the false
+negation is only caught by one that evaluates the "NOT" rather than dropping
+it — which is what the passing `NOT $60.00` step in the first fixture pairs
+with to pin the direction.
+
+Neither red case relies on the retry loop behaving: a failed assertion throws
+`StepFailureError`, so with the default `execution.retries: 1` each must-fail
+step is attempted twice before settling. Both attempts fail because the page
+value genuinely differs. Two existing behaviours keep that retry from becoming
+a "try until green" loop, and this suite is what would notice if either
+regressed — `evaluateAssertion` regenerates assertion code only when the code
+*throws*, never on a structured `pass: false`; and assertion failures never
+reach `collectedFailures`, so the retry prompt carries no hint about what the
+assertion expected or what it got.
+
+`fixtures/test-app/assertions.html` grew the targets those shapes needed and
+previously had nowhere to read: a Transfer panel (a field holding `50.20`, a
+disabled Transfer button, an enabled Cancel beside it, and deliberately no
+error node, so "verify no error is shown" has something real to be right
+about), a Scheduled Payments table that finally renders the `.badge.pending`
+and `.badge.closed` styles the stylesheet had always defined but never used, a
+Closed Accounts table with a header and an explicit empty state, and a
+settlement figure that resolves 2s after Refresh. Existing expectations are
+untouched — 10 holdings, 5 alerts, 50 transaction rows, and the holdings sum
+still matching `$52,150.00`.
+
 ### Added — SecureBank fixture: a Documents page for file-upload steps
 
 `fixtures/test-app` gains `/documents`, the page the upcoming file-upload
