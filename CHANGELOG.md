@@ -6,6 +6,44 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — Upload steps now work end to end
+
+The `upload` action has been in the parser, the executor and the step cache for
+a while, but nothing ever told the model it existed, so a step naming a file was
+guessed at as a `type` or a `click`. The prompt now carries an upload rule, and
+a path written in a step — `\attachments\logo.png`, backslashes or forward
+slashes — is resolved against the folder the test file is in, so a test moved
+along with its `attachments/` folder keeps working. Paths are fenced to the
+project root, and the file has to be readable by the server process, which is
+where the bytes are actually read.
+
+The uploader most real sites use is a styled button with its
+`<input type="file">` at `display:none`, and both ways of driving it now work:
+targeting the input directly (Playwright sets files on a hidden input quite
+happily), or clicking the button and answering the file chooser it opens. The
+DOM snapshot keeps a hidden file input's `id`, `name`, `type`, `accept` and
+`multiple`, so the model can name it in the first place, and `filePaths` sends
+several files in one action.
+
+A missing file now fails the step immediately, before any selector is evaluated,
+with a message naming the absolute path that was tried and the folder it was
+resolved from. It costs no AI retries — nothing the model does can make a file
+appear — and it neither invalidates a cached plan nor throws away a compiled
+code-behind entry, since the plan was fine and only the file was missing.
+Compiled entries resolve their paths through `step.filePath(...)` rather than
+freezing an absolute one. All of it is tested against the Documents page added
+to the SecureBank fixture app earlier.
+
+### Fixed — a failed step no longer claims retries it never spent
+
+The failure a step reports was built from `execution.retries` rather than from
+what actually happened, so it always read "Failed to execute step after 2
+attempts" even when only one was made. That was harmless while every failure
+burned every retry; it stopped being harmless now that an upload naming a
+missing file deliberately ends after the first attempt. The count now comes
+from the attempts made, the `retried` flag is only set when a retry really
+happened, and the console line drops "after retry" when there wasn't one.
+
 ### Added — Live coverage for verify steps, including two that must go red
 
 Verification had almost no live coverage. Two steps existed —

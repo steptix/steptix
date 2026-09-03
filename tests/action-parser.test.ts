@@ -334,3 +334,95 @@ describe('parseAIResponse — wait timeout hint (issue 022)', () => {
     expect(result.actions[0]?.waitType).toBeUndefined();
   });
 });
+
+describe('parseAIResponse — upload action (stories/upload-action.md §2)', () => {
+  // A model copying a Windows path out of the step emits INVALID JSON: \a is
+  // not an escape sequence, so the whole response is rejected and the turn is
+  // lost. This is the single most likely first failure a user meets, which is
+  // why the parser repairs it rather than relying on the prompt alone.
+  it('repairs unescaped backslashes inside a filePath', () => {
+    const raw = '{"actions":[{"action":"upload","selector":"#f","filePath":"'
+      + '\\attachments\\logo.png","description":"d"}]}';
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]!.filePath).toBe('attachments/logo.png');
+  });
+
+  // The repair is TRIED scoped-first on purpose: when only the path is broken,
+  // a regex elsewhere in the same response must come through untouched.
+  it('repairs the path without touching a valid escape elsewhere', () => {
+    const raw = '{"actions":[{"action":"upload","selector":"#f","filePath":"'
+      + '\\attachments\\logo.png","pattern":"(\\\\d{4})","description":"d"}]}';
+    const action = parseAIResponse(raw).actions[0]!;
+    expect(action.filePath).toBe('attachments/logo.png');
+    // The regex survived: the scoped repair rewrote only the path value.
+    expect(action.pattern).toBe('(\\d{4})');
+  });
+
+  // When the scoped repair is not enough — a model that echoed the path into
+  // `description` too — the parser widens rather than losing the whole turn.
+  // The trade-off was decided in stories/upload-action.md: the response is
+  // already unparseable, so a broad repair can only improve on throwing it away.
+  it('widens the repair when the path fix alone does not parse', () => {
+    const raw = '{"actions":[{"action":"upload","selector":"#f","filePath":"'
+      + '\\attachments\\logo.png","description":"Upload \\attachments\\logo.png"}]}';
+    const action = parseAIResponse(raw).actions[0]!;
+    expect(action.filePath).toBe('attachments/logo.png');
+    expect(action.description).toBe('Upload /attachments/logo.png');
+  });
+  it('still refuses JSON that no escape repair can rescue', () => {
+    expect(() => parseAIResponse('{"actions":[{"action":"upload",')).toThrow();
+  });
+  it('leaves a correctly escaped pattern alone', () => {
+    const raw = '{"actions":[{"action":"read","selector":"#a","pattern":"('
+      + '\\\\d{4})","as":"x","description":"d"}]}';
+    expect(parseAIResponse(raw).actions[0]!.pattern).toBe('(\\d{4})');
+  });
+
+  it('normalises a path to relative, forward-slashed form', () => {
+    const result = parseAIResponse(
+      '{"actions":[{"action":"upload","selector":"#f","filePath":"/attachments/logo.png","description":"d"}]}',
+    );
+    expect(result.actions[0]!.filePath).toBe('attachments/logo.png');
+  });
+
+  it('parses filePaths as an array, dropping blanks and non-strings', () => {
+    const result = parseAIResponse(
+      '{"actions":[{"action":"upload","selector":"#f","filePaths":["a.png","",2,"b.png"],"description":"d"}]}',
+    );
+    expect(result.actions[0]!.filePaths).toEqual(['a.png', 'b.png']);
+  });
+
+  // The model will put a single path under the plural key. Dropping it would
+  // cost a turn for a shape whose meaning is obvious.
+  it('reads a lone string under the plural key as filePath', () => {
+    const result = parseAIResponse(
+      '{"actions":[{"action":"upload","selector":"#f","filePaths":"attachments/x.png","description":"d"}]}',
+    );
+    expect(result.actions[0]!.filePath).toBe('attachments/x.png');
+    expect(result.actions[0]!.filePaths).toBeUndefined();
+  });
+
+  it('keeps filePaths and drops filePath when both are present', () => {
+    const result = parseAIResponse(
+      '{"actions":[{"action":"upload","selector":"#f","filePath":"a.png","filePaths":["b.png"],"description":"d"}]}',
+    );
+    expect(result.actions[0]!.filePaths).toEqual(['b.png']);
+    expect(result.actions[0]!.filePath).toBeUndefined();
+  });
+
+  it('normalises the aliases a model reaches for', () => {
+    for (const alias of ['attach', 'attach_file', 'file_upload', 'setInputFiles']) {
+      const result = parseAIResponse(
+        `{"actions":[{"action":"${alias}","selector":"#f","filePath":"a.png","description":"d"}]}`,
+      );
+      expect(result.actions[0]!.action, alias).toBe('upload');
+    }
+  });
+
+  it('leaves a {{param}} placeholder intact for the executor to interpolate', () => {
+    const result = parseAIResponse(
+      '{"actions":[{"action":"upload","selector":"#f","filePath":"{{statement}}","description":"d"}]}',
+    );
+    expect(result.actions[0]!.filePath).toBe('{{statement}}');
+  });
+});

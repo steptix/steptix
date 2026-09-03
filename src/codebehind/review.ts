@@ -72,7 +72,11 @@ ${input.file}
    compile chose not to generate for, or has no recording of, and code written
    for it without a recording is a guess. The set of entries you return must
    be exactly the set you were given.
-8. An \`ai: true\` entry is a decision, not an omission: leave it alone,
+8. **Upload paths go through \`step.filePath('…')\`** — never a bare string
+   literal handed to \`setInputFiles\`/\`setFiles\`, and never an absolute path. A
+   path in a step is relative to the test file's folder, and only
+   \`step.filePath\` resolves it that way at replay time.
+9. An \`ai: true\` entry is a decision, not an omission: leave it alone,
    comment included. Do not turn one into a \`run\` entry, however obvious the
    code looks — something already established that this step needs the model.
 

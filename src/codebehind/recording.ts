@@ -37,7 +37,13 @@ import { resolveCodeBehindCacheDir } from './loader.js';
  * first-class: a transcript without it generates exactly as it did before the
  * measurement existed.
  */
-export type RecordedAction = AIAction & { targeting?: ActionTargeting };
+export type RecordedAction = AIAction & {
+  targeting?: ActionTargeting;
+  /** Which route an `upload` took, so generation writes the shape that
+   *  worked: `setInputFiles` for `'input'`, the file-chooser pattern for
+   *  `'chooser'`. */
+  upload?: { via: 'input' | 'chooser' };
+};
 
 export interface RecordingManifest {
   /** Absolute path of the test. */
@@ -577,6 +583,13 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
   return (result?.turns ?? [])
     .flatMap((t) => t.subActions)
     .filter((sa) => !sa.error)
-    .map((sa) => (sa.targeting !== undefined ? { ...sa.action, targeting: sa.targeting } : sa.action));
+    .map((sa) => {
+      if (sa.targeting === undefined && sa.upload === undefined) return sa.action;
+      return {
+        ...sa.action,
+        ...(sa.targeting !== undefined && { targeting: sa.targeting }),
+        ...(sa.upload !== undefined && { upload: sa.upload }),
+      };
+    });
 }
 

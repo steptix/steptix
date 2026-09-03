@@ -26,6 +26,23 @@ export interface CodeBehindStepApi {
   getVar(name: string): string | undefined;
   /** Write a variable by its **authored** name (output aliases applied). */
   setVar(name: string, value: string | number | boolean | Array<string | number | boolean>): void;
+  /**
+   * Resolve a path written in a step — relative to the TEST FILE's folder —
+   * to the absolute path Playwright needs:
+   *
+   * ```ts
+   * await page.locator('#statement-file')
+   *   .setInputFiles(step.filePath('attachments/logo.png'));
+   * ```
+   *
+   * Synchronous, so an entry stays one expression, and forgiving about
+   * separators (`\\attachments\\logo.png` works too). Throws — with the same
+   * message an AI run would show — when the file is missing, is a folder, or
+   * resolves outside the project. Those throws are tagged non-retryable: the
+   * entry is not broken, so the runner fails the step instead of healing it
+   * under AI (stories/upload-action.md §8).
+   */
+  filePath(relative: string): string;
   /** Throw a labelled assertion error if `condition` is false. A failed
    *  `expect` is a real step failure, never a fall-through to AI. */
   expect(condition: boolean, message?: string): void;

@@ -579,3 +579,114 @@ describe('cacheDirName (issues 027 + 028)', () => {
 });
 
 const steps0 = ['Navigate to login', 'Enter username', 'Click submit'];
+
+describe('interpolation of upload paths (stories/upload-action.md §6)', () => {
+  // The load-bearing case. The step is interpolated BEFORE the model sees it,
+  // so a parameter written with backslashes reaches the model as text and
+  // comes back normalised. Searching only for the raw spelling would miss it,
+  // freeze the file name into the cache, and break replay on the next machine.
+  it('reverses a path parameter written with backslashes', () => {
+    const actions: AIAction[] = [
+      { action: 'upload', selector: '#f', filePath: 'attachments/statement.pdf', description: 'd' },
+    ];
+    const params = { statement: '\\attachments\\statement.pdf' };
+
+    const result = reverseInterpolate(actions, params);
+    expect(result[0]!.filePath).toBe('{{statement}}');
+  });
+
+  it('reverses each entry of filePaths', () => {
+    const actions: AIAction[] = [
+      { action: 'upload', selector: '#f', filePaths: ['attachments/a.png', 'attachments/b.png'], description: 'd' },
+    ];
+    const params = { first: 'attachments/a.png', second: '\\attachments\\b.png' };
+
+    const result = reverseInterpolate(actions, params);
+    expect(result[0]!.filePaths).toEqual(['{{first}}', '{{second}}']);
+  });
+
+  it('leaves a path with no parameter in it alone', () => {
+    const actions: AIAction[] = [
+      { action: 'upload', selector: '#f', filePath: 'attachments/logo.png', description: 'd' },
+    ];
+    const result = reverseInterpolate(actions, { other: 'nothing-to-see' });
+    expect(result[0]!.filePath).toBe('attachments/logo.png');
+  });
+
+  // Longest-first has to span BOTH spellings of every parameter: a short
+  // normalised form applied early can otherwise replace inside another
+  // parameter's longer raw value.
+  it('prefers the longest match across raw and normalised spellings', () => {
+    const actions: AIAction[] = [
+      { action: 'upload', selector: '#f', filePath: 'attachments/march-statement.pdf', description: 'd' },
+    ];
+    const params = {
+      full: '\\attachments\\march-statement.pdf',
+      partial: 'attachments/march',
+    };
+    const result = reverseInterpolate(actions, params);
+    expect(result[0]!.filePath).toBe('{{full}}');
+  });
+
+  it('restores the parameter\'s raw spelling on the way back out', () => {
+    const actions: AIAction[] = [
+      { action: 'upload', selector: '#f', filePath: '{{statement}}', description: 'd' },
+    ];
+    const params = { statement: '\\attachments\\statement.pdf' };
+
+    const result = forwardInterpolate(actions, params);
+    // Raw, not normalised: the executor and step.filePath normalise at the
+    // point of use, so both spellings resolve to the same file.
+    expect(result[0]!.filePath).toBe('\\attachments\\statement.pdf');
+  });
+
+  it('round-trips a path parameter', () => {
+    const params = { statement: '\\attachments\\statement.pdf' };
+    const original: AIAction[] = [
+      { action: 'upload', selector: '#f', filePath: 'attachments/statement.pdf', description: 'd' },
+    ];
+    const cached = reverseInterpolate(original, params);
+    expect(JSON.stringify(cached)).not.toContain('statement.pdf');
+    const replayed = forwardInterpolate(cached, params);
+    expect(replayed[0]!.filePath).toBe(params.statement);
+  });
+});
+
+describe('path normalisation must not reach `value` fields', () => {
+  // The regression this guards: widening every parameter to its normalised
+  // spelling and applying that to `value` too. A leading-slash parameter is
+  // ordinary — `path: /reports` — and its normalised form is the bare token
+  // `reports`, so a `type` action that legitimately types `reports` was being
+  // rewritten to {{path}} and replayed as `/reports`: the wrong text, silently.
+  it('does not rewrite a value that merely matches a parameter\'s normalised form', () => {
+    const actions: AIAction[] = [
+      { action: 'type', selector: '#q', value: 'reports', description: 'Type reports' },
+    ];
+    const params = { path: '/reports' };
+
+    const reversed = reverseInterpolate(actions, params);
+    expect(reversed[0]!.value).toBe('reports');
+    expect(forwardInterpolate(reversed, params)[0]!.value).toBe('reports');
+  });
+
+  it('still rewrites a value that matches the parameter exactly', () => {
+    const actions: AIAction[] = [
+      { action: 'type', selector: '#q', value: '/reports', description: 'Type the path' },
+    ];
+    const params = { path: '/reports' };
+    expect(reverseInterpolate(actions, params)[0]!.value).toBe('{{path}}');
+  });
+
+  // The path field, on the same action set, DOES get the normalised spelling.
+  it('applies the normalised spelling to path fields only', () => {
+    const actions: AIAction[] = [
+      { action: 'upload', selector: '#f', filePath: 'attachments/x.png', value: 'attachments/x.png', description: 'd' },
+    ];
+    const params = { doc: '\\attachments\\x.png' };
+
+    const reversed = reverseInterpolate(actions, params)[0]!;
+    expect(reversed.filePath).toBe('{{doc}}');
+    // `value` sees the raw spelling only, and the raw spelling is not in it.
+    expect(reversed.value).toBe('attachments/x.png');
+  });
+});

@@ -97,6 +97,7 @@ export function getReportTemplate(): string {
     .sub-action-desc { flex: 1; font-size: 0.875rem; }
     .sub-action-body { display: none; padding: 12px 14px; }
     .sub-action.open .sub-action-body { display: block; }
+    .sub-action-detail { font-size: 0.8125rem; color: #57606a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 8px; word-break: break-all; }
 
     /* Assertion */
     .assertion-block { margin-top: 14px; padding: 14px; border-radius: 6px; border: 1px solid var(--border); }

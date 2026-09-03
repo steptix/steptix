@@ -30,6 +30,9 @@ const ALLOWED_DOM_ATTRIBUTES: readonly string[] = [
   'id', 'data-testid', 'name', 'type', 'role', 'alt', 'label',
   'placeholder', 'href', 'src', 'value', 'checked', 'selected',
   'disabled', 'readonly', 'for', 'action', 'method', 'title',
+  // Upload fields: `multiple` decides whether one step can send two files,
+  // and `accept` tells the model which field wants which kind of file.
+  'accept', 'multiple',
 ];
 
 /**
@@ -856,10 +859,18 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
 
     var INTERACTIVE = new Set(['input', 'button', 'a', 'select', 'textarea', 'label']);
 
+    function isFileInput(el, tag) {
+      return tag === 'input' && String(el.getAttribute('type') || '').toLowerCase() === 'file';
+    }
+
     function processEl(el, depth) {
       const tag = el.tagName.toLowerCase();
       if (SKIP.has(tag)) return '';
-      if (!isVisible(el)) return '';
+      // Same carve-out as the capture script: a hidden <input type="file"> is
+      // the one hidden element worth showing, because it is the one a step can
+      // legitimately target. Without this, expanding an uploader card showed
+      // the button and no input at all.
+      if (!isVisible(el) && !isFileInput(el, tag)) return '';
       const indent = '  '.repeat(depth);
       const attrs = getAttrs(el);
       let text = '';

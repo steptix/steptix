@@ -160,7 +160,7 @@ Plan your next action based on the observed result — do not batch multiple act
    - Row in a table → tr:has-text("paul@example.com") (substring OK here — the value is specific)
    - Dismissing a dialog → [role="dialog"] button:text-is("Cancel")
    - Icon-only button → [aria-label="Close"]
-4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, duplicates hidden with display:none or aria-hidden are collapsed to tag-only placeholders marked <!-- hidden: ... --> with their attributes dropped — never target those. When more than one rendered candidate remains, use the screenshot to confirm which variant is actually visible
+4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, duplicates hidden with display:none or aria-hidden are collapsed to tag-only placeholders marked <!-- hidden: ... --> with their attributes dropped — never target those. ONE exception: a hidden \`<input type="file">\` keeps its attributes and IS a valid target — that is what a styled uploader looks like, and rule 10a covers it. When more than one rendered candidate remains, use the screenshot to confirm which variant is actually visible
 5. Only include an "assert" action when the step instruction's *intent* is verification — i.e. the user wants to check that a specific value or state matches an expectation. Action verbs that overlap with verification words ("Confirm by clicking the Submit button", "Check the box", "Ensure the toggle is on") are NOT verifications — they are clicks, and you should emit only the click action. Do NOT add an assert to self-verify that a click or other action succeeded — you will see the result in the next screenshot. A failed assert immediately fails the step, so be deliberate${dismissalRule}
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field
 8. For "assert" actions, ALWAYS set "description" (short report label) and "condition" (natural-language statement of what is being checked). The "against" field discriminates four shapes — pick the one that matches the resolved instruction text:
@@ -171,6 +171,10 @@ Plan your next action based on the observed result — do not batch multiple act
    Optional on any mode: "poll": { "timeoutMs": 5000, "intervalMs": 250 } when the instruction implies eventual consistency ("eventually shows", "after a moment") and no deterministic wait primitive fits.
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
+10a. UPLOADING A FILE. A step that names a file PATH — a token with a file extension or a folder separator, e.g. "Upload file \\attachments\\logo.png", "Attach receipt-1.png and receipt-2.png", "Use the Choose file button to upload id.pdf" — is an upload. (A "choose"/"select" with no path is a dropdown: rule 11.) Emit an "upload" action: { "action": "upload", "selector": "#statement-file", "filePath": "attachments/logo.png", "description": "Upload logo.png as the statement" }.
+   "filePath" RULES: copy the path exactly as the step wrote it, with backslashes turned into forward slashes and NO leading slash — write "attachments/logo.png", never "\\attachments\\logo.png" (a lone backslash is invalid JSON and costs the whole turn), and never an absolute path like "C:/Users/...". Do NOT guess a folder and do NOT check whether the file exists: the framework resolves the path against the test file's own folder and fails the step itself, with a clear message, if it is missing. For SEVERAL files into one field use "filePaths": ["attachments/receipt-1.png", "attachments/receipt-2.png"] instead of "filePath".
+   "selector" RULES: when the step names a control — "use the Choose file button", "click Browse", "drop it on the upload area" — target THAT control; the framework clicks it and answers the file picker it opens. When the step names no control, target the field's <input type="file">. A file input shown as \`<input id="..." type="file"> <!-- hidden: display:none -->\` is NORMAL for a styled uploader and is still the right target (the exception to rule 4) — do not try to make it visible first. Never "type" a path into a text field, and never "click" a file input.
+   A separate click on the Upload/Submit button the step names is still its own "click" action after the upload. Do not add a "wait" after an upload unless the step names a completion condition (rule 22)
 11. For "select" actions, set "selector" to the <select> element itself (NOT an <option>) and "value" to the visible option text (e.g. "Transaction Dispute"). Never click <option> elements directly — always use the "select" action on the parent <select>
 12. For "wait" actions, set "waitType" and "condition". IMPORTANT: keep selectors as pure CSS — describe WHAT element, and let "waitType" describe WHAT STATE. Never encode state (visibility, hidden, enabled, disabled, presence) in the selector itself via pseudo-classes like ":visible", ":hidden", ":not(:visible)", ":disabled", ":empty". The framework applies the correct Playwright state automatically based on "waitType", so adding state pseudos to the selector is redundant and commonly fails.
    - waitType "load": set condition to "networkidle" (preferred for "wait until page loads" type steps), "load", or "domcontentloaded"
@@ -988,6 +992,7 @@ function targetingLegend(actions: TranscriptAction[]): string {
     `- \`visibleMatchCount\` — how many of those were visible: what the runtime chose between when it took the first.\n` +
     `- \`resolvedSelector\` — a selector for the element that was actually acted on, verified in the page to match it and nothing else.\n` +
     `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n\n` +
+    `An \`upload\` action also carries \`upload.via\`: \`"input"\` means the files were set straight onto an \`<input type="file">\`, \`"chooser"\` means a control was clicked and the picker it opened was answered. Write whichever shape the transcript shows.\n\n` +
     `An action with no \`targeting\` was not measured. Nothing follows from its absence.\n\n`
   );
 }
@@ -1234,6 +1239,7 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
 - \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown: \`{{username}}\` is \`step.getVar('username')\`. An environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`, \`\${env.BASE_URL}\` is \`step.getVar('env.BASE_URL')\`. It returns a string (or undefined).
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
+- \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
 - \`baseUrl\` — the test's configured base URL, when it has one.
 - \`tabs\` — tab control, the code equivalent of the \`openPage\` / \`switchPage\` / \`closePage\` actions:
@@ -1257,6 +1263,14 @@ Rules — all of them are enforced:
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
 6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
 7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${tabHandleRule(input.actions)}
+7b. **Files come through \`step.filePath\`.** An \`upload\` action's \`filePath\` / \`filePaths\` in the transcript are relative to the test file, so pass each through \`step.filePath('…')\` — the verbatim string — and give the result to Playwright. When the action's \`upload.via\` is \`"input"\`, that is \`await page.locator('#statement-file').setInputFiles(step.filePath('attachments/logo.png'))\`. When it is \`"chooser"\`, the action clicked a control that opened a picker, so write:
+\`\`\`
+const chooser = page.waitForEvent('filechooser');
+chooser.catch(() => {});
+await page.locator('#identity-choose').click();
+await (await chooser).setFiles(step.filePath('attachments/statement.pdf'));
+\`\`\`
+(the \`.catch\` matters: without it a failing click leaves the waiter rejecting with nobody listening, which can end the run.) A parameterised path is \`step.filePath(step.getVar('name'))\`. NEVER write an absolute path, and never hand a bare string literal to \`setInputFiles\` or \`setFiles\`.
 ${selectorRules}
 ${postConditionNumber}. **End with a post-condition.** The last thing \`run\` does must check that the page shows the step succeeded — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page. On replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".${trackerPostCondition(input.actions)}
 

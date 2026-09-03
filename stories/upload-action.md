@@ -558,8 +558,11 @@ target. Two consequences for the ambiguity gate at actions.ts:261-284:
 - It keys on `matchCount` for state `attached`, which is wrong for this
   action (a hidden decoy plus one visible button is `matchCount: 2` and was
   the AI being right, per the ambiguity story). So the gate gets an
-  upload-specific clause: ambiguous when `visibleMatchCount > 1`, or when
-  `visibleMatchCount === 0 && matchCount > 1`.
+  upload-specific clause: ambiguous when more than one match is VISIBLE, or
+  when nothing is visible and more than one match is a hidden file input.
+  **As built**, the second half counts hidden file inputs rather than every
+  match, because that is the set the fallback route actually chooses from:
+  one file input among three hidden elements is not ambiguous.
 - That clause cannot read the counts off `targeting`: `measureTargeting`
   takes `visibleMatchCount` only when `full || state === 'visible'`
   (actions.ts:627-630), so a gate-only run (`ambiguousTarget: 'fail'`, no
@@ -567,7 +570,9 @@ target. Two consequences for the ambiguity gate at actions.ts:261-284:
   visible count is stripped from `targeting` (656-657), so the second half
   of the clause could never be true even under compile. For `upload`,
   measure both counts regardless of `full` and evaluate the clause on the
-  raw local counts before they are folded into `targeting`.
+  raw local counts before they are folded into `targeting`. The cost is one
+  or two extra `count()` round-trips per upload, and only on a run that
+  already asked to measure or to gate.
 
 `SINGULAR_TARGET_ACTIONS` (prompts.ts:871) is unchanged — an upload still
 has one target.
@@ -729,9 +734,10 @@ matches and needs nothing.
 - Transcript: the raw JSON already shows `filePath`/`filePaths` and
   `targeting` (prompts.ts:1067); `upload.via` rides along as a sibling
   (decision 14) and `targetingLegend` gains one line explaining it.
-- Review checklist ([review.ts:51-78](../src/codebehind/review.ts)): item 9,
-  "Upload paths go through `step.filePath`, never a literal or an absolute
-  path".
+- Review checklist ([review.ts:51-78](../src/codebehind/review.ts)): a new
+  item 8, "Upload paths go through `step.filePath`, never a literal or an
+  absolute path", which pushes the existing `ai: true` item to 9. Nothing
+  pins those numbers in tests.
 - Loader and writer: unchanged. Recording: `RecordedAction` widens to carry
   `upload` and `actionsOf` merges it (decision 14); `redactDeep` leaves
   paths alone.
@@ -744,10 +750,10 @@ matches and needs nothing.
   attachments/receipt-2.png` — the *relative* form on the success path,
   since the report is shared and the absolute path is in the run log (and
   in the error text when it failed, §3). Rendered with the existing
-  `.sub-action-body` class; no template change — but `hasBody`
-  (generator.ts:867) gates the body on screenshot/DOM/reasoning/error/API
-  data, so it must count the upload line too or a plain success renders
-  nothing.
+  `.sub-action-body` class, plus one new `.sub-action-detail` rule in
+  `template.ts` for it. `hasBody` (generator.ts:867) gates the body on
+  screenshot/DOM/reasoning/error/API data, so it must count the upload line
+  too or a plain success renders nothing.
 - Flick renders every action field generically
   (flick-vscode/src/webview/main.ts:922-935, arrays via `formatValue`):
   `filePaths` shows with no change. TestBench never sees actions (no action
@@ -1007,3 +1013,52 @@ answered the same day.
    outcome.
 
 No open questions remain.
+
+### Four more, settled by the implementation review
+
+3. **A malformed action stays retryable.** Only facts about the world — a
+   missing file, a folder, a fence breach, an unreadable `file://` URL, no
+   base folder — end the step without a retry. An `upload` carrying no path
+   at all is a bad action, and a retry is exactly what fixes one, so it is
+   not tagged. Decision 12 already implied this; the first cut tagged it
+   anyway.
+4. **The JSON repair widens on a second pass.** Scoped to the path keys
+   first, because that cannot touch a `read` action's regex `pattern`. If
+   the response still will not parse, the repair runs over every string:
+   the turn is lost either way at that point, and a model that echoed the
+   path into `description` as well is the ordinary shape of this failure.
+5. **Only a path-shaped normalisation widens the leak guard.** The guard is
+   a bare substring test, so widening `route: "/logs"` to the token `logs`
+   would report any entry containing that word as a leaked parameter. The
+   normalised form is added only when it still contains a separator.
+6. **A non-retryable code-behind failure gets its own report line.** It is
+   neither broken code nor a failed `step.expect`, and saying "code-behind
+   assertion" sent the reader looking for an assertion that does not exist.
+
+## What the implementation review changed
+
+A review of the built change (2026-09-03) found one regression in shared code
+and four faults on this story's own headline path:
+
+- **The blocker.** Widening every parameter to its normalised spelling was
+  applied to `value` fields too, not just to paths. A parameter like
+  `path: /reports` normalises to `reports`, so a `type` action that
+  legitimately typed `reports` was rewritten to `{{path}}` and replayed as
+  `/reports` — the wrong text, silently, on an action that has nothing to do
+  with uploads. The candidate lists are now separate: raw only for `value`,
+  raw plus normalised for the path fields.
+- A non-retryable code-behind failure was reported as a failed `step.expect`.
+- `executeUpload` could fall through onto an empty locator when nothing was
+  visible and the element then appeared inside the budget.
+- "No path given" was tagged non-retryable, ending a step a retry would fix.
+- A non-retryable failure reached the report with no turns at all, because
+  `withRetry` rethrew before `onFailure` could collect them.
+
+Smaller: the failure path could spend three full timeouts rather than one
+shared budget; a failed target probe claimed "this field takes one file"; the
+Runner UI fenced uploads at the test's own folder for want of a project root;
+and the spec drift corrected above.
+
+Each of the five has a test: the blocker in the step-cache suite, the cached
+and healed paths in `tests/upload-cached-failure.test.ts`, the rest in
+`tests/upload-action.test.ts` and `tests/upload-paths.test.ts`.

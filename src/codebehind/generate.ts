@@ -1,4 +1,5 @@
 import type { AiClient } from '../ai/client.js';
+import { normaliseUploadPath } from '../browser/upload-paths.js';
 import { findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
 import {
   buildStepCodePrompt,
@@ -185,17 +186,17 @@ export async function generateStepEntry(
   if (first.kind !== 'entry') return first;
 
   // ── The static backstops ──────────────────────────────────────────────────
-  // Both are for the case the prompt cannot cover: the model was told the
-  // thing and wrote it the other way anyway.
+  // All of them are for the case the prompt cannot cover: the model was told
+  // the thing and wrote it the other way anyway.
   //
   // Selector ambiguity first (stories/codebehind-selector-ambiguity.md) — it
   // throws on replay, so it is self-announcing, where a stale handle
   // (stories/codebehind-framework-actions.md) drives the wrong tab and PASSES.
-  // One re-ask is shared between them: two would double a compile's model
-  // calls for a pair of heuristics, and the complaint text carries whichever
-  // fault fired.
+  // One re-ask is shared between them all: more would multiply a compile's
+  // model calls for a handful of heuristics, and the complaint text carries
+  // whichever fault fired.
   const complaint =
-    ambiguousSelectorComplaint(first.code, options.actions) ??
+    staticEntryComplaint(first.code, options.actions) ??
     undeclaredContextComplaint(first.code) ??
     staleHandleComplaint(first.code);
   if (complaint === undefined) return first;
@@ -223,10 +224,11 @@ export async function generateStepEntry(
     );
     return first;
   }
-  if (ambiguousSelectorComplaint(second.code, options.actions) !== undefined) {
+  const stillWrong = staticEntryComplaint(second.code, options.actions);
+  if (stillWrong !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still targets a selector this run measured as ` +
-        `matching more than one element; it may throw on replay. ${complaint}`,
+      `Code-behind for "${binding.source}" still has a fault the static check can see; ` +
+        `it may throw or hard-code a path on replay. ${stillWrong}`,
     );
   }
   const stillUndeclared = undeclaredContextComplaint(second.code);
@@ -243,6 +245,46 @@ export async function generateStepEntry(
     );
   }
   return second;
+}
+
+/**
+ * Every static fault worth one re-ask, in the order they are checked.
+ *
+ * Selector ambiguity comes first deliberately: it is the fault the model gets
+ * wrong more often, and a bare selector throws on replay where a literal path
+ * merely breaks on the next machine.
+ */
+export function staticEntryComplaint(
+  code: string,
+  actions: RecordedAction[],
+): string | undefined {
+  return ambiguousSelectorComplaint(code, actions) ?? literalUploadPathComplaint(code, actions);
+}
+
+/**
+ * `setInputFiles('attachments/logo.png')` — a path frozen into the file.
+ *
+ * Generated code must route every upload path through `step.filePath(...)`,
+ * which resolves it against the TEST FILE's folder at replay time. A literal
+ * is resolved by Playwright against the server process's working directory
+ * instead, so the entry works on the machine that compiled it and fails
+ * everywhere else — the exact portability failure code-behind exists to avoid.
+ * An absolute literal is the same fault, caught by the same check.
+ */
+const LITERAL_FILE_ARG = /\.\s*(?:setInputFiles|setFiles)\s*\(\s*(['"`]|\[\s*['"`])/;
+
+export function literalUploadPathComplaint(
+  code: string,
+  actions: RecordedAction[],
+): string | undefined {
+  if (!actions.some((a) => a.action === 'upload')) return undefined;
+  if (!LITERAL_FILE_ARG.test(code)) return undefined;
+  return (
+    'The entry passes a string literal to setInputFiles/setFiles. An upload path in a step is '
+    + "relative to the test file's folder, so it must go through step.filePath('…') — which "
+    + 'resolves it at replay time and fails loudly if the file is missing. A literal path (relative '
+    + 'or absolute) only works on the machine that compiled it.'
+  );
 }
 
 /**
@@ -520,10 +562,21 @@ export function guardedValues(
   parameters: Array<{ name: string; value: string }>,
   envRefs: Array<{ ref: string; value: string }>,
 ): Array<{ name: string; value: string }> {
-  return [
+  const base = [
     ...parameters,
     ...envRefs.map((r) => ({ name: `\${${r.ref}}`, value: r.value })),
   ];
+  // A path parameter reaches the model already interpolated into the step, and
+  // the model writes it back NORMALISED — `\attachments\march.pdf` comes back
+  // as `attachments/march.pdf`. Guarding only the raw spelling would let that
+  // frozen path through the leak check (stories/upload-action.md §6).
+  // Path-shaped only. `findInlinedParameterValue` is a bare substring test, so
+  // widening an ordinary parameter like `route: "/logs"` into the token `logs`
+  // would start reporting any entry containing that word as a leak.
+  const normalised = base
+    .map((g) => ({ name: g.name, value: normaliseUploadPath(g.value) }))
+    .filter((g, i) => g.value !== base[i]!.value && g.value.includes('/'));
+  return [...base, ...normalised];
 }
 
 /** `{{username}}` for a parameter, `${data.url}` for an environment reference. */

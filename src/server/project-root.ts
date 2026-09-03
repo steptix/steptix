@@ -5,8 +5,15 @@ import { userRootDir } from '../env/user-root.js';
 /** File names that identify a project root when walking up from a test file. */
 const PROJECT_MARKERS = ['aiui.config.json'];
 
-/** win32 path comparison folds case; every other platform does not. */
-function comparable(target: string): string {
+/**
+ * win32 path comparison folds case; every other platform does not.
+ *
+ * Exported because the upload-path fence (stories/upload-action.md §3) has to
+ * compare a resolved file against a project root the SAME way this walk found
+ * it. Deliberately lexical — no `realpath` — so a junctioned worktree's files
+ * compare as in-tree rather than resolving out to the checkout they point at.
+ */
+export function comparable(target: string): string {
   return process.platform === 'win32' ? path.resolve(target).toLowerCase() : path.resolve(target);
 }
 

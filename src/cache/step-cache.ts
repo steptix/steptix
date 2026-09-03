@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AIAction, AIResponse } from '../ai/types.js';
 import { interpolate } from '../parser/parameters.js';
+import { normaliseUploadPath } from '../browser/upload-paths.js';
 import { logger } from '../utils/logger.js';
 
 // v4: per-step cache id changed from a bare source line to a frame-scoped key
@@ -321,28 +322,97 @@ export function cacheDirName(testFilePath: string, projectRoot?: string | null):
 }
 
 /**
- * Replace resolved parameter values with {{placeholder}} tokens in action `value` fields.
- * Sorts params by value length (longest first) to avoid partial matches.
+ * Every spelling of a parameter value that could appear inside an action.
+ *
+ * The raw value is the one a `value` field carries. A path field carries the
+ * NORMALISED value instead, and that is not a nicety: the step is interpolated
+ * before the model ever sees it, so a parameter written
+ * `\attachments\march.pdf` reaches the model as text and comes back as
+ * `attachments/march.pdf` in the action. Searching only for the raw spelling
+ * would miss it, freeze the file name into the cache, and break replay on the
+ * next machine (stories/upload-action.md §6).
+ *
+ * Longest-first across BOTH spellings of every parameter, not raw-first then
+ * normalised: a short normalised form applied early can otherwise replace
+ * inside another parameter's longer raw value.
+ */
+interface Substitution {
+  key: string;
+  value: string;
+}
+
+function substitutionCandidates(params: Record<string, string>): {
+  /** Raw values only. A `type` action types what the parameter says. */
+  forValue: Substitution[];
+  /** Raw AND normalised, for the path fields only. */
+  forPaths: Substitution[];
+} {
+  const forValue: Substitution[] = [];
+  const forPaths: Substitution[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (value.length === 0) continue;
+    forValue.push({ key, value });
+    forPaths.push({ key, value });
+    const normalised = normaliseUploadPath(value);
+    // Only a PATH-shaped normalisation earns a second candidate. Without
+    // that test, a perfectly ordinary parameter like `route: "/logs"`
+    // normalises to the bare token `logs` and starts matching text that has
+    // nothing to do with it.
+    if (normalised !== value && normalised.includes('/')) {
+      forPaths.push({ key, value: normalised });
+    }
+  }
+  const longestFirst = (a: Substitution, b: Substitution): number => b.value.length - a.value.length;
+  return { forValue: forValue.sort(longestFirst), forPaths: forPaths.sort(longestFirst) };
+}
+
+/** Path fields on an action, in the order the executor reads them. */
+function replacePathFields(
+  action: AIAction,
+  map: (text: string) => string,
+): Partial<AIAction> | null {
+  const patch: Partial<AIAction> = {};
+  if (action.filePath !== undefined) {
+    const next = map(action.filePath);
+    if (next !== action.filePath) patch.filePath = next;
+  }
+  if (action.filePaths !== undefined) {
+    const next = action.filePaths.map(map);
+    if (next.some((p, i) => p !== action.filePaths![i])) patch.filePaths = next;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+/**
+ * Replace resolved parameter values with {{placeholder}} tokens in an action's
+ * `value` and upload-path fields. Sorts by value length (longest first) to
+ * avoid partial matches.
  */
 export function reverseInterpolate(
   actions: AIAction[],
   params: Record<string, string>,
 ): AIAction[] {
-  const entries = Object.entries(params)
-    .filter(([, v]) => v.length > 0)
-    .sort((a, b) => b[1].length - a[1].length);
+  const { forValue, forPaths } = substitutionCandidates(params);
 
-  if (entries.length === 0) return actions;
+  if (forValue.length === 0) return actions;
+
+  const substituteWith = (entries: Substitution[]) => (text: string): string => {
+    let out = text;
+    for (const { key, value } of entries) {
+      out = out.replaceAll(value, `{{${key}}}`);
+    }
+    return out;
+  };
+  const inValue = substituteWith(forValue);
+  const inPath = substituteWith(forPaths);
 
   return actions.map((action) => {
-    if (!action.value) return action;
+    const pathPatch = replacePathFields(action, inPath);
+    if (!action.value) return pathPatch ? { ...action, ...pathPatch } : action;
 
-    let value = action.value;
-    for (const [key, paramValue] of entries) {
-      value = value.replaceAll(paramValue, `{{${key}}}`);
-    }
-
-    return value === action.value ? action : { ...action, value };
+    const value = inValue(action.value);
+    if (value === action.value) return pathPatch ? { ...action, ...pathPatch } : action;
+    return { ...action, ...(pathPatch ?? {}), value };
   });
 }
 
@@ -368,8 +438,13 @@ export function reverseInterpolateString(
 }
 
 /**
- * Replace {{placeholder}} tokens in action `value` fields with resolved parameter values.
- * Reuses the existing `interpolate()` function from the parser.
+ * Replace {{placeholder}} tokens in an action's `value` and upload-path fields
+ * with resolved parameter values. Reuses the existing `interpolate()` from the
+ * parser.
+ *
+ * A path restored here is the parameter's RAW spelling, backslashes and all;
+ * the executor and `step.filePath` normalise at the point of use, so both
+ * spellings resolve to the same file.
  */
 export function forwardInterpolate(
   actions: AIAction[],
@@ -378,9 +453,11 @@ export function forwardInterpolate(
   if (Object.keys(params).length === 0) return actions;
 
   return actions.map((action) => {
-    if (!action.value) return action;
+    const pathPatch = replacePathFields(action, (text) => interpolate(text, params));
+    if (!action.value) return pathPatch ? { ...action, ...pathPatch } : action;
 
     const value = interpolate(action.value, params);
-    return value === action.value ? action : { ...action, value };
+    if (value === action.value) return pathPatch ? { ...action, ...pathPatch } : action;
+    return { ...action, ...(pathPatch ?? {}), value };
   });
 }

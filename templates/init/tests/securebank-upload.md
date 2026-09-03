@@ -8,10 +8,14 @@ Drives the Documents page of the fixture app (`fixtures/test-app`, port 8787)
 with file-upload steps. A step path like `\attachments\logo.png` resolves
 against this file's folder, so the files are in `tests/attachments/`.
 
-This is the test that part 2 of
-[stories/file-upload-steps.md](../../../stories/file-upload-steps.md) has to
-make pass. Until then it is expected to fail: the model is never told the
-`upload` action exists.
+This is the acceptance test for [stories/upload-action.md](../../../stories/upload-action.md).
+It exercises all three uploaders on the Documents page: a plain file field, a
+styled button whose input is hidden, and a multi-file field — plus a rejected
+file type and a path that arrives through a `{{parameter}}` written with
+backslashes.
+
+## Parameters
+- statement: \attachments\statement.pdf
 
 ## Config
 - baseUrl: http://localhost:8787/
@@ -32,3 +36,4 @@ make pass. Until then it is expected to fail: the model is never told the
 11. Assert that {{document_count}} equals 4
 12. Upload file \attachments\malware.exe as the statement, then click Upload
 13. Assert that the status message says "malware.exe is not an allowed file type"
+14. Upload file {{statement}} as the statement, then click Upload

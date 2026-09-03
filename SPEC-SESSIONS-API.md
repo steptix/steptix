@@ -111,6 +111,15 @@ Steps are natural language instructions, identical to the format used in markdow
 - **Output capture**: `"[output: variable_name] Get the displayed username"` — captures a DOM value into a named variable. Multiple outputs per step are supported: `"[output: plan_name] [output: plan_price] Get the plan details"`.
 - **Ignored prefixes**: `[input: variable_name]` and `[interactive]` are silently skipped, as they are interactive/terminal concepts that do not apply to the API.
 
+A step may also name a file to upload — `Upload file attachments/logo.png`, or
+with Windows-style backslashes, which are normalised. The path is resolved
+against the folder holding the `testFilePath` sent with the request, and is
+fenced to the project root: a path that resolves outside it is refused. The file
+must be readable **by the server process** — the bytes are read where the server
+runs, not on the client machine — so a client on another host has to put the
+file somewhere the server can read it. A request that omits `testFilePath` has
+no folder to resolve a relative path against, so it can only use absolute paths.
+
 #### Output Variable Accumulation
 
 - Output variables captured via `[output: var]` are stored in the session.
@@ -360,7 +369,6 @@ List all active sessions.
 ## Out of Scope (v1)
 
 - WebSocket streaming of step progress
-- File uploads
 - Video recording
 - Parallel step execution within a single session
 - Per-session AI provider/model configuration

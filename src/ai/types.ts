@@ -44,8 +44,14 @@ export interface AIAction {
   value?: string;
   /** URL to navigate to */
   url?: string;
-  /** File path for upload actions */
+  /** File path for upload actions, relative to the test file's folder unless
+   *  it is a drive-letter, UNC or `file://` path. Never absolute as the model
+   *  writes it — see stories/upload-action.md, decision 2. */
   filePath?: string;
+  /** Several files for ONE upload. Exactly one of `filePath` / `filePaths`;
+   *  the parser drops the loser and the executor reads both through
+   *  `uploadPathsOf`. */
+  filePaths?: string[];
   /** Condition string for wait/assert actions */
   condition?: string;
   /** Expected value for assertion */

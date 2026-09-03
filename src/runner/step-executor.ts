@@ -23,6 +23,7 @@ import { parseAIResponse, parseAssertionCode, parseBranchedResponse } from '../a
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
+import type { UploadPathContext } from '../browser/upload-paths.js';
 import { launchBrowser, type PageTracker, type BrowserTracker, type LaunchOverrides } from '../browser/manager.js';
 import { withRetry } from './retry.js';
 import { runInteractiveRepl } from './interactive-repl.js';
@@ -214,6 +215,14 @@ export interface StepExecutorOptions {
    * DOM snapshot per step and nothing else reads it.
    */
   captureStepContext?: boolean;
+  /**
+   * Where a file named in an `upload` step lives: the test file's folder, and
+   * the project root that fences it (stories/upload-action.md §3). Every
+   * producer of these options has both to hand — the CLI from `test.filePath`,
+   * the Sessions API from the request's `testFilePath` and its project bundle.
+   * Absent on a run with no test file, where only absolute paths resolve.
+   */
+  uploadPaths?: UploadPathContext;
 }
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
@@ -229,11 +238,19 @@ function extractTextFromMessage(msg: ChatMessage): string {
 class StepFailureError extends Error {
   failures: PriorFailureContext[];
   turns: TurnResult[];
-  constructor(message: string, failures: PriorFailureContext[], turns: TurnResult[] = []) {
+  /** `false` when re-running cannot change the outcome — see `withRetry`. */
+  retryable: boolean;
+  constructor(
+    message: string,
+    failures: PriorFailureContext[],
+    turns: TurnResult[] = [],
+    retryable = true,
+  ) {
     super(message);
     this.name = 'StepFailureError';
     this.failures = failures;
     this.turns = turns;
+    this.retryable = retryable;
   }
 }
 
@@ -398,6 +415,9 @@ export async function executeStep(
   const startTime = Date.now();
   let retried = false;
   let priorFailures: PriorFailureContext[] = [];
+  /** A cached replay that failed for a reason re-planning cannot fix. Thrown
+   *  from the first attempt so the shared failure handler builds the result. */
+  let cachedFatal: StepFailureError | undefined;
   let priorAttemptTurns: TurnResult[] = [];
   // Cache files are named by the frame-scoped key when the server supplies one
   // (skill-body steps, repeated invocations); otherwise by stepIndex (CLI path).
@@ -451,9 +471,18 @@ export async function executeStep(
         // wouldn't render.
         return withStale({ ...result, fromCache: true });
       } catch (err) {
-        logger.warn(`Cached actions failed for step ${stepIndex} — invalidating and falling through to AI`);
-        await opts.stepCache.invalidateStep(cacheKey);
-        // Do NOT propagate failure context — give AI a clean slate
+        if (err instanceof StepFailureError && !err.retryable) {
+          // The cached plan is fine — the file it names is missing. Invalidating
+          // would discard a good entry, and re-running under AI would spend a
+          // turn on a failure no re-planning can fix. Fail the step instead,
+          // through the shared handler below so it still gets a screenshot and
+          // a proper StepResult.
+          cachedFatal = err;
+        } else {
+          logger.warn(`Cached actions failed for step ${stepIndex} — invalidating and falling through to AI`);
+          await opts.stepCache.invalidateStep(cacheKey);
+          // Do NOT propagate failure context — give AI a clean slate
+        }
       }
     } else {
       logger.debug(`Cache MISS for step ${stepIndex}`);
@@ -463,7 +492,14 @@ export async function executeStep(
   // --- Normal AI flow (with cache-write on success) ---
   const cacheCapture: CacheCapture = { turns: [] };
 
+  /** Attempts actually made — NOT what `execution.retries` allows. A
+   *  non-retryable failure ends after the first, and reporting the allowance
+   *  told the reader the step was tried twice on exactly the case that exists
+   *  to make sure it is tried once. */
+  let attemptsMade = 0;
   const attempt = async (attemptNumber: number): Promise<StepResult> => {
+    if (cachedFatal) throw cachedFatal;
+    attemptsMade = attemptNumber;
     if (attemptNumber === 2) retried = true;
 
     return executeStepAttempt(
@@ -546,7 +582,11 @@ export async function executeStep(
       };
     }
 
-    logger.error(`Step ${stepIndex} FAILED after retry: ${errorMessage}`);
+    logger.error(
+      attemptsMade > 1
+        ? `Step ${stepIndex} FAILED after retry: ${errorMessage}`
+        : `Step ${stepIndex} FAILED: ${errorMessage}`,
+    );
 
     // Capture failure screenshot (full-page for report visibility)
     let failureScreenshot: string | undefined;
@@ -570,11 +610,14 @@ export async function executeStep(
       status: 'failed',
       turns: priorAttemptTurns,
       durationMs,
-      retried: true,
+      retried,
       ...(failureScreenshot !== undefined && { screenshotBase64: failureScreenshot }),
       pageUrl: opts.page.url(),
       error: errorMessage,
-      aiExplanation: `Failed to execute step after ${opts.config.execution.retries + 1} attempts. Last error: ${errorMessage}`,
+      aiExplanation:
+        attemptsMade <= 1
+          ? `Failed to execute step. Last error: ${errorMessage}`
+          : `Failed to execute step after ${attemptsMade} attempts. Last error: ${errorMessage}`,
     });
   }
 }
@@ -655,6 +698,7 @@ async function runCodeBehindStep(
     ...(opts.envData && { envData: opts.envData }),
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
     ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
+    ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
     label: `codebehind:${stepIndex}`,
   });
 
@@ -670,7 +714,11 @@ async function runCodeBehindStep(
     page = opts.pageTracker.getActive();
   }
 
-  const brokenCode = outcome.status === 'failed' && !outcome.expectationFailed;
+  // A `step.filePath` that could not resolve is not broken code: the entry is
+  // fine and the file is missing, so healing under AI would spend a turn and
+  // throw away a working entry for nothing.
+  const brokenCode =
+    outcome.status === 'failed' && !outcome.expectationFailed && !outcome.nonRetryable;
   // Strict first: a compile replay that also happens to run keyless is still a
   // replay, and its own copy is the one that explains the red step.
   const healingDeclined = opts.codeBehindStrict || opts.keyless;
@@ -768,6 +816,23 @@ async function runCodeBehindStep(
             : 'The code-behind entry threw, and this machine has no AI configured, ' +
               'so the step was not re-run under AI. ') +
           `The entry failed with: ${outcome.error ?? 'unknown error'}`,
+      },
+    };
+  }
+
+  if (outcome.nonRetryable) {
+    // Neither broken code nor a failed expectation: the entry is fine and the
+    // file it names is not there. Saying "code-behind assertion" here would
+    // send the reader to look for a `step.expect` that does not exist.
+    logger.error(`Step ${stepIndex} FAILED (code-behind): ${outcome.error ?? ''}`);
+    return {
+      result: {
+        ...base,
+        error: outcome.error ?? 'Code-behind could not resolve a file',
+        aiExplanation:
+          'The file this step names could not be resolved, so the entry could not '
+          + 'run. The code-behind is not at fault and was kept: re-running the step '
+          + 'under AI would not make the file appear.',
       },
     };
   }
@@ -1169,6 +1234,8 @@ async function executeStepAttempt(
 
     // 8. Execute each sub-action
     let turnFailed = false;
+    /** Set when an action reported a failure no retry could change. */
+    let turnNonRetryable = false;
     let turnError: string | undefined;
 
     for (const action of aiResponse.actions) {
@@ -1717,6 +1784,7 @@ async function executeStepAttempt(
         executeAction(page, action, baseUrl, opts.signal, {
           measure: opts.captureStepContext === true && !cachedTurnForCapture,
           ambiguousTarget: config.browser.ambiguousTarget,
+          ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
         }),
       );
       const subDuration = Date.now() - subStartTime;
@@ -1786,6 +1854,11 @@ async function executeStepAttempt(
         // What the runtime found when it ran this action. `actionsOf` merges
         // it onto the action for generation and for the on-disk recording.
         ...(result.targeting !== undefined && { targeting: result.targeting }),
+        // Which upload route ran. A sibling of `targeting`, not a field inside
+        // it: generation decides "was this action measured" by whether
+        // `targeting` exists, so an upload carrying only a route would read as
+        // measured and take the wrong selector rules.
+        ...(result.upload !== undefined && { upload: result.upload }),
         durationMs: subDuration,
         ...(result.error !== undefined && { error: result.error }),
         pageUrl: postUrl,
@@ -1823,6 +1896,7 @@ async function executeStepAttempt(
 
         // Collect failure context so retry gets richer info
         const currentUrl = page.url();
+        if (result.retryable === false) turnNonRetryable = true;
         collectedFailures.push({
           selector: result.failedSelector ?? action.selector ?? '',
           error: result.error ?? 'Unknown error',
@@ -1866,6 +1940,7 @@ async function executeStepAttempt(
         turnError ?? 'Step failed',
         collectedFailures,
         allTurns,
+        !turnNonRetryable,
       );
     }
 
