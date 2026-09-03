@@ -275,6 +275,11 @@ step is relative to the test.
 
 ## Part 2 — framework support (follow-on, specified here)
 
+> **Superseded by [upload-action.md](upload-action.md)**, the full Part 2
+> spec written after Part 1 merged (PR #117). The outline below is kept as
+> the record of what Part 1 was shaped by; where the two differ, the newer
+> story wins.
+
 ### Step phrasing the model must recognise
 
 Any of *upload*, *attach*, *choose the file*, *select the file*, followed by
@@ -296,8 +301,10 @@ already has `upload`.
 ```
 
 - `filePath` stays as-is for one file; `filePaths` (array) is added for
-  several. Exactly one of the two. The parser normalises a one-element
-  `filePaths` to `filePath` so the executor sees one shape.
+  several. Exactly one of the two. (This outline said the parser would
+  collapse a one-element `filePaths` to `filePath`; the Part 2 spec keeps
+  it an array and reads both through one accessor — upload-action.md,
+  decision 13.)
 - The model writes the path **verbatim from the step**. Resolution is the
   framework's job (below), which is what keeps the cached action and the
   compiled code-behind machine-independent.
