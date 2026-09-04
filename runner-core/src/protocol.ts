@@ -450,6 +450,13 @@ export interface CompileSummary {
    *  the test's `.aiui-codebehind-cache/<name>.recording/`
    *  (stories/codebehind-recording-on-disk.md). */
   recordingDir: string;
+  /**
+   * Steps whose parameter was recovered by matching a recorded literal to
+   * its value because the model did not name the placeholder in the action
+   * (stories/placeholder-preserving-actions.md, decision 6). The compliance
+   * signal for that story; absent from older servers.
+   */
+  recoveredByValue?: Array<{ step: number; name: string }>;
 }
 
 /**

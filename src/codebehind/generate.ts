@@ -1,6 +1,6 @@
 import type { AiClient } from '../ai/client.js';
 import { normaliseUploadPath } from '../browser/upload-paths.js';
-import { findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
+import { MIN_GUARDED_VALUE_LENGTH, findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
 import {
   buildStepCodePrompt,
   buildSystemPrompt,
@@ -1058,7 +1058,7 @@ export function accountPlaceholders(options: {
     // wrote the value. Recovering it keeps the step compiling; the warning is
     // how often that happens gets measured.
     const trimmed = value?.trim();
-    if (trimmed !== undefined && trimmed.length >= MIN_VALUE_MATCH_LENGTH) {
+    if (trimmed !== undefined && trimmed.length >= MIN_GUARDED_VALUE_LENGTH) {
       if (literals.some((literal) => literal.trim() === trimmed)) {
         recoveredByValue.push(name);
         return;
@@ -1089,12 +1089,6 @@ export function accountPlaceholders(options: {
   };
 }
 
-/**
- * The floor under a value match, mirroring `findInlinedParameterValue`'s: a
- * one- or two-character value occurs incidentally in almost any recorded
- * field, and vouching on one would be worse than declining.
- */
-const MIN_VALUE_MATCH_LENGTH = 3;
 
 /**
  * Resolve the placeholders in a recorded string the way the runtime resolved

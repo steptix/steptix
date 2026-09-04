@@ -666,7 +666,7 @@ export function decodeDoubleEscapedNewlines(entry: string): string {
  * code — matching on it would reject every generation and teach nobody
  * anything. Nothing that short is a secret worth keeping out of a file.
  */
-const MIN_GUARDED_VALUE_LENGTH = 3;
+export const MIN_GUARDED_VALUE_LENGTH = 3;
 
 /**
  * The post-generation guard: refuse code that inlines a resolved parameter
