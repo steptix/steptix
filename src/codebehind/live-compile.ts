@@ -18,6 +18,7 @@ import {
   type CompileStep,
 } from './candidate.js';
 import {
+  anyActionCarriesPlaceholder,
   askForEntry,
   generateStepEntry,
   guardedValues,
@@ -25,6 +26,7 @@ import {
   stepEnvRefs,
   stepParameters,
   unresolvedRefsReason,
+  valueMatchWarning,
   type GeneratedEntry,
 } from './generate.js';
 import { buildRepairPrompt } from './repair.js';
@@ -247,6 +249,22 @@ export class LiveCompiler {
    *  review's leak guard. */
   private readonly parameters: Record<string, string> = {};
   /**
+   * Whether any action this run has offered so far named a placeholder
+   * (stories/placeholder-preserving-actions.md, decision 6).
+   *
+   * The boxed pipeline asks this of the whole recording at once; here the run
+   * is still happening, so it is what has been SEEN — set from every offered
+   * step, eligible or not, before the step is queued. A step generated before
+   * any placeholder has appeared is judged the old way, which is the safe
+   * direction: the cost is a missed warning, where the other direction is a
+   * decline the author has to chase.
+   */
+  private sawPlaceholder = false;
+  /** The compliance metric, per generated entry. */
+  private readonly recoveredByValue: Array<{ step: number; name: string }> = [];
+  /** The pre-change notice is said once, and only when it changed an answer. */
+  private saidPreChange = false;
+  /**
    * The whole run's steps, growing a block at a time.
    *
    * A logical run reaches the server as several requests whenever it is split
@@ -462,6 +480,12 @@ export class LiveCompiler {
     // that captured a password and was then skipped as "ran as code" still
     // put that password in the run's scope.
     Object.assign(this.parameters, input.resolvedParameters);
+    // Before the refusal below, for the reason the merge above is: a step the
+    // compile skips still proves what the model does with placeholders on this
+    // run.
+    if (!this.sawPlaceholder && anyActionCarriesPlaceholder(actionsOf(input.result))) {
+      this.sawPlaceholder = true;
+    }
     const at = this.offset + input.index;
     const text = input.binding?.source ?? this.plan[at]?.text ?? input.result.instruction;
     const refusal = generationRefusal({
@@ -597,6 +621,7 @@ export class LiveCompiler {
       actions: actionsOf(input.result),
       ...(input.result.assertions && { assertions: input.result.assertions }),
       resolvedParameters: input.resolvedParameters,
+      recordingCarriesPlaceholders: this.sawPlaceholder,
       ...(this.options.envData && { envData: this.options.envData }),
       aiClient: this.options.aiClient,
       contextContent: this.options.contextContent,
@@ -696,6 +721,20 @@ export class LiveCompiler {
     this.stepEvent('generate', step, 'generating…');
     const generated = await this.askModel(step, input);
     const applied = await applyGenerated(this.candidate, step, generated, this.stepEvent, 'generate');
+    if (applied.kind === 'entry' && applied.references) {
+      for (const name of applied.references.recoveredByValue) {
+        this.recoveredByValue.push({ step: step.number, name });
+        this.note?.(`Step ${step.number}: ${valueMatchWarning(name)}`, 'warn');
+      }
+      if (applied.references.preChangeFallback && !this.saidPreChange) {
+        this.saidPreChange = true;
+        this.note?.(
+          'No action in this run names a placeholder, so the compile identified values by ' +
+            'string match — the behaviour from before placeholder-preserving actions.',
+          'info',
+        );
+      }
+    }
     if (applied.kind === 'entry') this.compiled.push(step.number);
     else if (applied.kind === 'declined') this.declined.push(step.number);
     else {
@@ -762,6 +801,18 @@ export class LiveCompiler {
     // carried it left the button with nothing to open.
     const candidatePath = await this.candidate.persist();
 
+    // This path has no headline of its own — the summary rides the wire — so
+    // the compliance count says itself here, once, the way the boxed
+    // pipeline's headline tail does.
+    if (this.recoveredByValue.length > 0) {
+      const n = this.recoveredByValue.length;
+      this.note?.(
+        `${n} placeholder reference${n === 1 ? '' : 's'} recovered by value match — the model ` +
+          'did not name them in its actions.',
+        'warn',
+      );
+    }
+
     const files = this.candidate.changedFiles();
     const notAttempted = [...new Set([...(final.notAttempted ?? []), ...this.skippedByStop])].sort(
       (a, b) => a - b,
@@ -782,6 +833,7 @@ export class LiveCompiler {
       writtenOffAi: [],
       notAttempted,
       recordingDir: recordingDirFor(this.options.testFilePath),
+      recoveredByValue: [...this.recoveredByValue],
       ...(candidatePath !== undefined && { candidatePath }),
       ...(final.stoppedAt && { stoppedAt: final.stoppedAt }),
       ...(this.errors > 0 && {

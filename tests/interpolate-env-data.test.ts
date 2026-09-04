@@ -7,6 +7,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  ENV_DATA_REF_SOURCE,
+  envDataRefsIn,
   interpolateEnvData,
   interpolateEnvDataDeep,
   type EnvDataContext,
@@ -201,5 +203,31 @@ describe('interpolateEnvData — extra namespaces (dataSources)', () => {
     expect(
       interpolateEnvData('${data.fixtures.currency} ${env.REGION}', withExtra()),
     ).toBe('AUD au');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// One grammar, two consumers
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('ENV_DATA_REF_SOURCE — the shared `${…}` pattern', () => {
+  // The executor's substituter composes this source into a single alternation
+  // with `{{name}}`, so both syntaxes resolve in ONE pass and it never
+  // re-scans a value it inserted (stories/placeholder-preserving-actions.md,
+  // decision 3). Copying the pattern instead would let the two drift, and a
+  // reference the finder sees but the substituter misses lands in the page as
+  // literal text.
+  it('finds exactly what envDataRefsIn finds', () => {
+    const text =
+      'Open ${env.BASE_URL}/x for ${data.users.admin.email} on ${envName} ' +
+      'with ${endpoints.api.url} — but not ${notAReference} or {{plain}}';
+    const composed = [...text.matchAll(new RegExp(ENV_DATA_REF_SOURCE, 'g'))].map((m) => m[1]);
+    expect(composed).toEqual(envDataRefsIn(text));
+    expect(composed).toEqual([
+      'env.BASE_URL',
+      'data.users.admin.email',
+      'envName',
+      'endpoints.api.url',
+    ]);
   });
 });

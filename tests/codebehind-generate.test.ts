@@ -1046,7 +1046,10 @@ describe('generateStepEntry — the static backstop', () => {
       testName: 'demo',
     });
     expect(calls).toHaveLength(2);
-    expect(result).toEqual({ kind: 'entry', code: bare });
+    // `toMatchObject`, not `toEqual`: the entry also carries the placeholder
+    // rule's accounting for this step (this recording names no placeholder, so
+    // the old value match applied — codebehind-placeholder-rule.test.ts).
+    expect(result).toMatchObject({ kind: 'entry', code: bare });
     expect(result.kind === 'entry' && result.code).not.toContain('octocat-the-cat');
   });
 

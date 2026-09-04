@@ -34,6 +34,18 @@ import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
 import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cache.js';
 import { fingerprintAssertion } from '../cache/step-cache.js';
+import type { StepValues } from '../ai/prompts.js';
+import {
+  checkTurnReferences,
+  inlineStoreAsNames,
+  substituteAction,
+  substituteText,
+  type PlaceholderValues,
+} from './placeholder-substitution.js';
+import { referencedVariableNames } from '../skills/expander.js';
+import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
+import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
+import { redact, runSecrets } from '../utils/secrets.js';
 import type { CodeBehindBinding } from '../codebehind/loader.js';
 import { entrySourceText, runCodeBehindEntry } from '../codebehind/execute.js';
 import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
@@ -169,6 +181,18 @@ export interface StepExecutorOptions {
    * the run has no environment.
    */
   envData?: EnvDataContext;
+  /**
+   * Names and `${…}` refs this test has declared are NOT secrets, from
+   * `## Config: unmask: keyword, data.keys.public`
+   * (stories/placeholder-preserving-actions.md, decision 2).
+   *
+   * `isSecretName` is `/password|secret|token|key/i`, so it matches `keyword`,
+   * `monkey` and `secretary`. Masking those in the `## Values` block costs the
+   * model its eyes and not just its logs — a `keyword` column it has to find in
+   * the DOM would arrive as `***`. This is the per-test way out, matched
+   * against the exact name (`keyword`) or the exact ref (`data.keys.public`).
+   */
+  unmask?: ReadonlySet<string>;
   /**
    * Strict code-behind: an entry that throws **fails the step** instead of
    * falling through to AI (stories/codebehind-compile.md, "Replay").
@@ -405,12 +429,25 @@ export function isExtractionStep(instruction: string): boolean {
 /**
  * Execute a single test step with retry logic.
  * Returns a StepResult regardless of pass/fail.
+ *
+ * `instruction` is the SUBSTITUTED text — what the report's instruction line,
+ * the console line, the run log and the cache key are built from, and what
+ * every text-reading heuristic here (`isExtractionStep`, the `[output:]` parse)
+ * has always seen.
+ *
+ * `authoredInstruction` is the same step with its `{{name}}` and `${…}` tokens
+ * INTACT — what the model is shown, beside a `## Values` block saying what each
+ * one holds (stories/placeholder-preserving-actions.md, decision 1). It
+ * defaults to `instruction`, which is right for a caller that has no separate
+ * authored form: the interactive REPL's user-typed line, and a `[skill:]`
+ * argument the expander already baked in (phase 2).
  */
 export async function executeStep(
   stepIndex: number,
   totalSteps: number,
   instruction: string,
   opts: StepExecutorOptions,
+  authoredInstruction?: string,
 ): Promise<StepResult> {
   const startTime = Date.now();
   let retried = false;
@@ -462,6 +499,8 @@ export async function executeStep(
           [],
           1,
           cached,
+          undefined,
+          authoredInstruction,
         );
         logger.success(`Step ${stepIndex} passed (from cache)`);
         // Mark the result so the server's RunEvent emitter can attach
@@ -513,6 +552,7 @@ export async function executeStep(
       attemptNumber,
       undefined,
       cacheCapture,
+      authoredInstruction,
     );
   };
 
@@ -849,6 +889,80 @@ async function runCodeBehindStep(
   };
 }
 
+/**
+ * What a name the step references but nothing has captured yet renders as
+ * (stories/placeholder-preserving-actions.md, decision 4). Shown rather than
+ * hidden: a step that reads `{{balance}}` before the step that captures it has
+ * run is a partial re-run, and the model reading "(not yet captured)" is what
+ * makes the refusal that follows legible.
+ */
+const NOT_YET_CAPTURED = '(not yet captured)';
+
+/** The `[output:]` enrichment, applied to the authored text. The runners apply
+ *  it to the substituted text before they call in; without this the model is
+ *  shown a raw `[output: total]` prefix and no `[store as: total]` telling it
+ *  to capture anything. Idempotent — an already-enriched string has no
+ *  `[output:]` left to find. */
+function enrichAuthored(text: string): string {
+  const { variables, cleanedInstruction } = parseOutputPrefixes(text);
+  return variables.length > 0 ? buildEnrichedInstruction(cleanedInstruction, variables) : text;
+}
+
+/**
+ * The `## Values` table for one step: every reference its AUTHORED text makes,
+ * with what that reference holds on this run.
+ *
+ * Derived here rather than passed in, because there are six callers of
+ * `executeStep` and only two of them hold a parameter map they could build it
+ * from — and it has to be rebuilt per turn anyway, since a `read` in turn 1
+ * defines a name turn 2 may reference.
+ *
+ * Scoped to what the step REFERENCES, not to the whole map: that scoping is
+ * what stops every continuation turn of every step rendering every parameter.
+ * A name the step DEFINES — `[store as: x]`, or `store as {{x}}` in prose — is
+ * not a reference and is left out. `undefined` when the step references
+ * nothing, which is what keeps a plain step's prompt byte-identical to the one
+ * built before this block existed.
+ */
+function buildStepValues(authored: string, opts: StepExecutorOptions): StepValues | undefined {
+  const params = opts.resolvedParameters ?? {};
+  const { placeholders, captures } = referencedVariableNames(authored);
+  const defined = new Set([...captures, ...inlineStoreAsNames(authored)]);
+  const parameters = placeholders
+    .filter((name) => !defined.has(name))
+    .map((name) => ({ name, value: params[name] ?? NOT_YET_CAPTURED }));
+
+  const envRefs: Array<{ ref: string; value: string }> = [];
+  if (opts.envData) {
+    for (const ref of envDataRefsIn(authored)) {
+      const value = resolveEnvDataRef(ref, opts.envData);
+      // An unresolvable `${…}` threw at parse (CLI) or at the per-step
+      // interpolation (server), so this is unreachable for a step that got
+      // this far. Skipped rather than rendered: there is nothing to say it
+      // holds, and the checker refuses the turn if the model emits it anyway.
+      if (value !== undefined) envRefs.push({ ref, value });
+    }
+  }
+
+  if (parameters.length === 0 && envRefs.length === 0) return undefined;
+  return {
+    parameters,
+    ...(envRefs.length > 0 && { envRefs }),
+    ...(opts.unmask !== undefined && { unmask: opts.unmask }),
+  };
+}
+
+/** Every name the test's steps capture — `[store as: x]` and `store as {{x}}`.
+ *  Used only to make a refusal say "captured later" instead of "unknown". */
+function namesDefinedIn(steps: readonly string[]): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const step of steps) {
+    for (const name of referencedVariableNames(step).captures) out.add(name);
+    for (const name of inlineStoreAsNames(step)) out.add(name);
+  }
+  return out;
+}
+
 async function executeStepAttempt(
   stepIndex: number,
   totalSteps: number,
@@ -860,8 +974,32 @@ async function executeStepAttempt(
   attemptNumber: number = 1,
   cachedTurns?: CachedStepData[],
   cacheCapture?: CacheCapture,
+  authoredInstruction?: string,
 ): Promise<StepResult> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens, pageTracker } = opts;
+
+  // The step as WRITTEN, tokens intact — what the model reads, beside the
+  // `## Values` block. The `[output:]` enrichment runs on it as well as on the
+  // substituted text, or the model is shown a raw `[output: x]` prefix and no
+  // `[store as: x]` telling it to capture (stories/placeholder-preserving-actions.md
+  // §Executor).
+  const authored = enrichAuthored(authoredInstruction ?? instruction);
+  /** What the model may name: this run's parameters and the environment. */
+  const placeholderValues: PlaceholderValues = {
+    parameters: opts.resolvedParameters ?? {},
+    ...(opts.envData !== undefined && { envData: opts.envData }),
+  };
+  /** Names some LATER step captures, so a refusal can say "not yet" rather
+   *  than send the reader hunting for a typo. Only the CLI and the REPL pass
+   *  `testSteps`; without it the refusal is simply less specific. */
+  const definedLater = namesDefinedIn(opts.testSteps ?? []);
+  // The run's secret values, read fresh at each use: `[as: …]` captures and
+  // `[input: …]` answers grow the parameter map as the step runs.
+  const secretsNow = (): string[] =>
+    runSecrets({
+      parameters: opts.resolvedParameters ?? {},
+      ...(opts.envData !== undefined && { envData: opts.envData }),
+    });
   let page = pageTracker ? pageTracker.getActive() : opts.page;
   const maxTurns = config.execution.maxTurns;
 
@@ -1073,6 +1211,17 @@ async function executeStepAttempt(
 
     let userMessage: ChatMessage;
     const screenshotForAi = config.ai.sendScreenshots ? (screenshotBase64 ?? null) : null;
+    // What this step's placeholders hold right now, masked by name/path. Built
+    // per turn because a `read` in turn 1 can define a name turn 2 references.
+    const stepValues = buildStepValues(authored, opts);
+    // A controlled input that mirrors what was typed into its `value=`
+    // attribute puts the password in the snapshot. `capture-dom.js` serialises
+    // attributes rather than the `.value` property Playwright's `fill` sets, so
+    // a plain form is clean either way — this is the one line that covers the
+    // other kind (stories/placeholder-preserving-actions.md §Where a secret
+    // still goes). Masked for the MODEL only: the stored `firstTurnDomSnapshot`
+    // and the report's copy are untouched.
+    const domForAi = redact(domSnapshot, secretsNow());
 
     if (currentTurn === 1) {
       const retryInput: RetryDiagnostics | undefined = priorFailures.length > 0
@@ -1084,15 +1233,18 @@ async function executeStepAttempt(
           }
         : undefined;
       const retryHint = retryInput ? buildRetryContext(retryInput) : '';
-      const enrichedInstruction = retryHint ? `${instruction}${retryHint}` : instruction;
+      // The AUTHORED step, not the substituted one — decision 1. The retry
+      // hint is appended to it exactly as it was to the substituted form.
+      const enrichedInstruction = retryHint ? `${authored}${retryHint}` : authored;
       userMessage = buildStepMessage(
         enrichedInstruction,
-        domSnapshot,
+        domForAi,
         screenshotForAi,
         conversationHistory,
         openPages,
         testInfo,
         scrollPosition,
+        stepValues,
       );
     } else {
       userMessage = buildContinuationMessage(
@@ -1100,13 +1252,18 @@ async function executeStepAttempt(
         allCompletedActions,
         opts.resolvedParameters ?? {},
         currentUrl,
-        domSnapshot,
+        domForAi,
         screenshotForAi,
         currentTurn,
         openPages,
         explorationResults.length > 0 ? explorationResults : undefined,
         testInfo,
         scrollPosition,
+        // Always passed, even empty: without it the continuation turn falls
+        // back to rendering the WHOLE resolved parameter map unmasked, which
+        // was the widest surface a secret reached (decision 2).
+        stepValues ?? { parameters: [] },
+        authored,
       );
     }
 
@@ -1238,7 +1395,39 @@ async function executeStepAttempt(
     let turnNonRetryable = false;
     let turnError: string | undefined;
 
-    for (const action of aiResponse.actions) {
+    // Every reference in every action of THIS turn, checked before any of them
+    // runs (stories/placeholder-preserving-actions.md, decision 4). One bad
+    // reference and none of the turn's actions execute — a sign-in step cannot
+    // type the username and then fail on `{{passwrod}}`. Per turn, so a
+    // `needs_reeval` second turn is checked when it arrives and turn 1's
+    // actions stand. Retryable: the failure text names the correct key, and the
+    // retry prompt carries it, so `{{ email }}` can be fixed on attempt 2.
+    const refusal = checkTurnReferences(aiResponse.actions, {
+      known: new Set(Object.keys(opts.resolvedParameters ?? {})),
+      definedLater,
+      ...(opts.envData !== undefined && { envData: opts.envData }),
+    });
+    if (refusal !== undefined) {
+      turnFailed = true;
+      turnError = refusal;
+      logger.warn(refusal);
+      collectedFailures.push({
+        selector: '',
+        error: refusal,
+        actionType: aiResponse.actions[0]?.action ?? 'unknown',
+        startUrl: attemptStartUrl,
+        failureUrl: page.url(),
+        navigated: page.url() !== attemptStartUrl,
+      });
+    }
+
+    for (const emitted of refusal === undefined ? aiResponse.actions : []) {
+      // What the page gets: a COPY with `{{name}}` and `${…}` resolved. The
+      // emitted object is never written to — the transcript, the recording and
+      // the cache keep it as the model wrote it, which is the whole point of
+      // asking for the placeholder (decision 3). Every consumer below reads
+      // `action`; the three record sites read `emitted`.
+      const action = substituteAction(emitted, placeholderValues);
       if (action.action === 'prompt') continue;
 
       const subStartTime = Date.now();
@@ -1286,7 +1475,7 @@ async function executeStepAttempt(
         // Record as a sub-action for execution-order interleaving in the report
         turnSubActions.push({
           index: assertResult.subActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           timestamp: new Date().toISOString(),
@@ -1374,7 +1563,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(openError !== undefined && { error: openError }),
@@ -1432,7 +1621,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(openErr !== undefined && { error: openErr }),
@@ -1468,7 +1657,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(switchBrErr !== undefined && { error: switchBrErr }),
@@ -1512,7 +1701,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(closeBrErr !== undefined && { error: closeBrErr }),
@@ -1562,7 +1751,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(switchError !== undefined && { error: switchError }),
@@ -1610,7 +1799,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(closeError !== undefined && { error: closeError }),
@@ -1641,7 +1830,7 @@ async function executeStepAttempt(
         const subDuration = Date.now() - subStartTime;
         const subActionResult: SubActionResult = {
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: subDuration,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           timestamp: new Date().toISOString(),
@@ -1669,7 +1858,7 @@ async function executeStepAttempt(
         // log it as a no-op sub-action so it appears in the report.
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           timestamp: new Date().toISOString(),
@@ -1682,11 +1871,15 @@ async function executeStepAttempt(
         // default to "browser" so the request carries browser session cookies.
         if (!action.apiMode && contextContent.match(/Type:\s*(Front Proxy|Experience)/i)) {
           action.apiMode = 'browser';
+          // On the emitted object too, so the recording keeps saying which mode
+          // the call actually ran in. The only write to an emitted action, and
+          // it predates this story.
+          emitted.apiMode = 'browser';
           logger.debug('Auto-set apiMode to "browser" based on Front Proxy/Experience context');
         }
 
         const apiSubResult = await executeApiCallAction(
-          action,
+          action, // substituted — the request carries values, not placeholders
           page,
           stepIndex,
           csrfTokens,
@@ -1698,7 +1891,7 @@ async function executeStepAttempt(
         const subDuration = Date.now() - subStartTime;
         const subActionResult: SubActionResult = {
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: subDuration,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           ...(apiSubResult.apiCallData !== undefined && { apiCallData: apiSubResult.apiCallData }),
@@ -1735,7 +1928,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           timestamp: new Date().toISOString(),
@@ -1754,7 +1947,7 @@ async function executeStepAttempt(
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
-          action,
+          action: emitted,
           durationMs: Date.now() - subStartTime,
           ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
           timestamp: new Date().toISOString(),
@@ -1847,7 +2040,7 @@ async function executeStepAttempt(
       const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;
       turnSubActions.push({
         index: ++globalSubActionIndex,
-        action,
+        action: emitted,
         ...(postShotBase64 !== undefined && { screenshotBase64: postShotBase64 }),
         ...(domSnapshotVal !== undefined && { domSnapshot: domSnapshotVal }),
         ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
@@ -1886,7 +2079,7 @@ async function executeStepAttempt(
 
         // Build list of actions that succeeded before this failure
         const currentTurnSucceeded = aiResponse.actions
-          .slice(0, aiResponse.actions.indexOf(action))
+          .slice(0, aiResponse.actions.indexOf(emitted))
           .filter((a) => a.action !== 'assert' && a.action !== 'prompt')
           .map((a) => ({ action: a.action, description: a.description }));
         const allSucceeded = [
@@ -2440,6 +2633,22 @@ function extractEndpointPath(url: string): string {
  * Returns one StepResult per step in the group plus the index of the last
  * step consumed (so the caller can skip ahead).
  */
+/**
+ * A branch step's substituted form. `identifyStepGroups` reads the raw step
+ * list and never interpolates, so before this a matched branch step typed
+ * `{{email}}` into the page as six literal characters
+ * (stories/placeholder-preserving-actions.md §Executor). The model still sees
+ * the authored text — it is passed alongside as `authoredInstruction` — so the
+ * fix arrives twice over: the model names the placeholder and the executor
+ * substitutes it, and the step's own text resolves too.
+ */
+function substituteBranchInstruction(instruction: string, opts: StepExecutorOptions): string {
+  return substituteText(instruction, {
+    parameters: opts.resolvedParameters ?? {},
+    ...(opts.envData !== undefined && { envData: opts.envData }),
+  });
+}
+
 export async function executeBranchedStep(
   group: StepGroup,
   totalSteps: number,
@@ -2632,13 +2841,14 @@ export async function executeBranchedStep(
     matchedResult = await executeStep(
       matchedOutcome.index,
       totalSteps,
-      matchedOutcome.instruction,
+      substituteBranchInstruction(matchedOutcome.instruction, opts),
       // Cache by the 1-based step identity (issue 017). `matchedOutcome.index`
       // is the group's 0-based array index, but the normal step loop keys the
       // cache as `executeStep(i + 1, …)`; without this override a branched step
       // and a normal step one position apart would share `step-<n>.json`.
       // `result.index` stays 0-based for the skip/display logic below.
       { ...opts, cacheKey: matchedOutcome.index + 1 },
+      matchedOutcome.instruction,
     );
   } else {
     // No actions needed (e.g. continuation step = "Wait for dashboard" and dashboard is already loaded)
@@ -2678,9 +2888,10 @@ export async function executeBranchedStep(
     const contResult = await executeStep(
       group.continuationStep.index,
       totalSteps,
-      group.continuationStep.instruction,
+      substituteBranchInstruction(group.continuationStep.instruction, opts),
       // 1-based cache identity, matching the normal step loop (issue 017).
       { ...opts, cacheKey: group.continuationStep.index + 1 },
+      group.continuationStep.instruction,
     );
     results.push(contResult);
   } else {

@@ -1,6 +1,6 @@
 import type { AiClient } from '../ai/client.js';
 import { normaliseUploadPath } from '../browser/upload-paths.js';
-import { findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
+import { MIN_GUARDED_VALUE_LENGTH, findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
 import {
   buildStepCodePrompt,
   buildSystemPrompt,
@@ -90,6 +90,21 @@ export interface GenerateStepEntryOptions {
    *  carrying the `targeting` the runtime measured for it when there was one
    *  (stories/codebehind-selector-ambiguity.md). */
   actions: RecordedAction[];
+  /**
+   * Whether ANY action of the whole recording carried a placeholder token
+   * (stories/placeholder-preserving-actions.md, decision 6).
+   *
+   * The exact rule reads what the model NAMED, so it can only be applied to a
+   * recording made by a model that was asked to name placeholders. A recording
+   * made before that change carries values everywhere — and, for a secret, the
+   * redacted `***` — so every reference would look unaccounted and every step
+   * with a parameter would decline. False (the default) keeps the old value
+   * match for every reference, silently; the caller says so once in the
+   * compile's summary. `anyActionCarriesPlaceholder` is the test, applied
+   * across the run rather than per step: one step naming a placeholder proves
+   * the whole recording is a post-change one.
+   */
+  recordingCarriesPlaceholders?: boolean | undefined;
   /** Assertions the step evaluated, if any. */
   assertions?: AssertionResult[] | undefined;
   /** Live parameter map from the recording, for resolving `{{param}}`. */
@@ -116,10 +131,36 @@ export interface GenerateStepEntryOptions {
   urlAfter?: string | undefined;
 }
 
+/**
+ * What the placeholder rule had to do to let this step compile
+ * (stories/placeholder-preserving-actions.md, decision 6).
+ *
+ * Present on an entry only when there is something to say, so the common case
+ * — every reference named by the model — carries no field at all.
+ */
+export interface PlaceholderReport {
+  /**
+   * References the model did NOT name and the compile recovered by comparing
+   * a recorded literal against the resolved value. Named as written:
+   * `email` for `{{email}}`, `${data.url}` for an environment reference.
+   *
+   * This is the compliance metric, and the only one: it is how "the model
+   * names the placeholder most of the time" gets measured rather than
+   * trusted.
+   */
+  recoveredByValue: string[];
+  /**
+   * The exact rule was not applied to this step because the recording carries
+   * no placeholder token anywhere — it predates the change — and the step
+   * makes at least one reference the rule would otherwise have judged.
+   */
+  preChangeFallback: boolean;
+}
+
 /** What one generation call produced. */
 export type GeneratedEntry =
   /** Code, guard-checked, ready for the candidate. */
-  | { kind: 'entry'; code: string }
+  | { kind: 'entry'; code: string; references?: PlaceholderReport }
   /** Not expressible as code — becomes an `ai: true` entry with this reason. */
   | { kind: 'declined'; reason: string }
   /** The call itself failed. The compiler reports it and moves on. */
@@ -151,6 +192,31 @@ export async function generateStepEntry(
   if (unresolvedInputs.length > 0) {
     return { kind: 'declined', reason: unresolvedRefsReason(unresolvedInputs, options.envData) };
   }
+  // The exact rule (stories/placeholder-preserving-actions.md, decisions 5 and
+  // 6). Last of the pre-checks, because it is the most specific: a step that
+  // could never be code at all, or whose environment reference this run cannot
+  // answer, deserves the reason it actually failed on rather than "the model
+  // did not name a placeholder".
+  const accounting = accountPlaceholders({
+    binding,
+    actions: options.actions,
+    resolvedParameters: options.resolvedParameters,
+    ...(options.envData && { envData: options.envData }),
+    recordingCarriesPlaceholders: options.recordingCarriesPlaceholders === true,
+  });
+  if (accounting.decline !== undefined) {
+    return { kind: 'declined', reason: accounting.decline };
+  }
+  for (const name of accounting.recoveredByValue) {
+    logger.debug(`Code-behind for "${binding.source}": ${valueMatchWarning(name)}`);
+  }
+  const references: PlaceholderReport | undefined =
+    accounting.recoveredByValue.length > 0 || accounting.preChangeFallback
+      ? { recoveredByValue: accounting.recoveredByValue, preChangeFallback: accounting.preChangeFallback }
+      : undefined;
+  /** Carry the accounting out on whatever entry the model ends up producing. */
+  const reported = (result: GeneratedEntry): GeneratedEntry =>
+    result.kind === 'entry' && references !== undefined ? { ...result, references } : result;
 
   const promptInput: StepCodePromptInput = {
     rawStepText: binding.source,
@@ -175,6 +241,17 @@ export async function generateStepEntry(
     ...(options.urlAfter !== undefined && { urlAfter: options.urlAfter }),
   };
   const guarded = guardedValues(parameters, envRefs.resolved);
+  // Every value this step's references resolved to, keyed by the name the
+  // MODEL would have written in an action: the authored name, the run-time
+  // name a skill rename gave it, and each `${…}` reference. Used to read a
+  // placeholder-bearing selector the way the runtime read it — see
+  // `ambiguousSelectorComplaint`.
+  const substitute = (text: string): string =>
+    applyKnownValues(
+      text,
+      { ...options.resolvedParameters, ...Object.fromEntries(parameters.map((p) => [p.name, p.value])) },
+      envRefs.resolved,
+    );
 
   const first = await askForEntry(
     options.aiClient,
@@ -196,11 +273,11 @@ export async function generateStepEntry(
   // model calls for a handful of heuristics, and the complaint text carries
   // whichever fault fired.
   const complaint =
-    staticEntryComplaint(first.code, options.actions) ??
+    staticEntryComplaint(first.code, options.actions, substitute) ??
     undeclaredContextComplaint(first.code) ??
     staleHandleComplaint(first.code) ??
     unwaitedReadComplaint(first.code);
-  if (complaint === undefined) return first;
+  if (complaint === undefined) return reported(first);
 
   logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
   const second = await askForEntry(
@@ -223,9 +300,9 @@ export async function generateStepEntry(
       `The re-ask for "${binding.source}" produced no entry ` +
         `(${second.kind === 'error' ? second.message : second.reason}); keeping the first answer`,
     );
-    return first;
+    return reported(first);
   }
-  const stillWrong = staticEntryComplaint(second.code, options.actions);
+  const stillWrong = staticEntryComplaint(second.code, options.actions, substitute);
   if (stillWrong !== undefined) {
     logger.warn(
       `Code-behind for "${binding.source}" still has a fault the static check can see; ` +
@@ -252,7 +329,7 @@ export async function generateStepEntry(
         `it may read the state from before the step. ${stillUnwaited}`,
     );
   }
-  return second;
+  return reported(second);
 }
 
 /**
@@ -265,8 +342,12 @@ export async function generateStepEntry(
 export function staticEntryComplaint(
   code: string,
   actions: RecordedAction[],
+  substitute?: ((text: string) => string) | undefined,
 ): string | undefined {
-  return ambiguousSelectorComplaint(code, actions) ?? literalUploadPathComplaint(code, actions);
+  return (
+    ambiguousSelectorComplaint(code, actions, substitute) ??
+    literalUploadPathComplaint(code, actions)
+  );
 }
 
 /**
@@ -320,6 +401,7 @@ export function literalUploadPathComplaint(
 export function ambiguousSelectorComplaint(
   code: string,
   actions: RecordedAction[],
+  substitute?: ((text: string) => string) | undefined,
 ): string | undefined {
   let strings: StringToken[] | undefined;
   for (const action of actions) {
@@ -328,7 +410,16 @@ export function ambiguousSelectorComplaint(
     if (selector === undefined || count === undefined || count <= 1) continue;
     if (!isSingularTarget(action)) continue;
     strings ??= scan(code).strings;
-    if (!strings.some((token) => token.value === selector && isBareUse(code, token))) continue;
+    // Both spellings (stories/placeholder-preserving-actions.md §"Generator
+    // and compile"): a model that named the placeholder records
+    // `text={{plan}}` while the code it writes — and the measurement beside
+    // it — is the concrete `text=Premium`. Comparing only the recorded
+    // spelling makes the whole check blind on exactly the steps placeholders
+    // were introduced for.
+    const substituted = substitute?.(selector);
+    const spellings =
+      substituted !== undefined && substituted !== selector ? [selector, substituted] : [selector];
+    if (!strings.some((token) => spellings.includes(token.value) && isBareUse(code, token))) continue;
 
     const resolved = action.targeting?.resolvedSelector;
     return (
@@ -747,6 +838,276 @@ export function unresolvedInputRefs(
     for (const ref of envDataRefsIn(resolveInputValue(input, resolvedParameters, envData))) {
       if (!out.includes(ref)) out.push(ref);
     }
+  }
+  return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The exact rule (stories/placeholder-preserving-actions.md, decisions 5 & 6)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * A `{{name}}` reference, in the wider grammar the placeholder story's checker
+ * uses (decision 4).
+ *
+ * Wider than the substituter's `\{\{(\w+)\}\}` on purpose: the model is shown
+ * the authored step and writes the placeholder back itself, so `{{ email }}`
+ * is a thing it can produce. Reading it as a reference is what lets the rule
+ * answer with the name rather than with silence.
+ */
+const PLACEHOLDER_REF_RE = /\{\{\s*(\w+)\s*\}\}/g;
+
+/** The same, for a yes/no question about one string. Non-global: `.test` on a
+ *  global regex carries `lastIndex` between calls and would answer false every
+ *  other time. */
+const ANY_PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}/;
+
+/**
+ * A placeholder that DEFINES a variable rather than reading one:
+ * `Read the balance and store as {{balance}}`.
+ *
+ * A definition is not a reference — nothing has that value yet when the step
+ * starts — so the rule must not ask which action carried it, or every capture
+ * step would decline (decision 4, "Capture definitions are never references").
+ */
+const CAPTURE_DEFINITION_RE = /\b(?:store|save)\s+as:?\s*\{\{\s*(\w+)\s*\}\}/gi;
+
+/**
+ * The `{{name}}` references a piece of text makes, in source order, deduped,
+ * capture definitions excluded.
+ */
+export function placeholderNamesIn(text: string): string[] {
+  const defined = new Set<string>();
+  for (const m of text.matchAll(CAPTURE_DEFINITION_RE)) defined.add(m[1]!);
+  const out: string[] = [];
+  for (const m of text.matchAll(PLACEHOLDER_REF_RE)) {
+    const name = m[1]!;
+    if (defined.has(name) || out.includes(name)) continue;
+    out.push(name);
+  }
+  return out;
+}
+
+/** Every string leaf under `value` — arrays and nested objects included, which
+ *  is what `body` and `apiHeaders` need. */
+function collectStrings(value: unknown, out: string[]): void {
+  if (typeof value === 'string') {
+    out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, out);
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const item of Object.values(value)) collectStrings(item, out);
+  }
+}
+
+/**
+ * Actions that look at the page rather than act on it. They are in the
+ * transcript and nothing replayable carries them, so a token in one vouches
+ * for nothing — decision 5, "Exploration actions never vouch".
+ */
+const EXPLORATION_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['find', 'expand']);
+
+/**
+ * The fields of one recorded action a placeholder may vouch from: what the
+ * step typed, uploaded, navigated to, targeted, pressed, sent or expected.
+ *
+ * `condition` is here only for a predicate assertion, where the comparison is
+ * over values the step itself carries rather than over the model's reading of
+ * the page. Everywhere else `condition` is prose.
+ */
+function valueBearingStrings(action: RecordedAction): string[] {
+  if (EXPLORATION_ACTIONS.has(action.action)) return [];
+  const out: string[] = [];
+  const push = (value: string | undefined): void => {
+    if (typeof value === 'string') out.push(value);
+  };
+  push(action.value);
+  push(action.filePath);
+  for (const p of action.filePaths ?? []) push(p);
+  push(action.url);
+  push(action.selector);
+  push(action.expected);
+  push(action.key);
+  if (action.against === 'predicate') push(action.condition);
+  collectStrings(action.body, out);
+  for (const header of Object.values(action.apiHeaders ?? {})) push(header);
+  return out;
+}
+
+/**
+ * The fields that hold the model's own words. A reference that landed only
+ * here means the model read the sentence and deferred the interpretation to
+ * run time, which is the one thing code cannot express.
+ */
+function freeTextStrings(action: RecordedAction, field: 'condition' | 'description'): string[] {
+  if (EXPLORATION_ACTIONS.has(action.action)) return [];
+  if (field === 'condition') {
+    return action.against !== 'predicate' && typeof action.condition === 'string'
+      ? [action.condition]
+      : [];
+  }
+  return typeof action.description === 'string' ? [action.description] : [];
+}
+
+/** Every reference a set of recorded strings carries, keyed the way
+ *  `accountPlaceholders` keys them: `email`, or `${data.url}`. */
+function referencesIn(strings: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const text of strings) {
+    for (const name of placeholderNamesIn(text)) out.add(name);
+    for (const ref of envDataRefsIn(text)) out.add(`\${${ref}}`);
+  }
+  return out;
+}
+
+/**
+ * Did the model name a placeholder anywhere in these actions?
+ *
+ * The whole-recording question decision 6 turns on, asked of one step's
+ * actions and OR-ed across the run by the caller. Deliberately the widest
+ * possible read — every string leaf of every action, exploration actions
+ * included — because a false "post-change" is a decline the author has to
+ * chase, while a false "pre-change" only costs the warning.
+ */
+export function anyActionCarriesPlaceholder(actions: RecordedAction[]): boolean {
+  const strings: string[] = [];
+  for (const action of actions) collectStrings(action, strings);
+  return strings.some((s) => ANY_PLACEHOLDER_RE.test(s) || envDataRefsIn(s).length > 0);
+}
+
+/** The compliance warning, in one place so the note, the log and the tests
+ *  cannot drift. */
+export function valueMatchWarning(name: string): string {
+  return `recovered ${describeGuardedName(name)} by value match; the model did not name it`;
+}
+
+/** What the rule decided for one step. */
+export interface PlaceholderAccounting extends PlaceholderReport {
+  /** Why the step must stay AI, or undefined when it may compile. */
+  decline?: string;
+}
+
+/**
+ * Whether every reference the step makes is accounted for
+ * (stories/placeholder-preserving-actions.md, decisions 5 and 6).
+ *
+ * The exact rule: a step compiles only if each reference its authored text
+ * makes appears, AS A TOKEN, in a value-bearing field of some recorded action.
+ * A token only in free text means the model deferred the interpretation to run
+ * time; a token nowhere means it interpreted the value into something else.
+ * No string comparison, no three-character floor, and no risk from a
+ * coincidental `Dashboard` — the test is for the token, not for the value.
+ *
+ * Two carve-outs, both deliberate:
+ *
+ * - **Scope-supplied names** (decision 6). A name the binding's scope answers
+ *   — a skill argument, a part B section row — is interpolated into the body
+ *   text by the expander, so the runtime never sees a placeholder and the
+ *   model cannot name one. Those keep today's value match, silently, until
+ *   phase 2 moves them onto the runtime map. Warning them would drown the
+ *   measurement in cases nobody can act on.
+ * - **Pre-change recordings** (`recordingCarriesPlaceholders: false`). Same
+ *   value match, for every reference, plus a note from the caller.
+ *
+ * A skill RENAME is not a carve-out: the expander rewrites the step text to
+ * `{{__skill1_username}}` and the runtime substitutes that at run time, so the
+ * model is shown a placeholder and can name it. The token looked for is the
+ * renamed one; the reason names the authored one, which is what the author
+ * wrote.
+ */
+export function accountPlaceholders(options: {
+  binding: CodeBehindBinding;
+  actions: RecordedAction[];
+  resolvedParameters: Record<string, string>;
+  envData?: EnvDataContext | undefined;
+  recordingCarriesPlaceholders: boolean;
+}): PlaceholderAccounting {
+  const { binding, actions } = options;
+  const literals = actions.flatMap(valueBearingStrings);
+  const vouched = referencesIn(literals);
+  const inCondition = referencesIn(actions.flatMap((a) => freeTextStrings(a, 'condition')));
+  const inDescription = referencesIn(actions.flatMap((a) => freeTextStrings(a, 'description')));
+
+  const recoveredByValue: string[] = [];
+  let judged = false;
+  let decline: string | undefined;
+
+  /** One reference: the name the author wrote, the token the model would have
+   *  written, and the value this run resolved it to. */
+  const judge = (name: string, token: string, value: string | undefined): void => {
+    judged = true;
+    if (decline !== undefined || !options.recordingCarriesPlaceholders) return;
+    if (vouched.has(token)) return;
+    if (inCondition.has(token)) {
+      decline =
+        `${describeGuardedName(name)} appears only in an assertion's condition, which is ` +
+        'interpreted at run time and cannot be compiled';
+      return;
+    }
+    if (inDescription.has(token)) {
+      decline =
+        `${describeGuardedName(name)} appears only in an action's description, which is the ` +
+        "model's own words rather than a value it used";
+      return;
+    }
+    // The fallback the story keeps for phase 1: the model ignored the rule and
+    // wrote the value. Recovering it keeps the step compiling; the warning is
+    // how often that happens gets measured.
+    const trimmed = value?.trim();
+    if (trimmed !== undefined && trimmed.length >= MIN_GUARDED_VALUE_LENGTH) {
+      if (literals.some((literal) => literal.trim() === trimmed)) {
+        recoveredByValue.push(name);
+        return;
+      }
+    }
+    decline = `${describeGuardedName(name)} appears in no recorded action`;
+  };
+
+  for (const name of placeholderNamesIn(binding.source)) {
+    const renamed = binding.scope.renames[name];
+    // Decision 6: the expander baked this one into the text, so no token can
+    // exist. Today's behaviour, no warning, no decline.
+    if (renamed === undefined && binding.scope.inputs[name] !== undefined) continue;
+    judge(name, renamed ?? name, options.resolvedParameters[renamed ?? name]);
+  }
+  for (const ref of envDataRefsIn(binding.source)) {
+    judge(
+      `\${${ref}}`,
+      `\${${ref}}`,
+      options.envData ? resolveEnvDataRef(ref, options.envData) : undefined,
+    );
+  }
+
+  return {
+    recoveredByValue,
+    preChangeFallback: judged && !options.recordingCarriesPlaceholders,
+    ...(decline !== undefined && { decline }),
+  };
+}
+
+
+/**
+ * Resolve the placeholders in a recorded string the way the runtime resolved
+ * them, leaving anything this run cannot answer exactly as written.
+ *
+ * Not `interpolate`: that one warns about every placeholder it cannot resolve,
+ * and here an unresolved one is ordinary — a recorded selector may mention a
+ * variable a later step captures.
+ */
+function applyKnownValues(
+  text: string,
+  values: Record<string, string>,
+  envRefs: Array<{ ref: string; value: string }>,
+): string {
+  let out = text.replace(PLACEHOLDER_REF_RE, (match, name: string) =>
+    Object.hasOwn(values, name) ? (values[name] ?? match) : match,
+  );
+  for (const { ref, value } of envRefs) {
+    out = out.split(`\${${ref}}`).join(value);
   }
   return out;
 }

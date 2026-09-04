@@ -549,6 +549,24 @@ export function createApiServer(
       }
 
       const request: StepRequest = { steps: body.steps as string[] };
+      // `## Config: unmask:` — a comma-separated list of names this test says
+      // are not secrets (stories/placeholder-preserving-actions.md, decision 2).
+      // Validated rather than cast, unlike its neighbours: it is the one config
+      // key that turns masking OFF, so a non-string arriving here would be a
+      // shape the session manager has to guess about at the moment it decides
+      // whether to show the model a value.
+      if (
+        body.config !== undefined &&
+        body.config !== null &&
+        typeof body.config === 'object' &&
+        !Array.isArray(body.config)
+      ) {
+        const unmask = (body.config as Record<string, unknown>)['unmask'];
+        if (unmask !== undefined && typeof unmask !== 'string') {
+          res.status(400).json({ error: 'config.unmask must be a comma-separated string.' });
+          return;
+        }
+      }
       if (body.config !== undefined) {
         request.config = body.config as {
           baseUrl?: string;
@@ -561,6 +579,8 @@ export function createApiServer(
           // this declaration an honest description of the wire shape instead
           // of a stale one that happens to work.
           viewport?: string;
+          // Raw `## Config: unmask:` list, validated as a string just above.
+          unmask?: string;
           // `profile` is a descriptive label only — `port` selects the browser.
           // Retained so `GET /sessions` can say which browser a session drives.
           cdp?: { port: number; tab?: string; profile?: string };

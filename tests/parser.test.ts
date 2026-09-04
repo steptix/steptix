@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { parseTestContent } from '../src/parser/markdown.js';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { parseTestContent, parseTestFile } from '../src/parser/markdown.js';
+import { interpolateEnvData } from '../src/parser/interpolate-env-data.js';
+import { interpolate } from '../src/parser/parameters.js';
 
 describe('parseTestContent', () => {
   it('extracts H1 title', () => {
@@ -307,5 +312,123 @@ describe('data rows under ## Steps', () => {
       table('| a |\n|---|\n| 1 |\n\n') +
       '\n<!-- latest-runs:start -->\n## Latest runs\n- passed\n<!-- latest-runs:end -->\n';
     expect(parseTestContent(md).dataRows).toEqual([{ a: '1' }]);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// `${…}` at parse: validated, not rewritten
+// (stories/placeholder-preserving-actions.md §Environment and data-file
+// references)
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('parseTestFile — env/data references in steps', () => {
+  const ENV = { BASE_URL: 'https://uat.app.test', ADMIN_PWD: 'hunter2' };
+  const DATA = { users: { admin: { email: 'admin@app.test' } } };
+
+  let dir: string;
+
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'aiui-parser-envdata-'));
+  });
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const write = (name: string, body: string): string => {
+    const file = path.join(dir, name);
+    writeFileSync(file, body);
+    return file;
+  };
+
+  const parse = (file: string) =>
+    parseTestFile(file, { envData: { env: ENV, data: DATA, envName: 'uat' } });
+
+  it('keeps a step\'s tokens intact — the model is shown the step as written', async () => {
+    const file = write(
+      'steps.md',
+      '# T\n\n## Steps\n1. Open ${env.BASE_URL}/admin as {{who}}\n',
+    );
+    const parsed = await parse(file);
+    expect(parsed.steps[0]).toBe('Open ${env.BASE_URL}/admin as {{who}}');
+  });
+
+  it('still substitutes parameters, config, hooks and data rows at parse', async () => {
+    const file = write(
+      'surfaces.md',
+      [
+        '# T',
+        '',
+        '## Config',
+        '- baseUrl: ${env.BASE_URL}',
+        '',
+        '## Parameters',
+        '- home: ${env.BASE_URL}/home',
+        '',
+        '## Hooks',
+        '- before: Warm up ${env.BASE_URL}/health',
+        '',
+        '## Steps',
+        '| who |',
+        '|---|',
+        '| ${data.users.admin.email} |',
+        '',
+        '1. Sign in as {{who}}',
+      ].join('\n'),
+    );
+    const parsed = await parse(file);
+    expect(parsed.config.baseUrl).toBe('https://uat.app.test');
+    expect(parsed.parameters['home']).toBe('https://uat.app.test/home');
+    expect(parsed.hooks.before).toEqual(['Warm up https://uat.app.test/health']);
+    expect(parsed.dataRows).toEqual([{ who: 'admin@app.test' }]);
+  });
+
+  it('still resolves a tool call\'s arguments, which are code, not prompt text', async () => {
+    const file = write(
+      'tool.md',
+      '# T\n\n## Steps\n1. [tool: fetch url="${env.BASE_URL}/api"]\n',
+    );
+    const parsed = await parse(file);
+    expect(parsed.steps[0]).toBe('[tool: fetch url="${env.BASE_URL}/api"]');
+    expect(parsed.toolCalls[0]?.args['url']).toBe('https://uat.app.test/api');
+  });
+
+  it('still fails fast on an unknown reference, naming the file and the step', async () => {
+    const file = write('typo.md', '# T\n\n## Steps\n1. Open ${data.typo}\n');
+    await expect(parse(file)).rejects.toThrow(/Unknown data path 'typo'/);
+    await expect(parse(file)).rejects.toThrow(/typo\.md/);
+  });
+
+  it('gives the CLI the same substituted instruction the server stamps', async () => {
+    // The server holds the authored step as `originalStep` and applies
+    // `interpolateEnvData` then `interpolate`, per step. After this change the
+    // CLI holds the identical text in `parsed.steps` and applies the identical
+    // pair — so the two paths cannot drift, and neither can double-substitute.
+    const authored = 'Sign in to ${env.BASE_URL} as {{who}} with {{pw}}';
+    const file = write('parity.md', `# T\n\n## Steps\n1. ${authored}\n`);
+    const parsed = await parse(file);
+    const params = { who: 'admin@app.test', pw: 'hunter2' };
+
+    expect(parsed.steps[0]).toBe(authored);
+    const fromCli = interpolate(interpolateEnvData(parsed.steps[0]!, parsed.envData!), params);
+    const fromServer = interpolate(
+      interpolateEnvData(authored, { env: ENV, data: DATA, envName: 'uat' }),
+      params,
+    );
+    expect(fromCli).toBe(fromServer);
+    expect(fromCli).toBe('Sign in to https://uat.app.test as admin@app.test with hunter2');
+  });
+});
+
+describe('## Config: unmask', () => {
+  it('is read off the config block as its raw comma-separated string', () => {
+    // Held raw, like `viewport`: one parser, in the executor's caller, so the
+    // CLI and the server agree on what a name is
+    // (stories/placeholder-preserving-actions.md, decision 2).
+    const md = '# T\n\n## Config\n- unmask: keyword, data.keys.public\n\n## Steps\n1. Go\n';
+    expect(parseTestContent(md).config.unmask).toBe('keyword, data.keys.public');
+  });
+
+  it('is absent when the test does not declare one', () => {
+    expect(parseTestContent('# T\n\n## Steps\n1. Go\n').config.unmask).toBeUndefined();
   });
 });

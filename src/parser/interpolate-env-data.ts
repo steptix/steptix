@@ -132,11 +132,21 @@ const ENV_NAME_TOKEN_RE = /\$\{\s*envName\s*\}/g;
 
 /**
  * Every placeholder of the grammar above, whatever its namespace: `envName`
- * and `<word>.<dotted-path>`. Used to find the references in a step's
- * authored text without a context in hand — a namespace nothing declares is
- * a reference too, one `resolveEnvDataRef` answers with `undefined`.
+ * and `<word>.<dotted-path>` — as a pattern SOURCE with one capturing group,
+ * so the one grammar can be composed into a larger alternation instead of
+ * copied. The executor's substituter does exactly that: it resolves `{{name}}`
+ * and `${…}` in a single pass, which is what stops it re-scanning a value it
+ * just inserted (stories/placeholder-preserving-actions.md, decision 3).
  */
-const ANY_REF_RE = /\$\{\s*(envName|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_.\-]+)\s*\}/g;
+export const ENV_DATA_REF_SOURCE =
+  '\\$\\{\\s*(envName|[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z0-9_.\\-]+)\\s*\\}';
+
+/**
+ * Used to find the references in a step's authored text without a context in
+ * hand — a namespace nothing declares is a reference too, one
+ * `resolveEnvDataRef` answers with `undefined`.
+ */
+const ANY_REF_RE = new RegExp(ENV_DATA_REF_SOURCE, 'g');
 
 /**
  * The `${...}` references a step makes, as the bare name inside the braces

@@ -2,6 +2,41 @@ import type { AIAction, ChatMessage, MessageContentBlock } from './types.js';
 import type { ActionTargeting } from '../browser/actions.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
+import { isSecretName, isSecretRef, MASK } from '../utils/secrets.js';
+
+/**
+ * What a step's placeholders hold right now — the `## Values` block the model
+ * reads beside the step's AUTHORED text
+ * (stories/placeholder-preserving-actions.md, decision 1).
+ *
+ * The step prompt shows `Enter the email {{email}}` and this table, and the
+ * model puts `{{email}}` — not the value — in the field it filled from it.
+ * Rendered by {@link formatParameterBlock}, the formatter the generation
+ * prompt already uses, so a reference is described identically wherever the
+ * model meets it.
+ */
+export interface StepValues {
+  /** Every `{{name}}` the step references, with this run's value. A name the
+   *  step DEFINES (`store as {{balance}}`, `[as: x]`) is not a reference and
+   *  does not belong here. */
+  parameters: Array<{ name: string; value: string }>;
+  /** Every `${env.X}` / `${data.X.Y}` / `${source.X}` the step references,
+   *  with what it resolved to in this environment. */
+  envRefs?: Array<{ ref: string; value: string }>;
+  /** Names and refs the test has declared are not secrets, despite
+   *  `isSecretName` matching them (the per-test `## Config` hatch). */
+  unmask?: ReadonlySet<string>;
+}
+
+/** The `## Values` block, or '' when the step references nothing — absence is
+ *  what keeps a plain step's prompt byte-identical to the one built before
+ *  this block existed. */
+function formatValuesBlock(values?: StepValues): string {
+  if (!values) return '';
+  const { parameters, envRefs = [] } = values;
+  if (parameters.length === 0 && envRefs.length === 0) return '';
+  return formatParameterBlock(parameters, envRefs, values.unmask ?? new Set<string>());
+}
 
 /** Viewport dimensions passed to the system prompt */
 export interface ViewportInfo {
@@ -167,8 +202,11 @@ Plan your next action based on the observed result — do not batch multiple act
    - against: "dom" (default): the instruction asks you to verify something visible on the page. Set "condition" to what to read (e.g. "visible modal title text") and "expected" to the concrete literal it should equal (e.g. "Done"). Example: { "action": "assert", "against": "dom", "condition": "visible modal title text", "expected": "Done", "description": "Modal title equals Done" }.
    - against: "api": the instruction is purely about a prior API response. Set "condition" to a path/description into that response and "expected" to the literal value at that path. Example: { "action": "assert", "against": "api", "condition": "step_3.response.body.id", "expected": "DEL-1234", "description": "Created delegate id is DEL-1234" }.
    - against: "both": the instruction can reference either DOM or prior API responses. Same field requirements as "dom"/"api".
-   - against: "predicate": the instruction is a self-contained predicate — both sides of the comparison are already substituted into the resolved text. Use this whenever NOTHING in the DOM or prior API responses needs to be fetched. Set "condition" to the resolved English predicate verbatim. DO NOT include "expected" — predicate mode rejects it strictly. Triggers: instructions like "Assert that 8 is at least 5", "Assert that 2 equals 2", or 'Assert that ["O-1003","O-1007"] contains "O-1003"' (after parameter substitution leaves only literals on both sides — no DOM, no API). Example: { "action": "assert", "against": "predicate", "condition": "8 is at least 5", "description": "order_count >= 5" }.
+   - against: "predicate": the instruction is a self-contained predicate — everything either side of the comparison is in the step text itself, whether written as a literal or as a placeholder listed under "## Values". Use this whenever NOTHING in the DOM or prior API responses needs to be fetched. Set "condition" to the predicate AS WRITTEN, placeholders included — the framework substitutes them before the check is generated, so do not resolve them yourself. DO NOT include "expected" — predicate mode rejects it strictly. Triggers: instructions like "Assert that {{order_count}} is at least 5", "Assert that 8 is at least 5", "Assert that 2 equals 2", or 'Assert that ["O-1003","O-1007"] contains "O-1003"' (nothing to read from the page or from an API). Example: { "action": "assert", "against": "predicate", "condition": "{{order_count}} is at least 5", "description": "order_count >= 5" }.
    Optional on any mode: "poll": { "timeoutMs": 5000, "intervalMs": 250 } when the instruction implies eventual consistency ("eventually shows", "after a moment") and no deterministic wait primitive fits.
+8a. PLACEHOLDERS — name the value you used, do not copy it. A name listed under "## Values" is a placeholder: the step text shows it as {{email}} or \${data.url}, and the block says what it holds on this run. When a value you type, upload, navigate to, select by, press, send or expect came from one, write the PLACEHOLDER in that field and not the value it holds — "value", "filePath", "filePaths", "url", "selector", "key", "expected", an api_call's "body" and "apiHeaders", and a predicate "condition". The framework substitutes it at the moment it acts, so the page still receives the real value; naming it is what lets this step be re-run with a different one. Never put a placeholder in "description" — that is your own words about what you did. A placeholder that follows "store as" or "save as" names a variable you are DEFINING: it belongs in "as", it is not a reference, and it will not be listed under "## Values". "***" is a mask over a secret value, never a value to type — write the placeholder and the framework types the real thing. Only the names listed under "## Values" are placeholders: a literal "{{count}}" you can see rendered in the page is that page's text, and a step that writes "\\{{count}}" means those characters literally.
+   Example — step "Enter the email {{email}}", with "## Values" listing {{email}}: { "action": "type", "selector": "#email", "value": "{{email}}", "description": "Enter the email address" }. NOT "value": "demo@securebank.com".
+   Counter-example — step "Verify {{outcome}}", where "## Values" shows {{outcome}} holds the sentence "the Dashboard page is shown": that sentence is not a value to put in a field, it is something to interpret, so read it and assert what it describes — { "action": "assert", "against": "dom", "condition": "visible page heading", "expected": "Dashboard", "description": "Dashboard page is shown" }. A placeholder goes in a field only when that field is filled FROM its value.
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 10a. UPLOADING A FILE. A step that names a file PATH — a token with a file extension or a folder separator, e.g. "Upload file \\attachments\\logo.png", "Attach receipt-1.png and receipt-2.png", "Use the Choose file button to upload id.pdf" — is an upload. (A "choose"/"select" with no path is a dropdown: rule 11.) Emit an "upload" action: { "action": "upload", "selector": "#statement-file", "filePath": "attachments/logo.png", "description": "Upload logo.png as the statement" }.
@@ -336,6 +374,14 @@ After switching, set "needs_reeval": true so the framework captures the new page
 
 /**
  * Build the user message content for a step — text prompt plus screenshot.
+ *
+ * `stepInstruction` is the step as AUTHORED where the caller has that form:
+ * `{{name}}` and `${…}` intact, with `values` saying what each one holds
+ * (stories/placeholder-preserving-actions.md, decision 1). The `## Values`
+ * block sits between the step and the DOM, and is absent when the step
+ * references nothing — a plain step's prompt is then byte-identical to the one
+ * this function built before the block existed, which is what makes the change
+ * additive for every test that uses no parameters.
  */
 export function buildStepMessage(
   stepInstruction: string,
@@ -345,6 +391,7 @@ export function buildStepMessage(
   openPages?: PageInfo[],
   testInfoSection?: string,
   scrollPosition?: ScrollPositionInfo,
+  values?: StepValues,
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -363,9 +410,13 @@ export function buildStepMessage(
     ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]'
     : '';
 
+  // Absent, not empty, when the step references nothing — see the doc comment.
+  const valuesText = formatValuesBlock(values);
+  const valuesBlock = valuesText ? `\n## Values\n${valuesText}\n` : '';
+
   const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
-${scrollBlock}
+${scrollBlock}${valuesBlock}
 ## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
@@ -665,6 +716,22 @@ export function buildRetryContext(input: PriorFailureContext[] | RetryDiagnostic
 /**
  * Build the user message for a continuation turn in a multi-turn step.
  * Sent on turns > 1, after the AI has requested re-evaluation via needs_reeval.
+ *
+ * `values` replaces the raw `name = "value"` rendering of the WHOLE resolved
+ * parameter map with the same masked `## Values` table turn 1 carries, scoped
+ * to what this step references (stories/placeholder-preserving-actions.md,
+ * decision 2). It was the widest of the three surfaces a secret reached: every
+ * continuation turn of every step rendered every parameter, unmasked, whether
+ * the step referenced it or not.
+ *
+ * `capturedVariables` is the pre-`values` form and is used only when `values`
+ * is absent, so callers that have not been threaded yet keep today's block
+ * rather than losing it. Once every caller passes `values`, the parameter and
+ * this fallback go.
+ *
+ * `authoredInstruction` is the step as written, placeholders intact — what the
+ * two echoes of the instruction should show when the caller has that form.
+ * Defaults to `originalInstruction`.
  */
 export function buildContinuationMessage(
   originalInstruction: string,
@@ -678,14 +745,26 @@ export function buildContinuationMessage(
   explorationResults?: string[],
   testInfoSection?: string,
   scrollPosition?: ScrollPositionInfo,
+  values?: StepValues,
+  authoredInstruction?: string,
 ): ChatMessage {
+  const instructionText = authoredInstruction ?? originalInstruction;
+
   const actionLines = completedActions.length > 0
     ? completedActions.map((a) => `  - ${a.description}`).join('\n')
     : '  (none)';
 
-  const variableLines = Object.entries(capturedVariables).length > 0
+  const legacyVariableLines = Object.entries(capturedVariables).length > 0
     ? Object.entries(capturedVariables).map(([k, v]) => `  ${k} = "${v}"`).join('\n')
     : '  (none)';
+
+  // The masked table when the caller has one, today's unmasked map when it
+  // does not. Under turn 1's heading, because the system prompt's placeholder
+  // rule is written in terms of "the names listed under ## Values" and a turn
+  // that named the block something else would put its placeholders outside it.
+  const valuesSection = values
+    ? `## Values\n${formatValuesBlock(values) || '  (none)'}`
+    : `Variables captured so far:\n${legacyVariableLines}`;
 
   const openPagesSection = formatOpenPagesSection(openPages);
 
@@ -702,13 +781,12 @@ export function buildContinuationMessage(
 
   const textContent = `${testInfoBlock}You are continuing the execution of a step.
 
-Original instruction: "${originalInstruction}"
+Original instruction: "${instructionText}"
 
 Actions completed so far (turns 1–${turnNumber - 1}):
 ${actionLines}
 
-Variables captured so far:
-${variableLines}
+${valuesSection}
 
 Current URL: ${currentUrl}${scrollLine}
 
@@ -717,7 +795,7 @@ ${openPagesSection}${explorationSection}## DOM Snapshot
 ${domSnapshot}
 \`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
-What is the next action needed to complete the original instruction: "${originalInstruction}"?
+What is the next action needed to complete the original instruction: "${instructionText}"?
 Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "action": "noop", "description": "<why nothing is needed>", "needs_reeval": false }.`;
 
   if (screenshotBase64) {
@@ -836,6 +914,16 @@ If matched is "waiting", return an empty actions array. Do NOT guess — if the 
 
 /**
  * Format a completed step as a conversation history entry.
+ *
+ * `instruction` MUST be the MASKED substituted text — `redact(interpolated,
+ * secretsNow())` — not the raw substituted text and not the authored one
+ * (stories/placeholder-preserving-actions.md, decision 2). Substituted,
+ * because the history says what actually happened on the page and a later
+ * step reads it as evidence; masked, because this block is the surface that
+ * carried the password to the model on every step AFTER the one that typed
+ * it, so masking the step prompt alone would change nothing. The runners own
+ * that call — the entry is built where `secretsNow()` is, and this function
+ * cannot mask what it is handed without the run's secrets.
  */
 export function formatStepHistoryEntry(
   index: number,
@@ -942,21 +1030,40 @@ export interface StepCodePromptInput {
 }
 
 /**
- * The "Parameters in scope" block of the generation and repair prompts: each
- * `{{name}}` with its value on this run, then each environment reference with
- * its value and the `step.getVar` call that reads it. One formatter, so the
- * two prompts cannot describe the same reference two ways.
+ * The "Parameters in scope" block of the generation and repair prompts, and
+ * the `## Values` block of the step and continuation prompts: each `{{name}}`
+ * with its value on this run, then each environment reference with its value
+ * and the `step.getVar` call that reads it. One formatter, so no two prompts
+ * can describe the same reference two ways
+ * (stories/placeholder-preserving-actions.md, "Prompt").
+ *
+ * Secret-named entries render as `"***"` (decision 2). By NAME for a
+ * `{{name}}` — `isSecretName` — and by PATH for a `${…}` reference, so
+ * `${data.secrets.smtp.host}` masks exactly as `envDataSecretValues` masks its
+ * value. The model never needs a secret's value to name the placeholder that
+ * holds it, and masking here is what makes the CLI and TestBench compiles
+ * agree: only the CLI's was masked before, by the accident of reading
+ * `report.parameters` after `redactReport`.
+ *
+ * `unmask` is the per-test escape hatch: names (and refs) the author has
+ * declared are not secrets after all, because `isSecretName` matches `key`
+ * and a `keyword` column the model must find in the DOM is a real casualty.
  */
 export function formatParameterBlock(
   parameters: Array<{ name: string; value: string }>,
   envRefs: Array<{ ref: string; value: string }>,
+  unmask: ReadonlySet<string> = new Set<string>(),
 ): string {
   if (parameters.length === 0 && envRefs.length === 0) return '(this step uses no parameters)';
+  const show = (secret: boolean, name: string, value: string): string =>
+    JSON.stringify(secret && !unmask.has(name) ? MASK : value);
   return [
-    ...parameters.map((p) => `- {{${p.name}}} resolved to ${JSON.stringify(p.value)} on this run`),
+    ...parameters.map(
+      (p) => `- {{${p.name}}} resolved to ${show(isSecretName(p.name), p.name, p.value)} on this run`,
+    ),
     ...envRefs.map(
       (r) =>
-        `- \${${r.ref}} resolved to ${JSON.stringify(r.value)} on this run — read it with ` +
+        `- \${${r.ref}} resolved to ${show(isSecretRef(r.ref), r.ref, r.value)} on this run — read it with ` +
         `step.getVar(${JSON.stringify(r.ref)}); the value differs per environment`,
     ),
   ].join('\n');
@@ -1052,6 +1159,35 @@ function measuredSelectorRules(actions: TranscriptAction[]): string | undefined 
   ].filter(Boolean).join('\n');
 
   return `${counts}\n${handles}`;
+}
+
+/** A `{{name}}` or `${…}` the model left in a field, in the wider grammar the
+ *  act-time check uses — `{{ email }}` and `{{Email}}` are placeholders too. */
+const PLACEHOLDER_IN_FIELD = /\{\{\s*\w+\s*\}\}|\$\{[^}]+\}/;
+
+/**
+ * The one clause `resolvedSelector` cannot be allowed to overrule
+ * (stories/placeholder-preserving-actions.md, "Generator and compile").
+ *
+ * Targeting measures the SUBSTITUTED selector, so `text={{plan}}` is measured
+ * as `text=Premium` and comes back with a concrete `attribute` handle for row
+ * 1's element. Following the ordinary rule there would bake row 1's target
+ * back into the code the placeholder existed to free. Emitted only when a
+ * recorded selector actually carries a placeholder — a rule the transcript
+ * cannot trigger is pure cost on every compile.
+ *
+ * Indented as a sub-clause on purpose: `buildStepCodePrompt` computes the
+ * post-condition rule's number from the last `^N. ` line of the selector
+ * rules, so a new numbered rule here would shift it.
+ */
+function placeholderSelectorRule(actions: TranscriptAction[]): string {
+  const carries = actions.some((a) => a.selector !== undefined && PLACEHOLDER_IN_FIELD.test(a.selector));
+  if (!carries) return '';
+  return (
+    `\n   - A selector that CARRIES A PLACEHOLDER (\`text={{plan}}\`, \`#row-\${data.id}\`) is built from that ` +
+    `value: rebuild it from \`step.getVar('plan')\` whatever \`resolvedBy\` says. Its \`resolvedSelector\` was ` +
+    `measured on the substituted form, so it names THIS run's element and is advisory only here.`
+  );
 }
 
 /** The six actions `ctx.tabs` and `ctx.browsers` cover. */
@@ -1185,7 +1321,9 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
   // The selector rules key off the measurement when there is one and stay
   // today's inference when there is not, so a transcript with no `targeting`
   // builds byte-for-byte the prompt it built before the measurement existed.
-  const selectorRules = measuredSelectorRules(input.actions) ?? SELECTOR_RULE_INFERRED;
+  const selectorRules =
+    (measuredSelectorRules(input.actions) ?? SELECTOR_RULE_INFERRED) +
+    placeholderSelectorRule(input.actions);
   // The post-condition rule follows whatever the selector rules ended on —
   // one numbered rule when nothing was measured or nothing resolved, two when
   // the `resolvedBy` rule is in play.

@@ -19,6 +19,21 @@ export { isSecretName };
 
 export const MASK = '***';
 
+/**
+ * Is a `${…}` reference a secret? By its PATH, not its last segment:
+ * `${data.secrets.smtp.host}` is one because `secrets` is on the way to it.
+ *
+ * The same rule {@link envDataSecretValues} applies when it collects the
+ * values to mask — everything under a secret-named key — expressed over the
+ * reference instead of over the tree, for the surfaces that hold the
+ * reference and not the value (the prompt's `## Values` block). `${env.X}`
+ * has two segments and masks on the second, which is where an `.env` secret's
+ * name lives.
+ */
+export function isSecretRef(ref: string): boolean {
+  return ref.split('.').some((segment) => isSecretName(segment));
+}
+
 /** The values to mask: those of secret-named parameters, plus any the caller
  *  names (the environment's secrets). Empty values are never secrets — there
  *  is nothing to find, and `split('')` would shred the text. */
