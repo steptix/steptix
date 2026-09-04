@@ -109,7 +109,12 @@ the page.
 > `Set {{name}} to` with no double-quoted remainder, or with anything but
 > whitespace after the closing quote, is a parse error naming the line —
 > before a browser is launched — in the CLI, the server and the MCP assembler
-> alike.
+> alike; (11) a `Set` whose target is a declared parameter of the enclosing
+> skill, or a column of the enclosing looped section's table, is refused at
+> parse time with a message that names the target and says why — while a
+> `Set` to a run-level row column (a table directly under `## Steps`)
+> assigns normally, overwriting that row's seeded value for the rest of the
+> instance.
 
 ## What was measured, so nobody re-derives it
 
@@ -165,6 +170,24 @@ Everything below is read out of the current tree.
   already applies an `out.x="alias"` rename to a declared output. Free, but
   free because of spelling rather than design — the story pins it with a test
   so the next grammar change cannot silently unpin it.
+
+- **Two kinds of value are baked into step text at expansion time, and a
+  target with one of their names would be baked over.** `applySkillScope`'s
+  third pass is `interpolate(s, call.args)`: a skill *parameter* is not a
+  variable at run time — its value is written into the body text when the
+  call expands (the `varScope` comment says so: "their values are
+  interpolated into the text, never stored under a name"). Since PR #124, a
+  looped section's body gets the same treatment with its row:
+  `interpolateQuiet(s, rowBindings)` (`src/skills/expander.ts`), applied
+  before the body recurses so a `[skill: x arg="{{col}}"]` line inside it
+  reaches the call parser with the value in place
+  ([data-driven-rows](data-driven-rows.md), "interpolated into the body text
+  at expansion time"). A `Set {{col}} to "…"` in such a body would arrive at
+  the runner as `Set 42 to "…"` — a parse error whose message names a number
+  nobody typed. Run-level rows are different: a table directly under
+  `## Steps` reaches the run through `resolveParameters(test.parameters,
+  row)` (`src/runner/test-runner.ts`), so a run-row column *is* a runtime
+  variable, seeded per instance, and assignable like any other.
 
 - **The server's partial-re-run guard would refuse a skill-internal target.**
   `if (isPartialRerun && /\{\{__skill\w*\}\}/.test(interpolated))` runs
@@ -401,6 +424,21 @@ whole interpolated line. For any other step the two are the same string.
   caller under its alias — because the behaviour is currently free by
   spelling, and a later grammar change that stops treating the target as a
   placeholder would take it away without failing anything.
+
+- **A target that expansion would bake over is refused at parse time, by
+  name.** Inside a skill body, `Set {{p}} to "…"` where `p` is a declared
+  `## Parameters` name; inside a looped section body, `Set {{col}} to "…"`
+  where `col` is one of that table's columns. Both are refused when the
+  *authored* body is validated — before expansion, so the message can say
+  what actually happened: *"`{{username}}` is a parameter of this skill, and
+  parameters are values written into the step text, not variables — assign
+  to an output or an internal name instead"*, and the row equivalent. Left
+  to run, the target would already be a literal by the time the runner
+  looked, and the author would be reading a parse error about `Set
+  demo@securebank.com to …`. Refusing by name at the layer that still knows
+  the name is the same choice the sections work made for `[`-leading
+  headings. Run-row columns are deliberately *not* refused: they are runtime
+  variables, and overwriting one in a later step is an ordinary thing to want.
 
 - **Errands get it too, and the receipt is the only scope.** The value lands
   in `captures` like a `store as` would; a later errand starts empty, exactly
