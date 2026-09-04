@@ -21,6 +21,7 @@ export interface RunOptions {
   reporter?: string;
   env?: string;
   failOnHealed?: boolean;
+  row?: number;
 }
 
 export function registerRunCommand(program: Command): void {
@@ -36,6 +37,10 @@ export function registerRunCommand(program: Command): void {
     .option('--browser <engine>', 'Browser engine: chromium, firefox, webkit')
     .option('--reporter <type>', 'Reporter type (html)', 'html')
     .option('--env <name>', 'Environment name — loads .env.<name> from project root')
+    // 1-based, matching the row numbers the report shows. Narrows a
+    // data-driven test to one row for a debugging loop; the surviving instance
+    // keeps its original index, so it still reports "row 3 of 5".
+    .option('--row <n>', 'Run only this data row (1-based) of a data-driven test', parseInt)
     // Off by default: a healed run passes today and must keep passing today.
     // The flag is how CI opts into treating "passed, but four broken entries
     // healed under AI" as a build failure
@@ -148,6 +153,17 @@ async function runCommand(
     process.exit(0);
   }
 
+  // `--row` names a row of one test. Against a glob it would mean "row 3 of
+  // whichever files happen to have three rows", and abort the rest at the
+  // first file that has fewer — so it is refused rather than interpreted.
+  if (opts.row !== undefined && filteredTests.length > 1) {
+    logger.error(
+      `--row applies to a single test, but ${filteredTests.length} files matched. ` +
+        `Name one test file.`,
+    );
+    process.exit(1);
+  }
+
   console.log(chalk.bold(`\nRunning ${filteredTests.length} test(s)...\n`));
 
   // Run tests
@@ -160,6 +176,7 @@ async function runCommand(
       // When unset, runTest falls back to each test's frontmatter env, matching
       // this command's two-pass env precedence above.
       ...(cliEnvName !== undefined && { runEnvName: cliEnvName }),
+      ...(opts.row !== undefined && { row: opts.row }),
     });
   } catch (err) {
     logger.error(`Fatal error during test run: ${String(err)}`);
@@ -250,6 +267,17 @@ function printSummary(summary: RunSummary): void {
   console.log(`  Total:    ${summary.totalTests}`);
   console.log(`  ${chalk.green('Passed:')}   ${chalk.green(String(summary.passedTests))}`);
   console.log(`  ${chalk.red('Failed:')}   ${chalk.red(String(summary.failedTests))}`);
+  // A data-driven test counts once in Total, so without this line five rows
+  // would be invisible behind "Total: 1".
+  const rowLines = summary.reports.flatMap((r) => r.rows ?? []);
+  if (rowLines.length > 0) {
+    const passed = rowLines.filter((r) => r.status === 'passed').length;
+    const failed = rowLines.filter((r) => r.status === 'failed').length;
+    const notRun = rowLines.filter((r) => r.status === 'skipped').length;
+    const parts = [`${passed} passed`, `${failed} failed`];
+    if (notRun > 0) parts.push(`${notRun} not run`);
+    console.log(`  Rows:     ${rowLines.length} — ${parts.join(', ')}`);
+  }
   console.log(`  Duration: ${(summary.totalDurationMs / 1000).toFixed(1)}s`);
   console.log(`  Tokens:   ${summary.totalTokensUsed.toLocaleString()}`);
 

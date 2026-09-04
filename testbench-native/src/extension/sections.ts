@@ -14,7 +14,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { extractSections, matchText, sectionNameError } from 'ai-ui-automation-runner-core';
+import { parseSectionDataRows, extractSections, matchText, sectionNameError } from 'ai-ui-automation-runner-core';
 
 /** One entry of the `sections` request field. */
 export interface SectionPayloadEntry {
@@ -22,6 +22,9 @@ export interface SectionPayloadEntry {
   headingLine: number;
   steps: string[];
   stepLines: number[];
+  /** Rows from a table under the `### Name` heading: the server expands the
+   *  body once per row (stories/data-driven-rows.md, part B). */
+  rows?: Array<Record<string, string>>;
 }
 
 /**
@@ -43,6 +46,17 @@ export function buildSectionsPayload(text: string): Record<string, SectionPayloa
   const sections = extractSections(text);
   if (sections.length === 0) return null;
 
+  // Rows for any section that carries a data table (part B). Scanned rather
+  // than read off `extractSections`, whose return shape is frozen by the
+  // sections contract. A malformed table is reported by the run controller,
+  // which surfaces the message; here it simply means no rows to ship.
+  let rowsByName = new Map<string, Array<Record<string, string>>>();
+  try {
+    rowsByName = parseSectionDataRows(text);
+  } catch {
+    /* the run controller reports it */
+  }
+
   const payload = Object.create(null) as Record<string, SectionPayloadEntry>;
   for (const section of sections) {
     const key = matchText(section.name);
@@ -55,6 +69,7 @@ export function buildSectionsPayload(text: string): Record<string, SectionPayloa
       headingLine: section.headingLine,
       steps: section.steps.map((s) => s.instruction),
       stepLines: section.steps.map((s) => s.line),
+      ...(rowsByName.has(section.name) && { rows: rowsByName.get(section.name)! }),
     };
   }
   return Object.keys(payload).length > 0 ? payload : null;

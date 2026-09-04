@@ -1007,7 +1007,19 @@ export function resolveCompileParameters(
   const unresolved: string[] = [];
   for (const [key, rawValue] of Object.entries(raw)) {
     if (dataRow && dataRow[key] !== undefined) {
-      values[key] = dataRow[key]!;
+      // Through the `$VAR` rule, as the runner resolves it — a cell that
+      // resolved one way at compile and another at run would generate code
+      // against a value the run never sees.
+      const cell = dataRow[key]!;
+      if (cell.startsWith('$')) {
+        const fromEnv = env[cell.slice(1)];
+        if (fromEnv !== undefined) {
+          values[key] = fromEnv;
+          continue;
+        }
+        unresolved.push(key);
+      }
+      values[key] = cell;
       continue;
     }
     if (rawValue.startsWith('$')) {
@@ -1038,6 +1050,13 @@ export async function firstDataRow(
   test: ParsedTest,
   projectRoot: string,
 ): Promise<{ row: Record<string, string>; of: number } | undefined> {
+  // An inline table under `## Steps` needs no project root — it was parsed
+  // out of the file itself. Checked first, and the parser refuses a file that
+  // has both, so the order only decides which branch runs, never which wins.
+  if (test.dataRows) {
+    const inline = test.dataRows[0];
+    return inline ? { row: inline, of: test.dataRows.length } : undefined;
+  }
   const dataFile = test.frontmatter.dataFile;
   if (!dataFile) return undefined;
   const rows = await loadDataFile(dataFile, projectRoot);

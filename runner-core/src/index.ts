@@ -2,6 +2,7 @@ export * from './errors.js';
 export * from './env-file.js';
 export * from './user-root.js';
 export * from './step-lines.js';
+export * from './data-rows.js';
 export * from './section-match.js';
 export * from './section-index.js';
 export * from './sse-parser.js';

@@ -143,6 +143,16 @@ export interface ParsedSection {
   rawSteps: string[];
   /** 1-based raw-file line per body step, parallel to `steps`. */
   stepLines: number[];
+  /**
+   * Rows from a table directly under this section's `### Name` heading: every
+   * call of the section runs its body once per row, in the same session, with
+   * the row bound over the caller's scope for that iteration
+   * (stories/data-driven-rows.md, part B).
+   *
+   * Absent — never empty — when the section has no table, so a section called
+   * once still expands exactly as it did before the feature.
+   */
+  rows?: Array<Record<string, string>>;
 }
 
 /** A single parsed test file */
@@ -157,6 +167,17 @@ export interface ParsedTest {
   config: TestConfig;
   /** Resolved parameter key-value pairs */
   parameters: Record<string, string>;
+  /**
+   * Rows from a data table placed directly under `## Steps`: the run executes
+   * once per row, with the row's columns laid over `parameters`
+   * (stories/data-driven-rows.md, part A). The external equivalent is
+   * `frontmatter.dataFile`, and a file carrying both is refused at parse.
+   *
+   * Absent — never an empty array — when the file has no table, so every
+   * consumer's `if (test.dataRows)` reads the same and a header-only table is
+   * a parse error rather than a run that silently loops zero times.
+   */
+  dataRows?: Array<Record<string, string>>;
   /** Ordered list of natural language step instructions (skills already expanded) */
   steps: string[];
   /**
@@ -286,6 +307,14 @@ export interface TestInstance {
   test: ParsedTest;
   /** Data row index for data-driven tests (0-based), undefined for single runs */
   dataRowIndex?: number;
+  /** How many rows the run has in total. Carried on the instance rather than
+   *  re-derived, so `--row 3` can still report "row 3 of 5" after the other
+   *  four instances have been filtered away. */
+  dataRowCount?: number;
+  /** The row's cells as authored, before `## Parameters` were merged under
+   *  them. What the report's matrix table and loop bands display — the merged
+   *  `resolvedParameters` would also show every shared parameter. */
+  dataRowValues?: Record<string, string>;
   /** Parameter values merged with data row values */
   resolvedParameters: Record<string, string>;
 }

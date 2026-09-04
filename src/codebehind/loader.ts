@@ -283,24 +283,57 @@ function resolveDefiningSite(
   return { file: frame.uri };
 }
 
-/** Variable view for a step: the nearest ancestor **skill** frame's scope. */
+/**
+ * Variable view for a step, composed along its frame chain.
+ *
+ * Two different rules, because the two things a scope carries answer
+ * different questions:
+ *
+ *  - `renames` come from the nearest ancestor **skill** frame alone. They are
+ *    that skill instance's `__skill<N>_` namespace, and an outer skill's
+ *    namespace is not this one's.
+ *  - `inputs` are merged from **every** enclosing frame that has them,
+ *    innermost winning. A looped section binds its row as `inputs`
+ *    (stories/data-driven-rows.md, part B), and a body step inside one needs
+ *    to read that row — including from inside a skill the body calls, and
+ *    including the enclosing row of an outer loop, which is what makes a
+ *    nested loop's `{{account}}` resolve.
+ *
+ * Before section rows this walked to the nearest skill frame and returned an
+ * empty scope for anything else, so a looped body's `{{file}}` reached the
+ * generator with no name→value pair at all: it would inline row 1's literal
+ * with the leak guard blind, and `getVar('file')` would read `undefined` at
+ * replay.
+ */
 function varScopeFor(
   frameId: string,
   frames: Record<string, ExpandedFrame>,
 ): CodeBehindVarScope {
   let current: ExpandedFrame | undefined = frameId ? frames[frameId] : undefined;
   const seen = new Set<string>();
+  let renames: Record<string, string> | undefined;
+  /** Innermost-first, so the merge below can let the innermost win. */
+  const inputLayers: Array<Record<string, string>> = [];
+
   while (current && !seen.has(current.id)) {
     seen.add(current.id);
-    if (current.kind === 'skill') {
-      return {
-        renames: current.varScope ?? {},
-        inputs: current.inputs ?? {},
-      };
+    if (current.inputs) inputLayers.push(current.inputs);
+    // First skill ancestor wins the namespace, but the walk continues: an
+    // outer looped section's row is still in scope for a step inside it.
+    if (renames === undefined && current.kind === 'skill') {
+      renames = current.varScope ?? {};
     }
     current = current.parentId ? frames[current.parentId] : undefined;
   }
-  return EMPTY_SCOPE;
+
+  if (renames === undefined && inputLayers.length === 0) return EMPTY_SCOPE;
+
+  const inputs: Record<string, string> = {};
+  // Outermost first, so an inner layer overwrites an outer one of the same
+  // name — the shadowing rule a nested loop needs.
+  for (const layer of inputLayers.reverse()) Object.assign(inputs, layer);
+
+  return { renames: renames ?? {}, inputs };
 }
 
 interface LoadedCodeBehind {

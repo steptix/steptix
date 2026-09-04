@@ -190,3 +190,122 @@ timeout: 60s
     expect(result.parameters['url']).toBe('http://localhost:8080/path');
   });
 });
+
+/**
+ * A GFM table directly under `## Steps` makes the run loop, one iteration per
+ * row (stories/data-driven-rows.md, part A). Every malformed shape below is a
+ * parse error rather than a silent reading, because the failure mode they
+ * share is a test that quietly runs a different number of times than the
+ * author wrote.
+ */
+describe('data rows under ## Steps', () => {
+  const table = (body: string) => `# Matrix\n\n## Steps\n${body}\n1. Go\n2. Stop\n`;
+
+  it('reads a table above the steps into dataRows', () => {
+    const md = table(
+      '| email | password | outcome |\n' +
+        '|-------|----------|---------|\n' +
+        '| a@b.c | pw1      | dash    |\n' +
+        '|       | pw2      | banner  |\n\n',
+    );
+    const result = parseTestContent(md);
+    expect(result.dataRows).toEqual([
+      { email: 'a@b.c', password: 'pw1', outcome: 'dash' },
+      { email: '', password: 'pw2', outcome: 'banner' },
+    ]);
+    // The table is not a step, and does not disturb the step/line zip.
+    expect(result.steps).toEqual(['Go', 'Stop']);
+  });
+
+  it('leaves dataRows absent — not empty — when there is no table', () => {
+    const result = parseTestContent('# T\n\n## Steps\nProse is fine alone.\n\n1. Go\n');
+    expect(result.dataRows).toBeUndefined();
+  });
+
+  it('allows blank lines and HTML comments before the table', () => {
+    const md = table('\n<!-- why these rows -->\n| a |\n|---|\n| 1 |\n\n');
+    expect(parseTestContent(md).dataRows).toEqual([{ a: '1' }]);
+  });
+
+  it('honours an escaped pipe in a cell', () => {
+    const md = table(String.raw`| a | b |` + '\n|---|---|\n' + String.raw`| x \| y | z |` + '\n\n');
+    expect(parseTestContent(md).dataRows).toEqual([{ a: 'x | y', b: 'z' }]);
+  });
+
+  it('does not let backticks protect a pipe — that row is ragged', () => {
+    // Measured against the repo's marked: `` `a|b` `` splits into two cells.
+    // The scanner matching marked is the point; a cell the two disagree about
+    // would validate here and run with different values.
+    const md = table('| a | b |\n|---|---|\n| `x|y` | z |\n\n');
+    expect(() => parseTestContent(md)).toThrow(/Ragged row.*3 cell\(s\) against 2/s);
+  });
+
+  it('refuses a ragged row, naming its line', () => {
+    const md = table('| a | b |\n|---|---|\n| 1 |\n\n');
+    expect(() => parseTestContent(md)).toThrow(/Ragged row.*:6.*1 cell\(s\) against 2/s);
+  });
+
+  it('refuses a column name that is not an identifier', () => {
+    expect(() => parseTestContent(table('| first name |\n|---|\n| x |\n\n'))).toThrow(
+      /Invalid column name "first name"/,
+    );
+  });
+
+  it('refuses a duplicate column', () => {
+    expect(() => parseTestContent(table('| a | a |\n|---|---|\n| 1 | 2 |\n\n'))).toThrow(
+      /Duplicate column "a"/,
+    );
+  });
+
+  it('refuses a header with no rows rather than looping zero times', () => {
+    expect(() => parseTestContent(table('| a |\n|---|\n\n'))).toThrow(/has no rows/);
+  });
+
+  it('refuses a cell holding a placeholder', () => {
+    expect(() => parseTestContent(table('| a |\n|---|\n| {{x}} |\n\n'))).toThrow(
+      /holds a \{\{placeholder\}\}/,
+    );
+  });
+
+  it('refuses a second table', () => {
+    const md = table('| a |\n|---|\n| 1 |\n\n| b |\n|---|\n| 2 |\n\n');
+    expect(() => parseTestContent(md)).toThrow(/Second table/);
+  });
+
+  it('refuses a table after the first step', () => {
+    // marked folds this into the step above it, so there is no table token at
+    // all — the raw scan is the only side that can refuse it.
+    const md = '# T\n\n## Steps\n1. Go\n\n| a |\n|---|\n| 1 |\n';
+    expect(() => parseTestContent(md)).toThrow(/comes after a step/);
+  });
+
+  it('refuses prose between the heading and the table', () => {
+    const md = '# T\n\n## Steps\nSome words.\n\n| a |\n|---|\n| 1 |\n\n1. Go\n';
+    expect(() => parseTestContent(md)).toThrow(/comes after prose at line 4/);
+  });
+
+  it('refuses an indented table, which markdown reads as a code block', () => {
+    const md = '# T\n\n## Steps\n    | a |\n    |---|\n    | 1 |\n\n1. Go\n';
+    expect(() => parseTestContent(md)).toThrow(/indented/);
+  });
+
+  it('refuses a table in a skill file', () => {
+    const md = '---\ntype: skill\n---\n\n# S\n\n## Steps\n| a |\n|---|\n| 1 |\n\n1. Go\n';
+    expect(() => parseTestContent(md)).toThrow(/skill's own `## Steps`/);
+  });
+
+  it('refuses a table alongside dataFile', () => {
+    const md = '---\ndataFile: users.csv\n---\n\n# T\n\n## Steps\n| a |\n|---|\n| 1 |\n\n1. Go\n';
+    expect(() => parseTestContent(md)).toThrow(/both a data table.*dataFile: users\.csv/s);
+  });
+
+  it('ignores the run-history block the runner appends after the steps', () => {
+    // `appendRunHistory` writes an HTML marker and a `## Latest runs` heading
+    // at the end of the file. A file whose last section is `## Steps` must
+    // still parse after the runner has written to it.
+    const md =
+      table('| a |\n|---|\n| 1 |\n\n') +
+      '\n<!-- latest-runs:start -->\n## Latest runs\n- passed\n<!-- latest-runs:end -->\n';
+    expect(parseTestContent(md).dataRows).toEqual([{ a: '1' }]);
+  });
+});

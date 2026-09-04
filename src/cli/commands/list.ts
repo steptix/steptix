@@ -137,7 +137,10 @@ async function readTestSummary(
     relativePath: path.relative(baseDir, filePath),
     title,
     tags: frontmatter.tags,
-    hasDataFile: Boolean(frontmatter.dataFile),
+    // `list` never parses the body — it reads frontmatter and greps the H1 —
+    // so an inline table has to be spotted the same cheap way: a pipe-led
+    // line between the `## Steps` heading and its first numbered item.
+    hasDataFile: Boolean(frontmatter.dataFile) || hasInlineDataTable(body),
   };
 
   if (frontmatter.timeout !== undefined) {
@@ -145,4 +148,28 @@ async function readTestSummary(
   }
 
   return summary;
+}
+
+/**
+ * True when the body has a data table under `## Steps`: a pipe-led line
+ * between that heading and the first numbered item.
+ *
+ * Deliberately looser than the parser's scan — `list` reports a tag, it does
+ * not validate. A file this says yes to and the parser then refuses is a file
+ * that was going to be refused anyway, with a better message.
+ */
+function hasInlineDataTable(body: string): boolean {
+  const lines = body.split(/\r?\n/);
+  let inSteps = false;
+  for (const raw of lines) {
+    if (/^#{1,6}\s+\S/.test(raw)) {
+      if (inSteps) return false; // a heading closes the head region
+      inSteps = /^##\s+steps\s*$/i.test(raw);
+      continue;
+    }
+    if (!inSteps) continue;
+    if (/^\d+\.\s+\S/.test(raw)) return false; // first step, no table above it
+    if (/^\s*\|/.test(raw)) return true;
+  }
+  return false;
 }

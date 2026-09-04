@@ -3,6 +3,26 @@ import type { ActionTargeting } from '../browser/actions.js';
 
 export type StepStatus = 'passed' | 'failed' | 'skipped';
 
+/**
+ * Which iteration of a loop a step belongs to (stories/data-driven-rows.md,
+ * decision 12). One run writes one report, so the report holds every row's
+ * steps and the row has to travel on the step rather than on the report.
+ *
+ * `kind: 'row'` is a run row — a table under `## Steps`, where the flow being
+ * looped is the whole run, so there is no `label`. `kind: 'iteration'` is a
+ * section loop, where `label` is the section's name.
+ */
+export interface LoopMarker {
+  kind: 'row' | 'iteration';
+  /** The looped section's name; absent for a run row. */
+  label?: string;
+  /** 1-based. */
+  index: number;
+  count: number;
+  /** The row's cells, for the band and the matrix table. */
+  values: Record<string, string>;
+}
+
 /** Captured data from an API call sub-action */
 export interface ApiCallData {
   method: string;
@@ -120,6 +140,9 @@ export interface StepResult {
   index: number;
   instruction: string;
   status: StepStatus;
+  /** Set when this step ran inside a loop. Absent on an ordinary step, so a
+   *  report with no loops is byte-identical to one from before the feature. */
+  loop?: LoopMarker;
   /** Ordered turns — each groups an AI decision with the sub-actions it produced */
   turns: TurnResult[];
   /** All assertions evaluated during this step, in execution order */
@@ -319,6 +342,23 @@ export interface FailureDiagnosis {
 }
 
 /** Complete test run report data */
+/** One row's line in a merged report's matrix table. */
+export interface RowSummaryLine {
+  /** 1-based row number, matching the `loop.index` on that row's steps. */
+  index: number;
+  /** The row's cells as authored. */
+  values: Record<string, string>;
+  /** `skipped` is a row that never ran — the loop stopped before reaching it. */
+  status: StepStatus;
+  /** Why it never ran, e.g. "stopped" / "paused". Set only when skipped. */
+  notRunReason?: string;
+  durationMs: number;
+  tokensUsed: number;
+  /** This row's video, when one was kept. A merged report holds one `.webm`
+   *  per row, so the link belongs on the row rather than on the report. */
+  videoRelPath?: string;
+}
+
 export interface TestReport {
   /**
    * Why the run failed before (or without) a step failing — a code-behind
@@ -343,9 +383,17 @@ export interface TestReport {
   /** ISO 8601 date string */
   date: string;
   baseUrl?: string;
+  /** Parameters every row shared. A data-driven run has one set of these per
+   *  row, so the per-row values live on each step's `loop.values` and in the
+   *  matrix table instead (stories/data-driven-rows.md, decision 12). */
   parameters?: Record<string, string>;
-  /** Data row number for data-driven tests (1-based) */
-  dataRow?: number;
+  /**
+   * One line per run row, in row order — the matrix table rendered above the
+   * steps. Present only on a merged data-driven report; a row that never ran
+   * still gets an entry, because a matrix that silently omits what it skipped
+   * is worse than no matrix.
+   */
+  rows?: RowSummaryLine[];
   /** AI-generated root-cause analysis, populated when the test fails and diagnoseFailures is enabled */
   diagnosis?: FailureDiagnosis;
   /** True when the run entered the interactive REPL at any point (planned [interactive] step or post-failure handoff). */

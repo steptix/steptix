@@ -26,6 +26,11 @@ class FakeApiClient {
     /** Session ids passed to closeSession(), in call order. Lets tests assert
      *  WHICH session was closed (e.g. a batch's unique `<path>::run-N`). */
     this.closeSessionIds = [];
+
+    /** Each `finalizeRowReport` call: `{ sessionId, notRun }`. */
+    this.finalizeRowReportCalls = [];
+    /** Override to return a specific path, or null (nothing accumulated). */
+    this.finalizeRowReportImpl = null;
     this.streamCallCount = 0;
     /** Session ids passed to streamSteps() (the run), in call order. Lets tests
      *  assert batch runs use distinct, unique-per-run session ids. */
@@ -210,6 +215,17 @@ class FakeApiClient {
       if (signal.aborted) throw new ApiClientError('aborted', 'aborted');
       yield event;
     }
+  }
+
+  /**
+   * `POST /sessions/:id/report` — renders a data-driven run's one report from
+   * the rows the server accumulated. Records each call so tests can assert the
+   * loop finalises exactly once, and with the rows it never reached.
+   */
+  async finalizeRowReport(sessionId, notRun) {
+    this.finalizeRowReportCalls.push({ sessionId, notRun });
+    if (this.finalizeRowReportImpl) return this.finalizeRowReportImpl(sessionId, notRun);
+    return { reportPath: `/tmp/${sessionId.replace(/[^a-z0-9]+/gi, '-')}-rows.html` };
   }
 
   async closeSession(sessionId) {

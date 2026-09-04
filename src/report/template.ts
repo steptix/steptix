@@ -272,6 +272,25 @@ export function getReportTemplate(): string {
     .interactive-banner-hint { font-size: 0.85rem; color: #3730a3; font-style: italic; }
     .step-interactive-child .step-number { min-width: 70px; }
 
+    /* Loop bands — one per row of a data-driven run, or per iteration of a
+       looped section. A plain div, deliberately: a synthetic parent step
+       would shift every step count in the report. */
+    .loop-band { display: flex; align-items: baseline; gap: 10px; margin: 14px 0 8px; padding: 8px 14px; background: #f5f3ff; border: 1px solid #ddd6fe; border-left: 3px solid #7c3aed; border-radius: 6px; scroll-margin-top: 12px; }
+    .loop-band-lead { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #5b21b6; }
+    .loop-band-values { font-size: 0.85rem; color: #6d28d9; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; }
+    .step-in-loop { margin-left: 10px; }
+    .badge-row { background: #ede9fe; color: #5b21b6; border: 1px solid #ddd6fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+
+    /* The matrix table: which rows passed, answered without opening anything else. */
+    .rows-matrix { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; margin-bottom: 18px; }
+    .rows-matrix h2 { margin: 0 0 10px; font-size: 0.95rem; }
+    .rows-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .rows-table th, .rows-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+    .rows-table th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+    .rows-table tbody tr:last-child td { border-bottom: none; }
+    .rows-table .row-index, .rows-table .row-duration, .rows-table .row-tokens { font-variant-numeric: tabular-nums; color: var(--muted); }
+    .rows-table .badge.skip { background: #e5e7eb; color: var(--muted); }
+
     /* Test script */
     .script-block { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
     .script-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--code-bg); }
@@ -331,12 +350,6 @@ export function getReportTemplate(): string {
           <span class="meta-url" title="{{filePath}}">{{filePath}}</span>
           <button class="copy-btn" type="button" data-copy="{{filePath}}" title="Copy path"><span class="copy-btn-label">Copy</span></button>
         </span>
-      </div>
-      {{/if}}
-      {{#if dataRow}}
-      <div class="meta-item">
-        <span class="meta-label">Data Row</span>
-        <span class="meta-value">{{dataRow}}</span>
       </div>
       {{/if}}
     </div>
@@ -404,6 +417,7 @@ export function getReportTemplate(): string {
 
   <div class="steps-section">
     <h2>Steps</h2>
+    {{{rowsTableHtml}}}
     {{{stepsHtml}}}
   </div>
 

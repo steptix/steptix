@@ -185,9 +185,14 @@ export async function runCodeBehindEntry(
  *     (stories/codebehind-env-data.md). Parameters win, as they would in
  *     the markdown; a run with no environment answers `undefined`.
  *
- * Steps at the top level or in a plain section have an empty scope, so the
- * first three collapse to "the bare name" and this behaves exactly like the
- * tool executor's `step`.
+ * Steps at the top level, or in a section that is neither looped nor inside a
+ * skill, have an empty scope, so the first three collapse to "the bare name"
+ * and this behaves exactly like the tool executor's `step`.
+ *
+ * A step inside a LOOPED section does have a scope: its iteration's row
+ * arrives as `inputs`, so `getVar('file')` answers that iteration's cell
+ * (stories/data-driven-rows.md, part B). That is what lets one generated
+ * entry serve every iteration.
  */
 function makeStepApi(
   scope: CodeBehindVarScope,
@@ -216,7 +221,7 @@ function makeStepApi(
         if (refs.length === 0) return value;
         if (!envData) {
           throw new Error(
-            `skill argument "${name}" references \${${refs[0]}} and the run has no environment context to resolve it`,
+            `frame input "${name}" references \${${refs[0]}} and the run has no environment context to resolve it`,
           );
         }
         return interpolateEnvData(value, envData);

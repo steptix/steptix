@@ -39,9 +39,14 @@ export async function generateReport(
 
 /**
  * Build the stable base name (no extension) shared by a run's report HTML and
- * its session video: `<timestamp>-<safeTestName>[-row<n>]`. Exported so the
- * teardown paths can name the `.webm` to match the `.html` (so the report's
- * relative `<video src>` resolves to a sibling file).
+ * its session video: `<timestamp>-<safeTestName>`. Exported so the teardown
+ * paths can name the `.webm` to match the `.html` (so the report's relative
+ * `<video src>` resolves to a sibling file).
+ *
+ * There is no `-row<n>` here any more: a data-driven run writes one report
+ * for all its rows (stories/data-driven-rows.md, decision 12). The video is
+ * still one file per row, so the row suffix moved *there* — see
+ * `videoBaseNameFor`.
  */
 export function buildReportBaseName(report: TestReport): string {
   const timestamp = new Date(report.date)
@@ -56,8 +61,17 @@ export function buildReportBaseName(report: TestReport): string {
     .replace(/^-|-$/g, '')
     .substring(0, 60);
 
-  const rowSuffix = report.dataRow !== undefined ? `-row${report.dataRow}` : '';
-  return `${timestamp}-${safeName}${rowSuffix}`;
+  return `${timestamp}-${safeName}`;
+}
+
+/**
+ * The base name for one row's video. A merged report has one `.webm` per row
+ * and only one report name, so without the suffix every row would `saveAs`
+ * the same path and only the last row's recording would survive.
+ */
+export function videoBaseNameFor(report: TestReport, dataRowIndex?: number): string {
+  const base = buildReportBaseName(report);
+  return dataRowIndex === undefined ? base : `${base}-row${dataRowIndex + 1}`;
 }
 
 function buildFileName(report: TestReport): string {
@@ -123,7 +137,7 @@ export function renderReport(report: TestReport): string {
     duration,
     baseUrl: report.baseUrl,
     filePath: report.filePath,
-    dataRow: report.dataRow,
+    rowsTableHtml: renderRowsTable(report.rows),
     videoRelPath: report.videoRelPath,
     tags: report.tags,
     totalSteps: report.totalSteps,
@@ -396,11 +410,98 @@ ${fixHtml}
 </div>`;
 }
 
+/**
+ * A loop's banner, emitted whenever a step's marker differs from the previous
+ * step's — one `<div>`, never a `StepResult`.
+ *
+ * This is deliberately the `interactiveChild` mechanism: a plain div plus a
+ * class on the steps that follow it. A *synthetic* parent step would be the
+ * obvious alternative and is the one to avoid, because `results.length`,
+ * `totalSteps`, `passedSteps`, `failedSteps` and `countStepOrigins` all count
+ * steps, and inventing one that never ran would quietly shift every one of
+ * them.
+ */
+function renderLoopBand(marker: NonNullable<StepResult['loop']>): string {
+  const values = Object.entries(marker.values)
+    .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(v)}`)
+    .join(', ');
+  const lead =
+    marker.kind === 'row'
+      ? `Row ${marker.index} of ${marker.count}`
+      : `${escapeHtml(marker.label ?? 'Section')} — iteration ${marker.index} of ${marker.count}`;
+  return `<div class="loop-band" id="row-${marker.index}">
+  <span class="loop-band-lead">${lead}</span>
+  ${values ? `<span class="loop-band-values">${values}</span>` : ''}
+</div>`;
+}
+
+/** True when two markers describe the same iteration of the same loop. */
+function sameLoop(a: StepResult['loop'], b: StepResult['loop']): boolean {
+  if (!a || !b) return a === b;
+  return a.kind === b.kind && a.index === b.index && a.label === b.label;
+}
+
+/**
+ * The matrix table: one line per run row, above the steps. Rendered only for
+ * a data-driven run, and listing rows that never ran as well as those that
+ * did — a matrix that silently omits what it skipped is worse than no matrix.
+ */
+function renderRowsTable(rows: TestReport['rows']): string {
+  if (!rows || rows.length === 0) return '';
+
+  const columns = [...new Set(rows.flatMap((r) => Object.keys(r.values)))];
+  const head = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join('');
+
+  const body = rows
+    .map((row) => {
+      const cells = columns
+        .map((c) => `<td>${escapeHtml(row.values[c] ?? '')}</td>`)
+        .join('');
+      const statusClass =
+        row.status === 'passed' ? 'pass' : row.status === 'failed' ? 'fail' : 'skip';
+      const label =
+        row.status === 'skipped'
+          ? `not run${row.notRunReason ? ` (${escapeHtml(row.notRunReason)})` : ''}`
+          : row.status;
+      const video = row.videoRelPath
+        ? ` <a class="row-video" href="${escapeHtml(row.videoRelPath)}">video</a>`
+        : '';
+      const anchor =
+        row.status === 'skipped'
+          ? `${row.index}`
+          : `<a href="#row-${row.index}">${row.index}</a>`;
+      return `<tr>
+  <td class="row-index">${anchor}</td>
+  ${cells}
+  <td><span class="badge ${statusClass}">${label}</span></td>
+  <td class="row-duration">${(row.durationMs / 1000).toFixed(1)}s</td>
+  <td class="row-tokens">${row.tokensUsed.toLocaleString()}${video}</td>
+</tr>`;
+    })
+    .join('\n');
+
+  return `<div class="rows-matrix">
+  <h2>Rows</h2>
+  <table class="rows-table">
+    <thead><tr><th>#</th>${head}<th>Outcome</th><th>Duration</th><th>Tokens</th></tr></thead>
+    <tbody>
+${body}
+    </tbody>
+  </table>
+</div>`;
+}
+
 function renderSteps(steps: StepResult[]): string {
   const out: string[] = [];
+  let previousLoop: StepResult['loop'] = undefined;
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
     if (step.interactiveChild) continue; // handled when we meet the parent
+
+    if (!sameLoop(step.loop, previousLoop)) {
+      if (step.loop) out.push(renderLoopBand(step.loop));
+      previousLoop = step.loop;
+    }
 
     const interactiveMatch = step.instruction.match(/^\[interactive\]\s*(.*)$/i);
     if (interactiveMatch) {
@@ -531,7 +632,16 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
         <div class="screenshot-placeholder">Screenshot not captured — set <code>browser.captureScreenshotsPerAction: true</code> to enable.</div>
        </div>`;
 
-  const childStepClass = step.interactiveChild ? ' step-interactive-child' : '';
+  const childStepClass =
+    (step.interactiveChild ? ' step-interactive-child' : '') + (step.loop ? ' step-in-loop' : '');
+
+  // The band above says which row this is, but a step read on its own three
+  // screens below its band would not. For a section iteration the suffix goes
+  // on the section chip, which already names the flow.
+  const loopBadge =
+    step.loop && step.loop.kind === 'row'
+      ? `<span class="badge badge-row" title="Data row ${step.loop.index} of ${step.loop.count}">row ${step.loop.index}/${step.loop.count}</span>`
+      : '';
   const stepNumberLabel = overrides.numberLabel ?? `Step ${step.index}`;
   const displayedInstruction = overrides.displayInstruction ?? step.instruction;
 
@@ -561,8 +671,12 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
   // Alongside the skill chip, not instead of it: a skill invoked from inside
   // a section carries both.
+  const iterationSuffix =
+    step.loop && step.loop.kind === 'iteration'
+      ? ` (${step.loop.index}/${step.loop.count})`
+      : '';
   const sourceSectionBadge = step.sourceSection
-    ? `<span class="badge badge-section" title="Step expanded from inline section ${escapeHtml(step.sourceSection)}">${escapeHtml(step.sourceSection)}</span>`
+    ? `<span class="badge badge-section" title="Step expanded from inline section ${escapeHtml(step.sourceSection)}">${escapeHtml(step.sourceSection)}${iterationSuffix}</span>`
     : '';
 
   // Which tab this step drove (§11). Shown on every step, not only multi-tab
@@ -586,6 +700,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   <div class="step-header">
     <span class="step-number">${escapeHtml(stepNumberLabel)}</span>
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
+    ${loopBadge}
     ${sourceSectionBadge}
     ${sourceSkillBadge}
     ${originBadge}

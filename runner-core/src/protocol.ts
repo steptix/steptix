@@ -693,6 +693,25 @@ export interface HostParametersResolvedMsg {
   values: Record<string, string>;
 }
 
+/**
+ * The worst status each line reached across a data-driven run's rows, sent
+ * once when the loop ends (stories/data-driven-rows.md, part A).
+ *
+ * A line that failed on any row must stay red — a green gutter after a red row
+ * is a lie — but each row repaints the same lines, so the last clean row would
+ * otherwise erase the evidence. Deliberately NOT a `runEvent`: run events also
+ * reach the Test Explorer's listener, which renders each `step:fail` as a test
+ * message, so replaying them would double-count every failure there while
+ * fixing the gutter.
+ */
+export interface HostRowSummaryMsg {
+  type: 'rowSummary';
+  /** The test document these lines belong to, as a string URI. */
+  uri: string;
+  /** One entry per line that failed on at least one row. */
+  failures: Array<{ line: number; rows: number[] }>;
+}
+
 /** True while a run is in flight; lets the webview enable/disable buttons. */
 export interface HostRunningMsg {
   type: 'running';
@@ -837,6 +856,7 @@ export type HostToWebviewMsg =
   | HostPromptMsg
   | HostPromptDoneMsg
   | HostParametersResolvedMsg
+  | HostRowSummaryMsg
   | HostRunningMsg
   | HostBreakpointStopMsg
   | HostBatchBannerMsg
