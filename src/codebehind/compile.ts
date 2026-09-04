@@ -7,11 +7,13 @@ import type { TokenTracker } from '../utils/tokens.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
+  anyActionCarriesPlaceholder,
   askForEntry,
   generateStepEntry,
   guardedValues,
   stepEnvRefs,
   stepParameters,
+  valueMatchWarning,
   type GeneratedEntry,
 } from './generate.js';
 import { buildRepairPrompt } from './repair.js';
@@ -118,6 +120,19 @@ export interface CompileSummary {
   /** Where the recording — and the candidate, and any replay failure — were
    *  written: the test's `.aiui-codebehind-cache/<name>.recording/`. */
   recordingDir: string;
+  /**
+   * References the model did not name in its actions and the compile recovered
+   * by comparing a recorded literal against the resolved value
+   * (stories/placeholder-preserving-actions.md, decision 6).
+   *
+   * The compliance metric, and the only one: the sweep that decides the
+   * fallback's fate is `aiui compile` over `templates/init/tests/*.md` and
+   * `fixtures/tests/*.md`, summing this field. Empty is the goal.
+   *
+   * Optional so every existing producer of a summary — the server's failure
+   * frame among them — still typechecks; the two compilers always set it.
+   */
+  recoveredByValue?: Array<{ step: number; name: string }> | undefined;
 }
 
 export interface CompileResult {
@@ -227,6 +242,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const candidate = new Candidate();
   let runTokens = 0;
   let rounds = 0;
+  /** References the model did not name, recovered by value match — the
+   *  compliance metric (stories/placeholder-preserving-actions.md §6). Read by
+   *  `finish` at call time, so it is whatever Generate had reached. */
+  const recoveredByValue: Array<{ step: number; name: string }> = [];
 
   /** A step event, with the step's source line when the test knows it. */
   const stepEvent = (phase: CompilePhase, step: CompileStep, message: string): void => {
@@ -285,6 +304,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         writtenOffAi: [],
         notAttempted: [],
         recordingDir: recordingDirFor(test.filePath),
+        recoveredByValue,
         ...summary,
       },
     };
@@ -428,6 +448,17 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
 
   // ─── 3. Generate ──────────────────────────────────────────────────────────
   emit({ kind: 'phase', phase: 'generate', message: `${selection.order.length} step(s)` });
+  // Asked of the WHOLE recording, once: the exact reference rule can only read
+  // what the model named, and a recording made before the model was asked to
+  // name placeholders carries values everywhere — a secret's already redacted
+  // to `***` — so every reference would look unaccounted
+  // (stories/placeholder-preserving-actions.md, decision 6).
+  const recordingCarriesPlaceholders = record.steps.some((s) =>
+    anyActionCarriesPlaceholder(actionsOf(s)),
+  );
+  /** The pre-change notice is worth saying once, and only when it changed an
+   *  answer — a test that references nothing is unaffected by the rule. */
+  let saidPreChange = false;
   let declined = 0;
   /** Steps this compile wrote off as `ai: true` after a replay failure. */
   const writtenOffAi: number[] = [];
@@ -441,6 +472,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       actions: actionsOf(result),
       ...(result?.assertions && { assertions: result.assertions }),
       resolvedParameters: record.resolvedParameters,
+      recordingCarriesPlaceholders,
       // What `${data.url}` and kin resolved to, so the generator can say
       // "read it with step.getVar('data.url')" and the guard can catch the
       // value inlined (stories/codebehind-env-data.md).
@@ -455,6 +487,23 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       ...contextOf(result),
     });
     const applied = await applyGenerated(candidate, step, generated, stepEvent, 'generate');
+    if (applied.kind === 'entry' && applied.references) {
+      for (const name of applied.references.recoveredByValue) {
+        recoveredByValue.push({ step: step.number, name });
+        emit({ kind: 'note', level: 'warn', message: `step ${step.number}: ${valueMatchWarning(name)}` });
+      }
+      if (applied.references.preChangeFallback && !saidPreChange) {
+        saidPreChange = true;
+        emit({
+          kind: 'note',
+          level: 'info',
+          message:
+            'this recording predates placeholder-preserving actions — no action names a ' +
+            'placeholder, so the compile identified values by string match. Re-record the test ' +
+            'to compile under the exact rule.',
+        });
+      }
+    }
     if (applied.kind === 'declined') declined++;
     if (applied.kind === 'error') {
       return finish(
@@ -714,6 +763,11 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const tail = [
     writtenOffAi.length > 0 ? `${writtenOffAi.length} kept AI after replay failures` : '',
     unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
+    // The compliance signal, in front of whoever ran the compile rather than
+    // only in the summary object (stories/placeholder-preserving-actions.md §6).
+    recoveredByValue.length > 0
+      ? `${recoveredByValue.length} recovered by value match`
+      : '',
     stoppedAt ? `stopped at step ${stoppedAt.step}` : '',
   ].filter((s) => s !== '');
   const headline =
