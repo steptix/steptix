@@ -1763,6 +1763,45 @@ tokens, breakpoints fire per iteration, and nothing about a row reaches
   path runs row 1 and says so.
 - Part B ships after part A as two PRs, runtime then code-behind.
 
+## Measured on the first live run (2026-09-04)
+
+Part A's parser, runner and Sessions API are built. `securebank-matrix.md`
+was compiled and then run for all five rows against the fixture app. What it
+showed:
+
+- **The loop and the merge do what the story says.** Five rows, one report,
+  `Total: 1` with `Rows: 5 — 5 passed, 0 failed`, and `Steps: 30` — the
+  counts are the real executions, not the six authored lines, which is what
+  the band-not-a-parent-step decision was for.
+- **A compile does not multiply.** Six authored steps produced six recorded
+  steps and six generated entries, because `createTestFileRunner` builds its
+  own `TestInstance` and never goes through `expandTestInstances`. The row
+  values compiled to `step.getVar('email')` / `getVar('password')` /
+  `getVar('outcome')`, so one set of entries serves every row.
+- **22 of 30 steps ran as code with zero tokens. Eight healed under AI**, and
+  the eight are the finding: steps 5 and 6 on rows 2–5.
+
+**The decline rule is not implemented, and as specified it would not have
+been enough.** §"Code-behind" declines a step when a parameter it references
+has no value in the recorded actions' input-carrying fields. That catches
+step 6 (`Verify {{outcome}}`, which compiled to a heading heuristic derived
+from row 1's "the Dashboard page is shown" and cannot work for the banner
+rows). It does **not** catch step 5, *"Click the Sign In button"*, which
+references no column at all and yet compiled to
+`waitForURL('**/dashboard.html')` — row 1's outcome baked into a step whose
+own text is row-independent.
+
+So the rule needs a second half: a step is also row-bound when what it
+*recorded* depends on the row, not only when what it *reads* does. The cheap
+signal is available at compile time — the recording holds the page URL and
+DOM before and after each step, and row 1's step 5 ends on `dashboard.html`
+while rows 2–5 end on the login page. Recording a second row and declining
+any step whose post-state differs between them would catch both, and is the
+"record two rows and diff" follow-on §"Code-behind" already names — now with
+a measurement behind it rather than a hunch. Until then a matrix compiles
+usefully (22 of 30 steps free) and pays ~31k tokens per non-recorded row for
+the two steps that heal.
+
 ## Decisions after review (2026-09-04) — one report per run
 
 The story as reviewed kept today's `dataFile:` behaviour: each row is a

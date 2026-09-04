@@ -387,6 +387,22 @@ export async function runTest(
   // always has both, so an upload step works from a plain `aiui run`.
   const uploadPaths = { baseDir: path.dirname(test.filePath), projectRoot };
 
+  /**
+   * May this run read and write the step cache?
+   *
+   * Computed once and passed to every `executeStep` call, because there are
+   * three of them (main flow, hooks, and the interactive ad-hoc path) and a
+   * guard applied to only one of them is not a guard — the first cut of this
+   * changed the main-flow site alone, and a five-row live run still replayed
+   * four rows from cache.
+   *
+   * A row run never uses it (stories/data-driven-rows.md, decision 8): the
+   * cache is keyed per step line and reverse-interpolates only an action's
+   * `value`, so an assertion whose expectation came from a row would replay
+   * row 1's on every row. The cache is being retired; until then rows opt out.
+   */
+  const cacheEnabledForRun = config.cache.enabled && dataRowIndex === undefined;
+
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
     ?? config.execution.timeout;
@@ -844,7 +860,7 @@ export async function runTest(
           // expectation came from a row would replay row 1`s on every row
           // (stories/data-driven-rows.md, decision 8). The cache is being
           // retired; until then rows simply opt out.
-          cacheEnabled: config.cache.enabled && dataRowIndex === undefined,
+          cacheEnabled: cacheEnabledForRun,
           dismissalGuidance: hooks.hasAny,
         });
 
@@ -1055,7 +1071,7 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
-          cacheEnabled: config.cache.enabled,
+          cacheEnabled: cacheEnabledForRun,
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...codeBehindOptionsFor(i),
@@ -1083,7 +1099,7 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
-          cacheEnabled: config.cache.enabled,
+          cacheEnabled: cacheEnabledForRun,
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...codeBehindOptionsFor(i),
