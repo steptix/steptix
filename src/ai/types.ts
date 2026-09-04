@@ -191,11 +191,16 @@ export interface AIAction {
    * - `'api'`: assertion is purely about prior API responses; DOM is not sent
    *   to the AI when generating code.
    * - `'both'`: both DOM and API context are available.
-   * - `'predicate'`: the assertion is a self-contained predicate over values
-   *   already substituted into the instruction text (via `{{...}}`). Both
-   *   sides of the comparison are present in `condition`; no DOM or API
-   *   context is needed. `expected` is omitted in this mode — the parser
-   *   rejects it strictly to keep modes from drifting.
+   * - `'predicate'`: the assertion is a self-contained predicate — everything
+   *   either side of the comparison is in the step text itself, as a literal
+   *   or as a `{{name}}` / `${…}` placeholder listed under `## Values`, and no
+   *   DOM or API context is needed. `condition` holds the predicate AS
+   *   WRITTEN, placeholders included; the framework substitutes them before
+   *   the check is generated (stories/placeholder-preserving-actions.md,
+   *   decision 5 — predicate `condition` is the one free-text field that is
+   *   value-bearing, because a predicate compares values rather than reporting
+   *   the model's reading of the page). `expected` is omitted in this mode —
+   *   the parser rejects it strictly to keep modes from drifting.
    */
   against?: 'dom' | 'api' | 'both' | 'predicate';
 }
