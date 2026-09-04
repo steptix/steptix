@@ -1802,6 +1802,17 @@ a measurement behind it rather than a hunch. Until then a matrix compiles
 usefully (22 of 30 steps free) and pays ~31k tokens per non-recorded row for
 the two steps that heal.
 
+**Superseded in part.** The half of the rule that identifies *which recorded
+literal came from which column* — the field allow-list, the empty-value
+special case, the exclusion of assert fields — is replaced by
+[placeholder-preserving-actions.md](placeholder-preserving-actions.md),
+which has the model name the placeholder in the action instead of the
+compile reconstructing it by string match. Under that story step 6 is
+declined exactly, and `Click the {{plan}} tab` (this section's open cost)
+compiles. The other half — step 5, where no placeholder is involved and the
+*page* behaved differently per row — is not touched by it and still needs
+the two-row diff.
+
 ## Decisions after review (2026-09-04) — one report per run
 
 The story as reviewed kept today's `dataFile:` behaviour: each row is a
