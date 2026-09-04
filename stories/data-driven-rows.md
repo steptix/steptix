@@ -14,6 +14,12 @@ Part B (rows on a `### Section`) was added after that review at the user's
 direction and reviewed by three further passes the same day. All findings
 are folded in and the record is in §"What the review changed".
 
+One decision was then reversed on 2026-09-04, after the reviews: a
+data-driven run produces **one** report, never one per row. It converges
+the two parts' reporting and it reaches further into the code than any
+single review finding did — decision 12 is the rule, §"Reports" is the
+shape, and §"Decisions after review (2026-09-04)" is the reasoning.
+
 ## In plain terms
 
 ### A table under `## Steps` runs the test once per row
@@ -91,6 +97,14 @@ run's flow starts with a fresh browser; a section's flow starts on the
 page the previous step left. The table goes directly under the heading of
 the flow it drives, before that flow's first numbered step.
 
+**One run, one report — either way.** Five rows do not make five reports.
+A run produces one HTML file whose steps carry a loop marker, so the row
+(or the iteration) a step belongs to is a property of the step, not of the
+file. Above the steps, a matrix table lists every run row with its column
+values and its outcome, which is the whole point of writing a matrix: you
+open one file and see which rows went red. Decision 12 says why, and
+§"Reports" says what it costs.
+
 The argument for doing this in a natural-language framework is stronger
 than in a conventional one. Five copy-pasted tests cost five AI-planned
 runs each time. One flow with five rows plans each step once: step
@@ -107,31 +121,37 @@ an external CSV/JSON), `dataSources:` (named JSON trees) and `${data.X}`
 
 **You write:** the sign-in file above and run it from the CLI.
 **You get:** five runs in sequence, each announced on the console as
-`SecureBank sign-in validation (row N)`, five reports named
-`…-securebank-sign-in-validation-row1.html` through `-row5.html`, and the
-run summary listing each row as its own line. Row 1 ends on the dashboard;
-rows 2–5 end on the sign-in page with the red banner. The exit code is
-non-zero if any row failed. A wrong expectation in row 3 goes red on row 3
-and the remaining rows still run.
+`SecureBank sign-in validation (row N)`, and one report —
+`…-securebank-sign-in-validation.html`, no row suffix — that opens on a
+five-line matrix table (row number, the row's column values, pass/fail,
+duration, tokens, a link down to that row's first step) and then lists all
+thirty steps in document order, each row's six introduced by a
+`Row 2 of 5 — email=demo@securebank.com, password=***, outcome=the "Invalid
+email…` band. The run summary counts one test, and says `5 rows`. Row 1
+ends on the dashboard; rows 2–5 end on the sign-in page with the red
+banner. The exit code is non-zero if any row failed. A wrong expectation
+in row 3 goes red on row 3, the matrix line for row 3 is the red one, and
+the remaining rows still run. `## Latest runs` gains one line, not five.
 
 **You write:** the same file, and press Run in TestBench.
 **You get:** the gutter paints the steps for row 1, clears, then paints
-them for row 2, and so on, with a `Row 2 of 5 — email=demo@securebank.com,
-password=***, outcome=the "Invalid email…` line in the output log at each
-boundary. When the loop ends the gutter shows the *worst* status each
+them for row 2, and so on, with the same banner line in the output log at
+each boundary. When the loop ends the gutter shows the *worst* status each
 step reached across the rows, and hovering a red step says which rows
-failed there. Each row gets its own report, `…-securebank-matrix-row1.html`
-through `-row5.html` (the server names reports from the file, the CLI from
-the title — only the `-rowN` suffix is common), and the output log links
-all five.
+failed there. One report, named from the file
+(`…-securebank-matrix.html`) rather than the title, with the same matrix
+table and the same bands; the output log links it once, when the loop
+ends.
 
 **You write:** the sign-in file, put the cursor on the fourth table row,
 and pick *Run this row*.
-**You get:** one ordinary run, using row 4's values, reported as row 4 of
-5. It is an interactive run like any other, so a breakpoint, Pause, F11
-into a skill, the Variables view and *Re-run from step N* all work. This
-is the debugging loop: a matrix fails on one row, you fix the row or the
-page, you re-run that row alone.
+**You get:** one ordinary run, using row 4's values, whose report holds a
+one-line matrix table reading `Row 4 of 5` — the row keeps its number in
+the original table, so the report is comparable with the full matrix's.
+It is an interactive run like any other, so a breakpoint, Pause, F11 into
+a skill, the Variables view and *Re-run from step N* all work. This is the
+debugging loop: a matrix fails on one row, you fix the row or the page,
+you re-run that row alone.
 
 **You write:** the upload file above and press Run.
 **You get:** one run, one session, one report. Steps 1–3 run once; the
@@ -139,8 +159,10 @@ body of *Upload each statement* runs three times, its two lines
 repainting per iteration and the output log saying `Upload each
 statement — iteration 2 of 3 — file=\attachments\statement.pdf,
 status=Uploaded statement.pdf`; then steps 5–6 run once and the count is
-3. The report lists six body-step results, each badged `section: Upload
-each statement (2/3)`, in the flat list the report has today. A
+3. The report lists six body-step results in the flat list, each badged
+`section: Upload each statement (2/3)` and each pair introduced by the
+same band the run rows get — the identical line the output log shows.
+There is no matrix table, because the run is one row. A
 breakpoint on body line 2 pauses on every iteration, Continue carries on
 in place, and the Variables view shows that iteration's `file` and
 `status` under a frame labelled `Upload each statement (2/3)`. A failed
@@ -343,15 +365,30 @@ generation are per row. `resolveParameters` in
 a parameter with no column keeps its value for every row). The console
 announces `Title (row N)`; the run-log *file* does not — it is opened with
 the bare title and rows are told apart only by timestamp. The report
-carries `dataRow`, renders a "Data row" meta line and gets a `-rowN`
-file-name suffix ([generator.ts](../src/report/generator.ts)). `aiui list`
+carries a top-level `dataRow` ([types.ts:343](../src/report/types.ts)),
+renders a "Data Row" meta line ([template.ts:335](../src/report/template.ts))
+and gets a `-rowN` file-name suffix
+([generator.ts:59](../src/report/generator.ts), inside
+`buildReportBaseName`) — so a five-row `dataFile:` run writes five HTML
+files today. That is the behaviour decision 12 reverses, and the suffix is
+load-bearing in one other place: `buildReportBaseName` also names the
+run's `.webm`, so the videos are told apart by it too
+([test-runner.ts:1387](../src/runner/test-runner.ts),
+[manager.ts:1650](../src/browser/manager.ts)). Nothing under `tests/`
+asserts the suffix. `aiui list`
 prints a `data-driven` tag from the frontmatter alone; it never parses the
 body. The compile pipeline's `firstDataRow`
 ([compile.ts](../src/codebehind/compile.ts)) records against row 1 and
 says so, and `resolveCompileParameters` is a second, independent copy of
 the row-over-parameters rule. The `RunSummary` counts every instance as a
-separate test (`totalTests = reports.length`); there is no aggregate over a
-test's rows.
+separate test ([test-runner.ts:1503](../src/runner/test-runner.ts),
+`totalTests = reports.length`, printed as the summary's `Total:` line by
+[run.ts:250](../src/cli/commands/run.ts)); there is no aggregate over a
+test's rows. `appendRunHistory` is called once per instance in the same
+loop ([test-runner.ts:1489](../src/runner/test-runner.ts)) against a
+`MAX_ENTRIES = 10` cap ([history-appender.ts](../src/report/history-appender.ts)),
+so a five-row run buries the previous two runs' history lines. Decision 12
+changes both.
 
 **A row value skips `$VAR` resolution.** `resolveValue` returns a data-row
 value verbatim before it reaches the `$` branch, and row-only keys are
@@ -382,6 +419,26 @@ takes `instances[0]` on purpose. TestBench's *compile* path is different:
 [compile-runner.ts](../src/server/compile-runner.ts) parses the file
 server-side and already applies `firstDataRow`, so a `dataFile:` compile
 from TestBench records row 1 today. Runs are the gap.
+
+**The server writes a report per *batch*, and the client could not write
+one if it wanted to.** `fullStepResults` is declared inside `postSteps`
+([session-manager.ts:2265](../src/server/session-manager.ts)) and the
+report is built from it at the end of that one call
+([:4701](../src/server/session-manager.ts)), so today an `[input:]` split
+already produces two report files for one Run — a pre-existing wart the
+row loop would multiply, not invent. The client cannot take over the job:
+what crosses the SSE stream is `StepResultResponse`
+([:673](../src/server/session-manager.ts)) —
+`{ step, status, actions, screenshot, reasoning, outputs }` — with no
+turns, durations, token attribution, DOM snapshots or code-behind
+provenance, and neither `testbench-native/src` nor `runner-core/src`
+imports `generateReport` or `renderReport` at all. That settles decision
+12's hardest half before it is asked: the accumulation is the server's.
+The precedent for *where* it lives is `lastRunInfo`
+([:1189](../src/server/session-manager.ts)) — a bounded map on the
+manager, keyed by `sessionKey(sessionId)` and documented as surviving
+session deletion, which is exactly the property a row accumulator needs
+given decision 5 closes the session between rows.
 
 **Sections are already called more than once, and each call is a frame.**
 A `### Name` block is a macro: it shares the caller's scope, declares no
@@ -431,6 +488,20 @@ cache dir"); and replay executes `cachedTurn.actions` as stored
 1"). Row 2 of the matrix would replay row 1's assertion — check for the
 dashboard, on a page showing the banner. Until the cache is gone, row runs
 simply do not use it (decision 8).
+
+**The report already groups steps without a synthetic parent.**
+`renderSteps` ([generator.ts:399](../src/report/generator.ts)) walks the
+flat `StepResult[]`, and when it meets an `[interactive]` step it emits a
+`renderInteractiveBanner` — a plain `<div>`, not a step — then renders the
+`interactiveChild` steps that follow it with an extra CSS class
+(`step-interactive-child`, [:534](../src/report/generator.ts)) whose whole
+definition is `.step-interactive-child .step-number { min-width: 70px; }`
+([template.ts:272](../src/report/template.ts)). No parent `StepResult` is
+invented; `results.length`, `totalSteps`, `passedSteps` and `failedSteps`
+are untouched by the grouping. That is the mechanism decision 12's row
+bands reuse, and it is why "grouping would touch every consumer of the
+results count" — the claim part B made about section calls — is true only
+of the *synthetic-parent* form of grouping, not of this one.
 
 **Nothing parses a table.** [markdown.ts](../src/parser/markdown.ts)
 `parseSections` recognises five reserved H2s (`Config`, `Parameters`,
@@ -505,12 +576,16 @@ is a new branch in the walk, not a new parser. No test or skill file under
    broken Continue after a pause (which posts to the stable id), the
    keep-alive, every out-of-band session op, and the leftover-session
    collision `::run-<n>` was minted to avoid. The row number rides the
-   request, not the id. The server stays row-agnostic for the run loop: it
-   runs a batch with some `parameters`, as now. Two thin loops (CLI has
-   one, TestBench gains one) are cheaper and safer than one fat server
-   loop that would have to thread rows through step painting, pause,
-   breakpoints and re-run. The server gains an optional `dataRow?: number`
-   (1-based) and `dataRowCount?: number` on the steps request;
+   request, not the id. The server stays row-agnostic for *executing* the
+   run loop: it runs a batch with some `parameters`, as now. Two thin loops
+   (CLI has one, TestBench gains one) are cheaper and safer than one fat
+   server loop that would have to thread rows through step painting, pause,
+   breakpoints and re-run. What the server is *not* agnostic about is the
+   report: it accumulates step results across the rows' batches and renders
+   once (decision 12), because it is the only side that holds a
+   `StepResult`. The server gains an optional `dataRow?: number`
+   (1-based) and `dataRowCount?: number` on the steps request, plus a
+   `POST /sessions/:id/report` to finalise;
    §"Sessions API" says exactly what they change. Under `cdp:` a fresh
    session attaches to the user's browser, `context.close()` is a no-op
    over CDP, and `localStorage` is shared, so the cookie banner does not
@@ -518,8 +593,10 @@ is a new branch in the walk, not a new parser. No test or skill file under
    under `cdp:` is allowed but the fixture is not written for it.
 
 6. **A failing row does not stop a loop; a pause ends the run loop.** A
-   matrix exists to show *which* rows fail. For the run loop, each row is
-   reported on its own; the CLI's exit code and `--bail` behave as they do
+   matrix exists to show *which* rows fail — which is why every row that
+   ran gets a line in the one report's matrix table (decision 12), and why
+   a row that did not run gets one too, reading "not run". The CLI's exit
+   code and `--bail` behave as they do
    across tests (bail stops after the first failing row); TestBench's Stop
    stops the current row and paints the remaining rows' steps as skipped,
    reported as "not run (stopped)". A pause inside a multi-row run loop —
@@ -542,7 +619,8 @@ is a new branch in the walk, not a new parser. No test or skill file under
    in this story.
 
 7. **Run one row.** CLI: `aiui run test.md --row 3` (1-based, matching the
-   report suffix; out of range is an error naming the count; the pattern
+   row's position in the table and the number its matrix line carries; out
+   of range is an error naming the count; the pattern
    must match exactly one file). TestBench: a *Run this row* CodeLens on
    each table row — a new provider, the extension has none today — which
    for a run-level table is the ordinary interactive run with the rows
@@ -569,8 +647,8 @@ is a new branch in the walk, not a new parser. No test or skill file under
 9. **Rows are read once, when Run is pressed.** TestBench re-reads the
    live buffer per step block for `fullSteps` and `sections`; rows — both
    kinds — are snapshotted at the start so a mid-run table edit cannot
-   change the count, reorder rows, or make the `-rowN` suffix or the
-   iteration numbers lie.
+   change the count, reorder rows, or make the matrix table's row numbers
+   or the iteration numbers lie.
 
 10. **Secrets by column name.** Run-row columns become parameters, so
     `isSecretName` already governs them: a `password` column is masked in
@@ -603,6 +681,35 @@ is a new branch in the walk, not a new parser. No test or skill file under
     is inside one run and records every iteration; the generator binds
     them all to the same entries and generates from the first, which is
     what it does for a section called twice today.
+
+12. **One run, one report. Both loops, every path.** A five-row run writes
+    one HTML file, not five; `buildReportBaseName` loses its `-rowN`
+    suffix and `TestReport.dataRow` is deleted along with the "Data Row"
+    meta line it renders. The row a step belongs to becomes a property of
+    the *step*: `StepResult` gains
+    `loop?: { kind: 'row' | 'iteration'; label?: string; index: number;
+    count: number; values: Record<string, string> }`, which part B's
+    `iteration`/`iterationCount` collapse into — one field, one renderer,
+    one `(n/N)` convention for both loops (§"Reports"). The report gains a
+    matrix table above the steps, listing every run row with its cell
+    values and its outcome, so "which rows failed" is answered by opening
+    one file; that was listed as a follow-on index page and is now the
+    report itself. `runTests` merges the rows' reports into one and
+    `appendRunHistory` writes one line per run. On the Sessions API the
+    server accumulates across the rows' batches — it is the only side that
+    holds a `StepResult` (§"Context") — behind a manager-level store keyed
+    the way `lastRunInfo` is, so it survives the session close decision 5
+    makes between rows, and renders when the client posts
+    `POST /sessions/:id/report`.
+
+    The reversal costs two things worth naming. The video is still one
+    `.webm` per row on both paths, and `buildReportBaseName` was what told
+    them apart, so the row suffix survives *there* — the video base name is
+    the report's plus `-row<n>` when the run has rows, and the link moves
+    off the report's single `videoRelPath` onto the row's matrix line. And
+    the report's `parameters` block can no longer be the row's values,
+    because there are five sets: it keeps the parameters every row shares,
+    and the per-row values live in the matrix table and the bands.
 
 ## Part A — rows under `## Steps`
 
@@ -647,27 +754,108 @@ is a new branch in the walk, not a new parser. No test or skill file under
   `writeRecording` wipes and rewrites the directory every run, so five rows
   would leave row 5's on disk for a later `POST /codebehind/compile` to
   compile from.
-- `runTests` needs no new shape: it already lists each instance in the
-  summary. `runTests` boots real browsers, so its loop gets an injectable
+- `runTests` changes shape, because decision 12 makes a test's rows one
+  report and one summary line. `runTest` still returns a `TestReport` per
+  instance — nothing about the per-row browser, hooks or recording moves —
+  and `runTests` folds a test's instance reports through a new
+  `mergeRowReports(reports, rows)` in `src/report/`: `steps` concatenated
+  with each step's `loop` marker stamped from its instance's
+  `dataRowIndex` and row values, the four count fields and the three token
+  fields summed, `durationMs` summed, `status` failed if any row failed,
+  `date` the first row's, `parameters` narrowed to the keys every row
+  shares, and `dataRow` gone. The merge happens after each instance's own
+  `redactReport`, so every row arrives already masked with its own
+  secrets. Then one `generateReport` and one `appendRunHistory` per test,
+  outside the instance loop. A test with no rows takes the same path with
+  one instance and merges to itself, so the ordinary case has one code
+  path, not two.
+- `RunSummary` counts a test once. `totalTests = tests.length` after the
+  merge; `passedTests`/`failedTests` count merged reports; `reports` holds
+  the merged ones, which keeps `printSummary`'s `countStepOrigins` fold
+  ([run.ts:262](../src/cli/commands/run.ts)) correct without touching it —
+  a five-row run genuinely executed thirty steps and the origins line
+  should say so. `printSummary` gains a `Rows:` line when any report has
+  row markers, so the five runs are not silently invisible in a `Total: 1`.
+- `runTests` boots real browsers, so its loop gets an injectable
   `runTest` seam (the compile pipeline's `createTestFileRunner` is the
-  precedent) or the loop tests below cannot exist.
-- `runTest` opens the run-log file with `Title (row N)` so the log files
-  are told apart like the reports.
+  precedent) or the loop and merge tests below cannot exist.
+- `runTest` opens the run-log file with `Title (row N)` so the per-row logs
+  are told apart — the logs stay per row, because they are written as the
+  row runs and there is no merge point for a stream.
+- The video keeps a row suffix (decision 12): `finalizeMainPageVideo`'s
+  `stableBaseName` becomes `buildReportBaseName(report)` plus `-row<n>`
+  when the instance has a `dataRowIndex`, and the resulting relative path
+  is stashed on the instance report so the merge can hang it off that
+  row's matrix line instead of the report's one `videoRelPath`. Without
+  this, five rows all `saveAs` the same name and only row 5's survives.
 
 ### Sessions API (`src/server`)
 
-- `StepsRequest` gains `dataRow?` and `dataRowCount?`. Validation: positive
-  integers, `dataRow <= dataRowCount`, `dataRow` without `dataRowCount` is
-  400. Exactly three things read them: the report builder sets
-  `report.dataRow` (the file gets `-rowN`, the "Data row" meta line
-  renders — both existing); the run-log header line gains
-  `dataRow=N/M`; and one `output` info event `Row N of M` is emitted at
-  batch start so TestBench's log and the Test Explorer's output both carry
-  it. The server names reports from the file basename and never reads the
+- `StepRequest` gains `dataRow?`, `dataRowCount?` and `dataRowValues?`
+  (the row's columns, for the matrix table and the band — the server
+  cannot recover them from `parameters`, which is the row merged over
+  `## Parameters`). Validation: positive integers, `dataRow <=
+  dataRowCount`, `dataRow` without `dataRowCount` is 400, `dataRowValues`
+  an object of string values.
+- What they change. The run-log header line gains `dataRow=N/M`, and one
+  `output` info event `Row N of M` is emitted at batch start so
+  TestBench's log and the Test Explorer's output both carry it — both as
+  before. What is new is the report: **a batch carrying `dataRow` writes
+  no report at all.** It appends its `fullStepResults` — each step stamped
+  with `loop: { kind: 'row', index: dataRow, count: dataRowCount, values:
+  dataRowValues }` — to a row accumulator, and returns a `done` with no
+  `reportPath`.
+- The accumulator is a `Map<string, RowRunAccumulator>` on the manager
+  beside `lastRunInfo`, keyed by `sessionKey(sessionId)`, with the same
+  bounded-LRU eviction. It has to be on the manager rather than the
+  session for the reason `lastRunInfo` is: decision 5 closes the session
+  at every row boundary, so anything held on `ManagedSession` dies with
+  row 1. It holds the merged `StepResult[]`, the running counts and token
+  totals, the per-row outcome and duration, the row values, and the row's
+  video path when one is finalised. `dataRow === 1` starts a fresh one
+  (dropping any stale entry under that key, the way `postSteps` already
+  deletes `lastRunInfo` at run start,
+  [session-manager.ts:2261](../src/server/session-manager.ts)); a higher
+  `dataRow` appends; a batch with no `dataRow` writes its report as it
+  does today and touches nothing.
+- `POST /sessions/:id/report` renders the accumulator and returns
+  `{ reportPath }`, then clears it. It is a separate call rather than a
+  flag on the last batch because **the client cannot know which batch is
+  the last one until that batch comes back**: a pause ends the run loop
+  after the current row (decision 6), Stop ends it mid-row, and a thrown
+  row ends it there — all decided by the response, not
+  before the request. Keying finalisation on `dataRow === dataRowCount`
+  would therefore lose the report on exactly the runs where it matters
+  most, and would also fire early on a row split into several batches by
+  an `[input:]`. The route is idempotent-ish: an unknown or empty
+  accumulator is a 404, not a 500, so a double-post after a crash is
+  harmless. Rows that never ran are passed in the body as
+  `notRun: [{ row, reason }]` so their matrix lines can read "not run
+  (stopped)" — the server has no way to know they were planned. `recordLastRun`
+  ([session-manager.ts:1671](../src/server/session-manager.ts)), the
+  channel a *stopped* client uses to recover the report path a dropped
+  `done` would have carried, records the finalise's path rather than a
+  batch's — the stop path is exactly the one that must still produce a
+  report, and the client posts the finalise from its `finally` whether or
+  not the SSE stream survived.
+- Video. `session.pendingVideo` still finalises the row's `.webm` at the
+  close between rows, but there is no per-row report to re-render into:
+  instead the saved relative path is written onto that row's entry in the
+  accumulator, and lands when the report is finally rendered. That is
+  strictly simpler than today's re-render-in-place, and it needs the same
+  `-row<n>` suffix on `stableBaseName` the CLI needs (decision 12).
+- The server names reports from the file basename and never reads the
   H1, so the report *title* is not the CLI's and the story does not promise
   it. Tested at the client seam, through the real api-server entry, because
   that is where `envName` was once dropped while the resolver's own unit
   tests stayed green.
+- Not fixed here, but worth stating because the accumulator is the shape
+  that would fix it: an `[input:]` or `[interactive]` split already makes
+  the server write two reports for one Run today (§"Context"), and so does
+  a breakpoint continuation. Routing every batch of a run through an
+  accumulator would end that too. This story only claims it for batches
+  carrying `dataRow`, because widening it means auditing every client that
+  reads `reportPath` off `done`.
 
 ### MCP (`src/mcp/assemble.ts`)
 
@@ -675,8 +863,11 @@ is a new branch in the walk, not a new parser. No test or skill file under
 response, the way the compile path says "compiling with row 1 of N". The
 full loop over MCP is a follow-on; a silent single run with `{{email}}`
 reaching the model as text is the thing this story must not leave behind.
-Section rows need nothing here: they expand on the server, and MCP already
-sends `sections`.
+It sends the row's values as `parameters` and **not** `dataRow`: a batch
+carrying `dataRow` accumulates and waits for a finalise it would never
+send (§"Sessions API"), so the report would silently never be written. The
+notice lives in the response text. Section rows need nothing here: they
+expand on the server, and MCP already sends `sections`.
 
 ### runner-core
 
@@ -691,6 +882,12 @@ sends `sections`.
   `tests/invocation-mirror-parity.test.ts` are the precedents). That is
   three implementations of the table scan — server parse, server raw
   validation, editor — because the server cannot import runner-core.
+- `api-client.ts` carries the new request fields
+  (`dataRow`, `dataRowCount`, `dataRowValues` on `StreamStepsRequest`) and
+  gains a `finalizeRowReport(sessionId, notRun)` method for
+  `POST /sessions/:id/report`. Both are hand-mirrored copies of the
+  server's shapes, so both go in the contract's §3.2 alongside part B's
+  `rows`.
 - `frontmatter.ts` learns `dataFile` (it parses `dataSources` only today)
   so the "both present" diagnostic can fire client-side; that is a new TB
   code in `preflightSections`, which means a runner-core `node --test` run
@@ -717,11 +914,22 @@ sends `sections`.
   so the gutter repaints for the row; `ac.signal.aborted` check (Stop
   between rows); post `parametersResolved` with the row's values (the
   Variables view follows the row); then `streamSteps` with
-  `dataRow`/`dataRowCount`, `compile` only on the first selected row
+  `dataRow`/`dataRowCount`/`dataRowValues`, `compile` only on the first
+  selected row
   (decision 11), and no `cacheEnabled`. `currentSessionId`/`activeSessionId`
   do not change between rows, which is why the step-control POSTs and the
   awaiting-debugger acks keep working. After the last row of an
   interactive run the session stays open, as today.
+- When the loop ends — however it ends: last row, Stop, a pause parking
+  the run, a thrown row — the controller posts
+  `POST /sessions/:id/report`, listing the rows that never ran and why,
+  and sets `lastResolvedReportPath` from the single path that comes back.
+  That replaces `done`'s `reportPath`, which a row batch no longer
+  carries, as the source for "Open Report". The post lives in the run's
+  `finally` beside `forgetSentConfig`, so a row that throws still leaves a
+  report covering the rows that ran; a failure of the post itself is
+  logged and never fails the run, the posture report generation has
+  everywhere else.
 - Painting: during a row, decorations behave as for a normal run. The
   controller keeps `Map<line, { worst, failingRows }>` across rows; at loop
   end it posts a new controller→extension message (`rowSummary`) that
@@ -735,8 +943,8 @@ sends `sections`.
   messages.
 - The output log gets one banner line per row (§"In plain terms" format,
   secrets through `maskIfSecret`) and a one-line-per-row summary at the
-  end, with each row's report path and "not run (stopped/paused)" for rows
-  that did not run.
+  end, marking rows "not run (stopped/paused)" where they did not run,
+  followed by a single link to the run's one report.
 - Editor: completion for `{{` already lists parameters
   (`env-data-completion.ts`, PR #95/#96) and now lists columns too, marked
   `Data column` — run columns everywhere in the file, section columns
@@ -813,13 +1021,60 @@ row 1's replay. A worst-of-rows merge is a follow-on.
 
 ### Reports
 
-No template change: `dataRow` already renders. The `-rowN` suffix means
-five reports per run; the run summary and the TestBench output log link
-them. `appendRunHistory` writes one line per instance, so a matrix run
-appends five against the ten-entry cap — accepted, and the parser ignores
-the marker it writes (§"Parser"). Report timestamps are second-granular,
-so only *Run this row* twice within one second overwrites a report. A
-per-run index page that lists rows in one table is a follow-on.
+One report per run (decision 12), and the same shape whichever loop
+produced it. Three pieces.
+
+**The marker.** `StepResult` gains `loop?: LoopMarker`, where
+`LoopMarker = { kind: 'row' | 'iteration'; label?: string; index: number;
+count: number; values: Record<string, string> }`. A run row sets
+`kind: 'row'` and no `label` (the flow is the run); a section iteration
+sets `kind: 'iteration'` and `label` = the section name. Part B adds no
+second pair of `iteration`/`iterationCount` fields to `StepResult` — the
+marker is that. (`FrameInfo` keeps its own `iteration`/`iterationCount`:
+that is the *frame's* identity, read by the Variables view and the Call
+Stack, and it is what the marker is derived from.) Nested loops carry the
+innermost marker on the step and the
+enclosing ones on the frames, which is where the Call Stack already reads
+them; the report shows the innermost, because that is the one the step's
+values came from.
+
+**The band.** `renderSteps` emits a `renderLoopBand(marker)` — a `<div>`,
+not a step — whenever a step's marker differs from the previous step's,
+and gives the steps after it a `step-in-loop` class. This is exactly the
+`interactiveChild` mechanism (§"Context"): no synthetic parent
+`StepResult`, so `results.length`, `totalSteps`, `passedSteps`,
+`failedSteps` and `countStepOrigins` need no change and no consumer of the
+counts is touched. The band reads `Row 2 of 5 — email=…, password=***` or
+`Upload each statement — iteration 2 of 3 — file=…`, which is the same
+text the output log prints, deliberately. On top of the band, the step's
+own badge row carries the `(n/N)` suffix: appended to the section chip for
+an iteration, as part B specified, and as a new `row 2/5` chip for a run
+row — so a step read on its own, three screens below its band, still says
+which row it is.
+
+**The matrix table.** Rendered above the steps whenever the report holds
+`kind: 'row'` markers: one line per row, with the row number, each
+column's cell value, the outcome badge, duration, tokens, and an anchor to
+that row's band. A row that did not run gets a line reading "not run
+(stopped)" / "not run (paused)" — a matrix that silently omits the rows it
+skipped is worse than no matrix. The row's video, where one was kept,
+links from its line, because a merged report has five `.webm`s and one
+`videoRelPath` (decision 12). Section iterations get no table: the run is
+one row, and their structure is legible from the bands.
+
+`TestReport.dataRow` and the "Data Row" meta line go. `redactReport`
+already walks the whole report, so a secret-named column's value is masked
+inside `loop.values` by the existing value pass (decision 10 puts it in
+`runSecrets`); `loop.values` additionally goes through `redactMap` so a
+`password` column shows `***` even when its value is too short or too
+common for value-masking to be safe.
+
+`appendRunHistory` is called once per run, outside the instance loop, so a
+matrix run costs one line of the ten-entry cap instead of five; the parser
+ignores the marker it writes (§"Parser"). Report timestamps are
+second-granular, and there is now one report per run rather than one per
+row, so the only collision left is running the same test twice within one
+second.
 
 ### Hooks
 
@@ -964,7 +1219,9 @@ before the call line is parsed, so `[skill: x email="{{email}}"]` works.
   every row an object with identical identifier keys and string values;
   else 400).
 - The contract (stories/test-script-sections-contract.md) is frozen and
-  says "edit this file first": part B changes §3.2 (wire), §3.3
+  says "edit this file first": part B changes §3.2 (wire — `rows` on
+  `sections`, and part A's `dataRow`/`dataRowCount`/`dataRowValues` plus
+  the finalise route), §3.3
   (`FrameInfo` gains `iteration?`/`iterationCount?`), §3.4 (`SectionDefs`
   gains `rows?`), adds a §5 note that table lines inside a section are
   prose, and adds a `fixtures/sections/` corpus entry with at least two
@@ -1088,14 +1345,19 @@ are noted, neither is fixed here.
 ### Report
 
 The report is a flat list with a section badge; a section-call line
-expands away and has no result of its own. Body-step results gain
-`iteration` and `iterationCount` beside `sourceSection`, derived from the
-frame on both runners, and the badge renders
-`section: Upload each statement (2/3)`. Results stay flat and the counts
-are unchanged. Grouping under a synthetic call-site result is a
-follow-on; it would touch every consumer of `results.length`. The
-Variables view and the Call Stack view both label frames, so both get
-the `(n/N)` suffix.
+expands away and has no result of its own. Body-step results carry the
+same `loop` marker part A's rows do (decision 12), with
+`kind: 'iteration'` and `label` = the section name, derived from the frame
+on both runners; the badge renders `section: Upload each statement (2/3)`
+and an iteration band opens each pass through the body. Results stay flat
+and the counts are unchanged — the band is a `<div>` on the
+`interactiveChild` precedent, not a synthetic result. Grouping under a
+*synthetic call-site result* remains a follow-on and remains the thing
+that would touch every consumer of `results.length`; the band is the
+cheap half of that idea and this story takes it. There is no matrix table
+for a section loop: the run is one row, and a table of iterations would
+compete with the one part A's rows own. The Variables view and the Call
+Stack view both label frames, so both get the `(n/N)` suffix.
 
 ### Fixture
 
@@ -1138,6 +1400,23 @@ recording and the sidecar; the run-log file name carries the row. Nothing
 tests `expandTestInstances`, `loadDataFile` or `parseCsv` today; these are
 the first.
 
+**Report merge** (new `tests/report-row-merge.test.ts`): `mergeRowReports`
+on five instance reports produces one report whose `steps` are the thirty
+in order, each carrying a `loop` marker with the right index, count and
+values; counts and tokens summed; `status` failed when any row failed;
+`parameters` narrowed to keys every row shares; no `dataRow`;
+`buildReportBaseName` carries no `-rowN` for a merged report (the minimum
+case for the suffix removal); a single-instance test merges to a report
+indistinguishable from today's; a row's video path lands on that row's
+entry and not on the report's `videoRelPath`; a `password` column is
+`***` in `loop.values`. Rendering
+(`tests/report-source-section.test.ts` neighbours): the matrix table lists
+five lines with the failing one marked and a "not run (stopped)" line for
+a row that never ran; a band opens each row and the following steps carry
+`step-in-loop`; `countStepOrigins` and the four count fields are the same
+before and after the bands are introduced (the regression the band shape
+exists to avoid).
+
 **Expander** (part B, `tests/skill-expander-sections.test.ts`, through
 `parseTestFile` per the contract's §2.3 discipline): a section with three
 rows expands to three frames with `inputs`, `iteration` 1..3 and
@@ -1150,10 +1429,19 @@ with the cell substituted into its args; section recursion is still
 refused.
 
 **Sessions API** (`tests/api-server-viewport.test.ts` pattern, real
-Express entry): `dataRow` on the request appears on the report and in the
-file name; the run-log header carries `dataRow=N/M`; the `Row N of M`
+Express entry): the run-log header carries `dataRow=N/M`; the `Row N of M`
 output event; invalid values and `dataRow` without `dataRowCount` are 400
-with the field named. Part B (`tests/api-server-sections.test.ts`,
+with the field named. Then the accumulation, which is the half worth
+testing hardest: a batch with `dataRow` writes no report file and its
+`done` carries no `reportPath`; three row batches followed by
+`POST /sessions/:id/report` write exactly one file holding all three rows'
+steps with their markers; `dataRow: 1` after an abandoned earlier
+accumulation starts clean rather than appending to it; the accumulator
+survives a `DELETE /sessions/:id` between rows (the property it exists
+for — the minimum case, since a session-held accumulator passes every
+other test here); a finalise with `notRun` renders those rows' lines;
+finalising an unknown session is 404; a batch with *no* `dataRow` still
+writes its own report, unchanged. Part B (`tests/api-server-sections.test.ts`,
 `postSteps` through the real entry): `rows` survive the HTTP layer and a
 malformed `rows` is 400; `frame:push` carries `iteration`; a looped body
 step's binding source is the authored text; body-step results carry
@@ -1178,12 +1466,18 @@ its first numbered step past the table; `section-index` unchanged;
 
 **TestBench integration** (FakeApiClient harness, `batch-mode.test.cjs`
 and `viewport.test.cjs` patterns): a 3-row file posts three batches on one
-session id with per-row `parameters` and `dataRow`/`dataRowCount`, with
+session id with per-row `parameters` and
+`dataRow`/`dataRowCount`/`dataRowValues`, with
 `config` present on *every* row's first batch, `params` unpolluted by row
 1's `[input:]` answer, and `closeSessionIds` showing a close between rows;
 Run & Compile posts `compile` on the first row only; a single `done`;
-Stop during row 2 skips row 3 and paints it skipped; a breakpoint in row
-2 ends the loop after Continue finishes row 2; *Run this row* posts one
+exactly one `POST /sessions/:id/report` at loop end and
+`lastResolvedReportPath` taken from its response, not from `done`;
+Stop during row 2 skips row 3, paints it skipped, and still finalises with
+row 3 in `notRun`; a breakpoint in row
+2 ends the loop after Continue finishes row 2 and finalises with rows 3+
+in `notRun`; a row that throws still finalises (the `finally`); *Run this
+row* posts one
 batch with that row's values on the interactive id; the worst-status
 `rowSummary` and its hover detail; Test Explorer messages carry `(row N)`;
 column completion; F12 to the header cell. Part B (`frames.test.cjs`,
@@ -1196,7 +1490,8 @@ looped body lines is refused with the new code; the Variables view and
 Call Stack labels carry `(2/3)`.
 
 **Report** (`tests/report-source-section.test.ts`): the badge renders
-`section: Name (2/3)`; counts unchanged.
+`section: Name (2/3)`; an iteration band opens each pass through the body;
+counts unchanged.
 
 **Code-behind** (`tests/codebehind-compile-parameters.test.ts` pattern
 with the mocked runner): compile the sign-in fixture — steps 3–4 produce
@@ -1216,8 +1511,10 @@ entry and declines body line 2; three iterations bind to the same two
 entries.
 
 **Live** (`testbench-native/tests/integration/live/`): the sign-in fixture
-against `fixtures/test-app`, all five rows; assert the five `-rowN.html`
-files from disk (stop-report's pattern); row 1 on the dashboard; rows 2–5
+against `fixtures/test-app`, all five rows; assert from disk
+(stop-report's pattern) that the run left **one** HTML file, that it
+holds five matrix lines and thirty steps, and that no `-row` file exists
+beside it; row 1 on the dashboard; rows 2–5
 showing the banner text pinned to `fixtures/test-app/index.html`. Part B
 (`live/sections.test.cjs` pattern, `DELETE /api/documents` first): the
 upload fixture, one report, a document count of 3. Slow, and the only
@@ -1225,9 +1522,11 @@ tests that prove the model reads `{{outcome}}` and `{{status}}` correctly.
 
 ## Rollout
 
-Part A first: parser and runner (CLI-complete, useful on its own, and the
-`$VAR` fix reaches `dataFile:` users immediately), then the Sessions API
-field and the MCP notice, then TestBench. Part B after part A has landed,
+Part A first: parser, runner and the report merge (CLI-complete, useful on
+its own; the `$VAR` fix and the one-report change both reach `dataFile:`
+users immediately, since `dataFile:` is what writes `-rowN` files today),
+then the Sessions API fields, the accumulator and its finalise route, plus
+the MCP notice, then TestBench. Part B after part A has landed,
 as two PRs: the runtime half (scanners, expander loop, wire and contract,
 painting fix, secrets, resume refusals, report badge), then the
 code-behind scope change. Every part bundles runner-core changes
@@ -1258,8 +1557,14 @@ with part A, since it is currently mentioned only in the pipeline diagram.
   root (the CLI passes `cwd`, the server compile passes the project root).
 - The unknown-placeholder diagnostic (its own story).
 - The full run loop over MCP.
-- Per-row items in the Test Explorer, a per-run report index, a
-  worst-of-rows last-run sidecar, one run-history line per matrix run.
+- Per-row items in the Test Explorer; a worst-of-rows last-run sidecar.
+  (A per-run report index and one run-history line per matrix run were on
+  this list and are now in scope — decision 12.)
+- Routing *every* batch through the server's row accumulator, which would
+  also end the report-per-batch an `[input:]` split produces today
+  (§"Sessions API"). Only batches carrying `dataRow` accumulate here.
+- Filtering or sorting the matrix table, or diffing two rows side by side.
+  One table, document order.
 - Recording more than one run row during compile.
 
 ## Open for review
@@ -1275,8 +1580,19 @@ with part A, since it is currently mentioned only in the pipeline diagram.
 - Whether *Run this row* should also exist as a range (`--row 2-4`). Cheap
   to add; not asked for.
 - The worst-status repaint versus "last row wins". Worst-status is chosen
-  because a green gutter after a red row is a lie; the cost is that the
-  gutter no longer matches any single report.
+  because a green gutter after a red row is a lie; the cost was that the
+  gutter matched no single report — which decision 12 removes, since there
+  is now one report and the gutter is a summary of it.
+- Whether the matrix table should also carry a per-row token figure, given
+  that row 1 pays for the AI turns and rows 2–N replay from code-behind:
+  the interesting number is the *shape* of the spend across rows, and a
+  raw per-row count shows it. Included above; cheap to drop if it reads as
+  clutter.
+- Whether the row accumulator should be flushed by a TTL as well as by the
+  finalise route. `lastRunInfo`'s bounded LRU is the model and it has no
+  TTL; an abandoned accumulation is evicted by pressure, and holds a run's
+  `StepResult[]` (screenshots included) until then. A cap on accumulated
+  steps, or a TTL, is the obvious hardening and is not decided here.
 - Part B: whether a failed iteration should stop the run (first cut),
   let the loop finish and then stop, or continue into the steps after the
   call with the call-site step failed. The upload example is happy with
@@ -1325,8 +1641,10 @@ run loop (decision 6). Row 2 would have launched without `baseUrl` because
 the write-once config flag is reset per run, not per row — the boundary
 is now spelled out step by step (§"TestBench"). `dataRow` on the request
 cannot give the CLI's report title because the server names from the file
-basename — the story now promises the suffix, the meta line, a run-log
-field and an output event. The decline criterion as first worded would
+basename — the story then promised the suffix, the meta line, a run-log
+field and an output event (the first two are gone as of 2026-09-04; the
+server-names-from-the-basename fact still holds and still means the two
+paths' report *names* differ). The decline criterion as first worded would
 have *compiled* step 6, because the recorded assert action carries the
 outcome text in `condition`/`expected` — the rule now names the
 input-carrying fields and excludes assert fields. Also: `firstDataRow` is
@@ -1437,7 +1755,92 @@ tokens, breakpoints fire per iteration, and nothing about a row reaches
 - Worst-status repaint via a `rowSummary` message and `tracker.setStatus`,
   shared by both loops.
 - The report stays flat; body steps gain `iteration` and a badge suffix.
+  *(Superseded 2026-09-04: still flat, but the marker is `loop` and it
+  carries a band as well as the badge suffix.)*
 - The CLI summary keeps counting run rows as instances; no new aggregate.
+  *(Reversed 2026-09-04 — see below.)*
 - The unknown-placeholder diagnostic and the MCP run loop are out; the MCP
   path runs row 1 and says so.
 - Part B ships after part A as two PRs, runtime then code-behind.
+
+## Decisions after review (2026-09-04) — one report per run
+
+The story as reviewed kept today's `dataFile:` behaviour: each row is a
+full `runTest`, each writes its own `TestReport`, and the files are told
+apart by a `-rowN` suffix. Rejected by the user, flatly — five rows must
+not produce five report files. The point of a matrix is comparing rows,
+and a design that scatters the comparison across five files makes the
+reader do by hand the one thing the feature exists to do for them. This
+section records the reversal and what it took; decision 12 is the rule and
+§"Reports" is the shape.
+
+- **One report per run, both loops.** `buildReportBaseName` drops the
+  `-rowN` suffix ([generator.ts:59](../src/report/generator.ts)) and
+  `TestReport.dataRow` goes, with the "Data Row" meta line it feeds
+  ([types.ts:343](../src/report/types.ts),
+  [template.ts:335](../src/report/template.ts)). Nothing under `tests/`
+  asserts the suffix, so the removal breaks no existing test.
+- **The marker moves onto the step.** One optional `loop` field on
+  `StepResult`, carrying kind, label, index, count and the row's values;
+  part B's per-step `iteration`/`iterationCount` collapse into it, so both
+  loops share one field, one renderer and one `(n/N)` convention. The
+  frame-level `iteration`/`iterationCount` on `FrameInfo` stay — that is
+  the frame's identity, and the marker is derived from it.
+- **Grouping is cheaper than the story claimed.** Part B said grouping
+  would touch every consumer of `results.length`. True of a synthetic
+  call-site result; not true of the mechanism already in the file:
+  `renderSteps` emits the `[interactive]` banner as a plain `<div>` and
+  marks the steps after it with a CSS class
+  ([generator.ts:399,534](../src/report/generator.ts);
+  the class's entire definition is one `min-width` rule,
+  [template.ts:272](../src/report/template.ts)). Row and iteration bands
+  copy it exactly, and every count is untouched.
+- **The matrix table stops being a follow-on.** It is the report's answer
+  to "which rows failed", so it is the report. Rows that never ran get a
+  line too.
+- **`runTests` merges instead of reporting per instance.** A new
+  `mergeRowReports` folds a test's instance reports into one after each has
+  been redacted with its own secrets; `generateReport` and
+  `appendRunHistory` move outside the instance loop, so the ten-entry
+  history cap costs one line per run rather than five
+  ([test-runner.ts:1489](../src/runner/test-runner.ts)). `RunSummary`
+  becomes one test with N rows — `totalTests = reports.length`
+  ([:1503](../src/runner/test-runner.ts)) was the "existing per-instance
+  counting" part A leaned on, and it is what made a five-row smoke test
+  read as five tests in `Total:`
+  ([run.ts:250](../src/cli/commands/run.ts)).
+- **The Sessions API accumulates on the server, not in TestBench.** Not a
+  preference: `fullStepResults` is local to `postSteps` and holds real
+  `StepResult`s ([session-manager.ts:2265](../src/server/session-manager.ts)),
+  while the client is sent `StepResultResponse`
+  ([:673](../src/server/session-manager.ts)) — six fields, no turns, no
+  durations, no token attribution, no code-behind provenance — and neither
+  `testbench-native/src` nor `runner-core/src` imports `generateReport` or
+  `renderReport`. TestBench aggregating would mean a second full-fidelity
+  wire shape and moving report rendering into an extension that has never
+  rendered one. So the server accumulates.
+- **The accumulator lives on the manager, keyed like `lastRunInfo`.**
+  Decision 5 closes the session at every row boundary, so anything held on
+  `ManagedSession` dies with row 1. `lastRunInfo`
+  ([:1189](../src/server/session-manager.ts)) is the existing
+  manager-level, bounded, `sessionKey`-keyed map documented as surviving
+  session deletion — the same properties, for the same reason.
+- **Finalisation is its own route, not a flag on the last batch.** The
+  client cannot know a batch is the last: a pause ends the loop after the
+  current row (decision 6), Stop ends it mid-row, a throw ends it — all
+  decided by the response. And `dataRow === dataRowCount` would fire early
+  on a row an `[input:]` split into two batches. `POST /sessions/:id/report`
+  is posted from the run's `finally` and carries the rows that never ran.
+- **Two costs, both accepted.** The `.webm` is still per row and
+  `buildReportBaseName` was what told the files apart, so the row suffix
+  survives on the *video* name and the link moves onto the row's matrix
+  line ([test-runner.ts:1387](../src/runner/test-runner.ts),
+  [manager.ts:1650](../src/browser/manager.ts)) — without that, five rows
+  `saveAs` one name and only row 5's video is kept. And the report's
+  `parameters` block can no longer be a row's values, so it keeps only the
+  parameters every row shares.
+- **Not taken:** widening the accumulator to every batch. It would also fix
+  the report-per-batch an `[input:]` split causes today, which is a real
+  pre-existing wart, but it means auditing every client that reads
+  `reportPath` off `done`. Named in §"Non-goals" so the next person sees
+  the shape is already there.
