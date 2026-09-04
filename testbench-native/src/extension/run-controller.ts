@@ -15,6 +15,7 @@ import {
   maskIfSecret,
   parseConfig,
   parseFrontmatter,
+  parseDataRows,
   parseParameters,
   readEnvFile,
   readEnvOverlayFile,
@@ -89,6 +90,14 @@ export interface ApiClientLike {
    *  `done` event would have carried. Absent on older clients/fakes → the stop
    *  path simply skips recovery. Returns null on an older server (404). */
   getLastRun?(sessionId: string): Promise<LastRunInfoLike | null>;
+  /** Optional: render a data-driven run's one report from the rows the server
+   *  accumulated (`POST /sessions/:id/report`). Absent on older clients and on
+   *  fakes that never loop, in which case a row run simply leaves no report —
+   *  the rows themselves still ran. */
+  finalizeRowReport?(
+    sessionId: string,
+    notRun: Array<{ row: number; values: Record<string, string>; reason: string }>,
+  ): Promise<{ reportPath: string } | null>;
   // No `compileCodeBehind` here any more. The extension compiles through the
   // ordinary step route now (stories/compile-as-you-go.md); the boxed
   // `POST /codebehind/compile` pipeline stays server-side for `aiui compile`,
@@ -441,6 +450,12 @@ export class RunController {
    *  produced no step results or report generation failed; null is the
    *  no-report state. */
   private lastResolvedReportPath: string | null = null;
+
+  /** 1-based row being executed, or null outside a data-driven loop. */
+  private currentRowNumber: number | null = null;
+
+  /** Line → the rows that failed on it, for the end-of-loop repaint. */
+  private rowFailuresByLine = new Map<number, number[]>();
   /** Token totals for the most recently finalized run (issue 021). Set from the
    *  `done` event on a normal run, or recovered via `getLastRun` on STOP (where
    *  the `done` is dropped). null until a run finalizes. */
@@ -1357,6 +1372,19 @@ export class RunController {
    *  event listener. Used by every code path that emits step:start /
    *  step:pass / step:fail / output / capture / done. */
   private emitRunEvent(event: RunEvent): void {
+    // Which rows failed on which line, gathered as the run goes so the gutter
+    // can be repainted with the WORST status once the loop ends. Read off the
+    // events rather than threaded through the loop because a step can fail in
+    // several places (a block, a batch auto-fail, an error payload) and one
+    // collection point cannot miss one of them.
+    if (this.currentRowNumber !== null && event.type === 'step:fail') {
+      const at = this.rowFailuresByLine.get(event.line);
+      if (at) {
+        if (!at.includes(this.currentRowNumber)) at.push(this.currentRowNumber);
+      } else {
+        this.rowFailuresByLine.set(event.line, [this.currentRowNumber]);
+      }
+    }
     this.post({ type: 'runEvent', event });
     this.currentEventListener?.(event);
   }
@@ -2274,6 +2302,40 @@ export class RunController {
     // `effectiveEnvName` (resolved above, alongside the env overlay) is the env
     // sent to the server below so its ${env.X} map matches the client overlay.
     const params: Record<string, string> = { ...resolvedParameters };
+
+    /**
+     * The rows of a data-driven run (stories/data-driven-rows.md, part A),
+     * read once when Run is pressed.
+     *
+     * Snapshotted here rather than re-read per block, because `runStepBlock`
+     * re-reads the live buffer for `fullSteps` and `sections`: without the
+     * snapshot an edit to the table mid-run could change the count, reorder
+     * the rows, or make the row numbers in the report lie.
+     *
+     * A partial run — a re-run from a step, a Continue after a pause, a
+     * selection of lines — never loops. Those are all continuations of a run
+     * whose rows have already been decided, and re-entering the loop would
+     * start it again from row 1.
+     */
+    const wholeFileRun =
+      options.rerun === undefined &&
+      options.isContinuation !== true &&
+      options.isResume !== true;
+    const dataRows = wholeFileRun ? this.readDataRows(text, filePath, log) : null;
+    /** One entry per iteration: the row, or a single `null` for an ordinary run. */
+    const rowPlan: Array<Record<string, string> | null> = dataRows ?? [null];
+    /** Per-row outcome, for the end-of-run summary. */
+    const rowOutcomes: Array<{ row: number; values: Record<string, string>; failed: boolean }> = [];
+    /**
+     * Rows whose batch was sent, whether or not it finished.
+     *
+     * Not the same as `rowOutcomes`, which only gains a row that ran to the
+     * end of its steps. A row interrupted by Stop still reaches the server,
+     * which accumulates its results under an `aborted` status — so reporting
+     * it as "not run" would give it two lines in the matrix, one from the
+     * accumulator and one from the client.
+     */
+    const attemptedRows = new Set<number>();
     /**
      * Which compile mode this logical run is in.
      *
@@ -2308,6 +2370,46 @@ export class RunController {
     let pendingRerun = options.rerun;
 
     try {
+      for (const [rowIndex, row] of rowPlan.entries()) {
+      if (row !== null) {
+        // The row boundary. Order matters: the session has to go before the
+        // next row's batch so that batch creates it afresh (row 1 signs in;
+        // row 2 must not start on the dashboard), and `forgetSentConfig` has
+        // to go with it — `includeConfig` is `!configSentForSession`, which is
+        // otherwise reset only in this run's `finally`, so without it row 2's
+        // session would launch with no baseUrl, viewport or timeout and step 1
+        // would fail.
+        if (rowIndex > 0) {
+          if (this.parkedAtPause) {
+            // A pause ends the loop after the current row (decision 6).
+            // Resuming the loop itself would need a row cursor that survives a
+            // Continue; the debugging loop is Run This Row instead.
+            log(`run paused during row ${rowIndex} — remaining rows not run`);
+            break;
+          }
+          if (ac.signal.aborted) break;
+          try {
+            await client.closeSession(sessionId);
+          } catch {
+            /* best effort — a stale session must not fail the next row */
+          }
+          this.forgetSentConfig();
+          if (this.clearStatusesForUris) this.clearStatusesForUris([this.document.uri]);
+        }
+        // Rebuilt rather than mutated: `[input:]` answers write into `params`,
+        // and one row's answer must not leak into the next.
+        for (const key of Object.keys(params)) delete params[key];
+        Object.assign(params, resolvedParameters, row);
+        this.post({ type: 'parametersResolved', values: { ...params } });
+        const shown = Object.entries(row)
+          .map(([k, v]) => `${k}=${maskIfSecret(k, v)}`)
+          .join(', ');
+        this.postOutput(`Row ${rowIndex + 1} of ${rowPlan.length} — ${shown}`, 'info');
+        log(`row ${rowIndex + 1}/${rowPlan.length}`);
+        this.currentRowNumber = rowIndex + 1;
+        attemptedRows.add(rowIndex + 1);
+      }
+      const rowFailedAtStart = anyFailed;
       let i = 0;
       while (i < classified.length) {
         if (ac.signal.aborted) break;
@@ -2329,6 +2431,9 @@ export class RunController {
             sessionConfig,
             logging,
             cacheOverride: rawConfig['cache'],
+            ...(row !== null && {
+              dataRow: { row: rowIndex + 1, count: rowPlan.length, values: row },
+            }),
             signal: ac.signal,
             log,
             ...(options.stepMode && { stepMode: options.stepMode }),
@@ -2430,6 +2535,18 @@ export class RunController {
         }
       }
 
+      if (row !== null) {
+        // A failing row does not stop the loop (decision 6) — a matrix exists
+        // to show *which* rows fail. The run as a whole is still failed if any
+        // row was, which is what `anyFailed` carries forward.
+        rowOutcomes.push({
+          row: rowIndex + 1,
+          values: row,
+          failed: anyFailed && !rowFailedAtStart,
+        });
+      }
+      } // end of the row loop
+
       this.markConfigSent(sessionConfig.viewport);
 
       const status: 'passed' | 'failed' | 'aborted' =
@@ -2530,6 +2647,22 @@ export class RunController {
       this.emitRunEvent({ type: 'done', status: 'error' });
       return this.fail(payload, log);
     } finally {
+      // The one report a data-driven run gets. Here rather than after the
+      // loop because the loop has four exits — the last row, Stop, a pause
+      // parking the run, and a thrown row — and three of them leave through a
+      // `return` or a throw. A row that dies still leaves a report covering
+      // the rows that ran.
+      if (dataRows) {
+        this.currentRowNumber = null;
+        await this.finishRowRun({
+          client,
+          sessionId,
+          rowPlan,
+          rowOutcomes,
+          attemptedRows,
+          log,
+        });
+      }
       // A stream that ended without a `compile:result` (a dropped connection,
       // a server error) must not leave a spinner running for the rest of the
       // session. On the ordinary path the result already took it down and this
@@ -2576,6 +2709,103 @@ export class RunController {
     }
   }
 
+  /**
+   * The rows that make this run loop, or null when the file has none.
+   *
+   * A malformed table is reported and the run goes ahead as a single
+   * un-looped run, rather than being refused: the parse error is a fact about
+   * the table, and refusing to run the steps because of it would be a worse
+   * trade than running them once with the placeholders unresolved — which the
+   * author will see immediately in the step text.
+   */
+  private readDataRows(
+    text: string,
+    filePath: string,
+    log: (msg: string) => void,
+  ): Array<Record<string, string>> | null {
+    try {
+      const scan = parseDataRows(text, filePath);
+      if (!scan) return null;
+      log(`data table: ${scan.rows.length} row(s), columns [${scan.columns.join(', ')}]`);
+      return scan.rows;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.postOutput(`Data table not read: ${message}`, 'error');
+      log(`data table error: ${message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Close out a data-driven run: repaint the gutter with each line's worst
+   * status, print the per-row summary, and ask the server to render the run's
+   * one report.
+   *
+   * The repaint is a controller→extension message rather than a run event on
+   * purpose. Run events also reach the Test Explorer's listener, which renders
+   * each `step:fail` as a test message — replaying them here would double-count
+   * every failure in the Explorer while fixing the gutter.
+   */
+  private async finishRowRun(args: {
+    client: ApiClientLike;
+    sessionId: string;
+    rowPlan: Array<Record<string, string> | null>;
+    rowOutcomes: Array<{ row: number; values: Record<string, string>; failed: boolean }>;
+    attemptedRows: Set<number>;
+    log: (msg: string) => void;
+  }): Promise<void> {
+    const { client, sessionId, rowPlan, rowOutcomes, attemptedRows, log } = args;
+    const ran = attemptedRows;
+    const notRun = rowPlan
+      .map((values, index) => ({ row: index + 1, values: values ?? {} }))
+      .filter((r) => !ran.has(r.row))
+      .map((r) => ({ ...r, reason: this.pauseRequested ? 'paused' : 'stopped' }));
+
+    // Worst-status repaint. A green gutter after a red row is a lie, so a line
+    // that failed on any row stays red — with the failing rows named in the
+    // hover, since the line itself can no longer say which run it belonged to.
+    if (this.rowFailuresByLine.size > 0) {
+      const failures = [...this.rowFailuresByLine.entries()].map(([line, rows]) => ({
+        line,
+        rows: [...rows].sort((a, b) => a - b),
+      }));
+      this.post({ type: 'rowSummary', uri: this.document.uri.toString(), failures });
+    }
+    this.rowFailuresByLine.clear();
+
+    for (const outcome of rowOutcomes) {
+      this.postOutput(
+        `  Row ${outcome.row}: ${outcome.failed ? 'failed' : 'passed'}`,
+        outcome.failed ? 'error' : 'info',
+      );
+    }
+    for (const skipped of notRun) {
+      this.postOutput(`  Row ${skipped.row}: not run (${skipped.reason})`, 'warn');
+    }
+
+    // Never fails the run: report generation has that posture everywhere else,
+    // and a run whose steps all passed must not go red because the render did
+    // not.
+    if (!client.finalizeRowReport) {
+      log('row run finalise skipped: this client cannot render a merged report');
+      return;
+    }
+    try {
+      const result = await client.finalizeRowReport(sessionId, notRun);
+      if (result) {
+        this.lastResolvedReportPath = result.reportPath;
+        this.postOutput(`Report: ${result.reportPath}`, 'info');
+        log(`row run report: ${result.reportPath}`);
+      } else {
+        log('row run finalise: nothing accumulated on the server');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.postOutput(`Could not render the run's report: ${message}`, 'warn');
+      log(`row run finalise failed: ${message}`);
+    }
+  }
+
   private async runStepBlock(args: {
     block: ClassifiedStep[];
     client: ApiClientLike;
@@ -2592,6 +2822,9 @@ export class RunController {
      *  test declared one. Overrides the project's aiui.config.json
      *  `cache.enabled` for this run; see `resolveCacheOverride`. */
     cacheOverride?: string;
+    /** Which data row this batch runs, when the test has a data table. The
+     *  server accumulates such a batch instead of writing it a report. */
+    dataRow?: { row: number; count: number; values: Record<string, string> };
     /** Initial stepMode to send with the request body — when set, the
      *  server pauses between steps and the run is driven by `run-control`
      *  POSTs from the extension. */
@@ -2626,7 +2859,7 @@ export class RunController {
      *  slice pausing at its own breakpoint runs nothing. */
     suppressServerBreakpoints?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, suppressServerBreakpoints } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, suppressServerBreakpoints } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -2687,8 +2920,20 @@ export class RunController {
         // moving every sectionless run onto the expansion path.
         ...(sections && { sections }),
         // A re-run forces the cache off (see `rerun` doc) so an edited value
-        // re-plans rather than replaying a frozen cached action list.
-        ...(cacheEnabled && !rerun && { cacheEnabled: true }),
+        // re-plans rather than replaying a frozen cached action list. So does
+        // a data-driven row: the cache is keyed per step line and rewrites
+        // only an action's `value`, so an assertion whose expectation came
+        // from a row would replay row 1's on every row
+        // (stories/data-driven-rows.md, decision 8).
+        ...(cacheEnabled && !rerun && dataRow === undefined && { cacheEnabled: true }),
+        // A batch carrying `dataRow` writes no report: its results join the
+        // server's row accumulator, and `finalizeRowReport` renders the one
+        // report when the loop ends.
+        ...(dataRow !== undefined && {
+          dataRow: dataRow.row,
+          dataRowCount: dataRow.count,
+          dataRowValues: dataRow.values,
+        }),
         testFilePath,
         ...(stepMode && { stepMode }),
         ...(pauseAtNextTool && { pauseAtNextTool: true }),

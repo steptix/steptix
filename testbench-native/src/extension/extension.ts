@@ -578,6 +578,23 @@ class RunControllerRegistry implements vscode.Disposable {
   }
 
   private applyToTracker(uri: vscode.Uri, msg: HostToWebviewMsg): void {
+    // The worst status each line reached across a data-driven run's rows,
+    // applied once when the loop ends. Every row repaints the same lines, so
+    // without this the last clean row would erase a failure three rows back
+    // and the gutter would go green on a run that had red in it.
+    if (msg.type === 'rowSummary') {
+      const target = vscode.Uri.parse(msg.uri);
+      for (const failure of msg.failures) {
+        const rows = failure.rows.join(', ');
+        this.tracker.setStatus(target, failure.line, 'fail', {
+          error:
+            failure.rows.length === 1
+              ? `Failed on row ${rows}.`
+              : `Failed on rows ${rows}.`,
+        });
+      }
+      return;
+    }
     if (msg.type === 'runEvent') {
       const ev = msg.event;
       switch (ev.type) {

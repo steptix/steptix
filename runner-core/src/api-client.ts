@@ -231,6 +231,24 @@ export interface StreamStepsRequest {
    */
   cacheEnabled?: boolean;
   /**
+   * Which data row of a data-driven run this batch is, 1-based
+   * (stories/data-driven-rows.md, part A). The client owns the loop; the
+   * server owns the report.
+   *
+   * A batch carrying `dataRow` writes no report and its `done` carries no
+   * `reportPath`: the results join a row accumulator, and `finalizeRowReport`
+   * renders the one report the run gets when the loop ends.
+   */
+  dataRow?: number;
+  /** How many rows the run has. Required alongside `dataRow`. */
+  dataRowCount?: number;
+  /**
+   * The row's own cells, for the report's matrix table and loop bands. Not
+   * recoverable from `parameters`, which is the row already merged over the
+   * test's `## Parameters`.
+   */
+  dataRowValues?: Record<string, string>;
+  /**
    * Full post-expansion step list for the test. Required for multi-batch
    * runs (breakpoint pause + Continue) so the server's cache-bundle hash
    * stays stable across batches. Single-batch runs can omit it; the
@@ -574,6 +592,37 @@ export class ApiClient {
       ...(body.tokens && { tokens: body.tokens }),
       ...(typeof body.reportPath === 'string' && { reportPath: body.reportPath }),
     };
+  }
+
+  /**
+   * Render the one report of a data-driven run and return its path.
+   *
+   * Posted when the client's row loop ends, however it ends — last row, Stop,
+   * a pause parking the run, a thrown row. It is a separate call rather than a
+   * flag on the last batch because the client cannot know which batch is the
+   * last one until that batch comes back.
+   *
+   * `notRun` lists the rows the loop planned and never reached, so their lines
+   * in the matrix table can say so; only the client knows them. Returns null
+   * when the server has nothing accumulated (a 404), which is what a
+   * double-post after a crash looks like and is harmless.
+   */
+  async finalizeRowReport(
+    sessionId: string,
+    notRun: Array<{ row: number; values: Record<string, string>; reason: string }> = [],
+  ): Promise<{ reportPath: string } | null> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/report`;
+    const res = await this.fetchImpl(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': this.apiKey },
+      body: JSON.stringify({ notRun }),
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new Error(`Failed to finalise the run's report (HTTP ${String(res.status)}).`);
+    }
+    const body = (await res.json()) as { reportPath?: unknown };
+    return typeof body.reportPath === 'string' ? { reportPath: body.reportPath } : null;
   }
 
   /** Fire-and-best-effort: tells the server to drop the session and close the browser. */
