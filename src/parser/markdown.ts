@@ -606,13 +606,17 @@ function parseSections(rawContent: string, filePath: string): {
   const mainStepLines: number[] = [];
   const mainRawSteps: string[] = [];
 
-  const sectionAcc: ParsedSection[] = scan.heads.map((h) => ({
-    name: h.name,
-    headingLine: h.headingLine,
-    steps: [],
-    rawSteps: [],
-    stepLines: [],
-  }));
+  const sectionAcc: ParsedSection[] = scan.heads.map((h, index) => {
+    const table = scan.sectionTables?.get(index);
+    return {
+      name: h.name,
+      headingLine: h.headingLine,
+      steps: [],
+      rawSteps: [],
+      stepLines: [],
+      ...(table && { rows: table.rows }),
+    };
+  });
 
   for (let i = 0; i < steps.length; i++) {
     const entry = scan.entries[i];
@@ -773,6 +777,9 @@ export interface StepSpanScan {
    * `## Steps`, the same gate sections are behind.
    */
   dataTable?: DataTableScan;
+  /** Tables under a `### Section`, keyed by that section's index in `heads` —
+   *  the rows that make each call of it loop (part B). */
+  sectionTables?: Map<number, DataTableScan>;
 }
 
 /**
@@ -854,6 +861,11 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
       })
     : null;
 
+  /** Index (0-based) where the whole steps span ends — the line of the next
+   *  heading at or above its depth, or the end of the file. Needed to bound
+   *  the LAST section's table scan. */
+  let spanEndIndex = lines.length;
+
   const seenNames = new Map<string, number>();
   let currentSection: number | null = null;
   /**
@@ -876,7 +888,10 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
     const line = j + 1;
 
     const heading = ANY_HEADING_RE.exec(raw);
-    if (heading && heading[1]!.length <= headingDepth) break;
+    if (heading && heading[1]!.length <= headingDepth) {
+      spanEndIndex = j;
+      break;
+    }
 
     if (sectionsRecognised && HASHES_ONLY_RE.test(raw)) {
       // Hashes with no text, at any depth >= 3. Always an error, but raise it
@@ -948,7 +963,34 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
     );
   }
 
-  return { entries, heads, ...(dataTable && { dataTable }) };
+  // A table under a `### Section` loops that section's body, once per row,
+  // in the same session (stories/data-driven-rows.md, part B). Scanned after
+  // the main pass because a section's span is only known once the next
+  // heading has been seen: it runs from its own heading to the next `###` (or
+  // to wherever the whole steps span ended).
+  const sectionTables = new Map<number, DataTableScan>();
+  if (sectionsRecognised) {
+    for (const [index, head] of heads.entries()) {
+      const from = head.headingLine; // 1-based heading line == 0-based next line
+      const next = heads[index + 1];
+      const to = next ? next.headingLine - 1 : spanEndIndex;
+      const scan = scanDataTable({
+        lines,
+        from,
+        to,
+        filePath,
+        flow: `### ${head.name}`,
+      });
+      if (scan) sectionTables.set(index, scan);
+    }
+  }
+
+  return {
+    entries,
+    heads,
+    ...(dataTable && { dataTable }),
+    ...(sectionTables.size > 0 && { sectionTables }),
+  };
 }
 
 /** Parse a list of "- key: value" items into a key-value map */

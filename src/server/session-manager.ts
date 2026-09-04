@@ -17,7 +17,7 @@ import {
   resolveViewportSpec,
   viewportCdpConflictError,
 } from '../config/viewport.js';
-import type { StepResult, TestReport } from '../report/types.js';
+import type { LoopMarker, StepResult, TestReport } from '../report/types.js';
 // From report/TYPES, deliberately — not report/generator.js, which a dozen
 // api-server suites replace wholesale with a three-export `vi.mock`.
 import { isHealedStep } from '../report/types.js';
@@ -306,6 +306,10 @@ export interface StepRequest {
       steps: string[];
       /** Parallel to `steps`. */
       stepLines: number[];
+      /** Rows from a table under the `### Name` heading: the section`s body
+       *  runs once per row, in the same session (part B). Absent when the
+       *  section has no table. */
+      rows?: Array<Record<string, string>>;
     }
   >;
   /**
@@ -450,6 +454,10 @@ export interface FrameInfo {
   uri: string;
   line: number;
   skillName?: string;
+  /** 1-based iteration of a looped section, and how many there are
+   *  (stories/data-driven-rows.md, part B). Absent on every other frame. */
+  iteration?: number;
+  iterationCount?: number;
 }
 
 /**
@@ -1130,6 +1138,41 @@ export function hasSections(request: {
  * carry skill S and section A at once, which is why this is a separate walk
  * from `outermostSkillName` rather than the same walk with the kind swapped.
  */
+/**
+ * The `loop` marker for a step, derived from the nearest enclosing frame that
+ * is an iteration of a looped section (stories/data-driven-rows.md, part B).
+ *
+ * INNERMOST wins, unlike `outermostSectionName` above. The marker exists to
+ * say where the step's values came from, and inside nested loops that is the
+ * inner row; the enclosing ones stay legible on the frames themselves, which
+ * is where the Call Stack already reads them.
+ */
+function loopMarkerFor(
+  frameId: string | undefined,
+  frames: Record<string, FrameInfo> | null,
+  // The wire FrameInfo deliberately carries no `inputs` — they are kept in a
+  // parallel server-side map — so the row values come in separately.
+  inputsByFrame: Record<string, Record<string, string>>,
+): LoopMarker | undefined {
+  if (!frameId || !frames) return undefined;
+  const seen = new Set<string>();
+  let current: FrameInfo | undefined = frames[frameId];
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    if (current.iteration !== undefined && current.iterationCount !== undefined) {
+      return {
+        kind: 'iteration',
+        ...(current.skillName && { label: current.skillName }),
+        index: current.iteration,
+        count: current.iterationCount,
+        values: { ...(inputsByFrame[current.id] ?? {}) },
+      };
+    }
+    current = current.parentId ? frames[current.parentId] : undefined;
+  }
+  return undefined;
+}
+
 function outermostSectionName(
   frameId: string | undefined,
   frames: Record<string, FrameInfo> | null,
@@ -2787,7 +2830,20 @@ export class SessionManager {
         envDataCtx = { ...envDataCtx, extraData };
       }
     }
-    secretsNow = () => runSecrets({ parameters: resolvedParameters, envData: envDataCtx });
+    // Frame inputs join the secret list, not just the parameter map. A looped
+    // section's row is bound as frame `inputs` and interpolated into the step
+    // text, so a `password` column would otherwise print in clear in the
+    // report's instruction, the console line, the run log and the recording —
+    // and so would a literal `[skill: login password="x"]` argument, which has
+    // had the same hole all along (stories/data-driven-rows.md, decision 10).
+    //
+    // Read fresh on every call, as the parameter half already is: frames are
+    // built after this assignment, and captures keep adding to the map.
+    secretsNow = () =>
+      runSecrets({
+        parameters: { ...resolvedParameters, ...Object.assign({}, ...Object.values(frameInputs)) },
+        envData: envDataCtx,
+      });
 
     // Determine per-step timeout
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
@@ -2934,6 +2990,12 @@ export class SessionManager {
             uri: f.uri,
             line: f.invocationLine ?? 0,
             ...(f.skillName !== undefined && { skillName: f.skillName }),
+            // Not free: this conversion copies field by field, so an
+            // iteration would be dropped here without naming it.
+            ...(f.iteration !== undefined && {
+              iteration: f.iteration,
+              iterationCount: f.iterationCount,
+            }),
           };
           // Parallel input map kept server-side only (not part of the
           // wire FrameInfo). Merged into the `frame:scope` payload on
@@ -4571,6 +4633,16 @@ export class SessionManager {
         // that switched tabs must report the one it ended in.
         const tabAfterStep = await tabSpread();
 
+        // Which iteration of a looped section this step belongs to, derived
+        // from its frame rather than tracked alongside it — the frame is the
+        // iteration's identity, and a parallel array would be one more thing
+        // to keep aligned through expansion.
+        const loop = loopMarkerFor(
+          expansionOrigins?.[i]?.frameId,
+          expansionFrames,
+          frameInputs,
+        );
+
         const fullResult: StepResult = {
           ...stepResult,
           index: i + 1,
@@ -4578,6 +4650,7 @@ export class SessionManager {
           ...(Object.keys(stepOutputs).length > 0 && { outputs: stepOutputs }),
           ...(sourceSkill && { sourceSkill }),
           ...(sourceSection && { sourceSection }),
+          ...(loop && { loop }),
           ...tabAfterStep,
         };
         fullStepResults.push(fullResult);

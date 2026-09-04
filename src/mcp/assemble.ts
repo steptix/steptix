@@ -504,6 +504,7 @@ function sectionsPayload(
       headingLine: section.headingLine,
       steps: section.steps,
       stepLines: section.stepLines,
+      ...(section.rows && { rows: section.rows }),
     };
   }
   return out;

@@ -731,12 +731,22 @@ export function createApiServer(
               res.status(400).json({ error: invalid });
               return;
             }
-            const entry = raw as { name: string; headingLine: number; steps: string[]; stepLines: number[] };
+            const entry = raw as {
+              name: string;
+              headingLine: number;
+              steps: string[];
+              stepLines: number[];
+              rows?: Array<Record<string, string>>;
+            };
             sections[key] = {
               name: entry.name,
               headingLine: entry.headingLine,
               steps: entry.steps,
               stepLines: entry.stepLines,
+              // Named explicitly: this copy is field-by-field, so a new key
+              // travels only if it is listed. The seam that once dropped
+              // `envName`.
+              ...(entry.rows && { rows: entry.rows }),
             };
           }
           request.sections = sections;
@@ -2797,6 +2807,24 @@ function validateSectionEntry(key: string, raw: unknown): string | null {
   }
   if (!Array.isArray(entry.steps) || !entry.steps.every((s) => typeof s === 'string')) {
     return `${where}.steps must be an array of strings`;
+  }
+  // A looped section's rows (stories/data-driven-rows.md, part B). Refused
+  // rather than ignored: a malformed `rows` would silently run the body once
+  // instead of N times, which is the failure the whole feature is about.
+  if (entry.rows !== undefined) {
+    if (!Array.isArray(entry.rows) || entry.rows.length === 0) {
+      return `${where}.rows must be a non-empty array when present`;
+    }
+    for (const row of entry.rows) {
+      if (
+        typeof row !== 'object' ||
+        row === null ||
+        Array.isArray(row) ||
+        !Object.values(row as Record<string, unknown>).every((v) => typeof v === 'string')
+      ) {
+        return `${where}.rows entries must be objects of string values`;
+      }
+    }
   }
   if (
     !Array.isArray(entry.stepLines) ||

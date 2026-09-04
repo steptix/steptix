@@ -176,6 +176,10 @@ export interface StreamStepsRequest {
       steps: string[];
       /** Parallel to `steps`. */
       stepLines: number[];
+      /** Rows from a table under the `### Name` heading: the section`s body
+       *  runs once per row, in the same session (part B). Absent when the
+       *  section has no table. */
+      rows?: Array<Record<string, string>>;
     }
   >;
   /**

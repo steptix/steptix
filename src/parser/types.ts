@@ -143,6 +143,16 @@ export interface ParsedSection {
   rawSteps: string[];
   /** 1-based raw-file line per body step, parallel to `steps`. */
   stepLines: number[];
+  /**
+   * Rows from a table directly under this section's `### Name` heading: every
+   * call of the section runs its body once per row, in the same session, with
+   * the row bound over the caller's scope for that iteration
+   * (stories/data-driven-rows.md, part B).
+   *
+   * Absent — never empty — when the section has no table, so a section called
+   * once still expands exactly as it did before the feature.
+   */
+  rows?: Array<Record<string, string>>;
 }
 
 /** A single parsed test file */

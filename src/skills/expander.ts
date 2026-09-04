@@ -42,6 +42,21 @@ export function referencedVariableNames(
 const MAX_DEPTH = 10;
 
 /**
+ * `interpolate`, minus the warning on an unresolved placeholder.
+ *
+ * A looped section's body is interpolated with its row, and a body may
+ * legitimately reference a caller variable that only exists at run time —
+ * `interpolate` would log "Unresolved placeholder" for every such reference,
+ * once per iteration. Those are resolved later, by the runner, against the
+ * live parameter map.
+ */
+function interpolateQuiet(text: string, values: Record<string, string>): string {
+  return text.replace(PLACEHOLDER_RE, (match, key: string) =>
+    Object.hasOwn(values, key) ? (values[key] ?? match) : match,
+  );
+}
+
+/**
  * Section definitions the expander can resolve bare-name calls against,
  * keyed by `matchText(name)`.
  *
@@ -60,6 +75,10 @@ export type SectionDefs = Record<
     steps: string[];
     stepLines: number[];
     rawSteps?: string[] | undefined;
+    /** Rows from a table under the `### Name` heading: each call of the
+     *  section runs its body once per row (part B). Optional for the same
+     *  reason `rawSteps` is — a wire entry may omit it. */
+    rows?: Array<Record<string, string>> | undefined;
   }
 >;
 
@@ -110,6 +129,17 @@ export interface ExpandedFrame {
    * a debugger pause inside the skill can surface them.
    */
   inputs?: Record<string, string>;
+  /**
+   * 1-based iteration of a looped section, and how many there are
+   * (stories/data-driven-rows.md, part B). Absent on every other frame — a
+   * section called once, a skill, the test frame.
+   *
+   * The frame IDENTITY of an iteration. The report derives each body step`s
+   * `loop` marker from it, and the Variables and Call Stack views label the
+   * frame `Name (2/3)` with it.
+   */
+  iteration?: number;
+  iterationCount?: number;
   /**
    * Effective session-scope names this skill's `## Outputs` write to,
    * i.e. each declared output mapped through the caller's alias
@@ -355,6 +385,12 @@ function reportDeadSections(
 
 interface ExpandContext {
   skillsDir: string | undefined;
+  /**
+   * Row values bound by every enclosing looped section, innermost winning.
+   * Interpolated into a body`s step text as it is inlined, so the runner never
+   * sees `{{column}}` and a nested loop can still read the outer row.
+   */
+  rowBindings?: Record<string, string>;
   /** Sections visible to the step list currently being expanded. Swapped for
    *  the skill's own (scoped) map when recursing into a skill; kept as-is
    *  when recursing into a section body, so a section can call its siblings. */
@@ -468,60 +504,98 @@ async function expandRecursive(
           );
         }
 
-        const instanceId = ++ctx.seq.n;
-        const newFrameId = `f${instanceId}`;
-        ctx.frames[newFrameId] = {
-          id: newFrameId,
-          parentId: parentFrameId === '' ? null : parentFrameId,
-          kind: 'section',
-          // The file that DEFINES the section: the test file for a test-file
-          // section, the skill file for a skill-internal one.
-          uri: ctx.sectionsFilePath,
-          invocationLine: stepLines?.[i] ?? null,
-          // Field reused for the section name; the enclosing skill (if any)
-          // is on the nearest ancestor frame with kind 'skill'.
-          skillName: section.name,
-        };
+        // A table under the section's heading makes each call run the body
+        // once per row (stories/data-driven-rows.md, part B). Without one this
+        // is a single iteration with no bindings — exactly what a section call
+        // has always been.
+        const iterations = section.rows ?? [null];
 
-        // A section is a macro: it shares the caller's scope, so there is no
-        // scope pass here and `ctx` carries through unchanged. The body may
-        // call sibling sections, so the sections map stays put — only the
-        // match-side array swaps to this body's own.
-        const bodyCtx: ExpandContext = {
-          ...ctx,
-          ...(section.rawSteps
-            ? { rawSteps: section.rawSteps }
-            : { rawSteps: undefined }),
-        };
-        // Strip a leading `[no-hooks]` from each body step as it is inlined.
-        // The CLI parser already stripped these, but the wire shape carries
-        // markers verbatim (the client can't strip them — they are part of
-        // the match side), so without this the literal marker text would
-        // reach the AI on the server path only. A marker on a body step is
-        // stripped and ignored either way: it is the *invocation's* marker
-        // that opts the whole body out, via origin mapping.
-        const bodySteps = section.steps.map((s) => s.replace(NO_HOOKS_MARKER, ''));
+        for (const [iteration, row] of iterations.entries()) {
+          const instanceId = ++ctx.seq.n;
+          const newFrameId = `f${instanceId}`;
+          ctx.frames[newFrameId] = {
+            id: newFrameId,
+            parentId: parentFrameId === '' ? null : parentFrameId,
+            kind: 'section',
+            // The file that DEFINES the section: the test file for a test-file
+            // section, the skill file for a skill-internal one.
+            uri: ctx.sectionsFilePath,
+            invocationLine: stepLines?.[i] ?? null,
+            // Field reused for the section name; the enclosing skill (if any)
+            // is on the nearest ancestor frame with kind 'skill'.
+            skillName: section.name,
+            ...(row && {
+              // The row as this iteration's inputs, the way a skill call's
+              // args are. The server surfaces them in `frame:scope`, so the
+              // Variables view shows the iteration's values at a pause with no
+              // new wire shape.
+              inputs: { ...row },
+              iteration: iteration + 1,
+              iterationCount: iterations.length,
+            }),
+          };
 
-        const recursed = await expandRecursive(
-          bodySteps,
-          bodyCtx,
-          new Set([...visited, cycleKey]),
-          depth + 1,
-          sourceSkill,
-          // Outermost-wins, and only outside a skill: a step in a skill's
-          // internal section keeps the enclosing test-file section's tag
-          // (or null), never the skill-private name.
-          ctx.insideSkill ? sourceSection : (sourceSection ?? section.name),
-          newFrameId,
-          attribInputIndex ?? i,
-          section.stepLines,
-        );
+          // A section is a macro: it shares the caller's scope, so there is no
+          // scope pass here and `ctx` carries through unchanged. The body may
+          // call sibling sections, so the sections map stays put — only the
+          // match-side array swaps to this body's own.
+          //
+          // `rawSteps` stays the AUTHORED text even when a row is interpolated
+          // into the body below. The wire carries no `rawSteps` (contract
+          // §3.2), so `matchInput` falls back to `steps[i]` on the server —
+          // and if that were the interpolated text, the match side and the
+          // code-behind binding `source` would differ between the CLI and the
+          // server, binding entries on one path and not the other.
+          const bodyCtx: ExpandContext = {
+            ...ctx,
+            ...(section.rawSteps
+              ? { rawSteps: section.rawSteps }
+              : { rawSteps: undefined }),
+            // An inner looped body sees its enclosing rows too, innermost
+            // winning: a section shares the caller's scope, and a nested loop
+            // that could not read the outer row would contradict that.
+            ...(row && { rowBindings: { ...(ctx.rowBindings ?? {}), ...row } }),
+          };
+          // Strip a leading `[no-hooks]` from each body step as it is inlined.
+          // The CLI parser already stripped these, but the wire shape carries
+          // markers verbatim (the client can't strip them — they are part of
+          // the match side), so without this the literal marker text would
+          // reach the AI on the server path only. A marker on a body step is
+          // stripped and ignored either way: it is the *invocation's* marker
+          // that opts the whole body out, via origin mapping.
+          let bodySteps = section.steps.map((s) => s.replace(NO_HOOKS_MARKER, ''));
+          if (bodyCtx.rowBindings) {
+            // Interpolated BEFORE the recursion, so a `[skill: x arg="{{col}}"]`
+            // line inside the body reaches the skill-call parser with the value
+            // already in place — the same order `applySkillScope` uses for a
+            // skill's own args. `interpolateQuiet` leaves an unknown
+            // placeholder alone without warning: a body may legitimately
+            // reference a caller variable that only exists at run time.
+            const bindings = bodyCtx.rowBindings;
+            bodySteps = bodySteps.map((s) => interpolateQuiet(s, bindings));
+          }
 
-        out.push(...recursed.steps);
-        sources.push(...recursed.sourceSkills);
-        sourceSecs.push(...recursed.sourceSections);
-        raws.push(...recursed.rawSteps);
-        origins.push(...recursed.origins);
+          const recursed = await expandRecursive(
+            bodySteps,
+            bodyCtx,
+            new Set([...visited, cycleKey]),
+            depth + 1,
+            sourceSkill,
+            // Outermost-wins, and only outside a skill: a step in a skill's
+            // internal section keeps the enclosing test-file section's tag
+            // (or null), never the skill-private name.
+            ctx.insideSkill ? sourceSection : (sourceSection ?? section.name),
+            newFrameId,
+            attribInputIndex ?? i,
+            section.stepLines,
+          );
+
+          out.push(...recursed.steps);
+          sources.push(...recursed.sourceSkills);
+          sourceSecs.push(...recursed.sourceSections);
+          raws.push(...recursed.rawSteps);
+          origins.push(...recursed.origins);
+        }
         continue;
       }
 
@@ -886,16 +960,18 @@ function applySkillScope(
     if (alias && alias !== output) outputRenames.set(output, alias);
   }
 
-  const apply = (step: string): string => {
+  const applyExcept = (step: string, skip: ReadonlySet<string>): string => {
     let s = step;
 
     // 1. Apply output aliases first so subsequent rewrites don't clash.
     for (const [from, to] of outputRenames) {
+      if (skip.has(from)) continue;
       s = renameVar(s, from, to);
     }
 
     // 2. Rewrite internal names to the namespaced form.
     for (const [from, to] of internalRenames) {
+      if (skip.has(from)) continue;
       s = renameVar(s, from, to);
     }
 
@@ -904,6 +980,9 @@ function applySkillScope(
 
     return s;
   };
+
+  const NOTHING_SKIPPED: ReadonlySet<string> = new Set();
+  const apply = (step: string): string => applyExcept(step, NOTHING_SKIPPED);
 
   // Null-prototype, for the same reason the parser and api-server maps are:
   // `### __proto__` is a legal section name, and assigning it into an object
@@ -915,14 +994,24 @@ function applySkillScope(
   // untransformed `skill.sections` where the entry is still present.
   const sections: SectionDefs = Object.create(null) as SectionDefs;
   for (const [key, section] of Object.entries(skill.sections)) {
+    // A looped section's columns are NOT skill-internal variables: they are
+    // bound per iteration by the loop, not by the skill's scope. Namespacing
+    // them would rewrite `{{thing}}` to `{{__skill1_thing}}` in the body while
+    // the row still binds `thing`, leaving the placeholder to reach the AI as
+    // literal text — which is exactly what it did before this exclusion.
+    const columns = new Set(Object.keys(section.rows?.[0] ?? {}));
+    const applyBody = columns.size === 0
+      ? apply
+      : (text: string): string => applyExcept(text, columns);
     sections[key] = {
       name: section.name,
       headingLine: section.headingLine,
-      steps: section.steps.map(apply),
+      steps: section.steps.map(applyBody),
       // Copied, not transformed — see the docstring. Fresh arrays either way:
       // the ParsedSkill is shared via skillCache and must never be mutated.
       rawSteps: [...section.rawSteps],
       stepLines: [...section.stepLines],
+      ...(section.rows && { rows: section.rows.map((r) => ({ ...r })) }),
     };
   }
 

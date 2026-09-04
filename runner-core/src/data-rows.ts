@@ -348,3 +348,62 @@ export function parseDataRows(text: string, filePath = '<buffer>'): DataTableSca
   }
   return null;
 }
+
+/**
+ * Rows for every `### Section` that carries a table, keyed by section name as
+ * authored.
+ *
+ * A separate scan rather than a field on `extractSections`, whose return shape
+ * is frozen by the sections contract and pinned by a corpus of deep-equal
+ * fixtures. Sections are found the same way that scanner finds them, so the
+ * two agree about what a section heading is.
+ *
+ * Throws on a malformed table, exactly as the run-level scan does.
+ */
+export function parseSectionDataRows(
+  text: string,
+  filePath = '<buffer>',
+): Map<string, Array<Record<string, string>>> {
+  const out = new Map<string, Array<Record<string, string>>>();
+  const lines = text.split(/\r?\n/);
+
+  // Sections live only under a depth-2 `## Steps`, and the span ends at the
+  // next heading of depth <= 2.
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const m = STEPS_HEADING_RE.exec(lines[i] ?? '');
+    if (m) {
+      if (m[1]!.length !== 2) return out;
+      start = i + 1;
+      break;
+    }
+  }
+  if (start < 0) return out;
+
+  let spanEnd = lines.length;
+  const heads: Array<{ name: string; index: number }> = [];
+  for (let i = start; i < lines.length; i++) {
+    const heading = ANY_HEADING_RE.exec(lines[i] ?? '');
+    if (!heading) continue;
+    if (heading[1]!.length <= 2) {
+      spanEnd = i;
+      break;
+    }
+    if (heading[1]!.length === 3) {
+      heads.push({ name: (lines[i] ?? '').replace(/^#{3}\s*/, '').trim(), index: i });
+    }
+  }
+
+  for (const [n, head] of heads.entries()) {
+    const next = heads[n + 1];
+    const scan = scanDataTable({
+      lines,
+      from: head.index + 1,
+      to: next ? next.index : spanEnd,
+      filePath,
+      flow: `### ${head.name}`,
+    });
+    if (scan) out.set(head.name, scan.rows);
+  }
+  return out;
+}

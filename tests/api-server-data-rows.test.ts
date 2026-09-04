@@ -363,3 +363,59 @@ describe('validation at the wire', () => {
     expect(status).toBe(400);
   });
 });
+
+describe('section rows on the wire', () => {
+  it('expands a looped section once per row and marks each step', async () => {
+    // The seam that matters: the section entry is rebuilt field by field on
+    // the way in, so `rows` travels only because it is named there.
+    const id = sessionId('section-rows');
+    const { status } = await postSteps(id, {
+      testFilePath: '/tests/loop.md',
+      steps: ['Upload each file'],
+      sourceLines: [3],
+      sections: {
+        'upload each file': {
+          name: 'Upload each file',
+          headingLine: 5,
+          steps: ['Upload {{file}}'],
+          stepLines: [9],
+          rows: [{ file: 'a.png' }, { file: 'b.png' }],
+        },
+      },
+      dataRow: 1,
+      dataRowCount: 1,
+      dataRowValues: {},
+    });
+    expect(status).toBe(200);
+
+    await postReport(id);
+    const report = renderedReport();
+    // One authored body step, two rows: two executed steps.
+    expect(report.steps).toHaveLength(2);
+    expect(report.steps.map((s) => s.loop?.index)).toEqual([1, 2]);
+    expect(report.steps[0]!.loop).toMatchObject({
+      kind: 'iteration',
+      label: 'Upload each file',
+      count: 2,
+      values: { file: 'a.png' },
+    });
+  });
+
+  it('rejects a malformed rows field', async () => {
+    const { status } = await postSteps(sessionId('bad-rows'), {
+      testFilePath: '/tests/loop.md',
+      steps: ['Upload each file'],
+      sourceLines: [3],
+      sections: {
+        'upload each file': {
+          name: 'Upload each file',
+          headingLine: 5,
+          steps: ['Upload {{file}}'],
+          stepLines: [9],
+          rows: 'not-an-array',
+        },
+      },
+    });
+    expect(status).toBe(400);
+  });
+});
