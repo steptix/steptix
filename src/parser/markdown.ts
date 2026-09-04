@@ -19,6 +19,13 @@ import {
   type EnvDataContext,
 } from './interpolate-env-data.js';
 import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
+import { scanDataTable, type DataTableScan } from './data-rows.js';
+import {
+  ANY_HEADING_RE,
+  HASHES_ONLY_RE,
+  STEP_LINE_RE,
+  STEPS_HEADING_RE,
+} from './line-grammar.js';
 import { logger } from '../utils/logger.js';
 
 /** Valid `## Hooks` scope prefixes — case-insensitive match, stored lowercase. */
@@ -238,6 +245,18 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
     parsed.parameters[k] = interpolateEnvData(v, ctx);
   }
 
+  // Row cells are parameter values that happen to arrive in a table, so they
+  // resolve `${env.X}` / `${data.X}` in the same pass and against the same
+  // context — otherwise a reference would work in `## Parameters` and reach
+  // the model as literal text one line below it.
+  if (parsed.dataRows) {
+    for (const row of parsed.dataRows) {
+      for (const [k, v] of Object.entries(row)) {
+        row[k] = interpolateEnvData(v, ctx);
+      }
+    }
+  }
+
   // TestConfig is a flat key-value map; only the string fields need substitution.
   const cfg = parsed.config as Record<string, string | undefined>;
   for (const [k, v] of Object.entries(cfg)) {
@@ -362,6 +381,7 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
     sourceSections: sections.steps.map(() => null),
     sections: sections.sectionDefs,
     rawSteps: sections.rawSteps,
+    ...(sections.dataRows && { dataRows: sections.dataRows }),
     hooks: sections.hooks,
     hookToolCalls: {
       before: sections.hooks.before.map(() => null),
@@ -417,6 +437,9 @@ interface ParsedSections {
    *  type already uses `sections` for the whole reserved-H2 bundle. */
   sectionDefs: Record<string, ParsedSection>;
   hooks: TestHooks;
+  /** Rows from a table under `## Steps` — absent, never empty, when the file
+   *  has none. See `ParsedTest.dataRows`. */
+  dataRows?: Array<Record<string, string>>;
 }
 
 function parseSections(rawContent: string, filePath: string): {
@@ -621,6 +644,30 @@ function parseSections(rawContent: string, filePath: string): {
     sectionMap[matchText(section.name)] = section;
   }
 
+  // A table under `## Steps` loops the run. Two files can't have one: a skill
+  // is invoked with arguments rather than looped, and `dataFile:` already
+  // names an external set of rows — two sources of rows for one flow is an
+  // ambiguity with no sensible resolution, so it is refused rather than
+  // silently ranked.
+  if (scan.dataTable) {
+    if (frontmatter.type === 'skill') {
+      throw new Error(
+        `${filePath}:${scan.dataTable.headerLine} — a skill's own \`## Steps\` ` +
+          `cannot carry a data table. A skill is invoked with arguments, not ` +
+          `looped; put the table under the \`## Steps\` of the test that calls ` +
+          `it, or under a \`### Section\`.`,
+      );
+    }
+    if (frontmatter.dataFile) {
+      throw new Error(
+        `${filePath}:${scan.dataTable.headerLine} — the file has both a data ` +
+          `table under \`## Steps\` and \`dataFile: ${frontmatter.dataFile}\` ` +
+          `in its frontmatter. A run loops over one set of rows; keep the ` +
+          `table or the file, not both.`,
+      );
+    }
+  }
+
   return {
     sections: {
       config,
@@ -633,6 +680,7 @@ function parseSections(rawContent: string, filePath: string): {
       rawSteps: mainRawSteps,
       sectionDefs: sectionMap,
       hooks,
+      ...(scan.dataTable && { dataRows: scan.dataTable.rows }),
     },
     frontmatter,
     title,
@@ -718,6 +766,13 @@ export interface StepSpanScan {
   entries: StepSpanEntry[];
   /** `### Name` headings in document order. */
   heads: { name: string; headingLine: number }[];
+  /**
+   * The data table at the head of the main flow, when the file has one — the
+   * rows that make the whole run loop (stories/data-driven-rows.md, part A).
+   * Absent when there is no table, and recognised only under a depth-2
+   * `## Steps`, the same gate sections are behind.
+   */
+  dataTable?: DataTableScan;
 }
 
 /**
@@ -745,15 +800,13 @@ export interface StepSpanScan {
  * / empty / duplicate).
  */
 export function scanStepSpans(rawContent: string, filePath: string): StepSpanScan {
-  const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
-  const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
-  const STEP_LINE_RE = /^\d+\.\s+\S/;
-  /** A line that is nothing but hashes. Invisible to ANY_HEADING_RE (which
-   *  demands a non-space after them), so without this it would read as prose
-   *  to every parser — the CLI would throw its empty-name error while
-   *  TestBench happily ran the "body" items as main-flow steps. */
-  const HASHES_ONLY_RE = /^#{3,}\s*$/;
-
+  // The four line regexes live in ./line-grammar.js because the data-table
+  // scan below reads the same span and has to agree with this pass about what
+  // a step line and a heading are (HASHES_ONLY_RE catches a line that is
+  // nothing but hashes: ANY_HEADING_RE demands a non-space after them, so
+  // without it such a line reads as prose to every parser — the CLI would
+  // throw its empty-name error while TestBench ran the "body" items as
+  // main-flow steps).
   const lines = rawContent.split(/\r?\n/);
   const entries: StepSpanEntry[] = [];
   const heads: { name: string; headingLine: number }[] = [];
@@ -784,6 +837,23 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
   // in it, and no section can be defined. That matches the CLI token walk
   // below, which dispatches on heading depth 1 and 2 only.
   const sectionsRecognised = headingDepth === 2;
+
+  // The rows that loop the run, read before the steps they feed. `to` is the
+  // end of the file rather than the end of the span because the scan stops at
+  // the first heading of any depth anyway — which is exactly the head region,
+  // and is also what makes "a table after a step" detectable: the scan keeps
+  // looking past the first numbered item so it can refuse one, rather than
+  // leaving marked to fold it into that step and run the fold.
+  const dataTable = sectionsRecognised
+    ? scanDataTable({
+        lines,
+        from: headingIndex + 1,
+        to: lines.length,
+        filePath,
+        flow: (lines[headingIndex] ?? '## Steps').trim(),
+      })
+    : null;
+
   const seenNames = new Map<string, number>();
   let currentSection: number | null = null;
   /**
@@ -878,7 +948,7 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
     );
   }
 
-  return { entries, heads };
+  return { entries, heads, ...(dataTable && { dataTable }) };
 }
 
 /** Parse a list of "- key: value" items into a key-value map */

@@ -22,7 +22,8 @@ import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
-import { generateReport, getPrimaryModel, buildReportBaseName, countStepOrigins } from '../report/generator.js';
+import { generateReport, getPrimaryModel, videoBaseNameFor, countStepOrigins } from '../report/generator.js';
+import { mergeRowReports, type RowReport } from '../report/merge-rows.js';
 import { appendRunHistory } from '../report/history-appender.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { diagnoseFailure } from '../ai/diagnose.js';
@@ -422,7 +423,12 @@ export async function runTest(
   // failures to open are swallowed and never break the run.
   const runLog = fileMode === 'off'
     ? null
-    : openRunLogFile(test.title, config.reports.outputDir);
+    // The run log stays one file per row: it is written as the row runs, so
+    // there is no merge point for a stream the way there is for a report.
+    : openRunLogFile(
+        dataRowIndex === undefined ? test.title : `${test.title} (row ${dataRowIndex + 1})`,
+        config.reports.outputDir,
+      );
   if (runLog) {
     runLog.stream.write(
       `# test=${test.title} startedAt=${new Date().toISOString()} steps=${test.steps.length} mode=${fileMode}\n`,
@@ -833,7 +839,12 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
-          cacheEnabled: config.cache.enabled,
+          // A row run never uses the step cache: the cache is keyed per step
+          // line and rewrites only an action`s `value`, so an assertion whose
+          // expectation came from a row would replay row 1`s on every row
+          // (stories/data-driven-rows.md, decision 8). The cache is being
+          // retired; until then rows simply opt out.
+          cacheEnabled: config.cache.enabled && dataRowIndex === undefined,
           dismissalGuidance: hooks.hasAny,
         });
 
@@ -1263,7 +1274,12 @@ export async function runTest(
     // The code-behind last-run sidecar. Runs no longer write code-behind, so
     // this is the only thing they leave for the next compile — which steps ran
     // as code, and which had an entry that broke and healed under AI.
-    if (keepLastRun && lastRunSteps.length > 0) {
+    //
+    // Only the first row writes it. Both this and the recording below are
+    // last-writer-wins on disk, so five rows would leave row 5's behind for
+    // the next compile to read — and a compile records row 1
+    // (stories/data-driven-rows.md, decision 11).
+    if (keepLastRun && lastRunSteps.length > 0 && (dataRowIndex ?? 0) === 0) {
       await writeLastRun(test.filePath, lastRunSteps);
     }
 
@@ -1277,7 +1293,7 @@ export async function runTest(
     // The recording, beside the test, when this run was asked to capture —
     // which is a compile's Record (stories/codebehind-recording-on-disk.md).
     // Written here, once the run is over, and never kept in memory past it.
-    if (extras.captureStepContext) {
+    if (extras.captureStepContext && (dataRowIndex ?? 0) === 0) {
       await writeRecording(test.filePath, {
         steps: stepResults,
         status: overallStatus,
@@ -1291,7 +1307,6 @@ export async function runTest(
     logger.testEnd(test.title, overallStatus === 'passed', durationMs);
     logger.info(`Tokens used: ${tokenTracker.getSummary()}`);
 
-    const dataRowVal = dataRowIndex !== undefined ? dataRowIndex + 1 : undefined;
     // Steps that passed only because a broken entry healed under AI. Counted
     // by the same helper the report's origins row uses, so the banner and that
     // row can never disagree — and it already excludes hook and ad-hoc rows,
@@ -1318,7 +1333,6 @@ export async function runTest(
       date: new Date().toISOString(),
       ...(baseUrl !== undefined && { baseUrl }),
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
-      ...(dataRowVal !== undefined && { dataRow: dataRowVal }),
       ...(humanIntervened && { humanIntervened: true }),
       // Omitted (not 0) on a run that healed nothing: an unchanged run writes
       // an unchanged report. `status` above stays 'passed' on purpose — see
@@ -1395,7 +1409,7 @@ export async function runTest(
         mode: videoMode,
         passed: overallStatus === 'passed',
         videoDir,
-        stableBaseName: buildReportBaseName(report),
+        stableBaseName: videoBaseNameFor(report, dataRowIndex),
         closeContext,
       });
       if (savedAbs) {
@@ -1427,20 +1441,43 @@ export async function runTest(
 export async function expandTestInstances(
   test: ParsedTest,
   config: Config,
+  options: { row?: number } = {},
 ): Promise<TestInstance[]> {
   const projectRoot = process.cwd();
 
-  // Load data file rows if specified
+  // Rows come from a table under `## Steps` or from `dataFile:`, never both —
+  // the parser refuses a file carrying the two.
   let dataRows: Array<Record<string, string>> | undefined;
-  if (test.frontmatter.dataFile) {
+  if (test.dataRows) {
+    dataRows = test.dataRows;
+    logger.info(`Data table: ${dataRows.length} row(s)`);
+  } else if (test.frontmatter.dataFile) {
     const dataFilePath = test.frontmatter.dataFile;
     dataRows = await loadDataFile(dataFilePath, projectRoot);
     logger.info(`Data file: ${dataFilePath} (${dataRows.length} rows)`);
   }
 
+  if (options.row !== undefined) {
+    const total = dataRows?.length ?? 0;
+    if (total === 0) {
+      throw new Error(
+        `--row ${options.row} was given but "${test.title}" has no rows. Add a ` +
+          `table under \`## Steps\`, or drop the flag.`,
+      );
+    }
+    if (options.row < 1 || options.row > total) {
+      throw new Error(
+        `--row ${options.row} is out of range: "${test.title}" has ${total} ` +
+          `row(s), numbered 1 to ${total}.`,
+      );
+    }
+  }
+
   if (dataRows && dataRows.length > 0) {
-    // Create one instance per data row
-    return Promise.all(
+    // One instance per row. `--row` narrows *after* expansion so the surviving
+    // instance keeps its original index: `--row 3` must still report row 3 of
+    // 5, not row 1 of 1.
+    const instances = await Promise.all(
       dataRows.map(async (row, index) => {
         const resolvedParameters = await resolveParameters(
           test.parameters,
@@ -1450,10 +1487,15 @@ export async function expandTestInstances(
         return {
           test,
           dataRowIndex: index,
+          dataRowCount: dataRows.length,
+          dataRowValues: row,
           resolvedParameters,
         };
       }),
     );
+    return options.row === undefined
+      ? instances
+      : instances.filter((i) => i.dataRowIndex === options.row! - 1);
   }
 
   // Single instance
@@ -1468,8 +1510,21 @@ export async function expandTestInstances(
 export async function runTests(
   tests: ParsedTest[],
   config: Config,
-  options: { bail?: boolean; verbose?: boolean; runEnvName?: string } = {},
+  options: {
+    bail?: boolean;
+    verbose?: boolean;
+    runEnvName?: string;
+    /** 1-based: run only this data row. */
+    row?: number;
+    /**
+     * Seam for tests. `runTests` boots real browsers, so the loop — rows,
+     * `--bail`, and the merge below — is otherwise unreachable from a unit
+     * test. Precedent: the compile pipeline's `createTestFileRunner`.
+     */
+    runTestFn?: typeof runTest;
+  } = {},
 ): Promise<RunSummary> {
+  const runOne = options.runTestFn ?? runTest;
   const context = await loadContextFiles(config.tests.contextDir);
 
   if (context.files.length > 0) {
@@ -1483,27 +1538,74 @@ export async function runTests(
   for (const test of tests) {
     if (bailed) break;
 
-    const instances = await expandTestInstances(test, config);
+    const instances = await expandTestInstances(test, config, {
+      ...(options.row !== undefined && { row: options.row }),
+    });
 
-    for (const instance of instances) {
-      if (bailed) break;
+    // One test, one report — however many rows it has (decision 12). The rows
+    // still run as separate instances with their own browsers and their own
+    // redaction; only the writing is folded.
+    const rowReports: RowReport[] = [];
+    const unrun: Array<{ index: number; values: Record<string, string>; reason: string }> = [];
 
-      const report = await runTest(instance, config, context.combined, options.runEnvName);
-      reports.push(report);
-
-      // Save HTML report
-      const reportPath = await generateReport(report, config.reports.outputDir);
-      lastReportPath = reportPath;
-      logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
-
-      if (config.reports.appendRunHistoryToTestFile) {
-        await appendRunHistory(instance.test.filePath, reportPath, report.status, report.date, getPrimaryModel(report));
+    for (const [position, instance] of instances.entries()) {
+      if (bailed) {
+        // A row the bail stopped us reaching still gets a line in the matrix
+        // table. A matrix that silently omits what it skipped reads as if
+        // those rows passed.
+        if (instance.dataRowIndex !== undefined) {
+          unrun.push({
+            index: instance.dataRowIndex + 1,
+            values: instance.dataRowValues ?? {},
+            reason: 'stopped',
+          });
+        }
+        continue;
       }
+
+      const report = await runOne(instance, config, context.combined, options.runEnvName);
+      rowReports.push({
+        report,
+        ...(instance.dataRowIndex !== undefined && {
+          dataRowIndex: instance.dataRowIndex,
+          dataRowCount: instance.dataRowCount ?? instances.length,
+          dataRowValues: instance.dataRowValues ?? {},
+          secrets: runSecrets({
+            parameters: instance.resolvedParameters,
+            ...(test.envData && { envData: test.envData }),
+          }),
+        }),
+      });
 
       if (report.status === 'failed' && options.bail) {
-        logger.warn('Bailing on first failure (--bail flag set)');
+        logger.warn(
+          instances.length > 1
+            ? `Bailing on first failure (--bail flag set) — row ${position + 1} of ${instances.length}`
+            : 'Bailing on first failure (--bail flag set)',
+        );
         bailed = true;
       }
+    }
+
+    if (rowReports.length === 0) continue;
+
+    const merged = mergeRowReports(rowReports, unrun);
+    reports.push(merged);
+
+    const reportPath = await generateReport(merged, config.reports.outputDir);
+    lastReportPath = reportPath;
+    logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
+
+    // Once per test, not once per row: a five-row run used to spend five of
+    // the ten-entry history cap on one execution.
+    if (config.reports.appendRunHistoryToTestFile) {
+      await appendRunHistory(
+        test.filePath,
+        reportPath,
+        merged.status,
+        merged.date,
+        getPrimaryModel(merged),
+      );
     }
   }
 

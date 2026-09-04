@@ -26,12 +26,38 @@ export async function resolveParameters(
   if (dataRow) {
     for (const [key, value] of Object.entries(dataRow)) {
       if (!(key in resolved)) {
-        resolved[key] = value;
+        resolved[key] = resolveEnvRef(key, value);
       }
     }
   }
 
   return resolved;
+}
+
+/**
+ * Apply the `$VAR` rule to a value: a leading `$` names an environment
+ * variable, anything else is a literal.
+ *
+ * A row's cell goes through this for the same reason a `## Parameters` value
+ * does — so a password can live in `.env` and the table can hold
+ * `$TEST_PASSWORD` rather than the secret. Until data-driven rows this was
+ * skipped for rows entirely: `resolveValue` returned a row's cell before it
+ * reached the `$` branch, so a `dataFile:` row holding `$TEST_PASSWORD` typed
+ * that literal string into the page.
+ *
+ * An unset variable stays literal with a warning rather than becoming empty:
+ * an empty password submits a form and fails somewhere far from the cause.
+ */
+function resolveEnvRef(key: string, rawValue: string): string {
+  if (!rawValue.startsWith('$')) return rawValue;
+  const envVarName = rawValue.slice(1);
+  const envValue = process.env[envVarName];
+  if (envValue !== undefined) {
+    logger.debug(`Parameter "${key}" resolved from env var $${envVarName}`);
+    return envValue;
+  }
+  logger.warn(`Environment variable $${envVarName} not set for parameter "${key}"`);
+  return rawValue;
 }
 
 async function resolveValue(
@@ -40,12 +66,17 @@ async function resolveValue(
   dataRow?: Record<string, string>,
   promptUser = true,
 ): Promise<string> {
-  // 1. Check data row override (highest priority for data-driven tests)
+  // 1. Check data row override (highest priority for data-driven tests).
+  //     The cell still goes through the `$VAR` rule — a row is a set of
+  //     parameter values that happens to arrive in a table, and a cell that
+  //     resolved differently from the `## Parameters` line it shadows would
+  //     be a trap rather than a shorthand.
   if (dataRow && key in dataRow) {
     const dataValue = dataRow[key];
     if (dataValue !== undefined) {
-      logger.debug(`Parameter "${key}" resolved from data row: ${maskSecret(key, dataValue)}`);
-      return dataValue;
+      const resolvedValue = resolveEnvRef(key, dataValue);
+      logger.debug(`Parameter "${key}" resolved from data row: ${maskSecret(key, resolvedValue)}`);
+      return resolvedValue;
     }
   }
 
