@@ -243,8 +243,25 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     absPath,
     warnings,
   );
+  // A data-driven test runs its first row here and says so
+  // (stories/data-driven-rows.md §MCP). The row goes in as ordinary
+  // `parameters` and deliberately NOT as `dataRow`: a batch carrying `dataRow`
+  // accumulates on the server and waits for a `POST /sessions/:id/report` this
+  // path never sends, so the report would silently never be written. Looping
+  // every row over MCP is a follow-on; running row 1 silently, with
+  // `{{email}}` reaching the model as literal text, is what this must not do.
+  const firstRow = parsed.dataRows?.[0];
+  if (firstRow) {
+    warnings.push(
+      `This test has ${parsed.dataRows!.length} data rows; only row 1 is run ` +
+        `here (${Object.entries(firstRow)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(', ')}). Run it from the CLI or TestBench to run every row.`,
+    );
+  }
+
   const parameters = interpolateValues(
-    { ...parsed.parameters, ...args.parameters },
+    { ...parsed.parameters, ...firstRow, ...args.parameters },
     project,
     absPath,
     warnings,

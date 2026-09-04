@@ -75,7 +75,19 @@ import {
 } from './page-capture.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { parseTimeoutMs } from '../runner/test-runner.js';
-import { generateReport, buildReportBaseName } from '../report/generator.js';
+import { generateReport, buildReportBaseName, videoBaseNameFor } from '../report/generator.js';
+import { mergeRowReports, type RowReport, type UnrunRow } from '../report/merge-rows.js';
+
+/**
+ * The rows of one data-driven run, gathered across the batches that ran them
+ * and rendered as a single report by `finalizeRowRun`.
+ */
+interface RowRunAccumulator {
+  rows: RowReport[];
+  /** Where the report goes — captured from the session that ran row 1, since
+   *  the session is closed and recreated between rows. */
+  reportOutputDir: string;
+}
 import {
   logger,
   addLogCallback,
@@ -128,6 +140,29 @@ export interface StepRequest {
    * stories/project-scoped-data-dir-and-env.md.
    */
   envName?: string;
+  /**
+   * Which data row of a data-driven run this batch is, 1-based
+   * (stories/data-driven-rows.md, part A). The client owns the loop — it runs
+   * the rows in order, closing the session between them — and the server owns
+   * only the report.
+   *
+   * A batch carrying `dataRow` writes NO report. It appends its step results
+   * to a row accumulator on the manager and returns a `done` with no
+   * `reportPath`; the client posts `POST /sessions/:id/report` when its loop
+   * ends, and that renders the one report the run gets. Finalising has to be
+   * its own call because the client cannot know which batch is the last one
+   * until that batch comes back: a pause ends the loop after the current row,
+   * Stop ends it mid-row, and a throw ends it there.
+   */
+  dataRow?: number;
+  /** How many rows the run has. Required alongside `dataRow`. */
+  dataRowCount?: number;
+  /**
+   * The row's own cells, for the report's matrix table and loop bands. The
+   * server cannot recover these from `parameters`, which is the row already
+   * merged over `## Parameters`.
+   */
+  dataRowValues?: Record<string, string>;
   /**
    * The test's own frontmatter `dataSources` (name → path), forwarded by the
    * client from the editor buffer. Each path is resolved relative to
@@ -909,10 +944,17 @@ interface ManagedSession {
     /** The assembled report, re-rendered with `videoRelPath` once the .webm
      *  is finalised. */
     report: TestReport;
-    /** Absolute path of the already-written report HTML (overwritten in place). */
+    /** Absolute path of the already-written report HTML (overwritten in
+     *  place). Empty for a data-driven row, which wrote no report of its own —
+     *  the saved path is written onto `report` instead, and the accumulator
+     *  holds that same object. */
     reportPath: string;
     /** Run outcome — drives retain-on-failure deletion. */
     passed: boolean;
+    /** 0-based row index when this run was one row of a data-driven run. Keeps
+     *  the `.webm` names apart: a merged report has one video per row and only
+     *  one report name to derive them from. */
+    dataRowIndex?: number;
   };
   status: 'active' | 'executing' | 'closed';
   /**
@@ -1187,6 +1229,17 @@ export class SessionManager {
    * recompute live, or a reused session's next `markRunStart` would zero it.
    */
   private lastRunInfo = new Map<string, LastRunInfo>();
+
+  /**
+   * Rows of a data-driven run, accumulating across the batches that ran them
+   * (stories/data-driven-rows.md, decision 12: one run, one report).
+   *
+   * On the manager rather than on `ManagedSession` for the same reason
+   * `lastRunInfo` is: the client closes the session at every row boundary, so
+   * anything held on the session dies with row 1. Bounded the same way, and
+   * cleared by the finalise route.
+   */
+  private rowRuns = new Map<string, RowRunAccumulator>();
 
   constructor(
     config: Config,
@@ -1648,6 +1701,7 @@ export class SessionManager {
 
   /** Max distinct sessions we remember finalized-run info for (bounded growth). */
   private static readonly LAST_RUN_INFO_LIMIT = 200;
+  private static readonly ROW_RUN_LIMIT = 50;
 
   /**
    * The session's active page, for a caller that DRIVES it rather than reads it.
@@ -1670,6 +1724,68 @@ export class SessionManager {
    * Record the finalized-run info for a session (issue 021). Bounded LRU-ish:
    * re-inserting moves the key to the end; we evict the oldest once over the cap.
    */
+  /**
+   * Append one finished row to this session's accumulator, starting a fresh
+   * one on row 1.
+   *
+   * Row 1 dropping any existing entry is what stops a re-run inheriting the
+   * previous run's rows — the same reason `postSteps` deletes `lastRunInfo` at
+   * run start.
+   */
+  private accumulateRow(sessionId: string, row: RowReport, outputDir: string): void {
+    const key = this.sessionKey(sessionId);
+    const index = (row.dataRowIndex ?? 0) + 1;
+    if (index === 1) this.rowRuns.delete(key);
+
+    const existing = this.rowRuns.get(key);
+    if (existing) {
+      existing.rows.push(row);
+      return;
+    }
+    this.rowRuns.set(key, { rows: [row], reportOutputDir: outputDir });
+    if (this.rowRuns.size > SessionManager.ROW_RUN_LIMIT) {
+      const oldest = this.rowRuns.keys().next().value;
+      if (oldest !== undefined) this.rowRuns.delete(oldest);
+    }
+  }
+
+  /**
+   * Render the accumulated rows as the run's one report, then clear them.
+   *
+   * `notRun` comes from the client because only the client knows which rows it
+   * planned and never reached — a matrix that silently omits the rows a Stop
+   * skipped reads as if they passed. Returns null when there is nothing
+   * accumulated, which the route turns into a 404 rather than a 500, so a
+   * double-post after a crash is harmless.
+   */
+  async finalizeRowRun(
+    sessionId: string,
+    notRun: UnrunRow[] = [],
+  ): Promise<{ reportPath: string } | null> {
+    const key = this.sessionKey(sessionId);
+    const acc = this.rowRuns.get(key);
+    if (!acc || acc.rows.length === 0) return null;
+    this.rowRuns.delete(key);
+
+    const merged = mergeRowReports(acc.rows, notRun);
+    const reportPath = await generateReport(merged, acc.reportOutputDir);
+    logger.info(`Report saved: ${reportPath} (${acc.rows.length} row(s))`);
+
+    // The stop path is exactly the one that must still produce a report: a
+    // client that stopped mid-run closed its SSE stream and will recover this
+    // path by polling `GET /sessions/:id/last-run`. It posts the finalise from
+    // its `finally` whether or not the stream survived, so recording here —
+    // rather than on a batch, which wrote no report — is what makes that work.
+    const previous = this.lastRunInfo.get(key);
+    this.recordLastRun(sessionId, {
+      finalized: true,
+      tokens: previous?.tokens ?? { total: 0, input: 0, output: 0 },
+      reportPath,
+    });
+
+    return { reportPath };
+  }
+
   private recordLastRun(sessionId: string, info: LastRunInfo): void {
     this.lastRunInfo.delete(this.sessionKey(sessionId));
     this.lastRunInfo.set(this.sessionKey(sessionId), info);
@@ -1995,7 +2111,7 @@ export class SessionManager {
           mode: session.videoMode,
           passed: pending.passed,
           videoDir: session.videoDir,
-          stableBaseName: buildReportBaseName(pending.report),
+          stableBaseName: videoBaseNameFor(pending.report, pending.dataRowIndex),
           closeContext,
         });
         if (savedAbs) {
@@ -2004,8 +2120,18 @@ export class SessionManager {
             pending.report.videoRelPath = pathRelative(session.reportOutputDir, savedAbs)
               .split(sep)
               .join('/');
-            await generateReport(pending.report, session.reportOutputDir);
-            logger.info(`Report re-rendered with session video: ${pending.reportPath}`);
+            // A data-driven row has no report of its own to re-render. Setting
+            // the path above is the whole job: the accumulator holds this same
+            // object, and `mergeRowReports` lifts the path onto the row's line
+            // in the matrix when the run is finalised. Strictly simpler than
+            // the re-render-in-place below, and the only option — the merged
+            // report does not exist yet.
+            if (pending.dataRowIndex !== undefined) {
+              logger.info(`Session video attached to row ${pending.dataRowIndex + 1}`);
+            } else {
+              await generateReport(pending.report, session.reportOutputDir);
+              logger.info(`Report re-rendered with session video: ${pending.reportPath}`);
+            }
           } catch (err) {
             logger.warn(`Failed to attach session video to report for "${sessionId}": ${String(err)}`);
           }
@@ -2466,9 +2592,27 @@ export class SessionManager {
       : openRunLogFile(request.testFilePath ?? sessionId, session.reportOutputDir);
     if (runLog) {
       runLog.stream.write(
-        `# session=${sessionId} startedAt=${new Date().toISOString()} steps=${stepsTotal} mode=${fileMode}\n`,
+        `# session=${sessionId} startedAt=${new Date().toISOString()} steps=${stepsTotal} mode=${fileMode}` +
+          // Which row of a data-driven run this log covers. The logs stay one
+          // file per row — they are written as the row runs, so there is no
+          // merge point for a stream — and without this they are told apart
+          // only by their timestamps.
+          (request.dataRow !== undefined
+            ? ` dataRow=${request.dataRow}/${request.dataRowCount ?? request.dataRow}`
+            : '') +
+          '\n',
       );
       logger.info(`Run log: ${runLog.path}`);
+    }
+
+    // Said once per row, so the editor's output log and the Test Explorer's
+    // both carry the row without either having to reconstruct it.
+    if (request.dataRow !== undefined) {
+      emit({
+        type: 'output',
+        msg: `Row ${request.dataRow} of ${request.dataRowCount ?? request.dataRow}`,
+        kind: 'info',
+      });
     }
     // What this run must never print (stories/secret-redaction.md). The
     // parameter map and the env context are built further down; until then a
@@ -4752,8 +4896,38 @@ export class SessionManager {
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
         }, secretsNow());
-        reportPath = await generateReport(report, session.reportOutputDir);
-        logger.info(`Report saved: ${reportPath}`);
+
+        // A row of a data-driven run writes no report of its own: it joins the
+        // accumulator, and the whole run gets one report when the client posts
+        // the finalise (stories/data-driven-rows.md, decision 12). `done`
+        // therefore carries no `reportPath` for these batches.
+        if (request.dataRow !== undefined) {
+          this.accumulateRow(
+            sessionId,
+            {
+              report,
+              dataRowIndex: request.dataRow - 1,
+              dataRowCount: request.dataRowCount ?? request.dataRow,
+              dataRowValues: request.dataRowValues ?? {},
+              secrets: secretsNow(),
+            },
+            session.reportOutputDir,
+          );
+          // The row's own `.webm` still finalises at the close between rows.
+          // There is no per-row report to re-render, so the saved path is
+          // written onto this same `report` object — the accumulator holds the
+          // reference — and lands when the merge renders.
+          if (session.videoMode !== 'off') {
+            session.pendingVideo = {
+              report,
+              reportPath: '',
+              passed: overallStatus === 'passed',
+              dataRowIndex: request.dataRow - 1,
+            };
+          }
+        } else {
+          reportPath = await generateReport(report, session.reportOutputDir);
+          logger.info(`Report saved: ${reportPath}`);
 
         // Video (Tier 1 server limitation): a reusable session keeps its
         // browser context open between runs, so the .webm can't be finalised
@@ -4765,12 +4939,13 @@ export class SessionManager {
         // plain re-run (which reuses the open context and overwrites this
         // pendingVideo; the single context-spanning recording follows the
         // last run — see caveat #8 in stories/video-recording.md).
-        if (session.videoMode !== 'off') {
-          session.pendingVideo = {
-            report,
-            reportPath,
-            passed: overallStatus === 'passed',
-          };
+          if (session.videoMode !== 'off') {
+            session.pendingVideo = {
+              report,
+              reportPath,
+              passed: overallStatus === 'passed',
+            };
+          }
         }
       } catch (err) {
         logger.warn(`Failed to generate HTML report for session "${sessionId}": ${String(err)}`);

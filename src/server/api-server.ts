@@ -572,6 +572,48 @@ export function createApiServer(
       if (body.env !== undefined && body.env !== null && typeof body.env === 'object') {
         request.env = body.env as Record<string, string>;
       }
+      // Which data row this batch is (stories/data-driven-rows.md). Validated
+      // here rather than trusted: a batch carrying `dataRow` writes no report
+      // and waits for a finalise, so a malformed pair would leave a run with
+      // no report at all and nothing saying why.
+      if (body.dataRow !== undefined) {
+        const dataRow = body.dataRow;
+        const dataRowCount = body.dataRowCount;
+        if (!Number.isInteger(dataRow) || (dataRow as number) < 1) {
+          res.status(400).json({ error: 'dataRow must be a positive integer (1-based).' });
+          return;
+        }
+        if (!Number.isInteger(dataRowCount) || (dataRowCount as number) < 1) {
+          res
+            .status(400)
+            .json({ error: 'dataRowCount must be a positive integer when dataRow is given.' });
+          return;
+        }
+        if ((dataRow as number) > (dataRowCount as number)) {
+          res
+            .status(400)
+            .json({ error: `dataRow ${String(dataRow)} exceeds dataRowCount ${String(dataRowCount)}.` });
+          return;
+        }
+        request.dataRow = dataRow as number;
+        request.dataRowCount = dataRowCount as number;
+      } else if (body.dataRowCount !== undefined) {
+        res.status(400).json({ error: 'dataRowCount was given without dataRow.' });
+        return;
+      }
+      if (body.dataRowValues !== undefined) {
+        const values = body.dataRowValues;
+        if (
+          values === null ||
+          typeof values !== 'object' ||
+          Array.isArray(values) ||
+          !Object.values(values as Record<string, unknown>).every((v) => typeof v === 'string')
+        ) {
+          res.status(400).json({ error: 'dataRowValues must be an object of string values.' });
+          return;
+        }
+        request.dataRowValues = values as Record<string, string>;
+      }
       // Active environment name — drives server-side `${env.X}` / `${data.X}`
       // resolution (loads `.env.<name>` + `<dataDir>/<name>.json` from the test
       // file's project root). Without this the server never interpolates
@@ -1241,6 +1283,55 @@ export function createApiServer(
   app.get('/sessions/:id/last-run', (req: Request, res: Response) => {
     const sessionId = String(req.params.id);
     res.status(200).json(sessionManager.getLastRun(sessionId));
+  });
+
+  // POST /sessions/:id/report — render the one report of a data-driven run
+  // (stories/data-driven-rows.md, decision 12).
+  //
+  // Its own call rather than a flag on the last batch, because the client
+  // cannot know which batch is the last one until that batch comes back: a
+  // pause ends the loop after the current row, Stop ends it mid-row, and a
+  // throw ends it there. Keying finalisation on `dataRow === dataRowCount`
+  // would lose the report on exactly the runs where it matters most.
+  //
+  // `notRun` is supplied by the client because only the client knows which
+  // rows it planned and never reached.
+  app.post('/sessions/:id/report', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const sessionId = String(req.params.id);
+      const body = (req.body ?? {}) as { notRun?: unknown };
+      const notRun: Array<{ index: number; values: Record<string, string>; reason: string }> = [];
+
+      if (body.notRun !== undefined) {
+        if (!Array.isArray(body.notRun)) {
+          res.status(400).json({ error: 'notRun must be an array.' });
+          return;
+        }
+        for (const entry of body.notRun as Array<Record<string, unknown>>) {
+          const row = entry?.['row'];
+          if (!Number.isInteger(row) || (row as number) < 1) {
+            res.status(400).json({ error: 'Each notRun entry needs a positive integer "row".' });
+            return;
+          }
+          notRun.push({
+            index: row as number,
+            values: (entry['values'] as Record<string, string>) ?? {},
+            reason: typeof entry['reason'] === 'string' ? entry['reason'] : 'stopped',
+          });
+        }
+      }
+
+      const result = await sessionManager.finalizeRowRun(sessionId, notRun);
+      if (!result) {
+        // Not a 500: an unknown or already-finalised accumulator is what a
+        // double-post after a crash looks like, and that is harmless.
+        res.status(404).json({ error: `No data rows accumulated for session "${sessionId}".` });
+        return;
+      }
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
   });
 
   // GET /config — the effective server config and the run settings in force
