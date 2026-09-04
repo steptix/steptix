@@ -271,7 +271,7 @@ export class CodeBehindCompiler {
       emit({
         type: 'output',
         kind: 'info',
-        msg: `Data file ${test.frontmatter.dataFile}: compiling with row 1 of ${dataRow.of}.`,
+        msg: `${test.frontmatter.dataFile ? `Data file ${test.frontmatter.dataFile}` : 'Inline data table'}: compiling with row 1 of ${dataRow.of}.`,
       });
     }
 

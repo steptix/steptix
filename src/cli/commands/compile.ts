@@ -111,7 +111,7 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
   const dataRow = await firstDataRow(test, process.cwd());
   if (dataRow) {
     console.log(
-      `  ${chalk.cyan('Data'.padEnd(11))} ${test.frontmatter.dataFile}: compiling with row 1 of ${dataRow.of}`,
+      `  ${chalk.cyan('Data'.padEnd(11))} ${test.frontmatter.dataFile ?? 'inline table'}: compiling with row 1 of ${dataRow.of}`,
     );
   }
 

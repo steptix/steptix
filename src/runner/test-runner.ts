@@ -401,7 +401,15 @@ export async function runTest(
    * `value`, so an assertion whose expectation came from a row would replay
    * row 1's on every row. The cache is being retired; until then rows opt out.
    */
-  const cacheEnabledForRun = config.cache.enabled && dataRowIndex === undefined;
+  const cacheEnabledForRun =
+    config.cache.enabled &&
+    dataRowIndex === undefined &&
+    // A compile records row 1 through an instance it builds itself, with no
+    // index — the live run showed that path writing and replaying a per-line
+    // cache on a matrix test. Rows force the cache off for the TEST, not just
+    // for an instance that happens to carry a row number.
+    !test.dataRows &&
+    !test.frontmatter.dataFile;
 
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
