@@ -220,13 +220,25 @@ function expandHome(p: string): string {
  * config) and substitute `${env.X}` / `${data.X.Y}` against the supplied
  * context. Mutates in place — callers always pass freshly-parsed tests.
  *
+ * **Steps are VALIDATED here, not rewritten**
+ * (stories/placeholder-preserving-actions.md §Environment and data-file
+ * references). The model has to see the step as written, `${data.url}` intact,
+ * beside a block saying what it resolved to — and `parsed.steps` was the only
+ * CLI-side text that could be that form. So the pass still resolves every
+ * reference, and still throws with the same file-and-line message when one is
+ * unknown (fail-fast is the whole reason it ran at parse time), but it keeps
+ * the token-intact text and lets `runTest` substitute per step, as the server
+ * already does. Parameters, config, hooks and data rows stay parse-time: none
+ * of them is shown to the model as authored text.
+ *
  * Tool-call argument strings ARE interpolated (so `[tool: foo bar="${env.X}"]`
  * works), but the parsed `ToolCall.args` map is rebuilt by re-parsing the
- * interpolated step text rather than mutating each value individually.
+ * interpolated step text rather than mutating each value individually — which
+ * is why the resolved form is computed here even though it is not kept.
  */
 function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): void {
-  parsed.steps = parsed.steps.map((s) => interpolateEnvData(s, ctx));
-  parsed.toolCalls = parsed.steps.map((s) => parseToolCall(s));
+  const resolvedSteps = parsed.steps.map((s) => interpolateEnvData(s, ctx));
+  parsed.toolCalls = resolvedSteps.map((s) => parseToolCall(s));
 
   parsed.hooks = {
     before: parsed.hooks.before.map((s) => interpolateEnvData(s, ctx)),

@@ -38,7 +38,7 @@ import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
-import { envDataSecretValues } from '../parser/interpolate-env-data.js';
+import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
 
 /**
@@ -455,6 +455,19 @@ export async function runTest(
   // of its secret-named parameters and of the env/data secrets its `${…}`
   // references resolved against. Read fresh each time — captures add to it.
   const secretsNow = (): string[] => runSecrets({ parameters: resolvedParameters, envData: test.envData });
+  // `## Config: unmask: keyword, data.keys.public` — names this test declares
+  // are not secrets, despite `isSecretName` matching them
+  // (stories/placeholder-preserving-actions.md, decision 2). Read only by the
+  // prompt's `## Values` block: `secretsNow` above is untouched, so the report,
+  // the run log and the recording still mask everything they did before.
+  const unmaskNames: ReadonlySet<string> = new Set(
+    (test.config.unmask ?? '')
+      .split(',')
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0),
+  );
+  /** The executor options every call site shares for this feature. */
+  const placeholderOpts = unmaskNames.size > 0 ? { unmask: unmaskNames } : {};
   const removeFileBridges = runLog
     ? attachRunLogBridges(runLog, fileMode, secretsNow)
     : () => {};
@@ -743,9 +756,14 @@ export async function runTest(
             pageTracker: session.pageTracker,
             browserTracker,
             dismissalGuidance: hooks.hasAny,
+            ...placeholderOpts,
             // No stepCache — hook results are usually page-state-dependent
             // (e.g., "accept cookie banner if visible") and shouldn't be replayed blindly.
-          });
+          },
+          // A hook's authored form is `raw`: its `${…}` was substituted at
+          // parse (hooks are not shown to the model as authored text the way
+          // steps are), its `{{…}}` on the line above.
+          raw);
         }
 
         result.hookScope = scope;
@@ -761,7 +779,7 @@ export async function runTest(
           conversationHistory.push(
             formatStepHistoryEntry(
               hookIndex,
-              `(${scope} hook) ${hookInstruction}`,
+              redact(`(${scope} hook) ${hookInstruction}`, secretsNow()),
               result.status === 'passed',
               session.page.url(),
             ),
@@ -862,6 +880,14 @@ export async function runTest(
           // retired; until then rows simply opt out.
           cacheEnabled: cacheEnabledForRun,
           dismissalGuidance: hooks.hasAny,
+          testSteps: test.steps,
+          ...placeholderOpts,
+          // A branched step's text was never interpolated on the way in —
+          // `identifyStepGroups` reads the raw list — so the matched step typed
+          // `{{email}}` into the page literally. The executor substitutes now,
+          // and needs the run's env context to resolve `${…}` as well
+          // (stories/placeholder-preserving-actions.md §Executor).
+          ...(test.envData && { envData: test.envData }),
         });
 
         for (const result of branchedResults) {
@@ -879,7 +905,7 @@ export async function runTest(
           stepResults.push(result);
           const url = session.page.url();
           conversationHistory.push(
-            formatStepHistoryEntry(result.index, result.instruction, result.status === 'passed', url),
+            formatStepHistoryEntry(result.index, redact(result.instruction, secretsNow()), result.status === 'passed', url),
           );
 
           if (result.status === 'failed') {
@@ -908,9 +934,18 @@ export async function runTest(
       // see exactly the same `default` session every iteration.
       session = browserTracker.getActive();
 
+      // The step as AUTHORED: expanded (skill renames applied) with `{{}}` and
+      // `${}` tokens intact. `applyEnvDataInterpolation` validates rather than
+      // rewrites now, so this is the same form the server has always held as
+      // `originalStep` (stories/placeholder-preserving-actions.md §Runner and
+      // server). It is what the model reads.
       const rawInstruction = test.steps[i] ?? '';
-      // Interpolate {{placeholders}} in step text
-      const instruction = interpolate(rawInstruction, resolvedParameters);
+      // Env/data first (parse-time semantics: fixed for the whole run), then
+      // runtime `{{...}}` — the server's order, now the CLI's too.
+      const instruction = interpolate(
+        test.envData ? interpolateEnvData(rawInstruction, test.envData) : rawInstruction,
+        resolvedParameters,
+      );
 
       // The one log line that ignores the log level — so the one place the
       // resolved password would always print. Masked; the step itself runs
@@ -993,7 +1028,7 @@ export async function runTest(
           conversationHistory.push(
             formatStepHistoryEntry(
               i + 1,
-              ad.instruction,
+              redact(ad.instruction, secretsNow()),
               ad.status === 'passed',
               session.page.url(),
             ),
@@ -1040,7 +1075,7 @@ export async function runTest(
           conversationHistory.push(
             formatStepHistoryEntry(
               i + 1,
-              instruction,
+              redact(instruction, secretsNow()),
               stepResult.status === 'passed',
               session.page.url(),
             ),
@@ -1074,8 +1109,13 @@ export async function runTest(
           cacheEnabled: cacheEnabledForRun,
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
+          ...placeholderOpts,
           ...codeBehindOptionsFor(i),
-        });
+        },
+        // Authored: the executor applies the `[output:]` enrichment to it too,
+        // so the model reads `… [store as: total]` rather than a raw
+        // `[output: total]` prefix.
+        rawInstruction);
         if (stepResult.status === 'passed') {
           logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
         }
@@ -1102,8 +1142,10 @@ export async function runTest(
           cacheEnabled: cacheEnabledForRun,
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
+          ...placeholderOpts,
           ...codeBehindOptionsFor(i),
-        });
+        },
+        rawInstruction);
       }
 
       // Tag the step with its originating skill (if any) so the report can
@@ -1128,7 +1170,7 @@ export async function runTest(
       conversationHistory.push(
         formatStepHistoryEntry(
           i + 1,
-          instruction,
+          redact(instruction, secretsNow()),
           stepResult.status === 'passed',
           currentUrl,
         ),
@@ -1150,7 +1192,7 @@ export async function runTest(
             conversationHistory.push(
               formatStepHistoryEntry(
                 ad.index,
-                `(interactive) ${ad.instruction}`,
+                redact(`(interactive) ${ad.instruction}`, secretsNow()),
                 ad.status === 'passed',
                 session.page.url(),
               ),
@@ -1216,7 +1258,7 @@ export async function runTest(
             conversationHistory.push(
               formatStepHistoryEntry(
                 ad.index,
-                `(interactive) ${ad.instruction}`,
+                redact(`(interactive) ${ad.instruction}`, secretsNow()),
                 ad.status === 'passed',
                 session.page.url(),
               ),

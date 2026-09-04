@@ -298,7 +298,11 @@ describe('parseTestFile', () => {
     const parsed = await parseTestFile(md, {
       envData: { env: UAT.env, data: UAT.data!, envName: 'uat' },
     });
-    expect(parsed.steps[0]).toBe('Navigate to https://uat.example/');
+    // The parse VALIDATES references and keeps the tokens; the runner
+    // substitutes per step, so the model can be shown the step as written
+    // (stories/placeholder-preserving-actions.md §Environment and data-file
+    // references). `steps` and `rawSteps` therefore agree on this step.
+    expect(parsed.steps[0]).toBe('Navigate to ${data.url}');
     expect(parsed.expansion!.rawSteps[0]).toBe('Navigate to ${data.url}');
     expect(parsed.envData).toBeDefined();
     expect(resolveEnvDataRef('data.url', parsed.envData!)).toBe('https://uat.example/');

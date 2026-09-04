@@ -87,6 +87,20 @@ export interface TestConfig {
    *  Refused alongside `cdp:` — a viewport cannot be imposed on a browser the
    *  user started themselves. */
   viewport?: string;
+  /** Comma-separated parameter names and `${…}` refs this test declares are
+   *  NOT secrets, despite `isSecretName` matching them
+   *  (stories/placeholder-preserving-actions.md, decision 2):
+   *  `- unmask: keyword, data.keys.public`.
+   *
+   *  `isSecretName` is `/password|secret|token|key/i`, so `keyword` matches and
+   *  a column the model has to FIND in the DOM arrives as `***` — masking that
+   *  costs the model its eyes, not just its logs. Read only by the prompt's
+   *  `## Values` block; report, log and recording masking are untouched, so
+   *  unmasking here cannot leak a real secret into a file.
+   *
+   *  Held as the raw string, like `viewport`: one parse, in the executor's
+   *  caller, so the CLI and the server agree on what a name is. */
+  unmask?: string;
 }
 
 /**

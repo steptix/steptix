@@ -22,6 +22,15 @@ import path from 'node:path';
 import os from 'node:os';
 import { resolveEnvBundle } from '../src/env/resolve-bundle.js';
 import { parseTestFile } from '../src/parser/markdown.js';
+import { interpolateEnvData } from '../src/parser/interpolate-env-data.js';
+import type { ParsedTest } from '../src/parser/types.js';
+
+/** One step as the RUNNER sees it. The parse validates references and keeps
+ *  the tokens (stories/placeholder-preserving-actions.md §Environment and
+ *  data-file references); substitution moved to the run, per step. */
+function resolveStep(parsed: ParsedTest, index: number): string {
+  return interpolateEnvData(parsed.steps[index]!, parsed.envData!);
+}
 
 let tmpRoot: string;
 let homeDir: string;
@@ -120,12 +129,12 @@ dataSources:
     });
 
     expect(parsed.config.baseUrl).toBe('https://staging.example.com');
-    expect(parsed.steps[0]).toBe('Visit https://staging.example.com/admin');
-    expect(parsed.steps[1]).toBe('Login as admin@stg.example.com / stg-admin');
+    expect(resolveStep(parsed, 0)).toBe('Visit https://staging.example.com/admin');
+    expect(resolveStep(parsed, 1)).toBe('Login as admin@stg.example.com / stg-admin');
     // $VIP_PWD comes from .env.staging — proves $VAR resolution runs on extra namespaces.
-    expect(parsed.steps[2]).toBe('Switch to VIP vip@example.com / stg-vip');
-    expect(parsed.steps[3]).toBe('Place order 50000 USD');
-    expect(parsed.steps[4]).toBe('Assert tier "Platinum"');
+    expect(resolveStep(parsed, 2)).toBe('Switch to VIP vip@example.com / stg-vip');
+    expect(resolveStep(parsed, 3)).toBe('Place order 50000 USD');
+    expect(resolveStep(parsed, 4)).toBe('Assert tier "Platinum"');
   });
 
   it('resolves a relative dataSources path against the test file directory, not cwd', async () => {
@@ -153,7 +162,7 @@ dataSources:
       envData: { env: bundle.env, data: bundle.data },
     });
 
-    expect(parsed.steps[0]).toBe('Total 50000');
+    expect(resolveStep(parsed, 0)).toBe('Total 50000');
   });
 
   it('expands `~/...` paths against the user home directory', async () => {
@@ -179,7 +188,7 @@ dataSources:
     });
 
     expect(os.homedir()).toBe(homeDir);
-    expect(parsed.steps[0]).toBe('Hello home@example.com');
+    expect(resolveStep(parsed, 0)).toBe('Hello home@example.com');
   });
 
   it('throws a clear error when a dataSources file is missing', async () => {
@@ -253,7 +262,7 @@ env: staging
       envData: { env: bundle.env, data: bundle.data },
     });
 
-    expect(parsed.steps[0]).toBe(
+    expect(resolveStep(parsed, 0)).toBe(
       'Visit https://staging.example.com and ignore ${vip.users.x.y}',
     );
   });

@@ -115,6 +115,12 @@ export interface StepRequest {
     baseUrl?: string;
     timeout?: string;
     viewport?: string;
+    /** Raw `## Config: unmask:` list — comma-separated parameter names and
+     *  `${…}` refs this test declares are not secrets, despite `isSecretName`
+     *  matching them (stories/placeholder-preserving-actions.md, decision 2).
+     *  Only the prompt's `## Values` block reads it; report and log masking are
+     *  untouched. */
+    unmask?: string;
     cdp?: { port: number; tab?: string; profile?: string };
   };
   steps: string[];
@@ -2845,6 +2851,18 @@ export class SessionManager {
         envData: envDataCtx,
       });
 
+    // `## Config: unmask: keyword, data.keys.public` — names and `${…}` refs
+    // this test declares are NOT secrets, despite `isSecretName` matching them
+    // (stories/placeholder-preserving-actions.md, decision 2). Comma-separated,
+    // matched against the exact name or the exact ref. TestBench does not send
+    // this field yet; a request without it behaves exactly as before.
+    const unmaskNames: ReadonlySet<string> = new Set(
+      (request.config?.unmask ?? '')
+        .split(',')
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0),
+    );
+
     // Determine per-step timeout
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
       ?? this.config.execution.timeout;
@@ -4098,7 +4116,7 @@ export class SessionManager {
             session.conversationHistory.push(
               formatStepHistoryEntry(
                 session.totalStepsExecuted + 1,
-                result.instruction,
+                redact(result.instruction, secretsNow()),
                 result.status === 'passed',
                 currentUrl,
               ),
@@ -4470,10 +4488,20 @@ export class SessionManager {
                 // an AI clarification prompt must fail the step fast rather
                 // than block on stdin and hang the stream. See issues/014.
                 nonInteractive: true,
+                // The test's `## Config: unmask:` list — names `isSecretName`
+                // matches but this test says are not secrets
+                // (stories/placeholder-preserving-actions.md, decision 2).
+                ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
                 // Run abort signal — cancels in-flight AI calls and stops the
                 // step's turn loop the instant the client stops. See issues/020.
                 ...(signal && { signal }),
               },
+              // The step as WRITTEN — `{{}}` and `${}` intact, skill renames
+              // applied. The server has held this form all along and threw it
+              // away one line before the model saw it; the executor shows it
+              // beside a `## Values` block and substitutes at act time
+              // (stories/placeholder-preserving-actions.md, decision 1).
+              originalStep,
             );
           }
         } catch (err) {
@@ -4646,7 +4674,12 @@ export class SessionManager {
         const fullResult: StepResult = {
           ...stepResult,
           index: i + 1,
-          instruction: originalStep,
+          // The SUBSTITUTED, masked text — what the CLI has always stamped, and
+          // what the report's step line should read. The server stamped the
+          // authored `originalStep` here, so a data-driven row's report said
+          // `Enter the email {{email}}` five times over and never which email
+          // (stories/placeholder-preserving-actions.md, decision 9).
+          instruction: redact(stepInstruction, secretsNow()),
           ...(Object.keys(stepOutputs).length > 0 && { outputs: stepOutputs }),
           ...(sourceSkill && { sourceSkill }),
           ...(sourceSection && { sourceSection }),
@@ -4688,7 +4721,12 @@ export class SessionManager {
         session.conversationHistory.push(
           formatStepHistoryEntry(
             session.totalStepsExecuted + 1,
-            interpolated,
+            // Masked. `## Prior Steps` is built from these lines and goes to
+            // the model on every later step, so an unmasked one put the
+            // password in front of the model for the rest of the run
+            // (stories/placeholder-preserving-actions.md §Where a secret still
+            // goes).
+            redact(interpolated, secretsNow()),
             stepResult.status === 'passed',
             currentUrl,
           ),

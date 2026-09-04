@@ -727,7 +727,12 @@ export class ErrandRunner {
           // must fail the step fast rather than block on stdin.
           nonInteractive: true,
           ...(signal && { signal }),
-        });
+        },
+        // The step as the caller wrote it, `{{}}` and `${}` intact — the model
+        // reads that beside a `## Values` block and names the placeholder in
+        // the action it plans (stories/placeholder-preserving-actions.md,
+        // decision 1). The third interpolation site, treated like the other two.
+        originalStep);
       } catch (err) {
         if (signal?.aborted) {
           outcome.status = 'aborted';
@@ -793,7 +798,15 @@ export class ErrandRunner {
         // ignore
       }
       conversationHistory.push(
-        formatStepHistoryEntry(line, interpolated, stepResult.status === 'passed', currentUrl),
+        // Masked: `## Prior Steps` is rebuilt from these lines on every later
+        // step of the errand (stories/placeholder-preserving-actions.md
+        // §Where a secret still goes).
+        formatStepHistoryEntry(
+          line,
+          redact(interpolated, runSecrets({ parameters: scope, envData: args.envDataCtx })),
+          stepResult.status === 'passed',
+          currentUrl,
+        ),
       );
 
       const tabAfterStep = await tabSpread();

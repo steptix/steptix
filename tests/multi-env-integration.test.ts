@@ -18,6 +18,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { resolveEnvBundle } from '../src/env/resolve-bundle.js';
 import { parseTestFile } from '../src/parser/markdown.js';
+import { interpolateEnvData } from '../src/parser/interpolate-env-data.js';
+import type { ParsedTest } from '../src/parser/types.js';
+
+/** One step as the RUNNER sees it. The parse validates references and keeps
+ *  the tokens; substitution moved to the run, per step, so a test that wants
+ *  the resolved text has to do what the run does. */
+function resolveStep(parsed: ParsedTest, index: number): string {
+  return interpolateEnvData(parsed.steps[index]!, parsed.envData!);
+}
 
 let tmpRoot: string;
 let testFile: string;
@@ -103,13 +112,19 @@ describe('multi-env integration: same test, two envs', () => {
     expect(parsed.config.baseUrl).toBe('https://uat.example.com');
     expect(parsed.parameters['baseUrl']).toBe('https://uat.example.com');
 
-    expect(parsed.steps[0]).toBe('Navigate to https://uat.example.com/admin');
-    expect(parsed.steps[1]).toBe(
+    // Steps KEEP their tokens: the model is shown the step as written, beside
+    // a block saying what each reference holds, and the runner substitutes per
+    // step (stories/placeholder-preserving-actions.md §Environment and
+    // data-file references). Resolution is still proved here — by running the
+    // pass the runner runs, against the context the parse kept.
+    expect(parsed.steps[0]).toBe('Navigate to ${env.BASE_URL}/admin');
+    expect(resolveStep(parsed, 0)).toBe('Navigate to https://uat.example.com/admin');
+    expect(resolveStep(parsed, 1)).toBe(
       'Login as admin@uat.example.com with password uat-secret',
     );
-    expect(parsed.steps[2]).toBe('Find delegate DEL-1234');
-    expect(parsed.steps[3]).toBe('Approve 5000 AUD');
-    expect(parsed.steps[4]).toBe('Assert toast says "Approved"');
+    expect(resolveStep(parsed, 2)).toBe('Find delegate DEL-1234');
+    expect(resolveStep(parsed, 3)).toBe('Approve 5000 AUD');
+    expect(resolveStep(parsed, 4)).toBe('Assert toast says "Approved"');
 
     expect(parsed.hooks.before).toEqual([
       'Visit https://uat.example.com/health to warm the connection',
@@ -126,12 +141,13 @@ describe('multi-env integration: same test, two envs', () => {
     });
 
     expect(parsed.config.baseUrl).toBe('https://staging.example.com');
-    expect(parsed.steps[0]).toBe('Navigate to https://staging.example.com/admin');
-    expect(parsed.steps[1]).toBe(
+    expect(parsed.steps[0]).toBe('Navigate to ${env.BASE_URL}/admin');
+    expect(resolveStep(parsed, 0)).toBe('Navigate to https://staging.example.com/admin');
+    expect(resolveStep(parsed, 1)).toBe(
       'Login as admin@stg.example.com with password stg-secret',
     );
-    expect(parsed.steps[2]).toBe('Find delegate DEL-9999');
-    expect(parsed.steps[3]).toBe('Approve 250 AUD');
+    expect(resolveStep(parsed, 2)).toBe('Find delegate DEL-9999');
+    expect(resolveStep(parsed, 3)).toBe('Approve 250 AUD');
 
     expect(parsed.hooks.before).toEqual([
       'Visit https://staging.example.com/health to warm the connection',
@@ -185,6 +201,6 @@ env: staging
     const reparsed = await parseTestFile(pinnedFile, {
       envData: { env: bundle.env, data: bundle.data },
     });
-    expect(reparsed.steps[0]).toBe('Hit https://staging.example.com');
+    expect(resolveStep(reparsed, 0)).toBe('Hit https://staging.example.com');
   });
 });

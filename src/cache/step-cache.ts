@@ -4,7 +4,14 @@ import path from 'node:path';
 import type { AIAction, AIResponse } from '../ai/types.js';
 import { interpolate } from '../parser/parameters.js';
 import { normaliseUploadPath } from '../browser/upload-paths.js';
+import { forwardInterpolate } from '../runner/placeholder-substitution.js';
 import { logger } from '../utils/logger.js';
+
+/** Kept exported from here so nothing that imports it from the cache breaks.
+ *  It lives in the runner now — the cache is being retired and the executor's
+ *  act-time substitution outlives it
+ *  (stories/placeholder-preserving-actions.md §Executor). */
+export { forwardInterpolate };
 
 // v4: per-step cache id changed from a bare source line to a frame-scoped key
 // (`step-f1-17.json`) so skill-body steps and repeated invocations no longer
@@ -437,27 +444,5 @@ export function reverseInterpolateString(
   return result;
 }
 
-/**
- * Replace {{placeholder}} tokens in an action's `value` and upload-path fields
- * with resolved parameter values. Reuses the existing `interpolate()` from the
- * parser.
- *
- * A path restored here is the parameter's RAW spelling, backslashes and all;
- * the executor and `step.filePath` normalise at the point of use, so both
- * spellings resolve to the same file.
- */
-export function forwardInterpolate(
-  actions: AIAction[],
-  params: Record<string, string>,
-): AIAction[] {
-  if (Object.keys(params).length === 0) return actions;
-
-  return actions.map((action) => {
-    const pathPatch = replacePathFields(action, (text) => interpolate(text, params));
-    if (!action.value) return pathPatch ? { ...action, ...pathPatch } : action;
-
-    const value = interpolate(action.value, params);
-    if (value === action.value) return pathPatch ? { ...action, ...pathPatch } : action;
-    return { ...action, ...(pathPatch ?? {}), value };
-  });
-}
+// `forwardInterpolate` moved to src/runner/placeholder-substitution.ts and is
+// re-exported at the top of this file.

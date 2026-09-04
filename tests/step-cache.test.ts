@@ -152,15 +152,29 @@ describe('forwardInterpolate', () => {
     expect(result[0]!.value).toBe('{{unknown}}');
   });
 
-  it('does not replace in selector fields', () => {
+  it('replaces in every value-bearing field, selectors included', () => {
+    // It used to touch `value` and the upload paths only. The model now names
+    // the placeholder in whatever field it filled from one —
+    // `selector: "text={{plan}}"` is the case the rows story wanted — so the
+    // forward pass walks the whole action, like the executor's act-time
+    // substitution it shares code with
+    // (stories/placeholder-preserving-actions.md §Executor).
     const actions: AIAction[] = [
-      { action: 'click', selector: '{{email}}', value: '{{email}}', description: 'Click' },
+      { action: 'click', selector: 'text={{plan}}', value: '{{email}}', description: 'Click' },
     ];
-    const params = { email: 'test@example.com' };
+    const params = { email: 'test@example.com', plan: 'Premium' };
 
     const result = forwardInterpolate(actions, params);
-    expect(result[0]!.selector).toBe('{{email}}');
+    expect(result[0]!.selector).toBe('text=Premium');
     expect(result[0]!.value).toBe('test@example.com');
+  });
+
+  it('never substitutes into `as` — that names a variable being defined', () => {
+    const actions: AIAction[] = [
+      { action: 'read', selector: '#total', as: 'balance', description: 'Read' },
+    ];
+    const result = forwardInterpolate(actions, { balance: '42' });
+    expect(result[0]!.as).toBe('balance');
   });
 });
 
