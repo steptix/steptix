@@ -40,8 +40,10 @@ browser untouched and the token count unchanged.
 variable"; there is no bare-name form.
 
 **You write:** `Set {{note}} to "Balance on ${data.run_date}: {{balance}}"`
-**You get:** `${data.run_date}` already substituted when the file was parsed,
-the way it is in every other step, and `{{balance}}` substituted now.
+**You get:** both references resolved in the one pass every ordinary step
+now uses — `${data.run_date}` and `{{balance}}` alike — the way
+placeholder-preserving-actions already resolves them for the model's own
+actions (see §"What was measured" below on that story and where it lives).
 
 **You write:** `Set {{reference}} to "Ref: {{acount_number}}"` — a typo.
 **You get:** a failed step naming `{{acount_number}}` as the placeholder
@@ -83,7 +85,8 @@ the page.
 > errand, and the Electron runner; (2) the stored value is the quoted text
 > with every `{{name}}` replaced from the scope **as it stands at that step**
 > — a name assigned twice reads its latest value — and a `${env.X}` /
-> `${data.x}` already resolved at parse time, byte for byte; (3) a `{{name}}`
+> `${data.x}` resolved in the same run-time pass, using the same substituter
+> ordinary steps use; (3) a `{{name}}`
 > in the template that the scope does not hold **fails the step**, naming the
 > placeholder, and stores nothing; (4) recognition is on the authored text,
 > *before* `{{}}` interpolation: running the same `Set` a second time (a
@@ -146,11 +149,52 @@ Everything below is read out of the current tree.
   with the value**. So the form has to be recognised on the authored text.
   That is the single most important fact in this story.
 
-- **`${env.X}` / `${data.x}` need nothing.** They are substituted at parse time
-  over every step (`applyEnvDataInterpolation`, `src/parser/markdown.ts`,
-  and again per step on the server and errand paths for wire-delivered
-  steps), fixed for the whole run. By the time the runner sees a `Set` line,
-  a `${…}` in its template is already text.
+- **`${env.X}` / `${data.x}` are no longer parse-time text on the CLI's
+  main flow, and there is now a shared resolver to reuse instead of
+  building one.** Phase 1 of "placeholder-preserving actions" landed (PR
+  #126/#127) between this story's first draft and this rebase, and it moves
+  exactly this ground. Its own story — `stories/placeholder-preserving-actions.md`
+  — is spec-only and lives on the separate, unmerged branch
+  `claude/placeholder-preserving-actions`, not in this tree; what shipped is
+  read here straight from the diff and the code. `applyEnvDataInterpolation`
+  (`src/parser/markdown.ts`) now **validates** every `${…}` reference at
+  parse time — same fail-fast, same file-and-line error on an unknown one —
+  but keeps `parsed.steps` token-intact rather than rewriting it, "so the
+  model sees `${data.url}` as written." `test-runner.ts`'s main loop now
+  resolves `${…}` per step, immediately before `{{…}}`, exactly as the
+  server and errand loops already did — the one asymmetry left is hook
+  instructions, which `applyEnvDataInterpolation` still rewrites into
+  `parsed.hooks.*` at parse time (hook bodies are never shown to the model
+  as authored text, so there is nothing for them to preserve).
+
+  The phase also added `src/runner/placeholder-substitution.ts`, whose
+  `substituteText(text, { parameters, envData })` resolves **both**
+  `{{name}}` and `${…}` in one pass over one string — a single combined
+  regex (`SUBSTITUTE_RE`), so a value that itself contains `{{` is never
+  re-scanned — and whose `collectReferences(text)` enumerates every
+  reference either syntax makes, by the same grammars. This is a better
+  primitive for a `Set` template than chaining `interpolateEnvData` then
+  `interpolate` by hand: one call, one grammar, already used by every AI
+  action's own act-time substitution, and it sidesteps the very
+  re-scan hazard [issue 023](../issues/023-cache-reverse-interpolation-substring-collision.md)
+  is about (there, for a different write path — the cache's blind
+  `replaceAll`). `substituteText` itself leaves an unresolved reference as
+  written rather than failing — its callers already refused the turn by the
+  time it runs — so the `Set` branch composes it with its own
+  `collectReferences`-based check, and fails the step there instead (§Where
+  it runs), rather than reusing `checkTurnReferences`, whose refusal wording
+  is scoped to a model's *action* fields.
+
+  **The Electron runner never resolved `${…}` at all**, in this tree or the
+  last — `src/ui/main/runner-adapter.ts` calls only `interpolate`, never
+  `interpolateEnvData`, and PR #127 didn't touch it. It worked before this
+  phase by the accident of `parsed.steps` arriving pre-baked; it does not
+  work now, for any step, `Set` or ordinary. Not caused by this story and
+  not this story's to fix, but the `Set` branch there must not quietly
+  repeat the gap: `parsedTest.envData` is already on hand (it feeds
+  `runSecrets` a few lines away), so the branch's `substituteText` call
+  passes it, same as the other three loops, even though nothing else in
+  that file resolves `${…}` yet.
 
 - **`[input:]` is the precedent, and it is not the vehicle.** It is the one
   existing step that writes a variable with no model: the CLI writes
@@ -310,10 +354,16 @@ Each of the four step loops gains one branch, placed **before** its
 the errand's `originalStep`, the Electron runner's `rawInstruction`. The
 branch:
 
-1. resolves the template with `interpolate(template, scope)`, then checks
-   the result for any surviving `{{\w+}}`; one or more means a failed step
-   whose error names them;
-2. writes `scope[name] = value`;
+1. checks the template with `collectReferences(template)`
+   (`src/runner/placeholder-substitution.ts`): every `{{name}}` not in
+   `scope` and every `${…}` `resolveEnvDataRef` cannot answer fails the
+   step, naming the reference, in the same wording
+   `checkOneString`'s refusals use ("is not a parameter or captured
+   variable of this run") so the two failure modes read as one family;
+2. resolves the template with `substituteText(template, { parameters: scope,
+   envData })` — one call, one pass, both syntaxes, on every loop including
+   the Electron runner's (§"What was measured" — its `envData` is already on
+   hand, just never threaded before) — and writes `scope[name] = value`;
 3. pushes `StepResult{ status: 'passed', turns: [], outputs: { [name]: value },
    aiExplanation: 'Set <name> = "<value>"' }` — the `[input:]` shape with the
    value filled in;
@@ -450,12 +500,13 @@ whole interpolated line. For any other step the two are the same string.
 
 ## What already exists vs what is new
 
-Reused unchanged: `interpolate`; `resolvedParameters` / the errand's `scope`;
-`StepResult.outputs` and the ◆ Captured rendering; the `capture` event and
-`session.outputs` / `outputSources`; `secretsNow` and `redact`; `renameVar`
-and `applySkillScope`; `captureNamesBefore` and everything downstream of
-`CAPTURE_PATTERNS`; the compile `ineligible` listing; the `[input:]`
-synthetic-result shape.
+Reused unchanged: `collectReferences` / `substituteText` / `PlaceholderValues`
+(`src/runner/placeholder-substitution.ts`); `resolvedParameters` / the
+errand's `scope`; `StepResult.outputs` and the ◆ Captured rendering; the
+`capture` event and `session.outputs` / `outputSources`; `secretsNow` and
+`redact`; `renameVar` and `applySkillScope`; `captureNamesBefore` and
+everything downstream of `CAPTURE_PATTERNS`; the compile `ineligible`
+listing; the `[input:]` synthetic-result shape.
 
 Changed, once each: `CaptureEvent.source` and `classifyCaptureSource`
 (union + one value); `CAPTURE_PATTERNS` and the `variables-panel.js` steps
