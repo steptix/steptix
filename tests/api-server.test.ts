@@ -787,6 +787,63 @@ describe('API Server', () => {
       expect(captures[0]!.data).toMatchObject({ name: 'orderId', value: 'ORD-42', source: 'capture' });
     });
 
+    it('a Set step assigns with no executeStep call, and streams source="assignment"', { timeout: 30_000 }, async () => {
+      // The server half of stories/variable-assignment.md, asserted through the
+      // real HTTP entry rather than the manager: `executeStep` — the only door
+      // to the model — must not be called at all, and the value must reach the
+      // wire under its own source so the Variables panel can say it was
+      // assigned rather than read off the page.
+      const { executeStep } = await import('../src/runner/step-executor.js');
+      const before = vi.mocked(executeStep).mock.calls.length;
+
+      const res = await fetch(`${baseUrl}/sessions/set-step/steps?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({
+          steps: ['Set {{greeting}} to "Hello, {{who}}"'],
+          sourceLines: [7],
+          parameters: { who: 'world' },
+        }),
+      });
+
+      const events = await readSseStream(res);
+      expect(vi.mocked(executeStep).mock.calls.length).toBe(before);
+
+      const captures = events.filter((e) => e.event === 'capture');
+      expect(captures).toHaveLength(1);
+      expect(captures[0]!.data).toMatchObject({
+        name: 'greeting',
+        value: 'Hello, world',
+        source: 'assignment',
+        line: 7,
+      });
+      expect(events.find((e) => e.event === 'step:fail')).toBeUndefined();
+    });
+
+    it('a Set step whose template cannot resolve fails the step, naming the reference', { timeout: 30_000 }, async () => {
+      const res = await fetch(`${baseUrl}/sessions/set-step-bad/steps?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({ steps: ['Set {{a}} to "{{nope}}"'], sourceLines: [3] }),
+      });
+
+      const events = await readSseStream(res);
+      const fail = events.find((e) => e.event === 'step:fail');
+      expect(fail).toBeDefined();
+      expect(String(fail!.data.error)).toContain('{{nope}}');
+      // Nothing stored: a green step holding the literal `{{nope}}` would
+      // break a later step instead of this one.
+      expect(events.filter((e) => e.event === 'capture')).toHaveLength(0);
+    });
+
     it('falls back to step index when sourceLines omitted', { timeout: 30_000 }, async () => {
       const res = await fetch(`${baseUrl}/sessions/stream-2/steps?stream=1`, {
         method: 'POST',
