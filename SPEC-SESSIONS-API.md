@@ -109,6 +109,7 @@ Steps are natural language instructions, identical to the format used in markdow
 - **Plain instructions**: `"Click the Sign In button"`
 - **Parameter interpolation**: `"Enter \"{{email}}\" in the email field"` — resolved from `parameters` in the request body, or from previously captured output variables.
 - **Output capture**: `"[output: variable_name] Get the displayed username"` — captures a DOM value into a named variable. Multiple outputs per step are supported: `"[output: plan_name] [output: plan_price] Get the plan details"`.
+- **Variable assignment**: `"Set {{summary}} to \"{{username}} had {{balance}}\""` — stores a value built from the session's existing variables under a new name, with no AI call. The template resolves `{{name}}` and `${env.X}` / `${data.x}` against the session as it stands; a reference it cannot resolve fails the step rather than storing the literal. A malformed `Set {{name}} to …` is rejected before the run starts.
 - **Ignored prefixes**: `[input: variable_name]` and `[interactive]` are silently skipped, as they are interactive/terminal concepts that do not apply to the API.
 
 A step may also name a file to upload — `Upload file attachments/logo.png`, or
@@ -122,7 +123,7 @@ no folder to resolve a relative path against, so it can only use absolute paths.
 
 #### Output Variable Accumulation
 
-- Output variables captured via `[output: var]` are stored in the session.
+- Output variables captured via `[output: var]`, and values written by a `Set {{name}} to "…"` step, are stored in the session.
 - They accumulate across multiple requests to the same session.
 - They are automatically available for `{{variable}}` interpolation in subsequent requests without the caller needing to re-pass them.
 - A caller can override a previously captured output by passing the same key in the `parameters` object.

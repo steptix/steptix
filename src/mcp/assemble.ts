@@ -22,6 +22,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
+import { parseSetStep, setStepError } from '../parser/set-step.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
 import {
@@ -388,6 +389,16 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
     testFilePath,
     warnings,
   );
+  // A malformed `Set {{name}} to …` is refused here rather than sent: these
+  // steps never pass through the markdown parser, so this is their only
+  // parse-time gate (stories/variable-assignment.md). The caller's `try`
+  // turns it into a tool error, which is the right shape — the agent has to
+  // rewrite the step, not read a warning about it after a browser opened.
+  for (const [index, step] of args.steps.entries()) {
+    const error = setStepError(step, ` in step ${index + 1}`);
+    if (error) throw new Error(error);
+  }
+
   warnUnresolvablePlaceholders(project, args.steps, { ...config, ...parameters }, warnings);
 
   // The *undeclared*-parameter warning is `run_test_file`-only (there is no
@@ -785,18 +796,33 @@ export function unresolvablePlaceholderWarning(texts: readonly string[]): string
   );
 }
 
-/** `{{name}}` placeholders with no value in the merged parameter map. */
+/**
+ * `{{name}}` placeholders with no value in the merged parameter map.
+ *
+ * A name some step in the same list ASSIGNS is not missing: `Set {{summary}}
+ * to "…"` gives it a value before anything reads it, and warning that it
+ * "will reach the AI literally" would be wrong twice over — the assignment
+ * resolves it, and the Set line never reaches the AI at all
+ * (stories/variable-assignment.md). Order is deliberately not modelled: this
+ * is a pre-flight over a step list, and a read-before-write is the runtime's
+ * failure to report, with the scope in hand, rather than a guess made here.
+ */
 function missingParameters(
   steps: readonly string[],
   parameters: Record<string, string>,
 ): string[] {
+  const assigned = new Set<string>();
+  for (const step of steps) {
+    const setStep = parseSetStep(step);
+    if (setStep) assigned.add(setStep.name);
+  }
   const missing = new Set<string>();
   for (const step of steps) {
     for (const match of step.matchAll(PARAM_PLACEHOLDER)) {
       const name = match[1]!;
       // `hasOwn` for the same reason as above: `{{toString}}` would otherwise
       // look resolved and never be reported as left-literal.
-      if (!Object.hasOwn(parameters, name)) missing.add(name);
+      if (!Object.hasOwn(parameters, name) && !assigned.has(name)) missing.add(name);
     }
   }
   return [...missing];

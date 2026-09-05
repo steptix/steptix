@@ -4,6 +4,7 @@ import type { Config } from '../config/types.js';
 import type { ParsedTest } from '../parser/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
+import { parseSetStep } from '../parser/set-step.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
@@ -872,6 +873,8 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
     const isAiEntry = binding?.entry?.ai === true;
     const ineligible = test.toolCalls[i]
       ? 'a [tool:] step is dispatched, not compiled'
+      : parseSetStep(text)
+      ? 'a Set step is dispatched, not compiled'
       : !binding
         ? 'the step has no code-behind file to bind into'
         : undefined;

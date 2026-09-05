@@ -12,6 +12,7 @@ import {
 } from './section-match.js';
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
+import { parseSetStep, setStepError } from './set-step.js';
 import type { ToolCall } from '../tools/types.js';
 import {
   interpolateDataSourcePath,
@@ -413,6 +414,35 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
 function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
   const { sections, frontmatter, title } = parseSections(rawContent, filePath);
 
+  // A skill's parameters are not runtime variables: `applySkillScope`
+  // interpolates the caller's arguments into the body TEXT, so a `Set
+  // {{username}} to "…"` in a skill body would reach the runner as
+  // `Set demo@securebank.com to "…"`. Refused by name, here, where the name
+  // still exists (stories/variable-assignment.md §Locked). A test's
+  // `## Parameters` are the opposite case — they live in
+  // `resolvedParameters` and are assignable like anything else — which is
+  // why this check is skill-only and not in `parseSections`.
+  const declared = new Set(Object.keys(sections.parameters));
+  if (declared.size > 0) {
+    const bodies = [
+      sections.steps,
+      ...Object.values(sections.sectionDefs).map((s) => s.steps),
+    ];
+    for (const body of bodies) {
+      for (const step of body) {
+        const setStep = parseSetStep(step);
+        if (setStep && declared.has(setStep.name)) {
+          throw new Error(
+            `Cannot assign to {{${setStep.name}}} in ${filePath}: it is a ` +
+              `parameter of this skill, and a caller's arguments are written ` +
+              `into the step text rather than kept as variables. Assign to a ` +
+              `declared \`## Outputs\` name, or to an internal one.`,
+          );
+        }
+      }
+    }
+  }
+
   return {
     filePath,
     name: title || path.basename(filePath, '.md'),
@@ -633,6 +663,30 @@ function parseSections(rawContent: string, filePath: string): {
   for (let i = 0; i < steps.length; i++) {
     const entry = scan.entries[i];
     const target = entry?.sectionIndex != null ? sectionAcc[entry.sectionIndex] : null;
+
+    // `Set {{name}} to "…"` (stories/variable-assignment.md). Validated here
+    // because this is the one loop every authored step line of every file —
+    // test or skill, main flow or section body — passes through.
+    const where = ` in ${filePath}${entry ? ` at line ${entry.line}` : ''}`;
+    const setError = setStepError(steps[i]!, where);
+    if (setError) throw new Error(setError);
+
+    // A section that loops over a table has its row values interpolated into
+    // the body text at EXPANSION time (`interpolateQuiet`, expander.ts), so a
+    // Set target sharing a column name would arrive at the runner already
+    // replaced by a value — `Set 42 to "…"`, a parse error naming a number
+    // nobody typed. Refused here, where the name is still a name.
+    const setStep = parseSetStep(steps[i]!);
+    const columns = target?.rows?.[0];
+    if (setStep && columns && Object.hasOwn(columns, setStep.name)) {
+      throw new Error(
+        `Cannot assign to {{${setStep.name}}}${where}: it is a column of the ` +
+          `table under "### ${target.name}", and a looped section's row values ` +
+          `are written into its step text rather than kept as variables. ` +
+          `Assign to a different name.`,
+      );
+    }
+
     if (target) {
       // Body steps carry no skipHooks/toolCalls parallel: `[no-hooks]` on a
       // body line is stripped and ignored (the invocation's marker covers the

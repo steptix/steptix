@@ -130,6 +130,22 @@ timeout: 60s
 
 Steps can use special prefix syntax to control execution behaviour:
 
+#### `Set {{name}} to "…"` — Assign a Variable
+
+Stores a value built from values the run already holds. The right-hand side is a double-quoted template; every `{{name}}` and `${env.X}` / `${data.x}` inside it resolves against the run at that step, and the result is stored under the target name.
+
+```markdown
+## Steps
+1. Read the available balance [as: balance]
+2. Set {{summary}} to "{{username}} had {{balance}} available"
+```
+
+Runs as code: no AI call, no page interaction, no cache entry. The value is text only — nothing inside the quotes is evaluated beyond substitution.
+
+A `{{name}}` the run cannot resolve fails the step, naming it, rather than storing the literal. `Set {{name}} to` claims the line, so a malformed one (no quotes, or text after the closing quote) is a parse error rather than prose sent to the model; `Set the filter to Recent` names no variable and remains an ordinary AI step.
+
+The target must be a runtime variable. A skill's own `## Parameters`, and the columns of a table under a `### Section`, are interpolated into the step text at expansion time rather than kept as variables, so assigning to one is refused at parse time. A test's `## Parameters` and the columns of a table under `## Steps` are runtime values and may be assigned freely.
+
 #### `[input: variable_name]` — Pause for User Input
 
 Pauses test execution and prompts the user to enter a value in the terminal. The value is stored as a named parameter that can be referenced in subsequent steps using `{{variable_name}}` interpolation. This is useful for values that cannot be known ahead of time, such as OTP codes, CAPTCHAs, or approval codes.

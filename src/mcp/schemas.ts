@@ -384,7 +384,8 @@ export const runErrandInput = toolSchema({
     .min(1)
     .describe(
       'Natural-language steps, one per entry — the same step language as ' +
-        'run_steps, and `store as` captures come back in the receipt. ' +
+        'run_steps, and `store as` captures and `Set` assignments come back in ' +
+        'the receipt. ' +
         '`[skill: ...]` and `[tool: ...]` are refused: an errand carries no ' +
         'project skills or tools directory, so those need run_steps.',
     ),
@@ -1288,9 +1289,10 @@ export const runErrandOutput = toolSchema({
   captures: z
     .record(z.string(), z.string())
     .describe(
-      'Every `store as` capture. This is where an errand\'s variables go — to ' +
-        'you, because the server keeps no scope. A later errand starts empty, so ' +
-        'anything you need again must be passed back in the step text.',
+      'Every `store as` capture and every `Set` assignment. This is where an ' +
+        'errand\'s variables go — to you, because the server keeps no scope. A ' +
+        'later errand starts empty, so anything you need again must be passed ' +
+        'back in the step text.',
     ),
   finalUrl: z
     .string()

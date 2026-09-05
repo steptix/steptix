@@ -192,7 +192,7 @@ type ClassifiedLines = ReturnType<typeof classifyLines>;
  *  write to is a drift that no test can see). */
 export interface CaptureName {
   name: string;
-  marker: 'input' | 'output' | 'as' | 'out-alias';
+  marker: 'input' | 'output' | 'as' | 'out-alias' | 'set';
   /** 1-based line of the capturing step or hook entry. */
   line: number;
   /** 0-based column of the name token on that line, and its length. */
@@ -237,6 +237,19 @@ const CAPTURE_PATTERNS: ReadonlyArray<{
   // scope (variables-panel.js:43); `out.k` is the callee's own name and is not
   // addressable from here. One invocation may expose several.
   { re: /\bout\.\w+\s*=\s*"([^"]+)"/g, marker: 'out-alias' },
+  // `Set {{name}} to "…"` (stories/variable-assignment.md). Anchored and
+  // single-match, because the runtime is: `parseSetStep` reads the whole
+  // instruction, so a `Set …` further along a line binds nothing.
+  //
+  // The value is matched as a LOOKAHEAD for two reasons at once. It has to be
+  // checked at all — a line the runtime refuses (`Set {{a}} to "b" trailing`,
+  // or an unquoted value) must not offer a name for a file that cannot run,
+  // and `parseSetStep`'s `"(.*)"\s*$` is the rule being mirrored. And it has
+  // to stay OUT of the match text, because `writesIn` locates the name with
+  // `m[0].lastIndexOf(m[1])` — which needs the name to be the last
+  // name-shaped token of the match, and would otherwise find an echo of it
+  // inside the template.
+  { re: /^set\s+\{\{(\w+)\}\}\s+to\s+(?=".*"\s*$)/gi, marker: 'set' },
 ];
 
 /** `N. ` ordinal prefix — stripped to get the instruction the runner sees. */

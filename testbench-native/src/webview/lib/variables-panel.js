@@ -15,19 +15,22 @@
  *   runtimeValues    — values gathered during a run: [input:] answers
  *                      collected via the composer + [output:] captures
  *                      arriving as `capture` events.
- *   runtimeSources   — optional map {name → 'capture' | 'toolOutput'} carrying
- *                      the `source` discriminator from each `capture` event
- *                      (see runner-core CaptureEvent). Lets the panel tell a
- *                      value a skill/tool returned apart from one extracted
+ *   runtimeSources   — optional map {name → 'capture' | 'toolOutput' |
+ *                      'assignment'} carrying the `source` discriminator from
+ *                      each `capture` event (see runner-core CaptureEvent).
+ *                      Lets the panel tell a value a skill/tool returned, or
+ *                      one a `Set` step assigned, apart from one extracted
  *                      from the page. Absent / unknown names default to
  *                      `'capture'` (the conservative back-compat default for
- *                      a server that predates the field).
+ *                      a server that predates the field — and what makes
+ *                      adding a third value safe).
  *
  * Returns: an ordered list of { name, source, value, line?, captureSource? },
- * with duplicates removed (param > input > output if a name appears in more
- * than one place). `captureSource` is only set on rows whose runtime value
- * arrived via a `capture` event; it is the wire `source` discriminator
- * (`'capture'` | `'toolOutput'`), classified by `classifyCaptureSource`.
+ * with duplicates removed (param > input > output > set if a name appears in
+ * more than one place). `captureSource` is only set on rows whose runtime
+ * value arrived via a `capture` event; it is the wire `source` discriminator
+ * (`'capture'` | `'toolOutput'` | `'assignment'`), classified by
+ * `classifyCaptureSource`.
  */
 
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
@@ -41,6 +44,17 @@ const OUTPUT_PATTERN = /\[output:\s*(\w+)\]/i;
 // the invocation line, the Variables panel would silently omit a value
 // that's both captured (via `capture` events) and used downstream.
 const SKILL_OUT_ALIAS_RE = /\bout\.\w+\s*=\s*"([^"]+)"/g;
+// `Set {{name}} to "…"` — the same anchored form the extension scanner and the
+// runtime read (stories/variable-assignment.md). The row appears before a run,
+// like an [output:] row does, and fills in from the `capture` event when the
+// assignment happens.
+// The value is a lookahead so the whole grammar is checked — a line the
+// runtime refuses (`Set {{a}} to "b" trailing`) must not seed a row for a file
+// that cannot run — while the match text still ends at the name, matching the
+// extension scanner's regex exactly.
+const SET_STEP_RE = /^set\s+\{\{(\w+)\}\}\s+to\s+(?=".*"\s*$)/i;
+/** `N. ` ordinal, stripped to get the instruction the runtime reads. */
+const STEP_PREFIX_RE = /^\s*\d+\.\s+/;
 
 /**
  * Map a `capture` event's wire `source` discriminator onto the value the
@@ -52,7 +66,9 @@ const SKILL_OUT_ALIAS_RE = /\bout\.\w+\s*=\s*"([^"]+)"/g;
  * conservative default mandated by the spec. Never throws.
  */
 export function classifyCaptureSource(source) {
-  return source === "toolOutput" ? "toolOutput" : "capture";
+  if (source === "toolOutput") return "toolOutput";
+  if (source === "assignment") return "assignment";
+  return "capture";
 }
 
 export function collectVariables(text, parameterValues, runtimeValues, runtimeSources) {
@@ -111,6 +127,21 @@ export function collectVariables(text, parameterValues, runtimeValues, runtimeSo
         ...captureSourceFor(outputMatch[1]),
       });
       seen.add(outputMatch[1]);
+    }
+    // `Set {{name}} to "…"`. Matched on the INSTRUCTION — the text after the
+    // `N. ` ordinal — because the runtime's own reading is anchored to the
+    // instruction's start. The other patterns here are unanchored and so can
+    // match the raw line as it stands.
+    const setMatch = raw.replace(STEP_PREFIX_RE, '').match(SET_STEP_RE);
+    if (setMatch && !seen.has(setMatch[1])) {
+      out.push({
+        name: setMatch[1],
+        source: "set",
+        line: i + 1,
+        value: runtime[setMatch[1]],
+        ...captureSourceFor(setMatch[1]),
+      });
+      seen.add(setMatch[1]);
     }
     // `[skill: foo out.x="alias"]` — surface every caller alias.
     // Same semantic as a step-level [output:] from the caller's
