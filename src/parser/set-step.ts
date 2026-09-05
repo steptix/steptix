@@ -158,9 +158,15 @@ export function setStepError(instruction: string, where = ''): string | null {
       `quotes, or build the value in a tool.`
     );
   }
+  // A missing space after `to` lands here too (`Set {{x}} to"y"`), as does a
+  // trailing full stop. Both are "something is wrong at the end of the
+  // line", so name the two likely faults rather than only the common one —
+  // the previous wording sent an author who had omitted a space looking for
+  // trailing prose that was not there.
   return (
-    `${lead}. Nothing may follow the closing quote — the assignment is the ` +
-    `whole step. Move the rest to its own step.`
+    `${lead}. The assignment must end at the closing quote. Check for a ` +
+    'missing space after `to`, a stray character after the final quote ' +
+    `(a full stop is the usual one), or prose that belongs in its own step.`
   );
 }
 

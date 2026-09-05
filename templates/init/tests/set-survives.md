@@ -11,9 +11,9 @@ the value has to reach `session.outputs` so a later HTTP batch can seed
 see the sibling `store-as-survives.md`, which is the same seam from the
 other direction.
 
-The live test breakpoints step 3, runs, then resumes. Step 3 can only pass
-if `{{assigned}}` — written in batch 1 — was carried across the boundary
-and interpolated in batch 2. If the assignment never reached
+The live test breakpoints step 3, runs, then resumes. Step 3 reads
+`{{decorated}}`, which step 2 wrote in batch 1, so it can only pass if that
+value was carried across the boundary and interpolated in batch 2. If the assignment never reached
 `session.outputs`, `{{assigned}}` stays literal and the template resolution
 fails the step, naming it.
 

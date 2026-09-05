@@ -694,9 +694,14 @@ it a timeout. It now waits on the terminal condition, with a comment saying
 why it must differ from the sibling it was modelled on — the obvious later
 "tidy-up" is to make them match, which would break it again.
 
-Automated: 45 new tests across the grammar, the resolver, the parse-time
+Automated (as of the first build; rounds three to seven added more — see
+below): 45 new tests across the grammar, the resolver, the parse-time
 refusals, the two editor mirrors and the server and errand HTTP seams. Root
 suite 3691 green; testbench-native 575 pass / 1 skipped.
+
+**Final counts, after seven review rounds:** root 3728 across 183 files,
+testbench-native 577 (1 skipped), runner-core 522, and the live TestBench
+suite 33/33. The three Set-specific root files alone hold 77 tests.
 
 ### Still open
 

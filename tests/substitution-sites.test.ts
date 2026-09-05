@@ -90,6 +90,12 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // The Electron loop. Absent from the first version of this table, which is
   // its own small proof that a hand-written inventory needs a mechanical
   // check: it is one of the four loops the feature's whole claim names.
+  //
+  // Two calls, and only ONE is `step-text/authored` — the run loop, which
+  // reads the authored line first. The other is `steer()`, an instruction
+  // the user types at a breakpoint, which is not a test step and has no
+  // `Set` branch at all; a `Set` typed there goes to the model. The label is
+  // the stricter of the two rather than a claim about both.
   'src/ui/main/runner-adapter.ts': { why: 'step-text/authored', calls: 2 },
 };
 

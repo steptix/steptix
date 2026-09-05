@@ -98,7 +98,7 @@ describe('setStepError', () => {
 
   it('refuses trailing text after the closing quote', () => {
     const err = setStepError('Set {{x}} to "a" [store as: y]');
-    expect(err).toContain('Nothing may follow the closing quote');
+    expect(err).toContain('must end at the closing quote');
   });
 
   it('refuses an unclosed quote', () => {

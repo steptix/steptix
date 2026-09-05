@@ -24,7 +24,7 @@ describe('grammar, at parse time', () => {
 
   it('refuses trailing text after the closing quote', () => {
     const md = `# T\n\n## Steps\n1. Set {{a}} to "x" and click Save\n`;
-    expect(() => parseTestContent(md)).toThrow(/Nothing may follow the closing quote/);
+    expect(() => parseTestContent(md)).toThrow(/must end at the closing quote/);
   });
 
   it('accepts the complete form, and keeps the line authored', () => {

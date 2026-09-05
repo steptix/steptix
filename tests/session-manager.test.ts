@@ -1379,7 +1379,7 @@ describe('SessionManager', () => {
       expect(response.outputSources).toMatchObject({ region: 'parameter' });
     });
 
-it('keeps a __proto__ assignment in session.outputs across the wire', async () => {
+    it('keeps a __proto__ assignment in session.outputs across the wire', async () => {
       // `session.outputs` is a plain object, so `outputs['__proto__'] =`
       // creates no own key: the value resolved inside the batch and then
       // vanished from the HTTP outputs map and from the next batch's seed.

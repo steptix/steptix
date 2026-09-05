@@ -5,7 +5,6 @@ import type { ParsedTest } from '../parser/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
-import { NO_HOOKS_MARKER } from '../parser/section-match.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
@@ -874,12 +873,16 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
     const isAiEntry = binding?.entry?.ai === true;
     const ineligible = test.toolCalls[i]
       ? 'a [tool:] step is dispatched, not compiled'
-      // `text` here can be a RAW authored line, which still carries a
-      // `[no-hooks]` prefix — `test.steps` has it stripped, `rawSteps` does
-      // not. Stripping it before the check, exactly as `matchText` does, or a
-      // `[no-hooks] Set …` step would be offered to the compiler as an
-      // ordinary candidate and generated into a `.steps.ts` entry.
-      : parseSetStep(text.replace(NO_HOOKS_MARKER, ''))
+      // `text` can be a RAW authored line still carrying a `[no-hooks]`
+      // prefix (`rawSteps` keeps it). No strip needed: `parseSetStep`
+      // normalises the marker itself, and does it better than a strip here
+      // could — `NO_HOOKS_MARKER` is `^`-anchored with no leading `\s*`, so
+      // it would miss an indented line that `normalise` handles. This used to
+      // strip first, with a comment claiming the check would otherwise miss
+      // such a step; that stopped being true when the marker moved into the
+      // parser, and the line survived as dead code defended by a false
+      // rationale.
+      : parseSetStep(text)
       ? 'a Set step is dispatched, not compiled'
       : !binding
         ? 'the step has no code-behind file to bind into'
