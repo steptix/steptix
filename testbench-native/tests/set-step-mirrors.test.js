@@ -23,7 +23,10 @@ const FIXTURES = [
   { line: 'Set {{a}} to "b"', target: 'a' },
   { line: 'set {{a}} to "{{b}} and {{c}}"', target: 'a' },
   { line: 'SET {{a_1}} to ""', target: 'a_1' },
-  { line: 'Set {{a}} to "say "hi""', target: 'a' },
+  { line: 'Set {{a}} to "say "hi""', target: null },
+  { line: 'Set {{a}} to "x" and click "Save"', target: null },
+  // The prefix the runtime strips before it reads the line at all.
+  { line: '[no-hooks] Set {{a}} to "b"', target: 'a' },
   // Claims the form but does not parse — the runtime refuses the file, so the
   // editors must not offer a name for it either.
   { line: 'Set {{a}} to unquoted', target: null },
@@ -111,4 +114,19 @@ test('classifyCaptureSource: knows assignment, and still collapses the unknown',
   // third value safe for a client that predates it.
   assert.equal(classifyCaptureSource(undefined), 'capture');
   assert.equal(classifyCaptureSource('somethingNew'), 'capture');
+});
+
+test('extension scanner: locates the name exactly, even when it collides with `to`', () => {
+  // `writesIn` used to find the name with `m[0].lastIndexOf(m[1])`, assuming
+  // it is the match's last name-shaped token. The Set pattern's match ends
+  // with the keyword ` to `, so `{{to}}`, `{{t}}` and `{{o}}` all located the
+  // keyword instead — F12 and completion pointed at the wrong span. The `d`
+  // flag's group indices are exact and need no assumption.
+  for (const name of ['to', 't', 'o', 'name']) {
+    const raw = `1. Set {{${name}}} to "x"`;
+    const [write] = captureNamesBefore(['## Steps', raw].join('\n'), 99);
+    assert.equal(write.name, name);
+    assert.equal(write.column, raw.indexOf(`{{${name}}}`) + 2, `column for {{${name}}}`);
+    assert.equal(write.length, name.length);
+  }
 });

@@ -5,6 +5,7 @@ import type { ParsedTest } from '../parser/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
+import { NO_HOOKS_MARKER } from '../parser/section-match.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
@@ -873,7 +874,12 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
     const isAiEntry = binding?.entry?.ai === true;
     const ineligible = test.toolCalls[i]
       ? 'a [tool:] step is dispatched, not compiled'
-      : parseSetStep(text)
+      // `text` here can be a RAW authored line, which still carries a
+      // `[no-hooks]` prefix — `test.steps` has it stripped, `rawSteps` does
+      // not. Stripping it before the check, exactly as `matchText` does, or a
+      // `[no-hooks] Set …` step would be offered to the compiler as an
+      // ordinary candidate and generated into a `.steps.ts` entry.
+      : parseSetStep(text.replace(NO_HOOKS_MARKER, ''))
       ? 'a Set step is dispatched, not compiled'
       : !binding
         ? 'the step has no code-behind file to bind into'

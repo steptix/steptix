@@ -49,12 +49,14 @@ const SKILL_OUT_ALIAS_RE = /\bout\.\w+\s*=\s*"([^"]+)"/g;
 // like an [output:] row does, and fills in from the `capture` event when the
 // assignment happens.
 // The value is a lookahead so the whole grammar is checked — a line the
-// runtime refuses (`Set {{a}} to "b" trailing`) must not seed a row for a file
-// that cannot run — while the match text still ends at the name, matching the
-// extension scanner's regex exactly.
-const SET_STEP_RE = /^set\s+\{\{(\w+)\}\}\s+to\s+(?=".*"\s*$)/i;
-/** `N. ` ordinal, stripped to get the instruction the runtime reads. */
-const STEP_PREFIX_RE = /^\s*\d+\.\s+/;
+// runtime refuses (`Set {{a}} to "b" trailing`, or a value containing a quote)
+// must not seed a row for a file that cannot run — while the match text still
+// ends at the name, matching the extension scanner's regex exactly.
+const SET_STEP_RE = /^set\s+\{\{(\w+)\}\}\s+to\s+(?="[^"]*"\s*$)/i;
+/** `N. ` ordinal plus any `[no-hooks]` marker — both stripped by the runtime's
+ *  `extractSteps` before a step reaches `parseSetStep`, so stripping only the
+ *  ordinal here made `[no-hooks] Set {{x}} to "…"` invisible to the panel. */
+const STEP_PREFIX_RE = /^\s*\d+\.\s+(?:\[no-hooks\]\s*)?/i;
 
 /**
  * Map a `capture` event's wire `source` discriminator onto the value the

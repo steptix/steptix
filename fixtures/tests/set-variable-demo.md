@@ -22,8 +22,11 @@ configured at all.
   page (`Set the filter to Recent` is an ordinary AI step and stays one).
 - **Text only.** `"{{n}} + 1"` stores those five characters. Anything that
   *computes* belongs in a tool — see `regex-extract-demo.md`.
-- **The last quote on the line closes the value**, so an inner quote needs no
-  escaping (step 5).
+- **The value may not contain a double quote.** There is no way to tell one
+  inside the value from the one that closes it, and guessing silently stores
+  the wrong text — `Set {{q}} to "shoes" and search for "shoes"` looked like
+  an assignment plus an instruction and would have stored
+  `shoes" and search for "shoes`. Both are refused, loudly.
 - **An unresolvable `{{name}}` fails the step**, naming it. Storing the literal
   `{{typo}}` would pass green here and break a later step instead.
 
@@ -36,5 +39,5 @@ configured at all.
 2. Set {{summary}} to "{{greeting}}, {{username}} ({{region}})"
 3. Set {{copy}} to "{{summary}}"
 4. Set {{cleared}} to ""
-5. Set {{quoted}} to "she said "hi" twice"
+5. Set {{padded}} to "  spaces are kept  "
 6. Set {{summary}} to "{{summary}} — revised"

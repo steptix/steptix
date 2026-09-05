@@ -410,11 +410,11 @@ Every other way a variable gets a value reads it from somewhere outside the test
 
 The right-hand side is always a double-quoted string. Every `{{name}}` and `${env.X}` / `${data.x}` inside it resolves against the run as it stands at that step, and the result is stored under the target name. Copying one variable to another is just `Set {{backup}} to "{{original}}"`, and `Set {{x}} to ""` clears one.
 
-It costs nothing: no AI call, no page interaction, no cache. Notes:
+It costs nothing: no AI call, no page interaction, no action-cache entry. Notes:
 
 - The value is text, and only text. `"{{n}} + 1"` stores those characters — arithmetic and string surgery belong in a [tool](#tools), where `regex_extract` and friends already live.
 - A `{{name}}` the run cannot resolve **fails the step**, naming it. Storing the literal `{{typo}}` would pass green and break a later step instead.
-- The last quote on the line closes the value, so an inner quote needs no escaping: `Set {{q}} to "say "hi""` stores `say "hi"`.
+- The value may not contain a double quote — there is no way to tell one inside the value from the one that closes it, and guessing would silently store the wrong text. A step like `Set {{q}} to "shoes" and search for "shoes"` is refused for the same reason.
 - `Set {{name}} to` claims the line the way `[skill:` does, so a missing quote is a parse error rather than prose sent to the model. `Set the filter to Recent` names no variable and stays an ordinary AI step.
 - Inside a skill you can assign to a declared `## Outputs` name or an internal one, but not to one of the skill's own `## Parameters` — a caller's arguments are written into the step text rather than kept as variables, so there would be no variable there to assign to. The same applies to the columns of a table under a `### Section`. Both are refused when the file is parsed.
 

@@ -29,12 +29,29 @@ export interface ParsedSetStep {
 }
 
 /**
- * The complete form. `(.*)` is greedy, so it runs to the LAST quote on the
- * line: `Set {{q}} to "say "hi""` stores `say "hi"` and there is no escape
- * syntax to learn. `\s*$` is what makes trailing text an error rather than a
- * second, silent writer.
+ * The complete form. The value is `[^"]*` — it may not contain a double
+ * quote — and `\s*$` makes anything after the closing quote an error.
+ *
+ * This started as `(.*)`, greedy to the LAST quote, so that
+ * `Set {{q}} to "say "hi""` could store `say "hi"` with no escape syntax to
+ * learn. That was wrong, and quietly so. Greedy-to-last-quote also swallows
+ * a line like
+ *
+ *     Set {{query}} to "shoes" and search for "shoes"
+ *
+ * which a reviewer found: it parses, stores the garbage
+ * `shoes" and search for "shoes`, performs no search, and passes GREEN. The
+ * locked decision says "nothing may follow the closing quote — the
+ * assignment is the whole step", and the greedy form could not enforce it,
+ * because it cannot tell a quote inside the value from the one that closes
+ * it.
+ *
+ * So the convenience loses to the invariant, which is the same trade this
+ * step makes everywhere else: an unresolvable reference fails the step
+ * rather than storing a literal. A value containing a quote is now a loud
+ * refusal naming the problem, and the line above is refused too.
  */
-const SET_STEP_RE = /^set\s+\{\{(\w+)\}\}\s+to\s+"(.*)"\s*$/i;
+const SET_STEP_RE = /^set\s+\{\{(\w+)\}\}\s+to\s+"([^"]*)"\s*$/i;
 
 /**
  * The CLAIM: `Set {{name}} to` at the start of the instruction.
@@ -103,11 +120,21 @@ export function setStepError(instruction: string, where = ''): string | null {
       `An unquoted value is prose about the page, which this step cannot run.`
     );
   }
-  // One quote and no other: opened, never closed. Two or more means the value
-  // is closed and something followed it — the full form requires the closing
-  // quote to be the end of the line, so reaching here proves it was not.
+  // One quote and no other: opened, never closed.
   if (afterTo.lastIndexOf('"') === 0) {
     return `${lead}. The value assigned opens with a quote and never closes it.`;
+  }
+  // Three or more quotes means the value itself contains one — the case the
+  // greedy grammar used to swallow. Named separately from plain trailing
+  // text, because the author's mistake is different and so is the remedy.
+  const quotes = (afterTo.match(/"/g) ?? []).length;
+  if (quotes > 2) {
+    return (
+      `${lead}. The value assigned may not contain a double quote — there is ` +
+      `no way to tell one inside the value from the one that closes it, and ` +
+      `guessing would silently store the wrong text. Rephrase without the ` +
+      `quotes, or build the value in a tool.`
+    );
   }
   return (
     `${lead}. Nothing may follow the closing quote — the assignment is the ` +

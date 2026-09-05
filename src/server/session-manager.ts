@@ -3997,9 +3997,15 @@ export class SessionManager {
         // value on a re-run (stories/variable-assignment.md §Locked). Its
         // template is resolved inside the branch, below.
         const setStep = parseSetStep(originalStep);
-        const envInterpolated = envDataCtx
-          ? interpolateEnvData(originalStep, envDataCtx)
-          : originalStep;
+        // NOT evaluated for a Set step. `interpolateEnvData` THROWS on an
+        // unknown `${…}`, and this loop is `try { … } finally` with no catch,
+        // so a bad reference inside a Set template escaped `executeRun`
+        // entirely and surfaced as a server error rather than a `step:fail`.
+        // Skipping it here is what makes `resolveSetTemplate`'s own per-step
+        // refusal — which names the reference and fails just that step — the
+        // reachable path.
+        const envInterpolated =
+          setStep || !envDataCtx ? originalStep : interpolateEnvData(originalStep, envDataCtx);
         const interpolated = setStep
           ? originalStep
           : interpolate(envInterpolated, resolvedParameters);
@@ -4337,7 +4343,15 @@ export class SessionManager {
             if (outcome.assigned) {
               const { name, value } = outcome.assigned;
               session.outputs[name] = value;
-              session.outputSources[name] = 'assignment';
+              // First-write-wins, like every other write site here. The field
+              // documents itself as keeping "the variable's original identity
+              // rather than hiding it behind the latest source", and writing
+              // unconditionally broke that: a `## Parameters` value a Set
+              // later rewrote moved out of the Parameters section of the
+              // clients that group by this.
+              if (!(name in session.outputSources)) {
+                session.outputSources[name] = 'assignment';
+              }
               emit({
                 type: 'capture',
                 line: sourceLineFor(i),

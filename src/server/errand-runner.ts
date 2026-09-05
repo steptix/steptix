@@ -673,9 +673,14 @@ export class ErrandRunner {
       const setStep = parseSetStep(originalStep);
       let interpolated: string;
       try {
-        const envInterpolated = args.envDataCtx
-          ? interpolateEnvData(originalStep, args.envDataCtx)
-          : originalStep;
+        // Not evaluated for a Set step — `interpolateEnvData` throws on an
+        // unknown `${…}`, which would report the raw parser wording instead
+        // of `resolveSetTemplate`'s per-step refusal. Same reason as the
+        // session manager, where the throw was worse still.
+        const envInterpolated =
+          setStep || !args.envDataCtx
+            ? originalStep
+            : interpolateEnvData(originalStep, args.envDataCtx);
         interpolated = setStep ? originalStep : interpolate(envInterpolated, scope);
       } catch (err) {
         emit({ type: 'step:start', line, ...(await tabSpread()) });

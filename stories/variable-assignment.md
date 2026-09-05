@@ -27,7 +27,8 @@ This story adds one step form:
 7. Set {{reference}} to "Ref: {{account_number}}"
 ```
 
-The right-hand side is a quoted string. Every `{{name}}` inside it is replaced
+The right-hand side is a double-quoted string, and may not itself contain a
+quote. Every `{{name}}` inside it is replaced
 from the test's variables as they stand at that step, and the result is stored
 under the target name. No model, no page, no cache — it costs what a string
 replace costs.
@@ -115,8 +116,12 @@ the page.
 > target "has no value and will reach the AI literally"; (10) an opening
 > `Set {{name}} to` with no double-quoted remainder, or with anything but
 > whitespace after the closing quote, is a parse error naming the line —
-> before a browser is launched — in the CLI, the server and the MCP assembler
-> alike; (11) a `Set` whose target is a declared parameter of the enclosing
+> before a browser is launched — wherever the FILE is parsed: the CLI and the
+> MCP assembler. **Not** on the Sessions API, which receives step strings and
+> never parses markdown, nor in a `## Hooks` entry, which `parseSections`
+> does not walk; both send a malformed claim to the model as prose. Corrected
+> from "the CLI, the server and the MCP assembler alike", which review showed
+> was false for two of the three; (11) a `Set` whose target is a declared parameter of the enclosing
 > skill, or a column of the enclosing looped section's table, is refused at
 > parse time with a message that names the target and says why — while a
 > `Set` to a run-level row column (a table directly under `## Steps`)
@@ -687,3 +692,125 @@ suite 3691 green; testbench-native 575 pass / 1 skipped.
   writers, so `{{balance}}` after `Read the balance [as: balance]` looks as
   though it would still be warned about on every MCP run. Same list, same
   edit, whenever someone confirms it with a test.
+
+## What the review found
+
+Three independent subagent passes — adversarial correctness, claims-vs-code,
+and regression risk — were run after everything above was written. They found
+**eight real defects and a set of overclaims**, which is the honest headline:
+the live proofs above were all genuine, and none of them would have caught
+any of this. Every finding below was reproduced before it was acted on.
+
+### Defects, now fixed
+
+1. **The greedy value swallowed trailing prose.** `"(.*)"` ran to the last
+   quote on the line, so `Set {{query}} to "shoes" and search for "shoes"`
+   parsed, stored `shoes" and search for "shoes`, searched for nothing, and
+   **passed green**. That directly violated this story's own locked decision
+   ("nothing may follow the closing quote"), which the grammar could not
+   enforce because it cannot tell a quote inside the value from the one that
+   closes it. The value is now `[^"]*`: a quote inside it is a loud refusal
+   naming the problem. The `say "hi"` convenience is gone, and should be —
+   it was what bought the hole. A soft-wrapped template started working as a
+   side effect, since `[^"]` matches a newline.
+
+2. **A `Set` after a conditional never ran.** `identifyStepGroups` pairs a
+   conditional with the next step as its *continuation* — the thing the model
+   performs if the condition did not apply. A `Set` has no model half, so it
+   was swallowed into an AI turn: the variable was silently never assigned and
+   the step cost tokens. Both halves of what this step form exists to avoid,
+   and it falsified the headline "no model call" claim. The grouper now
+   declines an assignment as a continuation. The first fix for this was worse
+   than the bug — the synthetic continuation's index collided with the `Set`
+   step's own, and both loops `continue` past any index registered to a group,
+   so the step would have been skipped outright. Synthetic continuations are
+   no longer registered.
+
+3. **`Set {{__proto__}} to "…"` passed and stored nothing.** Plain assignment
+   hits the prototype setter, which ignores a string. The step reported passed
+   with the value in its `outputs` (a computed key does create an own
+   property) while the scope held nothing — a green step poisoning a later
+   one. Now written with `defineProperty`. This codebase already guards the
+   same hazard in three other maps; the omission was an oversight.
+
+4. **An unresolvable `${…}` threw instead of failing the step.** Both server
+   loops still evaluated `interpolateEnvData` over the whole authored line for
+   a `Set` step and discarded the result. It throws on an unknown reference,
+   and the session manager's run loop is `try { … } finally` with no catch —
+   so the throw escaped `executeRun` and surfaced as a server error rather
+   than a `step:fail`. That also made `resolveSetTemplate`'s own carefully
+   worded refusal unreachable on those paths. No longer evaluated for a `Set`.
+
+5. **Skill-internal names leaked.** `computeStepCaptures` and
+   `autoCapturedNames` both drop `__skill*`; writing `outputs` and `assigned`
+   directly bypassed both, so a `Set {{scratch}}` inside a skill surfaced
+   `__skill1_scratch` in the report, the HTTP outputs map and the Variables
+   panel — against verification rule (5). The assignment still happens; only
+   its reporting is suppressed.
+
+6. **F12 pointed at the wrong span for targets named `to`, `t` or `o`.**
+   `writesIn` located the name with `m[0].lastIndexOf(m[1])`, assuming it is
+   the match's last name-shaped token — true of the four older patterns, false
+   for this one, whose match ends with the keyword ` to `. Replaced with the
+   regex's own group offset via the `d` flag, which is exact for every
+   pattern and assumes nothing.
+
+7. **Both editor mirrors were blind to `[no-hooks] Set …`.** They stripped
+   only the `N. ` ordinal, and the `Set` pattern is one of the few anchored
+   ones — so the prefix this story explicitly allows cost the step its
+   completion, its F12 target and its panel row. Both now strip the marker
+   too, as the runtime does.
+
+8. **`outputSources` was written unconditionally**, against its own
+   documented contract of keeping a variable's original identity. A
+   `## Parameters` value a `Set` later rewrote moved out of the Parameters
+   section of any client that groups by it. Now first-write-wins, like every
+   other write site.
+
+### Overclaims, now corrected
+
+The pattern the claims-vs-code pass identified is worth stating plainly,
+because it is a lesson about how this story was written rather than about its
+code: **it is reliable when describing code it wrote, and overclaims whenever
+it asserts that something else now agrees with it.**
+
+- Verification rule (10) said the parse error applies "in the CLI, the server
+  and the MCP assembler alike". The Sessions API never parses markdown, and
+  `## Hooks` entries are not walked by the validation loop. Corrected in
+  place, and in SPEC-SESSIONS-API.md, which had the same false sentence.
+- "Proven separately in each of the four step loops" — the Electron loop has
+  **no test of any kind**, by anyone, and never executed. §"What already
+  exists vs what is new" also listed "the runner-adapter suite" among the new
+  tests. It does not exist.
+- §Still open claimed the Electron branch threads `envData` so a `${…}` in a
+  template resolves there. It does not: that runner calls `parseTestFile`
+  without an env context, so `parsedTest.envData` is always `undefined`. The
+  threading is correct but inert until the surrounding gap is fixed.
+- "No cache file" is too strong — a run still writes a `StepCache` `meta.json`
+  and a code-behind `last-run.json`. SPEC.md's narrower "no cache entry" is
+  the accurate wording. What is true, and what matters, is that a `Set` step
+  neither reads nor writes an action cache entry and never consults a
+  `.steps.ts`.
+- "One table, three readers" oversold it: the runtime's fixture table and the
+  mirrors' are two hand-kept copies. That is why the `[no-hooks]` gap sat in
+  both at once.
+- A claimed runner-core `node --test` case for the widened union was never
+  written.
+
+### Still open after the review
+
+- **The panel never renders the label the wire now carries.** `source:
+  'assignment'` is plumbed end to end and `classifyCaptureSource` returns it,
+  but the renderer's only badge condition is `captureSource === "toolOutput"`,
+  so an assignment is visually identical to a page capture. Verification rule
+  (6)'s claim about the panel is therefore not met.
+- **Two expander interactions.** An `out.x="alias"` naming one of the skill's
+  own parameters rewrites the target into that parameter and then bakes the
+  argument over it; and a looped section nested inside another inherits the
+  outer table's bindings, which the parse-time refusal does not check because
+  it only looks at the step's own section. Both degrade a `Set` to prose
+  silently. The second is the same class as the refusal already implemented,
+  just one scope out.
+- **The MCP suppression is cross-scope.** `missingParameters` suppresses the
+  warning for a name any step in the list assigns, including steps in a
+  section the main flow never calls.

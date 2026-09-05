@@ -30,10 +30,29 @@ describe('parseSetStep', () => {
     expect(parseSetStep('set {{ref}} to "x"')).toEqual({ name: 'ref', template: 'x' });
   });
 
-  it('reads the template to the LAST quote, so an inner quote is literal', () => {
-    expect(parseSetStep('Set {{q}} to "say "hi""')).toEqual({
-      name: 'q',
-      template: 'say "hi"',
+  it('refuses a value containing a quote, rather than guessing where it ends', () => {
+    // This used to PARSE, greedy to the last quote on the line, so that
+    // `say "hi"` could be stored with no escape syntax. The same rule
+    // swallowed the line in the next test into a garbage value that passed
+    // green, which is the trade that lost.
+    expect(parseSetStep('Set {{q}} to "say "hi""')).toBeNull();
+  });
+
+  it('refuses prose that follows a quoted value and happens to end in a quote', () => {
+    // The regression the greedy grammar hid: this parsed as
+    // template `shoes" and search for "shoes`, performed no search, and
+    // passed. Found by review, not by a test.
+    const line = 'Set {{query}} to "shoes" and search for "shoes"';
+    expect(parseSetStep(line)).toBeNull();
+    expect(setStepError(line)).toContain('may not contain a double quote');
+  });
+
+  it('accepts a template that wraps onto a second line', () => {
+    // `[^"]` matches a newline, so a soft-wrapped list item — which reaches
+    // the parser with the break embedded — is a value, not a parse error.
+    expect(parseSetStep('Set {{s}} to "one\ntwo"')).toEqual({
+      name: 's',
+      template: 'one\ntwo',
     });
   });
 
@@ -193,7 +212,8 @@ export const SET_STEP_FIXTURES: Array<{
   { line: 'Set {{a}} to "b"', parsed: { name: 'a', template: 'b' }, claims: true },
   { line: 'set {{a}} to "{{b}} and {{c}}"', parsed: { name: 'a', template: '{{b}} and {{c}}' }, claims: true },
   { line: 'SET {{a_1}} to ""', parsed: { name: 'a_1', template: '' }, claims: true },
-  { line: 'Set {{a}} to "say "hi""', parsed: { name: 'a', template: 'say "hi"' }, claims: true },
+  { line: 'Set {{a}} to "say "hi""', parsed: null, claims: true },
+  { line: 'Set {{a}} to "x" and click "Save"', parsed: null, claims: true },
   { line: 'Set {{a}} to unquoted', parsed: null, claims: true },
   { line: 'Set {{ a }} to "b"', parsed: null, claims: true },
   { line: 'Set {{a}} to "b" trailing', parsed: null, claims: true },
@@ -210,5 +230,65 @@ describe('fixture table', () => {
     // else may. That equivalence is what stops a new grammar case from
     // silently becoming prose.
     expect(setStepError(line) !== null).toBe(claims && parsed === null);
+  });
+});
+
+describe('a Set step is never swallowed by a conditional group', () => {
+  it('does not become a conditional continuation', async () => {
+    // A continuation is handed to the MODEL to perform if the conditional did
+    // not apply. A Set has no model half, so being chosen as one meant the
+    // variable was silently never assigned AND the step cost a turn — both
+    // halves of what this step form exists to avoid. Found by review; the
+    // story claimed "no model call" for all four loops without a test.
+    const { identifyStepGroups } = await import('../src/runner/step-grouper.js');
+    const groups = identifyStepGroups([
+      'If prompted for MFA, enter the code',
+      'Set {{done}} to "yes"',
+      'Click Save',
+    ]);
+    // The conditional still forms a group...
+    expect(groups.get(0)).toBeDefined();
+    // ...but the assignment is not in it, so the loops run it themselves.
+    expect(groups.get(1)).toBeUndefined();
+    expect(groups.get(0)!.continuationStep.instruction).toContain('no continuation');
+  });
+
+  it('still pairs a conditional with an ordinary continuation', () => {
+    // The guard must not change grouping for anything else.
+    return import('../src/runner/step-grouper.js').then(({ identifyStepGroups }) => {
+      const groups = identifyStepGroups([
+        'If prompted for MFA, enter the code',
+        'Click Save',
+      ]);
+      expect(groups.get(1)).toBeDefined();
+      expect(groups.get(0)!.continuationStep.instruction).toBe('Click Save');
+    });
+  });
+});
+
+describe('a Set target that needs a guarded write', () => {
+  it('stores __proto__ as an own property rather than silently dropping it', async () => {
+    // Plain assignment hits the prototype setter, which ignores a string: the
+    // step reported PASSED with the value in its outputs while the scope held
+    // nothing, so a later `{{__proto__}}` failed as undefined.
+    const { runSetStep } = await import('../src/runner/set-step-runner.js');
+    const scope: Record<string, string> = {};
+    const out = runSetStep({ name: '__proto__', template: 'hello' }, 'x', 1, scope);
+    expect(out.result.status).toBe('passed');
+    expect(Object.keys(scope)).toEqual(['__proto__']);
+    expect(scope['__proto__']).toBe('hello');
+  });
+
+  it('does not report a skill-internal name', async () => {
+    // `computeStepCaptures` and `autoCapturedNames` both drop `__skill*`;
+    // writing outputs directly bypassed both, surfacing `__skill1_scratch` in
+    // the report, the HTTP outputs map and the Variables panel.
+    const { runSetStep } = await import('../src/runner/set-step-runner.js');
+    const scope: Record<string, string> = {};
+    const out = runSetStep({ name: '__skill1_scratch', template: 'v' }, 'x', 1, scope);
+    expect(out.result.status).toBe('passed');
+    expect(scope['__skill1_scratch']).toBe('v'); // the assignment still happens
+    expect(out.result.outputs).toBeUndefined(); // its reporting does not
+    expect(out.assigned).toBeUndefined();
   });
 });

@@ -140,7 +140,7 @@ Stores a value built from values the run already holds. The right-hand side is a
 2. Set {{summary}} to "{{username}} had {{balance}} available"
 ```
 
-Runs as code: no AI call, no page interaction, no cache entry. The value is text only — nothing inside the quotes is evaluated beyond substitution.
+Runs as code: no AI call, no page interaction, no action-cache entry. The value is text only — nothing inside the quotes is evaluated beyond substitution, and it may not contain a double quote.
 
 A `{{name}}` the run cannot resolve fails the step, naming it, rather than storing the literal. `Set {{name}} to` claims the line, so a malformed one (no quotes, or text after the closing quote) is a parse error rather than prose sent to the model; `Set the filter to Recent` names no variable and remains an ordinary AI step.
 
