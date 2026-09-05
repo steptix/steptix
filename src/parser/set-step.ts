@@ -172,12 +172,22 @@ export function setStepError(instruction: string, where = ''): string | null {
  * makes the line unparseable, so that iteration's assignment is skipped while
  * the variable still holds the previous one's.
  *
- * Five review rounds each found this same defect at the NEXT substitution
- * site along — row bindings, then skill arguments, then hook baking, then the
- * skill body — because each round fixed the instance and asserted closure in
- * prose. This helper is that assertion made mechanical: every site that
- * writes into step text calls it, and `substitutionSites` in
- * `tests/set-step-parse.test.ts` is the enumeration a reader can check.
+ * Six review rounds each found this same defect at the NEXT substitution site
+ * along — row bindings, skill arguments, hook baking, skill bodies — because
+ * each round fixed the instance and asserted closure in prose.
+ *
+ * This helper does not by itself close that: it guards the sites that CALL it,
+ * and a new site that does not call it is invisible to it. Two tests carry the
+ * rest of the argument — `SITES` in `tests/set-step-parse.test.ts` pins the
+ * known sites (each proven by mutation to have teeth), and
+ * `tests/substitution-sites.test.ts` fails when a substitution call appears in
+ * a file nobody has classified.
+ *
+ * Two limits worth knowing, both real: the check is ONE-DIRECTIONAL — a
+ * substitution that MANUFACTURES a Set step out of a non-Set line passes
+ * silently (an `${env.INSTR}` holding `Set {{admin}} to "yes"` becomes a real
+ * assignment) — and it compares parseability, not the TARGET NAME, so a
+ * substitution that renames `Set {{a}}` to `Set {{b}}` is not seen.
  *
  * `describe` is called only on failure, so building a good message costs
  * nothing on the hot path.

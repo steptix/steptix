@@ -931,12 +931,25 @@ and then asserted closure *in prose* — and the prose was wrong twice, in
 both directions. The sentence "the one asymmetry left is hook instructions"
 is what told round four to stop; three sites were live.
 
-So the closure is now a mechanism. `substitutePreservingSet`
-(`src/parser/set-step.ts`) wraps a substitution and refuses it if a line that
-was a `Set` step stops being one. Every site that writes a value into step
-TEXT calls it, and `tests/set-step-parse.test.ts` drives a real file through
-each — so a site added without a guard fails a test rather than waiting for a
-sixth review.
+So the closure is a mechanism plus a canary, and it is worth being exact
+about which does what — round six disproved the first version of this
+paragraph by adding a substitution site in fifteen lines and watching all
+3725 tests stay green.
+
+`substitutePreservingSet` (`src/parser/set-step.ts`) wraps a substitution and
+refuses it when a line that was a `Set` step stops being one. It guards the
+sites that CALL it; a site that does not call it is invisible to it.
+`tests/set-step-parse.test.ts` pins the four known sites, each proven by
+mutation to fail when its guard is removed. And
+`tests/substitution-sites.test.ts` covers the half neither of those can: it
+inventories every substitution CALL in `src/` with a classification, so a NEW
+call fails until someone decides whether it writes into step text. Verified
+against round six’s own repro — adding the call to `src/runner/hooks.ts`
+fails that test by name.
+
+It is a canary, not a proof. It cannot tell whether a classification is
+honest, only that a new call was considered. That is a weaker claim than the
+last two rounds made, and it is the true one.
 
 | Site | Writes into step text | Guarded by |
 | --- | --- | --- |
@@ -944,7 +957,9 @@ sixth review.
 | `markdown.ts` skill **section** body `${…}` | yes | `substitutePreservingSet` |
 | `markdown.ts` `## Hooks` `${…}` | yes | preserved instead — the token survives and `resolveSetTemplate` resolves it per run, because `runHookScope` passes `envData` |
 | `markdown.ts` main-flow steps | no — validated, not rewritten | n/a |
-| `markdown.ts` parameters / rows / config / outputs | no — these are VALUES, read at run time | n/a |
+| `markdown.ts` parameters / rows / config | no — these are VALUES, read at run time | n/a |
+| `markdown.ts` skill output NAMES | no step text, but they are names not values — they decide whether a Set target is namespaced or aliasable | n/a |
+| `expander.ts` `[no-hooks]` strip on body steps | yes, but only removes an anchored prefix | safe: `parseSetStep` strips the marker itself |
 | `expander.ts` looped-section row bindings | yes | `checkedRowInterpolate` → `substitutePreservingSet`, plus a target-vs-column check |
 | `expander.ts` skill arguments | yes | `substitutePreservingSet` |
 | `expander.ts` `renameVar` internal namespacing | yes | safe by construction: `__skill<n>_<name>` is always `\w+` |
@@ -953,11 +968,17 @@ sixth review.
 | `step-executor.ts` branch instruction | yes | unreachable: the grouper refuses to make a `Set` a continuation |
 | `runner-core/` | no substitution at all | ships raw steps, marker preserved |
 
-Two things this table is honest about rather than tidy. The hook row is the
-one site that *preserves* instead of *refusing*, because a hook `Set` is not
-broken by baking — it is simply better resolved per run; the guard would have
-been the wrong tool. And the `renameVar` output-alias row is genuinely open,
-recorded here rather than in a comment nobody would find.
+Three things this table is honest about rather than tidy. The hook row
+*preserves* instead of *refusing*, because a hook `Set` is not broken by
+baking — it is simply better resolved per run; the guard would have been the
+wrong tool there. The `renameVar` output-alias row is genuinely open. And the
+guard has two blind spots, both real and neither covered by any row above:
+it is **one-directional**, so a substitution that MANUFACTURES a `Set` step
+out of a non-Set line passes silently (an `${env.INSTR}` whose value is
+`Set {{admin}} to "yes"` becomes a real assignment); and it compares
+parseability, not the target NAME, so a substitution that renames
+`Set {{a}}` to `Set {{b}}` — which a skill argument matching a declared
+output can do — is not seen.
 
 ### Still open
 

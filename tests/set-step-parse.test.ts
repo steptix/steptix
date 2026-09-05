@@ -287,10 +287,12 @@ describe('bake-overs at the other substitution sites', () => {
  * sentence claiming "the one asymmetry left is hooks" is what told round four
  * to stop looking; there were three sites left.
  *
- * This is that claim made checkable. The table names every place that writes a
- * value into step TEXT before `parseSetStep` reads it, and the test drives a
- * real file through each. A new substitution site added without a guard fails
- * here, whatever the site — which is the property no amount of prose had.
+ * This pins the FOUR KNOWN sites, each proven by mutation to have teeth: remove
+ * its guard and the corresponding row fails. What it does NOT do is notice a
+ * site nobody has named — round six proved that by adding one in fifteen lines
+ * and watching the whole suite stay green. `tests/substitution-sites.test.ts`
+ * is the canary for that half: it inventories every substitution CALL in
+ * `src/`, so a new one fails until someone classifies it.
  */
 describe('every substitution site preserves a Set step', () => {
   let dir: string;
