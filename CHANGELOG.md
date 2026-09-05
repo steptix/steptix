@@ -6,6 +6,33 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — "Capture the current page URL" can now be said
+
+No element carries the page's address as an attribute, so a step asking for the
+current URL had no expression in the action vocabulary at all. The model reached
+for `@url` regardless — the only shape available to it — `getAttribute('url')`
+returned null, and the read stored the empty string. Nothing failed at the
+capture; the run fell over later, on a step navigating to nothing, wearing the
+breakpoint machinery's name in its error message.
+
+`attribute: "url"` is now real: the address of the element's own document, so a
+read inside a frame reports that frame. A page that genuinely carries a `url`
+attribute still wins, following the same attribute-first precedent as `href` and
+`src`, so nothing that was readable before has become unreadable.
+
+### Fixed — one stale compile proposal answered the next compile's question
+
+TestBench holds a single pending code-behind proposal for the whole window,
+cleared only by Apply or Discard. A compile that did neither left its proposal
+standing, and the next compile's "is there a proposal yet?" — the context key
+that gates Apply, and the live tests' waits — was answered by the previous run's
+files before the new run had produced any. Six live tests failed as one cascade.
+
+A compile now parks any pending proposal before it starts, and puts it back if
+it produces none of its own, so a compile that fails no longer costs the author
+the proposal they were still deciding about.
+
+
 ### Fixed — a compiled post-condition that cannot go red
 
 A post-condition that always passes is the same as having none, only harder to

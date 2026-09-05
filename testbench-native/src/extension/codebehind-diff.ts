@@ -129,6 +129,37 @@ export class CodeBehindDiffs implements vscode.Disposable {
     await this.clear();
   }
 
+  /**
+   * Take the proposal out of the slot for the duration of a compile, and hand
+   * back the way to put it there again.
+   *
+   * A compile has to start from an empty slot, or anything asking "is there a
+   * proposal yet?" — the `testbench-native.codeBehindProposal` context key
+   * that gates Apply, a test's wait — is answered by the LAST compile's files
+   * before this one has produced any. But a compile that starts and then
+   * yields nothing (the server was down, the compile errored, every step was
+   * already code) must not have cost the author the proposal they were still
+   * deciding about, so every such exit calls the returned restore.
+   *
+   * `contents` is deliberately left alone, unlike `clear()`: it backs the
+   * virtual documents of diff editors that are still open, and emptying it
+   * mid-compile would make a reopened diff render as though the proposal
+   * deleted the whole file.
+   */
+  async park(): Promise<() => Promise<void>> {
+    const parked = this.proposal;
+    if (parked === null) return async () => {};
+    this.proposal = null;
+    await setPendingContext(false);
+    return async () => {
+      // Only if nothing else claimed the slot in the meantime — a restore
+      // must never overwrite a proposal this compile went on to produce.
+      if (this.proposal !== null) return;
+      this.proposal = parked;
+      await setPendingContext(true);
+    };
+  }
+
   private async clear(): Promise<void> {
     this.proposal = null;
     this.contents.clear();

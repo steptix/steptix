@@ -83,7 +83,12 @@ describe('TestBench live STOP → report recovery against real server', function
     assert.ok(fs.existsSync(testFile), `securebank.md not found at ${testFile}`);
 
     const uri = vscode.Uri.file(testFile);
-    await vscode.commands.executeCommand('vscode.open', uri);
+    // Shown, not just opened: `vscode.open` can return before the editor has
+    // focus, so the activeTextEditor wait below raced its budget and failed a
+    // full-suite run under load. showTextDocument resolves once it is shown.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor('securebank.md becomes active editor', () => {
       const editor = vscode.window.activeTextEditor;
       return editor && editor.document.uri.toString() === uri.toString();

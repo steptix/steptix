@@ -139,7 +139,12 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
   /** Open the fixture and wait until TestBench owns it. */
   async function focusTestFile() {
     const uri = vscode.Uri.file(testFile);
-    await vscode.commands.executeCommand('vscode.open', uri);
+    // Shown, not just opened: `vscode.open` can return before the editor has
+    // focus, so the activeTextEditor wait below raced its budget and failed a
+    // full-suite run under load. showTextDocument resolves once it is shown.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor(
       'compile-codebehind.md becomes the active editor',
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
@@ -163,7 +168,14 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
 
     // ===== Run & Compile =====
     void vscode.commands.executeCommand('testbench-native.runAndCompile');
-    await waitFor('the compile proposes files', () => hooks.pendingCodeBehind() !== null, 480_000);
+    await waitFor(
+      'the compile proposes files for THIS test',
+      // Not merely "a proposal exists": one slot serves the whole extension
+      // host, so a proposal an earlier test left behind answers that predicate
+      // instantly and this test then asserts against another file.
+      () => hooks.pendingCodeBehind()?.testFilePath.toLowerCase() === testFile.toLowerCase(),
+      480_000,
+    );
 
     const proposal = hooks.pendingCodeBehind();
     const proposed = Object.entries(proposal.files);
@@ -182,7 +194,9 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
     // ONE browser pass. The gutter shows what the run did — plain ✓, under AI —
     // because the entries are born unproven: there is no Replay to prove them
     // and no </> to paint yet.
-    await vscode.commands.executeCommand('vscode.open', uri);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor(
       'the test file is active again',
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
@@ -287,7 +301,14 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
     // Seed: a Run & Compile leaves a two-step recording on disk and the
     // browser parked after step 2 — which is where Compile This Step wants it.
     void vscode.commands.executeCommand('testbench-native.runAndCompile');
-    await waitFor('the seeding compile proposes files', () => hooks.pendingCodeBehind() !== null, 480_000);
+    await waitFor(
+      'the seeding compile proposes files for THIS test',
+      // Not merely "a proposal exists": one slot serves the whole extension
+      // host, so a proposal an earlier test left behind answers that predicate
+      // instantly and this test then asserts against another file.
+      () => hooks.pendingCodeBehind()?.testFilePath.toLowerCase() === testFile.toLowerCase(),
+      480_000,
+    );
     await vscode.commands.executeCommand('testbench-native.discardCodeBehind');
     const seeded = { one: readStep(1), two: readStep(2) };
     assert.ok(seeded.one.recordedAt && seeded.two.recordedAt);
@@ -298,7 +319,14 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
     void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
       lineNumber: STEP_LINES[1],
     });
-    await waitFor('the single-step compile proposes a file', () => hooks.pendingCodeBehind() !== null, 300_000);
+    await waitFor(
+      'the single-step compile proposes a file for THIS test',
+      // Not merely "a proposal exists": one slot serves the whole extension
+      // host, so a proposal an earlier test left behind answers that predicate
+      // instantly and this test then asserts against another file.
+      () => hooks.pendingCodeBehind()?.testFilePath.toLowerCase() === testFile.toLowerCase(),
+      300_000,
+    );
 
     const proposal = hooks.pendingCodeBehind();
     const content = Object.values(proposal.files)[0];
@@ -329,7 +357,9 @@ describe('TestBench live — run & compile, apply, replay as code', function () 
 
     // Only the clicked step ran: the gutter shows step 2 moving and step 1
     // untouched from the seeding run.
-    await vscode.commands.executeCommand('vscode.open', uri);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor(
       'the test file is active again',
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
@@ -352,7 +382,9 @@ it('Compile This Step on a section body binds the entry under the section', asyn
     fs.rmSync(cacheDir, { recursive: true, force: true });
 
     const uri = vscode.Uri.file(sectionMd);
-    await vscode.commands.executeCommand('vscode.open', uri);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor(
       'the section fixture becomes the active editor',
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
@@ -373,7 +405,14 @@ it('Compile This Step on a section body binds the entry under the section', asyn
     void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
       lineNumber: 21,
     });
-    await waitFor('the body-step compile proposes a file', () => hooks.pendingCodeBehind() !== null, 300_000);
+    await waitFor(
+      'the body-step compile proposes a file for THIS test',
+      // Not merely "a proposal exists": one slot serves the whole extension
+      // host, so a proposal an earlier test left behind answers that predicate
+      // instantly and this test then asserts against another file.
+      () => hooks.pendingCodeBehind()?.testFilePath.toLowerCase() === sectionMd.toLowerCase(),
+      300_000,
+    );
 
     const proposal = hooks.pendingCodeBehind();
     const proposed = Object.entries(proposal.files);

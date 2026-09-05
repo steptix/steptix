@@ -115,7 +115,12 @@ describe('TestBench live wait timeout-hint + abort-aware waits (issue 022)', fun
 
   /** Open + run a fixture from the top, returning once running. */
   async function startRun(uri) {
-    await vscode.commands.executeCommand('vscode.open', uri);
+    // Shown, not just opened: `vscode.open` can return before the editor has
+    // focus, so the activeTextEditor wait below raced its budget and failed a
+    // full-suite run under load. showTextDocument resolves once it is shown.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor('fixture is active editor', () => {
       const ed = vscode.window.activeTextEditor;
       return ed && ed.document.uri.toString() === uri.toString();

@@ -97,7 +97,12 @@ describe('TestBench live — [skill:] line gets painted at breakpoint pause', fu
     // Open the skill file first to drop a breakpoint into it (line 16
     // = "1. Navigate to about:blank", the skill's first step), then
     // switch focus to the test file so runSelected targets it.
-    await vscode.commands.executeCommand('vscode.open', skillUri);
+    // Shown, not just opened: `vscode.open` can return before the editor has
+    // focus, so the activeTextEditor wait below raced its budget and failed a
+    // full-suite run under load. showTextDocument resolves once it is shown.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(skillUri), {
+      preview: false,
+    });
     await waitFor(
       'skill file active for breakpoint placement',
       () => vscode.window.activeTextEditor?.document.uri.toString() === skillUri.toString(),
@@ -110,7 +115,9 @@ describe('TestBench live — [skill:] line gets painted at breakpoint pause', fu
       ),
     ]);
 
-    await vscode.commands.executeCommand('vscode.open', testUri);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(testUri), {
+      preview: false,
+    });
     await waitFor(
       'test file active',
       () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),
@@ -198,7 +205,9 @@ describe('TestBench live — [skill:] line gets painted at breakpoint pause', fu
       vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
     }
 
-    await vscode.commands.executeCommand('vscode.open', testUri);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(testUri), {
+      preview: false,
+    });
     await waitFor(
       'test file active',
       () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),

@@ -137,7 +137,12 @@ describe('TestBench live — browser steps compile to code', function () {
     }
 
     const uri = vscode.Uri.file(testFile);
-    await vscode.commands.executeCommand('vscode.open', uri);
+    // Shown, not just opened: `vscode.open` can return before the editor has
+    // focus, so the activeTextEditor wait below raced its budget and failed a
+    // full-suite run under load. showTextDocument resolves once it is shown.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor(
       'compile-browsers.md becomes the active editor',
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
@@ -149,7 +154,14 @@ describe('TestBench live — browser steps compile to code', function () {
 
     // ===== Run & Compile =====
     void vscode.commands.executeCommand('testbench-native.runAndCompile');
-    await waitFor('the compile proposes files', () => hooks.pendingCodeBehind() !== null, 480_000);
+    await waitFor(
+      'the compile proposes files for THIS test',
+      // Not merely "a proposal exists": one slot serves the whole extension
+      // host, so a proposal an earlier test left behind answers that predicate
+      // instantly and this test then asserts against another file.
+      () => hooks.pendingCodeBehind()?.testFilePath.toLowerCase() === testFile.toLowerCase(),
+      480_000,
+    );
 
     const proposal = hooks.pendingCodeBehind();
     const proposed = Object.entries(proposal.files);

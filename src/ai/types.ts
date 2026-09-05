@@ -109,6 +109,11 @@ export interface AIAction {
    * When omitted, falls back to the element's value (for form inputs) or textContent.
    * Use this when the displayed text differs from the underlying attribute — e.g.
    * search-result links where the visible URL is a stylised breadcrumb.
+   *
+   * `"url"` is the one name that is not purely an attribute: with no element on
+   * a page carrying its address, it reads the element's own document location,
+   * which is how "capture the current page URL" is expressed. A real `url`
+   * attribute still wins where one exists (prompt rule 13c).
    */
   attribute?: string;
   /**
