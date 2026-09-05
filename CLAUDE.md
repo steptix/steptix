@@ -202,6 +202,16 @@ memory free) `ai.complete` returning empty after 86 s. If a
 `*-breakpoint.test.cjs` flakes on a timeout, re-run it at `--shards=2` before
 believing it.
 
+Shards also cost coverage in one specific place, and the runner counts it out
+loud rather than hiding it. The two `cdp-tab-focus` screenshot checks skip
+themselves when Chromium produces no frames for a window the compositor
+considers occluded — the documented limitation in
+stories/cdp-tab-focus.md §Risks. Only one window can be in front, so four
+shards means at least three are occluded and the skip gets likelier: serially
+one of the two skipped, at `--shards=4` both did. A skip is a scenario nobody
+checked, so if you are actually changing tab focus or capture, run that file
+on its own with the window visible.
+
 Three things are per shard, and each one is load-bearing rather than tidy:
 
 - **Workspace.** Five compile suites `rmSync` the *same*
