@@ -1389,7 +1389,14 @@ it('keeps a __proto__ assignment in session.outputs across the wire', async () =
         steps: ['Set {{__proto__}} to "danger"'],
       });
 
-      expect(response.outputs).toMatchObject({ __proto__: 'danger' });
+      // Deliberately NOT `toMatchObject({ __proto__: 'danger' })`: in an
+      // object literal that key is the prototype-setter form, ignored for a
+      // string, so the expected object is `{}` and the assertion passes
+      // against anything. Found by review — in the test whose whole subject
+      // is that exact hazard.
+      expect(Object.getOwnPropertyDescriptor(response.outputs, '__proto__')?.value).toBe(
+        'danger',
+      );
       expect(Object.keys(response.outputs)).toContain('__proto__');
       // And it must be a plain own property, not a mutated prototype.
       expect(Object.getPrototypeOf(response.outputs)).toBe(Object.prototype);

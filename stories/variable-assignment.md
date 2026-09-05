@@ -124,12 +124,17 @@ the page.
 > never parses markdown, nor in a `## Hooks` entry, which `parseSections`
 > does not walk; both send a malformed claim to the model as prose. Corrected
 > from "the CLI, the server and the MCP assembler alike", which review showed
-> was false for two of the three; (11) a `Set` whose target is a declared parameter of the enclosing
-> skill, or a column of the enclosing looped section's table, is refused at
-> parse time with a message that names the target and says why — while a
-> `Set` to a run-level row column (a table directly under `## Steps`)
-> assigns normally, overwriting that row's seeded value for the rest of the
-> instance.
+> was false for two of the three; (11) a `Set` whose target would be written
+> over by substitution is refused before the run, with a message that names
+> the target and says why — **at parse time** for a declared parameter of the
+> enclosing skill or a column of the step's own looped section, and **in the
+> expander** for the cases only expansion can see: an enclosing looped
+> section's columns, a row or argument value that breaks the assigned value,
+> and a skill argument named after a declared output. A `Set` to a run-level
+> row column (a table directly under `## Steps`) assigns normally, since
+> those are genuinely runtime values, overwriting that row's seeded value for
+> the rest of the instance. A `Set` in a `## Hooks` entry keeps its `${…}`
+> tokens for the same reason a main-flow step does.
 
 ## What was measured, so nobody re-derives it
 
@@ -821,9 +826,10 @@ it asserts that something else now agrees with it.**
   own parameters rewrites the target into that parameter and then bakes the
   argument over it; and a looped section nested inside another inherits the
   outer table's bindings, which the parse-time refusal does not check because
-  it only looks at the step's own section. Both degrade a `Set` to prose
-  silently. The second is the same class as the refusal already implemented,
-  just one scope out.
+  it only looks at the step's own section. *(The nested-loop half was CLOSED
+  in round three — and was worse than described here: it did not degrade to
+  prose, it passed green on the wrong data. The `out.x=` half remains open,
+  and review judged it a pre-existing expander flaw that fails loudly.)*
 - **The MCP suppression is cross-scope.** `missingParameters` suppresses the
   warning for a name any step in the list assigns, including steps in a
   section the main flow never calls.
@@ -915,15 +921,37 @@ first-write-wins case that round one fixed without a regression test.
 
 ### Still open
 
-Unchanged from round one: the Variables panel renders no badge for
-`source: 'assignment'`, so verification rule (6) is still unmet; two expander
-interactions (an `out.x=` alias colliding with a parameter name, and a
-looped section nested inside another) can still degrade a `Set` to prose; and
-the MCP warning suppression is cross-scope. New, and not fixed: a looped
-section whose row value contains a `"` bakes into a line the new grammar
-refuses, so that row degrades to prose while its siblings assign — the
-grammar fix traded a green-garbage hole for a narrower silent-degradation
-one; a soft-wrapped template runs but is invisible to both editor mirrors;
-and `definedLater` is accepted by `runSetStep` and passed by none of its five
-callers, so a `Set` gets a blunter refusal than an ordinary step for the same
-mistake.
+**Closed since this section was first written** — recorded here because a
+handover artefact that says a hole is live when it is shut is the same defect
+as one that says a hole is shut when it is live, and round two's headline
+finding was exactly that. Round three closed both looped-section
+bake-overs (nested-loop bindings, and a row value containing a `"`); round
+four closed the hook-baking case and two skill-argument cases of the same
+family. All five were **worse** than this section originally said: not "the
+`Set` degrades to prose", but the assignment silently vanishing while a later
+step read the baked value and passed green.
+
+Genuinely open:
+
+- **The Variables panel renders no badge** for `source: 'assignment'`, so
+  verification rule (6) is unmet. Cosmetic; the row and its value do appear.
+- **`out.x="alias"` naming a skill parameter** rewrites the target into that
+  parameter. Reproduced, and judged a pre-existing expander flaw — the same
+  collision breaks a plain `[store as: X]` — that fails loudly rather than
+  silently. Deserves its own issue about alias/parameter collisions generally.
+- **A soft-wrapped template** runs on the CLI but is invisible to both editor
+  mirrors, and truncates on the wire — which is the pre-existing wrapped-step
+  truncation that applies to every step kind, not something this form
+  introduced.
+- **`definedLater` is dead**: accepted by `runSetStep` and passed by none of
+  its five callers, so a `Set` gets a blunter refusal than an ordinary step
+  for the same mistake. Wording only.
+- **The MCP warning suppression is cross-scope** — a `Set` in a section the
+  main flow never calls suppresses the advisory for the whole list. It
+  suppresses an advisory; the run behaves identically.
+- **`generationRefusal` has no `Set` arm**, so Run & Compile proposes one junk
+  `ai: true` entry per `Set` step with a reason that misdescribes why. No
+  tokens spent and no runtime effect, but the compile ineligibility work
+  guarded one of the two compile paths.
+- **`run_errand` has no parse gate** for a malformed `Set`, unlike
+  `run_steps`.

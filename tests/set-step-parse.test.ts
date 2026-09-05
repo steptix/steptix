@@ -192,3 +192,88 @@ describe('bake-over refusals that only expansion can see', () => {
     ]);
   });
 });
+
+describe('bake-overs at the other substitution sites', () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'set-sites-'));
+    mkdirSync(path.join(dir, 'skills'), { recursive: true });
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const skill = (name: string, body: string): void =>
+    writeFileSync(path.join(dir, 'skills', `${name}.md`), body);
+  const testFile = (md: string): string => {
+    const file = path.join(dir, `t-${Math.random().toString(36).slice(2)}.md`);
+    writeFileSync(file, md);
+    return file;
+  };
+
+  it('leaves a HOOK Set uninterpolated so a quote-bearing ${...} still assigns', async () => {
+    // Hooks are baked at parse time — they are never shown to the model as
+    // authored text. But a Set step IS read back by `parseSetStep` at run
+    // time, so baking a data value containing a `"` turned the hook into an
+    // unparseable line that ran as AI prose and never assigned.
+    const file = testFile(
+      ['# T', '', '## Hooks', '- before: Set {{g}} to "${data.greeting}"', '',
+       '## Steps', '1. Click Save', ''].join('\n'),
+    );
+    const parsed = await parseTestFile(file, {
+      envData: { env: {}, data: { greeting: 'He said "hi"' } },
+    });
+    // The token survives parse; `resolveSetTemplate` resolves it per run.
+    expect(parsed.hooks.before[0]).toBe('Set {{g}} to "${data.greeting}"');
+  });
+
+  it('still bakes a NON-Set hook, which has nothing to preserve', async () => {
+    const file = testFile(
+      ['# T', '', '## Hooks', '- before: Navigate to ${data.url}', '',
+       '## Steps', '1. Click Save', ''].join('\n'),
+    );
+    const parsed = await parseTestFile(file, {
+      envData: { env: {}, data: { url: 'https://x.test' } },
+    });
+    expect(parsed.hooks.before[0]).toBe('Navigate to https://x.test');
+  });
+
+  it('refuses a skill argument named after a declared OUTPUT', async () => {
+    // Outputs are excluded from internal renaming, so the argument was baked
+    // straight over the assignment's target and it silently never happened.
+    skill(
+      'outp',
+      // `msg` is an OUTPUT only — not a parameter — so the skill-parameter
+      // refusal does not fire. `validateCall` merely warns about an unknown
+      // argument, and the value still reaches `interpolate` and bakes the
+      // assignment's target away.
+      ['---', 'type: skill', '---', '', '# outp', '',
+       '## Outputs', '- msg', '', '## Steps', '1. Set {{msg}} to "assigned"', ''].join('\n'),
+    );
+    const file = testFile('# T\n\n## Steps\n1. [skill: outp msg="baked"]\n');
+    await expect(
+      parseTestFile(file, { skillsDir: path.join(dir, 'skills') }),
+    ).rejects.toThrow(/unparseable once its arguments/);
+  });
+
+  it('refuses an array-literal argument that breaks the assigned value', async () => {
+    skill(
+      'arr',
+      ['---', 'type: skill', '---', '', '# arr', '', '## Parameters', '- items: list', '',
+       '## Steps', '1. Set {{m}} to "got {{items}}"', ''].join('\n'),
+    );
+    const file = testFile('# T\n\n## Steps\n1. [skill: arr items=["a","b"]]\n');
+    await expect(
+      parseTestFile(file, { skillsDir: path.join(dir, 'skills') }),
+    ).rejects.toThrow(/unparseable once its arguments/);
+  });
+
+  it('still expands an ordinary skill argument into a Set template', async () => {
+    skill(
+      'ok',
+      ['---', 'type: skill', '---', '', '# ok', '', '## Parameters', '- who: name', '',
+       '## Steps', '1. Set {{greeting}} to "Hello {{who}}"', ''].join('\n'),
+    );
+    const file = testFile('# T\n\n## Steps\n1. [skill: ok who="Alice"]\n');
+    const parsed = await parseTestFile(file, { skillsDir: path.join(dir, 'skills') });
+    expect(parsed.steps[0]).toBe('Set {{__skill1_greeting}} to "Hello Alice"');
+  });
+});

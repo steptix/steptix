@@ -241,11 +241,23 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
   const resolvedSteps = parsed.steps.map((s) => interpolateEnvData(s, ctx));
   parsed.toolCalls = resolvedSteps.map((s) => parseToolCall(s));
 
+  // Hooks are still baked at parse time — they are never shown to the model as
+  // authored text, so there is nothing for them to preserve — EXCEPT a `Set`
+  // step, which is read back by `parseSetStep` at run time
+  // (`runHookScope`, src/runner/test-runner.ts). Baking a `${…}` into one
+  // destroys exactly that: a data value containing a `"` turns
+  // `Set {{g}} to "${data.greeting}"` into a line the value grammar refuses,
+  // so the assignment silently became an AI prose step and the variable was
+  // never written. The hook path passes `test.envData` into `runSetStep`, so
+  // leaving the token intact resolves it per step instead — the same order
+  // the main flow uses (stories/variable-assignment.md).
+  const hookEnvData = (s: string): string =>
+    parseSetStep(s) ? s : interpolateEnvData(s, ctx);
   parsed.hooks = {
-    before: parsed.hooks.before.map((s) => interpolateEnvData(s, ctx)),
-    beforeEach: parsed.hooks.beforeEach.map((s) => interpolateEnvData(s, ctx)),
-    afterEach: parsed.hooks.afterEach.map((s) => interpolateEnvData(s, ctx)),
-    after: parsed.hooks.after.map((s) => interpolateEnvData(s, ctx)),
+    before: parsed.hooks.before.map(hookEnvData),
+    beforeEach: parsed.hooks.beforeEach.map(hookEnvData),
+    afterEach: parsed.hooks.afterEach.map(hookEnvData),
+    after: parsed.hooks.after.map(hookEnvData),
   };
   parsed.hookToolCalls = {
     before: parsed.hooks.before.map((s) => parseToolCall(s)),

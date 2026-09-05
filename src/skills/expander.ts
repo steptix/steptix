@@ -1029,7 +1029,28 @@ function applySkillScope(
     }
 
     // 3. Interpolate caller-supplied parameter values.
+    //
+    // Guarded for the same two failures the row path guards
+    // (`checkedRowInterpolate`), because this is the other site that writes a
+    // caller's value into the body TEXT. Two shapes reach here that the
+    // parse-time check in `parseSkillContent` cannot see, because both depend
+    // on the CALL rather than the skill: an argument named after a declared
+    // `## Outputs` name (outputs are excluded from internal renaming, so the
+    // target is baked over and the assignment silently vanishes), and an
+    // array-literal argument, whose quotes make the interpolated line
+    // unparseable.
+    const beforeArgs = parseSetStep(s);
     s = interpolate(s, call.args);
+    if (beforeArgs && parseSetStep(s) === null) {
+      throw new Error(
+        `The call to skill "${skill.name}" makes ` +
+          `"Set {{${beforeArgs.name}}} to …" unparseable once its arguments ` +
+          `are substituted. An argument whose name matches the assignment's ` +
+          `target overwrites it, and an argument whose value contains a ` +
+          `double quote breaks the assigned value. Left to run, the ` +
+          `assignment would silently not happen.`,
+      );
+    }
 
     return s;
   };
