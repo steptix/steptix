@@ -10,6 +10,13 @@
  * loaded the VALUES of `.env.staging` into the process but never said which
  * environment had been picked.
  *
+ * A first cut of the fix passed the executor only the substituted text, so
+ * the model was shown a resolved password where the CLI shows it a masked
+ * placeholder, and left the environment overlay in `process.env` after the
+ * run for the next run to inherit. The review caught both
+ * (issues/resolved/052 §What the review found); the authored-line assertions
+ * and the two-runs case below are its.
+ *
  * What is driven here is the adapter's public `start()`, with the browser, the
  * step executor and the AI client replaced and everything between the file on
  * disk and the executor's arguments left real: the env files, the data file,
@@ -76,8 +83,22 @@ const STEPS_WITH_REFS = `
 4. Type {{who}} into the search box
 `;
 
+/**
+ * The two AI steps only. A `Set` whose template holds `${data.…}` would not be
+ * refused without an environment — it stores the literal, which the first
+ * cut's own before-output showed — but what a `Set` does with no environment
+ * is the Set story's to pin, not this one's.
+ */
+const STEPS_NO_SET = `
+# Login on no environment in particular
+
+## Steps
+1. Go to \${env.BASE_URL}/login
+2. Enter \${data.user.email} in the email field
+`;
+
 /** The project the adapter runs in: a base `.env`, one named env, its data. */
-function writeProject(root: string, testBody: string): string {
+function writeProject(root: string, testBody: string, name = 'login.md'): string {
   writeFileSync(path.join(root, '.env'), 'SHARED=from-base\n');
   writeFileSync(
     path.join(root, '.env.uat'),
@@ -89,7 +110,7 @@ function writeProject(root: string, testBody: string): string {
     JSON.stringify({ user: { email: 'admin@uat.example.com', password: '$ADMIN_PWD' } }),
   );
   mkdirSync(path.join(root, 'tests'), { recursive: true });
-  const file = path.join(root, 'tests', 'login.md');
+  const file = path.join(root, 'tests', name);
   writeFileSync(file, testBody);
   return file;
 }
@@ -100,18 +121,42 @@ function passed(index: number, instruction: string): StepResult {
 
 type Emitted = { channel: string; data: Record<string, unknown> };
 
-async function runAdapter(file: string): Promise<Emitted[]> {
+function makeAdapter(): { adapter: UIRunnerAdapter; events: Emitted[] } {
   const events: Emitted[] = [];
   const adapter = new UIRunnerAdapter((channel, data) => {
     events.push({ channel, data: data as Record<string, unknown> });
   });
+  return { adapter, events };
+}
+
+async function runAdapter(file: string): Promise<Emitted[]> {
+  const { adapter, events } = makeAdapter();
   await adapter.start(file, []);
   return events;
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for the adapter');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function errorLogs(events: Emitted[]): unknown[] {
+  return events
+    .filter((e) => e.channel === 'runner:log' && e.data['level'] === 'error')
+    .map((e) => e.data['message']);
 }
 
 /** What the model would have been asked to do, one entry per executor call. */
 function executed(): string[] {
   return executeStepMock.mock.calls.map((call) => call[2] as string);
+}
+
+/** The executor's fifth argument: the step as authored, tokens intact. */
+function authored(): unknown[] {
+  return executeStepMock.mock.calls.map((call) => call[4]);
 }
 
 function executorOptions(): StepExecutorOptions[] {
@@ -126,6 +171,16 @@ function stepStarts(events: Emitted[]): unknown[] {
   return events.filter((e) => e.channel === 'runner:step-start').map((e) => e.data['instruction']);
 }
 
+/**
+ * What `process.env` held while each executor call ran. The overlay is only
+ * observable from inside the run once `start()` puts the environment back, so
+ * the executor stand-in records it.
+ */
+type SeenEnv = { BASE_URL: string | undefined; SHARED: string | undefined };
+const envSeenByExecutor: SeenEnv[] = [];
+const UAT_SEEN: SeenEnv = { BASE_URL: 'https://uat.example.com', SHARED: 'from-base' };
+const NOTHING_SEEN: SeenEnv = { BASE_URL: undefined, SHARED: undefined };
+
 // ─── Per-test isolation: cwd is the project, process.env is restored ────────
 
 const originalEnv = { ...process.env };
@@ -139,10 +194,14 @@ beforeEach(() => {
   process.chdir(root);
   // The minimum scenario: nothing selects an environment unless the test does.
   delete process.env['AUTOMATION_ENV'];
+  delete process.env['BASE_URL'];
+  delete process.env['SHARED'];
+  envSeenByExecutor.length = 0;
   executeStepMock.mockReset();
-  executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) =>
-    passed(index, instruction),
-  );
+  executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) => {
+    envSeenByExecutor.push({ BASE_URL: process.env['BASE_URL'], SHARED: process.env['SHARED'] });
+    return passed(index, instruction);
+  });
   launchBrowserMock.mockReset();
   launchBrowserMock.mockResolvedValue({
     page: { url: () => 'about:blank', goto: vi.fn().mockResolvedValue(undefined) },
@@ -175,8 +234,16 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
       'Enter admin@uat.example.com in the email field',
       'Type admin@uat.example.com into the search box',
     ]);
-    // The panel shows the same text — except the Set line, shown as authored
-    // because a Set step is never interpolated before it runs.
+    // The executor is also handed the step as AUTHORED — the CLI's fifth
+    // argument — so the prompt shows `${data.user.email}` beside a `## Values`
+    // row, masked when the name looks secret, rather than the value inline.
+    expect(authored()).toEqual([
+      'Go to ${env.BASE_URL}/login',
+      'Enter ${data.user.email} in the email field',
+      'Type {{who}} into the search box',
+    ]);
+    // The panel shows the substituted text — except the Set line, shown as
+    // authored because a Set step is never interpolated before it runs.
     expect(stepStarts(events)).toEqual([
       'Go to https://uat.example.com/login',
       'Enter admin@uat.example.com in the email field',
@@ -193,10 +260,12 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
         user: { email: 'admin@uat.example.com', password: 'uat-secret' },
       });
     }
-    // The overlay reaches `process.env`, as it does for `aiui run`, so a
-    // `## Parameters` `$VAR` — which reads `process.env` directly — sees it.
-    expect(process.env['BASE_URL']).toBe('https://uat.example.com');
-    expect(process.env['SHARED']).toBe('from-base');
+    // The overlay reaches `process.env` for the run's duration, as it does
+    // for `aiui run`, so a `## Parameters` `$VAR` — which reads `process.env`
+    // directly — sees it; and it is gone when the run ends.
+    expect(envSeenByExecutor).toEqual([UAT_SEEN, UAT_SEEN, UAT_SEEN]);
+    expect(process.env['BASE_URL']).toBeUndefined();
+    expect(process.env['SHARED']).toBeUndefined();
     expect(events.at(-1)).toMatchObject({ channel: 'runner:complete', data: { status: 'passed' } });
   });
 
@@ -216,18 +285,7 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
   });
 
   it('with no environment selected a `${…}` is left as written, as `aiui run` without `--env` leaves it', async () => {
-    // Only the two AI steps: a `Set` whose template needs `${data.…}` would be
-    // refused here, and that refusal is the Set story's to test, not this one's.
-    const file = writeProject(
-      root,
-      `
-# Login on no environment in particular
-
-## Steps
-1. Go to \${env.BASE_URL}/login
-2. Enter \${data.user.email} in the email field
-`,
-    );
+    const file = writeProject(root, STEPS_NO_SET);
 
     const events = await runAdapter(file);
 
@@ -237,5 +295,55 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
       'Enter ${data.user.email} in the email field',
     ]);
     expect(executorOptions().every((o) => o.envData === undefined)).toBe(true);
+    expect(envSeenByExecutor).toEqual([NOTHING_SEEN, NOTHING_SEEN]);
+  });
+
+  it('the overlay does not outlive its run: a later run in the same window starts from the environment the window was launched with', async () => {
+    const { adapter, events } = makeAdapter();
+    const pinned = writeProject(root, FRONTMATTER_ENV + STEPS_WITH_REFS);
+    const unpinned = writeProject(root, STEPS_NO_SET, 'plain.md');
+
+    await adapter.start(pinned, []);
+    expect(envSeenByExecutor).toEqual([UAT_SEEN, UAT_SEEN, UAT_SEEN]);
+
+    executeStepMock.mockClear();
+    envSeenByExecutor.length = 0;
+    await adapter.start(unpinned, []);
+
+    expect(errors(events)).toEqual([]);
+    // Neither the reference nor `process.env` remembers the earlier run.
+    expect(executed()).toEqual([
+      'Go to ${env.BASE_URL}/login',
+      'Enter ${data.user.email} in the email field',
+    ]);
+    expect(executorOptions().every((o) => o.envData === undefined)).toBe(true);
+    expect(envSeenByExecutor).toEqual([NOTHING_SEEN, NOTHING_SEEN]);
+  });
+
+  it('a steer resolves against the same environment; one the environment cannot answer is refused as a log line and the run stays paused', async () => {
+    const { adapter, events } = makeAdapter();
+    const file = writeProject(root, FRONTMATTER_ENV + STEPS_WITH_REFS);
+
+    const run = adapter.start(file, [1]);
+    await waitFor(() => events.some((e) => e.channel === 'runner:paused'));
+
+    // Refused: said in the log, not thrown at an invoke nobody catches, and
+    // not `runner:error`, which would end the run in the panel.
+    await adapter.steer('Go to ${env.NOPE}/x');
+    expect(executeStepMock).not.toHaveBeenCalled();
+    expect(errorLogs(events)).toHaveLength(1);
+    expect(errorLogs(events)[0]).toMatch(/NOPE/);
+    expect(errors(events)).toEqual([]);
+
+    // Answered: the model reads the steer as typed, and acts on the value.
+    await adapter.steer('Go to ${env.BASE_URL}/help');
+    expect(executed()).toEqual(['Go to https://uat.example.com/help']);
+    expect(authored()).toEqual(['Go to ${env.BASE_URL}/help']);
+    expect(executorOptions()[0]?.envData?.envName).toBe('uat');
+
+    adapter.resume();
+    await run;
+    expect(errors(events)).toEqual([]);
+    expect(events.at(-1)).toMatchObject({ channel: 'runner:complete', data: { status: 'passed' } });
   });
 });

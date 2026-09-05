@@ -68,9 +68,14 @@ function runIsKeyless(config: Config): boolean {
  *
  * `mutateProcessEnv` because a `## Parameters` `$VAR` reads `process.env`
  * directly (`resolveEnvRef`, src/parser/parameters.ts) and `expandTestInstances`
- * hands it no per-run map — the CLI's reason, and its choice. The overlay
- * outlives the run in this long-lived process; `aiui ui --env` had already
- * made that true for the whole window before this runner read the name.
+ * hands it no per-run map — the CLI's reason, and its choice. The CLI's
+ * process then exits; this one does not, so `start()` puts `process.env`
+ * back when the run ends (`restoreProcessEnv`). Left in place, the overlay
+ * would win over the base `.env` on the NEXT run — `resolveEnvBundle` fills
+ * base keys only where the baseline lacks them — so a run pinned to `prod`
+ * after one pinned to `uat` would keep `uat`'s values for every key the two
+ * files share, resolve a `${env.X}` that exists only in `.env.uat`, and hand
+ * `loadConfig()` an `AI_MODEL` from a file the test never named.
  */
 async function envContextFor(envName: string, dataDir: string): Promise<EnvDataContext> {
   const bundle = await resolveEnvBundle({
@@ -80,6 +85,17 @@ async function envContextFor(envName: string, dataDir: string): Promise<EnvDataC
     mutateProcessEnv: true,
   });
   return { env: bundle.env, data: bundle.data, envName: bundle.envName };
+}
+
+/** `process.env` exactly as it was when the snapshot was taken: keys added
+ *  since are removed, values changed since are put back. */
+function restoreProcessEnv(snapshot: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in snapshot)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value !== undefined) process.env[key] = value;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +200,10 @@ export class UIRunnerAdapter {
       this.emit('runner:log', { level, message });
     });
 
+    // The environment this window was launched with — `aiui ui --env` and
+    // the shell — which a run pinned to an environment overlays for its own
+    // duration (`envContextFor`) and must not leave behind for the next one.
+    const envBefore = { ...process.env };
     try {
       await this.executeRun(filePath);
     } catch (err) {
@@ -194,6 +214,7 @@ export class UIRunnerAdapter {
     } finally {
       setLogCallback(null);
       await this.cleanup();
+      restoreProcessEnv(envBefore);
     }
   }
 
@@ -245,7 +266,20 @@ export class UIRunnerAdapter {
 
     const stepIndex = this.currentStepIndex;
     const totalSteps = this.test.steps.length;
-    const resolvedInstruction = this.resolveStepText(instruction);
+    // A `${…}` the environment cannot answer is refused here, as it is at
+    // parse time for a test step — but as a log line, not `runner:error`:
+    // that event ends the run in the panel, and the run is still paused at
+    // this breakpoint waiting for a steer that resolves. Thrown, it would
+    // reject the `runner:steer` invoke, which the renderer neither awaits
+    // nor catches, and the instruction would vanish without a word.
+    let resolvedInstruction: string;
+    try {
+      resolvedInstruction = this.resolveStepText(instruction);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit('runner:log', { level: 'error', message: `Steering instruction not run: ${message}` });
+      return;
+    }
 
     // Emit step-start for the steering step
     this.emit('runner:step-start', {
@@ -287,7 +321,10 @@ export class UIRunnerAdapter {
       // hold, matching the server and the CLI: a key IS present on the policy
       // path, so "no key" would send the reader to fix a correct line.
       ...(this.config.ai.allowInRuns === false && { keylessReason: 'policy' as const }),
-    });
+    },
+    // The steer as TYPED, tokens intact, for the run loop's reason: a
+    // `${env.PASSWORD}` typed here is shown to the model masked, not resolved.
+    instruction);
 
     // Emit sub-actions and screenshots
     this.emitStepDetails(stepIndex, result);
@@ -641,7 +678,12 @@ export class UIRunnerAdapter {
         // about whether there is AI to heal with.
         ...(runIsKeyless(this.config) && { keyless: true }),
         ...(this.config.ai.allowInRuns === false && { keylessReason: 'policy' as const }),
-      });
+      },
+      // The step as AUTHORED, tokens intact: what the model reads, beside a
+      // `## Values` block in which a secret is masked. Without it the executor
+      // falls back to the substituted text above and shows the model the
+      // password itself. The CLI passes the same argument.
+      rawInstruction);
 
       // Emit sub-actions and screenshots
       this.emitStepDetails(stepIndex, result);
