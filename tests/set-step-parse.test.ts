@@ -125,3 +125,70 @@ describe('bake-over refusals', () => {
     expect(() => parseTestContent(md)).not.toThrow();
   });
 });
+
+describe('bake-over refusals that only expansion can see', () => {
+  // The parse-time guard in markdown.ts checks the step's OWN section's
+  // columns. Review found two cases it structurally cannot reach, and both
+  // were worse than "degrades to prose": each passed GREEN on wrong data.
+  const parse = (md: string): Promise<unknown> => {
+    const file = path.join(dir, `expand-${Math.random().toString(36).slice(2)}.md`);
+    writeFileSync(file, md);
+    return parseTestFile(file, { skillsDir: path.join(dir, 'skills') });
+  };
+
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'set-expand-'));
+    mkdirSync(path.join(dir, 'skills'), { recursive: true });
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("refuses a target that an ENCLOSING looped section's row bakes over", async () => {
+    // The inner body inherits the outer table's bindings (`rowBindings` is
+    // merged), so `{{tag}}` was baked to the outer row value: the assignment
+    // silently vanished AND the next step read `a` instead of `assigned-1`,
+    // passing green on the wrong data.
+    await expect(
+      parse(
+        [
+          '# T', '', '## Steps', '1. Outer', '',
+          '### Outer', '', '| tag |', '| --- |', '| a |', '| b |', '',
+          '1. Inner', '',
+          '### Inner', '', '| n |', '| --- |', '| 1 |', '',
+          '1. Set {{tag}} to "assigned-{{n}}"',
+          '2. Type {{tag}} into the box', '',
+        ].join('\n'),
+      ),
+    ).rejects.toThrow(/Cannot assign to \{\{tag\}\}.*enclosing it/s);
+  });
+
+  it('refuses a row value that makes the assignment unparseable', async () => {
+    // A `"` in the row value breaks the `[^"]*` grammar once baked in, so
+    // that ROW's assignment was skipped while the variable still held the
+    // PREVIOUS row's value — the row then ran on stale data.
+    await expect(
+      parse(
+        [
+          '# T', '', '## Steps', '1. Greet', '',
+          '### Greet', '', '| who |', '| --- |', '| Alice |', '| He said "hi" |', '',
+          '1. Set {{msg}} to "Hello {{who}}"', '',
+        ].join('\n'),
+      ),
+    ).rejects.toThrow(/makes the step unparseable/);
+  });
+
+  it('still expands a looped section whose Set target is not a column', async () => {
+    // The guard must not refuse the legitimate shape.
+    const parsed = (await parse(
+      [
+        '# T', '', '## Steps', '1. Greet', '',
+        '### Greet', '', '| who |', '| --- |', '| Alice |', '| Bob |', '',
+        '1. Set {{greeting}} to "Hello {{who}}"', '',
+      ].join('\n'),
+    )) as { steps: string[] };
+    expect(parsed.steps).toEqual([
+      'Set {{greeting}} to "Hello Alice"',
+      'Set {{greeting}} to "Hello Bob"',
+    ]);
+  });
+});

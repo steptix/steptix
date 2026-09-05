@@ -251,11 +251,15 @@ const CAPTURE_PATTERNS: ReadonlyArray<{
 ];
 
 /** `N. ` ordinal, plus any `[no-hooks]` marker — stripped to get the
- *  instruction the runtime sees. The runtime strips both in `extractSteps`
- *  (markdown.ts) before a step ever reaches `parseSetStep`, so a mirror that
- *  stripped only the ordinal went blind to `[no-hooks] Set {{x}} to "…"`:
- *  no completion, no F12, no panel row. Only the ANCHORED patterns (input,
- *  output, set) were affected — the others match anywhere on the line. */
+ *  instruction the runtime sees.
+ *
+ *  The marker is stripped in two places on the runtime side, and it needs
+ *  both: `extractSteps` (markdown.ts) removes it on the CLI's parse, but the
+ *  wire deliberately carries it verbatim, so `parseSetStep` strips it too.
+ *  A mirror that stripped only the ordinal went blind to
+ *  `[no-hooks] Set {{x}} to "…"` — no completion, no F12, no panel row. Only
+ *  the ANCHORED patterns (input, output, set) were affected; the others
+ *  match anywhere on the line. */
 const STEP_PREFIX_RE = /^\s*\d+\.\s+(?:\[no-hooks\]\s*)?/i;
 /** `## Hooks` heading, and its `- scope: instruction` entries. Scope names
  *  match the parser's `HOOK_SCOPES` (src/parser/markdown.ts:25). */

@@ -813,7 +813,18 @@ export class ErrandRunner {
       const stepOutputs: Record<string, string> = {};
       // A Set step's own write. Its `capture` event has already gone out with
       // the right source; this is the receipt's copy.
-      if (setAssigned) stepOutputs[setAssigned.name] = setAssigned.value;
+      if (setAssigned) {
+        // `defineProperty` here too — the same `__proto__` hazard, one map
+        // further on. Display-only (this feeds the receipt's per-step row,
+        // not the scope), but leaving the third write plain is how the first
+        // two came to be missed.
+        Object.defineProperty(stepOutputs, setAssigned.name, {
+          value: setAssigned.value,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      }
       for (const name of new Set([...outputVars, ...autoCapturedNames(stepResult)])) {
         if (!(name in scope)) continue;
         const value = scope[name]!;

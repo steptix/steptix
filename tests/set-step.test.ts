@@ -279,36 +279,44 @@ describe('a Set step is never swallowed by a conditional group', () => {
     expect(groups.size).toBe(0);
   });
 
-  it('every step still runs — replaying the loops OWN advance arithmetic', async () => {
-    // The assertion the first fix lacked. Checking the map is not enough:
-    // both loops advance by jumping to `continuationStep.index`, so a test
-    // that only inspects the map passes while the runner skips a step. This
-    // replays that jump verbatim (test-runner.ts / session-manager.ts).
+  it('every step still runs AS ITSELF — replaying the loops own arithmetic', async () => {
+    // Checking that an index is "reached" is not enough, and the first
+    // version of this test proved it: run against round one's grouper it
+    // PASSED, because it counted `continuationStep.index` as reached — and
+    // under that grouper the thing that ran at the assignment's index was a
+    // synthetic placeholder string, not the assignment. The test could not
+    // tell "the step ran" from "the step was swallowed", which IS the bug.
+    //
+    // So this asserts WHAT ran at each index, not merely that the index was
+    // touched. Confirmed to fail against `git show 59dd058`'s grouper.
     const { identifyStepGroups } = await import('../src/runner/step-grouper.js');
     for (const steps of [
       ['If prompted for MFA, enter the code', 'Set {{a}} to "1"', 'Click Save'],
       ['If prompted, do it', 'If asked again, do it', 'Set {{a}} to "1"', 'Click Save'],
       ['If prompted, do it', 'Set {{a}} to "1"', 'If asked, do it', 'Click Save'],
       ['Click A', 'If prompted, do it', 'Set {{a}} to "1"'],
+      ['Set {{a}} to "1"', 'If prompted, do it', 'Click Save'],
     ]) {
       const groups = identifyStepGroups(steps);
-      const reached: number[] = [];
+      /** index -> the instruction text actually executed at that index. */
+      const ranAs = new Map<number, string>();
       for (let i = 0; i < steps.length; i++) {
         const g = groups.get(i);
         if (g && i === g.conditionalSteps[0]!.index) {
-          for (const c of g.conditionalSteps) reached.push(c.index);
-          reached.push(g.continuationStep.index);
+          for (const c of g.conditionalSteps) ranAs.set(c.index, c.instruction);
+          // What executeBranchedStep performs for the default path — which
+          // under round one was the placeholder, at the assignment's index.
+          ranAs.set(g.continuationStep.index, g.continuationStep.instruction);
           i = g.continuationStep.index;
           continue;
         }
         if (g) continue;
-        reached.push(i);
+        ranAs.set(i, steps[i]!);
       }
-      // Every index the list has is reached exactly once, by some path.
-      const setIndex = steps.findIndex((t) => t.startsWith('Set '));
-      expect(reached, JSON.stringify(steps)).toContain(setIndex);
+      const where = JSON.stringify(steps);
       for (let i = 0; i < steps.length; i++) {
-        expect(reached, `step ${i} of ${JSON.stringify(steps)}`).toContain(i);
+        // Every index runs, AND runs the text the author wrote there.
+        expect(ranAs.get(i), `index ${i} of ${where}`).toBe(steps[i]);
       }
     }
   });
