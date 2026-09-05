@@ -82,7 +82,12 @@ describe('TestBench live — [store as: X] survives a breakpoint pause', functio
     }
 
     const uri = vscode.Uri.file(testFile);
-    await vscode.commands.executeCommand('vscode.open', uri);
+    // Shown, not just opened: `vscode.open` can return before the editor has
+    // focus, so the activeTextEditor wait below raced its budget and failed a
+    // full-suite run under load. showTextDocument resolves once it is shown.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
+      preview: false,
+    });
     await waitFor(
       'store-as-survives.md becomes active editor',
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),

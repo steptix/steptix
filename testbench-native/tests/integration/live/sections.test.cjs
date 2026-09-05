@@ -96,7 +96,12 @@ describe('TestBench live — inline sections expand server-side', function () {
       vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
     }
 
-    await vscode.commands.executeCommand('vscode.open', testUri);
+    // Shown, not just opened: `vscode.open` can return before the editor has
+    // focus, so the activeTextEditor wait below raced its budget and failed a
+    // full-suite run under load. showTextDocument resolves once it is shown.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(testUri), {
+      preview: false,
+    });
     await waitFor(
       'test file active',
       () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),
@@ -188,7 +193,9 @@ describe('TestBench live — inline sections expand server-side', function () {
     const testFile = path.resolve(workspaceRoot, 'init', 'tests', 'sections-live.md');
     const testUri = vscode.Uri.file(testFile);
 
-    await vscode.commands.executeCommand('vscode.open', testUri);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(testUri), {
+      preview: false,
+    });
     await waitFor(
       'test file active',
       () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),
@@ -233,7 +240,9 @@ describe('TestBench live — inline sections expand server-side', function () {
     const testUri = vscode.Uri.file(testFile);
     const LAST_CALL = 20; // `3. Check the page` — the second invocation
 
-    await vscode.commands.executeCommand('vscode.open', testUri);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(testUri), {
+      preview: false,
+    });
     await waitFor(
       'test file active',
       () => vscode.window.activeTextEditor?.document.uri.toString() === testUri.toString(),
