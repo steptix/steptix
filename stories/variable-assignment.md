@@ -638,7 +638,36 @@ would have failed rather than silently succeeded:
 | `Set {{ref}} to Ref: 1234` | refused at parse time, naming the file and line |
 | Secret masking | report and run log scanned for the raw value, its HTML-escaped form and both halves: **zero occurrences**. A secret-*named* target masks its own value too, since `secretsNow` recomputes from the live map |
 
-Automated: 44 new tests across the grammar, the resolver, the parse-time
+### The server, through the real stack
+
+The CLI proof above is real but it is one loop. The Sessions API needed its
+own, because the vitest server tests mock `executeStep` and run a single
+batch — so neither the real loop nor the batch boundary is exercised there,
+which is exactly where an assignment can go missing.
+
+`set-survives-breakpoint.test.cjs` breakpoints step 3 of a three-assignment
+file, so the run splits into two HTTP batches. Batch 2 can only pass if a
+value written in batch 1 reached `session.outputs` and was seeded back. It
+is the assignment's version of `store-as-survives-breakpoint.test.cjs`, and
+it passes: batch 1 wrote `decorated = [carried-across]`, batch 2 read it and
+produced `[carried-across] and back`. Both batch reports show **0 input and
+0 output tokens**, so the cost claim holds on the server path too.
+
+Full live suite, this worktree's server and extension build: **33 tests, 0
+failures** — the 32 that existed plus this one, sharing one server and one
+VS Code window.
+
+**The test failed on its first run, and the product was fine.** It waited
+for `isRunning()` to become `true` after the resume, copying its
+`[store as:]` sibling — whose second batch is a real AI navigation lasting
+seconds. This one's second batch is a single assignment finishing in about a
+millisecond, well inside the 200ms poll, so the transient `true` was never
+observable. The reports proved the run had succeeded while the test called
+it a timeout. It now waits on the terminal condition, with a comment saying
+why it must differ from the sibling it was modelled on — the obvious later
+"tidy-up" is to make them match, which would break it again.
+
+Automated: 45 new tests across the grammar, the resolver, the parse-time
 refusals, the two editor mirrors and the server and errand HTTP seams. Root
 suite 3691 green; testbench-native 575 pass / 1 skipped.
 
