@@ -254,6 +254,42 @@ async function probeHealth(serverUrl) {
 }
 
 /**
+ * Build the framework's own `dist/`, which the shard servers execute.
+ *
+ * `npm run test:live` builds `testbench-native` — the extension and
+ * runner-core — and nothing else, because the runner it replaced never
+ * started a server: a human did, and owned its build. Now the runner spawns
+ * `<repo>/dist/index.js` itself, so it owns that build too, and skipping it
+ * means every shard silently runs whatever `src/` happened to be compiled
+ * last.
+ *
+ * Not hypothetical: a worktree three days stale ran the whole suite against a
+ * build predating the `@url` fallback in `extractValueInPage`, so "Capture the
+ * current page URL" captured the empty string and the failure looked like a
+ * model that could not pick an action. Seven seconds of `tsc` against that.
+ *
+ * Skipped when the caller passed `--server=<url>`: then the server is theirs,
+ * started from a checkout we should not be compiling.
+ */
+function buildFramework(repoRoot) {
+  const started = Date.now();
+  const result = cp.spawnSync('npm', ['run', 'build'], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: true,
+  });
+  if (result.status !== 0) {
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
+    throw new Error(
+      `\`npm run build\` failed in ${repoRoot} (exit ${result.status}). The shard ` +
+        `servers run that build, so a stale dist/ would test the wrong code.` +
+        (output ? `\n${output}` : ''),
+    );
+  }
+  return Date.now() - started;
+}
+
+/**
  * Start one Sessions API server for a shard and resolve once /health answers.
  *
  * Per shard rather than one shared: `addLogCallback` in src/utils/logger.ts is
@@ -447,6 +483,7 @@ module.exports = {
   pickFreePorts,
   probeHealth,
   killTree,
+  buildFramework,
   startServer,
   recordServers,
   reapStaleServers,

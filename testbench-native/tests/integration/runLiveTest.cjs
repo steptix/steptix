@@ -35,6 +35,7 @@ const {
   pointEnvAtServer,
   pickFreePorts,
   probeHealth,
+  buildFramework,
   startServer,
   recordServers,
   reapStaleServers,
@@ -376,6 +377,16 @@ async function main() {
   //    concurrent sessions in one server see each other's lines — and one
   //    suite asserts a line is ABSENT from its run log.
   console.log(`Live suite: ${files.length} file(s) across ${shardCount} shard(s)`);
+
+  // Before any port is picked: if this run is going to start the servers, it
+  // owns their build. `npm run test:live` compiles testbench-native and stops
+  // there, which was right while a human started the server and owned its
+  // checkout — and silently wrong the moment the runner started spawning
+  // `<repo>/dist/index.js` itself.
+  if (!sharedServer) {
+    const ms = buildFramework(repoRoot);
+    console.log(`  built:     ${path.join(repoRoot, 'dist')} (${(ms / 1000).toFixed(0)}s)`);
+  }
 
   const ports = sharedServer ? [] : await pickFreePorts(shardCount, SHARD_PORT_BASE);
   if (sharedServer) {

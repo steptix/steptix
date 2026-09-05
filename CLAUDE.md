@@ -176,6 +176,17 @@ to minutes, and any assignment fixed before the run is a guess. Each file's
 wall clock is remembered in `tests/integration/live-durations.json` and used
 to start the slow ones first next time.
 
+Because the runner starts those servers, it also builds what they run: it
+shells `npm run build` at the repo root (~7 s) before picking ports. The
+`test:live` script's own build covers `testbench-native` and `runner-core`
+only, which was right while a human started the server and owned its
+checkout. It is not right now, and the gap is silent — a worktree three days
+stale ran the whole suite against a `dist/` predating the `@url` fallback in
+`extractValueInPage`, so "Capture the current page URL" captured the empty
+string, `{{first_url}}` stayed literal, and the failure looked like a model
+that could not pick an action. Passing `--server=<url>` skips the build: that
+server is yours, started from a checkout this runner should not compile.
+
 ```powershell
 npm run test:live -- --shards=6        # a bigger box
 npm run test:live -- --shards=1        # serial: one VS Code, one launch
