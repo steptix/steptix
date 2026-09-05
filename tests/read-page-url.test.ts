@@ -30,6 +30,7 @@ describe('read @url — the page address', () => {
         contentType: 'text/html',
         body: `<html><body>
           <a id="link" href="/elsewhere">Elsewhere</a>
+          <div id="custom" url="/from-the-attribute">Carries a real url attribute</div>
           <iframe id="f" src="/framed"></iframe>
         </body></html>`,
       }),
@@ -93,6 +94,39 @@ describe('read @url — the page address', () => {
     });
 
     expect(result.capturedValue).toBe('');
+  });
+
+  it('a real url attribute wins over the page address', async () => {
+    // 'url' is not standard, but custom elements and data-layer markup do
+    // carry one. Following the href/src precedent — attribute first, fall
+    // through — keeps that readable instead of shadowing it with no escape.
+    const result = await executeAction(page, {
+      action: 'read',
+      selector: '#custom',
+      attribute: 'url',
+      as: 'declared',
+      description: 'Capture an element that really has a url attribute',
+    });
+
+    expect(result.capturedValue).toBe('/from-the-attribute');
+  });
+
+  it('inside a frame, reports the FRAME url — the reason for ownerDocument', async () => {
+    // The comment on extractValueInPage justifies reading off the element's
+    // own document rather than the top-level location. This is that claim,
+    // asserted: a read scoped to the iframe must yield /framed, not the
+    // address of the page hosting it.
+    const result = await executeAction(page, {
+      action: 'read',
+      frame: '#f',
+      selector: 'body',
+      attribute: 'url',
+      as: 'framed_url',
+      description: 'Capture the URL of the framed document',
+    });
+
+    expect(result.capturedValue).toBe('http://127.0.0.1:8787/framed');
+    expect(result.capturedValue).not.toBe(PAGE_URL);
   });
 
   it('multiple: true keeps the two extraction copies in lockstep', async () => {

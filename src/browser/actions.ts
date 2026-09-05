@@ -1725,6 +1725,11 @@ async function executeCount(root: Page | FrameLocator, action: AIAction): Promis
 function extractValueInPage(el: any, attribute?: string): string {
   if (attribute) {
     if (attribute === 'url') {
+      // Attribute first, like href/src: 'url' is not a standard attribute, but
+      // custom elements and data-layer markup do carry one, and a page URL
+      // that shadowed it would leave no spelling that reads the real thing.
+      const own = typeof el.getAttribute === 'function' ? el.getAttribute('url') : null;
+      if (typeof own === 'string' && own.length > 0) return own;
       const doc = el.ownerDocument;
       return doc && doc.location ? doc.location.href : '';
     }
@@ -1870,6 +1875,8 @@ async function executeReadMultiple(
         const e = el as any;
         if (attribute) {
           if (attribute === 'url') {
+            const own = typeof e.getAttribute === 'function' ? e.getAttribute('url') : null;
+            if (typeof own === 'string' && own.length > 0) return own;
             const doc = e.ownerDocument;
             return doc && doc.location ? doc.location.href : '';
           }

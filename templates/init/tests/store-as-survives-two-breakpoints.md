@@ -22,10 +22,14 @@ questions one boundary cannot:
 
 Breakpoints go on steps 3 and 5, splitting the run into three batches:
 steps 1-2 capture `first_url`, steps 3-4 capture `second_url`, and steps
-5-7 consume both. Step 7 is what makes step 6 worth trusting: navigating
-to a merely *valid* URL proves nothing if it is the wrong page, so the
-heading is checked to confirm `{{first_url}}` still held the FIRST page's
-address and not the second's.
+5-8 consume both.
+
+Each navigation is followed by a heading check, because navigating to a
+merely *valid* URL proves nothing if it is the wrong page. Step 8 confirms
+`{{first_url}}` still held the FIRST page's address. Step 6 closes the
+subtler hole: if the two captures had aliased and `second_url` carried
+`first_url`'s value, step 5 would still pass — the browser is already on
+that page — so only the heading can tell the two apart.
 
 Everything runs against the local fixture app on port 8787 — no external
 site, so nothing here depends on the network or a rate limit.
@@ -36,5 +40,6 @@ site, so nothing here depends on the network or a rate limit.
 3. Navigate to http://127.0.0.1:8787/dom-noise.html
 4. Capture the current page URL [store as: second_url]
 5. Navigate to {{second_url}}
-6. Navigate to {{first_url}}
-7. Verify the page heading says "SecureBank Portfolio"
+6. Verify the page heading says "DOM Noise Fixture"
+7. Navigate to {{first_url}}
+8. Verify the page heading says "SecureBank Portfolio"

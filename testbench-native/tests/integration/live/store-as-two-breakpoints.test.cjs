@@ -23,16 +23,58 @@ const vscode = require('vscode');
 
 const EXT_ID = 'pkent.testbench-native';
 
-// 1-based lines of the steps in store-as-survives-two-breakpoints.md.
-const STEP = {
-  navigateFirst: 34,
-  captureFirst: 35,
-  navigateSecond: 36,
-  captureSecond: 37,
-  useSecond: 38,
-  useFirst: 39,
-  verifyHeading: 40,
-};
+/**
+ * Resolve the 1-based line of each step by reading the fixture, rather than
+ * hardcoding them.
+ *
+ * Hardcoding is what makes this kind of test rot into a silent no-op. Insert
+ * one line of prose above `## Steps` and every step shifts by one; each
+ * constant then lands on a DIFFERENT step that also passes, the waits and
+ * assertions all still hold, and the run goes green with the heading check —
+ * the one assertion this test exists for — never evaluated. It has to fail
+ * loudly instead, so the lines are derived and their text is verified.
+ */
+function resolveSteps(testFile) {
+  const lines = fs.readFileSync(testFile, 'utf8').split(/\r?\n/);
+  const found = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\d+)\.\s+(.*)$/.exec(lines[i]);
+    if (m) found.push({ line: i + 1, n: Number(m[1]), text: m[2].trim() });
+  }
+
+  // The fixture's steps, in order, each keyed and pinned to a distinctive
+  // fragment of its own text. A step that is reworded fails here by name
+  // rather than drifting onto its neighbour.
+  const expected = [
+    ['navigateFirst', '/assertions.html'],
+    ['captureFirst', 'first_url'],
+    ['navigateSecond', '/dom-noise.html'],
+    ['captureSecond', 'second_url'],
+    ['useSecond', '{{second_url}}'],
+    ['verifySecond', 'DOM Noise Fixture'],
+    ['useFirst', '{{first_url}}'],
+    ['verifyFirst', 'SecureBank Portfolio'],
+  ];
+
+  assert.equal(
+    found.length,
+    expected.length,
+    `fixture must have exactly ${expected.length} steps, found ${found.length} — ` +
+      `if a step was added or removed, update this test deliberately`,
+  );
+
+  const STEP = {};
+  expected.forEach(([key, fragment], i) => {
+    const step = found[i];
+    assert.equal(step.n, i + 1, `step ${i + 1} is numbered ${step.n} in the fixture`);
+    assert.ok(
+      step.text.includes(fragment),
+      `step ${i + 1} (line ${step.line}) should contain '${fragment}', reads: '${step.text}'`,
+    );
+    STEP[key] = step.line;
+  });
+  return STEP;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -87,6 +129,22 @@ describe('TestBench live — captures survive TWO breakpoint pauses', function (
     if (vscode.debug.breakpoints.length > 0) {
       vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
     }
+    // In `after()`, not at the end of the `it`, so it runs when an assertion
+    // throws too — that is the case that matters. The workspace config is
+    // `headed: true`, so a session left open is a real Chrome window competing
+    // for the foreground with cdp-tab-focus, which asserts on which tab is
+    // frontmost. A test that failed mid-run also leaves the run itself
+    // executing against the server; restartSession ends both.
+    try {
+      await vscode.commands.executeCommand('testbench-native.stop');
+    } catch {
+      /* nothing running */
+    }
+    try {
+      await vscode.commands.executeCommand('testbench-native.restartSession');
+    } catch {
+      /* no session to close */
+    }
   });
 
   it('carries a batch-1 capture across two boundaries, and a batch-2 capture across one', async () => {
@@ -100,6 +158,8 @@ describe('TestBench live — captures survive TWO breakpoint pauses', function (
       'store-as-survives-two-breakpoints.md',
     );
     assert.ok(fs.existsSync(testFile), `fixture not found at ${testFile}`);
+
+    const STEP = resolveSteps(testFile);
 
     if (vscode.debug.breakpoints.length > 0) {
       vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
@@ -171,7 +231,7 @@ describe('TestBench live — captures survive TWO breakpoint pauses', function (
       `step 2 must still read as passed after the second pause, got '${afterBatch2[STEP.captureFirst]}'`,
     );
 
-    // ===== Batch 3: steps 5-7, consuming both captures =====
+    // ===== Batch 3: steps 5-8, consuming both captures =====
     void vscode.commands.executeCommand('testbench-native.continueRun');
     await waitFor('running again after the second resume', () => hooks.isRunning(), 15_000);
     await waitFor('idle once the final batch completes', () => !hooks.isRunning(), 240_000);
@@ -190,17 +250,24 @@ describe('TestBench live — captures survive TWO breakpoint pauses', function (
     // assertion one breakpoint cannot make.
     assert.ok(
       passed(final[STEP.useFirst]),
-      `step 6 must pass — proves {{first_url}}, captured in batch 1, survived TWO ` +
+      `step 7 must pass — proves {{first_url}}, captured in batch 1, survived TWO ` +
         `batch boundaries. Got '${final[STEP.useFirst]}'.`,
     );
 
-    // And it held the right value. Step 6 navigating somewhere valid is not
-    // enough: if first_url had been overwritten by second_url, the navigation
-    // would still succeed and land on the wrong page. The heading says which.
+    // And each held the RIGHT value. A navigation that merely succeeds proves
+    // nothing about which page it landed on, so the headings discriminate.
+    // Step 6 is the one that catches aliasing: had second_url carried
+    // first_url's value, step 5 would still have passed, because the browser
+    // was already sitting on that page.
     assert.ok(
-      passed(final[STEP.verifyHeading]),
-      `step 7 must pass — proves {{first_url}} still addressed the FIRST page, not the ` +
-        `second. Got '${final[STEP.verifyHeading]}'.`,
+      passed(final[STEP.verifySecond]),
+      `step 6 must pass — proves {{second_url}} addressed the SECOND page and had not ` +
+        `aliased to the first. Got '${final[STEP.verifySecond]}'.`,
+    );
+    assert.ok(
+      passed(final[STEP.verifyFirst]),
+      `step 8 must pass — proves {{first_url}} still addressed the FIRST page, not the ` +
+        `second. Got '${final[STEP.verifyFirst]}'.`,
     );
   });
 });

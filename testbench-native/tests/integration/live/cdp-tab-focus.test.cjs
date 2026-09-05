@@ -480,7 +480,11 @@ describe('TestBench live — CDP tab focus (stories/cdp-tab-focus.md)', function
     // difference, which the equality would not have.
     let chromium;
     try {
-      ({ chromium } = require('playwright'));
+      // playwright-core, not playwright: this only ever calls
+      // `chromium.connectOverCDP` against a browser the framework already
+      // launched, so the full package's postinstall would download ~300MB of
+      // browsers that nothing here starts — on every clean install and in CI.
+      ({ chromium } = require('playwright-core'));
     } catch {
       console.log('[live] playwright not resolvable from here — skipping the pixel check');
       this.skip();

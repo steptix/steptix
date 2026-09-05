@@ -128,15 +128,15 @@ export function registerCommands(
     if (controller.document.isDirty) {
       await controller.document.save();
     }
-    // A proposal from an earlier compile is never the answer for this one, and
-    // leaving it up means anything asking "is there a proposal yet?" — the
-    // `codeBehindPending` context key, a test's wait — is answered by the
-    // previous run's file before this run has produced its own. Cleared at the
-    // start rather than in `presentCompile`, because the window between
-    // starting and presenting is exactly when a stale proposal reads as this
-    // one's. Below the `isRunning` refusal on purpose: a compile that never
-    // starts must not discard the proposal the author is still deciding about.
-    await diffs.discard();
+    // Out of the slot for the duration, so that anything asking "is there a
+    // proposal yet?" — the `testbench-native.codeBehindProposal` context key
+    // that gates Apply, a test's wait — is not answered by the LAST compile's
+    // files before this one has produced any. Parked rather than discarded:
+    // every exit that yields no proposal restores it, so a compile that fails
+    // does not cost the author the one they were still deciding about. Below
+    // the `isRunning` refusal on purpose — a compile that never starts should
+    // not disturb the slot at all.
+    const restoreProposal = await diffs.park();
 
     const mode = options.mode ?? 'run';
     const lines = options.lines ?? [];
@@ -163,13 +163,15 @@ export function registerCommands(
     // Opening a diff now would interrupt the debugging session the breakpoint
     // exists for, and offer a proposal that is about to grow.
     if (controller.isParkedAtPause) {
+      // The proposal is still growing and Continue will present it, so this
+      // compile owns the slot from here — nothing to put back.
       vscode.window.setStatusBarMessage(
         'TestBench: paused at a breakpoint — Continue to finish compiling',
         5000,
       );
       return;
     }
-    await presentCompile(controller, label, result);
+    await presentCompile(controller, label, result, { restoreProposal });
   };
 
   /**
@@ -188,8 +190,15 @@ export function registerCommands(
       /** Where Apply lands the author — a skill-file compile returns to the
        *  SKILL, not the test whose session recorded it. */
       returnTo?: string;
+      /** Put back the proposal the caller parked, if this compile turns out to
+       *  produce none. Every early return below is such a case: the author was
+       *  mid-decision on the previous proposal and this run gave them nothing
+       *  to replace it with. Absent on the Continue path, which parks nothing
+       *  because the compile it is finishing already owns the slot. */
+      restoreProposal?: () => Promise<void>;
     } = {},
   ): Promise<void> => {
+    const restore = opts.restoreProposal ?? (async () => {});
     const outcome = result.compile;
     if (!outcome && !result.ok && result.error) {
       // The run never got going — the server was down, the port belongs to
@@ -197,6 +206,7 @@ export function registerCommands(
       // the catalogue's words and with the fix attached; a compile failure is
       // not a second vocabulary for the same problem.
       registry.lastCompileError = result.error.message;
+      await restore();
       return;
     }
     if (!outcome) {
@@ -204,6 +214,7 @@ export function registerCommands(
       // that drops `compile` off the allow-list) looks exactly like this, and
       // saying so beats a silent no-op.
       registry.lastCompileError = 'the run produced no compile result';
+      await restore();
       void vscode.window
         .showWarningMessage(
           `${label} ran, but nothing came back to compile. Is the server on a build that supports Run & Compile?`,
@@ -220,6 +231,7 @@ export function registerCommands(
     // the caller (and every test) waiting on the user.
     if (!outcome.ok) {
       registry.lastCompileError = outcome.error ?? 'unknown error';
+      await restore();
       const s = outcome.summary;
       const actions = ['Show log', ...(s?.recordingDir ? ['Open recording'] : [])];
       if (s?.candidatePath) actions.push('Open candidate');
@@ -245,6 +257,7 @@ export function registerCommands(
       vscode.window.showInformationMessage(
         `Nothing to compile in ${label} — every step already has code-behind.`,
       );
+      await restore();
       return;
     }
 
@@ -524,6 +537,10 @@ export function registerCommands(
     // refuse), and no `compileScope` is sent: the run's real skill frame is
     // the binding.
     if (controller.document.isDirty) await controller.document.save();
+    // Same reasoning as `runAndCompile`: this path reaches `presentCompile`
+    // without going through it, so without parking here a pending proposal
+    // from an earlier compile keeps answering for the whole of this run.
+    const restoreProposal = await diffs.park();
     registry.notifyRunning(true);
     let result;
     try {
@@ -541,6 +558,7 @@ export function registerCommands(
     // finished compiling, and opening a diff now offers a proposal that is
     // about to grow (or, for a user Pause, one that never arrived).
     if (controller.isParkedAtPause) {
+      // Continue will finish and present it; this compile owns the slot now.
       vscode.window.setStatusBarMessage(
         'TestBench: paused — Continue to finish compiling',
         5000,
@@ -553,7 +571,7 @@ export function registerCommands(
       // and this is the session whose page state it recorded against.
       `${path.basename(skillFsPath)} (recorded in ${path.basename(controller.document.uri.fsPath)}'s session)`,
       result,
-      { returnTo: skillFsPath },
+      { returnTo: skillFsPath, restoreProposal },
     );
   };
 
