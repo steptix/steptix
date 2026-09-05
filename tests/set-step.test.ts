@@ -8,6 +8,8 @@
  * description of them.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { interpolate } from '../src/parser/parameters.js';
 import { parseSetStep, setStepError, isSetStepClaim } from '../src/parser/set-step.js';
 import { resolveSetTemplate } from '../src/runner/placeholder-substitution.js';
 import type { EnvDataContext } from '../src/parser/interpolate-env-data.js';
@@ -200,35 +202,61 @@ describe('resolveSetTemplate', () => {
 });
 
 /**
- * One table, three readers. The runtime's answer for each authored line; the
- * TestBench completion scanner and the webview Variables panel are checked
- * against the same rows in their own suites (they see only the target name).
+ * One list, three readers — and now actually one list.
+ *
+ * The authored lines live in `fixtures/set-step/grammar-lines.json`. THIS
+ * file pins what the runtime does with each of them; the mirrors' suite
+ * (testbench-native/tests/set-step-mirrors.test.js) pins that the editor
+ * scanners agree, by calling `parseSetStep` rather than imitating it.
+ *
+ * The previous version of this was a table here and a hand-copied table
+ * there, "kept in step by hand" — which is exactly how the `[no-hooks]` gap
+ * came to sit in both mirrors at once, and by the time anyone counted, the
+ * two had drifted to 11 rows and 12. A row added to the JSON is now checked
+ * in all three places or fails here for want of an expectation.
  */
-export const SET_STEP_FIXTURES: Array<{
-  line: string;
-  parsed: { name: string; template: string } | null;
-  claims: boolean;
-}> = [
-  { line: 'Set {{a}} to "b"', parsed: { name: 'a', template: 'b' }, claims: true },
-  { line: 'set {{a}} to "{{b}} and {{c}}"', parsed: { name: 'a', template: '{{b}} and {{c}}' }, claims: true },
-  { line: 'SET {{a_1}} to ""', parsed: { name: 'a_1', template: '' }, claims: true },
-  { line: 'Set {{a}} to "say "hi""', parsed: null, claims: true },
-  { line: 'Set {{a}} to "x" and click "Save"', parsed: null, claims: true },
-  { line: 'Set {{a}} to unquoted', parsed: null, claims: true },
-  { line: 'Set {{ a }} to "b"', parsed: null, claims: true },
-  { line: 'Set {{a}} to "b" trailing', parsed: null, claims: true },
-  { line: 'Set the filter to Recent', parsed: null, claims: false },
-  { line: 'Set {{a}} using the dropdown', parsed: null, claims: false },
-  { line: 'Click Save', parsed: null, claims: false },
-];
+const GRAMMAR_LINES: string[] = JSON.parse(
+  readFileSync(
+    new URL('../fixtures/set-step/grammar-lines.json', import.meta.url),
+    'utf8',
+  ),
+).lines;
 
-describe('fixture table', () => {
-  it.each(SET_STEP_FIXTURES)('reads $line', ({ line, parsed, claims }) => {
-    expect(parseSetStep(line)).toEqual(parsed);
-    expect(isSetStepClaim(line)).toBe(claims);
+/** The runtime's expected reading of every line in the shared list. */
+const EXPECTED: Record<string, { name: string; template: string } | null> = {
+  'Set {{a}} to "b"': { name: 'a', template: 'b' },
+  'set {{a}} to "{{b}} and {{c}}"': { name: 'a', template: '{{b}} and {{c}}' },
+  'SET {{a_1}} to ""': { name: 'a_1', template: '' },
+  'Set {{a}} to "  padded  "': { name: 'a', template: '  padded  ' },
+  'Set {{a}} to "say "hi""': null,
+  'Set {{a}} to "x" and click "Save"': null,
+  'Set {{a}} to unquoted': null,
+  'Set {{ a }} to "b"': null,
+  'Set {{a}} to "b" trailing': null,
+  'Set {{a}} to "b': null,
+  'Set the filter to Recent': null,
+  'Set {{a}} using the dropdown': null,
+  'Click Save': null,
+  // The parser strips the marker ITSELF. It has to: runner-core keeps it on
+  // the wire deliberately, so the Sessions API and the errand runner receive
+  // it verbatim and were sending such lines to the model as prose.
+  '[no-hooks] Set {{a}} to "b"': { name: 'a', template: 'b' },
+  'Set {{to}} to "b"': { name: 'to', template: 'b' },
+  'Set {{o}} to "b"': { name: 'o', template: 'b' },
+};
+
+describe('shared grammar list', () => {
+  it('has an expectation for every line, and no stale ones', () => {
+    expect(Object.keys(EXPECTED).sort()).toEqual([...GRAMMAR_LINES].sort());
+  });
+
+  it.each(GRAMMAR_LINES)('reads %s', (line) => {
+    const parsed = EXPECTED[line]!;
+    expect(parseSetStep(line)).toEqual(parsed ?? null);
     // Every claim that does not parse must produce a diagnostic, and nothing
     // else may. That equivalence is what stops a new grammar case from
     // silently becoming prose.
+    const claims = isSetStepClaim(line);
     expect(setStepError(line) !== null).toBe(claims && parsed === null);
   });
 });
@@ -241,16 +269,48 @@ describe('a Set step is never swallowed by a conditional group', () => {
     // halves of what this step form exists to avoid. Found by review; the
     // story claimed "no model call" for all four loops without a test.
     const { identifyStepGroups } = await import('../src/runner/step-grouper.js');
-    const groups = identifyStepGroups([
-      'If prompted for MFA, enter the code',
-      'Set {{done}} to "yes"',
-      'Click Save',
-    ]);
-    // The conditional still forms a group...
-    expect(groups.get(0)).toBeDefined();
-    // ...but the assignment is not in it, so the loops run it themselves.
-    expect(groups.get(1)).toBeUndefined();
-    expect(groups.get(0)!.continuationStep.instruction).toContain('no continuation');
+    const steps = ['If prompted for MFA, enter the code', 'Set {{done}} to "yes"', 'Click Save'];
+    const groups = identifyStepGroups(steps);
+    // NO group at all. The first version of this fix kept the group and gave
+    // it a synthetic continuation, which was WORSE than the bug: both loops
+    // advance with `i = group.continuationStep.index` then `i++`, and that
+    // synthetic index IS the assignment's, so the step vanished from the run
+    // while a model turn was spent on the placeholder string.
+    expect(groups.size).toBe(0);
+  });
+
+  it('every step still runs — replaying the loops OWN advance arithmetic', async () => {
+    // The assertion the first fix lacked. Checking the map is not enough:
+    // both loops advance by jumping to `continuationStep.index`, so a test
+    // that only inspects the map passes while the runner skips a step. This
+    // replays that jump verbatim (test-runner.ts / session-manager.ts).
+    const { identifyStepGroups } = await import('../src/runner/step-grouper.js');
+    for (const steps of [
+      ['If prompted for MFA, enter the code', 'Set {{a}} to "1"', 'Click Save'],
+      ['If prompted, do it', 'If asked again, do it', 'Set {{a}} to "1"', 'Click Save'],
+      ['If prompted, do it', 'Set {{a}} to "1"', 'If asked, do it', 'Click Save'],
+      ['Click A', 'If prompted, do it', 'Set {{a}} to "1"'],
+    ]) {
+      const groups = identifyStepGroups(steps);
+      const reached: number[] = [];
+      for (let i = 0; i < steps.length; i++) {
+        const g = groups.get(i);
+        if (g && i === g.conditionalSteps[0]!.index) {
+          for (const c of g.conditionalSteps) reached.push(c.index);
+          reached.push(g.continuationStep.index);
+          i = g.continuationStep.index;
+          continue;
+        }
+        if (g) continue;
+        reached.push(i);
+      }
+      // Every index the list has is reached exactly once, by some path.
+      const setIndex = steps.findIndex((t) => t.startsWith('Set '));
+      expect(reached, JSON.stringify(steps)).toContain(setIndex);
+      for (let i = 0; i < steps.length; i++) {
+        expect(reached, `step ${i} of ${JSON.stringify(steps)}`).toContain(i);
+      }
+    }
   });
 
   it('still pairs a conditional with an ordinary continuation', () => {
@@ -290,5 +350,50 @@ describe('a Set target that needs a guarded write', () => {
     expect(scope['__skill1_scratch']).toBe('v'); // the assignment still happens
     expect(out.result.outputs).toBeUndefined(); // its reporting does not
     expect(out.assigned).toBeUndefined();
+  });
+});
+
+describe('recognised on the AUTHORED line, not the interpolated one', () => {
+  /**
+   * The single load-bearing decision of this feature, and it was pinned
+   * nowhere: a reviewer measured that mutating any of the four loops to parse
+   * the INTERPOLATED line left all 3698 tests green.
+   *
+   * The reason no existing test caught it is that every one of them assigns a
+   * target that does not yet hold a value — and on that first pass the two
+   * readings agree. The bug only appears on the SECOND assignment to a name,
+   * which is a re-run, a second batch, or a looped section.
+   */
+  it('a target that already holds a value is still a target, not a source', () => {
+    const authored = 'Set {{greeting}} to "Hello, {{who}}"';
+    const scope = { who: 'world', greeting: 'Hello, world' };
+
+    // What every loop actually does.
+    expect(parseSetStep(authored)).toEqual({
+      name: 'greeting',
+      template: 'Hello, {{who}}',
+    });
+
+    // What it would do if it parsed the interpolated line instead: the target
+    // is replaced by its own value, the line stops being an assignment, and
+    // the step degrades to prose — costing a model turn and assigning
+    // nothing.
+    const interpolated = interpolate(authored, scope);
+    expect(interpolated).toBe('Set Hello, world to "Hello, world"');
+    expect(parseSetStep(interpolated)).toBeNull();
+  });
+
+  it('assigns twice in a row, reading its own previous value', async () => {
+    const { runSetStep } = await import('../src/runner/set-step-runner.js');
+    const scope: Record<string, string> = {};
+    const step = { name: 's', template: '{{s}}x' };
+
+    // First pass: the template's own reference is unset, so it fails rather
+    // than storing the literal.
+    expect(runSetStep({ name: 's', template: 'a' }, '', 1, scope).result.status).toBe('passed');
+    // Second and third: each reads what the previous one wrote.
+    runSetStep(step, '', 2, scope);
+    runSetStep(step, '', 3, scope);
+    expect(scope['s']).toBe('axx');
   });
 });

@@ -1,53 +1,71 @@
 /**
- * The two editor mirrors of the `Set {{name}} to "…"` grammar
+ * The two editor mirrors of the `Set {{name}} to "…"` grammar must agree with
+ * the RUNTIME — checked by calling it, not against hand-copied rows
  * (stories/variable-assignment.md §What the scanners learn).
  *
- * The runtime reads that grammar in src/parser/set-step.ts; the extension's
- * completion/F12 scanner and the webview's Variables panel each re-state it,
- * for the reasons issue 035 documents. The FIXTURES table below is the same
- * set of authored lines the root suite's `tests/set-step.test.ts` pins the
- * runtime against — kept in step by hand, and checked here so a mirror that
- * drifts fails a test rather than an author.
+ * The hand-copied version of this file is why the `[no-hooks]` gap sat in both
+ * mirrors at once, and by the time a reviewer counted them the two tables had
+ * already drifted — 11 rows here, 12 there. So this now imports
+ * `parseSetStep` itself (it has no imports of its own, so it loads cleanly
+ * under Node's type stripping) and derives every expectation from it. The
+ * shared line list lives in `fixtures/set-step/grammar-lines.json`; the root
+ * suite pins what the runtime DOES with each line, and this file pins that
+ * the editors agree. Same split, and same reasoning, as
+ * `tests/invocation-mirror-parity.test.ts`.
  *
- * Each mirror sees less than the runtime does: they answer only "which name
- * does this line write", so `target` is null wherever the runtime would
- * refuse or ignore the line.
+ * Each mirror sees less than the runtime: they answer only "which name does
+ * this line write", so a line the runtime refuses must yield no name here.
  */
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { parseSetStep } from '../../src/parser/set-step.ts';
 import { captureNamesBefore } from '../src/extension/env-data-completion-core.ts';
 import { collectVariables, classifyCaptureSource } from '../src/webview/lib/variables-panel.js';
 
-/** authored instruction → the name it writes, or null. */
-const FIXTURES = [
-  { line: 'Set {{a}} to "b"', target: 'a' },
-  { line: 'set {{a}} to "{{b}} and {{c}}"', target: 'a' },
-  { line: 'SET {{a_1}} to ""', target: 'a_1' },
-  { line: 'Set {{a}} to "say "hi""', target: null },
-  { line: 'Set {{a}} to "x" and click "Save"', target: null },
-  // The prefix the runtime strips before it reads the line at all.
-  { line: '[no-hooks] Set {{a}} to "b"', target: 'a' },
-  // Claims the form but does not parse — the runtime refuses the file, so the
-  // editors must not offer a name for it either.
-  { line: 'Set {{a}} to unquoted', target: null },
-  { line: 'Set {{ a }} to "b"', target: null },
-  { line: 'Set {{a}} to "b" trailing', target: null },
-  // Never claims: prose the model handles.
-  { line: 'Set the filter to Recent', target: null },
-  { line: 'Set {{a}} using the dropdown', target: null },
-  { line: 'Click Save', target: null },
-];
+const here = dirname(fileURLToPath(import.meta.url));
+const LINES = JSON.parse(
+  readFileSync(resolve(here, '../../fixtures/set-step/grammar-lines.json'), 'utf8'),
+).lines;
 
-test('extension scanner: writes match the runtime on every fixture row', () => {
-  for (const { line, target } of FIXTURES) {
+/** The runtime's own answer, with the `[no-hooks]` marker stripped the way
+ *  `extractSteps` strips it before a step ever reaches the parser. */
+function runtimeTarget(line) {
+  return parseSetStep(line.replace(/^\[no-hooks\]\s*/i, ''))?.name ?? null;
+}
+
+test('the fixture list actually exercises both outcomes', () => {
+  // A parity check over rows that all answer the same way proves nothing.
+  const targets = LINES.map(runtimeTarget);
+  assert.ok(targets.some((t) => t !== null), 'no row the runtime accepts');
+  assert.ok(targets.some((t) => t === null), 'no row the runtime refuses');
+});
+
+test('extension scanner agrees with the runtime on every fixture line', () => {
+  for (const line of LINES) {
     const text = ['## Steps', `1. ${line}`, '2. done'].join('\n');
-    // Read from the END of the file, so the write is in scope either way.
     const names = captureNamesBefore(text, 99).map((c) => c.name);
-    if (target === null) {
-      assert.deepEqual(names, [], `expected no write for: ${line}`);
-    } else {
-      assert.deepEqual(names, [target], `wrong write for: ${line}`);
-    }
+    const expected = runtimeTarget(line);
+    assert.deepEqual(
+      names,
+      expected === null ? [] : [expected],
+      `extension scanner disagrees with the runtime on: ${line}`,
+    );
+  }
+});
+
+test('variables panel agrees with the runtime on every fixture line', () => {
+  for (const line of LINES) {
+    const text = ['## Steps', `1. ${line}`].join('\n');
+    const names = collectVariables(text, {}, {}).map((r) => r.name);
+    const expected = runtimeTarget(line);
+    assert.deepEqual(
+      names,
+      expected === null ? [] : [expected],
+      `variables panel disagrees with the runtime on: ${line}`,
+    );
   }
 });
 
@@ -59,22 +77,23 @@ test('extension scanner: a Set write is marked `set` and located on its line', (
   assert.equal(write.line, 3);
 });
 
-test('extension scanner: a Set later in the run is not in scope earlier', () => {
-  const text = ['## Steps', '1. Type "{{later}}"', '2. Set {{later}} to "x"'].join('\n');
-  // Line index 1 is step 1 — the assignment on step 2 has not run yet.
-  assert.deepEqual(captureNamesBefore(text, 1).map((c) => c.name), []);
+test('extension scanner: locates the name exactly, even when it collides with `to`', () => {
+  // `writesIn` used to find the name with `m[0].lastIndexOf(m[1])`, assuming
+  // it is the match's last name-shaped token. The Set pattern's match ends
+  // with the keyword ` to `, so `{{to}}`, `{{t}}` and `{{o}}` all located the
+  // keyword instead — F12 and completion pointed at the wrong span.
+  for (const name of ['to', 't', 'o', 'name']) {
+    const raw = `1. Set {{${name}}} to "x"`;
+    const [write] = captureNamesBefore(['## Steps', raw].join('\n'), 99);
+    assert.equal(write.name, name);
+    assert.equal(write.column, raw.indexOf(`{{${name}}}`) + 2, `column for {{${name}}}`);
+    assert.equal(write.length, name.length);
+  }
 });
 
-test('variables panel: rows match the runtime on every fixture row', () => {
-  for (const { line, target } of FIXTURES) {
-    const text = ['## Steps', `1. ${line}`].join('\n');
-    const names = collectVariables(text, {}, {}).map((r) => r.name);
-    if (target === null) {
-      assert.deepEqual(names, [], `expected no row for: ${line}`);
-    } else {
-      assert.deepEqual(names, [target], `wrong row for: ${line}`);
-    }
-  }
+test('extension scanner: a Set later in the run is not in scope earlier', () => {
+  const text = ['## Steps', '1. Type "{{later}}"', '2. Set {{later}} to "x"'].join('\n');
+  assert.deepEqual(captureNamesBefore(text, 1).map((c) => c.name), []);
 });
 
 test('variables panel: a Set row appears before the run and fills in after', () => {
@@ -84,13 +103,7 @@ test('variables panel: a Set row appears before the run and fills in after', () 
   ]);
   const filled = collectVariables(text, {}, { summary: 'hello' }, { summary: 'assignment' });
   assert.deepEqual(filled, [
-    {
-      name: 'summary',
-      source: 'set',
-      line: 2,
-      value: 'hello',
-      captureSource: 'assignment',
-    },
+    { name: 'summary', source: 'set', line: 2, value: 'hello', captureSource: 'assignment' },
   ]);
 });
 
@@ -114,19 +127,4 @@ test('classifyCaptureSource: knows assignment, and still collapses the unknown',
   // third value safe for a client that predates it.
   assert.equal(classifyCaptureSource(undefined), 'capture');
   assert.equal(classifyCaptureSource('somethingNew'), 'capture');
-});
-
-test('extension scanner: locates the name exactly, even when it collides with `to`', () => {
-  // `writesIn` used to find the name with `m[0].lastIndexOf(m[1])`, assuming
-  // it is the match's last name-shaped token. The Set pattern's match ends
-  // with the keyword ` to `, so `{{to}}`, `{{t}}` and `{{o}}` all located the
-  // keyword instead — F12 and completion pointed at the wrong span. The `d`
-  // flag's group indices are exact and need no assumption.
-  for (const name of ['to', 't', 'o', 'name']) {
-    const raw = `1. Set {{${name}}} to "x"`;
-    const [write] = captureNamesBefore(['## Steps', raw].join('\n'), 99);
-    assert.equal(write.name, name);
-    assert.equal(write.column, raw.indexOf(`{{${name}}}`) + 2, `column for {{${name}}}`);
-    assert.equal(write.length, name.length);
-  }
 });

@@ -3406,8 +3406,18 @@ export class SessionManager {
     // env/data substitutions first so grouping looks at the final step text
     // (otherwise `${data.foo}` placeholders could change which steps look
     // alike for grouping purposes).
+    //
+    // A Set step is passed through UNINTERPOLATED, for two reasons that both
+    // bite. `interpolateEnvData` throws on an unknown `${…}`, and this call
+    // sits at method-body level with no `try` above it — so a bad reference
+    // inside a Set template escaped the whole request as a server error
+    // rather than failing its own step, which is exactly what the guard 600
+    // lines below was written to prevent and could not, because this runs
+    // first. And `identifyStepGroups` must see the same text the run loop
+    // does (`parseSetStep(originalStep)`), or the two disagree about whether
+    // a line is an assignment at all.
     const interpolatedSteps = envDataCtx
-      ? effectiveSteps.map((s) => interpolateEnvData(s, envDataCtx))
+      ? effectiveSteps.map((s) => (parseSetStep(s) ? s : interpolateEnvData(s, envDataCtx)))
       : effectiveSteps;
     const stepGroups = identifyStepGroups(interpolatedSteps);
 
@@ -4342,7 +4352,18 @@ export class SessionManager {
             stepResult = outcome.result;
             if (outcome.assigned) {
               const { name, value } = outcome.assigned;
-              session.outputs[name] = value;
+              // `defineProperty` for the same reason `runSetStep` uses it:
+              // `session.outputs` is a plain `{}`, so `outputs['__proto__'] =`
+              // creates no own key — the value would resolve inside this batch
+              // and then silently vanish from the HTTP outputs map and from
+              // the seed the NEXT batch builds. The guard was one line short
+              // of the write it was meant to protect.
+              Object.defineProperty(session.outputs, name, {
+                value,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              });
               // First-write-wins, like every other write site here. The field
               // documents itself as keeping "the variable's original identity
               // rather than hiding it behind the latest source", and writing

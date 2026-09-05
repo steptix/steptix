@@ -74,36 +74,34 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
       i++;
     }
 
-    // The next non-conditional step is the continuation — unless it is an
-    // assignment, which cannot be one.
+    // An assignment cannot be a continuation, and the conditionals before it
+    // therefore form NO GROUP AT ALL.
     //
     // A continuation is handed to `executeBranchedStep` for the MODEL to
     // perform if the conditional did not apply. `Set {{x}} to "…"` has no
-    // model half: swallowing it means the variable is silently never
-    // assigned AND the step costs a turn, which is both halves of what this
-    // step form exists to avoid (stories/variable-assignment.md). Found by
-    // review, not by a test — the story claimed "no model call" for all four
-    // loops without one.
+    // model half, so swallowing it means the variable is never assigned and
+    // the step costs a turn anyway — both halves of what this step form
+    // exists to avoid (stories/variable-assignment.md).
     //
-    // Treated as "no continuation", the same shape a conditional at the end
-    // of the list already produces, so the assignment runs as an ordinary
-    // step immediately after the group.
+    // The obvious fix — a synthetic "no continuation" like the end-of-list
+    // case — is WRONG, and shipping it was worse than the bug. Both loops
+    // advance with `i = group.continuationStep.index` and then `i++`
+    // (test-runner.ts, session-manager.ts), so a synthetic index of
+    // `lastConditional + 1` — which is the assignment's own index — jumps
+    // straight past it: the step vanished from the run, a model turn was
+    // spent performing the placeholder string, and its result was filed under
+    // the assignment's index. Declining to register the index did nothing,
+    // because the skip is the jump, not the map.
+    //
+    // So: emit no group. The conditionals run as ordinary AI steps, which is
+    // what they were before grouping existed, and the assignment runs as
+    // itself. Nothing jumps, so nothing can be skipped.
+    if (i < steps.length && parseSetStep(steps[i]!)) continue;
+
     let continuation: GroupedStep;
-    /** False when the continuation is synthetic — nothing real to register. */
-    let continuationIsRealStep = true;
-    if (i < steps.length && !parseSetStep(steps[i]!)) {
+    if (i < steps.length) {
       continuation = { index: i, instruction: steps[i]! };
       i++; // consume the continuation step
-    } else if (i < steps.length) {
-      // The assignment keeps its own index and must NOT be registered in the
-      // map: both loops `continue` past any index that belongs to a group and
-      // is not its first conditional, so registering it here would skip the
-      // step outright — a worse bug than the swallow this guards against.
-      continuation = {
-        index: conditionals[conditionals.length - 1]!.index + 1,
-        instruction: '(no continuation — the next step is an assignment)',
-      };
-      continuationIsRealStep = false;
     } else {
       // Conditional at end of test — synthetic no-op continuation
       continuation = {
@@ -121,11 +119,7 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
     for (const cs of conditionals) {
       map.set(cs.index, group);
     }
-    // Only a REAL continuation is registered. The end-of-list synthetic one
-    // is past the last index so registering it was harmless; the assignment
-    // case's synthetic index is a real step, and registering that would make
-    // both loops skip it.
-    if (continuationIsRealStep) map.set(continuation.index, group);
+    map.set(continuation.index, group);
   }
 
   return map;

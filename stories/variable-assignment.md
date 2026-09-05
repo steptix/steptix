@@ -83,11 +83,14 @@ substituted, which is exactly what it would have seen had the value come off
 the page.
 
 > **Verification rule for this story.** "Done" means: (1) a `Set` step runs
-> with **no model call, no page action and no cache file** — the AI client is
-> never invoked, the result's `turns` is empty and the run's token total is
-> unchanged — proven separately in each of the four step loops: the CLI
-> runner (a main-flow step *and* a hook-scope step), the Sessions API, an
-> errand, and the Electron runner; (2) the stored value is the quoted text
+> with **no model call, no page action and no action-cache entry** — the AI
+> client is never invoked, the result's `turns` is empty and the run's token
+> total is unchanged. (Corrected twice: "no cache file" was too strong, since
+> a run still writes a `StepCache` `meta.json` and a code-behind
+> `last-run.json`; and this was claimed as "proven separately in each of the
+> four step loops" when the Electron loop has no test of any kind. Proven:
+> the CLI main flow and hooks, live; the Sessions API, live and at the HTTP
+> seam; the errand, at the HTTP seam. NOT proven: the Electron runner.) (2) the stored value is the quoted text
 > with every `{{name}}` replaced from the scope **as it stands at that step**
 > — a name assigned twice reads its latest value — and a `${env.X}` /
 > `${data.x}` resolved in the same run-time pass, using the same substituter
@@ -329,24 +332,31 @@ Everything below is read out of the current tree.
 ```
 SetStep  := 'Set' WS '{{' Name '}}' WS 'to' WS '"' Template '"' WS?
 Name     := \w+
-Template := everything from the first '"' after 'to' to the LAST '"' on the line
+Template := [^"]*        -- any text except a double quote (newlines allowed)
 ```
 
 - `Set` is case-insensitive: `set`, `Set`, `SET`.
 - `Name` is the same `\w+` every other variable form accepts, so the target
   is always something a later `{{…}}` can spell.
-- `Template` is read to the *last* quote on the line, so a `"` inside it is
-  literal — `Set {{q}} to "say "hi""` stores `say "hi"` — and there is no
-  escape syntax to learn. It may be empty: `Set {{x}} to ""` clears a
-  variable to the empty string.
+- `Template` may not contain a double quote. It was once read to the *last*
+  quote on the line, so that `Set {{q}} to "say "hi""` stored `say "hi"`
+  with no escape syntax — and that is precisely what made
+  `Set {{query}} to "shoes" and search for "shoes"` parse into garbage and
+  pass green (§What the review found, defect 1). A quote inside the value is
+  now a refusal that says so. It may be empty: `Set {{x}} to ""` clears a
+  variable to the empty string, and it may span a line break, since `[^"]`
+  matches a newline — though both editor mirrors are line-anchored and will
+  not see a wrapped one.
 - Inside the template, `{{name}}` is replaced from the scope at execution and
   `${…}` is already text. Nothing else is interpreted: `"{{n}} + 1"` stores
   those characters.
 - Nothing may follow the closing quote but whitespace. `Set {{x}} to "a"
   [store as: y]` is a parse error, not a step with two writers.
-- A `[no-hooks]` prefix is stripped by the parser before any of this and is
-  therefore allowed, though a step that touches no page has no hooks worth
-  skipping.
+- A `[no-hooks]` prefix is stripped by `parseSetStep` ITSELF, not only by
+  the markdown parser. It has to be: runner-core keeps the marker when it
+  puts a step on the wire, so the Sessions API and the errand runner receive
+  it verbatim, and both were sending `[no-hooks] Set …` to the model as
+  prose until review caught it.
 
 One parser, `parseSetStep(raw)` in `src/parser/set-step.ts`, returns
 `{ name, template }` or `null`, and a separate `setStepError(raw)` returns
@@ -575,7 +585,10 @@ Built 2026-09-05. Six things the spec did not anticipate, and one it got
 right for a reason worth keeping.
 
 - **The editor mirrors needed a lookahead, and the parity table is what
-  found it.** Written the obvious way — `^set\s+\{\{(\w+)\}\}\s+to\s+"` —
+  found it.** *(Superseded — see §What the review found. The
+  `lastIndexOf` reasoning below was itself a defect, and the value pattern
+  is now `[^"]*` rather than `.*`. Kept because the reasoning is how the
+  mistake was made.)* Written the obvious way — `^set\s+\{\{(\w+)\}\}\s+to\s+"` —
   both mirrors accepted `Set {{a}} to "b" trailing`, a line the runtime
   refuses, and would have offered a completion for a file that cannot parse.
   Checking the whole grammar is the fix, but the value cannot go *inside* the
@@ -634,7 +647,7 @@ would have failed rather than silently succeeded:
 
 | What | Result |
 | --- | --- |
-| `fixtures/tests/set-variable-demo.md`, six steps | passed, **0 tokens**; literal, multi-variable template, copy, empty value, inner quotes, reassignment |
+| `fixtures/tests/set-variable-demo.md`, six steps | passed, **0 tokens**; literal, multi-variable template, copy, empty value, padded value, reassignment. (Step 5 was an inner-quotes case until the grammar fix made that form a parse error.) |
 | Report rendering | all six values in the ◆ Captured box, correctly escaped |
 | A Set in a `before` hook feeding a main-flow Set | passed, 0 tokens |
 | A skill invoked twice | namespacing and output aliasing as above, 0 tokens |
@@ -814,3 +827,103 @@ it asserts that something else now agrees with it.**
 - **The MCP suppression is cross-scope.** `missingParameters` suppresses the
   warning for a name any step in the list assigns, including steps in a
   section the main flow never calls.
+
+## What the second review round found
+
+Three more passes were run after the first round's fixes, on the grounds that
+those fixes were themselves unreviewed and three of them reached beyond this
+feature into shared code. That was the right call: **the headline fix from
+round one was wrong, and shipped worse than the bug it replaced.**
+
+### The grouper fix was the near-miss, repeating
+
+Round one's defect 2 was that a `Set` following a conditional got swallowed
+into an AI turn. The fix declined the assignment as a continuation, gave the
+group a synthetic one, and — reasoning that "both loops `continue` past any
+index registered to a group" — declined to register it.
+
+That reasoning identified the wrong mechanism. The skip is not the map; it is
+the jump. Both loops advance with `i = group.continuationStep.index` followed
+by the `for`'s `i++`, and the synthetic index — `lastConditional + 1` — is
+exactly the assignment's own. So the step **vanished from the run entirely**,
+a model turn was spent performing the placeholder string
+`(no continuation — the next step is an assignment)`, and on the server that
+turn's result was filed under the assignment's index, so the wire reported a
+step titled `Set {{done}} to "yes"` whose status came from an AI turn on
+nonsense. Three failures where there had been two.
+
+The regression test written alongside it could not catch this: it asserted
+that the map had no entry for the assignment, which was true and irrelevant.
+It never replayed the arithmetic the loops actually use.
+
+The correct fix is smaller than either attempt: when the next step is an
+assignment, **emit no group at all**. The conditionals run as ordinary AI
+steps — what they were before grouping existed — and the assignment runs as
+itself. Nothing jumps, so nothing can be skipped. The test now replays both
+loops' advance arithmetic over four step shapes and asserts every index is
+reached.
+
+### And four more
+
+- **The `${…}` fix was inert on the Sessions API.** The in-loop skip was
+  correct but unreachable: 600 lines earlier, `executeStepsInternal` maps
+  `interpolateEnvData` over *every* step to feed the grouper, at method-body
+  level with no `try` above it. A bad reference in a template still escaped
+  the whole request. That map now passes a `Set` step through untouched —
+  which also fixes a quieter disagreement, where the grouper saw interpolated
+  text and the run loop saw authored text.
+- **`[no-hooks] Set …` was prose on both server paths.** runner-core keeps
+  the marker on the wire deliberately, and `parseSetStep` required it
+  pre-stripped — so TestBench, the primary client, never recognised such a
+  line. Round one had "fixed" this in the two editor mirrors, which meant the
+  editors offered a completion and an F12 target for a step the server would
+  not assign: the fix widened the divergence it was meant to close. The
+  parser now strips the marker itself, so every caller is correct by
+  construction.
+- **The `__proto__` guard stopped one line short**, twice: `session.outputs`
+  and the errand's `captures` are both plain objects written with plain
+  assignment, so the value resolved inside a batch and then vanished from the
+  HTTP outputs map and the next batch's seed.
+- **The parity table was a lie by round one's own account.** "One table,
+  three readers" described two hand-copied tables that had already drifted to
+  11 rows and 12 — the extra row being the `[no-hooks]` case, i.e. the drift
+  hid the very gap round one found. The lines now live in
+  `fixtures/set-step/grammar-lines.json`; this file's suite pins what the
+  runtime does with each, and the mirrors' suite pins that the editors agree
+  **by calling `parseSetStep`** rather than restating it. That is the pattern
+  `tests/invocation-mirror-parity.test.ts` already established, whose own
+  header says: "This test did not exist, and that is why they drifted."
+
+### The gap that let all of this through
+
+The test-quality pass asked the only question that mattered: for each test,
+what mutation survives it? The answer for the feature's single most
+load-bearing decision — *recognise on the authored line, never the
+interpolated one*, which has four long comments defending it — was **every
+mutation**. Changing any loop to parse the interpolated line left all 3698
+tests green.
+
+The reason is worth keeping: every test assigned a target that did not yet
+hold a value, and on that first assignment the two readings agree. The bug
+only appears on the *second* assignment to a name — a re-run, a second batch,
+a looped section. There is now a test for exactly that, and one that assigns
+three times in a row.
+
+Also added from that pass: the `outputSources` provenance test whose three
+siblings already existed and which was never written as a fourth, and the
+first-write-wins case that round one fixed without a regression test.
+
+### Still open
+
+Unchanged from round one: the Variables panel renders no badge for
+`source: 'assignment'`, so verification rule (6) is still unmet; two expander
+interactions (an `out.x=` alias colliding with a parameter name, and a
+looped section nested inside another) can still degrade a `Set` to prose; and
+the MCP warning suppression is cross-scope. New, and not fixed: a looped
+section whose row value contains a `"` bakes into a line the new grammar
+refuses, so that row degrades to prose while its siblings assign — the
+grammar fix traded a green-garbage hole for a narrower silent-degradation
+one; a soft-wrapped template runs but is invisible to both editor mirrors;
+and `definedLater` is accepted by `runSetStep` and passed by none of its five
+callers, so a `Set` gets a blunter refusal than an ordinary step for the same
+mistake.

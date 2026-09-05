@@ -731,7 +731,14 @@ export class ErrandRunner {
         stepResult = setOutcome.result;
         if (setOutcome.assigned) {
           setAssigned = setOutcome.assigned;
-          captures[setAssigned.name] = setAssigned.value;
+          // `defineProperty`, not `captures[name] =` — same `__proto__`
+          // hazard the scope write guards against, one map further on.
+          Object.defineProperty(captures, setAssigned.name, {
+            value: setAssigned.value,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
           emit({
             type: 'capture',
             line,

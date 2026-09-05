@@ -1354,6 +1354,31 @@ describe('SessionManager', () => {
       });
     });
 
+    it('tags a Set assignment as source "assignment" in outputSources', async () => {
+      const response = await manager.executeSteps('session-1', {
+        steps: ['Set {{summary}} to "hello, {{who}}"'],
+        parameters: { who: 'world' },
+      });
+
+      expect(response.outputs).toMatchObject({ summary: 'hello, world' });
+      expect(response.outputSources).toMatchObject({ summary: 'assignment' });
+    });
+
+    it('does not relabel a parameter a later Set rewrites', async () => {
+      // `outputSources` documents itself as keeping a variable's ORIGINAL
+      // identity rather than hiding it behind the latest source, and every
+      // other write site is first-write-wins. The Set branch wrote
+      // unconditionally, which moved a `## Parameters` value out of the
+      // Parameters section of any client that groups by this.
+      const response = await manager.executeSteps('session-1', {
+        steps: ['Set {{region}} to "au"'],
+        parameters: { region: 'eu' },
+      });
+
+      expect(response.outputs).toMatchObject({ region: 'au' });
+      expect(response.outputSources).toMatchObject({ region: 'parameter' });
+    });
+
     it('tags [output:] captures as source "capture" in outputSources', async () => {
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
         if (opts.resolvedParameters) {

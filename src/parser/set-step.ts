@@ -15,9 +15,17 @@
  *    so a claim that does not complete is an error naming the line rather than
  *    prose handed to a model.
  *
- * Both take the instruction — the text after the `N. ` ordinal, with any
- * `[no-hooks]` marker already stripped (`extractSteps` does that before
- * anything here runs).
+ * Both take the instruction — the text after the `N. ` ordinal — and strip a
+ * leading `[no-hooks]` marker themselves.
+ *
+ * That strip is not redundant with `extractSteps`, which only covers the
+ * markdown path. `runner-core`'s `extractSteps` deliberately keeps the marker
+ * when it puts a step on the wire, so the Sessions API and the errand runner
+ * receive it verbatim — and they were the two callers that then failed to
+ * recognise `[no-hooks] Set {{x}} to "y"` and sent it to the model as prose.
+ * Since TestBench is the primary client of that path, the marker had to be
+ * handled here rather than at each call site, where it had already been
+ * forgotten twice.
  */
 
 export interface ParsedSetStep {
@@ -71,18 +79,28 @@ const CLAIM_RE = /^set\s+\{\{\s*\w+\s*\}\}\s+to\b/i;
 /** The braces as written, for an error that can quote them back. */
 const TARGET_BRACES_RE = /^set\s+(\{\{\s*(\w+)\s*\}\})/i;
 
+/** The `[no-hooks]` prefix, matching `NO_HOOKS_MARKER` in section-match.ts.
+ *  Duplicated rather than imported to keep this module import-free — the
+ *  TestBench mirror suite loads it directly under Node's type stripping. */
+const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
+
+/** The instruction as the grammar sees it: trimmed, marker removed. */
+function normalise(instruction: string): string {
+  return instruction.trim().replace(NO_HOOKS_PREFIX, '').trim();
+}
+
 /** `{ name, template }`, or null when the line is not a Set step at all.
  *  A line that CLAIMS the form and does not parse also answers null here —
  *  {@link setStepError} is what turns that into a diagnostic. */
 export function parseSetStep(instruction: string): ParsedSetStep | null {
-  const match = SET_STEP_RE.exec(instruction.trim());
+  const match = SET_STEP_RE.exec(normalise(instruction));
   if (!match) return null;
   return { name: match[1]!, template: match[2]! };
 }
 
 /** True when the line opens `Set {{name}} to` — whether or not it completes. */
 export function isSetStepClaim(instruction: string): boolean {
-  return CLAIM_RE.test(instruction.trim());
+  return CLAIM_RE.test(normalise(instruction));
 }
 
 /**
@@ -94,7 +112,7 @@ export function isSetStepClaim(instruction: string): boolean {
  * that validates ahead of a run.
  */
 export function setStepError(instruction: string, where = ''): string | null {
-  const trimmed = instruction.trim();
+  const trimmed = normalise(instruction);
   if (!isSetStepClaim(trimmed)) return null;
   if (parseSetStep(trimmed) !== null) return null;
 
