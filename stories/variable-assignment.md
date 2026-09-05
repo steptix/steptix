@@ -1,5 +1,9 @@
 # Setting a variable from other variables, without a model in the loop
 
+**Built 2026-09-05.** All four step loops, both parse-time refusal families,
+both editor mirrors and the docs. §"What the build showed" at the end records
+what the implementation learned that the spec had not anticipated.
+
 ## In plain terms
 
 A test's variables only ever come from somewhere *outside* the test: a value
@@ -559,3 +563,98 @@ change).
   would be warned as "no value" on every MCP run of that file. If a test
   confirms it, teaching the scanner about `Set` targets and about captures is
   the same edit to the same list, and belongs in the same PR.
+
+## What the build showed
+
+Built 2026-09-05. Six things the spec did not anticipate, and one it got
+right for a reason worth keeping.
+
+- **The editor mirrors needed a lookahead, and the parity table is what
+  found it.** Written the obvious way — `^set\s+\{\{(\w+)\}\}\s+to\s+"` —
+  both mirrors accepted `Set {{a}} to "b" trailing`, a line the runtime
+  refuses, and would have offered a completion for a file that cannot parse.
+  Checking the whole grammar is the fix, but the value cannot go *inside* the
+  match: `writesIn` locates the name with `m[0].lastIndexOf(m[1])`, which
+  needs the name to be the match's last name-shaped token and would otherwise
+  find an echo of it inside the template. So the value is a lookahead —
+  `(?=".*"\s*$)` — checked but not consumed. The table caught this on its
+  first run, which is the argument for writing it before the mirrors rather
+  than after.
+
+- **`resolveSetTemplate` belongs beside the substituter, not the parser.**
+  It composes `collectReferences` with `substituteText`, reuses the private
+  `nearMatch`, and echoes `checkOneString`'s refusal wording — none of which
+  is reachable from `src/parser/`. The parser module ended up holding only
+  the grammar, which is the right split anyway: the runtime asks
+  `parseSetStep`, the validators ask `setStepError`.
+
+- **An errand has no `parameters`.** The first errand test passed some, and
+  the Set step correctly failed on the unresolvable reference. An errand's
+  scope starts empty and fills only from captures, so the honest test is a
+  `[output:]` step followed by a Set that reads it — which is also the shape
+  a caller would actually write.
+
+- **`nearMatch` is case-only, by inheritance.** `{{Account}}` for `account`
+  gets "did you mean"; `{{acount_number}}` for `account_number` gets the
+  plain "not a parameter or captured variable of this run". That is
+  `checkOneString`'s existing behaviour and the refusals should stay one
+  family, so it was left alone. Both name the reference, which is the part
+  that matters.
+
+- **The skill scoping really is free, and now proven rather than argued.**
+  A skill invoked twice, live: the undeclared `{{scratch}}` namespaced apart
+  per instance (`__skill1_scratch`, `__skill2_scratch`), the declared output
+  aliased into the caller as `alpha_tag` / `beta_tag`, and the caller
+  assigning from both. Not one line of that is in the Set implementation —
+  it all falls out of the target being a `{{X}}` that `renameVar` already
+  rewrites. The three tests pinning it are the whole point: a later grammar
+  change that stopped treating the target as a placeholder would take this
+  away without failing anything else.
+
+- **A reassignment reads its own previous value.** `Set {{summary}} to
+  "{{summary}} — revised"` works, because the template is resolved before
+  the write. Obvious in hindsight, unstated in the spec, and now the last
+  step of the repo fixture.
+
+- **The thing the spec got right:** recognising on the authored line. Every
+  loop needed it, and the server needed the extra half the spec called for —
+  the partial-re-run guard testing the resolved *template* rather than the
+  whole line, since the target is unresolved by definition and would
+  otherwise trip the guard on every partial re-run.
+
+### The live proof
+
+Through the built CLI with **no AI key in the environment**, so an AI call
+would have failed rather than silently succeeded:
+
+| What | Result |
+| --- | --- |
+| `fixtures/tests/set-variable-demo.md`, six steps | passed, **0 tokens**; literal, multi-variable template, copy, empty value, inner quotes, reassignment |
+| Report rendering | all six values in the ◆ Captured box, correctly escaped |
+| A Set in a `before` hook feeding a main-flow Set | passed, 0 tokens |
+| A skill invoked twice | namespacing and output aliasing as above, 0 tokens |
+| `Set {{reference}} to "Ref: {{acount_number}}"` | step **failed** naming `{{acount_number}}`; the next step never ran |
+| A Set onto a skill's own parameter | refused at parse time, wrapped with the caller |
+| `Set {{ref}} to Ref: 1234` | refused at parse time, naming the file and line |
+| Secret masking | report and run log scanned for the raw value, its HTML-escaped form and both halves: **zero occurrences**. A secret-*named* target masks its own value too, since `secretsNow` recomputes from the live map |
+
+Automated: 44 new tests across the grammar, the resolver, the parse-time
+refusals, the two editor mirrors and the server and errand HTTP seams. Root
+suite 3691 green; testbench-native 575 pass / 1 skipped.
+
+### Still open
+
+- **The Electron runner's `${…}` gap.** The Set branch there threads
+  `parsedTest.envData` through, so a `${data.x}` inside a Set template
+  resolves. Nothing else in that file does — it has never called
+  `interpolateEnvData`, and only worked before because the parser used to
+  bake those values into `parsed.steps`. Every ordinary AI step run through
+  the Electron UI now sends `${data.x}` to the model as literal text. Not
+  caused by this story and not fixed by it; worth its own issue.
+
+- **Does `missingParameters` misreport captured names?** Still unproven. The
+  Set half is done — a target the same step list assigns is no longer
+  reported — but the scan still has no exclusion for `[store as:]` / `[as:]`
+  writers, so `{{balance}}` after `Read the balance [as: balance]` looks as
+  though it would still be warned about on every MCP run. Same list, same
+  edit, whenever someone confirms it with a test.
