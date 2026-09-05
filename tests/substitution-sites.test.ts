@@ -42,9 +42,15 @@ import path from 'node:path';
  * them: an aliased import (`import { interpolate as bake }`), a new
  * substitution helper under a name not listed here, and dynamic dispatch.
  * This is a canary over the names it knows, not a proof over all of them.
+ *
+ * `resolveStepText` is the one such helper we know about: the Electron
+ * adapter's private wrapper over the first two. Listed so that a new caller
+ * of it is counted — the whole point of the count — rather than hidden
+ * behind the wrapper's single line (issues/resolved/052 §What the review
+ * found).
  */
 const SUBSTITUTION_CALL =
-  /\b(interpolate|interpolateQuiet|interpolateEnvData|interpolateEnvDataDeep|substituteText|substituteAction)\s*\(/g;
+  /\b(interpolate|interpolateQuiet|interpolateEnvData|interpolateEnvDataDeep|substituteText|substituteAction|resolveStepText)\s*\(/g;
 
 /**
  * Why each call site is safe. The classification is the load-bearing part —
@@ -91,12 +97,14 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // its own small proof that a hand-written inventory needs a mechanical
   // check: it is one of the four loops the feature's whole claim names.
   //
-  // Two calls, and only ONE is `step-text/authored` — the run loop, which
-  // reads the authored line first. The other is `steer()`, an instruction
-  // the user types at a breakpoint, which is not a test step and has no
-  // `Set` branch at all; a `Set` typed there goes to the model. The label is
-  // the stricter of the two rather than a claim about both.
-  'src/ui/main/runner-adapter.ts': { why: 'step-text/authored', calls: 2 },
+  // Five: the `resolveStepText` definition, the two raw calls on its one
+  // line — env/data, then `{{…}}` — and its two callers (issues/resolved/052).
+  // The run loop reaches it only after `parseSetStep` has read the authored
+  // line, which is what the label certifies. `steer()` reaches it too, for an
+  // instruction the user types at a breakpoint — not a test step, and with
+  // no `Set` branch at all; a `Set` typed there goes to the model. The label
+  // is the stricter of the two rather than a claim about both.
+  'src/ui/main/runner-adapter.ts': { why: 'step-text/authored', calls: 5 },
 };
 
 function walk(dir: string, out: string[] = []): string[] {

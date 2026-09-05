@@ -77,6 +77,13 @@ async function uiCommand(
   // lets Electron pick Wayland when available and fall back to X11.
   const spawnEnv = { ...process.env };
   delete spawnEnv['ELECTRON_RUN_AS_NODE'];
+  // The environment's NAME as well as its values. `loadEnvFile` above put
+  // `.env.<name>` into this process's environment, which the child inherits,
+  // but the runner also has to know which environment was selected — to load
+  // `data/<name>.json` and to resolve `${env.X}` / `${data.x}` in step text
+  // (issues/resolved/052). Same variable `aiui run` reads when it is given no
+  // `--env` flag.
+  if (opts.env) spawnEnv['AUTOMATION_ENV'] = opts.env;
 
   const extraFlags = process.platform === 'linux' ? ['--no-sandbox', '--ozone-platform-hint=auto'] : [];
 
