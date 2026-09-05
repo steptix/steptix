@@ -360,3 +360,80 @@ export function forwardInterpolate(
   if (Object.keys(params).length === 0) return actions;
   return actions.map((action) => substituteAction(action, { parameters: params }));
 }
+
+/**
+ * The value a `Set {{name}} to "template"` step stores, or the reason it
+ * cannot (stories/variable-assignment.md §Where it runs).
+ *
+ * Lives here rather than beside the parser because it is the same job the
+ * executor's own substitution does — resolve both syntaxes over one string —
+ * and because the refusals should read as one family with
+ * `checkOneString`'s. A Set step names no action and no field, so the prefix
+ * differs and the rest is deliberately word-for-word.
+ *
+ * The check is the whole point of the split: `substituteText` leaves a
+ * reference it cannot answer exactly as written, which for an action is
+ * belt-and-braces behind a turn the checker already refused, but for a Set
+ * step would store the literal `{{acount_number}}` and pass the step green.
+ *
+ * `${…}` is checked only when the run HAS an environment, matching
+ * `checkOneString`: without one, nothing resolved those references in any
+ * other step's text either, so refusing here would single out the one step
+ * that can see it.
+ */
+export function resolveSetTemplate(
+  name: string,
+  template: string,
+  values: PlaceholderValues,
+  definedLater?: ReadonlySet<string> | undefined,
+): { value: string } | { error: string } {
+  const where = `Set {{${name}}}: the template`;
+  const known = new Set(Object.keys(values.parameters));
+  const { placeholders, envRefs } = collectReferences(template);
+
+  for (const { name: ref, raw } of placeholders) {
+    const canonical = `{{${ref}}}`;
+    if (raw !== canonical) {
+      const key = known.has(ref) ? ref : (nearMatch(ref, known) ?? ref);
+      return {
+        error:
+          `${where} wrote \`${raw}\`. A placeholder carries no spaces inside ` +
+          `its braces — write \`{{${key}}}\`.`,
+      };
+    }
+    if (known.has(ref)) continue;
+    const near = nearMatch(ref, known);
+    if (near !== undefined) {
+      return {
+        error:
+          `${where} references \`${canonical}\`, which is not a parameter or ` +
+          `captured variable of this run — did you mean \`{{${near}}}\`?`,
+      };
+    }
+    if (definedLater?.has(ref)) {
+      return {
+        error:
+          `${where} references \`${canonical}\`, which has no value yet: it is ` +
+          `captured later in this test, or by a step this run skipped.`,
+      };
+    }
+    return {
+      error:
+        `${where} references \`${canonical}\`, which is not a parameter or ` +
+        `captured variable of this run.`,
+    };
+  }
+
+  if (values.envData) {
+    for (const ref of envRefs) {
+      if (resolveEnvDataRef(ref, values.envData) !== undefined) continue;
+      return {
+        error:
+          `${where} references \`\${${ref}}\`, which this run's environment ` +
+          `and data files cannot resolve.`,
+      };
+    }
+  }
+
+  return { value: substituteText(template, values) };
+}

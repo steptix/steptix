@@ -22,6 +22,8 @@ import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
+import { parseSetStep } from '../parser/set-step.js';
+import { runSetStep } from './set-step-runner.js';
 import { generateReport, getPrimaryModel, videoBaseNameFor, countStepOrigins } from '../report/generator.js';
 import { mergeRowReports, type RowReport } from '../report/merge-rows.js';
 import { appendRunHistory } from '../report/history-appender.js';
@@ -741,10 +743,31 @@ export async function runTest(
         const raw = instructions[idx]!;
         const toolCall = toolCalls[idx] ?? null;
         const sourceSkill = sourceSkills[idx] ?? null;
-        const hookInstruction = interpolate(raw, resolvedParameters);
+        // Same authored-line rule as the main flow. A hook's `${…}` was
+        // already resolved at parse time (`applyEnvDataInterpolation` still
+        // rewrites `parsed.hooks`, since a hook body is never shown to the
+        // model as authored text), so the template carries `{{…}}` only —
+        // and `resolveSetTemplate` is a no-op on the half that is missing.
+        const hookSetStep = parseSetStep(raw);
+        const hookInstruction = hookSetStep ? raw : interpolate(raw, resolvedParameters);
 
         let result: StepResult;
-        if (toolCall) {
+        if (hookSetStep) {
+          logger.info(`Running ${scope} hook: ${hookInstruction}`);
+          const outcome = runSetStep(
+            hookSetStep,
+            hookInstruction,
+            hookIndex,
+            resolvedParameters,
+            test.envData,
+          );
+          result = outcome.result;
+          if (outcome.assigned) {
+            logger.info(
+              `[set] ${outcome.assigned.name} = "${redact(outcome.assigned.value, secretsNow())}"`,
+            );
+          }
+        } else if (toolCall) {
           logger.info(`Running ${scope} hook (tool): ${hookInstruction}`);
           result = await runToolStep(toolCall, hookInstruction, hookIndex);
         } else {
@@ -948,12 +971,20 @@ export async function runTest(
       // `originalStep` (stories/placeholder-preserving-actions.md §Runner and
       // server). It is what the model reads.
       const rawInstruction = test.steps[i] ?? '';
+      // `Set {{x}} to "…"` is read off the AUTHORED line and never
+      // interpolated: `interpolate` would replace the TARGET with its own
+      // value on any run after the first, and warn about it on the first
+      // (stories/variable-assignment.md §Locked, "Recognised on the authored
+      // line"). Its own template is resolved inside the branch instead.
+      const setStep = parseSetStep(rawInstruction);
       // Env/data first (parse-time semantics: fixed for the whole run), then
       // runtime `{{...}}` — the server's order, now the CLI's too.
-      const instruction = interpolate(
-        test.envData ? interpolateEnvData(rawInstruction, test.envData) : rawInstruction,
-        resolvedParameters,
-      );
+      const instruction = setStep
+        ? rawInstruction
+        : interpolate(
+            test.envData ? interpolateEnvData(rawInstruction, test.envData) : rawInstruction,
+            resolvedParameters,
+          );
 
       // The one log line that ignores the log level — so the one place the
       // resolved password would always print. Masked; the step itself runs
@@ -966,13 +997,29 @@ export async function runTest(
       tokensAtStepStart = tokenTracker.total;
 
       // Handle [input: variable_name] steps — pause for user input
-      const inputStep = parseInputStep(instruction);
-      const interactiveStep = !inputStep ? parseInteractiveStep(instruction) : null;
-      const outputStep = !inputStep && !interactiveStep ? parseOutputStep(instruction) : null;
+      const inputStep = setStep ? null : parseInputStep(instruction);
+      const interactiveStep = !inputStep && !setStep ? parseInteractiveStep(instruction) : null;
+      const outputStep =
+        !inputStep && !interactiveStep && !setStep ? parseOutputStep(instruction) : null;
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
 
-      if (inputStep) {
+      if (setStep) {
+        const setOutcome = runSetStep(
+          setStep,
+          instruction,
+          i + 1,
+          resolvedParameters,
+          test.envData,
+        );
+        stepResult = setOutcome.result;
+        if (setOutcome.assigned) {
+          logger.info(
+            `[set] ${setOutcome.assigned.name} = ` +
+              `"${redact(setOutcome.assigned.value, secretsNow())}"`,
+          );
+        }
+      } else if (inputStep) {
         const stepStartTime = Date.now();
         const value = await promptUserForInput(inputStep.promptText);
         resolvedParameters[inputStep.variable] = value;
