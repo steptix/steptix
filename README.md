@@ -387,6 +387,7 @@ mobile user agent, or devicePixelRatio emulation); see
 
 ### Special step prefixes
 
+- `Set {{name}} to "text"` -- assigns a variable from other variables, with no AI call (see [Variables](#setting-a-variable))
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
 - `[interactive] optional hint` -- opens an interactive REPL (commands are `/`-prefixed: `/continue` advance, `/resume` jump to any step, `/screenshot` capture, `/help` for the full list)
 - `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory; `[skill: subfolder/name args]` for a skill in a subfolder (see [Skills](#skills))
@@ -395,6 +396,27 @@ mobile user agent, or devicePixelRatio emulation); see
 For `[skill:` and `[tool:` — and only those two — the colon is optional: `[skill login]` is the same call as `[skill: login]`. (`[input:`, `[output:]` and `[interactive]` are unchanged and still need their colon.) The keyword must be followed by the colon or whitespace, so bracketed prose like `[skills]` or `[skillful]` is never mistaken for an invocation, and neither is a markdown link such as `[skill guide](./guide.md)`.
 
 The two spellings differ in one way, deliberately. `[skill: ...]` is unambiguous intent, so a malformed one is a parse error pointing at the problem. The colon-less form is reachable by ordinary English — `Verify the [skill level: expert] badge` — so when it doesn't parse it is simply treated as prose rather than failing the file. Write the colon if you want the strict reading.
+
+### Setting a variable
+
+Every other way a variable gets a value reads it from somewhere outside the test — the page, a tool, a parameter, an environment file. `Set` is the one that builds a value out of values you already have:
+
+```markdown
+## Steps
+1. Read the available balance [as: balance]
+2. Set {{summary}} to "{{username}} had {{balance}} available"
+3. Assert that "{{summary}}" contains "{{balance}}"
+```
+
+The right-hand side is always a double-quoted string. Every `{{name}}` and `${env.X}` / `${data.x}` inside it resolves against the run as it stands at that step, and the result is stored under the target name. Copying one variable to another is just `Set {{backup}} to "{{original}}"`, and `Set {{x}} to ""` clears one.
+
+It costs nothing: no AI call, no page interaction, no action-cache entry. Notes:
+
+- The value is text, and only text. `"{{n}} + 1"` stores those characters — arithmetic and string surgery belong in a [tool](#tools), where `regex_extract` and friends already live.
+- A `{{name}}` the run cannot resolve **fails the step**, naming it. Storing the literal `{{typo}}` would pass green and break a later step instead.
+- The value may not contain a double quote — there is no way to tell one inside the value from the one that closes it, and guessing would silently store the wrong text. A step like `Set {{q}} to "shoes" and search for "shoes"` is refused for the same reason.
+- `Set {{name}} to` claims the line the way `[skill:` does, so a missing quote is a parse error rather than prose sent to the model. `Set the filter to Recent` names no variable and stays an ordinary AI step.
+- Inside a skill you can assign to a declared `## Outputs` name or an internal one, but not to one of the skill's own `## Parameters` — a caller's arguments are written into the step text rather than kept as variables, so there would be no variable there to assign to. The same applies to the columns of a table under a `### Section`. Both are refused when the file is parsed.
 
 ## Skills
 

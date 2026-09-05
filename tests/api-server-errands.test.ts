@@ -748,6 +748,44 @@ describe('POST /errands', () => {
     });
   });
 
+  it('a Set step builds on an earlier capture, and costs no executor call of its own', async () => {
+    // The errand half of stories/variable-assignment.md. An errand carries no
+    // `parameters` — its scope starts empty and fills only from captures — so
+    // a Set here reads what an earlier step stored, and the receipt is the
+    // only place either of them survives.
+    stepThatCaptures('order', 'ORD-42');
+    const before = vi.mocked(executeStepMock).mock.calls.length;
+
+    const { status, body } = await api('POST', '/errands', {
+      ...errandBody({
+        steps: ['[output: order] read the order id', 'Set {{ref}} to "Ref: {{order}}"'],
+      }),
+    });
+
+    expect(status).toBe(200);
+    expect(body.status).toBe('passed');
+    // One call for the capture step, none for the Set.
+    expect(vi.mocked(executeStepMock).mock.calls.length).toBe(before + 1);
+    expect(body.captures).toEqual({ order: 'ORD-42', ref: 'Ref: ORD-42' });
+    expect(body.results[1]).toMatchObject({
+      step: 'Set {{ref}} to "Ref: {{order}}"',
+      status: 'passed',
+      outputs: { ref: 'Ref: ORD-42' },
+    });
+  });
+
+  it('a Set step whose template cannot resolve fails the errand', async () => {
+    const { body } = await api('POST', '/errands', {
+      ...errandBody({ steps: ['Set {{a}} to "{{missing}}"', 'never reached'] }),
+    });
+
+    expect(body.status).toBe('failed');
+    expect(body.error.step).toBe(1);
+    expect(String(body.error.message)).toContain('{{missing}}');
+    expect(body.captures).toEqual({});
+    expect(body.stepsCompleted).toBe(0);
+  });
+
   it('streams the same events a session does, with the errand on the done frame', async () => {
     stepThatCaptures('order', 'A-9');
 

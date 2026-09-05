@@ -6,6 +6,7 @@
  * path). This allows the executor to present all possible outcomes to the AI
  * simultaneously rather than evaluating them sequentially.
  */
+import { parseSetStep } from '../parser/set-step.js';
 
 /** A single step reference within a group */
 export interface GroupedStep {
@@ -73,7 +74,30 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
       i++;
     }
 
-    // The next non-conditional step is the continuation
+    // An assignment cannot be a continuation, and the conditionals before it
+    // therefore form NO GROUP AT ALL.
+    //
+    // A continuation is handed to `executeBranchedStep` for the MODEL to
+    // perform if the conditional did not apply. `Set {{x}} to "…"` has no
+    // model half, so swallowing it means the variable is never assigned and
+    // the step costs a turn anyway — both halves of what this step form
+    // exists to avoid (stories/variable-assignment.md).
+    //
+    // The obvious fix — a synthetic "no continuation" like the end-of-list
+    // case — is WRONG, and shipping it was worse than the bug. Both loops
+    // advance with `i = group.continuationStep.index` and then `i++`
+    // (test-runner.ts, session-manager.ts), so a synthetic index of
+    // `lastConditional + 1` — which is the assignment's own index — jumps
+    // straight past it: the step vanished from the run, a model turn was
+    // spent performing the placeholder string, and its result was filed under
+    // the assignment's index. Declining to register the index did nothing,
+    // because the skip is the jump, not the map.
+    //
+    // So: emit no group. The conditionals run as ordinary AI steps, which is
+    // what they were before grouping existed, and the assignment runs as
+    // itself. Nothing jumps, so nothing can be skipped.
+    if (i < steps.length && parseSetStep(steps[i]!)) continue;
+
     let continuation: GroupedStep;
     if (i < steps.length) {
       continuation = { index: i, instruction: steps[i]! };

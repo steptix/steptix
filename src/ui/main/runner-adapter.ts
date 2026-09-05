@@ -24,6 +24,8 @@ import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
 import { loadContextFiles } from '../../context/loader.js';
 import { interpolate } from '../../parser/parameters.js';
+import { parseSetStep } from '../../parser/set-step.js';
+import { runSetStep } from '../../runner/set-step-runner.js';
 import { redactReport, runSecrets } from '../../utils/secrets.js';
 import { AiClient } from '../../ai/client.js';
 import { formatStepHistoryEntry } from '../../ai/prompts.js';
@@ -396,7 +398,13 @@ export class UIRunnerAdapter {
       this.currentStepIndex = stepIndex;
 
       const rawInstruction = parsedTest.steps[i] ?? '';
-      const instruction = interpolate(rawInstruction, this.resolvedParameters);
+      // Read off the AUTHORED step and never interpolated — `interpolate`
+      // would replace the TARGET with its own value once it holds one
+      // (stories/variable-assignment.md §Locked).
+      const setStep = parseSetStep(rawInstruction);
+      const instruction = setStep
+        ? rawInstruction
+        : interpolate(rawInstruction, this.resolvedParameters);
 
       // --- Check for breakpoint or stepOverNext BEFORE executing ---
       if (this.breakpoints.has(stepIndex) || this.stepOverNext) {
@@ -406,6 +414,45 @@ export class UIRunnerAdapter {
         // After resuming, re-check stopped and pointer override
         if (this.stopped) break;
         if (this.pointerOverride !== undefined) continue; // loop will pick up override
+      }
+
+      // --- Handle `Set {{name}} to "…"` steps ---
+      // `parsedTest.envData` is threaded through so a `${…}` inside the
+      // template resolves. Nothing else in this runner resolves `${…}` — it
+      // never called `interpolateEnvData`, and got away with it while the
+      // parser still baked those values into `parsedTest.steps`
+      // (stories/variable-assignment.md §What was measured). That gap is not
+      // this step's to fix, but it is not this step's to inherit either.
+      if (setStep) {
+        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        const outcome = runSetStep(
+          setStep,
+          instruction,
+          stepIndex,
+          this.resolvedParameters,
+          parsedTest.envData,
+        );
+        this.stepResults.push(outcome.result);
+        this.emit('runner:step-complete', {
+          stepIndex,
+          // A Set step is only ever passed or failed — it has nothing to skip.
+          status: outcome.result.status === 'passed' ? 'passed' : 'failed',
+          durationMs: outcome.result.durationMs,
+        });
+        this.conversationHistory.push(
+          formatStepHistoryEntry(
+            stepIndex,
+            instruction,
+            outcome.result.status === 'passed',
+            this.page?.url(),
+          ),
+        );
+        if (outcome.result.status === 'failed') {
+          this.emit('runner:error', { message: outcome.result.error ?? 'Set step failed' });
+          break;
+        }
+        i++;
+        continue;
       }
 
       // --- Handle [input: variable] steps ---

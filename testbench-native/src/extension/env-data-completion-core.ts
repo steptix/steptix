@@ -192,7 +192,7 @@ type ClassifiedLines = ReturnType<typeof classifyLines>;
  *  write to is a drift that no test can see). */
 export interface CaptureName {
   name: string;
-  marker: 'input' | 'output' | 'as' | 'out-alias';
+  marker: 'input' | 'output' | 'as' | 'out-alias' | 'set';
   /** 1-based line of the capturing step or hook entry. */
   line: number;
   /** 0-based column of the name token on that line, and its length. */
@@ -227,20 +227,40 @@ const CAPTURE_PATTERNS: ReadonlyArray<{
   // (src/runner/test-runner.ts:43,49) only match at the instruction's start, so
   // a marker anywhere else binds nothing. (`^` with no `/m` also makes these
   // single-match, which is the other half of the runner's behaviour.)
-  { re: /^\[input:\s*(\w+)\]/gi, marker: 'input' },
-  { re: /^\[output:\s*(\w+)\]/gi, marker: 'output' },
+  { re: /^\[input:\s*(\w+)\]/gdi, marker: 'input' },
+  { re: /^\[output:\s*(\w+)\]/gdi, marker: 'output' },
   // Inline captures, both spellings (cf. STORE_AS_RE, src/skills/expander.ts),
   // anywhere in the instruction — that is how the AI prompt reads them, and how
   // the runner's own `[output:]` enrichment appends one.
-  { re: /\[(?:store\s+)?as:\s*(\w+)\]/gi, marker: 'as' },
+  { re: /\[(?:store\s+)?as:\s*(\w+)\]/gdi, marker: 'as' },
   // `[skill: n out.k="alias"]` — the QUOTED alias is what enters the caller's
   // scope (variables-panel.js:43); `out.k` is the callee's own name and is not
   // addressable from here. One invocation may expose several.
-  { re: /\bout\.\w+\s*=\s*"([^"]+)"/g, marker: 'out-alias' },
+  { re: /\bout\.\w+\s*=\s*"([^"]+)"/gd, marker: 'out-alias' },
+  // `Set {{name}} to "…"` (stories/variable-assignment.md). Anchored and
+  // single-match, because the runtime is: `parseSetStep` reads the whole
+  // instruction, so a `Set …` further along a line binds nothing.
+  //
+  // The value is a LOOKAHEAD so that a line the runtime refuses — an
+  // unquoted value, trailing text, or a value containing a quote — offers no
+  // name for a file that cannot run, while the match text still ends at the
+  // name. `[^"]*` mirrors `parseSetStep`'s own grammar exactly; it used to be
+  // `.*`, which accepted `Set {{a}} to "x" and click "Save"` here and stored
+  // garbage there.
+  { re: /^set\s+\{\{(\w+)\}\}\s+to\s+(?="[^"]*"\s*$)/gdi, marker: 'set' },
 ];
 
-/** `N. ` ordinal prefix — stripped to get the instruction the runner sees. */
-const STEP_PREFIX_RE = /^\s*\d+\.\s+/;
+/** `N. ` ordinal, plus any `[no-hooks]` marker — stripped to get the
+ *  instruction the runtime sees.
+ *
+ *  The marker is stripped in two places on the runtime side, and it needs
+ *  both: `extractSteps` (markdown.ts) removes it on the CLI's parse, but the
+ *  wire deliberately carries it verbatim, so `parseSetStep` strips it too.
+ *  A mirror that stripped only the ordinal went blind to
+ *  `[no-hooks] Set {{x}} to "…"` — no completion, no F12, no panel row. Only
+ *  the ANCHORED patterns (input, output, set) were affected; the others
+ *  match anywhere on the line. */
+const STEP_PREFIX_RE = /^\s*\d+\.\s+(?:\[no-hooks\]\s*)?/i;
 /** `## Hooks` heading, and its `- scope: instruction` entries. Scope names
  *  match the parser's `HOOK_SCOPES` (src/parser/markdown.ts:25). */
 const HOOKS_HEADING_RE = /^(#{2,})\s+hooks\s*$/i;
@@ -410,14 +430,17 @@ function writesIn(instruction: string, line: number, offset: number): CaptureNam
   const hits: Array<{ at: number; name: string; marker: CaptureName['marker'] }> = [];
   for (const { re, marker } of CAPTURE_PATTERNS) {
     for (const m of instruction.matchAll(re)) {
-      // The captured name is the last name-shaped token of every pattern's
-      // match, so lastIndexOf finds it even when an earlier word echoes it
-      // (`[store as: as]`).
-      hits.push({
-        at: (m.index ?? 0) + m[0].lastIndexOf(m[1]!),
-        name: m[1]!,
-        marker,
-      });
+      // The group's OWN start offset, via the `d` flag, rather than
+      // `m[0].lastIndexOf(m[1])`.
+      //
+      // That heuristic assumed the name is the last name-shaped token of the
+      // match. Four patterns satisfy it; the `set` one does not, because its
+      // match text ends with the keyword ` to `. Measured before the fix:
+      // `Set {{to}} to "x"` located the name at the keyword, and `{{t}}` and
+      // `{{o}}` likewise — F12 and completion pointed at the wrong span.
+      // `indices` is exact for every pattern and needs no assumption at all.
+      const at = m.indices?.[1]?.[0] ?? (m.index ?? 0) + m[0].lastIndexOf(m[1]!);
+      hits.push({ at, name: m[1]!, marker });
     }
   }
   hits.sort((a, b) => a.at - b.at);

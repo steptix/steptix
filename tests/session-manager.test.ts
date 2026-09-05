@@ -1354,6 +1354,70 @@ describe('SessionManager', () => {
       });
     });
 
+    it('tags a Set assignment as source "assignment" in outputSources', async () => {
+      const response = await manager.executeSteps('session-1', {
+        steps: ['Set {{summary}} to "hello, {{who}}"'],
+        parameters: { who: 'world' },
+      });
+
+      expect(response.outputs).toMatchObject({ summary: 'hello, world' });
+      expect(response.outputSources).toMatchObject({ summary: 'assignment' });
+    });
+
+    it('does not relabel a parameter a later Set rewrites', async () => {
+      // `outputSources` documents itself as keeping a variable's ORIGINAL
+      // identity rather than hiding it behind the latest source, and every
+      // other write site is first-write-wins. The Set branch wrote
+      // unconditionally, which moved a `## Parameters` value out of the
+      // Parameters section of any client that groups by this.
+      const response = await manager.executeSteps('session-1', {
+        steps: ['Set {{region}} to "au"'],
+        parameters: { region: 'eu' },
+      });
+
+      expect(response.outputs).toMatchObject({ region: 'au' });
+      expect(response.outputSources).toMatchObject({ region: 'parameter' });
+    });
+
+    it('keeps a __proto__ assignment in session.outputs across the wire', async () => {
+      // `session.outputs` is a plain object, so `outputs['__proto__'] =`
+      // creates no own key: the value resolved inside the batch and then
+      // vanished from the HTTP outputs map and from the next batch's seed.
+      // Round two fixed it and shipped no test; a revert to plain assignment
+      // left all 3709 tests green.
+      const response = await manager.executeSteps('session-1', {
+        steps: ['Set {{__proto__}} to "danger"'],
+      });
+
+      // Deliberately NOT `toMatchObject({ __proto__: 'danger' })`: in an
+      // object literal that key is the prototype-setter form, ignored for a
+      // string, so the expected object is `{}` and the assertion passes
+      // against anything. Found by review — in the test whose whole subject
+      // is that exact hazard.
+      expect(Object.getOwnPropertyDescriptor(response.outputs, '__proto__')?.value).toBe(
+        'danger',
+      );
+      expect(Object.keys(response.outputs)).toContain('__proto__');
+      // And it must be a plain own property, not a mutated prototype.
+      expect(Object.getPrototypeOf(response.outputs)).toBe(Object.prototype);
+    });
+
+    it('fails the step, rather than the request, on an unresolvable ${...}', async () => {
+      // `interpolateEnvData` throws on an unknown reference, and the run loop
+      // has no catch above it — so a bad reference inside a Set template
+      // escaped as a server error instead of failing its own step. The guard
+      // added for it was unreachable until the pre-loop interpolation (which
+      // feeds the grouper) also learned to skip Set steps.
+      const response = await manager.executeSteps('session-1', {
+        steps: ['Set {{note}} to "${data.nope}"'],
+        envName: 'test',
+        env: { AI_API_KEY: 'k' },
+      });
+
+      expect(response.status).toBe('failed');
+      expect(String(response.error?.message)).toContain('${data.nope}');
+    });
+
     it('tags [output:] captures as source "capture" in outputSources', async () => {
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
         if (opts.resolvedParameters) {

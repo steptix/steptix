@@ -1688,6 +1688,8 @@ Step syntax: plain English, one action per step. Also supported:
                             (sub/name for one kept in a subfolder of it)
   [tool: name arg=value]    call a project tool (JS/TS) directly
   [input: label]            needs a human — SKIPPED in an unattended run
+  Set {{name}} to "text"    assign a variable from ones you already have,
+                            no AI call: Set {{ref}} to "Ref: {{order_id}}"
   Section Name              call an inline "### Section Name" from the same file
   \${env.VAR} / \${data.key} substituted from the selected environment
   {{param}}                 substituted from ## Parameters
@@ -1746,6 +1748,8 @@ Step syntax: plain English, one action per step. Also supported:
                             env_name, or they reach the AI as literal text
   {{name}}                  substituted from a capture made EARLIER IN THIS
                             errand; never from a previous one
+  Set {{name}} to "text"    assign a variable from ones you already have,
+                            no AI call: Set {{ref}} to "Ref: {{order_id}}"
   Upload file attachments/x.png   a file path is relative to the project root
 [skill: ...] and [tool: ...] are refused here — those need run_steps in a
 project, which is what carries the skills and tools directories.`.trim();

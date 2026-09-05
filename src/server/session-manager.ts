@@ -38,6 +38,8 @@ import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
+import { parseSetStep } from '../parser/set-step.js';
+import { runSetStep } from '../runner/set-step-runner.js';
 import {
   envDataSecretValues,
   interpolateEnvData,
@@ -562,7 +564,7 @@ export type RunEvent =
       codeBehindStale?: { file: string; error: string };
     }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
-  | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' }
+  | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' | 'assignment' }
   | {
       type: 'done';
       status: 'passed' | 'failed' | 'error' | 'aborted';
@@ -737,7 +739,7 @@ export interface StepResponse {
   outputs: Record<string, string>;
   /** Per-key provenance for `outputs`, same keys. Additive: older clients
    *  ignore it. See `ManagedSession.outputSources` for the labelling rules. */
-  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput'>;
+  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput' | 'assignment'>;
   error: { step: number; message: string } | null;
   pageTitle: string;
 }
@@ -1037,7 +1039,7 @@ interface ManagedSession {
    * the variable's original identity rather than hiding it behind the latest
    * source.
    */
-  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput'>;
+  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput' | 'assignment'>;
   totalStepsExecuted: number;
   conversationHistory: string[];
   aiClient: AiClient;
@@ -3404,8 +3406,18 @@ export class SessionManager {
     // env/data substitutions first so grouping looks at the final step text
     // (otherwise `${data.foo}` placeholders could change which steps look
     // alike for grouping purposes).
+    //
+    // A Set step is passed through UNINTERPOLATED, for two reasons that both
+    // bite. `interpolateEnvData` throws on an unknown `${…}`, and this call
+    // sits at method-body level with no `try` above it — so a bad reference
+    // inside a Set template escaped the whole request as a server error
+    // rather than failing its own step, which is exactly what the guard 600
+    // lines below was written to prevent and could not, because this runs
+    // first. And `identifyStepGroups` must see the same text the run loop
+    // does (`parseSetStep(originalStep)`), or the two disagree about whether
+    // a line is an assignment at all.
     const interpolatedSteps = envDataCtx
-      ? effectiveSteps.map((s) => interpolateEnvData(s, envDataCtx))
+      ? effectiveSteps.map((s) => (parseSetStep(s) ? s : interpolateEnvData(s, envDataCtx)))
       : effectiveSteps;
     const stepGroups = identifyStepGroups(interpolatedSteps);
 
@@ -3990,10 +4002,23 @@ export class SessionManager {
 
         // Apply env-data interpolation first (parse-time semantics: fixed for
         // the whole session), then runtime `{{...}}` parameter substitution.
-        const envInterpolated = envDataCtx
-          ? interpolateEnvData(originalStep, envDataCtx)
-          : originalStep;
-        const interpolated = interpolate(envInterpolated, resolvedParameters);
+        // `Set {{x}} to "…"` is read off the AUTHORED step and never
+        // interpolated — `interpolate` would replace the TARGET with its own
+        // value on a re-run (stories/variable-assignment.md §Locked). Its
+        // template is resolved inside the branch, below.
+        const setStep = parseSetStep(originalStep);
+        // NOT evaluated for a Set step. `interpolateEnvData` THROWS on an
+        // unknown `${…}`, and this loop is `try { … } finally` with no catch,
+        // so a bad reference inside a Set template escaped `executeRun`
+        // entirely and surfaced as a server error rather than a `step:fail`.
+        // Skipping it here is what makes `resolveSetTemplate`'s own per-step
+        // refusal — which names the reference and fails just that step — the
+        // reachable path.
+        const envInterpolated =
+          setStep || !envDataCtx ? originalStep : interpolateEnvData(originalStep, envDataCtx);
+        const interpolated = setStep
+          ? originalStep
+          : interpolate(envInterpolated, resolvedParameters);
 
         // Partial re-run guard: a leftover `{{__skill…}}` after interpolation
         // means this tail step needs an internal value that an earlier (skipped)
@@ -4003,7 +4028,14 @@ export class SessionManager {
         // full run — every internal var is produced before it's consumed. The
         // common case (the failed step itself depends on a skipped step) trips
         // on the first tail step, so nothing runs before the refusal.
-        if (isPartialRerun && /\{\{__skill\w*\}\}/.test(interpolated)) {
+        // For a Set step only the TEMPLATE can depend on a skipped step: the
+        // target is what this step writes, so it is unresolved by definition
+        // and would trip the guard on every partial re-run
+        // (stories/variable-assignment.md §What was measured).
+        const partialRerunSubject = setStep
+          ? interpolate(setStep.template, resolvedParameters)
+          : interpolated;
+        if (isPartialRerun && /\{\{__skill\w*\}\}/.test(partialRerunSubject)) {
           const frame = frameInfoFor(i);
           // Advice that serves every surface this refusal reaches: the
           // Variables-panel re-run, the Stop-debug selection, and a
@@ -4302,10 +4334,54 @@ export class SessionManager {
         // into a `StepResult` so the rest of the loop is unchanged. Without
         // a catalogue, fall through to `executeStep` and let the AI loop
         // see the raw `[tool: ...]` text (legacy behaviour).
-        const toolCall = toolCatalogue ? parseToolCall(originalStep) : null;
+        const toolCall = setStep ? null : toolCatalogue ? parseToolCall(originalStep) : null;
         let stepResult: StepResult;
         try {
-          if (toolCall && toolCatalogue) {
+          if (setStep) {
+            // Assignment: no model, no page, no cache. The capture event is
+            // emitted here rather than by the common sweep below so its
+            // `source` can say `assignment` — the sweep labels everything it
+            // finds `capture` (stories/variable-assignment.md §Locked).
+            const outcome = runSetStep(
+              setStep,
+              interpolated,
+              i + 1,
+              resolvedParameters,
+              envDataCtx,
+            );
+            stepResult = outcome.result;
+            if (outcome.assigned) {
+              const { name, value } = outcome.assigned;
+              // `defineProperty` for the same reason `runSetStep` uses it:
+              // `session.outputs` is a plain `{}`, so `outputs['__proto__'] =`
+              // creates no own key — the value would resolve inside this batch
+              // and then silently vanish from the HTTP outputs map and from
+              // the seed the NEXT batch builds. The guard was one line short
+              // of the write it was meant to protect.
+              Object.defineProperty(session.outputs, name, {
+                value,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              });
+              // First-write-wins, like every other write site here. The field
+              // documents itself as keeping "the variable's original identity
+              // rather than hiding it behind the latest source", and writing
+              // unconditionally broke that: a `## Parameters` value a Set
+              // later rewrote moved out of the Parameters section of the
+              // clients that group by this.
+              if (!(name in session.outputSources)) {
+                session.outputSources[name] = 'assignment';
+              }
+              emit({
+                type: 'capture',
+                line: sourceLineFor(i),
+                name,
+                value,
+                source: 'assignment',
+              });
+            }
+          } else if (toolCall && toolCatalogue) {
             // Tool step-into — Phase 5. When the session's one-shot
             // pause-at-next-tool flag is set, surface a
             // `tool:awaiting-debugger` event and wait for the client to

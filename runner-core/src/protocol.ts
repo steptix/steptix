@@ -151,8 +151,8 @@ export interface OutputEvent {
 }
 
 /**
- * Emitted whenever an `[output: var]` step extracts a value. Lets the
- * webview update the Variables panel live as captures happen.
+ * Emitted whenever a step gives a variable a value. Lets the webview update
+ * the Variables panel live as that happens.
  */
 export interface CaptureEvent {
   type: 'capture';
@@ -160,15 +160,17 @@ export interface CaptureEvent {
   name: string;
   value: string;
   /**
-   * Where this variable came from. Only `'capture'` (an `[output:]`/`[store
-   * as:]` extraction) and `'toolOutput'` (a `[tool:]`/`[skill:]` return)
-   * flow through this event — `'parameter'` values arrive via the separate
-   * `parametersResolved` event, which already tags them by event type, so it
-   * is intentionally absent here. Required on new emitters; consumers talking
-   * to a not-yet-upgraded server must treat an absent `source` as
-   * `'capture'` (the conservative default).
+   * Where this variable came from. Three values flow through this event:
+   * `'capture'` (an `[output:]`/`[store as:]` extraction from the page),
+   * `'toolOutput'` (a `[tool:]`/`[skill:]` return) and `'assignment'` (a
+   * `Set {{name}} to "…"` step — stories/variable-assignment.md).
+   * `'parameter'` values arrive via the separate `parametersResolved` event,
+   * which already tags them by event type, so it is intentionally absent
+   * here. Required on new emitters; consumers talking to a not-yet-upgraded
+   * server must treat an absent — or unrecognised — `source` as `'capture'`
+   * (the conservative default, and what makes adding this third value safe).
    */
-  source: 'capture' | 'toolOutput';
+  source: 'capture' | 'toolOutput' | 'assignment';
 }
 
 export interface DoneEvent {

@@ -12,6 +12,7 @@ import {
 } from './section-match.js';
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
+import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
 import type { ToolCall } from '../tools/types.js';
 import {
   interpolateDataSourcePath,
@@ -240,11 +241,26 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
   const resolvedSteps = parsed.steps.map((s) => interpolateEnvData(s, ctx));
   parsed.toolCalls = resolvedSteps.map((s) => parseToolCall(s));
 
+  // Hooks are still baked at parse time — they are never shown to the model as
+  // authored text, so there is nothing for them to preserve — EXCEPT a `Set`
+  // step, which is read back by `parseSetStep` at run time
+  // (`runHookScope`, src/runner/test-runner.ts). Baking a `${…}` into one
+  // destroys exactly that: a data value containing a `"` turns
+  // `Set {{g}} to "${data.greeting}"` into a line the value grammar refuses,
+  // so the assignment silently became an AI prose step and the variable was
+  // never written. The hook path passes `test.envData` into `runSetStep`, so
+  // leaving the token intact resolves it per step instead — the same order
+  // the main flow uses (stories/variable-assignment.md).
+  // Not the shared guard: a hook Set is not BROKEN by baking, it is simply
+  // better resolved per run (the hook path passes envData to runSetStep), so
+  // the token is preserved rather than the substitution refused.
+  const hookEnvData = (s: string): string =>
+    parseSetStep(s) ? s : interpolateEnvData(s, ctx);
   parsed.hooks = {
-    before: parsed.hooks.before.map((s) => interpolateEnvData(s, ctx)),
-    beforeEach: parsed.hooks.beforeEach.map((s) => interpolateEnvData(s, ctx)),
-    afterEach: parsed.hooks.afterEach.map((s) => interpolateEnvData(s, ctx)),
-    after: parsed.hooks.after.map((s) => interpolateEnvData(s, ctx)),
+    before: parsed.hooks.before.map(hookEnvData),
+    beforeEach: parsed.hooks.beforeEach.map(hookEnvData),
+    afterEach: parsed.hooks.afterEach.map(hookEnvData),
+    after: parsed.hooks.after.map(hookEnvData),
   };
   parsed.hookToolCalls = {
     before: parsed.hooks.before.map((s) => parseToolCall(s)),
@@ -349,7 +365,24 @@ async function applySkillEnvDataInterpolation(
     filePath: skillAbsPath,
   };
 
-  parsed.steps = parsed.steps.map((s) => interpolateEnvData(s, skillCtx));
+  // A skill's own `${…}` bake, guarded like every other site that writes into
+  // step text: a value holding a `"` would otherwise turn a body `Set` into a
+  // line the value grammar refuses, and it would run as AI prose having
+  // assigned nothing. This was the fifth consecutive round to find that
+  // defect one substitution site further along — see `substitutePreservingSet`.
+  const skillEnvData = (s: string): string =>
+    substitutePreservingSet(
+      s,
+      (text) => interpolateEnvData(text, skillCtx),
+      (target) =>
+        `A value substituted into skill "${parsed.name}" makes ` +
+        `"Set {{${target}}} to …" unparseable — almost always a \`${'${env.X}'}\` ` +
+        `or \`${'${<source>.x}'}\` whose value contains a double quote, which ` +
+        `the assigned value may not. Left to run, the assignment would ` +
+        `silently not happen.`,
+    );
+
+  parsed.steps = parsed.steps.map(skillEnvData);
   for (const [k, v] of Object.entries(parsed.parameters)) {
     parsed.parameters[k] = interpolateEnvData(v, skillCtx);
   }
@@ -365,7 +398,7 @@ async function applySkillEnvDataInterpolation(
   // with). `applySkillScope` leaves it alone for the same reason. See the
   // contract §3.1.
   for (const section of Object.values(parsed.sections)) {
-    section.steps = section.steps.map((s) => interpolateEnvData(s, skillCtx));
+    section.steps = section.steps.map(skillEnvData);
   }
 }
 
@@ -412,6 +445,35 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
 
 function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
   const { sections, frontmatter, title } = parseSections(rawContent, filePath);
+
+  // A skill's parameters are not runtime variables: `applySkillScope`
+  // interpolates the caller's arguments into the body TEXT, so a `Set
+  // {{username}} to "…"` in a skill body would reach the runner as
+  // `Set demo@securebank.com to "…"`. Refused by name, here, where the name
+  // still exists (stories/variable-assignment.md §Locked). A test's
+  // `## Parameters` are the opposite case — they live in
+  // `resolvedParameters` and are assignable like anything else — which is
+  // why this check is skill-only and not in `parseSections`.
+  const declared = new Set(Object.keys(sections.parameters));
+  if (declared.size > 0) {
+    const bodies = [
+      sections.steps,
+      ...Object.values(sections.sectionDefs).map((s) => s.steps),
+    ];
+    for (const body of bodies) {
+      for (const step of body) {
+        const setStep = parseSetStep(step);
+        if (setStep && declared.has(setStep.name)) {
+          throw new Error(
+            `Cannot assign to {{${setStep.name}}} in ${filePath}: it is a ` +
+              `parameter of this skill, and a caller's arguments are written ` +
+              `into the step text rather than kept as variables. Assign to a ` +
+              `declared \`## Outputs\` name, or to an internal one.`,
+          );
+        }
+      }
+    }
+  }
 
   return {
     filePath,
@@ -633,6 +695,30 @@ function parseSections(rawContent: string, filePath: string): {
   for (let i = 0; i < steps.length; i++) {
     const entry = scan.entries[i];
     const target = entry?.sectionIndex != null ? sectionAcc[entry.sectionIndex] : null;
+
+    // `Set {{name}} to "…"` (stories/variable-assignment.md). Validated here
+    // because this is the one loop every authored step line of every file —
+    // test or skill, main flow or section body — passes through.
+    const where = ` in ${filePath}${entry ? ` at line ${entry.line}` : ''}`;
+    const setError = setStepError(steps[i]!, where);
+    if (setError) throw new Error(setError);
+
+    // A section that loops over a table has its row values interpolated into
+    // the body text at EXPANSION time (`interpolateQuiet`, expander.ts), so a
+    // Set target sharing a column name would arrive at the runner already
+    // replaced by a value — `Set 42 to "…"`, a parse error naming a number
+    // nobody typed. Refused here, where the name is still a name.
+    const setStep = parseSetStep(steps[i]!);
+    const columns = target?.rows?.[0];
+    if (setStep && columns && Object.hasOwn(columns, setStep.name)) {
+      throw new Error(
+        `Cannot assign to {{${setStep.name}}}${where}: it is a column of the ` +
+          `table under "### ${target.name}", and a looped section's row values ` +
+          `are written into its step text rather than kept as variables. ` +
+          `Assign to a different name.`,
+      );
+    }
+
     if (target) {
       // Body steps carry no skipHooks/toolCalls parallel: `[no-hooks]` on a
       // body line is stripped and ignored (the invocation's marker covers the

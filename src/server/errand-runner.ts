@@ -19,6 +19,8 @@ import { ApiResponseStore } from '../api/response-store.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
+import { parseSetStep } from '../parser/set-step.js';
+import { runSetStep } from '../runner/set-step-runner.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
@@ -665,12 +667,21 @@ export class ErrandRunner {
       // between steps rather than inside one — it escaped `act` and left the
       // request with no errand block at all, so an errand that had already
       // driven the user's tab was reported as never having started.
+      // Read off the AUTHORED step and never interpolated — `interpolate`
+      // would replace the TARGET with its own value once it holds one
+      // (stories/variable-assignment.md §Locked).
+      const setStep = parseSetStep(originalStep);
       let interpolated: string;
       try {
-        const envInterpolated = args.envDataCtx
-          ? interpolateEnvData(originalStep, args.envDataCtx)
-          : originalStep;
-        interpolated = interpolate(envInterpolated, scope);
+        // Not evaluated for a Set step — `interpolateEnvData` throws on an
+        // unknown `${…}`, which would report the raw parser wording instead
+        // of `resolveSetTemplate`'s per-step refusal. Same reason as the
+        // session manager, where the throw was worse still.
+        const envInterpolated =
+          setStep || !args.envDataCtx
+            ? originalStep
+            : interpolateEnvData(originalStep, args.envDataCtx);
+        interpolated = setStep ? originalStep : interpolate(envInterpolated, scope);
       } catch (err) {
         emit({ type: 'step:start', line, ...(await tabSpread()) });
         recordThrow(line, originalStep, err, '');
@@ -709,56 +720,85 @@ export class ErrandRunner {
       emit({ type: 'step:start', line, ...(await tabSpread()) });
 
       let stepResult: StepResult;
-      try {
-        stepResult = await executeStep(line, steps.length, instruction, {
-          page: active.pageTracker.getActive(),
-          config: args.runConfig,
-          aiClient: args.aiClient,
-          contextContent: args.contextContent,
-          testName: `errand:${errandId}`,
-          conversationHistory: [...conversationHistory],
-          apiResponseStore,
-          csrfTokens,
-          resolvedParameters: scope,
-          uploadPaths: args.uploadPaths,
-          pageTracker: active.pageTracker,
-          browserTracker,
-          // No console is attached to an errand either, so an AI clarification
-          // must fail the step fast rather than block on stdin.
-          nonInteractive: true,
-          ...(signal && { signal }),
-        },
-        // The step as the caller wrote it, `{{}}` and `${}` intact — the model
-        // reads that beside a `## Values` block and names the placeholder in
-        // the action it plans (stories/placeholder-preserving-actions.md,
-        // decision 1). The third interpolation site, treated like the other two.
-        originalStep);
-      } catch (err) {
-        if (signal?.aborted) {
-          outcome.status = 'aborted';
-          logger.info(`Errand ${errandId}: aborted by client during step ${line}/${steps.length}`);
-          break;
+      // What a Set step assigned, for the common tail below to report the way
+      // it reports a capture. Emitted here rather than there so the `source`
+      // can say `assignment`.
+      let setAssigned: { name: string; value: string } | undefined;
+      if (setStep) {
+        // Assignment: no model, no page, no tabs to reclaim — which is why
+        // this sits outside the try/finally rather than inside it.
+        const setOutcome = runSetStep(setStep, instruction, line, scope, args.envDataCtx);
+        stepResult = setOutcome.result;
+        if (setOutcome.assigned) {
+          setAssigned = setOutcome.assigned;
+          // `defineProperty`, not `captures[name] =` — same `__proto__`
+          // hazard the scope write guards against, one map further on.
+          Object.defineProperty(captures, setAssigned.name, {
+            value: setAssigned.value,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+          emit({
+            type: 'capture',
+            line,
+            name: setAssigned.name,
+            value: setAssigned.value,
+            source: 'assignment',
+          });
         }
-        let errorScreenshot = '';
+      } else {
         try {
-          const shot = await captureScreenshot(active.pageTracker.getActive());
-          errorScreenshot = shot?.base64 ? `data:image/png;base64,${shot.base64}` : '';
-        } catch {
-          // ignore
+          stepResult = await executeStep(line, steps.length, instruction, {
+            page: active.pageTracker.getActive(),
+            config: args.runConfig,
+            aiClient: args.aiClient,
+            contextContent: args.contextContent,
+            testName: `errand:${errandId}`,
+            conversationHistory: [...conversationHistory],
+            apiResponseStore,
+            csrfTokens,
+            resolvedParameters: scope,
+            uploadPaths: args.uploadPaths,
+            pageTracker: active.pageTracker,
+            browserTracker,
+            // No console is attached to an errand either, so an AI clarification
+            // must fail the step fast rather than block on stdin.
+            nonInteractive: true,
+            ...(signal && { signal }),
+          },
+          // The step as the caller wrote it, `{{}}` and `${}` intact — the model
+          // reads that beside a `## Values` block and names the placeholder in
+          // the action it plans (stories/placeholder-preserving-actions.md,
+          // decision 1). The third interpolation site, treated like the other two.
+          originalStep);
+        } catch (err) {
+          if (signal?.aborted) {
+            outcome.status = 'aborted';
+            logger.info(`Errand ${errandId}: aborted by client during step ${line}/${steps.length}`);
+            break;
+          }
+          let errorScreenshot = '';
+          try {
+            const shot = await captureScreenshot(active.pageTracker.getActive());
+            errorScreenshot = shot?.base64 ? `data:image/png;base64,${shot.base64}` : '';
+          } catch {
+            // ignore
+          }
+          recordThrow(line, originalStep, err, errorScreenshot);
+          break;
+        } finally {
+          // Runs before the `break` above takes effect, so a step that opened a
+          // tab and then threw still leaves that tab held for the detach.
+          await claimOpenedTabs();
+          // The borrowed browser is not the only one a step can open a tab in,
+          // and the detach is too late to be the only place this runs: a tab a
+          // later step closes is out of its tracker by then, and a browser a
+          // later step closes is out of `browserTracker.all()` (manager.ts:892)
+          // with every tab it ever held. Both are tabs the errand opened, and
+          // `openedTabs` owes the caller a line about each.
+          await recordLaunchedTabs();
         }
-        recordThrow(line, originalStep, err, errorScreenshot);
-        break;
-      } finally {
-        // Runs before the `break` above takes effect, so a step that opened a
-        // tab and then threw still leaves that tab held for the detach.
-        await claimOpenedTabs();
-        // The borrowed browser is not the only one a step can open a tab in,
-        // and the detach is too late to be the only place this runs: a tab a
-        // later step closes is out of its tracker by then, and a browser a
-        // later step closes is out of `browserTracker.all()` (manager.ts:892)
-        // with every tab it ever held. Both are tabs the errand opened, and
-        // `openedTabs` owes the caller a line about each.
-        await recordLaunchedTabs();
       }
 
       if (signal?.aborted) {
@@ -771,6 +811,20 @@ export class ErrandRunner {
       // `as`-tagged reads. They accumulate in the receipt AND stay in `scope`
       // for later steps to interpolate.
       const stepOutputs: Record<string, string> = {};
+      // A Set step's own write. Its `capture` event has already gone out with
+      // the right source; this is the receipt's copy.
+      if (setAssigned) {
+        // `defineProperty` here too — the same `__proto__` hazard, one map
+        // further on. Display-only (this feeds the receipt's per-step row,
+        // not the scope), but leaving the third write plain is how the first
+        // two came to be missed.
+        Object.defineProperty(stepOutputs, setAssigned.name, {
+          value: setAssigned.value,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      }
       for (const name of new Set([...outputVars, ...autoCapturedNames(stepResult)])) {
         if (!(name in scope)) continue;
         const value = scope[name]!;

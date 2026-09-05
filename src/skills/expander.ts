@@ -6,6 +6,7 @@ import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import { matchInput, matchText, NO_HOOKS_MARKER } from '../parser/section-match.js';
 import { logger } from '../utils/logger.js';
 import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
+import { parseSetStep, substitutePreservingSet } from '../parser/set-step.js';
 
 /**
  * Parse-time expansion of `[skill: name arg="value" out.x="alias"]` step
@@ -37,6 +38,56 @@ export function referencedVariableNames(
     if (m[1] && !captures.includes(m[1])) captures.push(m[1]);
   }
   return { placeholders, captures };
+}
+
+/**
+ * `interpolateQuiet` for a looped section's body, with the two ways a row
+ * value can silently break a `Set` step refused instead
+ * (stories/variable-assignment.md).
+ *
+ * The parse-time guard in `markdown.ts` cannot catch either, because both
+ * depend on facts only expansion knows: it checks the step's OWN section's
+ * columns, and the bindings here are the merged ones — an enclosing looped
+ * section's row values are inherited into a nested body.
+ *
+ * Both failures found by review, and both were worse than "degrades to
+ * prose". A baked-over target stops being a Set step, so the assignment
+ * silently never happens AND the following step reads the row value that was
+ * baked in — passing green on the wrong data. A row value containing a `"`
+ * makes the line unparseable under the value grammar, so that row's
+ * assignment is skipped while the variable still holds the PREVIOUS row's
+ * value, and the row proceeds on stale data.
+ */
+function checkedRowInterpolate(
+  step: string,
+  bindings: Record<string, string>,
+  sectionName: string,
+): string {
+  const before = parseSetStep(step);
+  if (!before) return interpolateQuiet(step, bindings);
+
+  if (Object.hasOwn(bindings, before.name)) {
+    throw new Error(
+      `Cannot assign to {{${before.name}}} in the body of section ` +
+        `"${sectionName}": it is a column of a table this section — or one ` +
+        `enclosing it — loops over, and a looped section's row values are ` +
+        `written into its step text rather than kept as variables. The ` +
+        `assignment would silently not happen, and a later step reading ` +
+        `{{${before.name}}} would see the row value instead. Assign to a ` +
+        `different name.`,
+    );
+  }
+
+  return substitutePreservingSet(
+    step,
+    (text) => interpolateQuiet(text, bindings),
+    (target) =>
+      `A row value used by "Set {{${target}}} to …" in the body of section ` +
+      `"${sectionName}" makes the step unparseable once it is substituted — ` +
+      `almost always because the value contains a double quote, which the ` +
+      `assigned value may not. Left to run, that row's assignment would be ` +
+      `skipped while {{${target}}} still held the previous row's value.`,
+  );
 }
 
 const MAX_DEPTH = 10;
@@ -572,7 +623,7 @@ async function expandRecursive(
             // placeholder alone without warning: a body may legitimately
             // reference a caller variable that only exists at run time.
             const bindings = bodyCtx.rowBindings;
-            bodySteps = bodySteps.map((s) => interpolateQuiet(s, bindings));
+            bodySteps = bodySteps.map((s) => checkedRowInterpolate(s, bindings, section.name));
           }
 
           const recursed = await expandRecursive(
@@ -976,7 +1027,27 @@ function applySkillScope(
     }
 
     // 3. Interpolate caller-supplied parameter values.
-    s = interpolate(s, call.args);
+    //
+    // Guarded for the same two failures the row path guards
+    // (`checkedRowInterpolate`), because this is the other site that writes a
+    // caller's value into the body TEXT. Two shapes reach here that the
+    // parse-time check in `parseSkillContent` cannot see, because both depend
+    // on the CALL rather than the skill: an argument named after a declared
+    // `## Outputs` name (outputs are excluded from internal renaming, so the
+    // target is baked over and the assignment silently vanishes), and an
+    // array-literal argument, whose quotes make the interpolated line
+    // unparseable.
+    s = substitutePreservingSet(
+      s,
+      (text) => interpolate(text, call.args),
+      (target) =>
+        `The call to skill "${skill.name}" makes "Set {{${target}}} to …" ` +
+        `unparseable once its arguments are substituted. An argument whose ` +
+        `name matches the assignment target overwrites it — outputs are not ` +
+        `renamed, so a declared output name collides — and an argument whose ` +
+        `value contains a double quote breaks the assigned value. Left to ` +
+        `run, the assignment would silently not happen.`,
+    );
 
     return s;
   };
