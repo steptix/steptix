@@ -1710,6 +1710,13 @@ async function executeCount(root: Page | FrameLocator, action: AIAction): Promis
  * sites pass it through Playwright's serialization the same way.
  *
  * Behaviour:
+ *   - With `attribute` `url`: the address of the element's own document. No
+ *     element carries the page URL as an attribute, so "capture the current
+ *     page URL" had no expression at all in this vocabulary and the model
+ *     reached for `@url` anyway — which fell through to `getAttribute('url')`
+ *     and captured the empty string silently. Read off the element's
+ *     `ownerDocument` rather than the top-level `location` so a read inside a
+ *     frame reports the frame the selector resolved against.
  *   - With `attribute`: special-case `href`/`src` so the resolved absolute
  *     URL wins over the raw attribute string (which may be a relative path).
  *   - Without `attribute`: prefer the form-input `value` over `textContent`.
@@ -1717,6 +1724,10 @@ async function executeCount(root: Page | FrameLocator, action: AIAction): Promis
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractValueInPage(el: any, attribute?: string): string {
   if (attribute) {
+    if (attribute === 'url') {
+      const doc = el.ownerDocument;
+      return doc && doc.location ? doc.location.href : '';
+    }
     if (attribute === 'href' || attribute === 'src') {
       const resolved = el[attribute];
       if (typeof resolved === 'string' && resolved.length > 0) return resolved;
@@ -1858,6 +1869,10 @@ async function executeReadMultiple(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const e = el as any;
         if (attribute) {
+          if (attribute === 'url') {
+            const doc = e.ownerDocument;
+            return doc && doc.location ? doc.location.href : '';
+          }
           if (attribute === 'href' || attribute === 'src') {
             const resolved = e[attribute];
             if (typeof resolved === 'string' && resolved.length > 0) return resolved;
