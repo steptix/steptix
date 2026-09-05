@@ -6,7 +6,7 @@ import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import { matchInput, matchText, NO_HOOKS_MARKER } from '../parser/section-match.js';
 import { logger } from '../utils/logger.js';
 import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
-import { parseSetStep } from '../parser/set-step.js';
+import { parseSetStep, substitutePreservingSet } from '../parser/set-step.js';
 
 /**
  * Parse-time expansion of `[skill: name arg="value" out.x="alias"]` step
@@ -78,18 +78,16 @@ function checkedRowInterpolate(
     );
   }
 
-  const interpolated = interpolateQuiet(step, bindings);
-  if (parseSetStep(interpolated) === null) {
-    throw new Error(
-      `A row value used by "Set {{${before.name}}} to …" in the body of ` +
-        `section "${sectionName}" makes the step unparseable once it is ` +
-        `substituted — almost always because the value contains a double ` +
-        `quote, which the assigned value may not. Left to run, that row's ` +
-        `assignment would be skipped while {{${before.name}}} still held the ` +
-        `previous row's value.`,
-    );
-  }
-  return interpolated;
+  return substitutePreservingSet(
+    step,
+    (text) => interpolateQuiet(text, bindings),
+    (target) =>
+      `A row value used by "Set {{${target}}} to …" in the body of section ` +
+      `"${sectionName}" makes the step unparseable once it is substituted — ` +
+      `almost always because the value contains a double quote, which the ` +
+      `assigned value may not. Left to run, that row's assignment would be ` +
+      `skipped while {{${target}}} still held the previous row's value.`,
+  );
 }
 
 const MAX_DEPTH = 10;
@@ -1039,18 +1037,17 @@ function applySkillScope(
     // target is baked over and the assignment silently vanishes), and an
     // array-literal argument, whose quotes make the interpolated line
     // unparseable.
-    const beforeArgs = parseSetStep(s);
-    s = interpolate(s, call.args);
-    if (beforeArgs && parseSetStep(s) === null) {
-      throw new Error(
-        `The call to skill "${skill.name}" makes ` +
-          `"Set {{${beforeArgs.name}}} to …" unparseable once its arguments ` +
-          `are substituted. An argument whose name matches the assignment's ` +
-          `target overwrites it, and an argument whose value contains a ` +
-          `double quote breaks the assigned value. Left to run, the ` +
-          `assignment would silently not happen.`,
-      );
-    }
+    s = substitutePreservingSet(
+      s,
+      (text) => interpolate(text, call.args),
+      (target) =>
+        `The call to skill "${skill.name}" makes "Set {{${target}}} to …" ` +
+        `unparseable once its arguments are substituted. An argument whose ` +
+        `name matches the assignment target overwrites it — outputs are not ` +
+        `renamed, so a declared output name collides — and an argument whose ` +
+        `value contains a double quote breaks the assigned value. Left to ` +
+        `run, the assignment would silently not happen.`,
+    );
 
     return s;
   };

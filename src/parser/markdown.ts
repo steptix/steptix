@@ -12,7 +12,7 @@ import {
 } from './section-match.js';
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
-import { parseSetStep, setStepError } from './set-step.js';
+import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
 import type { ToolCall } from '../tools/types.js';
 import {
   interpolateDataSourcePath,
@@ -251,6 +251,9 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
   // never written. The hook path passes `test.envData` into `runSetStep`, so
   // leaving the token intact resolves it per step instead — the same order
   // the main flow uses (stories/variable-assignment.md).
+  // Not the shared guard: a hook Set is not BROKEN by baking, it is simply
+  // better resolved per run (the hook path passes envData to runSetStep), so
+  // the token is preserved rather than the substitution refused.
   const hookEnvData = (s: string): string =>
     parseSetStep(s) ? s : interpolateEnvData(s, ctx);
   parsed.hooks = {
@@ -362,7 +365,24 @@ async function applySkillEnvDataInterpolation(
     filePath: skillAbsPath,
   };
 
-  parsed.steps = parsed.steps.map((s) => interpolateEnvData(s, skillCtx));
+  // A skill's own `${…}` bake, guarded like every other site that writes into
+  // step text: a value holding a `"` would otherwise turn a body `Set` into a
+  // line the value grammar refuses, and it would run as AI prose having
+  // assigned nothing. This was the fifth consecutive round to find that
+  // defect one substitution site further along — see `substitutePreservingSet`.
+  const skillEnvData = (s: string): string =>
+    substitutePreservingSet(
+      s,
+      (text) => interpolateEnvData(text, skillCtx),
+      (target) =>
+        `A value substituted into skill "${parsed.name}" makes ` +
+        `"Set {{${target}}} to …" unparseable — almost always a \`${'${env.X}'}\` ` +
+        `or \`${'${<source>.x}'}\` whose value contains a double quote, which ` +
+        `the assigned value may not. Left to run, the assignment would ` +
+        `silently not happen.`,
+    );
+
+  parsed.steps = parsed.steps.map(skillEnvData);
   for (const [k, v] of Object.entries(parsed.parameters)) {
     parsed.parameters[k] = interpolateEnvData(v, skillCtx);
   }
@@ -378,7 +398,7 @@ async function applySkillEnvDataInterpolation(
   // with). `applySkillScope` leaves it alone for the same reason. See the
   // contract §3.1.
   for (const section of Object.values(parsed.sections)) {
-    section.steps = section.steps.map((s) => interpolateEnvData(s, skillCtx));
+    section.steps = section.steps.map(skillEnvData);
   }
 }
 

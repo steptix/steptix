@@ -277,3 +277,150 @@ describe('bake-overs at the other substitution sites', () => {
     expect(parsed.steps[0]).toBe('Set {{__skill1_greeting}} to "Hello Alice"');
   });
 });
+
+/**
+ * The enumeration five review rounds each proved was missing.
+ *
+ * Rounds one to five each found the SAME defect at the next substitution site
+ * along — row bindings, skill arguments, hook baking, the skill body — because
+ * each round fixed the instance and then asserted closure in prose. The story
+ * sentence claiming "the one asymmetry left is hooks" is what told round four
+ * to stop looking; there were three sites left.
+ *
+ * This is that claim made checkable. The table names every place that writes a
+ * value into step TEXT before `parseSetStep` reads it, and the test drives a
+ * real file through each. A new substitution site added without a guard fails
+ * here, whatever the site — which is the property no amount of prose had.
+ */
+describe('every substitution site preserves a Set step', () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'set-sites-all-'));
+    mkdirSync(path.join(dir, 'skills'), { recursive: true });
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const write = (rel: string, body: string): string => {
+    const p = path.join(dir, rel);
+    writeFileSync(p, body);
+    return p;
+  };
+  /** A value that breaks the assigned value wherever it is written in. */
+  const HOSTILE = 'He said "hi"';
+
+  const SITES: Array<{
+    site: string;
+    /** Builds a file whose Set step this site substitutes into. */
+    build: () => { file: string; opts: Parameters<typeof parseTestFile>[1] };
+  }> = [
+    {
+      site: 'markdown.ts — skill body ${…}',
+      build: () => {
+        write(
+          'skills/body.md',
+          ['---', 'type: skill', '---', '', '# body', '', '## Outputs', '- g', '',
+           '## Steps', '1. Set {{g}} to "${env.GREETING}"', ''].join('\n'),
+        );
+        return {
+          file: write('t-body.md', '# T\n\n## Steps\n1. [skill: body]\n'),
+          opts: { skillsDir: path.join(dir, 'skills'), envData: { env: { GREETING: HOSTILE } } },
+        };
+      },
+    },
+    {
+      site: 'markdown.ts — skill SECTION body ${…}',
+      build: () => {
+        write(
+          'skills/sect.md',
+          ['---', 'type: skill', '---', '', '# sect', '', '## Outputs', '- g', '',
+           '## Steps', '1. Inner', '', '### Inner', '',
+           '1. Set {{g}} to "${env.GREETING}"', ''].join('\n'),
+        );
+        return {
+          file: write('t-sect.md', '# T\n\n## Steps\n1. [skill: sect]\n'),
+          opts: { skillsDir: path.join(dir, 'skills'), envData: { env: { GREETING: HOSTILE } } },
+        };
+      },
+    },
+    {
+      site: 'expander.ts — skill arguments (output-name collision)',
+      build: () => {
+        // NOT a hostile quoted value: the invocation parser refuses
+        // `who="He said "hi""` before the expander sees it, so that half of
+        // this site is unreachable. The reachable half is an argument named
+        // after a declared OUTPUT — outputs are not renamed, so the value
+        // bakes straight over the assignment's target.
+        write(
+          'skills/args.md',
+          ['---', 'type: skill', '---', '', '# args', '', '## Parameters', '- who: n', '',
+           '## Outputs', '- g', '',
+           '## Steps', '1. Set {{g}} to "hi {{who}}"', ''].join('\n'),
+        );
+        return {
+          file: write('t-args.md', '# T\n\n## Steps\n1. [skill: args who="x" g="baked"]\n'),
+          opts: { skillsDir: path.join(dir, 'skills') },
+        };
+      },
+    },
+    {
+      site: 'expander.ts — looped section row bindings',
+      build: () => ({
+        file: write(
+          't-rows.md',
+          ['# T', '', '## Steps', '1. Greet', '', '### Greet', '',
+           '| who |', '| --- |', `| ${HOSTILE} |`, '',
+           '1. Set {{g}} to "hi {{who}}"', ''].join('\n'),
+        ),
+        opts: {},
+      }),
+    },
+  ];
+
+  it.each(SITES)('refuses a hostile value at $site', async ({ build }) => {
+    const { file, opts } = build();
+    // Every guarded site throws rather than producing a line that is no
+    // longer a Set step. The message differs per site; that it refuses at
+    // all is the invariant.
+    await expect(parseTestFile(file, opts)).rejects.toThrow(
+      /unparseable|may not contain a double quote|Cannot assign/,
+    );
+  });
+
+  it('the HOOK site preserves rather than refuses, and that is deliberate', async () => {
+    // A hook Set is not broken by baking — it is simply better resolved per
+    // run, because `runHookScope` passes `envData` into `runSetStep`. So this
+    // site keeps the token instead of refusing the substitution.
+    const file = write(
+      't-hook.md',
+      ['# T', '', '## Hooks', '- before: Set {{g}} to "${env.GREETING}"', '',
+       '## Steps', '1. Click Save', ''].join('\n'),
+    );
+    const parsed = await parseTestFile(file, { envData: { env: { GREETING: HOSTILE } } });
+    expect(parsed.hooks.before[0]).toBe('Set {{g}} to "${env.GREETING}"');
+  });
+
+  it('none of these sites refuses a file with no Set step', async () => {
+    // The guards must be invisible to everything else, or every existing test
+    // file becomes a parse error.
+    write(
+      'skills/plain.md',
+      ['---', 'type: skill', '---', '', '# plain', '', '## Parameters', '- who: n', '',
+       '## Steps', '1. Type "{{who}}" into ${env.FIELD}', ''].join('\n'),
+    );
+    const file = write(
+      't-plain.md',
+      ['# T', '', '## Hooks', '- before: Navigate to ${env.FIELD}', '',
+       // A benign arg value: a quoted one containing a quote is refused by
+       // the invocation parser, which is a different (and correct) refusal.
+       '## Steps', '1. [skill: plain who="Alice"]', '2. Loop', '',
+       '### Loop', '', '| who |', '| --- |', `| ${HOSTILE} |`, '',
+       '1. Type "{{who}}" into the box', ''].join('\n'),
+    );
+    await expect(
+      parseTestFile(file, {
+        skillsDir: path.join(dir, 'skills'),
+        envData: { env: { FIELD: '#search', GREETING: HOSTILE } },
+      }),
+    ).resolves.toBeDefined();
+  });
+});

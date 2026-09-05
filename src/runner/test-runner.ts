@@ -743,11 +743,14 @@ export async function runTest(
         const raw = instructions[idx]!;
         const toolCall = toolCalls[idx] ?? null;
         const sourceSkill = sourceSkills[idx] ?? null;
-        // Same authored-line rule as the main flow. A hook's `${…}` was
-        // already resolved at parse time (`applyEnvDataInterpolation` still
-        // rewrites `parsed.hooks`, since a hook body is never shown to the
-        // model as authored text), so the template carries `{{…}}` only —
-        // and `resolveSetTemplate` is a no-op on the half that is missing.
+        // Same authored-line rule as the main flow, and `test.envData` below
+        // is load-bearing rather than defensive: `applyEnvDataInterpolation`
+        // now SKIPS a hook `Set` (a non-Set hook is still baked, having
+        // nothing to preserve), so the template can still carry `${…}` and
+        // `resolveSetTemplate` is what resolves it. This comment used to say
+        // the opposite — that hooks were always baked, so the context was
+        // redundant — which would have led anyone trimming it to reinstate a
+        // silent failure (stories/variable-assignment.md).
         const hookSetStep = parseSetStep(raw);
         const hookInstruction = hookSetStep ? raw : interpolate(raw, resolvedParameters);
 

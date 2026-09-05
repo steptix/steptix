@@ -159,3 +159,38 @@ export function setStepError(instruction: string, where = ''): string | null {
     `whole step. Move the rest to its own step.`
   );
 }
+
+/**
+ * Substitute into a step, refusing to destroy a `Set` step in the process.
+ *
+ * THE reason this exists, and why it takes a callback rather than doing the
+ * substitution itself: a value written into step TEXT can break a `Set` line
+ * in two ways, and both are silent. Writing over the target
+ * (`Set {{tag}} …` → `Set a …`) stops the line being an assignment at all, so
+ * the variable is never written AND the following step reads the value that
+ * was baked in — a green run on wrong data. Writing a `"` into the value
+ * makes the line unparseable, so that iteration's assignment is skipped while
+ * the variable still holds the previous one's.
+ *
+ * Five review rounds each found this same defect at the NEXT substitution
+ * site along — row bindings, then skill arguments, then hook baking, then the
+ * skill body — because each round fixed the instance and asserted closure in
+ * prose. This helper is that assertion made mechanical: every site that
+ * writes into step text calls it, and `substitutionSites` in
+ * `tests/set-step-parse.test.ts` is the enumeration a reader can check.
+ *
+ * `describe` is called only on failure, so building a good message costs
+ * nothing on the hot path.
+ */
+export function substitutePreservingSet(
+  step: string,
+  substitute: (text: string) => string,
+  describe: (target: string) => string,
+): string {
+  const before = parseSetStep(step);
+  const after = substitute(step);
+  if (before && parseSetStep(after) === null) {
+    throw new Error(describe(before.name));
+  }
+  return after;
+}

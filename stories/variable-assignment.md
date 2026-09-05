@@ -179,10 +179,14 @@ Everything below is read out of the current tree.
   but keeps `parsed.steps` token-intact rather than rewriting it, "so the
   model sees `${data.url}` as written." `test-runner.ts`'s main loop now
   resolves `${…}` per step, immediately before `{{…}}`, exactly as the
-  server and errand loops already did — the one asymmetry left is hook
-  instructions, which `applyEnvDataInterpolation` still rewrites into
-  `parsed.hooks.*` at parse time (hook bodies are never shown to the model
-  as authored text, so there is nothing for them to preserve).
+  server and errand loops already did.
+
+  **This paragraph used to end "the one asymmetry left is hook
+  instructions". That sentence was false, and it is the single most
+  expensive line in this document** — it is what told round four the sweep
+  was finished, when three more substitution sites were live. There were
+  never "one" of anything; see §The substitution sites, which enumerates
+  them and is checked by a test rather than asserted here.
 
   The phase also added `src/runner/placeholder-substitution.ts`, whose
   `substituteText(text, { parameters, envData })` resolves **both**
@@ -918,6 +922,42 @@ three times in a row.
 Also added from that pass: the `outputSources` provenance test whose three
 siblings already existed and which was never written as a fourth, and the
 first-write-wins case that round one fixed without a regression test.
+
+## The substitution sites
+
+Five review rounds each found the same defect at the next site along. Not
+because any one fix was careless, but because each round fixed the instance
+and then asserted closure *in prose* — and the prose was wrong twice, in
+both directions. The sentence "the one asymmetry left is hook instructions"
+is what told round four to stop; three sites were live.
+
+So the closure is now a mechanism. `substitutePreservingSet`
+(`src/parser/set-step.ts`) wraps a substitution and refuses it if a line that
+was a `Set` step stops being one. Every site that writes a value into step
+TEXT calls it, and `tests/set-step-parse.test.ts` drives a real file through
+each — so a site added without a guard fails a test rather than waiting for a
+sixth review.
+
+| Site | Writes into step text | Guarded by |
+| --- | --- | --- |
+| `markdown.ts` skill body `${…}` | yes | `substitutePreservingSet` |
+| `markdown.ts` skill **section** body `${…}` | yes | `substitutePreservingSet` |
+| `markdown.ts` `## Hooks` `${…}` | yes | preserved instead — the token survives and `resolveSetTemplate` resolves it per run, because `runHookScope` passes `envData` |
+| `markdown.ts` main-flow steps | no — validated, not rewritten | n/a |
+| `markdown.ts` parameters / rows / config / outputs | no — these are VALUES, read at run time | n/a |
+| `expander.ts` looped-section row bindings | yes | `checkedRowInterpolate` → `substitutePreservingSet`, plus a target-vs-column check |
+| `expander.ts` skill arguments | yes | `substitutePreservingSet` |
+| `expander.ts` `renameVar` internal namespacing | yes | safe by construction: `__skill<n>_<name>` is always `\w+` |
+| `expander.ts` `renameVar` output alias | yes | **unguarded** — a non-`\w` alias (`out.g="my alias"`) breaks every step kind, not just this one; belongs in alias validation |
+| the four step loops | yes, at run time | each matches on the authored line before interpolating |
+| `step-executor.ts` branch instruction | yes | unreachable: the grouper refuses to make a `Set` a continuation |
+| `runner-core/` | no substitution at all | ships raw steps, marker preserved |
+
+Two things this table is honest about rather than tidy. The hook row is the
+one site that *preserves* instead of *refusing*, because a hook `Set` is not
+broken by baking — it is simply better resolved per run; the guard would have
+been the wrong tool. And the `renameVar` output-alias row is genuinely open,
+recorded here rather than in a comment nobody would find.
 
 ### Still open
 
