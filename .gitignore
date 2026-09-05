@@ -37,3 +37,10 @@ testbench-native/*.vsix
 # cache, etc), per-machine, may carry session state.
 .flick/
 flick-vscode/*.vsix
+
+# Parallel live-suite scratch: one directory per shard, holding that shard's
+# copy of templates/, its VS Code user-data/extensions dirs, its server log and
+# its per-file reports. Wiped and rebuilt at the start of every parallel run.
+# Beside templates/ rather than under testbench-native/ so a shard workspace
+# resolves bare imports through the same node_modules chain the real one does.
+.live-shards/

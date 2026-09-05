@@ -26,8 +26,26 @@ async function run() {
   }
 
   const testsRoot = __dirname;
-  const files = await glob('**/*.test.cjs', { cwd: testsRoot });
-  for (const f of files) mocha.addFile(path.resolve(testsRoot, f));
+  // TESTBENCH_LIVE_FILES names the files this instance owns, comma-separated
+  // and relative to this directory. The parallel runner sets it to one file
+  // per VS Code launch: shards contend on the workspace and the server, and
+  // splitting by FILE rather than by mocha's own --grep is what lets the
+  // runner hand each launch its own copy of both. Unset → every file, which
+  // is the serial runner and every ad-hoc invocation.
+  const requested = process.env.TESTBENCH_LIVE_FILES?.split(',')
+    .map((f) => f.trim())
+    .filter(Boolean);
+  const files = requested?.length
+    ? requested
+    : await glob('**/*.test.cjs', { cwd: testsRoot });
+  for (const f of files) {
+    const abs = path.resolve(testsRoot, f);
+    // A named file that is not there means the runner and this entry disagree
+    // about the suite. Mocha would simply run nothing, which the report then
+    // shows as a clean zero — so say it instead.
+    if (!fs.existsSync(abs)) throw new Error(`live test file not found: ${abs}`);
+    mocha.addFile(abs);
+  }
 
   const reportPath = process.env.TESTBENCH_TEST_REPORT;
   /** @type {Array<{ suite: string; title: string; state: string; err?: string }>} */

@@ -160,40 +160,115 @@ port, and fail with TB028 — leaving a stray server behind.
 
 ### Live integration tests in a worktree
 
-They work. Two manual commands, because the run has *two* independent notions
-of where the server is and both have to point at this worktree's:
+They run in parallel, and they start everything they need. One command, from
+any checkout:
 
 ```powershell
-# 1. this worktree's server, on its own port — leave it running
+cd <worktree>\testbench-native
+npm run test:live
+```
+
+That is four workers. Each gets its own VS Code instance, its own copy of
+`templates/`, and its own server started from this checkout's `dist/` on a
+free port from 3200 up. Workers pull the next test file off a shared queue as
+they free up, so the split balances itself — file durations range from seconds
+to minutes, and any assignment fixed before the run is a guess. Each file's
+wall clock is remembered in `tests/integration/live-durations.json` and used
+to start the slow ones first next time.
+
+```powershell
+npm run test:live -- --shards=6        # a bigger box
+npm run test:live -- --shards=1        # serial: one VS Code, one launch
+npm run test:live -- --files=cache-replay.test.cjs,sections.test.cjs
+$env:TESTBENCH_LIVE_GREP = "step cache replay"   # mocha --grep, as before
+```
+
+Measured on this machine (12 cores, 32 GB): 17 files, 1881 s of serial work,
+421 s of wall clock at `--shards=4`. Four is not free, though — the shards
+share one AI gateway key and one box, and what gives first is anything with a
+timing budget: a breakpoint-pause wait, and (at the first attempt, with less
+memory free) `ai.complete` returning empty after 86 s. If a
+`*-breakpoint.test.cjs` flakes on a timeout, re-run it at `--shards=2` before
+believing it.
+
+Three things are per shard, and each one is load-bearing rather than tidy:
+
+- **Workspace.** Five compile suites `rmSync` the *same*
+  `templates/init/tests/.aiui-codebehind-cache`, two of them compile the same
+  `compile-codebehind.md`, `cache-replay` wipes the project-wide
+  `templates/init/.cache`, and `templates/.env` sets
+  `APPEND_RUN_HISTORY_TO_TEST_FILE`, which rewrites the fixture `.md` a run
+  just used. Grouping those conflicts onto one worker would put the five
+  slowest suites back in a queue. So each worker copies `templates/` to
+  `.live-shards/wN/templates` at the repo root (minus `reports/`, the caches
+  and any stray `.steps.ts`) and the copy's `.env` gets `SERVER_URL` rewritten
+  to that shard's port. That line, not any flag, is what decides which server
+  the extension drives.
+
+  A copy also breaks any config path that climbs out of the workspace, and
+  `templates/init/aiui.config.json` has one: `"toolsDir":
+  "../../fixtures/tools/src"`, which in a copy points at a `fixtures/` that was
+  never copied. The server does not fail on that — it logs one `no tools
+  registered` WARN and carries on — so the run dies minutes later in a
+  different file's assertion. `rebaseConfigPaths` pins every out-of-tree
+  relative path to its original absolute location (tool source is code the
+  shards read, not state they write) and leaves in-tree ones relative so they
+  travel. A `!` line in the runner's `config:` output means a key it does not
+  know about climbs out too — the next `toolsDir`.
+
+  **Where** the copy lives matters as much as what is in it, which is why it
+  sits at the repo root rather than under `testbench-native/`. Node resolves a
+  bare import by walking up from the file: from `<repo>/templates/...` that
+  walk sees only `<repo>/node_modules`, but from
+  `<repo>/testbench-native/.live-shards/...` it passes through
+  `testbench-native/node_modules` first — a tree full of packages the real
+  workspace cannot see. That is enough to make the esbuild bundle of a
+  `.steps.ts` fail to load, and `loadCodeBehindFile` answers a load failure
+  with a WARN and `Steps fall back to AI` — so every compile suite compiled,
+  applied, and then failed its proving run with a plain ✓ where a `</>` was
+  expected. Measured: `compile-tabs` passed serially and in a repo-root shard,
+  and failed in a `testbench-native/` one.
+- **VS Code.** A second VS Code sharing a `--user-data-dir` does not start a
+  second instance — it forwards its arguments to the first one and exits, so
+  every shard after the first would report nothing while the first silently
+  ran someone else's files. Per-worker `--user-data-dir` and
+  `--extensions-dir`, under the shard directory.
+- **Server.** `addLogCallback` (src/utils/logger.ts) fans log lines out
+  process-globally, so concurrent sessions in one server see each other's
+  lines — and `compile-codebehind` asserts a line is *absent* from its run
+  log. A process each makes the question not arise.
+
+To drive a server you started yourself — for `--inspect`, or to watch one
+failure against the `src/` you are editing — pass `--server=<url>`, which
+`LIVE_SERVER_URL` still means too. Every shard then shares it, log cross-talk
+included, which is why `--shards=1` is the usual companion:
+
+```powershell
 cd <worktree>
 node dist/index.js serve -p <n> --idle-timeout 60
 ```
 
 ```powershell
-# 2. the live suite, told to assert against that same server
 cd <worktree>\testbench-native
-$env:LIVE_SERVER_URL = "http://localhost:<n>"
-$env:TESTBENCH_LIVE_GREP = "step cache replay"   # optional; full suite is >10 min
-npm run test:live
+npm run test:live -- --shards=1 --server=http://localhost:<n>
 ```
 
-The extension reads `SERVER_URL` by walking up from the test file to
-`templates/.env` (seeded and port-rewritten by the script). The test
-assertions read `LIVE_SERVER_URL`, which falls back to `:3100` in every
-suite regardless. Set only one and the tests assert against a different
-server than the extension is driving.
+`--shards=1` is the runner this replaced, kept verbatim: one launch, every
+file, the real `templates/` workspace, VS Code's output inherited so you can
+watch it. It is also the one mode that still has *two* independent notions of
+where the server is — the extension reads `SERVER_URL` by walking up from the
+test file to `templates/.env`, while the assertions read `LIVE_SERVER_URL` and
+fall back to `:3100` regardless. Set only one and the tests assert against a
+different server than the extension is driving. The parallel path writes both
+from the same value, so it cannot drift.
 
 `serve` needs no `--env-file`: `%LOCALAPPDATA%\aiui\.env` carries
 `AIUI_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` machine-wide, and its key
 matches the one in `.env` and `templates/.env`.
 
-Without `-Port` there is no env var to set — but then nothing else may be
-listening on 3100, or the suite silently tests the *other* checkout's `src/`.
-That silence is why `-Port` is the better default for a worktree.
-
-The rest is already handled: `templates/.env` is the live workspace,
-`runLiveTest.cjs` boots the `fixtures/test-app` site the browser-driving
-suites point at, and Playwright's browsers live in
+The rest is already handled: `runLiveTest.cjs` boots the `fixtures/test-app`
+site the browser-driving suites point at — one app for every shard, since the
+pages are static markup — and Playwright's browsers live in
 `%LOCALAPPDATA%\ms-playwright`, machine-wide, so no worktree re-downloads
 them.
 

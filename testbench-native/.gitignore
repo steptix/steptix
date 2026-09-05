@@ -21,3 +21,11 @@ tests/integration/fixtures/sub/
 tests/integration/fixtures/snc-project/
 tests/integration/fixtures/dc-project/
 tests/integration/fixtures/sac-project/
+
+# Remembered wall-clock per live test file, used to start the slow ones first.
+# A local timing hint, not a fact about the code — machine-specific, and stale
+# the moment a suite gets slower.
+tests/integration/live-durations.json
+# Ports+pids of the shard servers a parallel run owns, so the next run can
+# clean up after a Ctrl+Break that skipped the exit hook.
+tests/integration/live-servers.json
