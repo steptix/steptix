@@ -24,7 +24,9 @@ import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
 import { loadContextFiles } from '../../context/loader.js';
 import { interpolate } from '../../parser/parameters.js';
+import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
+import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
 import { redactReport, runSecrets } from '../../utils/secrets.js';
 import { AiClient } from '../../ai/client.js';
@@ -55,6 +57,29 @@ const INTERACTIVE_STEP_PATTERN = /^\[interactive\]\s*(.*)/i;
  */
 function runIsKeyless(config: Config): boolean {
   return !aiConfigured(config.ai) || config.ai.allowInRuns === false;
+}
+
+/**
+ * The env/data context for one named environment, composed the way `aiui run`
+ * composes it: this process's environment, the project's base `.env` for
+ * anything missing, `.env.<name>` on top, and `data/<name>.json`. The project
+ * is the working directory, as it already is for `skillsDir` and `loadConfig`
+ * in this runner.
+ *
+ * `mutateProcessEnv` because a `## Parameters` `$VAR` reads `process.env`
+ * directly (`resolveEnvRef`, src/parser/parameters.ts) and `expandTestInstances`
+ * hands it no per-run map — the CLI's reason, and its choice. The overlay
+ * outlives the run in this long-lived process; `aiui ui --env` had already
+ * made that true for the whole window before this runner read the name.
+ */
+async function envContextFor(envName: string, dataDir: string): Promise<EnvDataContext> {
+  const bundle = await resolveEnvBundle({
+    envName,
+    projectRoot: process.cwd(),
+    dataDir,
+    mutateProcessEnv: true,
+  });
+  return { env: bundle.env, data: bundle.data, envName: bundle.envName };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +245,7 @@ export class UIRunnerAdapter {
 
     const stepIndex = this.currentStepIndex;
     const totalSteps = this.test.steps.length;
-    const resolvedInstruction = interpolate(instruction, this.resolvedParameters);
+    const resolvedInstruction = this.resolveStepText(instruction);
 
     // Emit step-start for the steering step
     this.emit('runner:step-start', {
@@ -247,6 +272,7 @@ export class UIRunnerAdapter {
         },
       }),
       resolvedParameters: this.resolvedParameters,
+      ...(this.test.envData && { envData: this.test.envData }),
       ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
       // A broken entry fails with the heal-skip copy instead of reaching AI
       // (stories/keyless-replay-and-gateway-env.md §Part B). Read off
@@ -315,6 +341,22 @@ export class UIRunnerAdapter {
   // Internal — run loop
   // -----------------------------------------------------------------------
 
+  /**
+   * A step's text as the model reads it: `${env.X}` / `${data.x}` first —
+   * fixed for the run, against the context the parser validated the file
+   * with — then the runtime `{{name}}` pass. The CLI's order. The parser
+   * keeps both kinds of token in `parsedTest.steps` so a compile can show
+   * the authored line (stories/placeholder-preserving-actions.md), which is
+   * why the substitution has to happen here, per step, and why a runner
+   * that skips the first pass sends `${env.BASE_URL}` to the model verbatim
+   * (issues/resolved/052). With no context — no environment selected — a
+   * `${…}` is left as written, as `aiui run` without `--env` leaves it.
+   */
+  private resolveStepText(raw: string): string {
+    const envData = this.test?.envData;
+    return interpolate(envData ? interpolateEnvData(raw, envData) : raw, this.resolvedParameters);
+  }
+
   private async executeRun(filePath: string): Promise<void> {
     const runStartTime = Date.now();
 
@@ -326,9 +368,34 @@ export class UIRunnerAdapter {
     // without this an edited skill stays masked by its earlier-cached parse.
     clearSkillCache();
 
-    // 2. Parse the test file (expanding any [skill: ...] references)
+    // 2. Parse the test file (expanding any [skill: ...] references), with the
+    // run's env/data context when an environment is selected.
+    //
+    // The parser resolves `${env.X}` / `${data.x}` — validating them, loading
+    // `dataSources`, and recording `parsedTest.envData` for the run — only when
+    // it is handed a context. This runner never handed it one, so those
+    // references reached the model as literal text on every run since the
+    // feature landed (issues/resolved/052). Same precedence as `aiui run`:
+    // AUTOMATION_ENV, which `aiui ui --env` sets for this process, then the
+    // test's own `env:` frontmatter, then none — and none leaves a `${…}` as
+    // written, exactly as the CLI does without `--env`.
     const skillsDir = pathResolve(process.cwd(), this.config.tests.skillsDir);
-    const parsedTest = await parseTestFile(filePath, { skillsDir });
+    const dataDir = this.config.tests.dataDir;
+    const runEnvName = process.env['AUTOMATION_ENV']?.trim() || undefined;
+    const initial = await parseTestFile(filePath, {
+      skillsDir,
+      ...(runEnvName && { envData: await envContextFor(runEnvName, dataDir) }),
+    });
+    // Frontmatter `env:` is honoured only when nothing run-wide pinned one —
+    // the CLI's second pass, for the same reason: the first parse is how the
+    // frontmatter is read at all.
+    const parsedTest =
+      !runEnvName && initial.frontmatter.env
+        ? await parseTestFile(filePath, {
+            skillsDir,
+            envData: await envContextFor(initial.frontmatter.env, dataDir),
+          })
+        : initial;
     this.test = parsedTest;
     this.uploadProjectRoot = await resolveProjectRoot(parsedTest.filePath);
 
@@ -402,9 +469,7 @@ export class UIRunnerAdapter {
       // would replace the TARGET with its own value once it holds one
       // (stories/variable-assignment.md §Locked).
       const setStep = parseSetStep(rawInstruction);
-      const instruction = setStep
-        ? rawInstruction
-        : interpolate(rawInstruction, this.resolvedParameters);
+      const instruction = setStep ? rawInstruction : this.resolveStepText(rawInstruction);
 
       // --- Check for breakpoint or stepOverNext BEFORE executing ---
       if (this.breakpoints.has(stepIndex) || this.stepOverNext) {
@@ -418,11 +483,10 @@ export class UIRunnerAdapter {
 
       // --- Handle `Set {{name}} to "…"` steps ---
       // `parsedTest.envData` is threaded through so a `${…}` inside the
-      // template resolves. Nothing else in this runner resolves `${…}` — it
-      // never called `interpolateEnvData`, and got away with it while the
-      // parser still baked those values into `parsedTest.steps`
-      // (stories/variable-assignment.md §What was measured). That gap is not
-      // this step's to fix, but it is not this step's to inherit either.
+      // template resolves against the same context as every other step. It
+      // was threaded before the rest of this runner resolved `${…}` at all,
+      // and sat inert until the parse above started building that context
+      // (issues/resolved/052).
       if (setStep) {
         this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
         const outcome = runSetStep(
@@ -567,6 +631,10 @@ export class UIRunnerAdapter {
         },
       }),
         resolvedParameters: this.resolvedParameters,
+        // The context the step text resolved against, so the executor's
+        // `## Values` block, its action substitution, a code-behind
+        // `step.getVar('data.x')` and secret masking read the same values.
+        ...(parsedTest.envData && { envData: parsedTest.envData }),
         ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
         // Keyless, same as the steering call above — both call sites or
         // neither: a run and a steer on the same machine must not disagree

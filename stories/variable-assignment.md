@@ -711,7 +711,14 @@ suite 33/33. The three Set-specific root files alone hold 77 tests.
   `interpolateEnvData`, and only worked before because the parser used to
   bake those values into `parsed.steps`. Every ordinary AI step run through
   the Electron UI now sends `${data.x}` to the model as literal text. Not
-  caused by this story and not fixed by it; worth its own issue.
+  caused by this story and not fixed by it; worth its own issue. *(CLOSED —
+  [issues/resolved/052](../issues/resolved/052-electron-runner-never-resolved-env-data-refs.md).
+  The premise was half wrong, as §What the review found says below: the
+  parser never baked anything for that runner, because that runner never
+  handed it an env context. It does now — `AUTOMATION_ENV`, which `aiui ui
+  --env` sets for the Electron process, or the test's own `env:` frontmatter
+  — and every step then resolves `${…}` before `{{…}}`, the CLI's order. The
+  Set branch's threading went live with it.)*
 
 - **Does `missingParameters` misreport captured names?** Still unproven. The
   Set half is done — a target the same step list assigns is no longer
