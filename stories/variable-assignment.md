@@ -940,12 +940,13 @@ paragraph by adding a substitution site in fifteen lines and watching all
 refuses it when a line that was a `Set` step stops being one. It guards the
 sites that CALL it; a site that does not call it is invisible to it.
 `tests/set-step-parse.test.ts` pins the four known sites, each proven by
-mutation to fail when its guard is removed. And
-`tests/substitution-sites.test.ts` covers the half neither of those can: it
-inventories every substitution CALL in `src/` with a classification, so a NEW
-call fails until someone decides whether it writes into step text. Verified
-against round six’s own repro — adding the call to `src/runner/hooks.ts`
-fails that test by name.
+mutation to fail when its guard is removed. And `tests/substitution-sites.test.ts` covers the half neither of those can:
+it inventories every substitution CALL in `src/`, with a classification and a
+COUNT, so a new call fails until someone decides whether it writes into step
+text. Round seven escaped its first version twice — with `interpolate`, which
+the detector did not name, and by adding a call to an already-classified file,
+since the inventory was keyed per file — and both escapes reintroduced a real
+Set-destroying defect under a green suite. Both now fail it by name.
 
 It is a canary, not a proof. It cannot tell whether a classification is
 honest, only that a new call was considered. That is a weaker claim than the

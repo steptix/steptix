@@ -10,10 +10,14 @@
  *    interpolation — a target that had already been substituted would read as
  *    its own value on the second run (§Locked, "Recognised on the authored
  *    line").
- *  - {@link setStepError} is what every PARSE-TIME validator asks. A line that
- *    opens `Set {{name}} to` has claimed the form the way `[skill:` claims one,
- *    so a claim that does not complete is an error naming the line rather than
- *    prose handed to a model.
+ *  - {@link setStepError} is what a PARSE-TIME validator asks. A line that
+ *    opens `Set {{name}} to` has claimed the form the way `[skill:` claims
+ *    one, so a claim that does not complete is an error naming the line
+ *    rather than prose handed to a model — WHERE a validator runs. It runs
+ *    over `## Steps` and over MCP-supplied steps; it does NOT run over
+ *    `## Hooks` entries, project `defaultHooks`, or steps posted to the
+ *    Sessions API, all of which send a malformed claim to the model as prose.
+ *    Story rule (10) has the full list.
  *
  * Both take the instruction — the text after the `N. ` ordinal — and strip a
  * leading `[no-hooks]` marker themselves.
