@@ -128,6 +128,16 @@ export function registerCommands(
     if (controller.document.isDirty) {
       await controller.document.save();
     }
+    // A proposal from an earlier compile is never the answer for this one, and
+    // leaving it up means anything asking "is there a proposal yet?" — the
+    // `codeBehindPending` context key, a test's wait — is answered by the
+    // previous run's file before this run has produced its own. Cleared at the
+    // start rather than in `presentCompile`, because the window between
+    // starting and presenting is exactly when a stale proposal reads as this
+    // one's. Below the `isRunning` refusal on purpose: a compile that never
+    // starts must not discard the proposal the author is still deciding about.
+    await diffs.discard();
+
     const mode = options.mode ?? 'run';
     const lines = options.lines ?? [];
     const label = path.basename(controller.document.uri.fsPath);
