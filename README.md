@@ -2,7 +2,7 @@
 
 AI-powered UI test automation using natural language Markdown test files. Write tests in plain English, and an AI model interprets each step using Playwright to drive the browser.
 
-For AI-assisted test generation, give your AI the [test authoring guide](docs/ai-test-authoring-guide.md). It covers supported test language, variables, data-driven flows, skills, tools, and validation.
+For AI-assisted test generation, give your AI the [test-writing handbook](docs/test-writing-handbook.md) — how the framework reads a test, the phrasing that maps to real actions, and how to use skills and tools — together with the [test authoring guide](docs/ai-test-authoring-guide.md), the rule-by-rule reference covering variables, data-driven flows, hooks and validation.
 
 ## Prerequisites
 
@@ -687,7 +687,7 @@ export const slugify = tool<{ s: string }>(({ s }) =>
 export const upper = tool<{ s: string }>(({ s }) => s.toUpperCase());
 ```
 
-Both `[tool: slugify s="Hello World"]` and `[tool: upper s="quiet"]` work.
+Call them path-qualified: `[tool: strings/slugify s="Hello World"]` and `[tool: strings/upper s="quiet"]`. A bare `[tool: slugify …]` does not resolve — only a default export answers to the file name alone.
 
 #### Rung 3 — `defineTool({...})` (full schema)
 
