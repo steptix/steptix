@@ -2,6 +2,8 @@
 
 Use this document as context for an AI that generates tests for **ai-ui-automation** (`aiui`, also used by TestBench). It describes the implementation in this repository, checked on 2026-09-06. If the framework changes, check the source references at the end before assuming the grammar is unchanged.
 
+This is the rule-by-rule reference. For the mental model of how a step is executed and the phrasing that is known to work, read [test-writing-handbook.md](test-writing-handbook.md) first.
+
 The output is a Markdown test file, optionally accompanied by reusable Markdown skills, TypeScript tools, and fixture data. Ordinary steps are interpreted by AI against the live browser and executed through Playwright. Special forms such as skill calls, tool calls, and variable assignments are handled by the framework. Natural language is flexible; the surrounding file and invocation syntax is not.
 
 ## Instructions for the test-writing AI
@@ -76,7 +78,7 @@ Later examples illustrate individual features. Supply their application-specific
 | Location | Supported settings relevant to authors |
 | --- | --- |
 | YAML frontmatter | `tags: [smoke, login]`, `timeout: 90s`, `env: staging`, `dataFile: data/cases.json`, `dataSources:` mapping, and `type: skill` for library files. |
-| `## Config` bullet list | `baseUrl`, `timeout`, `viewport`, `cdp`, `cdpTab`, `consoleLogLevel`, `serverFileLogLevel`, `unmask`. |
+| `## Config` bullet list | `baseUrl`, `timeout`, `viewport`, `cdp`, `cdpTab`, `consoleLogLevel`, `serverFileLogLevel`, `unmask`, and `cache` (`on`/`off`, honoured on the TestBench and MCP paths). Unrecognised keys are kept and never read, with no warning. |
 | `## Parameters` bullet list | `- name: value`, referenced in steps as `{{name}}`. |
 
 `viewport` accepts `mobile` (390×844), `tablet` (768×1024), `desktop` (1440×900), or a size such as `1280x720`. It changes page dimensions, not touch support, user agent, or full mobile-device emulation. Do not combine a per-test viewport with `cdp`.
@@ -95,7 +97,7 @@ These are natural-language examples, not literal command keywords. The model cho
 | Native select or custom dropdown | `Select Australia from the Country dropdown` |
 | Checkbox or toggle | `Check the I agree checkbox` |
 | Hover | `Hover over Products to reveal its menu` |
-| Keyboard | `Press Enter in the Search field` |
+| Keyboard | `Type "shoes" into the Search field and press Enter` |
 | Scroll to a target | `Scroll to the Reviews section` |
 | Page extremes or relative scroll | `Scroll to the bottom of the page` / `Scroll down a little` |
 | File upload | `Upload "attachments/statement.pdf" using the Choose file button` |
@@ -110,7 +112,7 @@ These are natural-language examples, not literal command keywords. The model cho
 | Read or count | `Count the rows in the Orders table [store as: order_count]` |
 | Verification | `Verify the status of order {{order_id}} is Shipped` |
 
-Text entry normally replaces a field's contents; say explicitly when you need a different keyboard interaction. Scope repeated labels to their form, dialog, section, or row. For example, `Click Save in the Shipping address dialog` is more reliable than `Click Save`.
+Text entry normally replaces a field's contents; say explicitly when you need a different keyboard interaction. A key press is sent to the page, not to a named field, so type into the field in the same step first. Scope repeated labels to their form, dialog, section, or row. For example, `Click Save in the Shipping address dialog` is more reliable than `Click Save`.
 
 Tabs share their browser session. A separately opened browser supports independent actors/logins. `main` is the original tab label; `default` is the original browser label. Use explicit names for new tabs and browsers instead of guessing generated tab numbers. The standard close-page action does not close the main tab.
 
@@ -172,7 +174,9 @@ Use an explicit capture target:
 7. Assert that "{{summary}}" contains "{{order_id}}"
 ```
 
-The framework also supports a prefix such as `[output: order_id] Read the order number`, and natural-language `store as {{order_id}}`. `[as: name]` appears in existing tests. For reusable skills, use **`[store as: name]`**: the current skill expander explicitly rewrites that form for output aliases and internal scope, but does not rewrite `[as: name]` or `[output: name]`. An aliased skill output using those alternative markers can retain the wrong name.
+The framework also supports a prefix such as `[output: order_id] Read the order number`, and natural-language `store as {{order_id}}`. `[as: name]` is **not** a framework marker: nothing parses it, and it works in some shipped examples only because the model happens to derive the same name from it. Do not use it in new files. For reusable skills, use **`[store as: name]`**: the skill expander rewrites that form (and the prose `store as {{name}}` form, through its braces) for output aliases and internal scope, but does not rewrite `[as: name]` or `[output: name]`. An aliased skill output written with those markers can retain the wrong name.
+
+Placeholders reach the model as tokens, not values: the step is shown as written, with a `## Values` block listing what each `{{name}}` and `${ref}` holds on this run (secret-named ones as `***`), and the real value is substituted when the action executes. An unresolved `{{name}}` stays literal in the step text, is listed as not yet captured, and fails the step if the model uses it in an action.
 
 Reading link text and reading its `href` are different operations. Say which one you need. List captures are stored as JSON-encoded arrays. A read can extract a substring with a regex; describe the desired substring precisely, or use a tool for deterministic parsing. Do not rely on the AI remembering a value that was never captured.
 
@@ -304,7 +308,7 @@ Call it from a test with all inputs supplied:
 Skill rules:
 
 - The path selects the file: `auth/sign_in` means `<skillsDir>/auth/sign_in.md`. Match the file's case and omit `.md`. A leading `/` is optional for skill references.
-- Every declared parameter is required at the call site. Text after `- parameter:` in a skill is descriptive; it does **not** supply an optional default.
+- Every declared parameter is required at the call site. Text after `- parameter:` in a skill is descriptive; it does **not** supply an optional default. An undeclared extra argument is only warned about, and it still overwrites a same-named `{{name}}` in the body.
 - Bare `email` is shorthand for `email="{{email}}"`. Explicit `email="${data.users.admin.email}"` is also useful when an environment bundle is selected.
 - Skills expand before execution. Their parameters are substituted and internal variables are namespaced per invocation. Declare anything the caller needs under `## Outputs` and actually capture or assign it in the body.
 - Declared outputs use their declared names in the caller unless aliased. `out.display_name="signed_in_name"` maps the declared output to a caller variable. Use different aliases for repeated calls whose outputs must both survive.
@@ -379,7 +383,7 @@ Ensure `tests.toolsDir` points to the module directory (default `./tools/src`) a
 | `out.total` | Keep the declared output name `total`. |
 | `out.total="expected_total"` | Rename declared output `total` to caller variable `expected_total`. |
 
-Use lowercase `[skill: ...]` and `[tool: ...]`, one invocation per step. The colon is optional for these two forms, but including it makes malformed calls fail clearly. Separate arguments with spaces, not commas. String values require double quotes; `email=alice`, `email='alice'`, and `email={{email}}` are not supported string forms. There is no embedded-double-quote escape mechanism for the quoted scalar form; pass complex values through a variable or fixture instead. Do not append another action after the closing bracket. A leading descriptive label is allowed but is metadata, not an extra executable instruction.
+Use lowercase `[skill: ...]` and `[tool: ...]` (the keyword is case-sensitive), one invocation per step. The colon is optional for these two forms, but including it makes malformed calls fail clearly; without it, a malformed call silently becomes prose for the model. Separate arguments with spaces, not commas. String values require double quotes; `email=alice`, `email='alice'`, and `email={{email}}` are not supported string forms. There is no embedded-double-quote escape mechanism for the quoted scalar form; pass complex values through a variable or fixture instead. Do not append another action after the closing bracket. A leading descriptive label is allowed but is metadata, not an extra executable instruction.
 
 Tool paths differ from skill paths:
 
@@ -391,7 +395,7 @@ The final path segment is the tool name; preceding segments identify the module 
 
 ## Hooks and conditional steps
 
-The CLI file runner supports hooks before `## Steps`. Do not assume equivalent hook execution in the Sessions/MCP path; its current request assembly and session loop do not carry out these file hooks.
+The CLI file runner supports hooks before `## Steps`. Do not assume equivalent hook execution in the Sessions/MCP path; its current request assembly and session loop do not carry out these file hooks, and they issue no warning that the hooks were dropped.
 
 ```markdown
 ## Hooks
@@ -401,7 +405,7 @@ The CLI file runner supports hooks before `## Steps`. Do not assume equivalent h
 - after: Sign out if the account menu is available
 ```
 
-`before` runs once before the flow; `beforeEach` and `afterEach` wrap steps; `after` is best-effort teardown. Tools and skills can be called from hooks. Keep essential outcome assertions in the main flow: an `after` failure is logged and does not flip a passing test to failed.
+`before` runs once before the flow; `beforeEach` and `afterEach` wrap steps; `after` is best-effort teardown. Tools and skills can be called from hooks. Keep essential outcome assertions in the main flow: an `after` failure is logged and does not flip a passing test to failed. An `afterEach` failure, by contrast, aborts the test.
 
 `[no-hooks]` skips the per-step hooks, not the once-per-test hooks. For expanded sections/skills, put it on the **invocation** to cover the body, for example `1. [no-hooks] Inspect warning dialog`. A marker inside a section body is stripped and does not independently disable its hooks.
 
@@ -453,7 +457,8 @@ The framework's `aiui mcp` server exposes tools to an external AI host. Read tha
 | `list_sessions`, `close_session` | Manage the sessions created for exploration. |
 | `start_cdp_browser`, `list_cdp_browsers` | Discover or start a persistent test browser when an existing sign-in is required. Use returned profiles/ports, not guessed identifiers. |
 | `peek_tab` | Inspect an existing tab before deciding what to drive. |
-| `run_errand` | Perform a temporary task in an existing tab. It refuses skill/tool invocations and is not a replacement for validating a saved test. |
+| `run_errand` | Perform a temporary task in an existing tab. It refuses skill/tool invocations and a `session_id`, leaves no session or variable scope behind, and is not a replacement for validating a saved test. |
+| `navigate_tab`, `focus_cdp_tab`, `close_cdp_tab`, `log_into_site`, `server_status` | Also available: open a URL in a tab with no model turn, bring a CDP tab to the front or close it, run a sign-in flow, and check the server. |
 
 Only use a real, permitted project root; omit `project_root` when the server already has the correct project. A projectless session has no project skills/tools catalogue. Ad-hoc steps also do not automatically import a saved test's section definitions, tables, and hooks: validate the actual file afterwards.
 
