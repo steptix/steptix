@@ -2,6 +2,8 @@
 
 AI-powered UI test automation using natural language Markdown test files. Write tests in plain English, and an AI model interprets each step using Playwright to drive the browser.
 
+For AI-assisted test generation, give your AI the [test authoring guide](docs/ai-test-authoring-guide.md). It covers supported test language, variables, data-driven flows, skills, tools, and validation.
+
 ## Prerequisites
 
 - Node.js >= 22.21 (see [Corporate networks](#corporate-networks) — proxy support relies on it)
