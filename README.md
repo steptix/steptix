@@ -123,6 +123,40 @@ npx aiui ui --config ./custom.config.ts
 | `npm run lint` | Type-check without emitting |
 | `npm run clean` | Remove build artifacts |
 
+### Testing the TestBench extension
+
+The VS Code extension has two suites of its own, both run from
+`testbench-native/`. Neither is covered by the root `npm test`.
+
+| Script | Description |
+|--------|-------------|
+| `npm test` | Unit tests (`node --test`). Seconds, no browser |
+| `npm run test:integration` | Extension tests in a real VS Code, against a fake API client. No server, no browser |
+| `npm run test:live` | The full stack: real VS Code, real server, real browser, real model calls |
+
+```bash
+cd testbench-native && npm run test:live
+```
+
+That is the whole command. It builds what it needs, starts a server per
+worker on a free port from 3200 up, boots the `fixtures/test-app` site on
+8787, runs the suite across four VS Code instances, prints a merged report
+and tears everything down — about five and a half minutes for 33 tests.
+
+It needs `templates/.env` to carry `AI_API_KEY` and `SERVER_URL`; the model
+calls are real and are billed. Useful variants:
+
+```bash
+npm run test:live -- --shards=2                       # fewer workers
+npm run test:live -- --shards=1 --server=<url>        # serial, against your own server
+npm run test:live -- --files=cache-replay.test.cjs    # one file
+```
+
+A run can pass with tests *skipped* rather than failed — the report counts
+them out loud. The usual cause is `cdp-tab-focus`'s screenshot checks, which
+skip when the browser window is occluded and Chromium stops producing frames
+for it. See `CLAUDE.md` for the detail.
+
 ## MCP Server
 
 `aiui mcp` exposes this framework to coding agents over the Model Context
