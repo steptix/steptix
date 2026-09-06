@@ -276,7 +276,12 @@ npm run test:live -- --shards=1 --server=http://localhost:<n>
 
 `--shards=1` is the runner this replaced, kept verbatim: one launch, every
 file, the real `templates/` workspace, VS Code's output inherited so you can
-watch it. It is also the one mode that still has *two* independent notions of
+watch it. Verbatim includes its prerequisite — it starts no server and builds
+no `dist/`, so one must already be running (`:3100` unless you say otherwise)
+and be current. That is the whole difference in ownership: the parallel path
+starts the servers so it builds them, this one does not so it does not.
+
+It is also the one mode that still has *two* independent notions of
 where the server is — the extension reads `SERVER_URL` by walking up from the
 test file to `templates/.env`, while the assertions read `LIVE_SERVER_URL` and
 fall back to `:3100` regardless. Set only one and the tests assert against a
@@ -295,33 +300,53 @@ them.
 
 ### Running live suites in two worktrees at once
 
-Seven of the nine live suites are safe to run concurrently. Everything they
-contend on is per-worktree:
+Read the sharding section above first — a single run is *already* four VS
+Code instances, four servers and four browsers, so two worktrees at once
+means eight of each. That, not correctness, is the reason to think twice: on
+a 12-core box the four-shard run already loses a `cdp-tab-focus` capture
+check to occlusion and once lost a breakpoint wait to a timing budget.
+Doubling it makes those likelier, and neither failure names its cause.
 
-- **Servers** — distinct ports, via `-AutoPort`.
-- **VS Code** — each run gets its own `--user-data-dir` and `--extensions-dir`
-  under that worktree's `.vscode-test/`, so the instances don't forward to
-  each other. (Same mechanism as the orphaned-`Code.exe` hijack, working in
-  your favour: that bug needs a *shared* user-data-dir.)
+What they contend on is safe, and mostly by construction rather than by
+arrangement:
+
+- **Servers** — the runner scans upward from 3200 and skips any port already
+  listening, so a second worktree lands on the next free ones without being
+  told. The window where both scan before either binds is narrow, and loses
+  loudly: `serve` exits on EADDRINUSE and `startServer` reports *"exited
+  before becoming ready"* with the log path. It does not fall through to a
+  server someone else owns.
+- **Stale-server reaping** — each worktree records its own pids in its own
+  `tests/integration/live-servers.json`, and only kills a pid when `/health`
+  on that port answers claiming to *be* that pid. It cannot reap the other
+  worktree's servers, and pid reuse cannot make it kill a stranger.
+- **VS Code** — `--user-data-dir` and `--extensions-dir` are per SHARD now,
+  under `<repo>/.live-shards/wN/`, so they are per worktree for free.
+  (Same mechanism as the orphaned-`Code.exe` hijack, working in your favour:
+  that bug needs a *shared* user-data-dir.)
 - **Extension code** — `--extensionDevelopmentPath` per worktree, so the
   installed `.vsix` is not on the path in either run.
+- **Workspaces** — each shard drives its own copy of `templates/` under its
+  own worktree's `.live-shards/`, so the fixture files, the caches and the
+  `reports/` two runs would otherwise share are already separated.
 - **CDP browsers** — profiles resolve to
   `<project_root>/.aiui/cdp-profiles/<engine>-<name>/`
-  (`profileDirFor`, src/browser/cdp-registry.ts) and the launcher passes
-  `--remote-debugging-port=0`, so the OS assigns the port and it is read back
-  from `DevToolsActivePort`. Concurrency-safe by construction.
+  (`profileDirFor`, src/browser/cdp-registry.ts), and the project root is now
+  the shard's own copied workspace, so profiles are per shard. The launcher
+  passes `--remote-debugging-port=0`, so the OS assigns the port and it is
+  read back from `DevToolsActivePort`.
 - **Playwright** — shared binaries, per-launch temp profiles.
-- **`reports/` and `.cache/`** — resolved against the project root.
 
 - **The fixture app** — `fixtures/test-app` on the pinned port 8787, booted
   by `runLiveTest.cjs`. First run in wins the port; later runs probe it,
-  adopt it, and leave it alone on exit. Safe to share for the pages, which
-  are static markup. Since PR #117 it does hold one piece of per-run state:
-  the `/api/documents` list behind the Documents page. Tests that assert
-  on it clear it first (`DELETE /api/documents`), but two runs uploading
-  at the same moment can still see each other's rows — a
-  `securebank-upload.md` row-count failure during a concurrent run is that,
-  not a regression.
+  adopt it, and leave it alone on exit — which is what lets eight shards
+  share one. Safe for the pages, which are static markup. Since PR #117 it
+  does hold one piece of per-run state: the `/api/documents` list behind the
+  Documents page. Tests that assert on it clear it first
+  (`DELETE /api/documents`), but two runs uploading at the same moment can
+  still see each other's rows — a `securebank-upload.md` row-count failure
+  during a concurrent run is that, not a regression. No live suite in
+  `tests/integration/live/` drives it today.
 
 There used to be an exception here: `templates/init/tests/github.md` drove a
 real github.com login, so two worktrees ran it with the same credentials from
@@ -333,11 +358,13 @@ no rate limit, no 2FA challenge. `github.md` itself stays on disk: the fast
 suite opens it as a parse fixture, and it remains a worked example of testing
 a real site.
 
-The AI gateway key is still shared. Not a correctness problem, but concurrent
-runs share whatever rate limit it carries, so a flake there is not
-automatically a regression.
+The AI gateway key is still shared, and now by eight shards rather than two
+runs. Not a correctness problem, but they share whatever rate limit it
+carries — a four-shard run has already produced `ai.complete` returning
+empty after 86 s — so a flake there is not automatically a regression.
 
-Traced by reading, not yet proven by running two full suites at once.
+Traced by reading, not proven by running two full suites at once. Within one
+worktree, four shards and two shards have both come back clean.
 
 ### Why the junction repair matters
 
