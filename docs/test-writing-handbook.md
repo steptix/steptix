@@ -836,7 +836,7 @@ export default defineTool({
 
 | In scope | Type | Notes |
 | --- | --- | --- |
-| `page` | Playwright `Page` | The active tab. Actions persist for later steps. |
+| `page` | Playwright `Page` | The active tab when the step starts (§7.4). Actions persist for later steps. |
 | `context` | `BrowserContext` | Cookies, storage, `context.request` for HTTP calls that share the page's cookies. |
 | `browser` | `Browser` | For a fresh incognito context. |
 | `step.getVar(name)` | `string \| undefined` | Any test variable. |
@@ -848,8 +848,7 @@ export default defineTool({
 Not available: calling another tool, a skill or an AI step; the `tabs` and
 `browsers` helpers, which belong to compiled code-behind; any retry. A thrown
 error or a false `expect` fails the step once, with the message in the report.
-A page opened with `context.newPage()` is tracked but does not become the
-active tab.
+Which tab and browser a tool lands in, and how to steer it, is §7.4.
 
 `defineTool` parameters are `string`, `number`, `boolean` or `string[]`,
 `number[]`, `boolean[]`. A parameter without `default` is required; an unknown
@@ -880,6 +879,111 @@ that returns an object stores it JSON-encoded, and one that returns
 
 Tool calls use the same argument grammar as skill calls (§6.2). Objects
 (`key={…}`) are not accepted; pass a JSON array or a variable.
+
+### 7.4 Which tab and browser the tool runs in
+
+`page`, `context` and `browser` are resolved when the tool step starts, from
+the same active pointers the model's own actions use. A tool always gets
+whatever the last tab or browser step left active — it cannot ask for a
+different one, and no argument selects a page.
+
+That makes the ordering the whole mechanism. A tab the test opens itself is
+promoted on the spot, so a tool on the next step is already there:
+
+```markdown
+# Order titles without leaving the list
+
+## Config
+- baseUrl: https://app.example.test
+
+## Steps
+1. Navigate to /orders
+2. Read the href of every order link in the Orders table [store as: order_links]
+3. Open https://app.example.test/blank in a new tab and remember it as scratch
+4. [tool: visit_each urls="{{order_links}}" out.titles="order_titles"]
+5. Switch back to the main tab
+6. Verify the Orders table is still visible
+```
+
+`visit_each` navigates the tab it is handed, which is why step 3 exists: the
+scratch tab absorbs the navigation and the Orders list survives it. Step 5 is
+not optional either — the promotion in step 3 holds until something moves it,
+so without that line every later step is on the scratch tab.
+
+A tab the **application** opens — `window.open`, `target="_blank"`, a popup —
+is tracked and labelled but does not become active. A tool placed straight
+after the click reads the old tab and passes on the wrong page, which is a
+green failure rather than a loud one. Switch first, and in its own step: a
+`[tool:]` line takes a leading label but no second instruction, so the switch
+cannot ride along with it.
+
+```markdown
+# Report opened in a popup
+
+## Config
+- baseUrl: https://app.example.test
+
+## Steps
+1. Navigate to /reports
+2. Click "Open report" and switch to the tab it opened
+3. Read the href of every download link on the report [store as: report_links]
+4. [tool: visit_each urls="{{report_links}}" out.titles="report_titles"]
+5. Close the tab showing "Report"
+```
+
+Name a tab with `remember it as …` whenever more than one is open. A switch
+matches an exact label first, then a URL substring, then a title substring,
+all case-insensitively — so `Switch to the /accounts tab` also matches
+`/accounts-archive`, and two tabs both titled "Orders" resolve by whichever
+URL happens to hit first. A label is exact on the first pass and survives a
+retitle:
+
+```markdown
+# Two regions, one tool
+
+## Config
+- baseUrl: https://app.example.test
+
+## Steps
+1. Open https://app.example.test/eu in a new tab and remember it as eu
+2. Open https://app.example.test/us in a new tab and remember it as us
+3. Switch to the eu tab
+4. Read the href of every product link [store as: eu_links]
+5. [tool: visit_each urls="{{eu_links}}" out.titles="eu_titles"]
+6. Switch to the us tab
+7. Read the href of every product link [store as: us_links]
+8. [tool: visit_each urls="{{us_links}}" out.titles="us_titles"]
+```
+
+The `out.` aliases are what keep the two results apart; without them the
+second call overwrites the first.
+
+A second browser works the same way and moves more than the page: the tool
+also gets that browser's `context`, so a `context.request` call carries the
+second session's cookies rather than the first's.
+
+```markdown
+# Reviewer queue
+
+## Config
+- baseUrl: https://app.example.test
+
+## Parameters
+- admin_user: reviewer.admin@example.test
+- reviewer_user: second.reviewer@example.test
+
+## Steps
+1. Navigate to /queue and sign in as {{admin_user}}
+2. Open a second browser as reviewer
+3. Navigate to /queue and sign in as {{reviewer_user}}
+4. [tool: extract_order_ids baseUrl out.order_ids="review_ids"]
+5. Switch back to the default browser
+```
+
+A tool cannot move the pointer itself. `context.newPage()` inside tool code
+opens a real tab and the framework tracks it, but it does not become active,
+later steps stay where they were, and the report marks it as a tab the test
+did not open. Own the tab from the steps, not from the code.
 
 ## 8. Hooks
 
@@ -988,6 +1092,7 @@ report's skipped steps and warnings, not just the summary.
 | `[tool: slugify s="x"]` for a named export | `[tool: strings/slugify s="x"]` | Named exports need the file prefix. |
 | `[tool: visit_each urls={{links}}]` | `urls="{{links}}"` | Unquoted templates are a parse error. |
 | `[tool: a] [tool: b]` on one line | Two lines | Only one call per line survives. |
+| A popup-opening click, then `[tool: …]` | Add `and switch to the tab it opened` to the click | A tab the app opens is tracked but not active; the tool reads the old page and passes. |
 | `password: hunter2` under `## Parameters` | `password: $TEST_PASSWORD` | Secrets live in `.env`, and the name alone triggers masking. |
 | `[input: otp]` in a CI test | A tool that fetches the code from the test inbox | Input steps are skipped unattended. |
 | `## Steps (login)` | `## Steps` | Any other heading yields no steps. |
@@ -1023,6 +1128,7 @@ report's skipped steps and warnings, not just the summary.
 | Conditionals and hooks | [step-grouper.ts](../src/runner/step-grouper.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
 | Skill files, calls, expansion | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tools | [types.ts](../src/tools/types.ts), [define-tool.ts](../src/tools/define-tool.ts), [tool-helper.ts](../src/tools/tool-helper.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), working examples in [fixtures/tools/src](../fixtures/tools/src) |
+| Tab and browser tracking | [manager.ts](../src/browser/manager.ts), [step-executor.ts](../src/runner/step-executor.ts), [tabs.ts](../src/codebehind/tabs.ts) |
 | Shipped example tests and skills | [templates/init/tests](../templates/init/tests), [templates/init/skills](../templates/init/skills) |
 | MCP tools and their limits | [schemas.ts](../src/mcp/schemas.ts), [assemble.ts](../src/mcp/assemble.ts) |
 | Defaults | [defaults.ts](../src/config/defaults.ts) |
