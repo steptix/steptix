@@ -439,6 +439,13 @@ const sse = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`
  * `completeStream` treats absent-or-zero usage as missing and estimates output
  * tokens at `len/4`, so a measured count is what stops a streamed bridge call
  * reporting a number derived from the response's string length.
+ *
+ * It rides on a chunk that still carries a `choices` entry, which works because
+ * the client reads usage off ANY chunk that has it (@pkent/aigateway's
+ * `openaiCompatible` provider). OpenAI's own `include_usage` convention is a
+ * separate trailing chunk with `choices: []`, so a stricter client than the one
+ * this bridge is built for would drop these numbers on the floor. Worth knowing
+ * before pointing anything else at it.
  */
 export function streamFrames(c: CompletionShape): string[] {
   const base = { id: c.id, object: 'chat.completion.chunk', created: c.created, model: c.model };

@@ -123,7 +123,7 @@ The mappings, exhaustively:
 | `reasoning_effort`, `stream_options`, `temperature`, unknowns | — | drop silently, never error — the `retry`/`authoring` profiles send effort, streams carry `stream_options: {include_usage: true}`, and both must keep working |
 | `response_format: json_object` | — | best-effort emulation, below |
 | response fragments | `for await (…of res.text)` | concatenate (non-stream) or re-emit as SSE deltas (stream) |
-| usage | `countTokens` per prompt message + the raw response | measured on the wire (open question 3 below). Per message because the message overload counts role framing a bare string does not — exactly +4 tokens each, measured. The response is counted BEFORE the fence strip: what the model generated is what it spent. A count that throws degrades to zeros, which `completeStream` treats as missing and estimates at `ceil(len/4)` — the old behaviour, now only a fallback |
+| usage | `countTokens` per prompt message + the raw response | measured on the wire (open question 3 below). Per message because the message overload counts role framing a bare string does not — +4 tokens per message on both models measured. The response is counted BEFORE the fence strip: what the model generated is what it spent. Bounded and skipped on a dead socket: counting is capped at 2 s and not attempted at all once the client has hung up, because `countTokens` takes no cancellation token and a completion the seat already paid for must not be discarded waiting on a number. A count that fails, times out or is skipped degrades to zeros — which on the DEFAULT non-streaming path (`streamResponses: false`) `completeOnce` records as literal 0/0, and only on the streaming path become `completeStream`'s `ceil(len/4)` output estimate |
 
 **`json_object` emulation.** `AiClient` sends
 `response_format: {type: "json_object"}` on **every** request — both
@@ -278,7 +278,11 @@ Costs to document rather than change:
   config proceeds to the aiapi default.
 - **Integration (electron harness):** a fake `vscode.lm` namespace (the
   FakeApiClient pattern): consent-missing path, 401 without token, EADDRINUSE
-  standby/adopt, `/v1/models` shape, streaming and non-streaming bodies.
+  standby/adopt, `/v1/models` shape, streaming and non-streaming bodies,
+  measured usage on both of those bodies (the streamed one asserted on the
+  finish chunk, since zeros there silently restore the `ceil(len/4)` estimate),
+  every prompt message counted rather than just the first, and the completion
+  still served when `countTokens` throws at either position or never settles.
 - **Live (manual checklist, real Copilot seat — not CI-able):** setup command
   end-to-end; Compile This Step through the bridge; compile envelope parses
   (json_object emulation); a keyed failed run performs exactly one diagnose
@@ -319,8 +323,21 @@ plainly.
    credits unchanged at 27/1,500**, and the tokenizer is local — medians of
    0.131 ms at 100 B rising to 3.45 ms at 100 KB, i.e. ~0.12 ms fixed plus
    ~0.03 ms/KB, which is work proportional to the text rather than a round
-   trip. A six-message prompt plus its response costs about 1 ms on a step that
-   takes seconds. So the bridge counts rather than shipping zeros.
+   trip. That proportionality is the point: a handful of short messages is
+   about a millisecond, while a prompt carrying a 100 KB page snapshot is a few
+   on its own — still nothing against a step that takes seconds. So the bridge
+   counts rather than shipping zeros.
+
+   Also measured, and the fact the code comments lean on: the
+   `LanguageModelChatMessage` overload returns **exactly 4 tokens more** than
+   the same text as a bare string — 26 vs 22, 192 vs 188, 1,883 vs 1,879 and
+   18,787 vs 18,783 across four payload sizes, on `copilot/gpt-5.6-luna` and
+   again on `copilot/claude-sonnet-5`. That is per-message role framing, and it
+   is why the bridge counts messages rather than one joined string. It is a
+   per-tokenizer property, so treat it as "true of the two models measured"
+   rather than a guarantee for whatever a seat offers next; nothing breaks if a
+   third model differs, since the code sums whatever `countTokens` returns.
+   Both runs also agreed on ~5.32 chars/token.
 
    Two traps worth recording, because both produced confident wrong answers
    before being caught. Calling `countTokens` repeatedly on the SAME string
@@ -332,9 +349,19 @@ plainly.
 
    What this does NOT give anyone is a bill. GitHub meters AI credits, not
    tokens, so these figures reconcile with nothing on the invoice — they are
-   for comparing prompt sizes and checking headroom against `maxInputTokens`.
-   The cost question wants a request count, which the bridge already keeps as
-   `servedRequests` for the status bar.
+   for comparing prompt sizes and checking headroom against the model's own
+   `model.maxInputTokens` (VS Code's, not this repo's `ai.maxInputTokens`
+   config key, which is a different number). The cost question wants a request
+   count, which the bridge already keeps as `servedRequests` for the status
+   bar.
+
+   One behavioural consequence to expect, since it is easy to read as a
+   regression. `AiClient` calls `checkStepBudget` right after recording usage,
+   and with zeros that branch was unreachable on bridge traffic. Real counts
+   make it reachable, so a large compile prompt can now emit a token warning
+   that bridge runs never used to emit. It only logs — nothing throws, and no
+   framework change was needed for any of this — but "no framework change"
+   means the code, not the output.
 4. **RESOLVED — diagnosis and quota.** Superseded by the AI run switch
    ([run-settings.md](run-settings.md) §9): setup never touches
    `ai.diagnoseFailures`, spend control is the run mode, and diagnosis works

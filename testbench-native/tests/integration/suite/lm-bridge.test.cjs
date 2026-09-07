@@ -224,6 +224,29 @@ describe('TestBench Copilot LM bridge', function () {
       assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
     });
   }
+
+  it('serves the completion when countTokens never settles', async () => {
+    // A tokenizer that hangs is the case a try/catch cannot save you from:
+    // `countTokens` takes no cancellation token, so without a bound the bridge
+    // would sit on a generated answer until the client gave up at 120s and
+    // discard a completion the seat had already paid for. MEASURE_BUDGET_MS
+    // turns that into a served completion with no numbers.
+    fake.reply = ['{"entry":"ok"}'];
+    fake.countTokensHangs = true;
+    const started = Date.now();
+    const result = await call('/v1/chat/completions', {
+      method: 'POST',
+      body: completionRequest(),
+    });
+    const elapsed = Date.now() - started;
+    assert.equal(result.status, 200);
+    const body = json(result);
+    assert.equal(body.choices[0].message.content, '{"entry":"ok"}');
+    assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+    // Bounded, and by the budget rather than by the client giving up.
+    assert.ok(elapsed < 30_000, `served in ${elapsed}ms, which is not a bound`);
+  });
+
   it('answers a streamed request as ONE delta then [DONE], carrying usage', async () => {
     // Fenced, so the completion count distinguishes raw from stripped HERE too:
     // raw is 32 chars (8 tokens), the stripped text the client sees is 20 (5).

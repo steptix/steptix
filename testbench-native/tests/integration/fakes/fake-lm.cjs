@@ -41,6 +41,9 @@ class FakeLm {
     this.counted = [];
     /** When set, countTokens rejects with it — the usage-unavailable path. */
     this.countTokensFailsWith = null;
+    /** When true, countTokens never settles — the wedged-tokenizer case the
+     *  bridge bounds with MEASURE_BUDGET_MS. */
+    this.countTokensHangs = false;
     /** Let this many countTokens calls succeed before failing. 0 = fail the
      *  first. Failing only the LAST call is what catches a try/catch narrowed
      *  to the prompt loop, leaving the response count outside it. */
@@ -87,6 +90,7 @@ class FakeLm {
        */
       async countTokens(input) {
         fake.counted.push(input);
+        if (fake.countTokensHangs) return new Promise(() => {});
         if (fake.countTokensFailsWith && fake.counted.length > fake.countTokensFailsAfter) {
           throw fake.countTokensFailsWith;
         }
