@@ -37,6 +37,17 @@ class FakeLm {
     this.requests = [];
     /** Every selector selectChatModels was called with, in order. */
     this.selectors = [];
+    /** Every input countTokens was called with, in order. */
+    this.counted = [];
+    /** When set, countTokens rejects with it — the usage-unavailable path. */
+    this.countTokensFailsWith = null;
+    /** When true, countTokens never settles — the wedged-tokenizer case the
+     *  bridge bounds with MEASURE_BUDGET_MS. */
+    this.countTokensHangs = false;
+    /** Let this many countTokens calls succeed before failing. 0 = fail the
+     *  first. Failing only the LAST call is what catches a try/catch narrowed
+     *  to the prompt loop, leaving the response count outside it. */
+    this.countTokensFailsAfter = 0;
   }
 
   /** Reject the next request the way a revoked consent does. */
@@ -71,6 +82,22 @@ class FakeLm {
       vendor: model.vendor,
       family: model.family,
       name: model.name,
+      /**
+       * Deliberately NOT a constant: 1 token per 4 characters plus 4 for a
+       * message's role framing, mirroring the real tokenizer's measured shape.
+       * A fake returning the same number for prompt and completion could not
+       * catch the two being wired up the wrong way round.
+       */
+      async countTokens(input) {
+        fake.counted.push(input);
+        if (fake.countTokensHangs) return new Promise(() => {});
+        if (fake.countTokensFailsWith && fake.counted.length > fake.countTokensFailsAfter) {
+          throw fake.countTokensFailsWith;
+        }
+        const text = typeof input === 'string' ? input : input.text;
+        const framing = typeof input === 'string' ? 0 : 4;
+        return Math.ceil(text.length / 4) + framing;
+      },
       async sendRequest(messages, options) {
         fake.requests.push({ model: model.id, messages, options });
         if (fake.failWith) {

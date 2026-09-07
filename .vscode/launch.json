@@ -2,6 +2,34 @@
   "version": "0.2.0",
   "configurations": [
     {
+      // CLAUDE.md says to run a dev host rather than installing from a
+      // worktree, because `~/.vscode/extensions/` is machine-global and two
+      // checkouts collide there. This is how you launch one.
+      //
+      // F5 rather than the CLI, and the reason is narrower than "the CLI does
+      // not work". Measured 2026-09-07: with NO VS Code running,
+      // `code --extensionDevelopmentPath=.` does spawn a real dev host, exactly
+      // as CLAUDE.md says. With an instance already running it does not — the
+      // arguments are forwarded to that instance, which opens a plain window
+      // and drops the flag, leaving no process carrying it. Since you almost
+      // always have VS Code open, F5 is the form that behaves either way.
+      //
+      // The preLaunchTask matters for the same reason the version bump does:
+      // without it F5 loads whatever `dist/` happens to be on disk, which is
+      // the stale-build trap in a different costume.
+      "name": "Run TestBench Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "preLaunchTask": "Build TestBench extension",
+      // The fixture workspace, so the host opens somewhere useful rather than
+      // on an empty window you then have to open a folder in.
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/testbench-native",
+        "${workspaceFolder}/templates"
+      ],
+      "outFiles": ["${workspaceFolder}/testbench-native/dist/**/*.js"]
+    },
+    {
       "name": "Debug Test File",
       "type": "node",
       "request": "launch",

@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { getOutputChannel } from './output-channel.js';
 import {
   IMAGE_STRIP_WARNING,
+  ZERO_USAGE,
   bodyLimitError,
   chatCompletionBody,
   isAuthorized,
@@ -22,6 +23,7 @@ import {
   unknownRouteError,
   type BridgeError,
   type BridgeMessage,
+  type BridgeUsage,
   type LmSelector,
 } from './lm-bridge-core.js';
 
@@ -50,6 +52,23 @@ export const DEFAULT_PORT = 18790;
 /** How long to wait before re-attempting a port another window is holding. */
 const DEFAULT_RETRY_MS = 15_000;
 
+/**
+ * How long usage measurement may take before the completion is served without
+ * it.
+ *
+ * Sized against the largest request this bridge accepts, not against a typical
+ * one: `MAX_BODY_BYTES` is 32 MB, which at the measured ~0.03 ms/KB is roughly
+ * a second of counting across all N+1 calls. So this is about 2x headroom at
+ * the limit and thousands of times that for a realistic compile prompt — a
+ * bound on pathology, not a performance budget.
+ *
+ * The alternative to a bound is worse than a missing number: `countTokens`
+ * takes no cancellation token, so an unbounded wait would hold a generated
+ * answer until the client gives up at 120 s, discarding a completion the seat
+ * has already paid for.
+ */
+const MEASURE_BUDGET_MS = 2_000;
+
 /** Shown in Copilot's consent dialog, so it says what the seat is being spent on. */
 const JUSTIFICATION =
   'TestBench compiles and repairs natural-language test steps using your Copilot seat.';
@@ -69,6 +88,14 @@ export interface LmModelHandle {
     messages: BridgeMessage[],
     options: { modelOptions?: Record<string, unknown>; signal?: AbortSignal },
   ): Promise<AsyncIterable<string>>;
+  /**
+   * Tokens in one message or string, by this model's own tokenizer.
+   *
+   * Measured free of Copilot credits and local (~0.12 ms + 0.03 ms/KB), which
+   * is why the bridge can afford to call it per message rather than shipping
+   * the zeros it used to.
+   */
+  countTokens(input: BridgeMessage | string): Promise<number>;
 }
 
 /**
@@ -101,18 +128,32 @@ export const realLmFacade: LmFacade = {
   },
 };
 
+/**
+ * `BridgeMessage` in the shape `vscode.lm` takes.
+ *
+ * Shared by `sendRequest` and `countTokens` on purpose: counting a different
+ * object from the one sent would report tokens for a prompt that was never
+ * issued. The overloads are not interchangeable either — a message counts the
+ * role framing that a bare string does not, +4 tokens per message on both
+ * models measured.
+ */
+function toLmMessage(m: BridgeMessage): vscode.LanguageModelChatMessage {
+  return m.role === 'assistant'
+    ? vscode.LanguageModelChatMessage.Assistant(m.text)
+    : vscode.LanguageModelChatMessage.User(m.text);
+}
+
 function wrapModel(model: vscode.LanguageModelChat): LmModelHandle {
   return {
     id: model.id,
     vendor: model.vendor,
     family: model.family,
     name: model.name,
+    async countTokens(input) {
+      return await model.countTokens(typeof input === 'string' ? input : toLmMessage(input));
+    },
     async sendRequest(messages, options) {
-      const lmMessages = messages.map((m) =>
-        m.role === 'assistant'
-          ? vscode.LanguageModelChatMessage.Assistant(m.text)
-          : vscode.LanguageModelChatMessage.User(m.text),
-      );
+      const lmMessages = messages.map(toLmMessage);
       // The run's own abort (a user Stop, or the client's 120s timeout) closes
       // the HTTP response; without forwarding it, the model keeps generating
       // against a socket nobody is reading and the seat pays for it.
@@ -167,6 +208,7 @@ export class LmBridge implements vscode.Disposable {
   /** See {@link ensureToken} — the in-flight or settled mint, memoized. */
   private tokenPromise: Promise<string> | undefined;
   private imageWarningShown = false;
+  private zeroUsageWarningShown = false;
   private disposed = false;
   /** Serializes {@link sync}; see its comment. */
   private syncChain: Promise<void> = Promise.resolve();
@@ -548,6 +590,9 @@ export class LmBridge implements vscode.Disposable {
       created: Math.floor(Date.now() / 1000),
       model: request.model,
       text: request.wantsJson ? stripJsonFence(text) : text,
+      // The RAW text, not the fence-stripped payload above: what the model
+      // generated is what it spent, and the fence is the bridge's to remove.
+      usage: await this.measureUsage(model, request.messages, text, abort.signal),
     };
 
     if (!request.stream) return this.writeJson(res, 200, chatCompletionBody(payload));
@@ -559,6 +604,89 @@ export class LmBridge implements vscode.Disposable {
     });
     for (const frame of streamFrames(payload)) res.write(frame);
     res.end();
+  }
+
+  /**
+   * Token usage for one served completion.
+   *
+   * Per MESSAGE for the prompt, because the message overload counts role
+   * framing that a bare string does not — +4 tokens per message on both models
+   * measured (stories/copilot-lm-bridge.md, resolved question 3) — so summing
+   * messages is closer to what the provider would charge than counting one
+   * joined string would be.
+   *
+   * Cost is proportional to the prompt, not flat: ~0.12 ms per call plus
+   * ~0.03 ms/KB, so a handful of short messages is around a millisecond while a
+   * 100 KB page snapshot is a few on its own.
+   *
+   * Never throws, and never outlives its usefulness. A failed count must not
+   * fail a completion that already succeeded — the caller wants the answer, the
+   * seat has already been spent, and `AiClient` copes with zeros. That
+   * principle is why the two guards below exist rather than just the try:
+   * a disconnected client is not owed N+1 tokenizer calls, and an unbounded
+   * `countTokens` would otherwise let a wedged tokenizer discard a generated
+   * answer at the client's 120 s timeout.
+   */
+  private async measureUsage(
+    model: LmModelHandle,
+    messages: BridgeMessage[],
+    text: string,
+    signal: AbortSignal,
+  ): Promise<BridgeUsage> {
+    // Nobody is reading this response. The completion is already generated and
+    // the seat already spent; counting it now buys a number no one will see.
+    if (signal.aborted) return { ...ZERO_USAGE };
+
+    let expired: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        this.countUsage(model, messages, text),
+        new Promise<never>((_, reject) => {
+          expired = setTimeout(
+            () => reject(new Error(`counting exceeded ${MEASURE_BUDGET_MS}ms`)),
+            MEASURE_BUDGET_MS,
+          );
+        }),
+      ]);
+    } catch (err) {
+      this.log(`usage not measured: ${err instanceof Error ? err.message : String(err)}`);
+      return { ...ZERO_USAGE };
+    } finally {
+      clearTimeout(expired);
+    }
+  }
+
+  /** The counting itself; {@link measureUsage} owns the guards around it. */
+  private async countUsage(
+    model: LmModelHandle,
+    messages: BridgeMessage[],
+    text: string,
+  ): Promise<BridgeUsage> {
+    let prompt = 0;
+    for (const message of messages) prompt += await model.countTokens(message);
+    const completion = await model.countTokens(text);
+
+    // A model whose tokenizer answers 0 for real text is a thing that exists:
+    // `copilotcli/auto` is a router entry with maxInputTokens 0 whose
+    // countTokens returns 0 for any input. Its zeros are indistinguishable on
+    // the wire from the not-measured fallback, so the difference gets said
+    // rather than leaving someone to wonder why a busy compile reports nothing
+    // — once per bridge, like the image-strip warning above, because the cause
+    // is a configured model and every later request would say the same thing.
+    if (prompt === 0 && !this.zeroUsageWarningShown && messages.some((m) => m.text.trim() !== '')) {
+      this.zeroUsageWarningShown = true;
+      this.log(
+        `usage measured as 0 for a non-empty prompt — ${qualifiedModelId(model)} ` +
+          'reports no usable tokenizer (a router alias like copilotcli/auto does ' +
+          'this); point AI_MODEL at a concrete model to get real counts',
+      );
+    }
+
+    return {
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: prompt + completion,
+    };
   }
 
   /** First selector that resolves wins; see `modelSelectorAttempts`. */

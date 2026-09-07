@@ -19,6 +19,7 @@ import { strict as assert } from 'node:assert';
 import {
   IMAGE_OMITTED_NOTE,
   MAX_BODY_BYTES,
+  ZERO_USAGE,
   bodyLimitError,
   chatCompletionBody,
   isAuthorized,
@@ -368,7 +369,14 @@ test('a lone ``` line is not treated as a fence', () => {
 // Response shaping
 // ---------------------------------------------------------------------------
 
-const shape = { id: 'chatcmpl-1', created: 1_700_000_000, model: 'copilot/gpt-4.1', text: '{"a":1}' };
+const usage = { prompt_tokens: 41, completion_tokens: 7, total_tokens: 48 };
+const shape = {
+  id: 'chatcmpl-1',
+  created: 1_700_000_000,
+  model: 'copilot/gpt-4.1',
+  text: '{"a":1}',
+  usage,
+};
 
 test('the non-streaming body is a complete OpenAI chat.completion', () => {
   const body = chatCompletionBody(shape);
@@ -376,9 +384,34 @@ test('the non-streaming body is a complete OpenAI chat.completion', () => {
   assert.equal(body.model, 'copilot/gpt-4.1');
   assert.deepEqual(body.choices[0].message, { role: 'assistant', content: '{"a":1}' });
   assert.equal(body.choices[0].finish_reason, 'stop');
-  assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  assert.deepEqual(body.usage, usage);
 });
 
+test('neither builder hands out a reference to the usage it was given', () => {
+  // ZERO_USAGE is a module-level singleton and every fallback spreads it. If a
+  // builder aliased instead of copying, one consumer mutating `body.usage`
+  // would poison that constant for the extension host's lifetime — so the
+  // mutation has to be applied to what came OUT and checked against what went
+  // IN. (Mutating a second body built from a different object proves nothing:
+  // that passes against an aliasing implementation too.)
+  const body = chatCompletionBody(shape);
+  body.usage.prompt_tokens = 999;
+  assert.equal(shape.usage.prompt_tokens, 41);
+
+  const finish = JSON.parse(streamFrames(shape)[1].replace(/^data: /, ''));
+  finish.usage.completion_tokens = 999;
+  assert.equal(shape.usage.completion_tokens, 7);
+});
+
+test('ZERO_USAGE cannot be mutated by a consumer that forgets to copy', () => {
+  // Frozen rather than trusted: the fallback is reached exactly when something
+  // has already gone wrong, which is the worst moment to also corrupt state
+  // every later request reads.
+  assert.throws(() => {
+    ZERO_USAGE.prompt_tokens = 1;
+  }, TypeError);
+  assert.deepEqual(ZERO_USAGE, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+});
 test('a streamed response is ONE delta, a finish chunk, then [DONE]', () => {
   const frames = streamFrames(shape);
   assert.equal(frames.length, 3);
@@ -392,9 +425,9 @@ test('a streamed response is ONE delta, a finish chunk, then [DONE]', () => {
   assert.deepEqual(second.choices[0].delta, {});
   assert.equal(second.choices[0].finish_reason, 'stop');
   // stream_options: {include_usage: true} rides on every streamed request, so
-  // the finish chunk carries usage — zeros, which completeStream then
-  // estimates over.
-  assert.deepEqual(second.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  // the finish chunk carries usage. Real numbers here are what stop
+  // completeStream treating it as missing and estimating output at len/4.
+  assert.deepEqual(second.usage, usage);
 
   assert.equal(frames[2], 'data: [DONE]\n\n');
   for (const frame of frames) assert.ok(frame.endsWith('\n\n'), 'each frame terminates the event');
