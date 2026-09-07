@@ -41,6 +41,10 @@ class FakeLm {
     this.counted = [];
     /** When set, countTokens rejects with it — the usage-unavailable path. */
     this.countTokensFailsWith = null;
+    /** Let this many countTokens calls succeed before failing. 0 = fail the
+     *  first. Failing only the LAST call is what catches a try/catch narrowed
+     *  to the prompt loop, leaving the response count outside it. */
+    this.countTokensFailsAfter = 0;
   }
 
   /** Reject the next request the way a revoked consent does. */
@@ -83,7 +87,9 @@ class FakeLm {
        */
       async countTokens(input) {
         fake.counted.push(input);
-        if (fake.countTokensFailsWith) throw fake.countTokensFailsWith;
+        if (fake.countTokensFailsWith && fake.counted.length > fake.countTokensFailsAfter) {
+          throw fake.countTokensFailsWith;
+        }
         const text = typeof input === 'string' ? input : input.text;
         const framing = typeof input === 'string' ? 0 : 4;
         return Math.ceil(text.length / 4) + framing;

@@ -202,12 +202,18 @@ describe('TestBench Copilot LM bridge', function () {
     assert.deepEqual(sent.options.modelOptions, { max_tokens: 4096 });
   });
 
-  it('serves the completion with zeroed usage when countTokens fails', async () => {
-    // Usage is a nicety; the answer is the product. A tokenizer that throws
-    // must not turn a completion the seat already paid for into an error.
-    fake.reply = ['{"entry":"ok"}'];
-    fake.countTokensFailsWith = new Error('tokenizer unavailable');
-    try {
+  for (const { when, after } of [
+    { when: 'on the first prompt message', after: 0 },
+    { when: 'on the response, after the prompt counted fine', after: 1 },
+  ]) {
+    it(`serves the completion with zeroed usage when countTokens fails ${when}`, async () => {
+      // Usage is a nicety; the answer is the product. A tokenizer that throws
+      // must not turn a completion the seat already paid for into an error.
+      // Both positions, because a try/catch wrapped around only the prompt
+      // loop would survive the first case and throw on the second.
+      fake.reply = ['{"entry":"ok"}'];
+      fake.countTokensFailsWith = new Error('tokenizer unavailable');
+      fake.countTokensFailsAfter = after;
       const result = await call('/v1/chat/completions', {
         method: 'POST',
         body: completionRequest(),
@@ -216,13 +222,12 @@ describe('TestBench Copilot LM bridge', function () {
       const body = json(result);
       assert.equal(body.choices[0].message.content, '{"entry":"ok"}');
       assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
-    } finally {
-      fake.countTokensFailsWith = null;
-    }
-  });
-
-  it('answers a streamed request as ONE delta then [DONE]', async () => {
-    fake.reply = ['{"entry":', '"streamed"}'];
+    });
+  }
+  it('answers a streamed request as ONE delta then [DONE], carrying usage', async () => {
+    // Fenced, so the completion count distinguishes raw from stripped HERE too:
+    // raw is 32 chars (8 tokens), the stripped text the client sees is 20 (5).
+    fake.reply = ['```json\n{"entry":', '"streamed"}\n```'];
     const result = await call('/v1/chat/completions', {
       method: 'POST',
       body: completionRequest({ stream: true, stream_options: { include_usage: true } }),
@@ -241,7 +246,48 @@ describe('TestBench Copilot LM bridge', function () {
     // Both fragments arrive in ONE delta: the response was buffered so the
     // fence strip could run, which is only possible before anything is emitted.
     assert.equal(first.choices[0].delta.content, '{"entry":"streamed"}');
-    assert.equal(JSON.parse(frames[1]).choices[0].finish_reason, 'stop');
+    const finish = JSON.parse(frames[1]);
+    assert.equal(finish.choices[0].finish_reason, 'stop');
+    // The finish chunk is where `stream_options: {include_usage: true}` looks,
+    // and zeros here are not neutral: `completeStream` reads zero-or-absent as
+    // missing and estimates output at ceil(len/4). Measured numbers are the
+    // only thing that stops a run reporting a figure derived from string
+    // length, so this assertion is the streaming half of the whole change.
+    assert.deepEqual(finish.usage, { prompt_tokens: 14, completion_tokens: 8, total_tokens: 22 });
+  });
+
+  it('counts EVERY prompt message, not just the first', async () => {
+    // The default fixture folds system+user into one message, so the summation
+    // loop never iterates and `prompt = count(messages[0])` would pass. An
+    // assistant turn survives the fold, so this is the shape that separates
+    // them. Counts, with the fake's ceil(len/4) + 4 framing per message:
+    //   the folded system+user message   40 chars -> 10 + 4 = 14
+    //   '{"entry":"first"}'              17 chars ->  5 + 4 =  9
+    //   'Now compile step 2.'            19 chars ->  5 + 4 =  9
+    // Summing gives 32; counting only the first message gives 14.
+    fake.reply = ['{"entry":"second"}'];
+    const result = await call('/v1/chat/completions', {
+      method: 'POST',
+      body: completionRequest({
+        messages: [
+          { role: 'system', content: 'You compile test steps.' },
+          { role: 'user', content: 'Compile step 1.' },
+          { role: 'assistant', content: '{"entry":"first"}' },
+          { role: 'user', content: 'Now compile step 2.' },
+        ],
+      }),
+    });
+    assert.equal(result.status, 200);
+    assert.equal(json(result).usage.prompt_tokens, 32);
+
+    // And each prompt message was counted AS A MESSAGE. A bridge that passed
+    // the raw string would lose the 4 framing tokens per message on the real
+    // tokenizer, silently under-reporting every prompt.
+    const promptInputs = fake.counted.slice(0, -1);
+    assert.equal(promptInputs.length, 3);
+    for (const input of promptInputs) assert.equal(typeof input, 'object');
+    // The response is counted as a plain string — it has no role to frame.
+    assert.equal(typeof fake.counted[fake.counted.length - 1], 'string');
   });
 
   it('resolves a vendor-qualified model by splitting it when the exact id misses', async () => {

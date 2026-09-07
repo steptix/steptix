@@ -608,6 +608,21 @@ export class LmBridge implements vscode.Disposable {
       let prompt = 0;
       for (const message of messages) prompt += await model.countTokens(message);
       const completion = await model.countTokens(text);
+
+      // A model whose tokenizer answers 0 for real text is a thing that
+      // exists: `copilotcli/auto` is a router entry with maxInputTokens 0
+      // whose countTokens returns 0 for any input. Its zeros are
+      // indistinguishable on the wire from the not-measured fallback, so the
+      // difference gets said once, here, rather than leaving someone to
+      // wonder why a busy compile reports nothing.
+      if (prompt === 0 && messages.some((m) => m.text.trim() !== '')) {
+        this.log(
+          `usage measured as 0 for a non-empty prompt — ${qualifiedModelId(model)} ` +
+            'reports no usable tokenizer (a router alias like copilotcli/auto does ' +
+            'this); point AI_MODEL at a concrete model to get real counts',
+        );
+      }
+
       return {
         prompt_tokens: prompt,
         completion_tokens: completion,

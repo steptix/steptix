@@ -94,8 +94,17 @@ export interface BridgeUsage {
  * served: usage is a nicety, the answer is the product. Zeros are the honest
  * way to say "not measured", and `AiClient` already treats zero-or-absent usage
  * on the streaming path as missing.
+ *
+ * Frozen because it is a module singleton every fallback spreads: a consumer
+ * that aliased it instead of copying could otherwise corrupt the constant for
+ * the rest of the extension host's life, at exactly the moment something has
+ * already gone wrong.
  */
-export const ZERO_USAGE: BridgeUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+export const ZERO_USAGE: Readonly<BridgeUsage> = Object.freeze({
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+});
 
 // ---------------------------------------------------------------------------
 // Routing

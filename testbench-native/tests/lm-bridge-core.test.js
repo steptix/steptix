@@ -387,23 +387,31 @@ test('the non-streaming body is a complete OpenAI chat.completion', () => {
   assert.deepEqual(body.usage, usage);
 });
 
-test('each body reports its own measured usage, not a shared object', () => {
-  const other = chatCompletionBody({ ...shape, usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } });
-  assert.deepEqual(other.usage, { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 });
-  // A caller that mutates what it got back must not reach into the next body:
-  // both builders spread their input rather than sharing the object.
-  other.usage.prompt_tokens = 999;
-  assert.equal(chatCompletionBody(shape).usage.prompt_tokens, 41);
+test('neither builder hands out a reference to the usage it was given', () => {
+  // ZERO_USAGE is a module-level singleton and every fallback spreads it. If a
+  // builder aliased instead of copying, one consumer mutating `body.usage`
+  // would poison that constant for the extension host's lifetime — so the
+  // mutation has to be applied to what came OUT and checked against what went
+  // IN. (Mutating a second body built from a different object proves nothing:
+  // that passes against an aliasing implementation too.)
+  const body = chatCompletionBody(shape);
+  body.usage.prompt_tokens = 999;
+  assert.equal(shape.usage.prompt_tokens, 41);
+
+  const finish = JSON.parse(streamFrames(shape)[1].replace(/^data: /, ''));
+  finish.usage.completion_tokens = 999;
+  assert.equal(shape.usage.completion_tokens, 7);
 });
 
-test('unmeasurable usage degrades to zeros rather than failing the completion', () => {
-  // What `measureUsage` returns when `countTokens` throws. Zero is how the
-  // bridge says "not measured", and AiClient's streaming path already reads
-  // zero-or-absent as missing.
-  const body = chatCompletionBody({ ...shape, usage: ZERO_USAGE });
-  assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+test('ZERO_USAGE cannot be mutated by a consumer that forgets to copy', () => {
+  // Frozen rather than trusted: the fallback is reached exactly when something
+  // has already gone wrong, which is the worst moment to also corrupt state
+  // every later request reads.
+  assert.throws(() => {
+    ZERO_USAGE.prompt_tokens = 1;
+  }, TypeError);
+  assert.deepEqual(ZERO_USAGE, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
 });
-
 test('a streamed response is ONE delta, a finish chunk, then [DONE]', () => {
   const frames = streamFrames(shape);
   assert.equal(frames.length, 3);
