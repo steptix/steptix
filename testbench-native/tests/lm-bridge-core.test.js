@@ -19,6 +19,7 @@ import { strict as assert } from 'node:assert';
 import {
   IMAGE_OMITTED_NOTE,
   MAX_BODY_BYTES,
+  ZERO_USAGE,
   bodyLimitError,
   chatCompletionBody,
   isAuthorized,
@@ -368,7 +369,14 @@ test('a lone ``` line is not treated as a fence', () => {
 // Response shaping
 // ---------------------------------------------------------------------------
 
-const shape = { id: 'chatcmpl-1', created: 1_700_000_000, model: 'copilot/gpt-4.1', text: '{"a":1}' };
+const usage = { prompt_tokens: 41, completion_tokens: 7, total_tokens: 48 };
+const shape = {
+  id: 'chatcmpl-1',
+  created: 1_700_000_000,
+  model: 'copilot/gpt-4.1',
+  text: '{"a":1}',
+  usage,
+};
 
 test('the non-streaming body is a complete OpenAI chat.completion', () => {
   const body = chatCompletionBody(shape);
@@ -376,6 +384,23 @@ test('the non-streaming body is a complete OpenAI chat.completion', () => {
   assert.equal(body.model, 'copilot/gpt-4.1');
   assert.deepEqual(body.choices[0].message, { role: 'assistant', content: '{"a":1}' });
   assert.equal(body.choices[0].finish_reason, 'stop');
+  assert.deepEqual(body.usage, usage);
+});
+
+test('each body reports its own measured usage, not a shared object', () => {
+  const other = chatCompletionBody({ ...shape, usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } });
+  assert.deepEqual(other.usage, { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 });
+  // A caller that mutates what it got back must not reach into the next body:
+  // both builders spread their input rather than sharing the object.
+  other.usage.prompt_tokens = 999;
+  assert.equal(chatCompletionBody(shape).usage.prompt_tokens, 41);
+});
+
+test('unmeasurable usage degrades to zeros rather than failing the completion', () => {
+  // What `measureUsage` returns when `countTokens` throws. Zero is how the
+  // bridge says "not measured", and AiClient's streaming path already reads
+  // zero-or-absent as missing.
+  const body = chatCompletionBody({ ...shape, usage: ZERO_USAGE });
   assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
 });
 
@@ -392,9 +417,9 @@ test('a streamed response is ONE delta, a finish chunk, then [DONE]', () => {
   assert.deepEqual(second.choices[0].delta, {});
   assert.equal(second.choices[0].finish_reason, 'stop');
   // stream_options: {include_usage: true} rides on every streamed request, so
-  // the finish chunk carries usage — zeros, which completeStream then
-  // estimates over.
-  assert.deepEqual(second.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  // the finish chunk carries usage. Real numbers here are what stop
+  // completeStream treating it as missing and estimating output at len/4.
+  assert.deepEqual(second.usage, usage);
 
   assert.equal(frames[2], 'data: [DONE]\n\n');
   for (const frame of frames) assert.ok(frame.endsWith('\n\n'), 'each frame terminates the event');

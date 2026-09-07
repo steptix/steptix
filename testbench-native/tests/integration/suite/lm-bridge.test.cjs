@@ -183,7 +183,14 @@ describe('TestBench Copilot LM bridge', function () {
     assert.equal(body.object, 'chat.completion');
     assert.equal(body.choices[0].message.content, '{"entry":"compiled"}');
     assert.equal(body.choices[0].finish_reason, 'stop');
-    assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+    // Measured, not zeros. The fake counts ceil(len/4) plus 4 for a message's
+    // role framing, so these are derivable rather than magic:
+    //   prompt     = the one folded user message, 40 chars -> 10, +4 framing
+    //   completion = the RAW reply, fences and all, 32 chars -> 8
+    // That completion figure is the load-bearing one. The fence-stripped text
+    // the client receives is 20 chars (5 tokens), so 8 proves the bridge counts
+    // what the model GENERATED rather than what survived the strip.
+    assert.deepEqual(body.usage, { prompt_tokens: 14, completion_tokens: 8, total_tokens: 22 });
 
     // The system message folded, and the cap arrived under the only spelling
     // this wire uses.
@@ -193,6 +200,25 @@ describe('TestBench Copilot LM bridge', function () {
       { role: 'user', text: 'You compile test steps.\n\nCompile step 1.' },
     ]);
     assert.deepEqual(sent.options.modelOptions, { max_tokens: 4096 });
+  });
+
+  it('serves the completion with zeroed usage when countTokens fails', async () => {
+    // Usage is a nicety; the answer is the product. A tokenizer that throws
+    // must not turn a completion the seat already paid for into an error.
+    fake.reply = ['{"entry":"ok"}'];
+    fake.countTokensFailsWith = new Error('tokenizer unavailable');
+    try {
+      const result = await call('/v1/chat/completions', {
+        method: 'POST',
+        body: completionRequest(),
+      });
+      assert.equal(result.status, 200);
+      const body = json(result);
+      assert.equal(body.choices[0].message.content, '{"entry":"ok"}');
+      assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+    } finally {
+      fake.countTokensFailsWith = null;
+    }
   });
 
   it('answers a streamed request as ONE delta then [DONE]', async () => {

@@ -78,8 +78,24 @@ export const IMAGE_STRIP_WARNING =
   "project's aiui.config.json (off by default), and the failure-diagnosis pass, " +
   'which captures its own screenshot regardless of that setting.';
 
-/** `vscode.lm` reports no token usage, so this is what goes on the wire. */
-export const ZERO_USAGE = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } as const;
+/** Usage as the OpenAI wire spells it. */
+export interface BridgeUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+/**
+ * What goes on the wire when counting could not be done.
+ *
+ * `vscode.lm` reports no usage of its own, so the bridge measures it with the
+ * model's own `countTokens` — free of Copilot credits and about 0.12 ms plus
+ * 0.03 ms/KB, both measured. When that fails the completion still has to be
+ * served: usage is a nicety, the answer is the product. Zeros are the honest
+ * way to say "not measured", and `AiClient` already treats zero-or-absent usage
+ * on the streaming path as missing.
+ */
+export const ZERO_USAGE: BridgeUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
 // ---------------------------------------------------------------------------
 // Routing
@@ -374,6 +390,8 @@ export interface CompletionShape {
   created: number;
   model: string;
   text: string;
+  /** Measured by `countTokens`, or {@link ZERO_USAGE} when that was not possible. */
+  usage: BridgeUsage;
 }
 
 /** The non-streaming `chat.completion` body. */
@@ -391,7 +409,7 @@ export function chatCompletionBody(c: CompletionShape): Record<string, unknown> 
         finish_reason: 'stop',
       },
     ],
-    usage: { ...ZERO_USAGE },
+    usage: { ...c.usage },
   };
 }
 
@@ -407,10 +425,11 @@ const sse = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`
  * (the quota text survives) instead of a truncated completion that looks like
  * a model returning nonsense.
  *
- * The zero usage rides on the finish chunk because `stream_options:
- * {include_usage: true}` is on every streamed request; `completeStream` treats
- * absent-or-zero usage as missing and estimates output tokens at `len/4`, so
- * streamed bridge calls report an estimate either way.
+ * Usage rides on the finish chunk because `stream_options: {include_usage:
+ * true}` is on every streamed request. It matters that this is real:
+ * `completeStream` treats absent-or-zero usage as missing and estimates output
+ * tokens at `len/4`, so a measured count is what stops a streamed bridge call
+ * reporting a number derived from the response's string length.
  */
 export function streamFrames(c: CompletionShape): string[] {
   const base = { id: c.id, object: 'chat.completion.chunk', created: c.created, model: c.model };
@@ -422,7 +441,7 @@ export function streamFrames(c: CompletionShape): string[] {
     sse({
       ...base,
       choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      usage: { ...ZERO_USAGE },
+      usage: { ...c.usage },
     }),
     'data: [DONE]\n\n',
   ];

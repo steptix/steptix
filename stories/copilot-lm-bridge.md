@@ -123,7 +123,7 @@ The mappings, exhaustively:
 | `reasoning_effort`, `stream_options`, `temperature`, unknowns | — | drop silently, never error — the `retry`/`authoring` profiles send effort, streams carry `stream_options: {include_usage: true}`, and both must keep working |
 | `response_format: json_object` | — | best-effort emulation, below |
 | response fragments | `for await (…of res.text)` | concatenate (non-stream) or re-emit as SSE deltas (stream) |
-| usage | — (`vscode.lm` reports none) | zeros on the wire; note `completeStream` treats absent-*or zero* usage as missing and **estimates output tokens** (`ceil(len/4)`), so streamed bridge calls report estimates, not 0 |
+| usage | `countTokens` per prompt message + the raw response | measured on the wire (open question 3 below). Per message because the message overload counts role framing a bare string does not — exactly +4 tokens each, measured. The response is counted BEFORE the fence strip: what the model generated is what it spent. A count that throws degrades to zeros, which `completeStream` treats as missing and estimates at `ceil(len/4)` — the old behaviour, now only a fallback |
 
 **`json_object` emulation.** `AiClient` sends
 `response_format: {type: "json_object"}` on **every** request — both
@@ -312,12 +312,29 @@ plainly.
    `gateway/` demands a non-default URL (loud error otherwise — an explicit
    URL equal to the default host is also refused) while `aibroker/` keeps the
    aiapi default — each spelling matches its behavior.
-3. **Usage reporting.** Zeros, or estimate via `model.countTokens()` at the
-   cost of extra calls? Zeros proposed — noting they are true zeros only on
-   the non-streaming path: `completeStream` already estimates absent-or-zero
-   usage at `ceil(len/4)` (output side only), so streamed bridge calls report
-   estimates either way.
-   Revisit if the mixed zero/estimate reports confuse people.
+3. **RESOLVED — usage reporting: measure it.** The question was whether
+   `model.countTokens()` was worth "the cost of extra calls". Measured
+   2026-09-07 on Copilot Pro (VS Code 1.136.1), and the cost is close to
+   nothing: **816 `countTokens` calls with zero `sendRequest` calls left AI
+   credits unchanged at 27/1,500**, and the tokenizer is local — medians of
+   0.131 ms at 100 B rising to 3.45 ms at 100 KB, i.e. ~0.12 ms fixed plus
+   ~0.03 ms/KB, which is work proportional to the text rather than a round
+   trip. A six-message prompt plus its response costs about 1 ms on a step that
+   takes seconds. So the bridge counts rather than shipping zeros.
+
+   Two traps worth recording, because both produced confident wrong answers
+   before being caught. Calling `countTokens` repeatedly on the SAME string
+   measures a memo, not a tokenizer (11 µs medians, flat across three orders of
+   magnitude, which reads as "remote"); vary the payload. And
+   `selectChatModels()[0]` is `copilotcli/auto` — a router entry with an empty
+   family and `maxInputTokens: 0` whose `countTokens` returns 0 for any input,
+   so a measurement that trusts it reports microsecond timings on zero tokens.
+
+   What this does NOT give anyone is a bill. GitHub meters AI credits, not
+   tokens, so these figures reconcile with nothing on the invoice — they are
+   for comparing prompt sizes and checking headroom against `maxInputTokens`.
+   The cost question wants a request count, which the bridge already keeps as
+   `servedRequests` for the status bar.
 4. **RESOLVED — diagnosis and quota.** Superseded by the AI run switch
    ([run-settings.md](run-settings.md) §9): setup never touches
    `ai.diagnoseFailures`, spend control is the run mode, and diagnosis works

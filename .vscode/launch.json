@@ -2,10 +2,24 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Run TestBench Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/testbench-native"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/testbench-native/dist/**/*.js"
+      ]
+    },
+    {
       "name": "Debug Test File",
       "type": "node",
       "request": "launch",
-      "runtimeArgs": ["--import", "tsx"],
+      "runtimeArgs": [
+        "--import",
+        "tsx"
+      ],
       "args": [
         "src/index.ts",
         "run",

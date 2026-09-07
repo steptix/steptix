@@ -37,6 +37,10 @@ class FakeLm {
     this.requests = [];
     /** Every selector selectChatModels was called with, in order. */
     this.selectors = [];
+    /** Every input countTokens was called with, in order. */
+    this.counted = [];
+    /** When set, countTokens rejects with it — the usage-unavailable path. */
+    this.countTokensFailsWith = null;
   }
 
   /** Reject the next request the way a revoked consent does. */
@@ -71,6 +75,19 @@ class FakeLm {
       vendor: model.vendor,
       family: model.family,
       name: model.name,
+      /**
+       * Deliberately NOT a constant: 1 token per 4 characters plus 4 for a
+       * message's role framing, mirroring the real tokenizer's measured shape.
+       * A fake returning the same number for prompt and completion could not
+       * catch the two being wired up the wrong way round.
+       */
+      async countTokens(input) {
+        fake.counted.push(input);
+        if (fake.countTokensFailsWith) throw fake.countTokensFailsWith;
+        const text = typeof input === 'string' ? input : input.text;
+        const framing = typeof input === 'string' ? 0 : 4;
+        return Math.ceil(text.length / 4) + framing;
+      },
       async sendRequest(messages, options) {
         fake.requests.push({ model: model.id, messages, options });
         if (fake.failWith) {

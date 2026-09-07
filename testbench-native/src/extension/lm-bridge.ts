@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { getOutputChannel } from './output-channel.js';
 import {
   IMAGE_STRIP_WARNING,
+  ZERO_USAGE,
   bodyLimitError,
   chatCompletionBody,
   isAuthorized,
@@ -22,6 +23,7 @@ import {
   unknownRouteError,
   type BridgeError,
   type BridgeMessage,
+  type BridgeUsage,
   type LmSelector,
 } from './lm-bridge-core.js';
 
@@ -69,6 +71,14 @@ export interface LmModelHandle {
     messages: BridgeMessage[],
     options: { modelOptions?: Record<string, unknown>; signal?: AbortSignal },
   ): Promise<AsyncIterable<string>>;
+  /**
+   * Tokens in one message or string, by this model's own tokenizer.
+   *
+   * Measured free of Copilot credits and local (~0.12 ms + 0.03 ms/KB), which
+   * is why the bridge can afford to call it per message rather than shipping
+   * the zeros it used to.
+   */
+  countTokens(input: BridgeMessage | string): Promise<number>;
 }
 
 /**
@@ -101,18 +111,31 @@ export const realLmFacade: LmFacade = {
   },
 };
 
+/**
+ * `BridgeMessage` in the shape `vscode.lm` takes.
+ *
+ * Shared by `sendRequest` and `countTokens` on purpose: counting a different
+ * object from the one sent would report tokens for a prompt that was never
+ * issued, and the two are four tokens apart per message (the role framing the
+ * message overload counts and a bare string does not).
+ */
+function toLmMessage(m: BridgeMessage): vscode.LanguageModelChatMessage {
+  return m.role === 'assistant'
+    ? vscode.LanguageModelChatMessage.Assistant(m.text)
+    : vscode.LanguageModelChatMessage.User(m.text);
+}
+
 function wrapModel(model: vscode.LanguageModelChat): LmModelHandle {
   return {
     id: model.id,
     vendor: model.vendor,
     family: model.family,
     name: model.name,
+    async countTokens(input) {
+      return await model.countTokens(typeof input === 'string' ? input : toLmMessage(input));
+    },
     async sendRequest(messages, options) {
-      const lmMessages = messages.map((m) =>
-        m.role === 'assistant'
-          ? vscode.LanguageModelChatMessage.Assistant(m.text)
-          : vscode.LanguageModelChatMessage.User(m.text),
-      );
+      const lmMessages = messages.map(toLmMessage);
       // The run's own abort (a user Stop, or the client's 120s timeout) closes
       // the HTTP response; without forwarding it, the model keeps generating
       // against a socket nobody is reading and the seat pays for it.
@@ -548,6 +571,9 @@ export class LmBridge implements vscode.Disposable {
       created: Math.floor(Date.now() / 1000),
       model: request.model,
       text: request.wantsJson ? stripJsonFence(text) : text,
+      // The RAW text, not the fence-stripped payload above: what the model
+      // generated is what it spent, and the fence is the bridge's to remove.
+      usage: await this.measureUsage(model, request.messages, text),
     };
 
     if (!request.stream) return this.writeJson(res, 200, chatCompletionBody(payload));
@@ -559,6 +585,38 @@ export class LmBridge implements vscode.Disposable {
     });
     for (const frame of streamFrames(payload)) res.write(frame);
     res.end();
+  }
+
+  /**
+   * Token usage for one served completion.
+   *
+   * Per MESSAGE for the prompt, because the message overload counts the role
+   * framing a bare string does not — measured at exactly +4 tokens each — so
+   * summing messages is closer to what the provider would charge than counting
+   * one joined string would be.
+   *
+   * Never throws. A failed count must not fail a completion that already
+   * succeeded: the caller wants the answer, and `AiClient` copes with zeros.
+   * Measured cost of doing this at all is ~1 ms for a six-message prompt.
+   */
+  private async measureUsage(
+    model: LmModelHandle,
+    messages: BridgeMessage[],
+    text: string,
+  ): Promise<BridgeUsage> {
+    try {
+      let prompt = 0;
+      for (const message of messages) prompt += await model.countTokens(message);
+      const completion = await model.countTokens(text);
+      return {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: prompt + completion,
+      };
+    } catch (err) {
+      this.log(`usage not measured: ${err instanceof Error ? err.message : String(err)}`);
+      return { ...ZERO_USAGE };
+    }
   }
 
   /** First selector that resolves wins; see `modelSelectorAttempts`. */
