@@ -243,8 +243,11 @@ describe('TestBench Copilot LM bridge', function () {
     const body = json(result);
     assert.equal(body.choices[0].message.content, '{"entry":"ok"}');
     assert.deepEqual(body.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
-    // Bounded, and by the budget rather than by the client giving up.
-    assert.ok(elapsed < 30_000, `served in ${elapsed}ms, which is not a bound`);
+    // Bounded, and by the budget rather than by the mocha timeout. The budget
+    // is 2s; this allows 5x for a loaded box but still fails an unbounded wait,
+    // which would run to the suite timeout at 30s. A literal because
+    // MEASURE_BUDGET_MS lives in a .ts module this .cjs suite cannot import.
+    assert.ok(elapsed < 10_000, `served in ${elapsed}ms, which is not a bound`);
   });
 
   it('answers a streamed request as ONE delta then [DONE], carrying usage', async () => {

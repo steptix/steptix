@@ -56,8 +56,12 @@ const DEFAULT_RETRY_MS = 15_000;
  * How long usage measurement may take before the completion is served without
  * it.
  *
- * Measured worst case is a few milliseconds for a 100 KB message, so this is
- * ~500x headroom and will only ever be reached by a tokenizer that has wedged.
+ * Sized against the largest request this bridge accepts, not against a typical
+ * one: `MAX_BODY_BYTES` is 32 MB, which at the measured ~0.03 ms/KB is roughly
+ * a second of counting across all N+1 calls. So this is about 2x headroom at
+ * the limit and thousands of times that for a realistic compile prompt — a
+ * bound on pathology, not a performance budget.
+ *
  * The alternative to a bound is worse than a missing number: `countTokens`
  * takes no cancellation token, so an unbounded wait would hold a generated
  * answer until the client gives up at 120 s, discarding a completion the seat
@@ -204,6 +208,7 @@ export class LmBridge implements vscode.Disposable {
   /** See {@link ensureToken} — the in-flight or settled mint, memoized. */
   private tokenPromise: Promise<string> | undefined;
   private imageWarningShown = false;
+  private zeroUsageWarningShown = false;
   private disposed = false;
   /** Serializes {@link sync}; see its comment. */
   private syncChain: Promise<void> = Promise.resolve();
@@ -665,9 +670,11 @@ export class LmBridge implements vscode.Disposable {
     // `copilotcli/auto` is a router entry with maxInputTokens 0 whose
     // countTokens returns 0 for any input. Its zeros are indistinguishable on
     // the wire from the not-measured fallback, so the difference gets said
-    // once, here, rather than leaving someone to wonder why a busy compile
-    // reports nothing.
-    if (prompt === 0 && messages.some((m) => m.text.trim() !== '')) {
+    // rather than leaving someone to wonder why a busy compile reports nothing
+    // — once per bridge, like the image-strip warning above, because the cause
+    // is a configured model and every later request would say the same thing.
+    if (prompt === 0 && !this.zeroUsageWarningShown && messages.some((m) => m.text.trim() !== '')) {
+      this.zeroUsageWarningShown = true;
       this.log(
         `usage measured as 0 for a non-empty prompt — ${qualifiedModelId(model)} ` +
           'reports no usable tokenizer (a router alias like copilotcli/auto does ' +

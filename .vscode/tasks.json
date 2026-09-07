@@ -5,10 +5,18 @@
       // The preLaunchTask for "Run TestBench Extension". `npm run build` in
       // testbench-native builds runner-core, the webview and the extension
       // bundle, so F5 always launches the code you are looking at.
-      "label": "npm: build - testbench-native",
+      //
+      // NOT labelled "npm: build - testbench-native": VS Code's own npm task
+      // auto-detection generates a task under exactly that label for the same
+      // package.json, and two tasks sharing a label is a coin toss nobody
+      // needs, even when both happen to do the same thing.
+      "label": "Build TestBench extension",
       "type": "shell",
       "command": "npm run build",
       "options": { "cwd": "${workspaceFolder}/testbench-native" },
+      // No matcher: with `reveal: silent` that means the terminal stays hidden
+      // on success and is revealed on failure, which is the behaviour you want
+      // from a build that gates a launch.
       "problemMatcher": [],
       "presentation": { "reveal": "silent", "panel": "shared" }
     }
