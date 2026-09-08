@@ -6,6 +6,7 @@ import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { loopCompileRefusal } from '../runner/control-flow.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
@@ -319,6 +320,25 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // to compile is the most expensive way to learn that. Everything selection
   // needs — which steps have entries, and which a previous run flagged — is
   // already on disk in the file and the last-run sidecar.
+  // A loop is refused outright, before anything runs
+  // (stories/control-flow.md). A compile places an entry at
+  // `spans[occurrence]`, and occurrence is counted per step line — but a loop
+  // body runs the same lines a number of times only the page decides, so the
+  // Record produces N transcripts for one slot and the plan's "not attempted"
+  // arithmetic counts a step that ran three times as one. Refusing is honest
+  // and cheap; supporting it properly is its own story. A CHAIN compiles
+  // normally: its steps run at most once, and the untaken branch is simply not
+  // attempted, which the summary already has a word for.
+  const loopLine = firstLoopGuard(test);
+  if (loopLine !== undefined) {
+    // `aiui compile` compiles a whole FILE — there is no slice to scope this
+    // to, which is why the refusal stands here where the server's is now
+    // bounded to the batch's own range. The wording is shared so the two
+    // surfaces say the same thing about the same file.
+    const message = loopCompileRefusal(loopLine);
+    return finish('failed', { compiled: 0, kept: 0, keptAi: 0, written: [], error: message }, message);
+  }
+
   const steps = await describeSteps(test);
   const staleKeys = await collectStaleKeys(test, options.recorded, steps);
   let selection = selectSteps(steps, options.select ?? {}, staleKeys);
@@ -995,6 +1015,26 @@ function listSteps(numbers: number[]): string {
 // Selection
 // ───────────────────────────────────────────────────────────────────────────
 
+/**
+ * The first `While` / `Repeat … until` / `For each` guard line in the test, or
+ * undefined when it has none (stories/control-flow.md, decision 12).
+ *
+ * Reads the expansion's control records rather than re-parsing: a loop can be
+ * written inside a section body or a skill, and only the expander knows the
+ * flat list those became.
+ */
+function firstLoopGuard(test: ParsedTest): string | undefined {
+  const controls = test.expansion?.controls ?? [];
+  for (let i = 0; i < controls.length; i++) {
+    const record = controls[i];
+    if (!record) continue;
+    if (record.kind === 'while' || record.kind === 'repeat' || record.kind === 'foreach') {
+      return test.expansion?.rawSteps[i] ?? test.steps[i] ?? record.label;
+    }
+  }
+  return undefined;
+}
+
 /** Every expanded step, with its binding and why it can or cannot be in S. */
 async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
   const registry = test.expansion
@@ -1009,18 +1049,32 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       )
     : undefined;
 
+  const controls = test.expansion?.controls ?? [];
+
   return test.steps.map((step, i) => {
     const binding = registry?.bindingFor(i);
     const text = binding?.source ?? test.expansion?.rawSteps[i] ?? step;
     const isAiEntry = binding?.entry?.ai === true;
     // The UNCONDITIONAL `Return` / `Stop` only (`body === undefined`). The
-    // conditional form is the one thing this story adds to the compiler — it
-    // becomes `if (…) step.exit()` — while the unconditional one is dispatched
-    // by the loop with no model call at all, exactly as `Set` is, so there is
-    // nothing to record and nothing to make cheaper
+    // conditional form is the one thing step-flow-control adds to the compiler
+    // — it becomes `if (…) step.exit()` — while the unconditional one is
+    // dispatched by the loop with no model call at all, exactly as `Set` is,
+    // so there is nothing to record and nothing to make cheaper
     // (stories/step-flow-control.md, decisions 3 and 11).
+    //
+    // `If <condition>, then return` is a flow-control step and NOT a control
+    // line, so `controls[i]` is null on it and it takes the conditional branch
+    // above: the compiler writes it, rather than refusing it as a guard
+    // (stories/control-flow.md §"Composition with `If … then return`").
     const flowControl = parseFlowControlStep(text);
-    const ineligible = test.toolCalls[i]
+    const ineligible = controls[i]
+      ? // The guard is dispatched by the framework — it asks a model a
+        // question and performs nothing — so there is no transcript to
+        // generate from and nothing for an entry to replace. Its TAIL is an
+        // ordinary step and compiles normally (stories/control-flow.md,
+        // decision 12).
+        'a control line is dispatched, not compiled'
+      : test.toolCalls[i]
       ? 'a [tool:] step is dispatched, not compiled'
       // `text` can be a RAW authored line still carrying a `[no-hooks]`
       // prefix (`rawSteps` keeps it). No strip needed: `parseSetStep`

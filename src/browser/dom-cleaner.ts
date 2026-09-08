@@ -25,6 +25,16 @@ const DEFAULT_MAX_IFRAME_DEPTH = 5;
  * Keep this list in sync with the selector hierarchy used by buildSelector
  * (data-testid > id > name > aria-label) — dropping any of those four
  * breaks selector generation downstream.
+ *
+ * Three of these names are state, not markup: in capture-dom.js `checked`,
+ * `selected` and `value` on a form control are read from the element's live
+ * IDL properties, because a click or a keystroke changes the property and
+ * never the attribute. Dropping one of the three from this list would take
+ * that live state out of the snapshot with it. The `expand` walk below reads
+ * `value` live for the same reason — two capture tools must not disagree
+ * about the same field in the same run — and `checked` / `selected` from the
+ * markup, which for those two is no loss: its empty-value skip means neither
+ * has ever appeared in `expand` output at all. See its getAttrs.
  */
 const ALLOWED_DOM_ATTRIBUTES: readonly string[] = [
   'id', 'data-testid', 'name', 'type', 'role', 'alt', 'label',
@@ -813,10 +823,141 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
     const selector = ${JSON.stringify(selector)};
     const SKIP = new Set(['script', 'style', 'noscript', 'svg', 'meta', 'link', 'base', 'title']);
 
+    // ── Live \`value\`, the same rule capture-dom.js uses ──────────────────
+    //
+    // Typing sets the \`value\` IDL PROPERTY and never the attribute, so an
+    // attribute-only read answers with the page-load value for the life of
+    // the page. The whole-page snapshot reads the property (capture-dom.js
+    // \`liveState\`), so leaving this walk on attributes made the two capture
+    // tools contradict each other about the same field in the same run: the
+    // snapshot said \`value="ada@new.test"\` and \`expand\`, one turn later,
+    // said \`value="preset@old.test"\`.
+    //
+    // \`checked\` / \`selected\` stay attribute-sourced here: this walk skips
+    // every empty-valued attribute, so those two have never appeared in
+    // \`expand\` output at all, and giving them a live reading means choosing
+    // a shape (\`checked=""\` against its own empty-skip rule, or
+    // \`checked="true"\`) rather than fixing a staleness.
+    //
+    // SECRET_NAME_RE mirrors \`isSecretName\` in src/utils/secrets.ts, and
+    // PASSWORD_FIELD_RE is the wider FIELD-only test beside it (a parameter
+    // name decides masking of a value the run owns; a field name decides
+    // whether a value the run does not own is disclosed). Both copied for the
+    // same reason capture-dom.js copies them — this string is evaluated in
+    // the page and can import nothing. Keep all three files in step.
+    const SECRET_NAME_RE = /password|secret|token|key/i;
+    // PASSWORD_FIELD_RE is SECRET_NAME_RE plus the password family, minus the
+    // bare \`key\` that makes the name rule over-match. \`pass\` is fenced by
+    // lookarounds so \`passenger1_name\` / \`passportNumber\` / \`bypass_cache\` /
+    // \`compass_heading\` keep their live value (review 5, finding 2) while
+    // \`passwd\`, \`user_pass\`, \`pass1\` still mask — a \`\\b\` fence let those
+    // leak, because \`_\` and digits are word characters (review 6, finding 1).
+    // Mirror of capture-dom.js; keep the two identical.
+    const PASSWORD_FIELD_RE =
+      /pwd|(?<!by|com)pass(?!enger|port)|credential|secret|token/i;
+    // \`pin\` is matched on TOKENS (camelCase split, non-letters as
+    // separators, whole token \`pin\` / \`mpin\` / \`pincode\`): \`\\bpin\\b\` leaked
+    // \`pin_code\` and \`pin1\` (review 7, finding 1) and a bare \`pin\` would
+    // mask \`shipping\` and \`spinner\`. Mirror of capture-dom.js's hasPinToken.
+    function hasPinToken(text) {
+      const tokens = String(text)
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .toLowerCase()
+        .split(/[^a-z]+/);
+      return tokens.some((t) => t === 'pin' || t === 'mpin' || t === 'pincode');
+    }
+    const SECRET_NAME_ATTRS = ['name', 'id', 'aria-label', 'autocomplete'];
+    // Prose, so only the harsh test applies: a placeholder is not an
+    // identifier ("Search by keyword"), but it is often the ONLY thing naming
+    // a password box on a minimal sign-in form (review 5, finding 1). Neither
+    // rule has an \`unmask\` hatch — this string is evaluated in the page with
+    // no config input.
+    const PASSWORD_ONLY_ATTRS = ['placeholder'];
+    const STATIC_VALUE_INPUT_TYPES = new Set([
+      'password', 'file', 'hidden', 'submit', 'reset', 'button', 'image',
+    ]);
+
+    function isSecretField(el) {
+      if (String(el.getAttribute('type') || '').toLowerCase() === 'password') return true;
+      const autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase();
+      if (autocomplete.indexOf('current-password') !== -1) return true;
+      if (autocomplete.indexOf('new-password') !== -1) return true;
+      for (const name of SECRET_NAME_ATTRS) {
+        const named = el.getAttribute(name);
+        if (!named) continue;
+        if (SECRET_NAME_RE.test(named) || PASSWORD_FIELD_RE.test(named) || hasPinToken(named)) return true;
+      }
+      for (const name of PASSWORD_ONLY_ATTRS) {
+        const prose = el.getAttribute(name);
+        if (!prose) continue;
+        if (PASSWORD_FIELD_RE.test(prose) || hasPinToken(prose)) return true;
+      }
+      return false;
+    }
+
+    /** "This attribute is OFF: print nothing, and drop what the markup says."
+     *  The snapshot says this with \`{ value: null }\` from \`liveState\`, which
+     *  is a different answer from \`liveState\` returning null ("nothing here
+     *  is live, the markup rules"). This walk had one null for both, so it
+     *  printed a stale markup \`value\` the snapshot had already dropped. */
+    const DROP = {};
+
+    /** A secret field says a value is THERE and withheld, never what it is —
+     *  the snapshot's \`maskedValue\`. Empty DROPS, so the markup's own
+     *  \`value\` cannot stand in for the live one this walk refuses to read. */
+    function maskedValueFor(el) {
+      const v = el.value == null ? '' : String(el.value);
+      return v === '' ? DROP : '***';
+    }
+
+    /** The snapshot's \`liveValue\`: a blank control whose markup carried no
+     *  \`value\` has nothing to say, and an explicit \`value=""\` still prints. */
+    function liveOrDrop(el) {
+      const v = el.value == null ? '' : String(el.value);
+      if (v === '' && !el.hasAttribute('value')) return DROP;
+      return v;
+    }
+
+    /** The live \`value\` to print, DROP for "print none", or null to fall
+     *  back to the markup's. */
+    function liveValueFor(el, tag) {
+      if (tag === 'select') return liveOrDrop(el);
+      if (tag === 'textarea') {
+        if (isSecretField(el)) return maskedValueFor(el);
+        // The snapshot's carve-out, mirrored: a textarea's default value IS
+        // its child text, which this walk prints on the next line, so it
+        // speaks up only once the live text has diverged from it. Without
+        // this the two capture tools disagreed about every untouched
+        // textarea on the page (review 4, finding 12).
+        return el.value === el.defaultValue ? DROP : String(el.value);
+      }
+      if (tag !== 'input') return null;
+      const type = String(el.getAttribute('type') || 'text').toLowerCase();
+      // A checkbox's \`.value\` is its submit payload ("on" by default), not
+      // its state — the same carve-out the snapshot makes.
+      if (type === 'checkbox' || type === 'radio') return null;
+      if (type !== 'password' && STATIC_VALUE_INPUT_TYPES.has(type)) return null;
+      if (isSecretField(el)) return maskedValueFor(el);
+      return liveOrDrop(el);
+    }
+
     function getAttrs(el) {
       const attrs = [];
       const important = ${JSON.stringify(ALLOWED_DOM_ATTRIBUTES)};
+      const tag = el.tagName.toLowerCase();
+      // One line per element here too, so a typed textarea cannot split one.
+      const rawLive = liveValueFor(el, tag);
+      const live = typeof rawLive === 'string' ? rawLive.replace(/\\s+/g, ' ') : rawLive;
+      const secret = (tag === 'input' || tag === 'textarea') && isSecretField(el);
       for (const attr of important) {
+        if (attr === 'value' && live !== null) {
+          // The live reading answers for this attribute, empty string
+          // included: \`value=""\` is how the snapshot says "the run emptied
+          // this field", and skipping it here as an empty attribute was the
+          // last place the two tools still differed (review 5, finding 5).
+          if (live !== DROP) attrs.push('value="' + live + '"');
+          continue;
+        }
         const val = el.getAttribute(attr);
         if (val !== null && val !== '') {
           attrs.push(attr + '="' + val + '"');
@@ -833,7 +974,13 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
         if (a.name.indexOf('aria-') === 0) {
           attrs.push(a.name + '="' + a.value + '"');
         } else if (a.name.indexOf('data-') === 0 && a.name !== 'data-testid') {
-          attrs.push(a.name + '="' + a.value + '"');
+          // A field whose \`value\` was just masked must not hand the same
+          // string back in \`data-value\`: a page that mirrors its input into
+          // an attribute would undo the mask on the very line that applied it
+          // (review 5, finding 4). The hook's NAME still prints, so the model
+          // can see it exists, and the whole-page snapshot emits no data-*
+          // at all — so this moves the two tools closer, not further apart.
+          attrs.push(a.name + '="' + (secret ? '***' : a.value) + '"');
         }
       }
       return attrs.length > 0 ? ' ' + attrs.join(' ') : '';

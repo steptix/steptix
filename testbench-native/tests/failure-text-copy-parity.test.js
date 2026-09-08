@@ -16,8 +16,15 @@
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { describeStepFailure as inlineDescribe, formatStepFailure } from "../src/webview/lib/failure-text-inline.js";
-import { describeStepFailure as coreDescribe } from "../src/../../runner-core/src/protocol.ts";
+import {
+  describeStepFailure as inlineDescribe,
+  formatStepFailure,
+  isSkippedPass as inlineSkipped,
+} from "../src/webview/lib/failure-text-inline.js";
+import {
+  describeStepFailure as coreDescribe,
+  isSkippedPass as coreSkipped,
+} from "../src/../../runner-core/src/protocol.ts";
 
 const CB = { file: "/p/tests/booking.steps.ts", error: "locator resolved to 2 elements" };
 
@@ -76,4 +83,35 @@ test("a ✗ row after a failed heal shows both errors on their own lines", () =>
 
 test("a plain ✗ row shows the error alone", () => {
   assert.equal(formatStepFailure({ error: "no such button" }, false), "no such button");
+});
+
+// ── isSkippedPass: the second mirrored predicate ───────────────────────────
+//
+// A step the run decided against rides the PASS event with `output: 'skipped'`
+// (stories/control-flow.md). The extension host asks runner-core; the panel
+// cannot import it, so it asks its own copy. A copy that drifts paints the
+// untaken branch of a chain green in one surface and grey in the other, which
+// is exactly the divergence this file exists to prevent.
+
+for (const [i, event] of [
+  { type: "step:pass", line: 1, output: "skipped" },
+  { type: "step:pass", line: 1 },
+  { type: "step:pass", line: 1, output: "" },
+  { type: "step:pass", line: 1, output: "Skipped" },
+  { type: "step:pass", line: 1, output: "the Cash checkbox is ticked" },
+  {},
+].entries()) {
+  test(`webview isSkippedPass matches runner-core for case ${i}`, () => {
+    assert.equal(
+      inlineSkipped(event),
+      coreSkipped(event),
+      `divergent verdict for ${JSON.stringify(event)}`,
+    );
+  });
+}
+
+test("only the exact sentinel counts as a step that did not run", () => {
+  assert.equal(coreSkipped({ output: "skipped" }), true);
+  assert.equal(coreSkipped({ output: "skipped: no branch held" }), false);
+  assert.equal(coreSkipped({}), false);
 });

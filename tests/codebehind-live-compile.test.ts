@@ -209,17 +209,25 @@ function compilerFor(
     signal?: AbortSignal;
     events?: LiveCompileEvent[];
     notes?: string[];
+    /** Indices the framework dispatches — a control line's guard. */
+    dispatched?: number[];
   } = {},
 ): LiveCompiler {
   const events = options.events ?? [];
   const notes = options.notes ?? [];
+  const dispatched = new Set(options.dispatched ?? []);
   return new LiveCompiler({
     mode: options.mode ?? 'run',
     testFilePath: testFile,
     aiClient: options.client ?? fakeClient().client,
     contextContent: '',
     testName: 'checkout.md',
-    plan: steps.map((text, i) => ({ text, inScope: true, line: 10 + i })),
+    plan: steps.map((text, i) => ({
+      text,
+      inScope: !dispatched.has(i),
+      ...(dispatched.has(i) && { dispatched: true }),
+      line: 10 + i,
+    })),
     ...(options.signal && { signal: options.signal }),
     emit: (event) => events.push(event),
     note: (message) => notes.push(message),
@@ -439,6 +447,65 @@ describe('the trailing generation queue', () => {
     expect(second.files[stepsFile]).toContain("source: 'Check out'");
     expect(second.summary.totalSteps).toBe(3);
     expect(second.summary.unproven).toEqual([1, 3]);
+  });
+
+  it('a dispatched guard is not in the compile`s denominator', async () => {
+    // A chain's guards are performed by the framework, not by the model, so
+    // there is no transcript to write from and no entry a compile could ever
+    // produce for one. Counting them made a two-branch chain report "2 of 4"
+    // for a test with exactly two compilable steps in it
+    // (stories/control-flow.md, decision 12).
+    const compiler = compilerFor(
+      [
+        'If cash, then Pay with cash',
+        'Click Pay now',
+        'Otherwise, Pay by card',
+        'Enter the card details',
+      ],
+      { dispatched: [0, 2] },
+    );
+    compiler.offer({
+      index: 1,
+      binding: binding('Click Pay now'),
+      result: result(2, 'Click Pay now'),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(outcome.summary.totalSteps).toBe(2);
+    expect(outcome.summary.compiled).toBe(1);
+  });
+
+  it('and a slice counts only the compilable steps inside it', async () => {
+    const compiler = compilerFor(
+      ['Sign in', 'If cash, then Pay with cash', 'Click Pay now', 'Sign out'],
+      { dispatched: [1] },
+    );
+    compiler.setSlice(1, 2);
+    compiler.offer({
+      index: 2,
+      binding: binding('Click Pay now'),
+      result: result(3, 'Click Pay now'),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    // Two steps in the slice, one of them dispatched.
+    expect(outcome.summary.totalSteps).toBe(1);
+  });
+
+  it('but a step that merely already HAS an entry still counts', async () => {
+    // `inScope: false` says both "dispatched" and "already written", and only
+    // the first is out of the denominator — the second is exactly a step this
+    // compile is about and chose not to redo.
+    const compiler = compilerFor(['Sign in', 'Click Pay now']);
+    compiler.setSlice(1, 1);
+    compiler.offer({
+      index: 1,
+      binding: binding('Click Pay now'),
+      result: result(2, 'Click Pay now'),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(outcome.summary.totalSteps).toBe(1);
   });
 
   it('re-reviews only what a later block changed', async () => {

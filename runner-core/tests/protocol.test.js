@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { isCompileEvent, isHostMsg, isRunEvent, isWebviewMsg } from '../dist/protocol.js';
+import {
+  isCompileEvent,
+  isHostMsg,
+  isRunEvent,
+  isSkippedPass,
+  isWebviewMsg,
+} from '../dist/protocol.js';
 
 test('isHostMsg: accepts every host variant', () => {
   // Keep in sync with HostToWebviewMsg / isHostMsg in src/protocol.ts.
@@ -275,4 +281,26 @@ test('isRunEvent: accepts both awaiting-debugger variants', () => {
   };
   assert.equal(isRunEvent(cb), true);
   assert.equal(cb.file, '/p/tests/a.steps.ts');
+});
+
+test('isSkippedPass: a pass carrying output "skipped" is a step that never ran', () => {
+  // The wire has no third verdict, so an untaken branch — and the body of a
+  // `While` that never entered — arrives as a PASS with `output: 'skipped'`
+  // (stories/control-flow.md). Every surface that derives a glyph or a log
+  // line from `step:pass` asks this first; three of six used not to, and
+  // painted a step that did nothing green.
+  assert.equal(isSkippedPass({ type: 'step:pass', line: 5, output: 'skipped' }), true);
+});
+
+test('isSkippedPass: every other pass is a real one', () => {
+  assert.equal(isSkippedPass({ type: 'step:pass', line: 5 }), false);
+  assert.equal(isSkippedPass({ type: 'step:pass', line: 5, output: '' }), false);
+  // The reasoning a guard carries is an ordinary output, not the sentinel.
+  assert.equal(
+    isSkippedPass({ type: 'step:pass', line: 5, output: 'the Cash checkbox is ticked' }),
+    false,
+  );
+  // Near misses are not the sentinel either — it is one exact string.
+  assert.equal(isSkippedPass({ type: 'step:pass', line: 5, output: 'Skipped' }), false);
+  assert.equal(isSkippedPass({ type: 'step:pass', line: 5, output: 'skipped: no branch held' }), false);
 });

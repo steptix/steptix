@@ -4,6 +4,7 @@ import {
   classifyLines,
   classifySelectedSteps,
   extractSteps,
+  danglingChainMemberError,
   isStepLine,
   isTestFile,
   nearestStepAtOrAbove,
@@ -291,4 +292,239 @@ test('classifySelectedSteps: ignores [input:]-shaped text outside Steps section'
   assert.equal(got.length, 1);
   assert.equal(got[0].kind, 'step');
   assert.equal(got[0].instruction, 'real step');
+});
+
+// ---------------------------------------------------------------------------
+// A dangling chain member — the batch splitter's refusal
+// ---------------------------------------------------------------------------
+/**
+ * A dangling `Else if` / `Otherwise` — one whose previous step line in the
+ * same flow is not a chain member — refused with the CLI parser's own wording
+ * (stories/control-flow.md §"Runs that start or end mid-structure").
+ *
+ * The case that motivates the client-side check is an `[input: …]` between two
+ * members: that step ends a batch, so the halves of ONE decision land in
+ * different requests and the second arrives with no memory of the `If` it is
+ * the alternative of. The rule is stated on the CHAIN rather than on the
+ * `[input:]` because an `[input:]` line IS a numbered step — it breaks the
+ * chain before it can sit inside one — so a check phrased the other way blames
+ * a line the CLI parser never blames, and the two tools disagree about the
+ * same file.
+ */
+
+const inputChain = (middle) =>
+  [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If the Cash checkbox is ticked, then Pay with cash',
+    `2. ${middle}`,
+    '3. Otherwise, Pay by card',
+  ].join('\n');
+
+test('danglingChainMemberError: an [input:] between chain members leaves the Otherwise dangling', () => {
+  const problem = danglingChainMemberError(inputChain('[input: pin] Enter your PIN'));
+  assert.match(problem ?? '', /^Line 7 — /);
+  assert.match(problem ?? '', /"Otherwise, Pay by card" has no decision to be the alternative of/);
+  assert.match(problem ?? '', /must follow an `If … then …` or another `Else if`/);
+  assert.match(problem ?? '', /\(## Steps\)/);
+});
+
+test('danglingChainMemberError: [interactive] does it too', () => {
+  assert.match(
+    danglingChainMemberError(inputChain('[interactive]')) ?? '',
+    /has no decision to be the alternative of/,
+  );
+});
+
+test('danglingChainMemberError: an ORDINARY step between them is the same fault', () => {
+  // The rule is about the chain, not about the prompt: any numbered step
+  // between two members breaks the chain, and the CLI parser refuses the file
+  // with this same sentence.
+  assert.match(
+    danglingChainMemberError(inputChain('Click Save')) ?? '',
+    /"Otherwise, Pay by card" has no decision to be the alternative of/,
+  );
+});
+
+test('danglingChainMemberError: a well-formed chain is accepted', () => {
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then X',
+    '2. Else if b, then Y',
+    '3. Otherwise, Z',
+    '4. Click Save',
+  ].join('\n');
+  assert.equal(danglingChainMemberError(text), null);
+});
+
+test('danglingChainMemberError: an [input:] outside a chain is fine', () => {
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. [input: pin] Enter your PIN',
+    '2. If a, then X',
+    '3. Otherwise, Y',
+    '4. [input: code] Enter the code',
+  ].join('\n');
+  assert.equal(danglingChainMemberError(text), null);
+});
+
+test('danglingChainMemberError: inside a tail`s section body an [input:] is allowed', () => {
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then Pay by card',
+    '2. Otherwise, Pay with cash',
+    '',
+    '### Pay by card',
+    '',
+    '1. Enter the card number',
+    '2. [input: cvv] Enter the CVV',
+    '3. Click Pay now',
+    '',
+    '### Pay with cash',
+    '',
+    '1. Click Pay now',
+  ].join('\n');
+  assert.equal(danglingChainMemberError(text), null);
+});
+
+test('danglingChainMemberError: a chain inside a section body is checked too', () => {
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. Pay',
+    '',
+    '### Pay',
+    '',
+    '1. If a, then X',
+    '2. [input: pin] Enter your PIN',
+    '3. Else if b, then Y',
+  ].join('\n');
+  const problem = danglingChainMemberError(text);
+  assert.match(problem ?? '', /"Else if b, then Y" has no decision/);
+  // …and it names the body it is in, not `## Steps`.
+  assert.match(problem ?? '', /\(### Pay\)/);
+});
+
+test('danglingChainMemberError: a chain does not run across a section boundary', () => {
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then X',
+    '',
+    '### Helper',
+    '',
+    '1. Otherwise, Y',
+  ].join('\n');
+  assert.match(danglingChainMemberError(text) ?? '', /\(### Helper\)/);
+});
+
+test('danglingChainMemberError: a step naming a section is a CALL, not a chain member', () => {
+  // Resolution order (decision 3): a section unwisely named `Otherwise, …` is
+  // called by a step spelling it out, and a call is not a dangling member.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. Otherwise, Pay by card',
+    '',
+    '### Otherwise, Pay by card',
+    '',
+    '1. Click B',
+  ].join('\n');
+  assert.equal(danglingChainMemberError(text), null);
+});
+
+test('danglingChainMemberError: a document with no control flow is never refused', () => {
+  const text = ['# T', '', '## Steps', '', '1. Click A', '2. [input: pin] PIN', '3. Click B'].join(
+    '\n',
+  );
+  assert.equal(danglingChainMemberError(text), null);
+});
+
+test('danglingChainMemberError: an `Else if` BELOW the `Otherwise` is refused', () => {
+  // The other half of the rule. `Otherwise` ends a chain, so a member under
+  // one is never the branch the decision picks — at run time the planner takes
+  // the FIRST condition-less member, so a second `Otherwise` is unreachable
+  // and an `Else if` below one is still evaluated. Refused by the CLI parser
+  // since stage 1; refused here so a file TestBench runs is a file the CLI
+  // runs.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then Sec1',
+    '2. Otherwise, Sec2',
+    '3. Else if b, then Sec3',
+  ].join('\n');
+  const problem = danglingChainMemberError(text);
+  assert.match(problem ?? '', /^Line 7 — "Else if b, then Sec3" follows an `Otherwise`/);
+  assert.match(problem ?? '', /at most one `Else` \/ `Otherwise`, and it comes last/);
+});
+
+test('danglingChainMemberError: a SECOND `Otherwise` is refused the same way', () => {
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then Sec1',
+    '2. Otherwise, Sec2',
+    '3. Otherwise, Sec3',
+  ].join('\n');
+  assert.match(
+    danglingChainMemberError(text) ?? '',
+    /"Otherwise, Sec3" follows an `Otherwise`, which ends a chain/,
+  );
+});
+
+test('danglingChainMemberError: a NEW `If` after an `Otherwise` opens a fresh chain', () => {
+  // The control for the two above: closing one chain must not poison the next.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then Sec1',
+    '2. Otherwise, Sec2',
+    '3. If b, then Sec3',
+    '4. Otherwise, Sec4',
+  ].join('\n');
+  assert.equal(danglingChainMemberError(text), null);
+});
+
+test('danglingChainMemberError: an ordinary step between them reopens nothing', () => {
+  // A closed chain followed by a plain step and then an `Otherwise` is the
+  // DANGLING fault, not the closed one — the previous step line is not a chain
+  // member at all, so the author reads the sentence that names that.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then Sec1',
+    '2. Otherwise, Sec2',
+    '3. Click Save',
+    '4. Otherwise, Sec3',
+  ].join('\n');
+  assert.match(
+    danglingChainMemberError(text) ?? '',
+    /"Otherwise, Sec3" has no decision to be the alternative of/,
+  );
 });

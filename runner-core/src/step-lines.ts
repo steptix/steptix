@@ -30,7 +30,13 @@
  *    hosts and webviews, not here.
  */
 
-import { NO_HOOKS_MARKER } from './section-match.js';
+import { matchText, NO_HOOKS_MARKER } from './section-match.js';
+import {
+  chainMemberWord,
+  closedChainMemberMessage,
+  danglingChainMemberMessage,
+  parseControlLine,
+} from './control-line.js';
 
 export type LineKind =
   | 'step'
@@ -545,6 +551,95 @@ export function classifySelectedSteps(
 export function resolveRunLines(text: string, requestedLines: number[]): number[] {
   const selection = resolveRunSelection(text, requestedLines);
   return selection.scope === 'main-flow' ? selection.lines : [];
+}
+
+/**
+ * Why this document's control flow cannot be run as written, or null.
+ *
+ * ONE rule with two halves, the same one the CLI parser and the expander
+ * apply: *an `Else if` / `Otherwise` must follow a chain member on the
+ * previous step line of the same flow, and must not follow the `Otherwise`
+ * that closed it*. The wordings come from {@link danglingChainMemberMessage}
+ * and {@link closedChainMemberMessage}, mirrored from
+ * `src/parser/control-line.ts` and pinned by
+ * `tests/control-line-parity.test.ts` — an author who meets this refusal in
+ * the editor and again from the CLI must read the same sentence, naming the
+ * same line.
+ *
+ * The client checks it because the client is the one cutting the batch. The
+ * case that motivates the check is an `[input: …]` / `[interactive]` step
+ * between two members: those end a batch, so the two halves of one decision
+ * land in different requests and the `Otherwise` arrives with nothing to be
+ * the alternative of. But the rule is stated on the chain rather than on the
+ * `[input:]`, because that is a document the CLI parser cannot produce — an
+ * `[input:]` line IS a numbered step, so it breaks the chain before it can sit
+ * inside one, and blaming it would leave TestBench and the CLI pointing at
+ * different lines for the same file.
+ *
+ * A step whose text names a defined section is a CALL, not a control line
+ * (resolution order, decision 3), which is why the section names are read
+ * first: without that, a `### Otherwise, …`-named section called from the main
+ * flow would be refused for a chain it never joins.
+ *
+ * Inside a tail's SECTION BODY an `[input:]` is fine — the same carve-out
+ * sections already have, and it falls out for free here because a body is a
+ * different flow from the main list.
+ */
+export function danglingChainMemberError(text: string): string | null {
+  const sectionList = extractSections(text);
+  const sectionNames = new Set(sectionList.map((s) => matchText(s.name)));
+  const flows: { name: string; steps: { line: number; instruction: string }[] }[] = [
+    { name: '## Steps', steps: extractSteps(text) },
+    ...sectionList.map((s) => ({ name: `### ${s.name}`, steps: s.steps })),
+  ];
+
+  for (const flow of flows) {
+    /** The chain member on the PREVIOUS step line of this flow, or null. */
+    let previous: 'if' | 'elseif' | 'else' | null = null;
+    /** Whether that chain has already had its `Otherwise`. */
+    let closed = false;
+    for (const step of flow.steps) {
+      if (sectionNames.has(matchText(step.instruction))) {
+        previous = null;
+        closed = false;
+        continue;
+      }
+      const control = parseControlLine(step.instruction);
+      if (!control) {
+        previous = null;
+        closed = false;
+        continue;
+      }
+      if (control.kind === 'elseif' || control.kind === 'else') {
+        if (previous === null) {
+          return danglingChainMemberMessage({
+            line: step.instruction,
+            word: chainMemberWord(control.kind),
+            flow: flow.name,
+            where: `Line ${step.line}`,
+          });
+        }
+        // The other half of the rule: `Otherwise` is the LAST member, so an
+        // `Else if` or a second `Otherwise` under one is refused too. Without
+        // it the client ran a file the CLI parser rejects — and at run time a
+        // second `Otherwise`'s tail is unreachable (`fallbackOf` takes the
+        // first condition-less member) while an `Else if` below one is still
+        // evaluated.
+        if (closed) {
+          return closedChainMemberMessage({
+            line: step.instruction,
+            where: `Line ${step.line}`,
+          });
+        }
+        previous = control.kind;
+        closed = control.kind === 'else';
+        continue;
+      }
+      previous = control.kind === 'if' ? 'if' : null;
+      closed = false;
+    }
+  }
+  return null;
 }
 
 function classifyOne(step: { line: number; instruction: string }): ClassifiedStep {

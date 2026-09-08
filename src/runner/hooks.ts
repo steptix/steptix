@@ -93,7 +93,13 @@ async function expandDefaults(config: Config): Promise<ExpandedDefaults> {
     raws: string[] | undefined,
   ): Promise<{ steps: string[]; sources: (string | null)[]; tools: ReturnType<typeof parseToolCall>[] }> => {
     if (!raws || raws.length === 0) return { steps: [], sources: [], tools: [] };
-    const exp = await expandSkills(raws, skillsDir);
+    // `expandControlLines: false` for the same reason the per-file hook
+    // scopes pass it: project `defaultHooks` are never validated at parse
+    // time, so a control line there would split into an unevaluated guard and
+    // an unconditional tail (stories/control-flow.md).
+    const exp = await expandSkills(raws, skillsDir, undefined, undefined, undefined, {
+      expandControlLines: false,
+    });
     return {
       steps: exp.steps,
       sources: exp.sourceSkills,

@@ -97,10 +97,10 @@
           "description": "Show browser window (false = headless)"
         },
         "viewport": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5932-5966-src_config_types.ts-5874-5967-src_config_types.ts-5773-12764-src_config_types.ts-0-24393449752545%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5932-5966-src_config_types.ts-5874-5967-src_config_types.ts-5773-12764-src_config_types.ts-0-24914449752545%3E"
         },
         "windowSize": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6023-6057-src_config_types.ts-5967-6058-src_config_types.ts-5773-12764-src_config_types.ts-0-243931327565221%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6023-6057-src_config_types.ts-5967-6058-src_config_types.ts-5773-12764-src_config_types.ts-0-249141327565221%3E"
         },
         "fixedViewport": {
           "type": "object",
@@ -196,7 +196,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-5932-5966-src_config_types.ts-5874-5967-src_config_types.ts-5773-12764-src_config_types.ts-0-24393449752545>": {
+    "DeepPartial<structure-src_config_types.ts-5932-5966-src_config_types.ts-5874-5967-src_config_types.ts-5773-12764-src_config_types.ts-0-24914449752545>": {
       "type": "object",
       "properties": {
         "width": {
@@ -209,7 +209,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6023-6057-src_config_types.ts-5967-6058-src_config_types.ts-5773-12764-src_config_types.ts-0-243931327565221>": {
+    "DeepPartial<structure-src_config_types.ts-6023-6057-src_config_types.ts-5967-6058-src_config_types.ts-5773-12764-src_config_types.ts-0-249141327565221>": {
       "type": "object",
       "properties": {
         "width": {
@@ -321,6 +321,10 @@
         "maxTurns": {
           "type": "number",
           "description": "Maximum number of AI turns per step for multi-turn execution (default: 15)"
+        },
+        "maxLoopIterations": {
+          "type": "number",
+          "description": "Cap on the passes a single `While` or `Repeat … until` loop line may make before the framework gives up (default: 25). A per-line `, up to N times` suffix overrides it for that line; `For each` ignores it, since the list is its bound.\n\nReaching the cap with the exit condition still unmet **fails the loop line** rather than exiting quietly — a loop that hit its cap has not done what the author asked (stories/control-flow.md, decision 9)."
         },
         "interactiveOnFailure": {
           "type": "boolean",

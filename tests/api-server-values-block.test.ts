@@ -19,6 +19,9 @@ import type { AIAction, ChatMessage } from '../src/ai/types.js';
 
 const ai = vi.hoisted(() => ({ requests: [] as ChatMessage[][], responses: [] as string[] }));
 const acted = vi.hoisted(() => ({ received: [] as AIAction[] }));
+/** What `captureDomSnapshot` answers. Mutable so one test can put a live form
+ *  value in the page the model is shown. */
+const dom = vi.hoisted(() => ({ text: '<html><body>ok</body></html>' }));
 
 const mockPage = {
   url: () => 'https://app.test/dashboard',
@@ -75,7 +78,7 @@ vi.mock('../src/browser/actions.js', async (importOriginal) => {
 
 vi.mock('../src/browser/dom-cleaner.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/dom-cleaner.js')>();
-  return { ...actual, captureDomSnapshot: async () => '<html><body>ok</body></html>' };
+  return { ...actual, captureDomSnapshot: async () => dom.text };
 });
 
 vi.mock('../src/browser/page-state.js', () => ({
@@ -193,7 +196,10 @@ beforeAll(async () => {
   mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
   writeFileSync(path.join(projectRoot, 'aiui.config.json'), JSON.stringify({}));
-  writeFileSync(path.join(projectRoot, '.env.uat'), 'BASE_URL=https://uat.app.test\n');
+  writeFileSync(
+    path.join(projectRoot, '.env.uat'),
+    'BASE_URL=https://uat.app.test\nLOGIN_PASSWORD=hunter2-ENV-SECRET\n',
+  );
   writeFileSync(
     path.join(projectRoot, 'data', 'uat.json'),
     JSON.stringify({ url: 'https://uat.app.test/admin' }),
@@ -216,6 +222,7 @@ beforeEach(() => {
   ai.requests = [];
   ai.responses = [];
   acted.received = [];
+  dom.text = '<html><body>ok</body></html>';
 });
 
 function allRequestText(): string {
@@ -262,6 +269,41 @@ describe('the ## Values block through the real Sessions API entry', () => {
     expect(run.body.results[0].step).toBe('Open ${data.url} and enter the email {{email}}');
 
     await api('DELETE', `/sessions/values-block`);
+  });
+
+  it('masks an ${env.…} secret in the watch group`s poll message', async () => {
+    // The watch group's poller reads the page on every poll and sends the
+    // snapshot to the model. It redacts with `secretsFor(opts)`, which
+    // consults `envData` only when the caller passes it — and the server's
+    // `executeBranchedStep` call was the one call site that did not, so this
+    // path sent a `${env.PASSWORD}` value in full while every ordinary step
+    // on the same run showed `***` (review 4, finding 3).
+    //
+    // Nothing in the STEP TEXT mentions the secret: the run's secret set is
+    // the env context's, not the step's, which is the whole point.
+    dom.text =
+      '<html><body><input type="text" name="who" value="hunter2-ENV-SECRET">' +
+      '<button>Continue</button></body></html>';
+    ai.responses = [
+      // One poll, answering with the continuation label and no actions, so the
+      // group resolves without a second AI call.
+      JSON.stringify({ matched: 'B', actions: [], reasoning: 'no banner' }),
+    ];
+
+    const run = await api('POST', `/sessions/branched-secrets/steps`, {
+      steps: ['If a cookie banner appears, click Reject all', 'Click Continue'],
+      envName: 'uat',
+      testFilePath,
+    });
+    expect(run.status).toBe(200);
+
+    const sent = allRequestText();
+    expect(sent).not.toContain('hunter2-ENV-SECRET');
+    expect(sent).toContain('value="***"');
+    // Masked, not dropped: the poller still sees the page it is watching.
+    expect(sent).toContain('<button>Continue</button>');
+
+    await api('DELETE', `/sessions/branched-secrets`);
   });
 
   it('rejects a non-string config.unmask', async () => {

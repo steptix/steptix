@@ -10,6 +10,7 @@ import {
   matchText,
   composeEnv,
   extractSteps,
+  danglingChainMemberError,
   resolveRunSelection,
   sectionBodyLinesAt,
   interpretReplCommand,
@@ -24,6 +25,7 @@ import {
   readMachineKey,
   reportError,
   describeStepFailure,
+  isSkippedPass,
   resolveEnvFile,
   resolveSection,
   userRootEnvPath,
@@ -237,6 +239,12 @@ export function compileLogLine(event: CompileEvent): string | null {
       // to. Starts and the run's `done` say nothing the phase line did not.
       const inner = event.event;
       if (inner.type === 'step:pass') {
+        // A step the compile's run decided against — the untaken branch of a
+        // chain, which a compile is allowed to contain — did not run, so it
+        // gets the same `—` the interactive run log gives it rather than a ✓.
+        if (isSkippedPass(inner)) {
+          return `  ${' '.repeat(11)} — step on line ${inner.line} skipped`;
+        }
         const how = inner.codeBehindStale
           ? ` ⚠ under AI — code-behind failed: ${inner.codeBehindStale.error}`
           : inner.fromCodeBehind
@@ -2429,6 +2437,20 @@ export class RunController {
       return this.fail(payload, log);
     }
 
+    // An `Else if` / `Otherwise` that follows no decision, refused before
+    // anything runs (stories/control-flow.md §"Runs that start or end
+    // mid-structure"), in the CLI parser's own wording. The commonest cause is
+    // an `[input:]` between two members: that step splits the batch, so the
+    // chain's halves land in different requests — the first deciding and
+    // dispatching nothing, the second arriving with no decision to act on —
+    // and neither half can be right on its own. Client-side because the split
+    // is the client's: the server only ever sees the pieces.
+    const chainProblem = danglingChainMemberError(text);
+    if (chainProblem) {
+      const payload = reportError('TB032', { detail: chainProblem });
+      return this.fail(payload, log);
+    }
+
     // What the caller's line selection means. `scope` is the new half: a
     // selection made entirely of section-body lines resolves to those lines
     // and runs them DETACHED, at the root frame (see
@@ -4308,7 +4330,15 @@ export class RunController {
       // AI because the compiled entry threw.
       if (event.type === 'step:pass') {
         passCount += 1;
-        if (event.codeBehindStale) {
+        // A step the run decided not to take rides the pass event (the wire has
+        // no third verdict) but did not run, so the log says so rather than
+        // claiming a ✓ (stories/control-flow.md). `passCount` is deliberately
+        // still incremented: it mirrors the server's own `stepsCompleted`,
+        // which counts a skipped step for the same reason the `[input:]` skip
+        // path always has.
+        if (isSkippedPass(event)) {
+          log(`— step ${event.line} skipped`);
+        } else if (event.codeBehindStale) {
           staleCount += 1;
           log(`⚠ step ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`);
         } else if (event.fromCodeBehind) {

@@ -256,6 +256,13 @@ export interface ParsedTest {
     rawSteps: string[];
     origins: import('../skills/expander.js').ExpandedStepOrigin[];
     frames: Record<string, import('../skills/expander.js').ExpandedFrame>;
+    /**
+     * Parallel to `steps` — non-null on a control-flow guard, giving the
+     * index range of its body and the end of its chain
+     * (stories/control-flow.md §Design). All-null for a file with no control
+     * lines. See `SkillExpansion.controls`.
+     */
+    controls: (import('../runner/control-flow.js').ControlRecord | null)[];
   };
   /**
    * The env/data context the `${env.X}` / `${data.X}` / `${<source>.X}`

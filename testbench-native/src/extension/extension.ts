@@ -4,6 +4,7 @@ import {
   type HostToWebviewMsg,
   type StepFailureDetail,
   type WebviewToHostMsg,
+  isSkippedPass,
   stepFailureDetail,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
@@ -769,12 +770,22 @@ class RunControllerRegistry implements vscode.Disposable {
         }
         case 'step:pass': {
           const target = this.targetUriFor(uri, ev.frame);
-          // How the step passed decides the glyph. `codeBehindStale` outranks
-          // everything: the step DID pass, but its compiled entry threw and the
-          // AI covered for it, and ⚠ is the only mark that asks for a recompile.
-          // Then the code mark (ran as code), then ⚡ (every AI turn served from StepCache),
-          // then the plain ✓.
-          const status = ev.codeBehindStale
+          // How the step passed decides the glyph. `output: 'skipped'` outranks
+          // even the code-behind marks, because the step did not run at all:
+          // the untaken half of a decision, or the whole body of a `While` that
+          // never entered (stories/control-flow.md — "the other line and its
+          // section paint as skipped, so you can read which way it went off the
+          // editor"). It rides the PASS event because a branch that was not
+          // taken is not a failure and the wire has no third verdict; painting
+          // it ✓ would claim work that was never done.
+          //
+          // Then `codeBehindStale`: the step DID pass, but its compiled entry
+          // threw and the AI covered for it, and ⚠ is the only mark that asks
+          // for a recompile. Then the code mark (ran as code), then ⚡ (every AI
+          // turn served from StepCache), then the plain ✓.
+          const status = isSkippedPass(ev)
+            ? 'skip'
+            : ev.codeBehindStale
             ? 'pass-stale'
             : ev.fromCodeBehind
               ? 'pass-code-behind'
@@ -998,13 +1009,19 @@ class RunControllerRegistry implements vscode.Disposable {
           this.tracker.setStatus(
             uri,
             ev.line,
-            ev.codeBehindStale
-              ? 'pass-stale'
-              : ev.fromCodeBehind
-                ? 'pass-code-behind'
-                : ev.fromCache
-                  ? 'pass-cached'
-                  : 'pass',
+            // A compile of a file with a chain is allowed — its steps run at
+            // most once — and the Record run emits `step:pass output:'skipped'`
+            // for the untaken branch. Same rule as the run gutter above: the
+            // step did not run, so it is not a ✓.
+            isSkippedPass(ev)
+              ? 'skip'
+              : ev.codeBehindStale
+                ? 'pass-stale'
+                : ev.fromCodeBehind
+                  ? 'pass-code-behind'
+                  : ev.fromCache
+                    ? 'pass-cached'
+                    : 'pass',
             ev.codeBehindStale
               ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
               : undefined,

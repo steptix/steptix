@@ -430,10 +430,14 @@ function renderLoopBand(marker: NonNullable<StepResult['loop']>): string {
   const values = Object.entries(marker.values)
     .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(v)}`)
     .join(', ');
+  // `?` when a `While` / `Repeat` never reached its end — the run was stopped
+  // or the body failed, so nothing back-filled the count and inventing one
+  // would claim the loop finished (stories/control-flow.md).
+  const total = marker.count ?? '?';
   const lead =
     marker.kind === 'row'
-      ? `Row ${marker.index} of ${marker.count}`
-      : `${escapeHtml(marker.label ?? 'Section')} — iteration ${marker.index} of ${marker.count}`;
+      ? `Row ${marker.index} of ${total}`
+      : `${escapeHtml(marker.label ?? 'Section')} — iteration ${marker.index} of ${total}`;
   return `<div class="loop-band" id="row-${marker.index}">
   <span class="loop-band-lead">${lead}</span>
   ${values ? `<span class="loop-band-values">${values}</span>` : ''}
@@ -651,7 +655,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   // on the section chip, which already names the flow.
   const loopBadge =
     step.loop && step.loop.kind === 'row'
-      ? `<span class="badge badge-row" title="Data row ${step.loop.index} of ${step.loop.count}">row ${step.loop.index}/${step.loop.count}</span>`
+      ? `<span class="badge badge-row" title="Data row ${step.loop.index} of ${step.loop.count ?? '?'}">row ${step.loop.index}/${step.loop.count ?? '?'}</span>`
       : '';
   const stepNumberLabel = overrides.numberLabel ?? `Step ${step.index}`;
   const displayedInstruction = overrides.displayInstruction ?? step.instruction;
@@ -684,7 +688,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   // a section carries both.
   const iterationSuffix =
     step.loop && step.loop.kind === 'iteration'
-      ? ` (${step.loop.index}/${step.loop.count})`
+      ? ` (${step.loop.index}/${step.loop.count ?? '?'})`
       : '';
   const sourceSectionBadge = step.sourceSection
     ? `<span class="badge badge-section" title="Step expanded from inline section ${escapeHtml(step.sourceSection)}">${escapeHtml(step.sourceSection)}${iterationSuffix}</span>`

@@ -14,6 +14,15 @@ import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
 import { parseFlowControlStep, flowControlInHookError } from './flow-control-step.js';
+import {
+  chainMemberWord,
+  closedChainMemberMessage,
+  controlLineError,
+  danglingChainMemberMessage,
+  isControlLineClaim,
+  parseControlLine,
+  type ControlLine,
+} from './control-line.js';
 import type { ToolCall } from '../tools/types.js';
 import {
   interpolateDataSourcePath,
@@ -66,7 +75,14 @@ export async function parseTestFile(
   // as prose. The CLI always passes its `./skills` default, so this only
   // widens behaviour for direct `parseTestFile` consumers.
   const definesSections = Object.keys(parsed.sections).length > 0;
-  if (options.skillsDir || definesSections) {
+  // …and when the file holds a control line, for the same reason: its tail is
+  // a step the expander has to place, and skipping expansion would ship
+  // `While the Next button is enabled, Go to the next page` to the AI as one
+  // prose instruction.
+  const definesControlFlow = parsed.steps.some(
+    (_, i) => parseControlLine(matchInput(parsed, i)) !== null,
+  );
+  if (options.skillsDir || definesSections || definesControlFlow) {
     // Thread the run-wide env context (env vars + envName) into skill
     // expansion so a skill's own `dataSources` (declared in the skill's
     // frontmatter) can resolve `${envName}` / `${env.X}` in their paths and
@@ -94,10 +110,17 @@ export async function parseTestFile(
       (o) => preExpansionStepLines[o.inputIndex] ?? 0,
     );
 
-    const beforeExp = await expandSkills(parsed.hooks.before, options.skillsDir, envCtxForSkills, absPath);
-    const beforeEachExp = await expandSkills(parsed.hooks.beforeEach, options.skillsDir, envCtxForSkills, absPath);
-    const afterEachExp = await expandSkills(parsed.hooks.afterEach, options.skillsDir, envCtxForSkills, absPath);
-    const afterExp = await expandSkills(parsed.hooks.after, options.skillsDir, envCtxForSkills, absPath);
+    // `expandControlLines: false` on every hook scope. Hooks are the one step
+    // list control flow deliberately does not reach — the same carve-out
+    // `setStepError` has — because a hook entry is never validated at parse
+    // time, so a `If …, then …` there would silently become two hook steps:
+    // an unevaluated guard handed to the model as prose, and a tail that ran
+    // unconditionally (stories/control-flow.md; `opts.expandControlLines`).
+    const noControls = { expandControlLines: false } as const;
+    const beforeExp = await expandSkills(parsed.hooks.before, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
+    const beforeEachExp = await expandSkills(parsed.hooks.beforeEach, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
+    const afterEachExp = await expandSkills(parsed.hooks.afterEach, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
+    const afterExp = await expandSkills(parsed.hooks.after, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
 
     parsed.hooks = {
       before: beforeExp.steps,
@@ -114,7 +137,15 @@ export async function parseTestFile(
     // Skill bodies may themselves contain `[tool: ...]` lines that surface
     // only after expansion, so re-derive the parallel toolCalls arrays
     // against every expanded step list (test body + each hook scope).
-    parsed.toolCalls = parsed.steps.map((s) => parseToolCall(s));
+    // A GUARD is never a tool call, however its tail is written.
+    // `parseInvocation` accepts any text before the token as a label, so
+    // `If a, then [tool: fetch_orders]` would otherwise arrive at the runner
+    // as a tool call whose label happens to be a decision — and be dispatched
+    // unconditionally. The tail is a step of its own in this list and gets
+    // its own (correct) entry, so nothing is lost by nulling the guard's.
+    parsed.toolCalls = parsed.steps.map((s, i) =>
+      stepsExp.controls[i] ? null : parseToolCall(s),
+    );
     parsed.hookToolCalls = {
       before: parsed.hooks.before.map((s) => parseToolCall(s)),
       beforeEach: parsed.hooks.beforeEach.map((s) => parseToolCall(s)),
@@ -138,6 +169,7 @@ export async function parseTestFile(
       rawSteps: stepsExp.rawSteps,
       origins: stepsExp.origins,
       frames: stepsExp.frames,
+      controls: stepsExp.controls,
     };
   }
 
@@ -148,6 +180,11 @@ export async function parseTestFile(
     rawSteps: parsed.steps.map((_, i) => matchInput(parsed, i)),
     origins: parsed.steps.map((_, i) => ({ inputIndex: i, frameId: '' })),
     frames: {},
+    // No expansion ran, so no control line was resolved. A file with neither
+    // skills nor sections CAN still hold one (`While …, Click Load more`), and
+    // this path answers "no structure" for it — which is the same answer it
+    // gives for `[skill:]` lines it did not expand either.
+    controls: parsed.steps.map(() => null),
   };
 
   if (options.envData) {
@@ -240,7 +277,11 @@ function expandHome(p: string): string {
  */
 function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): void {
   const resolvedSteps = parsed.steps.map((s) => interpolateEnvData(s, ctx));
-  parsed.toolCalls = resolvedSteps.map((s) => parseToolCall(s));
+  // Guards keep their null, for the reason `parseTestFile` gives when it
+  // first derives this array: a labelled `[tool:]` in a tail must not make
+  // the decision itself dispatch as a tool.
+  const controls = parsed.expansion?.controls;
+  parsed.toolCalls = resolvedSteps.map((s, i) => (controls?.[i] ? null : parseToolCall(s)));
 
   // Hooks are still baked at parse time — they are never shown to the model as
   // authored text, so there is nothing for them to preserve — EXCEPT a `Set`
@@ -470,6 +511,22 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
               `parameter of this skill, and a caller's arguments are written ` +
               `into the step text rather than kept as variables. Assign to a ` +
               `declared \`## Outputs\` name, or to an internal one.`,
+          );
+        }
+        // Same refusal, same reason, for the name a `For each` binds per
+        // pass: `applySkillScope` would write the caller's argument over it
+        // and leave `For each demo@x in {{list}}`, which claims the form,
+        // fails to complete it, and runs as one prose step with no loop.
+        // The LIST name is deliberately not refused — passing `list="{{accounts}}"`
+        // to hand a skill the variable to iterate is a legitimate call.
+        const control = parseControlLine(step);
+        if (control?.kind === 'foreach' && declared.has(control.item)) {
+          throw new Error(
+            `Cannot loop over {{${control.item}}} in ${filePath}: it is a ` +
+              `parameter of this skill, and a caller's arguments are written ` +
+              `into the step text rather than kept as variables. The ` +
+              `\`For each\` line would stop being one. Loop over a different ` +
+              `name.`,
           );
         }
       }
@@ -720,6 +777,43 @@ function parseSections(rawContent: string, filePath: string): {
       );
     }
 
+    // The `For each` half of the same refusal, on BOTH of its names. `For each
+    // {{x}} in {{list}}` binds `x` per pass and reads `list` once, and a row
+    // value baked over either one destroys the loop:
+    //
+    //  - over the ITEM it leaves `For each demo@x in {{list}}`, a line that
+    //    claims the form and fails to complete it;
+    //  - over the LIST it leaves `For each {{x}} in Savings, Everyday`, which
+    //    does not claim the form at all —
+    //
+    // and both are then run as one prose step with no loop. Refused here,
+    // where the names are still names. The expander's `checkedRowInterpolate`
+    // carries the same guard for the bindings an ENCLOSING looped section
+    // merges in, which this pass cannot see.
+    //
+    // A skill PARAMETER as the list is a different thing and stays legal:
+    // `[skill: check list="{{accounts}}"]` leaves a placeholder behind, so the
+    // body still reads a variable at run time.
+    const control = parseControlLine(matchSides[i]!);
+    if (control?.kind === 'foreach' && columns) {
+      const bakedOver = `it is a column of the table under "### ${target!.name}", and a looped section's row values are written into its step text rather than kept as variables.`;
+      if (Object.hasOwn(columns, control.item)) {
+        throw new Error(
+          `Cannot loop over {{${control.item}}}${where}: ${bakedOver} The ` +
+            `\`For each\` line would stop being one. Loop over a different name.`,
+        );
+      }
+      if (Object.hasOwn(columns, control.list)) {
+        throw new Error(
+          `Cannot loop over the items of {{${control.list}}}${where}: ` +
+            `${bakedOver} \`{{${control.list}}}\` would be replaced by this ` +
+            `row's value before the line was read, so it would stop being a ` +
+            `\`For each\` at all. Capture the list into a differently-named ` +
+            `variable and loop over that.`,
+        );
+      }
+    }
+
     if (target) {
       // Body steps carry no skipHooks/toolCalls parallel: `[no-hooks]` on a
       // body line is stripped and ignored (the invocation's marker covers the
@@ -735,6 +829,23 @@ function parseSections(rawContent: string, filePath: string): {
       mainStepLines.push(entry?.line ?? 0);
       mainRawSteps.push(matchSides[i]!);
     }
+  }
+
+  // Control flow, one flow at a time (stories/control-flow.md §Parser). A
+  // chain is "consecutive step lines of the SAME flow", so the main flow and
+  // each section body are validated separately — which is also what makes a
+  // chain that runs off the end of `## Steps` into a `### Section` an error
+  // rather than a chain nobody can see the shape of.
+  const sectionNames = new Set(sectionAcc.map((s) => matchText(s.name)));
+  validateControlFlow(filePath, '## Steps', mainRawSteps, mainStepLines, sectionNames);
+  for (const section of sectionAcc) {
+    validateControlFlow(
+      filePath,
+      `### ${section.name}`,
+      section.rawSteps,
+      section.stepLines,
+      sectionNames,
+    );
   }
 
   // Null-prototype: a section may legally be named `__proto__` (§2.5 bans
@@ -788,6 +899,117 @@ function parseSections(rawContent: string, filePath: string): {
     frontmatter,
     title,
   };
+}
+
+/** `[input: name]` and `[interactive]` as every runner matches them. Neither
+ *  may be a control line's tail: both hand the run back to a human, and the
+ *  client splits a batch at them — so a chain with one inside it would have
+ *  its halves in different requests, neither right on its own. */
+const INPUT_STEP_RE = /^\[input:\s*\w*\]/i;
+const INTERACTIVE_STEP_RE = /^\[interactive\]/i;
+
+/**
+ * Validate the control lines of ONE flow — the main `## Steps` list, or one
+ * `### Section` body (stories/control-flow.md §Parser).
+ *
+ * Two passes' worth of rules, in one walk:
+ *
+ *  - **completion** — a line that CLAIMS one of the six forms and does not
+ *    complete it is a parse error naming the line, the `Set` rule. Judged on
+ *    the MATCH side, the same authored text the expander will parse, so what
+ *    is validated here and what runs there cannot disagree.
+ *  - **structure** — `Else if` / `Otherwise` must follow an `If` or `Else if`
+ *    on the previous step line of this flow; `Otherwise` comes at most once
+ *    and last; and a tail may be neither another control line (nest through a
+ *    section instead) nor `[input: …]` nor `[interactive]`.
+ *
+ * Blank lines and prose between two members do not break a chain — they are
+ * not step lines, so they are not in `rawSteps` at all. Another numbered step
+ * does.
+ *
+ * `sectionNames` is resolution order made real (decision 3): a step, or a
+ * tail, whose match text IS a section name is a CALL before it is anything
+ * else. Without it a file with a `### While waiting` section would be refused
+ * for a `While` line that has no comma, on a step the expander resolves as a
+ * section call and never parses as a loop at all.
+ */
+function validateControlFlow(
+  filePath: string,
+  flow: string,
+  rawSteps: string[],
+  stepLines: number[],
+  sectionNames: ReadonlySet<string>,
+): void {
+  /** The chain member on the PREVIOUS step line, or null. */
+  let previous: ControlLine | null = null;
+  /** Whether the open chain has already had its `Otherwise`. */
+  let closed = false;
+
+  for (let i = 0; i < rawSteps.length; i++) {
+    const raw = rawSteps[i]!;
+    const at = ` in ${filePath}${stepLines[i] ? ` at line ${stepLines[i]}` : ''}`;
+
+    if (sectionNames.has(matchText(raw))) {
+      previous = null;
+      closed = false;
+      continue;
+    }
+
+    const error = controlLineError(raw, at);
+    if (error) throw new Error(error);
+
+    const control = parseControlLine(raw);
+    if (!control) {
+      previous = null;
+      closed = false;
+      continue;
+    }
+
+    const where = `${filePath}${stepLines[i] ? `:${stepLines[i]}` : ''}`;
+    if (control.kind === 'elseif' || control.kind === 'else') {
+      const word = chainMemberWord(control.kind);
+      if (previous === null) {
+        throw new Error(danglingChainMemberMessage({ line: raw, word, flow, where }));
+      }
+      if (closed) {
+        throw new Error(closedChainMemberMessage({ line: raw, where }));
+      }
+      if (control.kind === 'else') closed = true;
+    } else if (control.kind === 'if') {
+      closed = false;
+    }
+
+    // Membership is settled before the tail is judged, because every tail
+    // refusal below throws — so the two cannot get out of order, and the
+    // update is written once.
+    const chained =
+      control.kind === 'if' || control.kind === 'elseif' || control.kind === 'else';
+    previous = chained ? control : null;
+    if (!chained) closed = false;
+
+    const tail = control.tail;
+    // The tail resolves in the same order the step did, so a tail that names
+    // a section is a call and nothing else — even if that section's name
+    // happens to open a keyword.
+    if (sectionNames.has(matchText(tail))) continue;
+    if (isControlLineClaim(tail)) {
+      throw new Error(
+        `${where} — the step "${raw}" names another control line as the step ` +
+          `to run ("${tail}"). A control line's tail is ONE ordinary step; ` +
+          `nest a decision or a loop by moving it into a \`### Section\` and ` +
+          `naming that section here.`,
+      );
+    }
+    if (INPUT_STEP_RE.test(tail) || INTERACTIVE_STEP_RE.test(tail)) {
+      const token = INPUT_STEP_RE.test(tail) ? '[input: …]' : '[interactive]';
+      throw new Error(
+        `${where} — the step "${raw}" names \`${token}\` as the step to run. ` +
+          `That hands the run back to a human, which splits it into two ` +
+          `requests — and neither half of a decision is right on its own. ` +
+          `Put it in a \`### Section\` and name that section here.`,
+      );
+    }
+  }
 }
 
 /**
@@ -1009,6 +1231,21 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
         ignoredHeading = null;
         const name = raw.replace(/^#{3}\s*/, '').trim();
         validateSectionName(name, filePath, line);
+        // A heading whose NAME is itself a control line — `### Else if b, then
+        // S2`. A step reading exactly that resolves by BARE NAME at rung 2 of
+        // the expander's order, which deliberately beats the control split
+        // (review 1's blocker 3), so the step becomes an unconditional call
+        // and its condition is never asked. All three enforcers agree, which
+        // is why nothing else can tell the author. Resolution is left exactly
+        // as it is; this line is the only thing that says so out loud.
+        if (parseControlLine(name)) {
+          logger.warn(
+            `Section "${name}" at ${filePath}:${line} is named like a control ` +
+              `line. A step whose text is exactly this heading calls the ` +
+              `section — the condition is part of the name, not a decision ` +
+              `the run makes. Rename the section if you meant it to be one.`,
+          );
+        }
         const key = matchText(name);
         const prior = seenNames.get(key);
         if (prior !== undefined) {

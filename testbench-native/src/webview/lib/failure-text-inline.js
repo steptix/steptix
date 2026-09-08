@@ -63,3 +63,19 @@ export function formatStepFailure(failure, isStale) {
   if (failure.fromCodeBehind) return `code-behind failed: ${failure.error ?? ""}`;
   return failure.error ?? null;
 }
+
+/**
+ * `isSkippedPass` MIRRORS runner-core's function of the same name, for the
+ * same reason `describeStepFailure` above is mirrored, and is pinned to it by
+ * `tests/failure-text-copy-parity.test.js`.
+ *
+ * A step the run decided against rides the PASS event carrying
+ * `output: 'skipped'` — the wire has no third verdict — so the panel's run log
+ * must ask this before it prints a ✓ (stories/control-flow.md).
+ *
+ * @param {{output?: string}} event
+ * @returns {boolean}
+ */
+export function isSkippedPass(event) {
+  return event.output === "skipped";
+}

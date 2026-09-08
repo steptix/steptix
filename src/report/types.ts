@@ -18,7 +18,19 @@ export interface LoopMarker {
   label?: string;
   /** 1-based. */
   index: number;
-  count: number;
+  /**
+   * How many iterations there are in total — ABSENT while a runtime loop is
+   * still running (stories/control-flow.md §"Painting, frames and the report").
+   *
+   * A table's rows are counted before the first one runs, so a data row and a
+   * `For each` always know it. A `While` or `Repeat … until` does not: it stops
+   * when the page says so. Those markers are handed out without a count and
+   * back-filled in place when the loop ends (`LoopRuntime.endLoop`), so the
+   * live band reads `(3/?)` and the rendered report reads `(3/7)`. A count that
+   * is still absent at render time means the loop never ended — the run was
+   * stopped, or the body failed — and `?` is then the honest answer.
+   */
+  count?: number;
   /** The row's cells, for the band and the matrix table. */
   values: Record<string, string>;
 }

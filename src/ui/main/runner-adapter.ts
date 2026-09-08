@@ -35,6 +35,26 @@ import {
 } from '../../runner/flow-control.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
+import {
+  createControlState,
+  guardVisitEvaluates,
+  planAfterStep,
+  planForStart,
+  returnExit,
+  type ControlRecord,
+} from '../../runner/control-flow.js';
+import {
+  eachSkipped,
+  evaluateGuard,
+  guardHistoryLines,
+  guardResult,
+  guardRows,
+  isLoopRecord,
+  LoopRuntime,
+  skipReasonFor,
+  skippedResult,
+  SkipQueue,
+} from '../../runner/control-runtime.js';
 import { redactReport, runSecrets } from '../../utils/secrets.js';
 import { AiClient } from '../../ai/client.js';
 import { formatStepHistoryEntry } from '../../ai/prompts.js';
@@ -487,6 +507,53 @@ export class UIRunnerAdapter {
     let bail = false;
     let i = 0;
 
+    // ── Control flow (stories/control-flow.md) ─────────────────────────────
+    //
+    // The Runner UI is the fourth copy of the step loop and gets the same three
+    // hooks the other two do, or the story is three-quarters done. Everything
+    // decision-shaped lives in the shared planner and `control-runtime`; what
+    // is local here is how a row reaches the renderer.
+    const controls: (ControlRecord | null)[] =
+      parsedTest.expansion?.controls ?? parsedTest.steps.map(() => null);
+    const hasControls = controls.some((record) => record !== null);
+    const controlState = createControlState(this.config.execution.maxLoopIterations);
+    const loops = new LoopRuntime();
+    const skipQueue = new SkipQueue();
+    const skipReasons = new Map<number, string>();
+    /** Record every queued skipped step the run has now moved past, so the
+     *  report reads in file order rather than in decision order. */
+    const flushSkips = (before: number | 'all'): void => {
+      const due = before === 'all' ? skipQueue.takeAll() : skipQueue.take(before);
+      for (const k of due) {
+        const result = skippedResult({
+          index: k + 1,
+          instruction: parsedTest.steps[k] ?? '',
+          reason: skipReasons.get(k) ?? 'Skipped',
+          loop: loops.markerFor(k),
+        });
+        this.stepResults.push(result);
+        // `skipped`, not `passed`: the untaken half of a decision is the one
+        // thing a chain leaves behind for the reader, and painting it green
+        // says the opposite of what happened.
+        this.emit('runner:step-complete', { stepIndex: k + 1, status: 'skipped', durationMs: 0 });
+      }
+    };
+    /**
+     * Where the run goes after step `i`: the next line, or back to a loop's
+     * guard when `i` closed its body.
+     *
+     * Every path that advances the pointer goes through this — the CLI and the
+     * server have the same helper for the same reason. A bare `i++` on the
+     * `Set` / `[input:]` / `[interactive]` paths meant a loop whose body ENDS
+     * in one of them ran exactly one pass and left silently, which no other
+     * run loop did.
+     */
+    const advance = (from: number): number => {
+      if (!hasControls) return from + 1;
+      const after = planAfterStep(controls, from, controlState);
+      return after ? after.next : from + 1;
+    };
+
     while (i < totalSteps) {
       if (this.stopped || bail) break;
 
@@ -496,6 +563,40 @@ export class UIRunnerAdapter {
         i = this.pointerOverride - 1;
         this.pointerOverride = undefined;
         if (i < 0 || i >= totalSteps) break;
+        // `planForStart`, the third planner hook — applied here because this
+        // is where this runner's pointer can move. The debugger's jump-to-step
+        // can land INSIDE a tail or a loop body, and without this the chain's
+        // other members are never marked skipped and the loop's pass counter
+        // is never seeded, so the first pass after the jump reports as pass 1
+        // of a loop that has already run (stories/control-flow.md §"Runs that
+        // start or end mid-structure" — the same treatment a `startAt` gets on
+        // the server).
+        if (hasControls) {
+          // A jump INTO a loop body starts that body again, and this visit
+          // owes the rows every other visit of it emits. `released` is the
+          // run's memory of what has already been reported, so the loop's own
+          // range is forgotten here — the same range, and the same reason, as
+          // `rearmLoopBreakpoints` on the server. Without it a jump back into
+          // a body holding a chain reported the taken rows and none of the
+          // skipped ones, because an earlier pass had already released those
+          // indices (review 4, finding 5).
+          for (let g = 0; g < controls.length; g++) {
+            const record = controls[g];
+            if (!record || !isLoopRecord(record)) continue;
+            if (i < record.bodyStart || i > record.bodyEnd) continue;
+            skipQueue.rearm(record.bodyStart, record.bodyEnd);
+          }
+          const jumped = planForStart(controls, i, controlState);
+          for (const k of eachSkipped(jumped.skip)) {
+            skipReasons.set(k, 'Skipped: the run jumped into another branch of this decision');
+            // `addOnce`: a jump BACKWARDS re-plans ranges an earlier decision
+            // already skipped, and this is the one caller that can hand the
+            // queue the same index twice for the same reason. Everywhere else
+            // a repeated index is a repeated pass and belongs in the report
+            // twice (control-runtime.ts, SkipQueue.addOnce).
+            skipQueue.addOnce([k]);
+          }
+        }
       }
 
       if (Date.now() > timeoutDeadline) {
@@ -535,11 +636,21 @@ export class UIRunnerAdapter {
       /** Push and emit a `skipped` result for every step the return leaves
        *  behind, and answer with the index to resume from. */
       const skipRestOfFlow = (label: string | null): number => {
-        const exit = frameExitIndex(
-          parsedTest.expansion?.origins,
-          parsedTest.expansion?.frames,
+        // The frame's answer, clamped to the innermost control body around the
+        // returning step — an iteration is a flow too, so a return inside a
+        // loop body ends the PASS rather than the run. `enclosed` is what says
+        // the planner gets the last word on where to resume: back to the
+        // loop's guard, or out past a chain (`returnExit`,
+        // src/runner/control-flow.ts).
+        const { exit, enclosed } = returnExit(
+          controls,
           i,
-          totalSteps,
+          frameExitIndex(
+            parsedTest.expansion?.origins,
+            parsedTest.expansion?.frames,
+            i,
+            totalSteps,
+          ),
         );
         // The reason string carries the returning step's line so it is findable
         // from the editor, which does not number by the expanded index the
@@ -564,10 +675,18 @@ export class UIRunnerAdapter {
             ...(skipped.aiExplanation !== undefined && { reason: skipped.aiExplanation }),
           });
         }
-        return exit + 1;
+        return enclosed ? advance(exit) : exit + 1;
       };
 
       // --- Check for breakpoint or stepOverNext BEFORE executing ---
+      //
+      // No per-index memory of what has already paused, deliberately: a loop
+      // body re-runs the SAME `stepIndex` on every pass, so a set of consumed
+      // indices would silently disarm the author's breakpoint after pass 1 —
+      // which is exactly what the server did until `rearmLoopBreakpoints`
+      // (session-manager.ts). The contract is "a breakpoint on a body line
+      // fires on every pass" (stories/control-flow.md §"Painting, frames and
+      // the report"), and here it does by construction.
       if (this.breakpoints.has(stepIndex) || this.stepOverNext) {
         const reason = this.stepOverNext ? 'stepover' as const : 'breakpoint' as const;
         this.stepOverNext = false;
@@ -575,6 +694,113 @@ export class UIRunnerAdapter {
         // After resuming, re-check stopped and pointer override
         if (this.stopped) break;
         if (this.pointerOverride !== undefined) continue; // loop will pick up override
+      }
+
+      // --- Control flow: evaluate the guard, then follow the plan ---
+      // After the breakpoint check, so a breakpoint on a guard line pauses
+      // BEFORE the decision (stories/control-flow.md §"Painting, frames and
+      // the report").
+      const controlRecord = hasControls ? (controls[i] ?? null) : null;
+      if (controlRecord) {
+        // Only a visit that will produce a guard row announces itself. The
+        // `runner:step-complete` below is inside `if (rows.guard)`, and a visit
+        // that asks nobody produces no row — a `Repeat`'s first pass, every
+        // revisit of a `For each` — so a start emitted there is never
+        // completed and the renderer's row stays spinning
+        // (stories/control-flow.md §"What the live run found").
+        if (guardVisitEvaluates(controls, i, controlState)) {
+          this.emit('runner:step-start', { stepIndex, instruction: rawInstruction, totalSteps });
+        }
+
+        const evaluation = await evaluateGuard({
+          controls,
+          index: i,
+          state: controlState,
+          resolvedParameters: this.resolvedParameters,
+          executorOptions: {
+            page: this.page,
+            config: this.config,
+            aiClient: this.aiClient,
+            contextContent: this.contextContent,
+            testName: parsedTest.title,
+            ...(baseUrl !== undefined && { baseUrl }),
+            conversationHistory: [...this.conversationHistory],
+            ...(this.apiResponseStore != null && { apiResponseStore: this.apiResponseStore }),
+            csrfTokens: this.csrfTokens,
+            resolvedParameters: this.resolvedParameters,
+            ...(parsedTest.envData && { envData: parsedTest.envData }),
+            ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
+          },
+        });
+        const { plan } = evaluation;
+
+        const marker =
+          plan.pass && isLoopRecord(controlRecord)
+            ? loops.beginPass(i, controlRecord, plan.pass)
+            : undefined;
+        if (plan.pass?.bindings) Object.assign(this.resolvedParameters, plan.pass.bindings);
+        if (plan.loopEnded) loops.endLoop(plan.loopEnded);
+
+        const rows = guardRows(controlRecord, i, evaluation);
+        const reason = skipReasonFor(controlRecord, plan);
+        for (const k of rows.skip) skipReasons.set(k, reason);
+        skipQueue.add(rows.skip);
+
+        if (rows.guard) {
+          flushSkips(rows.guard.index);
+          const result = guardResult({
+            index: rows.guard.index + 1,
+            instruction: parsedTest.steps[rows.guard.index] ?? rawInstruction,
+            status: rows.guard.status,
+            durationMs: evaluation.durationMs,
+            reasoning: evaluation.reasoning,
+            error: evaluation.error,
+            aiInteractions: evaluation.aiInteractions,
+            loop: marker,
+          });
+          this.stepResults.push(result);
+          if (evaluation.reasoning) {
+            this.emit('runner:ai-reasoning', {
+              stepIndex: rows.guard.index + 1,
+              text: evaluation.reasoning,
+            });
+          }
+          this.emit('runner:step-complete', {
+            stepIndex: rows.guard.index + 1,
+            // A guard reports what it recorded, `skipped` included: a chain
+            // that decided nothing held is the row that says so.
+            status: rows.guard.status,
+            durationMs: evaluation.durationMs,
+            ...(evaluation.error !== undefined && { error: evaluation.error }),
+          });
+          // The SELECTED member's line, plus a `did not hold` line for each
+          // alternative the judge ruled out — `rawInstruction` is only where
+          // the question was asked from. Unredacted, matching every other
+          // history line this runner writes.
+          this.conversationHistory.push(
+            ...guardHistoryLines({
+              controls,
+              index: i,
+              rows,
+              plan,
+              text: (k) => parsedTest.steps[k] ?? rawInstruction,
+            }),
+          );
+        }
+
+        this.tokenTracker?.resetStep();
+
+        if (evaluation.error) {
+          if (isLoopRecord(controlRecord)) {
+            loops.abandon(i, controlState.passes.get(i) ?? 0);
+          }
+          this.emit('runner:error', { message: evaluation.error });
+          bail = true;
+          break;
+        }
+
+        i = plan.next;
+        continue;
       }
 
       // --- Handle `Set {{name}} to "…"` steps ---
@@ -611,7 +837,7 @@ export class UIRunnerAdapter {
           this.emit('runner:error', { message: outcome.result.error ?? 'Set step failed' });
           break;
         }
-        i++;
+        i = advance(i);
         continue;
       }
 
@@ -694,7 +920,7 @@ export class UIRunnerAdapter {
           formatStepHistoryEntry(stepIndex, instruction, true, this.page?.url()),
         );
 
-        i++;
+        i = advance(i);
         continue;
       }
 
@@ -730,7 +956,7 @@ export class UIRunnerAdapter {
           formatStepHistoryEntry(stepIndex, instruction, true, this.page?.url()),
         );
 
-        i++;
+        i = advance(i);
         continue;
       }
 
@@ -775,6 +1001,14 @@ export class UIRunnerAdapter {
       // password itself. The CLI passes the same argument.
       rawInstruction);
 
+      // Skipped lines BELOW this one, before anything of this step is said.
+      // A chain's untaken members sit on both sides of the taken one, so the
+      // ones behind us are released here — and released before this step's own
+      // events, or the renderer's log reads 1, 2, 6, 3, 4, 5 for a chain whose
+      // first branch was taken. The results array was always in order (this
+      // ran before the push); the events were not.
+      flushSkips(i);
+
       // Emit sub-actions and screenshots
       this.emitStepDetails(stepIndex, result);
 
@@ -782,6 +1016,12 @@ export class UIRunnerAdapter {
       // from …" rather than the model's bare fragment.
       const flowLabel = result.flowControl ? flowFrame() : null;
       if (result.flowControl) nameFlow(result, flowLabel);
+
+      // Which loop pass this step belongs to — the band the report draws
+      // around it. Stamped before the push, which is the only chance: the
+      // array holds the object, and the report is generated off it.
+      const stepLoop = loops.markerFor(i);
+      if (stepLoop) result.loop = stepLoop;
 
       // Pushed before the skipped steps so the report keeps its order.
       this.stepResults.push(result);
@@ -800,7 +1040,9 @@ export class UIRunnerAdapter {
       });
 
       // The skipped steps come after the returning step's own completion.
-      const resumeAt = result.flowControl ? skipRestOfFlow(flowLabel) : i + 1;
+      // `advance(i)` is the ordinary answer: a step that closes a loop body
+      // jumps back to its guard rather than to the next line.
+      const resumeAt = result.flowControl ? skipRestOfFlow(flowLabel) : advance(i);
 
       // Add to conversation history
       const currentUrl = this.page.url();
@@ -822,6 +1064,8 @@ export class UIRunnerAdapter {
       this.tokenTracker.resetStep();
       i = resumeAt;
     }
+
+    if (hasControls) flushSkips('all');
 
     // 10. Emit completion
     const failedSteps = this.stepResults.filter((s) => s.status === 'failed').length;

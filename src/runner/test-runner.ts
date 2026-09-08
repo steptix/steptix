@@ -18,6 +18,24 @@ import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalize
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
+import {
+  createControlState,
+  guardVisitEvaluates,
+  planAfterStep,
+  returnExit,
+  type ControlRecord,
+} from './control-flow.js';
+import {
+  evaluateGuard,
+  guardHistoryLines,
+  guardResult,
+  guardRows,
+  isLoopRecord,
+  LoopRuntime,
+  skipReasonFor,
+  skippedResult,
+  SkipQueue,
+} from './control-runtime.js';
 import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
@@ -619,9 +637,15 @@ export async function runTest(
      * (hook results inflate that array) and became WRONG once a return could
      * legitimately leave steps unrun (stories/step-flow-control.md, decision
      * 15). A main-flow return must read as a pass with N skipped, never as a
-     * timeout.
+     * timeout. A chain or loop guard that skipped its untaken half
+     * (stories/control-flow.md) leaves the same shape behind, and must read
+     * the same way.
      */
     let timedOut = false;
+    /** The run was stopped by its `extras.signal` rather than finishing. Set
+     *  only by the guard's abort catch below — the CLI has no other abort
+     *  path (issues/020). */
+    let aborted = false;
 
     /**
      * The code-behind slice of `StepExecutorOptions` for expanded step `i`.
@@ -890,6 +914,67 @@ export async function runTest(
     // Detect conditional step groups for multi-outcome branching
     const stepGroups = identifyStepGroups(test.steps);
 
+    // ── Control flow (stories/control-flow.md) ───────────────────────────
+    //
+    // `controls[i]` is non-null exactly on a guard — an `If … then`, an
+    // `Else if`, an `Otherwise`, a `While`, a `Repeat … until` or a `For
+    // each`. All-null for every file written before this feature, so the loop
+    // below is byte-for-byte what it was for them.
+    const controls: (ControlRecord | null)[] =
+      test.expansion?.controls ?? test.steps.map(() => null);
+    const hasControls = controls.some((record) => record !== null);
+    const controlState = createControlState(config.execution.maxLoopIterations);
+    const loops = new LoopRuntime();
+    const skipQueue = new SkipQueue();
+    /** Steps inside any loop body: they opt out of the step cache, because the
+     *  cache rewrites one value per line and a pass is a different value
+     *  (stories/data-driven-rows.md, decision 8 — same reason as a row run). */
+    const loopBodySteps = new Set<number>();
+    for (const record of controls) {
+      if (!record || !isLoopRecord(record)) continue;
+      for (let k = record.bodyStart; k <= record.bodyEnd; k++) loopBodySteps.add(k);
+    }
+    const cacheEnabledFor = (i: number): boolean =>
+      cacheEnabledForRun && !loopBodySteps.has(i);
+
+    /** Tag a result with the skill / section it came from, as the main loop
+     *  does — guard and skipped rows are steps like any other in the report. */
+    const tagOrigin = (result: StepResult, index0: number): StepResult => {
+      const skill = test.sourceSkills[index0] ?? null;
+      if (skill) result.sourceSkill = skill;
+      const section = test.sourceSections[index0] ?? null;
+      if (section) result.sourceSection = section;
+      return result;
+    };
+
+    /** Why each queued index was skipped — recorded when it is queued, because
+     *  the decision that skipped it is long gone by the time the row is. */
+    const skipReasons = new Map<number, string>();
+
+    /** Release every queued skipped step the run has now moved past. */
+    const flushSkips = (before: number | 'all'): void => {
+      const due = before === 'all' ? skipQueue.takeAll() : skipQueue.take(before);
+      for (const k of due) {
+        stepResults.push(
+          tagOrigin(
+            skippedResult({
+              index: k + 1,
+              instruction: test.steps[k] ?? '',
+              reason: skipReasons.get(k) ?? 'Skipped',
+              loop: loops.markerFor(k),
+            }),
+            k,
+          ),
+        );
+      }
+    };
+    /** Where the run goes after step `i`: the next line, or back to a loop's
+     *  guard when `i` closed its body. */
+    const advanceAfter = (i: number): number => {
+      const after = planAfterStep(controls, i, controlState);
+      return after ? after.next : i + 1;
+    };
+
     // The last expanded step this run executes (exclusive). A prefix replay
     // stops short of the whole test on purpose; see `RunTestExtras.stopAfterStep`.
     const stepLimit =
@@ -909,6 +994,173 @@ export async function runTest(
         logger.error(`Test timeout after ${testTimeout}ms at step ${i + 1}`);
         timedOut = true;
         break;
+      }
+
+      // ── Control flow: a guard decides, and the planner says what follows ──
+      //
+      // Before the hooks, deliberately: a guard is not a page step. It never
+      // reaches `executeStep`, it is never cached and never compiled, and
+      // wrapping it in `beforeEach` / `afterEach` would run the test's plumbing
+      // twice around one line — once for the decision and once for the step the
+      // decision chose (stories/control-flow.md §"What is deliberately
+      // unchanged"). Skipped steps get no hooks for the stronger reason that
+      // they did not run at all.
+      const controlRecord = hasControls ? (controls[i] ?? null) : null;
+      if (controlRecord) {
+        session = browserTracker.getActive();
+        const guardText = test.steps[i] ?? '';
+        // Same pairing rule the event-emitting loops follow: the console's
+        // `Step N` header opens a step, and only a visit that asks somebody
+        // closes it with a `Step N passed` (or a failure). A visit that asks
+        // nobody — a `Repeat`'s first pass, a `For each`'s revisits — records
+        // no row, so printing a header for it announced a step that never
+        // reported (stories/control-flow.md §"What the live run found").
+        if (guardVisitEvaluates(controls, i, controlState)) {
+          logger.step(i + 1, test.steps.length, redact(guardText, secretsNow()));
+        }
+        tokensAtStepStart = tokenTracker.total;
+
+        let evaluation;
+        try {
+          evaluation = await evaluateGuard({
+          controls,
+          index: i,
+          state: controlState,
+          resolvedParameters,
+          executorOptions: {
+            page: session.page,
+            config,
+            aiClient,
+            contextContent,
+            testName: test.title,
+            ...(baseUrl !== undefined && { baseUrl }),
+            conversationHistory: [...conversationHistory],
+            apiResponseStore,
+            csrfTokens,
+            uploadPaths,
+            resolvedParameters,
+            pageTracker: session.pageTracker,
+            browserTracker,
+            dismissalGuidance: hooks.hasAny,
+            testSteps: test.steps,
+            ...placeholderOpts,
+            // The judge reads the condition as AUTHORED beside a `## Values`
+            // block, so it needs the same env context an ordinary step's
+            // prompt does (stories/placeholder-preserving-actions.md).
+            ...(test.envData && { envData: test.envData }),
+            ...(extras.signal && { signal: extras.signal }),
+          },
+          });
+        } catch (err) {
+          // `evaluateGuard` RETHROWS an abort — a stop mid-judge is a stop,
+          // not a failure (issues/020) — and until now nothing here caught it,
+          // so it would have rejected out of `runTest` with no report written
+          // and the browser left open.
+          //
+          // There is no other abort path in this function to copy: `runTest`
+          // threads `extras.signal` into the executor and the judge and
+          // handles neither, because `executeStep` swallows an abort and
+          // returns a failed result. So this is the CLI's first one, and it
+          // ends the run the way the SERVER ends an aborted one — the step in
+          // flight is recorded `interrupted`, the report is marked `aborted`,
+          // and the report is still written. Nothing today sets
+          // `extras.signal` (`aiui run` and `compile` both leave it unset), so
+          // this is the hook for whoever wires one rather than a live path.
+          if (extras.signal?.aborted || (err as Error | undefined)?.name === 'AbortError') {
+            logger.info(`Run stopped at step ${i + 1} while deciding "${redact(guardText, secretsNow())}"`);
+            aborted = true;
+            stepResults.push(
+              tagOrigin(
+                {
+                  index: i + 1,
+                  instruction: redact(guardText, secretsNow()),
+                  status: 'failed',
+                  turns: [],
+                  durationMs: 0,
+                  retried: false,
+                  interrupted: true,
+                  aiExplanation: 'Stopped by user (run aborted).',
+                },
+                i,
+              ),
+            );
+            bail = true;
+            break;
+          }
+          throw err;
+        }
+        const { plan } = evaluation;
+
+        // A pass is starting: bind the item, open the band. Bindings go into
+        // the live parameter map, so `{{account}}` in the body resolves — and
+        // keeps its last value after the loop, which is the documented
+        // consequence of there being one map.
+        const marker =
+          plan.pass && isLoopRecord(controlRecord)
+            ? loops.beginPass(i, controlRecord, plan.pass)
+            : undefined;
+        if (plan.pass?.bindings) Object.assign(resolvedParameters, plan.pass.bindings);
+        // The loop ended: every `(n/?)` marker it issued becomes `(n/count)`.
+        if (plan.loopEnded) loops.endLoop(plan.loopEnded);
+
+        const rows = guardRows(controlRecord, i, evaluation);
+        const reason = skipReasonFor(controlRecord, plan);
+        for (const k of rows.skip) skipReasons.set(k, reason);
+        skipQueue.add(rows.skip);
+
+        if (rows.guard) {
+          flushSkips(rows.guard.index);
+          const result = tagOrigin(
+            guardResult({
+              index: rows.guard.index + 1,
+              instruction: test.steps[rows.guard.index] ?? guardText,
+              status: rows.guard.status,
+              durationMs: evaluation.durationMs,
+              reasoning: evaluation.reasoning,
+              error: evaluation.error,
+              aiInteractions: evaluation.aiInteractions,
+              loop: marker,
+            }),
+            rows.guard.index,
+          );
+          recordLastRun(rows.guard.index, result);
+          const guardCaptures = computeStepCaptures(result, resolvedParameters);
+          if (guardCaptures) result.outputs = guardCaptures;
+          stepResults.push(result);
+          // Built from the SELECTED member, with a `did not hold` line for
+          // each alternative the judge ruled out — the head of the chain is
+          // only where the question was asked from.
+          conversationHistory.push(
+            ...guardHistoryLines({
+              controls,
+              index: i,
+              rows,
+              plan,
+              text: (k) => redact(test.steps[k] ?? guardText, secretsNow()),
+            }),
+          );
+        }
+
+        tokenTracker.resetStep();
+
+        if (evaluation.error) {
+          logger.error(`Step ${i + 1} FAILED: ${evaluation.error}`);
+          // The loop stops where it got to, so its band reports the passes it
+          // actually made rather than staying open at `?`.
+          if (isLoopRecord(controlRecord)) {
+            loops.abandon(i, controlState.passes.get(i) ?? 0);
+          }
+          bail = true;
+          break;
+        }
+
+        if (rows.guard?.status === 'passed' && !plan.pass) {
+          logger.success(`Step ${rows.guard.index + 1} passed`);
+        }
+
+        // `i++` is about to run, so aim one short of where the plan points.
+        i = plan.next - 1;
+        continue;
       }
 
       const stepSkipsHooks = test.skipHooks[i] ?? false;
@@ -935,6 +1187,11 @@ export async function runTest(
         // Start of a conditional group — execute as branched step
         logger.info(`Conditional group detected at step ${i + 1}: ${group.conditionalSteps.length} conditional + 1 continuation`);
 
+        // Anything an earlier decision skipped, before this group's rows land:
+        // every other result-producing path in this loop flushes first, and
+        // without it a chain's untaken half sank to the bottom of the report.
+        if (hasControls) flushSkips(i);
+
         const branchedResults = await executeBranchedStep(group, test.steps.length, {
           page: session.page,
           config,
@@ -954,8 +1211,10 @@ export async function runTest(
           // line and rewrites only an action`s `value`, so an assertion whose
           // expectation came from a row would replay row 1`s on every row
           // (stories/data-driven-rows.md, decision 8). The cache is being
-          // retired; until then rows simply opt out.
-          cacheEnabled: cacheEnabledForRun,
+          // retired; until then rows simply opt out — and so, for the same
+          // reason, does every step inside a loop body
+          // (stories/control-flow.md, decision 12).
+          cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
@@ -968,11 +1227,30 @@ export async function runTest(
         });
 
         for (const result of branchedResults) {
-          // Tag with originating skill / section if any (result.index is 1-based).
-          const branchSourceSkill = test.sourceSkills[result.index - 1] ?? null;
+          // `executeBranchedStep` copies `StepGroup`'s own indices — positions
+          // in `test.steps`, so **0-based** — onto every row it builds,
+          // including the matched one it passes to `executeStep` as the step
+          // index. Every other row in this report carries a 1-based `index`
+          // and the HTML report renders `index` verbatim, so a watch group was
+          // the one block whose report rows were numbered one low: `1, 1, 2, 4`
+          // for a four-step file, one number repeated and one missing, and
+          // disagreeing with the console lines below (review 3, finding 6).
+          //
+          // Converted ONCE, here, so this block has one convention: `index` is
+          // the display number from now on and everything that indexes an
+          // array takes `sourceIndex`.
+          result.index += 1;
+          const sourceIndex = result.index - 1;
+          const branchSourceSkill = test.sourceSkills[sourceIndex] ?? null;
           if (branchSourceSkill) result.sourceSkill = branchSourceSkill;
-          const branchSourceSection = test.sourceSections[result.index - 1] ?? null;
+          const branchSourceSection = test.sourceSections[sourceIndex] ?? null;
           if (branchSourceSection) result.sourceSection = branchSourceSection;
+          // A watch group inside a loop body belongs to the pass that is
+          // running, or its rows render as unlabelled duplicates outside every
+          // band. Never overwritten: a result that already carries a marker is
+          // not this loop's to relabel.
+          const branchLoop = loops.markerFor(sourceIndex);
+          if (branchLoop && result.loop === undefined) result.loop = branchLoop;
           // Unlike the server path (whose MCP-facing `results` array never
           // includes branched steps at all — a different surface than this
           // report), the CLI does render branched steps, so there's no
@@ -981,22 +1259,28 @@ export async function runTest(
           if (branchCaptures) result.outputs = branchCaptures;
           stepResults.push(result);
           const url = session.page.url();
+          // Already 1-based — see the stamp at the top of this loop. The
+          // history line the model reads, the three console lines below and
+          // the report's own row all take this one number now.
+          const branchStepNumber = result.index;
           conversationHistory.push(
-            formatStepHistoryEntry(result.index, redact(result.instruction, secretsNow()), result.status === 'passed', url),
+            formatStepHistoryEntry(branchStepNumber, redact(result.instruction, secretsNow()), result.status === 'passed', url),
           );
 
           if (result.status === 'failed') {
-            logger.error(`Step ${result.index} FAILED: ${result.error ?? 'unknown error'}`);
+            logger.error(`Step ${branchStepNumber} FAILED: ${result.error ?? 'unknown error'}`);
             bail = true;
           } else if (result.status === 'skipped') {
-            logger.info(`Step ${result.index} skipped (conditional not matched)`);
+            logger.info(`Step ${branchStepNumber} skipped (conditional not matched)`);
           } else {
-            logger.success(`Step ${result.index} passed`);
+            logger.success(`Step ${branchStepNumber} passed`);
           }
         }
 
-        // Skip past all steps in this group (they've been handled)
-        i = group.continuationStep.index;
+        // Skip past all steps in this group (they've been handled), then let
+        // control flow have its say: the continuation step can be the last
+        // step of a loop body, which sends the run back to the guard.
+        i = advanceAfter(group.continuationStep.index) - 1;
         tokenTracker.resetStep();
         continue;
       }
@@ -1240,7 +1524,7 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
-          cacheEnabled: cacheEnabledForRun,
+          cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
@@ -1273,7 +1557,7 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
-          cacheEnabled: cacheEnabledForRun,
+          cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
@@ -1310,6 +1594,14 @@ export async function runTest(
         );
       }
 
+      // Which loop pass this step belongs to — the band the report draws
+      // around it, and the `(3/?)` on its section chip.
+      const stepLoop = loops.markerFor(i);
+      if (stepLoop) stepResult.loop = stepLoop;
+
+      // Untaken branches recorded before this step, so the report reads in the
+      // order the file is written in rather than in the order decisions fell.
+      flushSkips(i);
       recordLastRun(i, stepResult);
       stepResults.push(stepResult);
       if (interactiveStep) {
@@ -1484,10 +1776,18 @@ export async function runTest(
         const label = frameLabel(test.expansion?.origins, test.expansion?.frames, i);
         // `stepLimit` still bounds the run: a prefix replay
         // (`stopAfterStep`) must not report steps it was never going to
-        // reach as skipped.
-        const exit = Math.min(
-          frameExitIndex(test.expansion?.origins, test.expansion?.frames, i, test.steps.length),
-          stepLimit - 1,
+        // reach as skipped. `returnExit` then clamps that to the innermost
+        // control body around the returning step, because an iteration is a
+        // flow too — a return inside a loop body ends the PASS, and the loop
+        // re-evaluates (stories/control-flow.md §"Composition with
+        // `If … then return`").
+        const { exit, enclosed } = returnExit(
+          controls,
+          i,
+          Math.min(
+            frameExitIndex(test.expansion?.origins, test.expansion?.frames, i, test.steps.length),
+            stepLimit - 1,
+          ),
         );
         // The returning step's AUTHORED line rides on every reason string, so
         // a reader who only has the editor can find the step that ended the
@@ -1507,13 +1807,28 @@ export async function runTest(
           stepResults.push(skipped);
           logger.info(`Step ${j + 1} skipped — ${skipped.aiExplanation}`);
         }
-        i = exit;
+        // `i++` follows the `continue`, so aim one short of where the run
+        // resumes. Inside a control body the planner has the last word — back
+        // to a loop's guard, or out past the chain the member belonged to; in
+        // the main flow it must NOT be consulted, or a test whose last step
+        // closes a loop would jump back into the loop the return just skipped.
+        i = enclosed ? advanceAfter(exit) - 1 : exit;
         tokenTracker.resetStep();
         continue;
       }
 
       tokenTracker.resetStep();
+
+      // A step that closes a loop body sends the run back to its guard rather
+      // than to the next line — the jump-back the flat step list never grows
+      // to accommodate (stories/control-flow.md, decision 8). `i++` follows,
+      // so aim one short. A no-op everywhere else.
+      if (hasControls) i = advanceAfter(i) - 1;
     }
+
+    // Anything the last decision skipped and nothing has moved past yet — an
+    // `Otherwise` whose body was the end of the test, most often.
+    if (hasControls) flushSkips('all');
 
     // Run `after` hooks — best effort, failures logged but don't flip test status.
     if (hooks.after.length > 0) {
@@ -1543,7 +1858,14 @@ export async function runTest(
 
     const durationMs = Date.now() - startTime;
     const passedSteps = stepResults.filter((s) => s.status === 'passed').length;
-    const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
+    // `&& !s.interrupted`, the same filter the server uses
+    // (session-manager.ts). The row the abort catch above pushes is
+    // `status: 'failed', interrupted: true` — a step that was stopped, not one
+    // that went wrong — so counting it made a stopped CLI run write
+    // `failedSteps: 1, status: 'failed'` where the same stop on the server
+    // wrote `failedSteps: 0` and issue 021's amber `aborted` state (review 3,
+    // finding 11).
+    const failedSteps = stepResults.filter((s) => s.status === 'failed' && !s.interrupted).length;
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
     const skippedSteps = stepResults.filter((s) => s.status === 'skipped').length;
     overallStatus = failedSteps > 0 || timedOut || strictLoadError !== undefined ? 'failed' : 'passed';
@@ -1604,6 +1926,10 @@ export async function runTest(
       ...(baseUrl !== undefined && { baseUrl }),
       ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
       ...(humanIntervened && { humanIntervened: true }),
+      // The amber "stopped" badge rather than a red failure: the run did not
+      // fail, it was stopped (issue 021's state, reached from the CLI for the
+      // first time here).
+      ...(aborted && { aborted: true }),
       // Omitted (not 0) on a run that healed nothing: an unchanged run writes
       // an unchanged report. `status` above stays 'passed' on purpose — see
       // the field's doc comment in report/types.ts.
@@ -1614,7 +1940,9 @@ export async function runTest(
       ...(strictLoadError !== undefined && { error: strictLoadError }),
     }, secretsNow());
 
-    if (overallStatus === 'failed' && config.ai.diagnoseFailures && !keyless) {
+    // Never on a run the user stopped: a diagnosis of "why did this fail"
+    // spends tokens answering a question nobody asked.
+    if (overallStatus === 'failed' && !aborted && config.ai.diagnoseFailures && !keyless) {
       logger.info('Running failure diagnosis…');
       const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
         ...config.browser.domNoiseReduction,
@@ -1630,7 +1958,7 @@ export async function runTest(
         report.outputTokens = tokenTracker.outputTotal;
         logger.info(`Likely cause (${diagnosis.faultCategory}, ${diagnosis.confidence} confidence): ${diagnosis.rootCause}`);
       }
-    } else if (overallStatus === 'failed' && config.ai.diagnoseFailures) {
+    } else if (overallStatus === 'failed' && !aborted && config.ai.diagnoseFailures) {
       // Keyless. `diagnoseFailures` stays default-true — keyless is a runtime
       // condition, not a config edit the user should have to know to make — so
       // the run says why it skipped rather than silently producing a report

@@ -55,6 +55,7 @@ export const DEFAULT_CONFIG: Config = {
     screenshotOnFailure: true,
     promptOnAmbiguity: true,
     maxTurns: 15,
+    maxLoopIterations: 25,
     interactiveOnFailure: false,
   },
   reports: {

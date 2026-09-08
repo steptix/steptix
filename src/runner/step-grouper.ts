@@ -8,6 +8,7 @@
  */
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { isControlLineClaim } from '../parser/control-line.js';
 
 /** A single step reference within a group */
 export interface GroupedStep {
@@ -37,6 +38,14 @@ export interface StepGroup {
  *
  * The regex is anchored to the start of the instruction (after stripping
  * any leading [prefix] markers like [output: x]).
+ *
+ * A CONTROL line is never a watch, however it opens. `If a Remember this
+ * device prompt appears, click Not now` is a watch and stays one; `If the Cash
+ * checkbox is ticked, then Pay with cash` is a decision the framework makes
+ * once, and grouping it here would hand it to `executeBranchedStep` — which
+ * would poll for it to "appear" and then perform the whole line, tail
+ * included, as prose. `then` is the opt-in, so the claim is the exclusion
+ * (stories/control-flow.md §Grouper).
  */
 export function isConditionalStep(instruction: string): boolean {
   // Strip leading [prefix] markers
@@ -46,7 +55,16 @@ export function isConditionalStep(instruction: string): boolean {
   // `executeBranchedStep`, which runs the matched conditional AND the
   // continuation in a single call — so the very step the return exists to
   // skip would run immediately after it.
+  //
+  // Asked FIRST, before the control-line claim, because the two grammars
+  // overlap on `If <condition>, then return`: flow control owns that line
+  // everywhere it is asked (stories/control-flow.md §"Composition with
+  // `If … then return`"). Both answers are `false` here, so the order is
+  // documentation rather than behaviour — but it is the order every other
+  // caller uses, and a reader who finds the two the other way round somewhere
+  // else should treat that as the bug.
   if (parseFlowControlStep(stripped)) return false;
+  if (isControlLineClaim(stripped)) return false;
   return /^(if\s|when\s(prompted|asked))/i.test(stripped);
 }
 
@@ -103,6 +121,7 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
     // So: emit no group. The conditionals run as ordinary AI steps, which is
     // what they were before grouping existed, and the assignment runs as
     // itself. Nothing jumps, so nothing can be skipped.
+    //
     // A flow-control step takes the SAME exemption, for the same reason
     // (stories/step-flow-control.md, decision 7). `isConditionalStep` already
     // refuses to collect one as a conditional; this is the other half —
@@ -110,9 +129,21 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
     // that was meant to end the flow would never run and the steps it was
     // meant to skip would all run instead. A green report for work that did
     // not happen is the one failure direction this codebase treats as worst,
-    // and this is the shape that produces it. Emit no group: the conditionals
-    // before it run as ordinary AI steps, and the return runs as itself.
-    if (i < steps.length && (parseSetStep(steps[i]!) || parseFlowControlStep(steps[i]!))) continue;
+    // and this is the shape that produces it.
+    //
+    // A CONTROL line is excluded on exactly the same terms, and it is the
+    // same bug wearing a third keyword: `executeBranchedStep` would perform
+    // `If the Cash checkbox is ticked, then Pay with cash` as the model's
+    // fallback action, so the decision would never be made, the section would
+    // never dispatch — and both loops advance past a group with
+    // `i = group.continuationStep.index`, so the guard AND its whole tail
+    // would vanish from the run. No synthetic continuation for any of the
+    // three: the fix is to form no group, so nothing jumps.
+    if (i < steps.length && parseSetStep(steps[i]!)) continue;
+    if (i < steps.length && parseFlowControlStep(steps[i]!)) continue;
+    if (i < steps.length && isControlLineClaim(steps[i]!.replace(/^\[.*?\]\s*/gi, ''))) {
+      continue;
+    }
 
     let continuation: GroupedStep;
     if (i < steps.length) {

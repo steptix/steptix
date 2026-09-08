@@ -425,6 +425,14 @@ body {
   line-height: 1;
 }
 
+/* A step the run decided against — the untaken half of a chain, a loop body
+   that never ran. Grey rather than green or red: it is neither. */
+.gutter-marker-skipped {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+}
+
 /* Step line overlays */
 .cm-step-passed .cm-line {
   background: rgba(78, 201, 78, 0.08);
@@ -550,6 +558,11 @@ body {
 }
 
 .step-status-pending {
+  background: rgba(133, 133, 133, 0.2);
+  color: var(--text-secondary);
+}
+
+.step-status-skipped {
   background: rgba(133, 133, 133, 0.2);
   color: var(--text-secondary);
 }

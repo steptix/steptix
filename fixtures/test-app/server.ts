@@ -43,6 +43,16 @@
  *                                over 1 MB (413); a batch is all-or-nothing.
  *     DELETE /api/documents    → clears the list, so concurrent runs can isolate
  *                                themselves without restarting the server.
+ *
+ *   Control flow test page — stories/control-flow.md:
+ *     GET    /control-flow     → payment-method checkboxes (If / Else if /
+ *                                Otherwise), a four-page statement list whose
+ *                                Next button disables on the last page (While),
+ *                                a Load more button that removes itself on its
+ *                                third click (Repeat … until), and three named
+ *                                accounts with balances (capture + For each).
+ *                                All state is client-side, so it resets on load
+ *                                and concurrent shards cannot disturb one another.
  */
 
 import http from 'node:http';
@@ -1443,6 +1453,7 @@ async function handleRequest(
       '/confirm-action': 'confirm-action.html',
       '/dom-noise': 'dom-noise.html',
       '/documents': 'documents.html',
+      '/control-flow': 'control-flow.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

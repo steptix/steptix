@@ -24,7 +24,7 @@ import {
   setStrip,
   stripFor,
 } from "./lib/panel-scope-inline.js";
-import { describeStepFailure, formatStepFailure } from "./lib/failure-text-inline.js";
+import { describeStepFailure, formatStepFailure, isSkippedPass } from "./lib/failure-text-inline.js";
 import {
   applyRowClick,
   buildRunRowsPayload,
@@ -615,6 +615,15 @@ function TestBenchRunner() {
         setRunning(true);
         break;
       case "step:pass":
+        // A step the run decided against rides the pass event — the wire has
+        // no third verdict — but it did not run, so it gets a `−` and not a
+        // ✓. Without this the panel printed "✓ Step on line N passed" and then
+        // "skipped" for the same event, one line apart
+        // (stories/control-flow.md).
+        if (isSkippedPass(event)) {
+          log(`− Step on line ${event.line} skipped`, "info", uri);
+          break;
+        }
         if (event.codeBehindStale) {
           log(
             `⚠ Step on line ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`,

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import type { ErrorPayload, FrameInfo, RunEvent } from 'ai-ui-automation-runner-core';
-import { describeStepFailure } from 'ai-ui-automation-runner-core';
+import { describeStepFailure, isSkippedPass } from 'ai-ui-automation-runner-core';
 import { frameTargetUri } from './workspace.js';
 import type { TestDiscovery, DiscoveredTest, DiscoveryEvent } from './test-discovery.js';
 import type { RunController } from './run-controller.js';
@@ -484,7 +484,14 @@ export class TestBenchTestController implements vscode.Disposable {
           break;
         case 'step:pass':
           // Same vocabulary as the interactive run log, so the two surfaces
-          // never disagree about how a step passed.
+          // never disagree about how a step passed — including the one that
+          // did not run at all: a step the run decided against rides the pass
+          // event because the wire has no third verdict
+          // (stories/control-flow.md).
+          if (isSkippedPass(event)) {
+            emit(`— step on line ${event.line}${whereOf(event)} skipped`);
+            break;
+          }
           if (event.codeBehindStale) {
             emit(
               `⚠ step on line ${event.line}${whereOf(event)} passed under AI — ` +

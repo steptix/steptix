@@ -838,10 +838,16 @@ Create `aiui.config.json` in your project root:
   },
   "execution": {
     "timeout": 60000,
-    "retries": 1
+    "retries": 1,
+    "maxLoopIterations": 25
   }
 }
 ```
+
+`execution.maxLoopIterations` is the default cap on how many passes one
+`While` or `Repeat … until` step line may make before the framework gives up
+and fails that line; a line can override it with `, up to N times`. See
+[stories/control-flow.md](./stories/control-flow.md).
 
 Editing `aiui.config.json` inside VS Code with the TestBench extension gives you
 autocomplete, enum-checking, and hover docs automatically — the extension ships

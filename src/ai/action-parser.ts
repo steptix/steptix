@@ -188,7 +188,21 @@ export function parseAssertionCode(rawResponse: string): string {
  * Parse the AI response for a branched (conditional) step.
  * Extracts the `matched` field in addition to standard actions.
  */
-export function parseBranchedResponse(rawResponse: string): BranchedAIResponse {
+export function parseBranchedResponse(
+  rawResponse: string,
+  opts: {
+    /**
+     * Accept a response with no `actions` array at all.
+     *
+     * Off for the watch form, where the actions ARE the answer — a reply
+     * without them is a lost turn and re-asking is right. On for the condition
+     * judge (stories/control-flow.md §"Condition evaluation"), which forbids
+     * acting: there, a missing array is the model obeying, and treating it as
+     * malformed would burn the 30 s budget on a correct answer.
+     */
+    actionsOptional?: boolean;
+  } = {},
+): BranchedAIResponse {
   const jsonString = extractJson(rawResponse);
 
   let parsed: unknown;
@@ -219,6 +233,11 @@ export function parseBranchedResponse(rawResponse: string): BranchedAIResponse {
   }
 
   // Otherwise parse normally for actions
+  if (opts.actionsOptional && !Array.isArray(obj['actions']) && typeof obj['action'] !== 'string') {
+    const reasoning =
+      typeof obj['reasoning'] === 'string' ? obj['reasoning'] : 'No reasoning provided';
+    return { matched, actions: [], reasoning };
+  }
   const base = validateAndNormaliseResponse(parsed);
   return { matched, ...base };
 }

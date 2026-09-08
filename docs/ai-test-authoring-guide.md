@@ -393,7 +393,7 @@ Tool paths differ from skill paths:
 
 The final path segment is the tool name; preceding segments identify the module without its extension. A leading slash is not accepted for tools. Use the actual declared tool/output names, which may differ from a module filename. Do not assume an arbitrary named export can always be resolved by its bare name.
 
-## Hooks and conditional steps
+## Hooks, conditional steps and loops
 
 The CLI file runner supports hooks before `## Steps`. Do not assume equivalent hook execution in the Sessions/MCP path; its current request assembly and session loop do not carry out these file hooks, and they issue no warning that the hooks were dropped.
 
@@ -411,7 +411,9 @@ The CLI file runner supports hooks before `## Steps`. Do not assume equivalent h
 
 Implementation caveat: older hook documentation mentions `hooks: replace` and `- beforeEach: none` as overrides. The current Markdown frontmatter parser does not preserve `hooks`, and `none` adds no hook rather than clearing project defaults. Do not rely on those forms to disable configured defaults; use verified project configuration and invocation-level `[no-hooks]` as appropriate.
 
-Conditional language is supported, but is not a general programming language. Steps beginning with `If ...`, `When prompted ...`, or `When asked ...` can be grouped as alternative outcomes with the next nonconditional step as continuation. One matching alternative is selected; unmatched alternatives are skipped, then the continuation runs. Do not write consecutive conditionals expecting every matching condition to execute independently.
+Conditional language comes in two forms, and one word tells them apart: an `If` line containing `then` is a **decision** the framework dispatches; an `If` line without `then` is a **watch** that waits for a page state to appear. Neither makes the file a general programming language.
+
+The watch form is unchanged. Steps beginning with `If ...` and containing no `then`, plus every step beginning with `When prompted ...` or `When asked ...` — `then` changes the meaning of an `If` only, so `When prompted for MFA, then enter the code` is still a watch — are grouped as alternative outcomes with the next nonconditional step as continuation. The executor re-reads the page until one alternative matches, one is selected, the rest are skipped, then the continuation runs. Do not write consecutive watch steps expecting every matching condition to execute independently — they are alternatives, and exactly one of them runs.
 
 For example, after submitting a sign-in form:
 
@@ -423,9 +425,47 @@ For example, after submitting a sign-in form:
 4. Verify the Dashboard heading is visible
 ```
 
-Keep conditional bodies self-contained browser instructions and use a normal browser wait/assertion as continuation. Do not embed `[tool: ...]` or `[skill: ...]` in an English `If` clause to simulate conditional dispatch. Use a tool for complex branching or dynamic iteration; use table-driven sections for a fixed list of repeated cases.
+Keep watch bodies to self-contained browser instructions and use a normal browser wait or assertion as continuation. A `[tool: ...]`, `[skill: ...]` or section name inside a watch clause is still not conditional dispatch: the line is prose and the model performs what it can of it.
 
-For an explicitly attended test, `1. [input: otp] Enter the one-time code` captures the person's answer as `{{otp}}`; `1. [interactive] Complete the manual setup` opens interactive steering. These require a compatible interactive runner. They are not suitable substitutes for automated setup in CI.
+The decision and loop forms are six numbered-line kinds, each ending in a **tail** that is exactly one step — a `### Section` name, a `[skill: ...]`, a `[tool: ...]`, a `Set {{x}} to "..."`, or a plain browser instruction. A body of more than one step goes in a section, and that is also the only way to nest one decision inside another. Nothing is indented; indented sub-lists are not steps.
+
+```markdown
+## Steps
+1. Navigate to /invoices/4471
+2. If the Cash checkbox is ticked, then Pay with cash
+3. Else if the Card checkbox is ticked, then Pay by card
+4. Otherwise, Verify the Pay now button is disabled
+5. While the Next button is enabled, Go to the next page
+6. Repeat Click Load more until the Load more button is gone, up to 20 times
+7. Read the name of every account in the Your accounts panel [store as: accounts]
+8. For each {{account}} in {{accounts}}, Check the account
+
+### Pay with cash
+1. Click Pay now
+2. Verify the receipt says "Paid in cash"
+
+### Pay by card
+1. Click Pay now
+2. Verify the receipt says "Paid by card"
+
+### Go to the next page
+1. Click the Next button
+
+### Check the account
+1. Verify the Your accounts panel has a row for "{{account}}" showing a balance
+```
+
+Rules that decide whether a line parses and what it does:
+
+- An `If` opens a chain that any number of `Else if` lines and at most one final `Otherwise` (or `Else`) may continue, on consecutive step lines. Every condition in the chain is put to the model in one call after the page settles, the first that holds wins, and every other member and every step of its tail is marked skipped. A decision is made once — a false answer is an answer, not something to wait for. With nothing holding and no `Otherwise`, the chain is skipped and the run continues.
+- `While <condition>, <tail>` asks before each pass; `Repeat <tail> until <condition>` asks after each one. Both stop at a cap: the line's own `, up to N times`, or `execution.maxLoopIterations` from `aiui.config.json` (25 by default). Reaching the cap **fails the loop line**; a cap is a bug net, not the way a loop is meant to end.
+- `For each {{item}} in {{list}}, <tail>` needs `{{list}}` to hold a JSON array, which is what a plural capture ("every", "all", "each") stores or an array-typed tool returns. A `Set` produces text, and a comma-separated string fails the line rather than being split on a guessed delimiter.
+- Splitting is positional, so reword rather than fight it: the condition of an `If` or `Else if` ends at the first ` then `, a `While` condition ends at the first comma, and a `Repeat` tail ends at the first ` until `.
+- Each evaluation costs one model call, so a three-pass `While` costs four, and a plain-instruction tail costs a further call to perform it. `If a cookie banner appears, reject it` is cheaper as a watch.
+
+So embedding a skill or tool in an `If` clause is no longer the thing to avoid — it is the point of the `then` form. Reach for a tool when the branching is arithmetic, string parsing, or anything the page cannot be asked about in a `Verify` sentence, and for a table under a section when the list of cases is fixed and authored rather than read off the page.
+
+For an explicitly attended test, `1. [input: otp] Enter the one-time code` captures the person's answer as `{{otp}}`; `1. [interactive] Complete the manual setup` opens interactive steering. These require a compatible interactive runner. They are not suitable substitutes for automated setup in CI. An `[input: ...]` line placed *between* members of a chain is refused at parse time, because the batch split would put the halves of one decision in different requests; put it inside the tail's section body instead.
 
 ## Running and validating generated tests
 
@@ -490,6 +530,6 @@ Use these when extending or checking this guide. Source and tests take precedenc
 | Skill scope and invocation grammar | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tool signatures, lookup, and execution | [types.ts](../src/tools/types.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), [finalise.ts](../src/tools/finalise.ts) |
 | Supported AI actions and interpretation | [types.ts](../src/ai/types.ts), [prompts.ts](../src/ai/prompts.ts), [step-executor.ts](../src/runner/step-executor.ts) |
-| Branches, hooks, and test execution | [step-grouper.ts](../src/runner/step-grouper.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
+| Watches, decisions, loops, hooks, and test execution | [step-grouper.ts](../src/runner/step-grouper.ts), [control-line.ts](../src/parser/control-line.ts), [control-flow.ts](../src/runner/control-flow.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
 | MCP inputs and limitations | [schemas.ts](../src/mcp/schemas.ts), [assemble.ts](../src/mcp/assemble.ts) |
 | Defaults and application context | [defaults.ts](../src/config/defaults.ts), [loader.ts](../src/context/loader.ts) |

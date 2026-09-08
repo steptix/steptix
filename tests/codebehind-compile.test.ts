@@ -595,6 +595,75 @@ export default defineSteps([
     expect(result.status).toBe('failed');
     expect(result.summary.error).toContain('--steps names step 7');
   });
+
+  // ── Control flow (stories/control-flow.md, decision 12) ──────────────────
+
+  it('refuses a test that loops, before it runs anything', async () => {
+    const md = await write(
+      'looping.md',
+      [
+        '# Looping',
+        '',
+        '## Steps',
+        '1. Open the statements page',
+        '2. While the Next button is enabled, Click Next',
+        '',
+      ].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    const { runner, requests } = scriptedRunner(3, []);
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: scriptedClient([]).client, runner,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.summary.error).toContain('While the Next button is enabled, Click Next');
+    expect(result.summary.error).toContain('a number of times the page decides');
+    // The advice names things that actually work. The first version said
+    // "compile the section the loop runs, on its own" — and the check it came
+    // from ran over the whole FILE, so that compile was refused too.
+    expect(result.summary.error).toContain('Compile This Step on a step OUTSIDE the loop');
+    expect(result.summary.error).toContain('the body of the section the loop runs');
+    expect(result.summary.error).toContain('remove the loop before compiling');
+    // Nothing ran — the point of refusing before Record.
+    expect(requests).toEqual([]);
+  });
+
+  it('compiles a chain, generating for the tails and not for the guards', async () => {
+    const md = await write(
+      'decide.md',
+      [
+        '# Decide',
+        '',
+        '## Steps',
+        '1. If the Cash checkbox is ticked, then Confirm the booking',
+        '2. Otherwise, Enter the booking code',
+        '',
+      ].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    // Four expanded steps: guard, tail, guard, tail. Only the two tails are
+    // eligible, so the client is scripted for exactly two entries.
+    const { client } = scriptedClient([
+      entryEnvelope('Confirm the booking', `await page.locator('#confirmed').waitFor();`),
+      entryEnvelope('Enter the booking code'),
+      REVIEW_NOOP,
+    ]);
+    const { runner } = scriptedRunner(4, ['pass']);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.status).toBe('green');
+    // Steps 2 and 4 — the tails. The guards were never offered.
+    expect(generatedSteps(events)).toEqual([2, 4]);
+    const written = await fs.readFile(path.join(dir, 'decide.steps.ts'), 'utf-8');
+    expect(written).not.toContain('If the Cash checkbox is ticked');
+    expect(written).not.toContain('Otherwise');
+  });
 });
 
 describe('compileTest — replay, repair and the never-converging step', () => {

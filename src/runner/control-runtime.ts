@@ -1,0 +1,669 @@
+/**
+ * The impure half of control flow: what the three run loops share
+ * (stories/control-flow.md §Runtime).
+ *
+ * [control-flow.ts](control-flow.ts) is the pure planner — it decides what to
+ * skip and where to go next, and knows nothing about pages, models or step
+ * results. This module is the layer immediately above it: it obtains the
+ * verdict the planner asks for (one model call, or one variable read), turns a
+ * failed guard into the sentence the author reads, and tracks which loop pass
+ * is running so a result can be stamped with its band.
+ *
+ * It exists because there are THREE run loops — the CLI
+ * ([test-runner.ts](test-runner.ts)), the Sessions API
+ * ([../server/session-manager.ts](../server/session-manager.ts)) and the
+ * Electron UI ([../ui/main/runner-adapter.ts](../ui/main/runner-adapter.ts)) —
+ * and every rule that lives in only one of them is a rule the other two get
+ * wrong. What is deliberately NOT here is emission: each loop pushes results,
+ * paints lines and (on the server) emits frame events its own way, and those
+ * differences are real.
+ */
+
+import type { AiInteraction, LoopMarker, StepResult } from '../report/types.js';
+import {
+  chainMembersFrom,
+  exitFrom,
+  parseListValue,
+  planAfterGuard,
+  planAtGuard,
+  type ControlPlan,
+  type ControlRecord,
+  type ControlState,
+  type GuardVerdict,
+} from './control-flow.js';
+import { evaluateConditions } from './step-executor.js';
+import type { StepExecutorOptions } from './step-executor.js';
+
+/** A loop record, narrowed — the three kinds that own a body and a label. */
+export type LoopRecord = Extract<ControlRecord, { label: string }>;
+
+/** True for a `While` / `Repeat` / `For each` record. */
+export function isLoopRecord(record: ControlRecord): record is LoopRecord {
+  return record.kind === 'while' || record.kind === 'repeat' || record.kind === 'foreach';
+}
+
+/** What one visit to a guard produced. */
+export interface GuardEvaluation {
+  /** The planner's answer. Present even on failure, so a caller that carries
+   *  on has somewhere to go. */
+  plan: ControlPlan;
+  /**
+   * Whether a decision was actually made here.
+   *
+   * False for the visits that ask nobody — a `Repeat`'s first pass, a `For
+   * each` continuing on a cursor it already holds — and those get no guard
+   * result row, because the story's "one result per evaluation" is about the
+   * cost of the decisions and those cost nothing.
+   */
+  evaluated: boolean;
+  /** The model's words, when a model was asked. */
+  reasoning?: string;
+  /** Every judge turn, so a guard's cost is as visible as a step's. */
+  aiInteractions: AiInteraction[];
+  /** The guard itself failed: a cap breach, a `For each` over a non-list, or a
+   *  judge that could not decide. The caller fails the guard and stops. */
+  error?: string;
+  durationMs: number;
+}
+
+/**
+ * Visit the guard at `index`: ask whatever the planner needs asked, then plan.
+ *
+ * The one impure step in the whole feature. Everything it can go wrong with
+ * comes back as {@link GuardEvaluation.error} — except an abort, which is
+ * rethrown so the caller can end the run as 'aborted' rather than 'failed'
+ * (issues/020's rule, applied to the judge as it already is to the watch).
+ */
+export async function evaluateGuard(args: {
+  controls: readonly (ControlRecord | null)[];
+  index: number;
+  state: ControlState;
+  /** This run's live variable map — where a `For each` reads its list. */
+  resolvedParameters: Record<string, string>;
+  /** Options for the judge's model call. */
+  executorOptions: StepExecutorOptions;
+}): Promise<GuardEvaluation> {
+  const { controls, index, state, resolvedParameters, executorOptions } = args;
+  const startedAt = Date.now();
+  const request = planAtGuard(controls, index, state);
+
+  let verdict: GuardVerdict;
+  let reasoning: string | undefined;
+  let aiInteractions: AiInteraction[] = [];
+  let judgeError: string | undefined;
+
+  try {
+    switch (request.ask) {
+      case 'chain': {
+        const judged = await evaluateConditions(
+          request.conditions.map((c) => c.condition),
+          executorOptions,
+        );
+        reasoning = judged.reasoning;
+        aiInteractions = judged.aiInteractions;
+        // Back to ABSOLUTE indices: the judge answered about a list the
+        // planner built, and the planner reads step positions. `null` stays
+        // null — the planner turns "none" into the `Otherwise` itself.
+        verdict = {
+          kind: 'chain',
+          selected:
+            judged.selected === null
+              ? null
+              : (request.conditions[judged.selected]?.index ?? null),
+        };
+        break;
+      }
+      case 'condition': {
+        const judged = await evaluateConditions([request.condition], executorOptions);
+        reasoning = judged.reasoning;
+        aiInteractions = judged.aiInteractions;
+        verdict = { kind: 'condition', holds: judged.selected === 0 };
+        break;
+      }
+      case 'list': {
+        const parsed = parseListValue(request.list, resolvedParameters[request.list]);
+        if ('error' in parsed) {
+          return {
+            plan: { skip: [], next: exitFailed(controls, index) },
+            evaluated: true,
+            aiInteractions: [],
+            error: parsed.error,
+            durationMs: Date.now() - startedAt,
+          };
+        }
+        verdict = { kind: 'list', items: parsed.items };
+        reasoning = `\`{{${request.list}}}\` holds ${parsed.items.length} item${
+          parsed.items.length === 1 ? '' : 's'
+        }`;
+        break;
+      }
+      default:
+        verdict = { kind: 'resume' };
+        break;
+    }
+  } catch (err) {
+    // A stop mid-judge is a stop, not a failure. Rethrown for the caller's own
+    // abort handling; anything else fails this guard with the judge's words.
+    if (executorOptions.signal?.aborted || (err as Error | undefined)?.name === 'AbortError') {
+      throw err;
+    }
+    judgeError = err instanceof Error ? err.message : String(err);
+    return {
+      plan: { skip: [], next: exitFailed(controls, index) },
+      evaluated: true,
+      aiInteractions,
+      error: judgeError,
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  const plan = planAfterGuard(controls, index, verdict, state);
+  const record = controls[index];
+  return {
+    plan,
+    evaluated: request.ask !== 'nothing',
+    ...(reasoning !== undefined && { reasoning }),
+    aiInteractions,
+    ...(plan.capBreached &&
+      record &&
+      isLoopRecord(record) && { error: capBreachMessage(record, plan.capBreached) }),
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+/**
+ * Where a run that carries on past a FAILED guard should go.
+ *
+ * The structure the guard opened is over — a chain's last step, a loop's — so
+ * the exit is the enclosing structure's, exactly as it is for a guard that
+ * ended normally ({@link exitFrom}). Every caller today fails the run here, so
+ * this only decides where one that kept going would land; it costs a line to
+ * make that the same answer the planner gives everywhere else.
+ */
+function exitFailed(
+  controls: readonly (ControlRecord | null)[],
+  index: number,
+): number {
+  const record = controls[index];
+  if (!record) return index + 1;
+  return exitFrom(controls, 'chainEnd' in record ? record.chainEnd : record.bodyEnd, index);
+}
+
+/**
+ * What a loop that ran out of passes says (stories/control-flow.md, decision 9).
+ *
+ * Names the cap AND where the cap came from, because the two have different
+ * fixes: a line's own `, up to N times` is edited on the line, and the config
+ * default is edited in `aiui.config.json`. Both ways out are spelled, along
+ * with the third possibility — that the exit condition is wrong and no cap
+ * would have helped.
+ */
+export function capBreachMessage(
+  record: LoopRecord,
+  breach: { cap: number; source: 'line' | 'config' },
+): string {
+  const where =
+    breach.source === 'line' ? "this line's `, up to N times`" : 'execution.maxLoopIterations';
+  const condition = 'condition' in record ? record.condition : '';
+  const stillWrong =
+    record.kind === 'repeat'
+      ? `"${condition}" was still not true`
+      : `"${condition}" was still true`;
+  return (
+    `the loop reached its cap of ${breach.cap} passes (${where}) and ${stillWrong}; ` +
+    'raise the cap on the line with `, up to N times`, or check the exit condition.'
+  );
+}
+
+/**
+ * One conversation-history line per guard evaluation.
+ *
+ * Later steps read `## Prior Steps` as evidence for what the run has already
+ * done, and a run that branched is exactly where "what happened before this"
+ * stops being obvious from the step list alone. Masked by the caller, like
+ * every other history line (stories/placeholder-preserving-actions.md).
+ */
+export function guardHistoryLine(
+  instruction: string,
+  outcome: 'held' | 'did not hold' | 'ended' | 'failed',
+): string {
+  return `${instruction} → ${outcome}`;
+}
+
+/**
+ * Every `## Prior Steps` line one guard visit contributes, in file order.
+ *
+ * The line that says `held` is the SELECTED member's, not the head of the
+ * chain's — the head is merely the line the judge was asked from. A run that
+ * took the `Else if` used to tell every later step that the `If` held, which
+ * is the one place in a run where the evidence the model reads and what the
+ * run actually did had diverged.
+ *
+ * Every member the judge considered and rejected gets its own `did not hold`
+ * line: those are the alternatives it ruled out, in order, and they are as
+ * much of the decision as the winner is. Members BELOW the selected one are
+ * not mentioned — first-holds-wins means they were never asked about, and
+ * saying they did not hold would be a claim nobody made.
+ *
+ * `text(index)` supplies the instruction for an absolute index, already masked
+ * by the caller (each run loop redacts on its own terms).
+ */
+export function guardHistoryLines(args: {
+  controls: readonly (ControlRecord | null)[];
+  /** The guard the judge was asked from. */
+  index: number;
+  rows: GuardRows;
+  plan: ControlPlan;
+  text: (index: number) => string;
+}): string[] {
+  const { controls, index, rows, plan, text } = args;
+  if (!rows.guard) return [];
+  const record = controls[index];
+
+  if (rows.guard.status === 'failed') {
+    return [guardHistoryLine(text(index), 'failed')];
+  }
+
+  const isChain =
+    record !== null &&
+    record !== undefined &&
+    (record.kind === 'if' || record.kind === 'elseif' || record.kind === 'else');
+  if (!isChain) {
+    return [
+      guardHistoryLine(text(index), plan.loopEnded ? 'ended' : 'held'),
+    ];
+  }
+
+  const selected = plan.selected ?? null;
+  const lines: string[] = [];
+  for (const member of chainMembersFrom(controls, index)) {
+    if (selected !== null && member === selected) {
+      lines.push(guardHistoryLine(text(member), 'held'));
+      break;
+    }
+    // Past the winner: never asked, so never answered.
+    if (selected !== null && member > selected) break;
+    lines.push(guardHistoryLine(text(member), 'did not hold'));
+  }
+  return lines;
+}
+
+/** A guard's own result row. */
+export function guardResult(args: {
+  /** 1-based, like every other `StepResult.index`. */
+  index: number;
+  instruction: string;
+  status: 'passed' | 'skipped' | 'failed';
+  durationMs: number;
+  reasoning?: string | undefined;
+  error?: string | undefined;
+  aiInteractions?: AiInteraction[] | undefined;
+  loop?: LoopMarker | undefined;
+}): StepResult {
+  const interactions = args.aiInteractions ?? [];
+  return {
+    index: args.index,
+    instruction: args.instruction,
+    status: args.status,
+    // One turn holding the judge's calls, and no sub-actions — a guard never
+    // acts. Rendered by the report's ordinary turn block, so the model's raw
+    // answer is as inspectable here as it is on a step.
+    turns:
+      interactions.length > 0
+        ? [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: interactions[0]?.timestamp ?? new Date().toISOString(),
+              aiInteractions: interactions,
+              subActions: [],
+            },
+          ]
+        : [],
+    durationMs: args.durationMs,
+    retried: false,
+    ...(args.error !== undefined && { error: args.error }),
+    ...(args.reasoning !== undefined && { aiExplanation: args.reasoning }),
+    ...(args.loop !== undefined && { loop: args.loop }),
+  };
+}
+
+/** A step the run decided not to take. */
+export function skippedResult(args: {
+  index: number;
+  instruction: string;
+  reason: string;
+  loop?: LoopMarker | undefined;
+}): StepResult {
+  return {
+    index: args.index,
+    instruction: args.instruction,
+    status: 'skipped',
+    turns: [],
+    durationMs: 0,
+    retried: false,
+    aiExplanation: args.reason,
+    ...(args.loop !== undefined && { loop: args.loop }),
+  };
+}
+
+/** One pass of one loop, while it is running. */
+interface ActivePass {
+  guard: number;
+  record: LoopRecord;
+  marker: LoopMarker;
+  /**
+   * How many passes this guard has begun in the whole run, this one included.
+   *
+   * NOT `marker.index`: a loop nested in another loop's body restarts its
+   * `iteration` at 1 on every entry (that is what makes the band read `(1/2)`
+   * again), so the iteration alone cannot mint a unique frame id — the outer
+   * loop's second pass would re-mint the inner loop's first-pass id and
+   * overwrite it in `expansionFrames`.
+   */
+  ordinal: number;
+  /** Server only: original frame id → this pass's clone. Empty elsewhere. */
+  frameAlias: Map<string, string>;
+}
+
+/**
+ * Which loop pass a step belongs to, and what the report calls it.
+ *
+ * The frame-derived `loopMarkerFor` the rows story shipped cannot answer this
+ * on its own: a control line's tail may be a plain instruction, which produces
+ * no frame at all, so there would be nothing to derive a marker from. A stack
+ * of active passes answers for both shapes, and answers identically in all
+ * three run loops — the server additionally clones frames, and hangs the
+ * per-pass aliases off the same stack so the two can never disagree about
+ * which pass is running.
+ *
+ * `count` is UNKNOWN while a `While` or `Repeat` runs. Markers are handed out
+ * by reference and back-filled in place when the loop ends ({@link endLoop}),
+ * which works because the results still live in memory when the report is
+ * rendered.
+ */
+export class LoopRuntime {
+  private readonly stack: ActivePass[] = [];
+  /** Guard index → every marker handed out for it, for the back-fill. */
+  private readonly issued = new Map<number, LoopMarker[]>();
+  /** Guard index → passes begun for it in this run. Never reset — it is what
+   *  makes a nested loop's per-pass frame ids unique across re-entries. */
+  private readonly ordinals = new Map<number, number>();
+
+  /** A pass is starting. Returns the marker its guard row and body steps carry. */
+  beginPass(
+    guard: number,
+    record: LoopRecord,
+    pass: NonNullable<ControlPlan['pass']>,
+  ): LoopMarker {
+    // A loop re-entering itself replaces its own top entry; a loop nested
+    // inside another's body pushes on top of it.
+    while (this.stack.length > 0 && this.stack[this.stack.length - 1]!.guard === guard) {
+      this.stack.pop();
+    }
+    const marker: LoopMarker = {
+      kind: 'iteration',
+      label: record.label,
+      index: pass.iteration,
+      ...(pass.count !== undefined && { count: pass.count }),
+      values: { ...(pass.bindings ?? {}) },
+    };
+    const ordinal = (this.ordinals.get(guard) ?? 0) + 1;
+    this.ordinals.set(guard, ordinal);
+    this.stack.push({ guard, record, marker, ordinal, frameAlias: new Map() });
+    const seen = this.issued.get(guard) ?? [];
+    seen.push(marker);
+    this.issued.set(guard, seen);
+    return marker;
+  }
+
+  /**
+   * A loop ended: fill in the count every marker of it was issued without.
+   *
+   * Mutates the markers in place, which is the point — they are the same
+   * objects the step results already carry, so `(3/?)` becomes `(3/7)` in the
+   * rendered report without the results being rewritten.
+   */
+  endLoop(ended: { guard: number; count: number }): void {
+    for (const marker of this.issued.get(ended.guard) ?? []) {
+      if (marker.count === undefined) marker.count = ended.count;
+    }
+    this.issued.delete(ended.guard);
+    this.dropPassesFor(ended.guard);
+  }
+
+  /** A loop stopped without ending normally (a cap breach, a failed body).
+   *  The count is what it managed, which is the honest number for the band. */
+  abandon(guard: number, count: number): void {
+    this.endLoop({ guard, count });
+  }
+
+  /** The marker for a body step, or undefined outside every loop. */
+  markerFor(index: number): LoopMarker | undefined {
+    for (let k = this.stack.length - 1; k >= 0; k--) {
+      const pass = this.stack[k]!;
+      if (index >= pass.record.bodyStart && index <= pass.record.bodyEnd) return pass.marker;
+    }
+    return undefined;
+  }
+
+  /** Is `index` inside any loop's body? Drives the step-cache opt-out, which
+   *  is a property of the FILE rather than of the run — so it takes the
+   *  records, not the stack. */
+  static insideLoopBody(
+    controls: readonly (ControlRecord | null)[],
+    index: number,
+  ): boolean {
+    for (const record of controls) {
+      if (!record || !isLoopRecord(record)) continue;
+      if (index >= record.bodyStart && index <= record.bodyEnd) return true;
+    }
+    return false;
+  }
+
+  // ── Frame aliases (the Sessions API's half) ───────────────────────────────
+
+  /** Record that `original` is running as `clone` for the current pass. */
+  aliasFrame(original: string, clone: string): void {
+    this.stack[this.stack.length - 1]?.frameAlias.set(original, clone);
+  }
+
+  /**
+   * Has THIS pass already cloned `original`?
+   *
+   * Deliberately not {@link frameFor}, which searches the whole stack: a loop
+   * nested inside another loop's body sits under aliases the ENCLOSING pass
+   * installed, and asking "is there an alias anywhere" made the inner loop
+   * believe its frames were already cloned for this pass. Every inner pass
+   * then painted into the outer pass's frame and stamped no `iteration` at
+   * all. The question the clone walk actually wants is about the current pass
+   * only.
+   */
+  clonedInCurrentPass(original: string): boolean {
+    return this.stack[this.stack.length - 1]?.frameAlias.has(original) ?? false;
+  }
+
+  /** How many passes the current pass's guard has begun in this run — the
+   *  monotonic half of a per-pass frame id. 0 outside every loop. */
+  get currentPassOrdinal(): number {
+    return this.stack[this.stack.length - 1]?.ordinal ?? 0;
+  }
+
+  /** The frame id to emit for `original` right now — its clone if a pass owns
+   *  one, else the id the expander minted. */
+  frameFor(original: string): string {
+    for (let k = this.stack.length - 1; k >= 0; k--) {
+      const clone = this.stack[k]!.frameAlias.get(original);
+      if (clone !== undefined) return clone;
+    }
+    return original;
+  }
+
+  /** True while any loop pass is running — the cheap test a run with no
+   *  control lines pays instead of a map lookup per step. */
+  get active(): boolean {
+    return this.stack.length > 0;
+  }
+
+  private dropPassesFor(guard: number): void {
+    for (let k = this.stack.length - 1; k >= 0; k--) {
+      if (this.stack[k]!.guard === guard) this.stack.splice(k, 1);
+    }
+  }
+}
+
+/** Expand inclusive index ranges into the indices they name, ascending. */
+export function* eachSkipped(ranges: ReadonlyArray<readonly [number, number]>): Generator<number> {
+  for (const [start, end] of ranges) {
+    for (let i = start; i <= end; i++) yield i;
+  }
+}
+
+/**
+ * Which rows one guard visit produces, and with what status.
+ *
+ * Separate from emitting them because the three run loops emit differently —
+ * results arrays, SSE events, IPC messages — but must agree completely on
+ * WHICH rows exist. The rules, in the story's words:
+ *
+ *  - a chain's selected member is `passed`, every other member and every step
+ *    of every other tail is `skipped` (§"A chain is a decision", step 3);
+ *  - a chain where nothing held and there is no `Otherwise` has no passed
+ *    member at all, so the guard that was ASKED carries the model's reasoning
+ *    as a skipped row — otherwise the one decision the run made would leave no
+ *    trace anywhere;
+ *  - a loop's guard is `passed` once per evaluation (§"A loop is a decision
+ *    made again"), and the visits that ask nobody produce no row;
+ *  - a guard that could not decide is `failed`, and nothing else is recorded:
+ *    the run stops, and marking its body skipped would claim a decision was
+ *    made about it.
+ */
+export interface GuardRows {
+  /** The guard row, absolute 0-based index. Absent for an ask-nobody visit. */
+  guard?: { index: number; status: 'passed' | 'skipped' | 'failed' };
+  /** Steps to record as skipped, ascending, never including `guard.index`. */
+  skip: number[];
+}
+
+export function guardRows(
+  record: ControlRecord,
+  index: number,
+  evaluation: GuardEvaluation,
+): GuardRows {
+  if (evaluation.error !== undefined) {
+    return { guard: { index, status: 'failed' }, skip: [] };
+  }
+  const skip = [...eachSkipped(evaluation.plan.skip)];
+  if (record.kind === 'if' || record.kind === 'elseif' || record.kind === 'else') {
+    const selected = evaluation.plan.selected ?? null;
+    if (selected !== null) return { guard: { index: selected, status: 'passed' }, skip };
+    return {
+      guard: { index, status: 'skipped' },
+      skip: skip.filter((k) => k !== index),
+    };
+  }
+  if (!evaluation.evaluated) return { skip };
+  return { guard: { index, status: 'passed' }, skip };
+}
+
+/** What a skipped row says about itself, in one sentence per shape. */
+export function skipReasonFor(record: ControlRecord, plan: ControlPlan): string {
+  if (record.kind === 'if' || record.kind === 'elseif' || record.kind === 'else') {
+    return plan.selected === null || plan.selected === undefined
+      ? 'Skipped: no condition in this decision held'
+      : 'Skipped: another branch of this decision was taken';
+  }
+  if (record.kind === 'foreach') return 'Skipped: the list was empty';
+  return 'Skipped: the loop ran no passes';
+}
+
+/**
+ * Skipped indices waiting to be recorded, held back until the run has moved
+ * past them.
+ *
+ * A chain's untaken members sit on BOTH sides of the taken one — `If` … `Else
+ * if` … `Otherwise` skips 1–3 and 7–8 to run 4–6 — and a report that recorded
+ * every skip the moment the decision was made would read 1, 2, 3, 7, 8, 4, 5,
+ * 6. The queue releases an index only once the run has reached something after
+ * it, so the rows stay in the order the file is written in.
+ */
+export class SkipQueue {
+  private pending: number[] = [];
+  /** Every index this queue has already handed to a caller. Read only by
+   *  {@link addOnce}; see there for why `add` must not consult it. */
+  private released = new Set<number>();
+
+  add(indices: readonly number[]): void {
+    this.pending.push(...indices);
+    this.pending.sort((a, b) => a - b);
+  }
+
+  /**
+   * Queue `indices`, but never one already queued or already released.
+   *
+   * For a pointer that can move BACKWARDS — the Runner UI debugger's
+   * jump-to-step — `planForStart` re-plans the ranges the run has already
+   * skipped, so a plain `add` gave the renderer a second
+   * `runner:step-complete` for each and the report a second skipped row
+   * (review 3, finding 4).
+   *
+   * {@link add} itself must keep duplicating, which is why this is a separate
+   * door rather than a change to that one: a chain inside a loop body
+   * legitimately skips the SAME indices once per pass, and the rows of the
+   * untaken branch belong to their passes.
+   */
+  addOnce(indices: readonly number[]): void {
+    for (const k of indices) {
+      if (this.released.has(k) || this.pending.includes(k)) continue;
+      this.pending.push(k);
+    }
+    this.pending.sort((a, b) => a - b);
+  }
+
+  /** Every queued index strictly below `index`, removed and returned. */
+  take(index: number): number[] {
+    const out: number[] = [];
+    this.pending = this.pending.filter((k) => {
+      if (k < index) {
+        out.push(k);
+        this.released.add(k);
+        return false;
+      }
+      return true;
+    });
+    return out;
+  }
+
+  /**
+   * Forget that `[start, end]` was ever released, so {@link addOnce} can queue
+   * those indices again.
+   *
+   * A pass of a loop body OWES the rows every other pass of it emits, and
+   * `released` is the run's memory of what has already been reported — a
+   * memory that must not outlive the pass when the caller is about to start a
+   * new one. Without this, a jump INTO a loop body from outside it produced a
+   * visit with no skipped rows at all: the chain inside the body had released
+   * those indices on an earlier pass, so `addOnce` refused them and the
+   * untaken branch simply vanished from the report (review 4, finding 5).
+   *
+   * The same range, and the same reason, as `rearmLoopBreakpoints` on the
+   * server: a loop's own `[bodyStart, bodyEnd]`, and only where a pass starts.
+   */
+  rearm(start: number, end: number): void {
+    for (const k of [...this.released]) {
+      if (k >= start && k <= end) this.released.delete(k);
+    }
+  }
+
+  /** Whatever is left, at the end of the run. */
+  takeAll(): number[] {
+    const out = this.pending;
+    for (const k of out) this.released.add(k);
+    this.pending = [];
+    return out;
+  }
+
+  get size(): number {
+    return this.pending.length;
+  }
+}

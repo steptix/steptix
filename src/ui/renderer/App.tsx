@@ -294,8 +294,10 @@ export function App() {
         if (data.status === 'passed') {
           dispatch({ type: 'ADD_LOG', level: 'success', message: `✓ Step ${data.stepIndex} passed (${dur}s)` });
         } else if (data.status === 'skipped') {
-          // A step a `return` left behind (stories/step-flow-control.md). Not
-          // a failure and not a pass: it never ran, and the reason says why.
+          // A decision the run made, or a step a `return` left behind — not a
+          // problem either way: the untaken branch of a chain, a loop body
+          // that never ran, an unattended `[input:]`, or everything after a
+          // `return` in this flow. The reason says which.
           dispatch({
             type: 'ADD_LOG',
             level: 'info',

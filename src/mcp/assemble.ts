@@ -23,6 +23,7 @@ import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseSetStep, setStepError } from '../parser/set-step.js';
+import { controlLineError } from '../parser/control-line.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
 import {
@@ -397,6 +398,12 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
   for (const [index, step] of args.steps.entries()) {
     const error = setStepError(step, ` in step ${index + 1}`);
     if (error) throw new Error(error);
+    // Same gate, same reason, for a malformed control line: these steps never
+    // pass through the markdown parser, so this is the only place a claimed-
+    // but-incomplete `If … then` / `While` / `For each` is refused rather
+    // than handed to a model as prose (stories/control-flow.md §Parser).
+    const controlError = controlLineError(step, ` in step ${index + 1}`);
+    if (controlError) throw new Error(controlError);
   }
 
   warnUnresolvablePlaceholders(project, args.steps, { ...config, ...parameters }, warnings);
