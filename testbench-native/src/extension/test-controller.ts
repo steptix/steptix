@@ -502,8 +502,23 @@ export class TestBenchTestController implements vscode.Disposable {
           // share — the streamed line and the TestMessage the failure peek
           // shows. Without it a broken entry's crash never reaches Test
           // Explorer at all when the AI attempt failed too.
-          const detail = describeStepFailure(event);
-          emit(`✗ step on line ${event.line}${whereOf(event)} failed — ${detail}`);
+          //
+          // `(row 3) ` in front when the run is looping a data table: the
+          // Explorer keeps ONE item per file and runs every row, so five rows
+          // failing step 6 otherwise read as five identical messages with
+          // nothing to tell them apart (§What does not change). Read off the
+          // controller, which is the only thing that knows which row is in
+          // flight — the events themselves carry no row.
+          const row = controller.currentRow;
+          const described = describeStepFailure(event);
+          // The row belongs with the WHERE, not with the why: `✗ step on line
+          // 12 (row 3) failed — timeout` reads as one sentence, while
+          // `failed — (row 3) timeout` reads as if the row were part of the
+          // error text. The TestMessage keeps the prefix, because in the
+          // Explorer's failure peek there is no line prefix to attach it to.
+          const detail = row === null ? described : `(row ${row}) ${described}`;
+          const where = row === null ? whereOf(event) : `${whereOf(event)} (row ${row})`;
+          emit(`✗ step on line ${event.line}${where} failed — ${described}`);
           failures.push({ uri: fileOf(event), line: event.line, error: detail });
           break;
         }

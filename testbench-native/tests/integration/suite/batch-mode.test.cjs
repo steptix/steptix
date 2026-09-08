@@ -67,6 +67,22 @@ const TAGGED_FIXTURE = [
 ].join('\n');
 const NO_HEADING_FIXTURE = ['## Steps', '1. step without title', ''].join('\n');
 
+// A data-driven test: the table under `## Steps` makes the Explorer's ONE
+// item run its step once per row. Lines: 3 the heading, 4 the table header,
+// 5 the delimiter, 6/7 the rows, 9 the step.
+const ROWS_FIXTURE = [
+  '# Batch rows',
+  '',
+  '## Steps',
+  '| email |',
+  '|-------|',
+  '| a@b.c |',
+  '| d@e.f |',
+  '',
+  '1. Enter {{email}}',
+  '',
+].join('\n');
+
 /** All tmp fixtures the suite writes. Cleaned up in `after`. */
 const FIXTURES = {
   'batch-pass.tmp.md': PASS_FIXTURE,
@@ -78,6 +94,7 @@ const FIXTURES = {
   'disabled-fixture.tmp.md': DISABLED_FIXTURE,
   'tagged-fixture.tmp.md': TAGGED_FIXTURE,
   'no-heading-fixture.tmp.md': NO_HEADING_FIXTURE,
+  'batch-rows.tmp.md': ROWS_FIXTURE,
 };
 
 const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));
@@ -613,5 +630,58 @@ describe('TestBench batch-run mode', function () {
 
     assert.equal(counts.failed, 1, 'interactive in batch must fail the test');
     assert.equal(counts.passed, 0);
+  });
+
+  it('prefixes a failure with the row it happened on', async () => {
+    // The Explorer keeps ONE item per file and runs every row, so five rows
+    // failing step 6 read as five identical messages with nothing to tell
+    // them apart (stories/data-row-progress-and-selection.md §What does not
+    // change). The row comes off the controller: the events carry none.
+    const counts = await runBatchWithScript(
+      hooks,
+      fake,
+      [fixtureUri('batch-rows.tmp.md')],
+      [
+        async (f) => {
+          f.push({ type: 'step:fail', line: 9, error: 'no such field' });
+          f.end();
+        },
+        async (f) => {
+          f.push({ type: 'step:fail', line: 9, error: 'no such field' });
+          f.end();
+        },
+      ],
+    );
+
+    assert.equal(counts.failed, 1, 'one item, however many rows');
+    const messages = hooks.batchFailureMessages().map((m) => m.text);
+    assert.deepEqual(
+      messages,
+      ['(row 1) no such field', '(row 2) no such field'],
+      `the two rows must be distinguishable. Got ${JSON.stringify(messages)}`,
+    );
+    // In the streamed line the row belongs with the WHERE, not with the why:
+    // `✗ step on line 9 (row 1) failed — no such field` is one sentence, while
+    // `failed — (row 1) no such field` reads as if the row were part of the
+    // error text.
+    const emitted = hooks.batchOutput().filter((l) => l.includes('step on line 9'));
+    assert.ok(
+      emitted.some((l) => l.includes('✗ step on line 9 (row 1) failed — no such field')),
+      `the row names the location, not the error. Got ${JSON.stringify(emitted)}`,
+    );
+  });
+
+  it('leaves a failure on a test with no table unprefixed', async () => {
+    // The regression guard: `(row N)` appears only inside a row loop.
+    await runBatchWithScript(hooks, fake, [fixtureUri('batch-fail.tmp.md')], [
+      async (f) => {
+        f.push({ type: 'step:fail', line: 4, error: 'simulated failure' });
+        f.end();
+      },
+    ]);
+    assert.deepEqual(
+      hooks.batchFailureMessages().map((m) => m.text),
+      ['simulated failure'],
+    );
   });
 });

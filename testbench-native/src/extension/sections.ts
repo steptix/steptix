@@ -25,6 +25,14 @@ export interface SectionPayloadEntry {
   /** Rows from a table under the `### Name` heading: the server expands the
    *  body once per row (stories/data-driven-rows.md, part B). */
   rows?: Array<Record<string, string>>;
+  /** Where each shipped row sits in the AUTHORED table, 1-based and parallel
+   *  to `rows` — sent only when a selection narrowed the loop
+   *  (stories/data-row-progress-and-selection.md, decision 1). */
+  rowNumbers?: number[];
+  /** The authored table's total row count, so a narrowed iteration still
+   *  reads `(2/3)`. Sent with `rowNumbers` or not at all — the server refuses
+   *  one without the other. */
+  rowCount?: number;
 }
 
 /**
@@ -42,7 +50,22 @@ export interface SectionPayloadEntry {
  * validation could see it. The contract lists this as the fourth of four maps
  * that have to guard against it, and the only one on this side of the wire.
  */
-export function buildSectionsPayload(text: string): Record<string, SectionPayloadEntry> | null {
+export function buildSectionsPayload(
+  text: string,
+  /**
+   * Narrow a section's loop to these 1-based table positions, keyed by the
+   * section name as authored (stories/data-row-progress-and-selection.md
+   * §Selecting rows of a section). A section not named here ships all of its
+   * rows, exactly as before — an axis nobody narrowed means all of it.
+   *
+   * The chosen rows travel with `rowNumbers` and `rowCount` so the server can
+   * number each iteration by its position in the AUTHORED table: without them
+   * a run of row 2 alone would be stamped `iteration 1 of 1` and every surface
+   * downstream — the frame, the banner, the `(2/3)` badge — would name the
+   * wrong row.
+   */
+  sectionRows?: Record<string, number[]>,
+): Record<string, SectionPayloadEntry> | null {
   const sections = extractSections(text);
   if (sections.length === 0) return null;
 
@@ -64,12 +87,30 @@ export function buildSectionsPayload(text: string): Record<string, SectionPayloa
     // duplicate is refused by `preflightSections` before this runs, so this
     // is belt-and-braces rather than a policy decision.
     if (key === '' || Object.prototype.hasOwnProperty.call(payload, key)) continue;
+    const allRows = rowsByName.get(section.name);
+    // The narrowing, applied here rather than at the scan: `rowsByName` is
+    // also what says how many rows the table HAS, and `rowCount` is that
+    // number — not the number that survived the filter.
+    const chosen = sectionRows?.[section.name];
+    const narrowed =
+      allRows !== undefined && chosen !== undefined && chosen.length > 0
+        ? [...new Set(chosen)]
+            .sort((a, b) => a - b)
+            .filter((n) => n >= 1 && n <= allRows.length)
+        : null;
     payload[key] = {
       name: section.name,
       headingLine: section.headingLine,
       steps: section.steps.map((s) => s.instruction),
       stepLines: section.steps.map((s) => s.line),
-      ...(rowsByName.has(section.name) && { rows: rowsByName.get(section.name)! }),
+      ...(allRows !== undefined &&
+        (narrowed && narrowed.length > 0
+          ? {
+              rows: narrowed.map((n) => allRows[n - 1]!),
+              rowNumbers: narrowed,
+              rowCount: allRows.length,
+            }
+          : { rows: allRows })),
     };
   }
   return Object.keys(payload).length > 0 ? payload : null;

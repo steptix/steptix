@@ -25,6 +25,28 @@ import {
   stripFor,
 } from "./lib/panel-scope-inline.js";
 import { describeStepFailure, formatStepFailure } from "./lib/failure-text-inline.js";
+import {
+  applyRowClick,
+  buildRunRowsPayload,
+  buildTableRowsPayload,
+  countSelectedRows,
+  formatRowDuration,
+  isRowLoopRunning,
+  prefixRowFailure,
+  rowFailuresFor,
+  rowGlyph,
+  rowGroups,
+  rowKey,
+  rowsCollapseKey,
+  rowsFor,
+  rowStatusClass,
+  runButtonLabel,
+  runTableRowCount,
+  runButtonTitle,
+  setRowFailuresFor,
+  setRowsFor,
+  variablesHeaderSuffix,
+} from "./lib/rows-panel.js";
 
 // Inline narrowing helper. The webview can't import named exports from
 // runner-core directly because Vite's CJS interop drops names through
@@ -36,6 +58,8 @@ const HOST_MSG_TYPES = new Set([
   "prompt",
   "promptDone",
   "parametersResolved",
+  "rows",
+  "rowSummary",
   "running",
   "breakpointStop",
   "batchBanner",
@@ -296,6 +320,68 @@ function StepContextMenu({ menu, onClose }) {
   );
 }
 
+/**
+ * Per-row right-click menu (stories/data-row-progress-and-selection.md
+ * §"How you run one row, or some"). Same shell as `StepContextMenu` — the
+ * transparent backdrop catches outside clicks, Escape closes — with the two
+ * gestures a row has: run the row you pointed at, and, when a multi-row
+ * selection is in play, run all of it.
+ *
+ * Both send whole rows (no `lines`): "run this row" has always meant the flow
+ * for that row, not a slice of it.
+ */
+function RowContextMenu({ menu, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const runThis = () => { onClose(); hostBridge.postRunRows(menu.thisRowPayload); };
+  const runSelected = () => { onClose(); hostBridge.postRunRows(menu.selectedPayload); };
+  const reveal = () => { onClose(); hostBridge.postRevealLine(menu.line); };
+
+  return (
+    <div
+      onMouseDown={onClose}
+      onContextMenu={(e) => { e.preventDefault(); onClose(); }}
+      style={{ position: "fixed", inset: 0, zIndex: 1000 }}
+    >
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.preventDefault()}
+        style={{
+          position: "fixed",
+          left: menu.x,
+          top: menu.y,
+          minWidth: 180,
+          background: "var(--vscode-menu-background, #252526)",
+          color: "var(--vscode-menu-foreground, #cccccc)",
+          border: "1px solid var(--vscode-menu-border, var(--vscode-contrastBorder, #454545))",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+          padding: "4px 0",
+          borderRadius: 2,
+          fontFamily: "var(--vscode-font-family)",
+          fontSize: "var(--vscode-font-size, 13px)",
+        }}
+      >
+        {/* Disabled while a run is in flight or parked at a breakpoint, like
+            the group header's ▷ Run all — a second run cannot start, and an
+            item that does nothing when clicked is worse than a greyed one. */}
+        <button className="tb-menu-item" onClick={runThis} disabled={menu.runDisabled}>
+          Run this row
+        </button>
+        {menu.selectedCount > 1 && (
+          <button className="tb-menu-item" onClick={runSelected} disabled={menu.runDisabled}>
+            Run selected rows ({menu.selectedCount})
+          </button>
+        )}
+        <button className="tb-menu-item" onClick={reveal}>Reveal in editor</button>
+      </div>
+    </div>
+  );
+}
+
 // Minimum heights (px) that keep each resizable section usable when the
 // panel is short. Steps is the protected region — it never shrinks below
 // ~a few rows, so the Output panel can no longer cover it. Output yields
@@ -363,6 +449,35 @@ function TestBenchRunner() {
    */
   const [webviewSelection, setWebviewSelection] = useState(() => new Set());
   const selectionAnchorRef = useRef(null);
+  /**
+   * The Rows section (stories/data-row-progress-and-selection.md). Per file,
+   * like the Output lines are: the panel is one webview that every controller
+   * posts to, and a file's rows belong to that file. Replaced wholesale by
+   * each `rows` message — the host decides what the table looks like now.
+   */
+  const [rowsByUri, setRowsByUri] = useState({});
+  /**
+   * `rowSummary`'s `{ line → rows[] }` per file — the rows each step line
+   * failed on across a loop, which prefixes that line's failure text with
+   * `(row 3)` / `(rows 2, 4)` once the loop is over.
+   */
+  const [rowFailuresByUri, setRowFailuresByUri] = useState({});
+  /**
+   * Webview-local multi-selection of ROW lines, kept apart from
+   * `webviewSelection` (steps) because the two are different axes: a
+   * selection may span both lists, and Run then sends the rows AND the steps.
+   * Entries are `<tableKey>#<row>` so a row of the run table and row 2 of a
+   * section table never collide.
+   */
+  const [rowSelection, setRowSelection] = useState(() => new Set());
+  /** Shift+click pivot for the Rows list — `{ tableKey, row }`, so a range
+   *  never spans two tables. The Steps list has its own. */
+  const rowAnchorRef = useRef(null);
+  /** Collapse state per table, keyed by `tableKey`. Absent = expanded. */
+  const [rowsCollapsed, setRowsCollapsed] = useState({});
+  /** Per-row right-click menu — cursor coords plus the payloads the two items
+   *  would post, resolved at open time from the row and the selection. */
+  const [rowMenu, setRowMenu] = useState(null);
   /** Output panel height in pixels — user-resizable via a drag handle on
    *  the top edge. Clamped to [80, viewport - 120] at drag time. */
   const [outputHeight, setOutputHeight] = useState(220);
@@ -420,6 +535,12 @@ function TestBenchRunner() {
             // captured scope is wiped on the host side too).
             setSkillRerun(null);
             setRerunEdits({});
+            // Same reasoning for the `(row N)` prefixes: they describe the
+            // last loop, and the run starting now has not failed on any row
+            // yet. The map is cleared whole rather than for one file because
+            // `running` carries no URI — a lost prefix on some other file is
+            // cheaper than one that lies about this run.
+            setRowFailuresByUri({});
           }
           runningRef.current = msg.running;
           setRunning(msg.running);
@@ -440,6 +561,17 @@ function TestBenchRunner() {
           break;
         case "parametersResolved":
           setRuntimeVariables((prev) => ({ ...prev, ...msg.values }));
+          break;
+        case "rows":
+          // The whole state of every table, as of now. Each message replaces
+          // the file's rows rather than merging into them, so a row the host
+          // no longer lists cannot linger with a mark from two runs ago.
+          setRowsByUri((prev) => setRowsFor(prev, msg.uri ?? activeUriRef.current, msg.tables));
+          break;
+        case "rowSummary":
+          setRowFailuresByUri((prev) =>
+            setRowFailuresFor(prev, msg.uri ?? activeUriRef.current, msg.failures),
+          );
           break;
         case "batchBanner":
           setBatchBanner(msg.state);
@@ -575,6 +707,12 @@ function TestBenchRunner() {
   useEffect(() => {
     setWebviewSelection(new Set());
     selectionAnchorRef.current = null;
+    // The row selection is file-scoped for the same reason, and its entries
+    // name tables of the file you just left. The rows THEMSELVES stay put in
+    // `rowsByUri` — they are that file's last run, like its Output lines.
+    setRowSelection(new Set());
+    rowAnchorRef.current = null;
+    setRowMenu(null);
     setRuntimeVariables({});
     setRuntimeSources({});
     setSkillRerun(null);
@@ -630,6 +768,106 @@ function TestBenchRunner() {
     }));
   }, [snapshot, stepLines]);
 
+  // ── Rows ───────────────────────────────────────────────────────────────
+  // The active file's tables, and only ever the active file's. Everything
+  // below is derived from them, so a file with no `rows` message renders no
+  // Rows section and every row-aware label falls back to what it says today.
+  const rowTables = rowsFor(rowsByUri, snapshot?.uri);
+  const groups = useMemo(() => rowGroups(rowTables), [rowTables]);
+  const selectedRowCount = useMemo(
+    () => countSelectedRows(rowTables, rowSelection),
+    [rowTables, rowSelection],
+  );
+  const rowFailures = rowFailuresFor(rowFailuresByUri, snapshot?.uri);
+  // During a loop the Steps list shows the CURRENT row's failures, so a
+  // `(row N)` prefix from the last loop would name the wrong one.
+  const rowLoopRunning = isRowLoopRunning(rowTables);
+  const varsSuffix = variablesHeaderSuffix(rowTables);
+  const rowRunDisabled = running || snapshot?.breakpointStop != null;
+  // The multiplier a plain step selection is subject to in a data-driven file:
+  // with no rows ticked, every selected step runs once per row, and the Run
+  // button has to say so (`Run (×5 rows)`).
+  const runTableRows = runTableRowCount(rowTables);
+
+  /**
+   * Click on a row line. The Steps list's gestures, applied to the other
+   * axis: plain click replaces (and drops the step selection — a plain click
+   * means "start over"), Ctrl/⌘ toggles, Shift extends a range inside the
+   * same table. A plain or range click also reveals the row in the editor.
+   */
+  const handleRowClick = (group, row, e) => {
+    const next = applyRowClick({
+      selection: rowSelection,
+      group,
+      row: row.row,
+      toggle: Boolean(e && (e.ctrlKey || e.metaKey)),
+      range: Boolean(e && e.shiftKey),
+      anchor: rowAnchorRef.current,
+    });
+    setRowSelection(next.selection);
+    rowAnchorRef.current = next.anchor;
+    if (next.clearSteps) {
+      setWebviewSelection(new Set());
+      selectionAnchorRef.current = null;
+    }
+    if (next.reveal) hostBridge.postRevealLine(row.line);
+  };
+
+  /**
+   * Right-click on a row. Like the Steps list, a right-click on a row that
+   * is not already selected makes it the lone selection, so *Run this row*
+   * operates on the row you pointed at rather than on a stale batch. Both
+   * payloads are resolved here, from the selection as it will be.
+   */
+  const handleRowContextMenu = (group, row, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    let selection = rowSelection;
+    if (!rowSelection.has(rowKey(group.key, row.row))) {
+      selection = new Set([rowKey(group.key, row.row)]);
+      setRowSelection(selection);
+      setWebviewSelection(new Set());
+      selectionAnchorRef.current = null;
+      rowAnchorRef.current = { tableKey: group.key, row: row.row };
+    }
+    const MENU_W = 200;
+    const MENU_H = 110;
+    setRowMenu({
+      x: Math.max(0, Math.min(e.clientX, window.innerWidth - MENU_W - 4)),
+      y: Math.max(0, Math.min(e.clientY, window.innerHeight - MENU_H - 4)),
+      line: row.line,
+      selectedCount: countSelectedRows(rowTables, selection),
+      runDisabled: rowRunDisabled,
+      thisRowPayload: buildTableRowsPayload(group, [row.row]),
+      selectedPayload: buildRunRowsPayload({ tables: rowTables, rowSelection: selection }),
+    });
+  };
+  const closeRowMenu = () => setRowMenu(null);
+
+  /**
+   * ▷ Run all — every row of THIS table, whatever their marks.
+   *
+   * Sends the TABLE, like ↻ Re-run failed below: the numbers on screen came
+   * from a `rows` message that may predate an edit to the table, so a row
+   * added since would be the one row "run all rows" left out. The host reads
+   * the file as it is now.
+   */
+  const handleRunAllRows = (group) => {
+    hostBridge.postRunAllRows(group.table.table);
+  };
+  /**
+   * ↻ Re-run failed — the rows of this table that are red.
+   *
+   * Sends the TABLE, not the numbers on screen: this list came from a `rows`
+   * message that may predate an edit to the table, and re-running a
+   * remembered number would run whatever row now sits in that position. The
+   * host re-reads the file, through the same `failedRowsToRerun` the palette
+   * command uses.
+   */
+  const handleRerunFailedRows = (group) => {
+    hostBridge.postRerunFailedRows(group.table.table);
+  };
+
   const handleRun = () => {
     if (!isTestFile) return;
     // Webview selection wins when it's non-empty; otherwise fall back to
@@ -637,6 +875,16 @@ function TestBenchRunner() {
     // lines sorted so the run-controller emits step:start events in
     // document order regardless of the order the user clicked.
     const fromWebview = [...webviewSelection].sort((a, b) => a - b);
+    // With rows in the selection this is a `runRows`, not a `run`: the
+    // selection narrows two axes, and the step lines it carries are the
+    // panel's own — the editor's cursor selection is the host's separate path
+    // to the same controller and must not be folded in behind the user's back.
+    if (selectedRowCount > 0) {
+      hostBridge.postRunRows(
+        buildRunRowsPayload({ tables: rowTables, rowSelection, stepLines: fromWebview }),
+      );
+      return;
+    }
     const lines = fromWebview.length > 0 ? fromWebview : (snapshot?.selectedLines ?? []);
     hostBridge.postRun(lines);
   };
@@ -688,8 +936,13 @@ function TestBenchRunner() {
       return;
     }
 
+    // A plain click means "start over", in BOTH lists — otherwise clicking
+    // one step after picking three rows would leave `Run (4)` on the button
+    // and quietly run the rows too.
     setWebviewSelection(new Set([lineNumber]));
     selectionAnchorRef.current = lineNumber;
+    setRowSelection(new Set());
+    rowAnchorRef.current = null;
     hostBridge.postRevealLine(lineNumber);
   };
 
@@ -844,6 +1097,31 @@ function TestBenchRunner() {
           user-select: none;
         }
         .tb-section-body { padding: 4px 8px; }
+        /* A row the loop planned and did not reach. The gutter's skip icon is
+           a hollow slate circle; this is that colour, so ◌ reads the same in
+           both places. */
+        .tb-step--skip { color: var(--vscode-descriptionForeground, #94a3b8); }
+        /* One row line of the Rows section. Same shell as a step row — the
+           tb-step hover, selection and status colours all apply — with a
+           monospace values column that elides rather than wraps, because a
+           five-column table will not fit in a sidebar and the full text is
+           one hover away. */
+        .tb-row-values {
+          flex: 1;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-family: var(--vscode-editor-font-family, monospace);
+          font-size: 0.92em;
+        }
+        .tb-row-detail { flex-shrink: 0; font-size: 0.85em; opacity: 0.85; }
+        .tb-row-duration {
+          flex-shrink: 0;
+          font-size: 0.85em;
+          opacity: 0.55;
+          font-variant-numeric: tabular-nums;
+        }
       `}</style>
 
       <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)" }}>
@@ -874,13 +1152,9 @@ function TestBenchRunner() {
             <button
               className="tb-btn tb-btn--primary"
               onClick={handleRun}
-              title={
-                webviewSelection.size > 0
-                  ? `Run ${webviewSelection.size} selected step${webviewSelection.size === 1 ? "" : "s"}`
-                  : "Run the selected step(s) — use the sidebar list (Ctrl/Shift+click for multi-select) or the editor cursor (F5)"
-              }
+              title={runButtonTitle({ rows: selectedRowCount, steps: webviewSelection.size, tableRows: runTableRows })}
             >
-              ▶ Run{webviewSelection.size > 1 ? ` (${webviewSelection.size})` : ""}
+              ▶ {runButtonLabel({ rows: selectedRowCount, steps: webviewSelection.size, tableRows: runTableRows })}
             </button>
           )}
           <button
@@ -984,10 +1258,103 @@ function TestBenchRunner() {
             </button>
           </div>
         )}
+        {/* The Rows section — the report's matrix table, live. Present only
+            while the host's latest `rows` message for this file carries a
+            table; a test with no data table is exactly as it was. One group
+            per table, each collapsible on its own, so a file with a run table
+            and three section tables does not bury the run table. */}
+        {groups.length > 0 && (
+          <div style={{ flexShrink: 0, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)", maxHeight: 220, overflowY: "auto" }}>
+            {groups.map((group) => {
+              // Per file as well as per table: the panel is one webview shared
+              // by every test, so a bare table key collapsed the Rows section
+              // on every data-driven file at once.
+              const collapseKey = rowsCollapseKey(snapshot?.uri, group.key);
+              const collapsed = rowsCollapsed[collapseKey] === true;
+              return (
+                <div key={group.key}>
+                  <div
+                    className="tb-section-header"
+                    onClick={() => setRowsCollapsed((prev) => ({ ...prev, [collapseKey]: !collapsed }))}
+                  >
+                    <ChevronIcon open={!collapsed} />
+                    <span style={{ textTransform: "none", letterSpacing: 0 }}>{group.label}</span>
+                    <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                      <button
+                        className="tb-btn"
+                        onClick={(e) => { e.stopPropagation(); handleRunAllRows(group); }}
+                        disabled={rowRunDisabled}
+                        title="Run every row of this table, whatever their marks"
+                        style={{ padding: "1px 6px", fontSize: "0.85em" }}
+                      >▷ Run all rows</button>
+                      {/* Only while the last run of this file left a red row
+                          in THIS table — a button that would run nothing is
+                          worse than no button. */}
+                      {group.hasFailed && (
+                        <button
+                          className="tb-btn"
+                          onClick={(e) => { e.stopPropagation(); handleRerunFailedRows(group); }}
+                          disabled={rowRunDisabled}
+                          title="Run just the rows that failed"
+                          style={{ padding: "1px 6px", fontSize: "0.85em" }}
+                        >↻ Re-run failed</button>
+                      )}
+                    </span>
+                  </div>
+                  {!collapsed && (
+                    <div className="tb-section-body">
+                      {group.rows.length === 0 && (
+                        <div style={{ padding: "2px 4px", opacity: 0.6, fontStyle: "italic" }}>
+                          No rows in this table.
+                        </div>
+                      )}
+                      {group.rows.map((row) => {
+                        const selected = rowSelection.has(rowKey(group.key, row.row));
+                        const cls = [
+                          "tb-step",
+                          rowStatusClass(row.status),
+                          selected ? "tb-step--selected" : "",
+                        ].filter(Boolean).join(" ");
+                        const duration = formatRowDuration(row.durationMs);
+                        return (
+                          <div
+                            key={row.row}
+                            className={cls}
+                            onClick={(e) => handleRowClick(group, row, e)}
+                            onContextMenu={(e) => handleRowContextMenu(group, row, e)}
+                            title={`${row.values}${row.detail ? ` — ${row.detail}` : ""}\nReveal line ${row.line}`}
+                          >
+                            <span style={{ width: 14, textAlign: "center", flexShrink: 0 }}>
+                              {rowGlyph(row.status)}
+                            </span>
+                            <span style={{ width: 16, textAlign: "right", flexShrink: 0, opacity: 0.7 }}>
+                              {row.row}
+                            </span>
+                            <span className="tb-row-values" title={row.values}>{row.values}</span>
+                            {row.detail && <span className="tb-row-detail">{row.detail}</span>}
+                            {duration && <span className="tb-row-duration">{duration}</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {variableRows.length > 0 && (
           <div style={{ flexShrink: 0, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)" }}>
             <div className="tb-section-header" onClick={() => setVariablesCollapsed((v) => !v)}>
-              <ChevronIcon open={!variablesCollapsed} /> Variables
+              <ChevronIcon open={!variablesCollapsed} />
+              <span>Variables</span>
+              {/* `· row 3 of 5` while the run-row loop is on a row: these
+                  values are that row's, and the header is where a reader
+                  looks to know whose values they are. */}
+              {varsSuffix && (
+                <span style={{ opacity: 0.7, textTransform: "none", letterSpacing: 0 }}>{varsSuffix}</span>
+              )}
             </div>
             {!variablesCollapsed && (
               <div className="tb-section-body" style={{ maxHeight: 180, overflowY: "auto" }}>
@@ -1064,7 +1431,14 @@ function TestBenchRunner() {
             const stepError = errorMap[lineNumber];
             const stepFailure =
               failureMap[lineNumber] && (status === STATUS.FAIL || status === STATUS.PASS_STALE)
-                ? formatStepFailure(failureMap[lineNumber], status === STATUS.PASS_STALE)
+                ? // After a row loop, say WHICH rows this line failed on —
+                  // the same cross-reference the gutter hover carries. While
+                  // the loop is still running the painting is the current
+                  // row's, so it needs no prefix.
+                  prefixRowFailure(
+                    formatStepFailure(failureMap[lineNumber], status === STATUS.PASS_STALE),
+                    rowLoopRunning ? undefined : rowFailures[lineNumber],
+                  )
                 : null;
             const cls = [
               "tb-step",
@@ -1283,6 +1657,7 @@ function TestBenchRunner() {
       )}
 
       {stepMenu && <StepContextMenu menu={stepMenu} onClose={closeStepMenu} />}
+      {rowMenu && <RowContextMenu menu={rowMenu} onClose={closeRowMenu} />}
     </div>
   );
 }

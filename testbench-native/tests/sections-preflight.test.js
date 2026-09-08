@@ -107,6 +107,93 @@ test("payload: matches the frozen fixture's sections", () => {
 });
 
 // ---------------------------------------------------------------------------
+// buildSectionsPayload — a narrowed section loop
+// (stories/data-row-progress-and-selection.md §Selecting rows of a section)
+// ---------------------------------------------------------------------------
+
+/** A test whose one section loops over three rows. */
+const ROWS_DOC = doc(
+  "## Steps",
+  "1. Upload each statement",
+  "",
+  "### Upload each statement",
+  "| file  | status |",
+  "|-------|--------|",
+  "| a.png | got a  |",
+  "| b.png | got b  |",
+  "| c.png | got c  |",
+  "1. Upload {{file}}",
+  "2. Assert {{status}}",
+);
+
+test("payload: without a filter, all rows ship and neither new field appears", () => {
+  const entry = buildSectionsPayload(ROWS_DOC)["upload each statement"];
+  assert.equal(entry.rows.length, 3);
+  assert.equal(entry.rowNumbers, undefined);
+  assert.equal(entry.rowCount, undefined);
+});
+
+test("payload: a filter ships the chosen rows plus rowNumbers and rowCount", () => {
+  // Both, or neither — the server 400s on one alone, because `rowNumbers`
+  // without `rowCount` would number iterations 2 and 3 "of 2".
+  const entry = buildSectionsPayload(ROWS_DOC, { "Upload each statement": [2] })[
+    "upload each statement"
+  ];
+  assert.deepEqual(entry.rows, [{ file: "b.png", status: "got b" }]);
+  assert.deepEqual(entry.rowNumbers, [2]);
+  // The AUTHORED table's count, not the shipped rows' — that is the whole
+  // point of the pair: a one-row run still reads `iteration 2 of 3`.
+  assert.equal(entry.rowCount, 3);
+});
+
+test("payload: a filter is sorted, de-duped and clipped to the table", () => {
+  const entry = buildSectionsPayload(ROWS_DOC, {
+    "Upload each statement": [3, 1, 1, 9],
+  })["upload each statement"];
+  assert.deepEqual(entry.rowNumbers, [1, 3]);
+  assert.deepEqual(
+    entry.rows.map((r) => r.file),
+    ["a.png", "c.png"],
+  );
+});
+
+test("payload: a section nobody narrowed is untouched", () => {
+  const two = doc(
+    "## Steps",
+    "1. Alpha",
+    "2. Beta",
+    "",
+    "### Alpha",
+    "| n |",
+    "|---|",
+    "| 1 |",
+    "| 2 |",
+    "1. Do {{n}}",
+    "",
+    "### Beta",
+    "| m |",
+    "|---|",
+    "| 9 |",
+    "1. Do {{m}}",
+  );
+  const payload = buildSectionsPayload(two, { Alpha: [2] });
+  assert.deepEqual(payload["alpha"].rowNumbers, [2]);
+  assert.equal(payload["beta"].rowNumbers, undefined);
+  assert.equal(payload["beta"].rows.length, 1);
+});
+
+test("payload: a filter naming a section with no table changes nothing", () => {
+  // The refusal for an unknown name is `rowSelectionRefusal`'s job, before
+  // the run. Here it must simply not corrupt the payload.
+  const payload = buildSectionsPayload(
+    doc("## Steps", "1. Sign In", "", "### Sign In", "1. Type creds"),
+    { "Sign In": [1] },
+  );
+  assert.equal(payload["sign in"].rows, undefined);
+  assert.equal(payload["sign in"].rowNumbers, undefined);
+});
+
+// ---------------------------------------------------------------------------
 // preflightSections
 // ---------------------------------------------------------------------------
 

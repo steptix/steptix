@@ -1,15 +1,18 @@
 import * as vscode from 'vscode';
 import {
+  type HostRowsMsg,
   type HostToWebviewMsg,
   type StepFailureDetail,
   type WebviewToHostMsg,
   stepFailureDetail,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
-import { DecorationManager, computeStepsSummary } from './decorations.js';
+import { DecorationManager, computeStepsSummary, dataTablesOf } from './decorations.js';
 // The same builder the ⚠ decoration calls, so the test hook cannot drift from
 // what actually renders.
 import { staleHoverMessage } from './failure-hover-core.js';
+import { lineStatusFromRowStatus, rowHeaderSummary } from './row-summary-core.js';
+import { allRowsOfTable, buildRowsMessage, rowSelectionRefusal } from './row-selection-core.js';
 import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
@@ -56,6 +59,20 @@ const FIRST_ACTIVATION_KEY = 'testbench-native.shownActivationToast';
  * Registry mapping document URI → RunController. Lazy: a controller is
  * created the first time the user runs against a file, then reused.
  */
+/**
+ * What makes two `rows` messages "the same table in the same state".
+ *
+ * Everything a derivation from the file can know, and nothing it cannot:
+ * `durationMs` is deliberately absent, because only a run measures one and a
+ * derived message that lacked it would otherwise look like a change and
+ * overwrite the run's times with blanks.
+ */
+function rowsComparisonKey(msg: HostRowsMsg): string {
+  return JSON.stringify(
+    msg.tables.map((t) => [t.table, t.rows.map((r) => [r.row, r.line, r.values, r.status])]),
+  );
+}
+
 class RunControllerRegistry implements vscode.Disposable {
   private readonly controllers = new Map<string, RunController>();
   /** Detached, HEADLESS controllers used only by batch (flask / Test Explorer)
@@ -137,6 +154,11 @@ class RunControllerRegistry implements vscode.Disposable {
     // shows Run (its Stop and Pause gone for the rest of its run), and a test
     // that is doing nothing shows Stop and Pause for someone else's run.
     this.trackerSub = tracker.onChange(() => {
+      // OUTSIDE the signature dedupe: the Rows section has to answer to the
+      // document as well as to the editor switch — a table gains a row, a
+      // reload restores yesterday's ✗ marks, Clear Run Statuses wipes them —
+      // and none of those change which file is active.
+      this.postRowsForActiveFile();
       const now = this.activeSignature();
       if (now === this.lastActiveSignature) return;
       this.lastActiveSignature = now;
@@ -150,7 +172,74 @@ class RunControllerRegistry implements vscode.Disposable {
       // re-render the panel on every cursor move for the length of a compile.
       this.postCompileStripFor(now === '<none>' ? null : now);
       this.refreshRunningContext();
+      this.refreshFailedRowsContext();
     });
+  }
+
+  /** The `(row, line, values, status)` of the last `rows` message this
+   *  registry derived for each file — what a fresh derivation is compared
+   *  against, so an editor event that changed nothing posts nothing. */
+  private lastDerivedRows = new Map<string, string>();
+  /** Which file the last rows derivation was for, so an editor switch is
+   *  distinguishable from an edit to the file already showing. */
+  private lastRowsActiveUri: string | null = null;
+
+  /**
+   * Keep the panel's Rows section true for the file the author is looking at,
+   * run or no run.
+   *
+   * It used to be fed only from inside a run, so opening a data-driven test
+   * showed an empty Rows section, and reloading the window emptied it again
+   * even though the ✓/✗ marks were still painted on the rows — the marks
+   * persist, the message that described them did not. This derives the same
+   * message from the file plus the tracker's statuses, which is what makes the
+   * section right the moment the file opens and right again after a reload.
+   *
+   * Three rules keep it out of a live run's way:
+   *  - Nothing is posted while that file is running. The controller's matrix
+   *    is the authority then, and a derived post between the row boundary's
+   *    status clear and the controller's re-post would flash an all-`pending`
+   *    table.
+   *  - The comparison ignores `durationMs`, which only a run can know, so a
+   *    finished run's `8.2s` is not overwritten by a derivation that has none.
+   *  - After a run the tracker was painted FROM the controller's message, so
+   *    a derivation of it is identical and posts nothing at all.
+   */
+  private postRowsForActiveFile(): void {
+    const uri = this.activeSignature();
+    // An editor switch always re-posts, even when nothing about the file
+    // changed: the panel is one webview shared by every file, it can be
+    // disposed and rebuilt whenever the view is hidden, and the file that just
+    // became active is entitled to be told what its rows are — the same reason
+    // `postCompileStripFor` re-posts a strip on every switch.
+    const switched = this.lastRowsActiveUri !== uri;
+    this.lastRowsActiveUri = uri;
+    if (uri === '<none>') return;
+    if (this.controllers.get(uri)?.isRunning === true) return;
+    const snap = this.tracker.snapshot();
+    if (!snap.isTestFile || snap.uri !== uri) return;
+    const statuses = new Map(snap.statuses);
+    const hovers = new Map(
+      [...snap.failures].map(([line, detail]) => [line, detail.error]),
+    );
+    const msg = buildRowsMessage(uri, snap.text, (line) => {
+      const status = statuses.get(line);
+      const hover = hovers.get(line);
+      if (status === undefined && hover === undefined) return undefined;
+      return { ...(status !== undefined && { status }), ...(hover !== undefined && { hover }) };
+    });
+    if (!msg) {
+      // A file whose table was deleted (or which never had one) still has to
+      // be told, or the panel keeps showing the table that is gone.
+      const had = this.lastDerivedRows.delete(uri);
+      if (had || switched) this.view.post({ type: 'rows', uri, tables: [] });
+      return;
+    }
+    const key = rowsComparisonKey(msg);
+    if (!switched && this.lastDerivedRows.get(uri) === key) return;
+    this.lastDerivedRows.set(uri, key);
+    this.view.post(msg);
+    this.refreshFailedRowsContext();
   }
 
   /**
@@ -316,6 +405,9 @@ class RunControllerRegistry implements vscode.Disposable {
       // Fresh-run hook: a full run from the top drops this test's skill-debug
       // context (the banner + "run on stopped session" affordance go stale).
       () => this.clearSkillDebugIfOwnedBy(document.uri.toString()),
+      // NOTE: `lineStatuses` / `lineHovers` are set on the instance below —
+      // the positional list is already long enough that a ninth argument
+      // would need two `undefined` placeholders to reach.
       undefined, // pollSleep — real timer
       {
         healthProbe: this.healthProbe,
@@ -331,6 +423,18 @@ class RunControllerRegistry implements vscode.Disposable {
       },
     );
     controller.attachCompileTailSignals(this.compileTailSignals);
+    // What the gutter shows right now. A run that narrows an axis seeds the
+    // rows it did NOT select from these, so an unselected row keeps the mark
+    // it already had across the row boundary's status clear (decision 6).
+    controller.lineStatuses = () =>
+      new Map(this.tracker.snapshotFor(document.uri)?.statuses ?? []);
+    controller.lineHovers = () => {
+      const out = new Map<number, string>();
+      for (const [line, detail] of this.tracker.snapshotFor(document.uri)?.failures ?? []) {
+        if (detail.error !== undefined) out.set(line, detail.error);
+      }
+      return out;
+    };
     this.controllers.set(key, controller);
     // Re-fire the controller's frame-stack changes through the registry
     // so a single view subscriber catches every controller's transitions.
@@ -593,6 +697,40 @@ class RunControllerRegistry implements vscode.Disposable {
               : `Failed on rows ${rows}.`,
         });
       }
+      return;
+    }
+    // The live data-row matrix. One message feeds two surfaces: the Runner
+    // panel renders the Rows section from it, and this paints the same rows
+    // in the table itself, using the status vocabulary the steps already have
+    // (stories/data-row-progress-and-selection.md §Row status in the table).
+    //
+    // Applied in one batch — the matrix rewrites every row at every boundary,
+    // which is exactly what restores rows 1..n-1 after the row boundary's
+    // file-wide status clear, and a per-line write would emit a snapshot for
+    // each of them.
+    if (msg.type === 'rows') {
+      // Remembered as if we had derived it: after the run, a derivation of
+      // the tracker (which this very call is about to paint) is identical, so
+      // the comparison in `postRowsForActiveFile` finds no change and the
+      // durations this message carries survive.
+      this.lastDerivedRows.set(msg.uri, rowsComparisonKey(msg));
+      const target = vscode.Uri.parse(msg.uri);
+      this.tracker.setStatuses(
+        target,
+        msg.tables.flatMap((table) =>
+          table.rows.map((row) => {
+            const status = lineStatusFromRowStatus(row.status);
+            return {
+              line: row.line,
+              status,
+              // A passed row has no hover, as a passed step has none. A failed
+              // or skipped one carries its reason, which is the only place the
+              // reason exists once the run log has scrolled.
+              ...(row.hover !== undefined && { failure: { error: row.hover } }),
+            };
+          }),
+        ),
+      );
       return;
     }
     if (msg.type === 'runEvent') {
@@ -1252,6 +1390,9 @@ class RunControllerRegistry implements vscode.Disposable {
       this.setRunningContext(true);
     } else {
       this.refreshRunningContext();
+      // A run that just ended is where a failing row set comes from, and
+      // *Re-run Failed Rows* is gated on there being one.
+      this.refreshFailedRowsContext();
     }
     this.view.post({ type: 'running', running: this.lastRunningContextValue });
     // A run just started or ended — both change what /health reports, and a
@@ -1267,6 +1408,28 @@ class RunControllerRegistry implements vscode.Disposable {
     if (value === this.lastRunningContextValue) return;
     this.lastRunningContextValue = value;
     void vscode.commands.executeCommand('setContext', 'testbench-native.running', value);
+  }
+
+  /** Mirror of the last value pushed to `testbench-native.hasFailedRows` —
+   *  the ACTIVE file's, since the palette entry acts on the active file. */
+  private lastFailedRowsContextValue = false;
+
+  /**
+   * Publish whether the active file's last run left a failing row, so
+   * *Re-run Failed Rows* appears in the palette on exactly the files where it
+   * would do something. Deduped like the other keys: this is recomputed on
+   * every editor switch and every run edge.
+   */
+  refreshFailedRowsContext(): void {
+    const controller = this.active();
+    const value = controller !== undefined && controller.failedRowsToRerun !== null;
+    if (value === this.lastFailedRowsContextValue) return;
+    this.lastFailedRowsContextValue = value;
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.hasFailedRows',
+      value,
+    );
   }
 
   /** Mirror of the last value pushed to `testbench-native.stepPaused`. */
@@ -1392,6 +1555,19 @@ export interface TestBenchTestHooks {
    *  main-flow step count: a section body can run zero times or many, so
    *  counting body lines makes M meaningless and lets N exceed it. */
   stepsSummaryForTests: (uri: vscode.Uri) => { passed: number; total: number };
+  /** Every data table in a document, with the header summary the decoration
+   *  renders and the status now on each row line. Built from the same scan and
+   *  the same summary function the decoration pass uses — the rendered
+   *  after-text cannot be read back from the extension host, so a test that
+   *  reimplemented the counting would pass while the header was wrong. */
+  rowTablesForTests: (uri: vscode.Uri) => Array<{
+    /** The section's name as authored, or null for the table under `## Steps`. */
+    section: string | null;
+    headerLine: number;
+    rowLines: number[];
+    statuses: Array<string | null>;
+    summary: string;
+  }>;
   variablesDescription: () => string;
   /** Run-state signature for arbitrary text. Statuses are pinned to line
    *  numbers and a section heading decides which body a line belongs to, so
@@ -1887,6 +2063,23 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
         const { passed, total } = computeStepsSummary(snap);
         return { passed, total };
       },
+      rowTablesForTests: (uri: vscode.Uri) => {
+        // The REAL table scan and the REAL summary function, against the same
+        // snapshot the decoration pass reads — so a regression in either turns
+        // this test red. The rendered after-text itself cannot be read back.
+        const snap = tracker.snapshotFor(uri) ?? tracker.snapshot();
+        const statusByLine = new Map(snap.statuses);
+        return dataTablesOf(snap.text).map((table) => ({
+          section: table.section,
+          headerLine: table.headerLine,
+          rowLines: [...table.rowLines],
+          statuses: table.rowLines.map((line) => statusByLine.get(line) ?? null),
+          summary: rowHeaderSummary(
+            table.rowLines.map((line) => statusByLine.get(line)),
+            table.kind,
+          ),
+        }));
+      },
       variablesDescription: () => variablesProvider.descriptionForTests(),
       stepSignatureForText: (text: string) => tracker.stepSignatureForTests(text),
       lastBatchRun: () => testController.lastRun,
@@ -1959,6 +2152,24 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   };
 }
 
+/**
+ * Every row of the named table, read out of the document as it is NOW — the
+ * ▷ Run all rows selection.
+ *
+ * `null` when that table has no rows (it was deleted, or it no longer parses),
+ * which the caller reports rather than sending: an empty `rows` is not a
+ * narrowing, and would silently run the whole file.
+ */
+function allRowsOf(
+  controller: { document: vscode.TextDocument },
+  table: 'run' | { section: string },
+): { rows?: number[]; sectionRows?: Record<string, number[]> } | null {
+  const section = typeof table === 'object' ? table.section : null;
+  const rows = allRowsOfTable(controller.document.getText(), section);
+  if (rows.length === 0) return null;
+  return section === null ? { rows } : { sectionRows: { [section]: rows } };
+}
+
 async function handleWebviewMessage(
   msg: WebviewToHostMsg,
   registry: RunControllerRegistry,
@@ -1975,6 +2186,69 @@ async function handleWebviewMessage(
       registry.notifyRunning(true);
       void controller
         .runLines(msg.lines, { breakpoints })
+        .finally(() => registry.notifyRunning(false));
+      return;
+    }
+    case 'runRows': {
+      // The panel's Rows section and its ▷ Run all rows land here. Wrapped
+      // exactly like `run`: the row axis narrows what runs, it does not change
+      // what a run IS.
+      const controller = registry.active();
+      if (!controller) return notifyNoActive();
+      // ▷ Run all rows names the TABLE, not the numbers on screen — the same
+      // rule ↻ Re-run failed follows, and for the same reason: the panel's
+      // list came from a `rows` message that may predate an edit to the table,
+      // so a row added since would be the one row "run all" left out.
+      const selection = msg.all === undefined ? msg : allRowsOf(controller, msg.all);
+      if (selection === null) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: that table has no rows any more',
+          2500,
+        );
+        return;
+      }
+      const refusal = rowSelectionRefusal(controller.document.getText(), selection);
+      if (refusal) {
+        void vscode.window.showWarningMessage(refusal);
+        return;
+      }
+      const breakpoints = tracker.breakpoints(controller.document.uri);
+      registry.notifyRunning(true);
+      void controller
+        .runLines(msg.all === undefined ? (msg.lines ?? []) : [], {
+          breakpoints,
+          ...(selection.rows && { rows: selection.rows }),
+          ...(selection.sectionRows && { sectionRows: selection.sectionRows }),
+        })
+        .finally(() => registry.notifyRunning(false));
+      return;
+    }
+    case 'rerunFailedRows': {
+      // The panel's ↻ button names the TABLE, not the rows: its own `rows`
+      // message can be a run old, and re-running a remembered number would
+      // run whatever row now sits in that position. The host answers from the
+      // file as it is, through the same `failedRowsToRerun` the palette
+      // command uses, so the two cannot pick different rows.
+      const controller = registry.active();
+      if (!controller) return notifyNoActive();
+      const failed = controller.failedRowsToRerun;
+      const section = typeof msg.table === 'object' ? msg.table.section : null;
+      const rows =
+        section === null
+          ? failed?.rows
+          : failed?.sectionRows?.[section];
+      if (!rows || rows.length === 0) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: no failing rows in that table any more',
+          2500,
+        );
+        return;
+      }
+      const selection = section === null ? { rows } : { sectionRows: { [section]: rows } };
+      const breakpoints = tracker.breakpoints(controller.document.uri);
+      registry.notifyRunning(true);
+      void controller
+        .runLines([], { breakpoints, ...selection })
         .finally(() => registry.notifyRunning(false));
       return;
     }

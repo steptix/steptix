@@ -63,10 +63,32 @@ const BAD_TABLE_FIXTURE = [
   '',
 ].join('\n');
 
+// Two rows, and step 2 asks the author for a value. Cancelling that prompt
+// used to end only THAT row's steps: the row went ✓, the loop moved on and
+// asked again — one prompt per row to say "not this run".
+// Line 7: header, 9/10: the rows, 12: step 1, 13: the `[input:]` step.
+const INPUT_FIXTURE = [
+  '# Rows with a prompt',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '| email | password |',
+  '|-------|----------|',
+  '| a@b.c | pw1 |',
+  '| d@e.f | pw2 |',
+  '',
+  '1. Enter {{email}}',
+  '2. [input: code] Enter the code you were sent',
+  '',
+].join('\n');
+
 const FIXTURES = {
   'data-rows.tmp.md': ROWS_FIXTURE,
   'data-rows-plain.tmp.md': PLAIN_FIXTURE,
   'data-rows-bad.tmp.md': BAD_TABLE_FIXTURE,
+  'data-rows-input.tmp.md': INPUT_FIXTURE,
 };
 
 const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));
@@ -144,13 +166,15 @@ describe('TestBench data-row loop', function () {
     assert.equal(fake.requests[1].parameters.email, 'd@e.f');
   });
 
-  it('closes the session between rows so row 2 starts in a fresh browser', async () => {
+  it('closes the session before every row so each starts in a fresh browser', async () => {
     // The whole reason a run row is its own browser: row 1 may have signed in.
     //
     // Counted against the PLAIN fixture rather than asserted as an absolute,
     // because an interactive run already closes any stale session once before
-    // it starts. The row boundary is the close this feature adds, so the
-    // difference is what the test is about.
+    // it starts. The closes this feature adds are the difference — and there
+    // is now ONE PER ROW, not one between rows: the first row of a row run
+    // reused whatever session was already open, so it started on the page the
+    // previous run left with that browser's localStorage.
     await open('data-rows-plain.tmp.md');
     await runAllRows(1);
     const baseline = fake.closeSessionIds.length;
@@ -162,8 +186,8 @@ describe('TestBench data-row loop', function () {
 
     assert.equal(
       fake.closeSessionIds.length,
-      baseline + 1,
-      `two rows must add exactly one close over an unlooped run (baseline ${baseline}, got ${fake.closeSessionIds.length})`,
+      baseline + 2,
+      `two rows must add one close each over an unlooped run (baseline ${baseline}, got ${fake.closeSessionIds.length})`,
     );
   });
 
@@ -246,5 +270,1144 @@ describe('TestBench data-row loop', function () {
     assert.equal(fake.requests.length, 1);
     assert.equal(fake.requests[0].dataRow, undefined);
     assert.equal(fake.finalizeRowReportCalls.length, 0);
+  });
+});
+
+/**
+ * The table as the control surface (stories/data-row-progress-and-selection.md).
+ *
+ * The rows of the table carry their own status marks, in the same cell the
+ * steps use, and the header line carries a summary of them. Asserted through
+ * the tracker and the `rowTablesForTests` hook — which calls the REAL scan and
+ * the REAL summary function the decoration pass uses, because a rendered
+ * decoration's text cannot be read back from the extension host.
+ */
+describe('TestBench data-row painting', function () {
+  this.timeout(40_000);
+
+  /** @type {FakeApiClient} */
+  let fake;
+  let hooks;
+
+  // Lines of `ROWS_FIXTURE`: 7 is the table header, 9 and 10 the two data
+  // rows, 12 and 13 the two steps.
+  const HEADER_LINE = 7;
+  const ROW_LINES = [9, 10];
+  const STEP_LINE = 12;
+
+  before(async () => {
+    for (const [name, content] of Object.entries(FIXTURES)) {
+      fs.writeFileSync(path.resolve(FIXTURES_DIR, name), content);
+    }
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    assert.ok(ext, `${EXT_ID} not loaded`);
+    if (!ext.isActive) await ext.activate();
+    hooks = ext.exports?.__testHooks;
+    assert.ok(hooks, '__testHooks not exposed');
+    await hooks.discoveryReady();
+  });
+
+  after(() => {
+    for (const name of Object.keys(FIXTURES)) {
+      try { fs.unlinkSync(path.resolve(FIXTURES_DIR, name)); } catch { /* ignore */ }
+    }
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    if (vscode.debug.breakpoints.length > 0) {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+    }
+    fake = new FakeApiClient();
+    hooks.setApiClientFactory(() => fake);
+  });
+
+  async function open(name) {
+    const uri = fixtureUri(name);
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture editor active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
+    return uri;
+  }
+
+  /** Run every row to completion by ending each stream as it opens. */
+  async function runAllRows(expectedRequests) {
+    fake.streamScripts = Array.from({ length: expectedRequests }, () => (f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor(
+      `${expectedRequests} request(s)`,
+      () => fake.requests.length >= expectedRequests,
+    );
+    await waitFor('run finished', () => hooks.isRunning() === false);
+  }
+
+  /** The status on each data-row line, in table order. */
+  const rowStatuses = (uri) => {
+    const snap = hooks.tracker.snapshotFor(uri);
+    const byLine = new Map(snap ? snap.statuses : []);
+    return ROW_LINES.map((line) => byLine.get(line) ?? null);
+  };
+
+  /** The one table's header summary — the after-text on the header line. */
+  const summary = (uri) => {
+    const tables = hooks.rowTablesForTests(uri);
+    return tables.length === 1 ? tables[0].summary : `expected one table, got ${tables.length}`;
+  };
+
+  /** The most recent `rows` message the host posted since `mark`, or null. */
+  const lastRowsMsg = (mark) => {
+    const msgs = hooks.hostMessagesSince(mark).filter((m) => m.type === 'rows');
+    return msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  };
+
+  it('paints each row in turn and leaves the pass/fail marks with the header summary', async () => {
+    const uri = await open('data-rows.tmp.md');
+    // Row 1's stream stays open until we have seen it banded; row 2's fails.
+    fake.streamScripts = [
+      () => { /* leave row 1 running */ },
+      (f) => {
+        f.push({ type: 'step:start', line: STEP_LINE });
+        f.push({ type: 'step:fail', line: STEP_LINE, error: 'no such element' });
+        f.end();
+      },
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+
+    await waitFor('row 1 running', () => rowStatuses(uri)[0] === 'running');
+    assert.deepEqual(rowStatuses(uri), ['running', null], 'only the running row is marked');
+    assert.equal(summary(uri), '2 rows · row 1 of 2 running');
+
+    fake.endAt(0);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    // Row 2's boundary clears the whole file's statuses so its steps repaint
+    // from blank. Row 1's pass has to survive that, which is the whole reason
+    // the matrix is re-posted rather than painted event by event.
+    assert.deepEqual(rowStatuses(uri), ['pass', 'fail']);
+    assert.equal(summary(uri), '2 rows · 1 passed · 1 failed');
+  });
+
+  it('the failed row names the step it died at, quotes it, and shows its values', async () => {
+    const uri = await open('data-rows.tmp.md');
+    fake.streamScripts = [
+      (f) => { f.end(); },
+      (f) => {
+        f.push({ type: 'step:fail', line: STEP_LINE, error: 'no such element' });
+        f.end();
+      },
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    // Wait for both batches before the idle check: `isRunning` is false in
+    // the moment between the command being dispatched and the run starting,
+    // so a bare idle wait returns before anything has happened.
+    await waitFor('two requests', () => fake.requests.length >= 2);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    const snap = hooks.tracker.snapshotFor(uri);
+    const failure = new Map(snap.failures).get(ROW_LINES[1]);
+    assert.ok(failure, 'the failed row must carry its reason');
+    // The row says which step; the step's own hover (rowSummary) says which rows.
+    assert.match(failure.error, /^Row 2 failed at step 1 — "Enter \{\{email\}\}"/);
+    assert.match(failure.error, /no such element/);
+    // …and the row's values, masked the way the Output banner masks them.
+    assert.match(failure.error, /email=d@e\.f, password=\*{3}/);
+    // A passed row carries no hover, exactly as a passed step carries none.
+    assert.equal(new Map(snap.failures).get(ROW_LINES[0]), undefined);
+  });
+
+  it('Stop marks the row it interrupted and skips the rest, with the reason', async () => {
+    const uri = await open('data-rows.tmp.md');
+    fake.streamScripts = [() => { /* leave row 1 running */ }];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('row 1 running', () => rowStatuses(uri)[0] === 'running');
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.deepEqual(rowStatuses(uri), ['stopped', 'skip']);
+    assert.equal(summary(uri), '2 rows · 1 stopped · 1 not run');
+    const snap = hooks.tracker.snapshotFor(uri);
+    assert.equal(new Map(snap.failures).get(ROW_LINES[1]).error, 'Row 2 not run (stopped)');
+    // The ■ is the one mark with no other explanation anywhere — the row has
+    // no failure, no skip reason and no duration worth reading — so it says
+    // what happened to it.
+    assert.equal(
+      new Map(snap.failures).get(ROW_LINES[0]).error,
+      'Row 1 stopped — the run was stopped while this row was running',
+    );
+  });
+
+  it('the Output’s row lines and its summary account for a Stop', async () => {
+    // The interrupted row is in neither outcome list: it never finished its
+    // steps (so not in `rowOutcomes`) and its batch was sent (so not in
+    // `notRun`). It used to get no line at all while the summary counted it,
+    // so the parts summed to one less than the count.
+    const uri = await open('data-rows.tmp.md');
+    const mark = hooks.hostMessageCount();
+    fake.streamScripts = [() => { /* leave row 1 running */ }];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('row 1 running', () => rowStatuses(uri)[0] === 'running');
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    const lines = hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'output')
+      .map((m) => m.event.msg);
+    assert.ok(
+      lines.some((l) => /^ {2}Row 1: stopped \(\d+\.\ds\)$/.test(l)),
+      `the interrupted row needs a line. Got ${JSON.stringify(lines)}`,
+    );
+    assert.ok(
+      lines.includes('  Row 2: not run (stopped)'),
+      `expected the never-reached row. Got ${JSON.stringify(lines)}`,
+    );
+    assert.ok(
+      lines.includes('Rows: 2 — 0 passed, 0 failed, 1 stopped, 1 not run'),
+      `the parts must sum to the planned count. Got ${JSON.stringify(lines)}`,
+    );
+  });
+
+  // ── A pause ends the loop, and says so ──────────────────────────────────
+  //
+  // The bug these pin: `parkedAtPause` is assigned AFTER the row loop (a
+  // breakpoint trim) or in the catch (a Pause), so the guard that read it at
+  // the TOP of each iteration could never fire. A breakpoint on step 2 handed
+  // the loop step 1, and the loop ran that one step for every row, closed the
+  // browser between them and painted the whole matrix ✓ — a green
+  // `2 rows · 2 passed` with the pause arrow sitting on step 2.
+
+  /** Run with a breakpoint on step 2, and stop when the run parks. */
+  async function runToBreakpoint(uri) {
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(uri, new vscode.Position(STEP_LINE, 0)), // step 2
+        true,
+      ),
+    ]);
+    fake.streamScripts = [(f) => f.end()];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('parked at the breakpoint', () =>
+      hooks.tracker.snapshotFor(uri).breakpointStop === STEP_LINE + 1);
+    await waitFor('idle while parked', () => hooks.isRunning() === false);
+  }
+
+  it('a breakpoint ends the loop after the row it parked in', async () => {
+    const uri = await open('data-rows.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runToBreakpoint(uri);
+
+    assert.equal(fake.requests.length, 1, 'exactly one batch: the loop stopped at row 1');
+    // Row 1 keeps the band — that is where the run IS, with half its steps
+    // run and a Continue away from the rest. It must not be ✓.
+    assert.deepEqual(rowStatuses(uri), ['running', 'skip']);
+    assert.equal(summary(uri), '2 rows · row 1 of 2 running · 1 not run');
+    const failures = new Map(hooks.tracker.snapshotFor(uri).failures);
+    assert.equal(
+      failures.get(ROW_LINES[1]).error,
+      'Row 2 not run (paused) — right-click the line number and pick Run This Row ' +
+        'to run it on its own',
+    );
+
+    const lines = hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'output')
+      .map((m) => m.event.msg);
+    assert.ok(
+      lines.some((l) => /^ {2}Row 1: paused/.test(l)),
+      `the parked row needs a line of its own. Got ${JSON.stringify(lines)}`,
+    );
+    assert.ok(
+      lines.includes('  Row 2: not run (paused)'),
+      `Got ${JSON.stringify(lines)}`,
+    );
+    assert.ok(
+      lines.includes('Rows: 2 — 0 passed, 0 failed, 1 paused, 1 not run'),
+      `the parts must sum to the planned count. Got ${JSON.stringify(lines)}`,
+    );
+    // The report is still written, and it knows which rows never ran.
+    assert.equal(fake.finalizeRowReportCalls.length, 1);
+    assert.deepEqual(
+      fake.finalizeRowReportCalls[0].notRun.map((r) => [r.row, r.reason]),
+      [[2, 'paused']],
+    );
+  });
+
+  it('Continue settles the row the pause parked in', async () => {
+    const uri = await open('data-rows.tmp.md');
+    await runToBreakpoint(uri);
+    assert.deepEqual(rowStatuses(uri), ['running', 'skip']);
+
+    fake.streamScripts = [undefined, (f) => f.end()];
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('a second request', () => fake.requests.length >= 2);
+    await waitFor('idle after the continue', () => hooks.isRunning() === false);
+
+    assert.deepEqual(
+      rowStatuses(uri),
+      ['pass', 'skip'],
+      'the Continue is what decides the parked row; row 2 is still not run',
+    );
+  });
+
+  it('a Stop while parked closes the row out ■, not ✓', async () => {
+    const uri = await open('data-rows.tmp.md');
+    await runToBreakpoint(uri);
+
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await waitFor('row 1 stopped', () => rowStatuses(uri)[0] === 'stopped');
+    assert.deepEqual(rowStatuses(uri), ['stopped', 'skip']);
+    const failures = new Map(hooks.tracker.snapshotFor(uri).failures);
+    assert.equal(
+      failures.get(ROW_LINES[0]).error,
+      'Row 1 stopped — the run was stopped while this row was running',
+    );
+  });
+
+  it('a cancelled [input:] prompt ends the loop instead of asking again', async () => {
+    // The break left `anyFailed` false, so the row was painted ✓ and the loop
+    // moved on — one prompt per row to say "not this run", and a green matrix
+    // for steps that never ran.
+    const uri = await open('data-rows-input.tmp.md');
+    fake.streamScripts = [(f) => f.end(), (f) => f.end()];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('row 1’s first step is sent', () => fake.requests.length >= 1);
+
+    // An `[input:]` prompt is VS Code's own InputBox, so Escape is what
+    // cancels it. Issued on every poll: the box opens once the step batch's
+    // stream ends, and closing a quick-open that is not there is a no-op.
+    await waitFor('the run ends when the prompt is dismissed', async () => {
+      await vscode.commands.executeCommand('workbench.action.closeQuickOpen');
+      return hooks.isRunning() === false;
+    });
+
+    // Had the loop carried on, row 2 would have sent its own first batch and
+    // then asked for the code all over again.
+    assert.equal(fake.requests.length, 1, 'row 2 must not be started');
+    const rowStatusesHere = () => {
+      const byLine = new Map(hooks.tracker.snapshotFor(uri).statuses);
+      return [9, 10].map((line) => byLine.get(line) ?? null);
+    };
+    assert.deepEqual(rowStatusesHere(), ['stopped', 'skip']);
+    const failures = new Map(hooks.tracker.snapshotFor(uri).failures);
+    assert.equal(
+      failures.get(9).error,
+      'Row 1 stopped — the prompt was cancelled',
+    );
+    // To the rows it never reached this IS a Stop — the author said "not this
+    // run" — so they read as one.
+    assert.equal(failures.get(10).error, 'Row 2 not run (stopped)');
+  });
+
+  it('shows the Rows section before anything has run, and again after a reload', async () => {
+    // The matrix used to be posted only from inside a run, so opening a
+    // data-driven test showed an empty Rows section — and a window reload
+    // emptied it again even though the ✓/✗ marks were still on the rows.
+    await open('data-rows-plain.tmp.md');
+    const mark = hooks.hostMessageCount();
+    const uri = await open('data-rows.tmp.md');
+    await waitFor('a matrix for a file nobody has run', () => lastRowsMsg(mark) !== null);
+
+    const opened = lastRowsMsg(mark);
+    assert.equal(opened.uri, uri.toString());
+    assert.equal(opened.tables.length, 1);
+    assert.equal(opened.tables[0].headerLine, HEADER_LINE);
+    assert.deepEqual(
+      opened.tables[0].rows.map((r) => [r.row, r.line, r.values, r.status]),
+      [
+        [1, ROW_LINES[0], 'email=a@b.c, password=***', 'pending'],
+        [2, ROW_LINES[1], 'email=d@e.f, password=***', 'pending'],
+      ],
+    );
+  });
+
+  it('derives the matrix from the marks the tracker persisted, hover and all', async () => {
+    const uri = await open('data-rows.tmp.md');
+    // A run that leaves row 2 red, then a switch away and back — which is the
+    // observable half of a reload: the tracker's marks are what survives, and
+    // the panel has to be told about them again.
+    fake.streamScripts = [
+      (f) => f.end(),
+      (f) => {
+        f.push({ type: 'step:fail', line: STEP_LINE, error: 'no such element' });
+        f.end();
+      },
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('two requests', () => fake.requests.length >= 2);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assert.deepEqual(rowStatuses(uri), ['pass', 'fail']);
+
+    await open('data-rows-plain.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await open('data-rows.tmp.md');
+    await waitFor('the matrix comes back', () => lastRowsMsg(mark) !== null);
+
+    const msg = lastRowsMsg(mark);
+    assert.deepEqual(
+      msg.tables[0].rows.map((r) => [r.row, r.status, r.detail]),
+      [
+        [1, 'passed', undefined],
+        [2, 'failed', 'failed at step 1'],
+      ],
+      'the note is read back out of the persisted hover',
+    );
+  });
+
+  it('the panel’s ↻ Re-run failed asks by TABLE, and the host resolves the rows', async () => {
+    // The panel's own numbers can be a run old. Naming the table and letting
+    // the host re-read the file is what keeps the button and the palette
+    // command from ever picking different rows.
+    const uri = await open('data-rows.tmp.md');
+    fake.streamScripts = [
+      (f) => f.end(),
+      (f) => {
+        f.push({ type: 'step:fail', line: STEP_LINE, error: 'boom' });
+        f.end();
+      },
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('two requests', () => fake.requests.length >= 2);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assert.deepEqual(rowStatuses(uri), ['pass', 'fail']);
+
+    fake.streamScripts = [undefined, undefined, (f) => f.end()];
+    void hooks.dispatchWebviewMessage({ type: 'rerunFailedRows', table: 'run' });
+    await waitFor('a third request', () => fake.requests.length >= 3);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.equal(fake.requests.length, 3, 'only the failing row re-runs');
+    assert.deepEqual([fake.requests[2].dataRow, fake.requests[2].dataRowCount], [2, 2]);
+  });
+
+  it('posts the matrix to the panel, with the editor line and masked values', async () => {
+    const uri = await open('data-rows.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runAllRows(2);
+
+    const msg = lastRowsMsg(mark);
+    assert.ok(msg, 'expected a `rows` message');
+    assert.equal(msg.uri, uri.toString());
+    assert.equal(msg.tables.length, 1);
+    assert.equal(msg.tables[0].table, 'run');
+    assert.equal(msg.tables[0].headerLine, HEADER_LINE);
+    assert.deepEqual(
+      msg.tables[0].rows.map((r) => [r.row, r.line, r.values, r.status]),
+      [
+        [1, ROW_LINES[0], 'email=a@b.c, password=***', 'passed'],
+        [2, ROW_LINES[1], 'email=d@e.f, password=***', 'passed'],
+      ],
+    );
+    for (const row of msg.tables[0].rows) {
+      assert.equal(typeof row.durationMs, 'number', 'a finished row reports its duration');
+    }
+  });
+
+  it('leaves a test with no table with no summaries and an EMPTY matrix', async () => {
+    const uri = await open('data-rows-plain.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runAllRows(1);
+    assert.deepEqual(hooks.rowTablesForTests(uri), [], 'no tables, no summaries');
+    // An empty list is a message, not silence: it is what a file has to say
+    // when its table is gone, and the panel's Rows section only disappears
+    // because it was told. The next test is that case for real.
+    const msg = lastRowsMsg(mark);
+    assert.ok(msg, 'the file still says what its rows are');
+    assert.deepEqual(msg.tables, []);
+  });
+
+  it('a run of a file whose table was deleted tells the panel the rows are gone', async () => {
+    const uri = await open('data-rows.tmp.md');
+    await runAllRows(2);
+
+    // Delete the four table lines (header, delimiter, both rows).
+    const edit = new vscode.WorkspaceEdit();
+    edit.delete(
+      uri,
+      new vscode.Range(new vscode.Position(HEADER_LINE - 1, 0), new vscode.Position(ROW_LINES[1], 0)),
+    );
+    assert.ok(await vscode.workspace.applyEdit(edit), 'the edit must apply');
+
+    try {
+      const mark = hooks.hostMessageCount();
+      fake.streamScripts = [undefined, undefined, (f) => f.end()];
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('a third request', () => fake.requests.length >= 3);
+      await waitFor('run finished', () => hooks.isRunning() === false);
+
+      const msg = lastRowsMsg(mark);
+      assert.ok(msg, 'the panel has to be told, or it keeps showing rows that are gone');
+      assert.deepEqual(msg.tables, []);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
+  it('paints nothing for a malformed table — the run is unlooped, so there are no rows', async () => {
+    const uri = await open('data-rows-bad.tmp.md');
+    await runAllRows(1);
+    assert.deepEqual(hooks.rowTablesForTests(uri), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Running the rows you chose
+// (stories/data-row-progress-and-selection.md §Running rows)
+// ---------------------------------------------------------------------------
+
+// line 7: header, 8: delimiter, 9/10/11: the three rows,
+// line 13/14/15: the three steps.
+const THREE_ROWS_FIXTURE = [
+  '# Rows three',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '| email | password |',
+  '|-------|----------|',
+  '| a@b.c | pw1 |',
+  '| d@e.f | pw2 |',
+  '| g@h.i | pw3 |',
+  '',
+  '1. Enter {{email}}',
+  '2. Enter {{password}}',
+  '3. Submit',
+  '',
+].join('\n');
+
+// line 7/8/9: the three steps; line 11 the `### Upload each statement`
+// heading, 12 header, 13 delimiter, 14/15/16 the rows, 17/18 the body.
+const SECTION_ROWS_FIXTURE = [
+  '# Section rows',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '1. Sign in',
+  '2. Upload each statement',
+  '3. Count them',
+  '',
+  '### Upload each statement',
+  '| file  |',
+  '|-------|',
+  '| a.png |',
+  '| b.png |',
+  '| c.png |',
+  '1. Upload {{file}}',
+  '2. Check it landed',
+  '',
+].join('\n');
+
+// A section table whose one row is short a cell. Nothing used to say so:
+// `buildSectionsPayload`, `dataTablesOf` and `scanTables` each swallow the
+// throw for a good local reason, and the section then ran once with `{{file}}`
+// unresolved — which reads as a model failure two steps later.
+const BAD_SECTION_FIXTURE = [
+  '# Section bad',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '1. Sign in',
+  '2. Upload each statement',
+  '',
+  '### Upload each statement',
+  '| file  | kind |',
+  '|-------|------|',
+  '| a.png |',
+  '1. Upload {{file}}',
+  '',
+].join('\n');
+
+const SELECTION_FIXTURES = {
+  'data-rows-3.tmp.md': THREE_ROWS_FIXTURE,
+  'data-rows-section.tmp.md': SECTION_ROWS_FIXTURE,
+  'data-rows-bad-section.tmp.md': BAD_SECTION_FIXTURE,
+  // Its own copy: the two suites above delete their fixtures in `after`.
+  'data-rows-none.tmp.md': PLAIN_FIXTURE,
+};
+
+/**
+ * Running the rows you chose.
+ *
+ * The selection narrows every axis it names, and an axis with nothing in it
+ * means all of that axis — so the assertions are about WHICH batches went out
+ * and what each carried: a filtered plan keeps every number (`dataRow` is the
+ * table position, `dataRowCount` the table's count), a run that named steps
+ * does NOT restart the browser between rows, and a row nobody selected keeps
+ * the mark it already had.
+ */
+describe('TestBench data-row selection', function () {
+  this.timeout(40_000);
+
+  /** @type {FakeApiClient} */
+  let fake;
+  let hooks;
+
+  const HEADER_LINE = 7;
+  const ROW_LINES = [9, 10, 11];
+  const STEP_LINES = [13, 14, 15];
+
+  before(async () => {
+    for (const [name, content] of Object.entries(SELECTION_FIXTURES)) {
+      fs.writeFileSync(path.resolve(FIXTURES_DIR, name), content);
+    }
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    assert.ok(ext, `${EXT_ID} not loaded`);
+    if (!ext.isActive) await ext.activate();
+    hooks = ext.exports?.__testHooks;
+    assert.ok(hooks, '__testHooks not exposed');
+    await hooks.discoveryReady();
+    await hooks.discoveryRefresh();
+  });
+
+  after(() => {
+    for (const name of Object.keys(SELECTION_FIXTURES)) {
+      try { fs.unlinkSync(path.resolve(FIXTURES_DIR, name)); } catch { /* ignore */ }
+    }
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    if (vscode.debug.breakpoints.length > 0) {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+    }
+    fake = new FakeApiClient();
+    hooks.setApiClientFactory(() => fake);
+  });
+
+  async function open(name) {
+    const uri = fixtureUri(name);
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture editor active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
+    return uri;
+  }
+
+  /**
+   * Queue scripts for the NEXT streams this fake opens.
+   *
+   * `streamScripts` is indexed by the fake's cumulative stream count, so a
+   * test that runs twice has to pad past the first run's streams — assigning a
+   * fresh array would leave the second run's streams unscripted and hanging.
+   */
+  function queueScripts(...scripts) {
+    fake.streamScripts = [
+      ...Array.from({ length: fake.streamCallCount }, () => undefined),
+      ...scripts,
+    ];
+  }
+
+  /** Dispatch a `runRows` message and wait for `expected` more batches. */
+  async function runRows(msg, expected) {
+    const before = fake.requests.length;
+    queueScripts(...Array.from({ length: expected }, () => (f) => f.end()));
+    void hooks.dispatchWebviewMessage({ type: 'runRows', ...msg });
+    if (expected > 0) {
+      await waitFor(
+        `${expected} more request(s)`,
+        () => fake.requests.length >= before + expected,
+      );
+    }
+    await waitFor('run finished', () => hooks.isRunning() === false);
+  }
+
+  /** The status on each data-row line, in table order. */
+  const rowStatuses = (uri) => {
+    const snap = hooks.tracker.snapshotFor(uri);
+    const byLine = new Map(snap ? snap.statuses : []);
+    return ROW_LINES.map((line) => byLine.get(line) ?? null);
+  };
+
+  /** Every `output` run event the host posted since `mark`. */
+  const outputSince = (mark) =>
+    hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'output')
+      .map((m) => m.event.msg);
+
+  it('runs one chosen row, keeping its table number and the table count', async () => {
+    const uri = await open('data-rows-3.tmp.md');
+    await runRows({ rows: [3] }, 1);
+
+    assert.equal(fake.requests.length, 1, 'one row, one batch');
+    assert.deepEqual(
+      [fake.requests[0].dataRow, fake.requests[0].dataRowCount],
+      [3, 3],
+      'the plan is filtered, never renumbered',
+    );
+    assert.deepEqual(fake.requests[0].dataRowValues, { email: 'g@h.i', password: 'pw3' });
+    assert.deepEqual(rowStatuses(uri), [null, null, 'pass'], 'only the chosen row is painted');
+  });
+
+  it('runs two chosen rows in table order, each in a fresh browser', async () => {
+    await open('data-rows-3.tmp.md');
+    // A one-row run first, purely to absorb the interactive pre-close: the
+    // closes this feature is about are the ones the row loop makes, so the
+    // assertion is a difference, not an absolute.
+    await runRows({ rows: [2] }, 1);
+    const baseline = fake.closeSessionIds.length;
+
+    await runRows({ rows: [3, 1] }, 2);
+    assert.deepEqual(
+      fake.requests.slice(1).map((r) => r.dataRow),
+      [1, 3],
+      'table order, whatever order the numbers arrived in',
+    );
+    assert.equal(
+      fake.closeSessionIds.length,
+      baseline + 2,
+      'one close per row: row 1 must not inherit the browser row 2 left open, and row 3 must not inherit row 1s',
+    );
+  });
+
+  it('closes a session a previous run left open BEFORE the first row', async () => {
+    // The defect this pins. The recycle used to live at the boundary BETWEEN
+    // rows, so the first planned row — row 1 of a Run All, the single row of
+    // Run This Row — reused whatever interactive session was already open. Live
+    // evidence: after a green five-row run of `securebank-matrix.md`, Run This
+    // Row on row 4 navigated fine and failed step 2, "Reject non-essential
+    // cookies in the cookie banner" — the previous row's browser had already
+    // made that choice and remembered it, so there was no banner.
+    await open('data-rows-3.tmp.md');
+    // A whole-file run, which leaves its session open: it belongs to the last
+    // row that ran (§What does not change).
+    await runRows({ all: 'run' }, 3);
+    const baseline = fake.closeSessionIds.length;
+    const batchesAtClose = [];
+    fake.closeSessionImpl = () => batchesAtClose.push(fake.requests.length);
+    const before = fake.requests.length;
+
+    await runRows({ rows: [3] }, 1);
+
+    assert.equal(fake.requests.length, before + 1, 'one row, one batch');
+    assert.equal(
+      fake.closeSessionIds.length,
+      baseline + 1,
+      'the one planned row still gets its one close',
+    );
+    assert.deepEqual(
+      batchesAtClose,
+      [before],
+      'the close must land BEFORE the row batch, or the row runs in the old browser',
+    );
+  });
+
+  it('…and a step selection of rows closes nothing, the first row included', async () => {
+    // The other half of decision 4: a selection of SOME steps runs where the
+    // session is, so the pre-first-row recycle must not fire there either —
+    // that would put the first selected row on a blank page.
+    await open('data-rows-3.tmp.md');
+    await runRows({ all: 'run' }, 3);
+    const closes = [];
+    fake.closeSessionImpl = (sessionId) => closes.push(sessionId);
+
+    await runRows({ rows: [1, 2], lines: [STEP_LINES[1]] }, 2);
+
+    assert.deepEqual(closes, [], 'a step selection runs on the session it is on');
+  });
+
+  it('leaves the rows nobody selected exactly as they were', async () => {
+    // Decision 6. The run's opening clear wipes the whole file's statuses and
+    // the matrix is what puts them back — so an unselected row survives only
+    // because the matrix was seeded from what the gutter already showed.
+    const uri = await open('data-rows-3.tmp.md');
+    fake.streamScripts = [
+      (f) => f.end(),
+      (f) => {
+        f.push({ type: 'step:fail', line: STEP_LINES[0], error: 'no such element' });
+        f.end();
+      },
+      (f) => f.end(),
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('three requests', () => fake.requests.length >= 3);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assert.deepEqual(rowStatuses(uri), ['pass', 'fail', 'pass']);
+
+    await runRows({ rows: [1] }, 1);
+    assert.deepEqual(
+      rowStatuses(uri),
+      ['pass', 'fail', 'pass'],
+      'rows 2 and 3 keep their marks — they were not skipped, they were not in the run',
+    );
+    // …and the failed row keeps its hover, the only place the reason survives
+    // once the run log has scrolled.
+    const snap = hooks.tracker.snapshotFor(uri);
+    assert.match(new Map(snap.failures).get(ROW_LINES[1]).error, /^Row 2 failed at step 1/);
+  });
+
+  it('a step selection with rows runs on the session it is on, once per row', async () => {
+    // Decision 4: a fresh browser per row belongs to the WHOLE-FILE run.
+    await open('data-rows-3.tmp.md');
+    await runRows({ rows: [2] }, 1);
+    const baseline = fake.closeSessionIds.length;
+    const mark = hooks.hostMessageCount();
+
+    await runRows({ rows: [1, 2], lines: [STEP_LINES[1], STEP_LINES[2]] }, 2);
+
+    const sent = fake.requests.slice(1);
+    assert.deepEqual(sent.map((r) => r.dataRow), [1, 2]);
+    for (const request of sent) {
+      assert.deepEqual(
+        request.sourceLines,
+        [STEP_LINES[1], STEP_LINES[2]],
+        'only the selected steps run, on every row',
+      );
+    }
+    assert.equal(
+      fake.closeSessionIds.length,
+      baseline,
+      'no browser restart between rows: the steps run where the session is',
+    );
+    const banners = outputSince(mark).filter((m) => m.startsWith('Row '));
+    assert.deepEqual(banners, [
+      'Row 1 of 3 (steps 2–3) — email=a@b.c, password=***',
+      'Row 2 of 3 (steps 2–3) — email=d@e.f, password=***',
+    ]);
+  });
+
+  it('a selection that covers every step is a whole-file run — fresh browser per row', async () => {
+    // Ctrl+A then F5, and shift-clicking the first step and the last in the
+    // panel, both arrive as a step selection naming every step there is.
+    // Reading that as "some steps" put five rows in one browser and started
+    // rows 2..n on the page row 1 signed into. A selection that covers
+    // everything means everything, which is what it already means for steps.
+    await open('data-rows-3.tmp.md');
+    await runRows({ rows: [2] }, 1);
+    const baseline = fake.closeSessionIds.length;
+
+    await runRows({ rows: [1, 2], lines: STEP_LINES }, 2);
+    assert.equal(
+      fake.closeSessionIds.length,
+      baseline + 2,
+      'every step selected: both rows must start in a fresh browser',
+    );
+  });
+
+  it('a drag from ## Steps to the first step is a whole-file run too', async () => {
+    // The most ordinary gesture there is, and the one the raw-lines test could
+    // not see: the selection's lines are the heading, the table and a blank —
+    // not one step among them — while the resolver's fallback correctly reads
+    // it as the whole flow. Asking the RAW lines whether they cover every step
+    // answered no, so five rows ran in one browser and rows 2..n started on
+    // the page row 1 had signed into.
+    await open('data-rows-3.tmp.md');
+    await runRows({ rows: [2] }, 1);
+    const baseline = fake.closeSessionIds.length;
+
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(5, 0), // the `## Steps` heading, line 6
+      new vscode.Position(STEP_LINES[0] - 1, 0), // stops AT the start of step 1
+    );
+    queueScripts((f) => f.end(), (f) => f.end(), (f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('three more requests', () => fake.requests.length >= 4);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.deepEqual(fake.requests.slice(1).map((r) => r.dataRow), [1, 2, 3]);
+    assert.equal(
+      fake.closeSessionIds.length,
+      baseline + 3,
+      'every row must start in a fresh browser, the first one included',
+    );
+  });
+
+  it('▷ Run all rows resolves the rows from the file, not from the panel', async () => {
+    // The panel's numbers came from a `rows` message that may be a run old, so
+    // the button names the TABLE and the host reads the file as it is.
+    await open('data-rows-3.tmp.md');
+    await runRows({ all: 'run' }, 3);
+    assert.deepEqual(fake.requests.map((r) => r.dataRow), [1, 2, 3]);
+    assert.deepEqual(fake.requests.map((r) => r.dataRowCount), [3, 3, 3]);
+  });
+
+  it('…and for a section table it runs every iteration of that one', async () => {
+    await open('data-rows-section.tmp.md');
+    await runRows({ all: { section: 'Upload each statement' } }, 1);
+    const entry = fake.requests[0].sections['upload each statement'];
+    assert.deepEqual(entry.rowNumbers, [1, 2, 3]);
+    assert.equal(entry.rowCount, 3);
+    assert.equal(fake.requests[0].dataRow, undefined, 'narrowing a section is not a row loop');
+  });
+
+  it('▷ Run all rows on a file with no table runs nothing at all', async () => {
+    // Not "every row of a table that is not there", which an empty `rows` list
+    // would have meant: an axis with nothing in it means ALL of that axis, so
+    // sending one would have run the whole file.
+    await open('data-rows-none.tmp.md');
+    void hooks.dispatchWebviewMessage({ type: 'runRows', all: 'run' });
+    await sleep(300);
+    assert.equal(fake.requests.length, 0);
+  });
+
+  it('…and a proper subset of the steps still runs where the session is', async () => {
+    await open('data-rows-3.tmp.md');
+    await runRows({ rows: [2] }, 1);
+    const baseline = fake.closeSessionIds.length;
+
+    await runRows({ rows: [1, 2], lines: STEP_LINES.slice(0, 2) }, 2);
+    assert.equal(
+      fake.closeSessionIds.length,
+      baseline,
+      'one step short of the whole flow is a step selection, and those run in place',
+    );
+  });
+
+  it('says out loud that a step selection runs once per row', async () => {
+    // The silent case: no rows ticked, one step selected, five runs.
+    await open('data-rows-3.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runRows({ lines: [STEP_LINES[1]] }, 3);
+    assert.ok(
+      outputSince(mark).includes(
+        'Running 1 selected step for each of 3 rows — select rows in the table to narrow it',
+      ),
+      `expected the multiplier to be announced. Got ${JSON.stringify(outputSince(mark))}`,
+    );
+  });
+
+  it('prints a line per row and the CLI rows summary', async () => {
+    await open('data-rows-3.tmp.md');
+    const mark = hooks.hostMessageCount();
+    fake.streamScripts = [
+      (f) => f.end(),
+      (f) => {
+        f.push({ type: 'step:fail', line: STEP_LINES[0], error: 'boom' });
+        f.end();
+      },
+    ];
+    void hooks.dispatchWebviewMessage({ type: 'runRows', rows: [1, 2] });
+    await waitFor('two requests', () => fake.requests.length >= 2);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    const lines = outputSince(mark);
+    assert.ok(
+      lines.some((l) => /^ {2}Row 1: passed \(\d+\.\ds\)$/.test(l)),
+      `expected a per-row line with a duration. Got ${JSON.stringify(lines)}`,
+    );
+    assert.ok(
+      lines.some((l) => /^ {2}Row 2: failed at step 1 \(\d+\.\ds\)$/.test(l)),
+      `the failed row names the step it died at. Got ${JSON.stringify(lines)}`,
+    );
+    // The count is what this run PLANNED — an unselected row was never in it.
+    assert.ok(
+      lines.includes('Rows: 2 — 1 passed, 1 failed'),
+      `expected the rows summary. Got ${JSON.stringify(lines)}`,
+    );
+  });
+
+  it('Run This Row on a table line runs that row alone', async () => {
+    const uri = await open('data-rows-3.tmp.md');
+    fake.streamScripts = [(f) => f.end()];
+    await vscode.commands.executeCommand('testbench-native.runRow', { lineNumber: ROW_LINES[1] });
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.equal(fake.requests.length, 1);
+    assert.deepEqual([fake.requests[0].dataRow, fake.requests[0].dataRowCount], [2, 3]);
+    assert.deepEqual(rowStatuses(uri), [null, 'pass', null]);
+  });
+
+  it('offers Run This Row on the data-row lines and on no others', async () => {
+    // The gutter item's `when` is `editorLineNumber in <this array>` — the
+    // only per-line `when` VS Code has, and its evaluation is not observable
+    // from the extension host, so the array is what a test can pin.
+    await open('data-rows-3.tmp.md');
+    await waitFor(
+      'the key is published',
+      () => hooks.tracker.lastDataRowLinesContextValue.length > 0,
+    );
+    assert.deepEqual(hooks.tracker.lastDataRowLinesContextValue, ROW_LINES);
+
+    // The section fixture's rows too — and, on a file with no table, nothing.
+    await open('data-rows-section.tmp.md');
+    await waitFor(
+      'the section rows',
+      () => hooks.tracker.lastDataRowLinesContextValue.length === 3,
+    );
+    assert.deepEqual(hooks.tracker.lastDataRowLinesContextValue, [14, 15, 16]);
+
+    await open('data-rows-none.tmp.md');
+    await waitFor(
+      'no rows to run',
+      () => hooks.tracker.lastDataRowLinesContextValue.length === 0,
+    );
+  });
+
+  it('Run This Row refuses a line that is not a data row, and sends nothing', async () => {
+    await open('data-rows-3.tmp.md');
+    await vscode.commands.executeCommand('testbench-native.runRow', { lineNumber: HEADER_LINE });
+    await sleep(200);
+    assert.equal(fake.requests.length, 0, 'the header is not a row');
+  });
+
+  it('refuses a row number the table does not have, before anything is sent', async () => {
+    await open('data-rows-3.tmp.md');
+    void hooks.dispatchWebviewMessage({ type: 'runRows', rows: [9] });
+    await sleep(300);
+    assert.equal(fake.requests.length, 0, 'row 9 of a three-row table runs nothing');
+  });
+
+  it('Re-run Failed Rows re-runs exactly the rows the last run left red', async () => {
+    const uri = await open('data-rows-3.tmp.md');
+    fake.streamScripts = [
+      (f) => f.end(),
+      (f) => {
+        f.push({ type: 'step:fail', line: STEP_LINES[0], error: 'boom' });
+        f.end();
+      },
+      (f) => f.end(),
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('three requests', () => fake.requests.length >= 3);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assert.deepEqual(rowStatuses(uri), ['pass', 'fail', 'pass']);
+
+    queueScripts((f) => f.end());
+    await vscode.commands.executeCommand('testbench-native.rerunFailedRows');
+    await waitFor('a fourth request', () => fake.requests.length >= 4);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.equal(fake.requests.length, 4, 'only the failing row re-runs');
+    assert.deepEqual([fake.requests[3].dataRow, fake.requests[3].dataRowCount], [2, 3]);
+    assert.deepEqual(rowStatuses(uri), ['pass', 'pass', 'pass'], 'and it can go green');
+  });
+
+  it('a selection of table rows plus Run runs those rows, whole', async () => {
+    // The gesture the spec leads with: drag over rows 1-2, F5. No step lines
+    // in the selection, so every step runs — an axis with nothing selected
+    // means all of that axis.
+    await open('data-rows-3.tmp.md');
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(ROW_LINES[0] - 1, 0),
+      new vscode.Position(ROW_LINES[1] - 1, 5),
+    );
+    queueScripts((f) => f.end(), (f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('two requests', () => fake.requests.length >= 2);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.deepEqual(fake.requests.map((r) => r.dataRow), [1, 2]);
+    assert.deepEqual(fake.requests[0].sourceLines, STEP_LINES, 'every step, for each row');
+  });
+
+  it('a whole-line selection of one row does not swallow the row below it', async () => {
+    // Decision 10. Triple-click, Ctrl+L and Shift+Down all end at column 0 of
+    // the NEXT line — the line break the gesture swallowed, not a line the
+    // author chose. Without the guard this would run rows 2 and 3.
+    await open('data-rows-3.tmp.md');
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(ROW_LINES[1] - 1, 0),
+      new vscode.Position(ROW_LINES[2] - 1, 0),
+    );
+    queueScripts((f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.equal(fake.requests.length, 1, 'one row, not two');
+    assert.equal(fake.requests[0].dataRow, 2);
+  });
+
+  it('a selection of nothing but the table header runs every row', async () => {
+    // You cannot select a table and get nothing (§Running rows).
+    await open('data-rows-3.tmp.md');
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(HEADER_LINE - 1, 0),
+      new vscode.Position(HEADER_LINE - 1, 6),
+    );
+    queueScripts((f) => f.end(), (f) => f.end(), (f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('three requests', () => fake.requests.length >= 3);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.deepEqual(fake.requests.map((r) => r.dataRow), [1, 2, 3]);
+  });
+
+  it('ships a narrowed section loop with its table numbering, and says so', async () => {
+    await open('data-rows-section.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runRows({ sectionRows: { 'Upload each statement': [2] } }, 1);
+
+    const entry = fake.requests[0].sections['upload each statement'];
+    assert.deepEqual(entry.rows, [{ file: 'b.png' }], 'only the chosen row travels');
+    assert.deepEqual(entry.rowNumbers, [2], 'with its position in the AUTHORED table');
+    assert.equal(entry.rowCount, 3, 'and the table count, so the badge still reads (2/3)');
+    // No `dataRow`: narrowing a section does not make the RUN a row loop.
+    assert.equal(fake.requests[0].dataRow, undefined);
+    assert.ok(
+      outputSince(mark).includes(
+        'Upload each statement — running rows 2 of 3; ' +
+          'steps after this call will see only those rows',
+      ),
+      `expected the narrowing to be logged. Got ${JSON.stringify(outputSince(mark))}`,
+    );
+  });
+
+  it('ignores a section narrowing whose call is not among the selected steps', async () => {
+    // Logged, not refused: an axis nobody selected means all of it, and a
+    // selection that stops short of the call has already said what it wants.
+    await open('data-rows-section.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runRows({ sectionRows: { 'Upload each statement': [2] }, lines: [7] }, 1);
+
+    const entry = fake.requests[0].sections['upload each statement'];
+    assert.equal(entry.rows.length, 3, 'the section ships whole');
+    assert.equal(entry.rowNumbers, undefined);
+    assert.equal(entry.rowCount, undefined);
+    assert.ok(
+      outputSince(mark).includes(
+        'Upload each statement — rows 2 ignored: ' +
+          'the step that calls this section is not in your selection',
+      ),
+      `expected the drop to be logged. Got ${JSON.stringify(outputSince(mark))}`,
+    );
+  });
+
+  it('says so when a SECTION table cannot be read, instead of running it unresolved', async () => {
+    await open('data-rows-bad-section.tmp.md');
+    const mark = hooks.hostMessageCount();
+    queueScripts((f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    const reported = outputSince(mark).filter((l) =>
+      l.startsWith('Section data table not read: '),
+    );
+    assert.equal(reported.length, 1, `expected one report. Got ${JSON.stringify(outputSince(mark))}`);
+    assert.match(reported[0], /Upload each statement/, 'it names the table that failed');
+    // The run still goes ahead — the parse error is a fact about the table,
+    // and refusing to run the steps would be the worse trade.
+    assert.equal(fake.requests.length, 1);
+  });
+
+  it('an unnarrowed run still ships every section row and neither new field', async () => {
+    // The regression guard: the wire is byte-identical for a run nobody
+    // narrowed, which is every run that existed before this feature.
+    await open('data-rows-section.tmp.md');
+    fake.streamScripts = [(f) => f.end()];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    const entry = fake.requests[0].sections['upload each statement'];
+    assert.equal(entry.rows.length, 3);
+    assert.equal(entry.rowNumbers, undefined);
+    assert.equal(entry.rowCount, undefined);
   });
 });

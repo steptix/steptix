@@ -350,21 +350,28 @@ export function parseDataRows(text: string, filePath = '<buffer>'): DataTableSca
 }
 
 /**
- * Rows for every `### Section` that carries a table, keyed by section name as
- * authored.
+ * The full scan for every `### Section` that carries a table, keyed by section
+ * name as authored.
  *
  * A separate scan rather than a field on `extractSections`, whose return shape
  * is frozen by the sections contract and pinned by a corpus of deep-equal
  * fixtures. Sections are found the same way that scanner finds them, so the
  * two agree about what a section heading is.
  *
+ * This is the shape TestBench needs to *paint* a section table — `headerLine`
+ * for the header summary and `rowLines` for the per-row status marks
+ * (stories/data-row-progress-and-selection.md §Section tables). The runner
+ * only ever wanted the cell values, which is what `parseSectionDataRows`
+ * returns; it is a projection of this function rather than a second scan, so
+ * the two cannot disagree about which table belongs to which section.
+ *
  * Throws on a malformed table, exactly as the run-level scan does.
  */
-export function parseSectionDataRows(
+export function scanSectionDataTables(
   text: string,
   filePath = '<buffer>',
-): Map<string, Array<Record<string, string>>> {
-  const out = new Map<string, Array<Record<string, string>>>();
+): Map<string, DataTableScan> {
+  const out = new Map<string, DataTableScan>();
   const lines = text.split(/\r?\n/);
 
   // Sections live only under a depth-2 `## Steps`, and the span ends at the
@@ -403,7 +410,25 @@ export function parseSectionDataRows(
       filePath,
       flow: `### ${head.name}`,
     });
-    if (scan) out.set(head.name, scan.rows);
+    if (scan) out.set(head.name, scan);
+  }
+  return out;
+}
+
+/**
+ * Rows for every `### Section` that carries a table, keyed by section name as
+ * authored — a projection of {@link scanSectionDataTables} down to the cell
+ * values, which is all the runner ever needed.
+ *
+ * Throws on a malformed table, exactly as the run-level scan does.
+ */
+export function parseSectionDataRows(
+  text: string,
+  filePath = '<buffer>',
+): Map<string, Array<Record<string, string>>> {
+  const out = new Map<string, Array<Record<string, string>>>();
+  for (const [name, scan] of scanSectionDataTables(text, filePath)) {
+    out.set(name, scan.rows);
   }
   return out;
 }

@@ -11,6 +11,7 @@ import {
   redactDeep,
   redactMap,
   redactReport,
+  EMPTY,
   MASK,
 } from '../src/utils/secrets.js';
 import type { TestReport } from '../src/report/types.js';
@@ -116,12 +117,27 @@ describe('redactDeep — every string in an object, by value', () => {
 
 describe('redactMap — values held under their names', () => {
   it('masks secret-named entries outright and the rest by value', () => {
-    expect(redactMap({ username: 'octocat', password: 'hunter2!x', note: 'pw is hunter2!x', token: '' }, ['hunter2!x'])).toEqual({
+    expect(redactMap({ username: 'octocat', password: 'hunter2!x', note: 'pw is hunter2!x' }, ['hunter2!x'])).toEqual({
       username: 'octocat',
       password: MASK,
       note: `pw is ${MASK}`,
-      token: MASK,
     });
+  });
+
+  it('says an EMPTY secret is empty, because *** cannot be told from a password', () => {
+    // A data-driven test's whole point can be one row with a blank password
+    // and one with a wrong one. Masking both to `***` makes the report's
+    // matrix unable to tell them apart, and nothing is disclosed by saying a
+    // field was left blank — which is what the client's `maskIfSecret`
+    // already says on the Output banner for the same cell.
+    expect(redactMap({ password: '', token: '', apiKey: '' }, [])).toEqual({
+      password: EMPTY,
+      token: EMPTY,
+      apiKey: EMPTY,
+    });
+    // A non-empty one is still masked outright, by its NAME, whether or not
+    // its value is in `secrets`.
+    expect(redactMap({ password: 'never-collected' }, [])).toEqual({ password: MASK });
   });
 });
 

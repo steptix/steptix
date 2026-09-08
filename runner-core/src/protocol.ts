@@ -52,6 +52,23 @@ export interface FrameInfo {
    * nearest ancestor frame with `kind === 'skill'`, not here.
    */
   skillName?: string;
+  /**
+   * 1-based position, in the section's own data table, of the row this frame
+   * is running — present only on a looped section's frames
+   * (stories/data-driven-rows.md part B). The server has stamped this on
+   * every such frame since part B landed (`src/skills/expander.ts` writes it,
+   * `src/server/session-manager.ts` copies it onto the wire frame); it is
+   * declared here so the client can *read* it.
+   *
+   * It is the table position, not the loop index: a run that narrows the
+   * section to rows 2 and 3 still reports `iteration: 2` then `3`, so the
+   * frame, the Output banner, the report badge and the gutter all name the
+   * same row (stories/data-row-progress-and-selection.md, decision 1).
+   */
+  iteration?: number;
+  /** How many rows the section's table has. Sent alongside `iteration` and
+   *  never on its own — the `(2/3)` badge's denominator. */
+  iterationCount?: number;
 }
 
 export interface StepStartEvent {
@@ -721,6 +738,68 @@ export interface HostRowSummaryMsg {
   failures: Array<{ line: number; rows: number[] }>;
 }
 
+/** How a data row of a table ended. The report's words, so the panel, the
+ *  gutter and the HTML report cannot describe the same row differently
+ *  (stories/data-row-progress-and-selection.md, decision 8). */
+export type DataRowStatus =
+  | 'pending'
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'stopped'
+  | 'skipped';
+
+/**
+ * Host → webview: the live matrix — every data table in the active file and
+ * each row's state (stories/data-row-progress-and-selection.md §The Rows
+ * section in the Runner panel).
+ *
+ * Posted when a run starts (every row `pending`), at each row and iteration
+ * boundary, and at run end. It carries what the report's matrix carries, so
+ * the panel and the report cannot disagree.
+ *
+ * The extension host reads it too: `applyToTracker` paints each row's `line`
+ * with the status cell the step vocabulary already has, which is why the
+ * message names the editor line as well as the table position. One message,
+ * one source of truth for both surfaces.
+ */
+export interface HostRowsMsg {
+  type: 'rows';
+  /** The test document, as a string URI. */
+  uri: string;
+  tables: Array<{
+    /** 'run' for the table under `## Steps`; otherwise the section name as
+     *  authored. */
+    table: 'run' | { section: string };
+    /** 1-based line of the table's header row. */
+    headerLine: number;
+    rows: Array<{
+      /** 1-based table position — stable across a narrowed run. */
+      row: number;
+      /** 1-based editor line the row occupies. */
+      line: number;
+      /** `"k=v, k=v"` with secrets masked — the SAME text as the Output
+       *  banner (`maskIfSecret`). */
+      values: string;
+      status: DataRowStatus;
+      /** `"failed at step 6"` | `"not run (stopped)"` | `"not run (paused)"` |
+       *  `"not run (iteration 2 failed)"`. The panel's trailing note. */
+      detail?: string;
+      durationMs?: number;
+      /**
+       * Gutter hover for this row's mark — the long form of `detail`: a
+       * failed row's `Row 3 failed at step 6 — "<step text>"` plus the error
+       * and the row's values, or a skipped row's reason with the Run This Row
+       * hint. Absent on a passed row, which has no hover, exactly as a passed
+       * step has none.
+       *
+       * Read by the extension host only; the panel shows `detail`.
+       */
+      hover?: string;
+    }>;
+  }>;
+}
+
 /** True while a run is in flight; lets the webview enable/disable buttons. */
 export interface HostRunningMsg {
   type: 'running';
@@ -866,6 +945,7 @@ export type HostToWebviewMsg =
   | HostPromptDoneMsg
   | HostParametersResolvedMsg
   | HostRowSummaryMsg
+  | HostRowsMsg
   | HostRunningMsg
   | HostBreakpointStopMsg
   | HostBatchBannerMsg
@@ -994,10 +1074,56 @@ export interface WebviewCompileMsg {
   type: 'compile';
 }
 
+/**
+ * Webview → host: run the chosen rows (and optionally chosen step lines).
+ *
+ * The selection narrows every axis, and an axis with nothing selected means
+ * all of it (stories/data-row-progress-and-selection.md, decision 3): no
+ * `rows` means every run row, no `lines` means every step.
+ */
+export interface WebviewRunRowsMsg {
+  type: 'runRows';
+  /** Run-table rows, 1-based table positions, ascending. */
+  rows?: number[];
+  /** Section name as authored → 1-based table positions, ascending. */
+  sectionRows?: Record<string, number[]>;
+  /** Selected step lines, if any. */
+  lines?: number[];
+  /**
+   * Every row of ONE table — the ▷ Run all rows button — named as the table
+   * rather than as the numbers the panel happens to be showing.
+   *
+   * Same reasoning as `rerunFailedRows`: the panel's list came from a `rows`
+   * message that can be a run old, so a table that has since gained a row
+   * would run all but the new one. The host resolves the set from the file as
+   * it is now. When present it replaces `rows`/`sectionRows`, which the panel
+   * does not send alongside it.
+   */
+  all?: 'run' | { section: string };
+}
+
+/**
+ * Webview → host: re-run the rows one table left red.
+ *
+ * The panel does NOT send the numbers it is showing. Its `rows` message can be
+ * a run old, and re-running a stale number would run a row the author has
+ * since edited into a different one — so the button names the TABLE and the
+ * host resolves the set from the file as it is now, through the same
+ * `failedRowsToRerun` the palette command uses.
+ */
+export interface WebviewRerunFailedRowsMsg {
+  type: 'rerunFailedRows';
+  /** 'run' for the table under `## Steps`; otherwise the section name as
+   *  authored. */
+  table: 'run' | { section: string };
+}
+
 export type WebviewToHostMsg =
   | WebviewCompileMsg
   | WebviewReadyMsg
   | WebviewRunMsg
+  | WebviewRunRowsMsg
+  | WebviewRerunFailedRowsMsg
   | WebviewRunAllMsg
   | WebviewStopMsg
   | WebviewRestartSessionMsg
@@ -1026,6 +1152,12 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'prompt' ||
     t === 'promptDone' ||
     t === 'parametersResolved' ||
+    // The two data-row messages. `rowSummary` was missing here from the day
+    // it was added — nothing in the extension host routes host messages
+    // through this guard, so the omission was invisible; it is listed now so
+    // a future consumer that does guard cannot silently drop the repaint.
+    t === 'rowSummary' ||
+    t === 'rows' ||
     t === 'running' ||
     t === 'breakpointStop' ||
     t === 'batchBanner' ||
@@ -1042,6 +1174,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
   return (
     t === 'ready' ||
     t === 'run' ||
+    t === 'runRows' ||
+    t === 'rerunFailedRows' ||
     t === 'runAll' ||
     t === 'stop' ||
     t === 'restartSession' ||

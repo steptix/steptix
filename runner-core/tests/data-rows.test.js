@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { parseDataRows, splitTableRow } from '../dist/data-rows.js';
+import {
+  parseDataRows,
+  parseSectionDataRows,
+  scanSectionDataTables,
+  splitTableRow,
+} from '../dist/data-rows.js';
 
 /**
  * The client-side read of a data table (stories/data-driven-rows.md, part A).
@@ -96,4 +101,123 @@ test('refuses an indented table, which markdown reads as a code block', () => {
 
 test('reports the buffer name in errors so a diagnostic can point at it', () => {
   assert.throws(() => parseDataRows(table('| a | b |\n|---|---|\n| 1 |\n\n'), 'matrix.md'), /matrix\.md:6/);
+});
+
+/**
+ * `scanSectionDataTables` — the full scan per section, which TestBench needs
+ * to PAINT a section table (headerLine for the summary, rowLines for the
+ * marks). `parseSectionDataRows` is a projection of it, so every case here
+ * also asserts the two agree; a second, drifting scan is exactly what the
+ * projection exists to prevent.
+ */
+
+const sectioned = [
+  '# Upload',
+  '',
+  '## Steps',
+  '',
+  '1. Sign in',
+  '2. [section: Upload each statement]',
+  '3. Check the count',
+  '',
+  '### Upload each statement',
+  '| file | label |',
+  '|------|-------|',
+  '| a.pdf | Jan |',
+  '| b.pdf | Feb |',
+  '',
+  '1. Upload {{file}}',
+  '',
+  '### No table here',
+  '',
+  '1. Do a thing',
+  '',
+].join('\n');
+
+test('scanSectionDataTables: keys by section name and reports header + row lines', () => {
+  const scans = scanSectionDataTables(sectioned);
+  assert.deepEqual([...scans.keys()], ['Upload each statement']);
+  const scan = scans.get('Upload each statement');
+  assert.equal(scan.headerLine, 10);
+  assert.deepEqual(scan.rowLines, [12, 13]);
+  assert.deepEqual(scan.columns, ['file', 'label']);
+  assert.deepEqual(scan.rows, [
+    { file: 'a.pdf', label: 'Jan' },
+    { file: 'b.pdf', label: 'Feb' },
+  ]);
+});
+
+test('parseSectionDataRows is exactly the rows of scanSectionDataTables', () => {
+  const rows = parseSectionDataRows(sectioned);
+  const scans = scanSectionDataTables(sectioned);
+  assert.deepEqual([...rows.keys()], [...scans.keys()]);
+  for (const [name, values] of rows) {
+    assert.deepEqual(values, scans.get(name).rows);
+  }
+});
+
+test('scanSectionDataTables: a section with no table is absent, not empty', () => {
+  const scans = scanSectionDataTables(sectioned);
+  assert.equal(scans.has('No table here'), false);
+});
+
+test('scanSectionDataTables: sees every section that has one', () => {
+  const two = [
+    '# T',
+    '',
+    '## Steps',
+    '1. [section: One]',
+    '2. [section: Two]',
+    '',
+    '### One',
+    '| a |',
+    '|---|',
+    '| 1 |',
+    '',
+    '1. Go',
+    '',
+    '### Two',
+    '| b |',
+    '|---|',
+    '| 2 |',
+    '| 3 |',
+    '',
+    '1. Go',
+    '',
+  ].join('\n');
+  const scans = scanSectionDataTables(two);
+  assert.deepEqual([...scans.keys()], ['One', 'Two']);
+  assert.deepEqual(scans.get('One').rowLines, [10]);
+  assert.deepEqual(scans.get('Two').rowLines, [17, 18]);
+});
+
+test('scanSectionDataTables: the run table under ## Steps is not a section table', () => {
+  // Both scans read the same file; only their spans differ. A run table
+  // leaking into the section map would loop the wrong body.
+  const md = [
+    '# T',
+    '',
+    '## Steps',
+    '| email |',
+    '|-------|',
+    '| a@b.c |',
+    '',
+    '1. Go',
+    '',
+    '### Body',
+    '',
+    '1. Inner',
+    '',
+  ].join('\n');
+  assert.equal(scanSectionDataTables(md).size, 0);
+  assert.deepEqual(parseDataRows(md).rowLines, [6]);
+});
+
+test('scanSectionDataTables: refuses a malformed section table the same way', () => {
+  const md = [
+    '# T', '', '## Steps', '1. [section: S]', '',
+    '### S', '| a | b |', '|---|---|', '| 1 |', '', '1. Go', '',
+  ].join('\n');
+  assert.throws(() => scanSectionDataTables(md, 'up.md'), /Ragged row/);
+  assert.throws(() => parseSectionDataRows(md, 'up.md'), /up\.md:9/);
 });

@@ -318,6 +318,14 @@ export interface StepRequest {
        *  runs once per row, in the same session (part B). Absent when the
        *  section has no table. */
       rows?: Array<Record<string, string>>;
+      /** 1-based position in the AUTHORED table of each row in `rows`, sent
+       *  only when the client shipped a subset of them
+       *  (stories/data-row-progress-and-selection.md). Both of these travel
+       *  together or not at all; the wire validator refuses one alone. */
+      rowNumbers?: number[];
+      /** The authored table's total row count, so a narrowed loop still
+       *  reads `iteration 2 of 3`. */
+      rowCount?: number;
     }
   >;
   /**
